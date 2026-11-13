@@ -1,26 +1,32 @@
-# Install
+# Install v5
 
-v5 is in prerelease. Stable Hack today is the v4 line, installed with Homebrew or
-the release installer. v5 prereleases install beside it through a separate
-channel, `hack-next`, so you can try v5 without touching your stable setup. When
-5.0.0 ships, the Homebrew formula and release installer move to v5.
+Start here: **1. Install** → [2. First project](getting-started.md).
+Already using v4? Read [3. Upgrade from v4](upgrade.md) before running v5 in a project.
 
 ## Prerequisites
 
-- A running Docker-compatible engine with Docker Compose for the default backend.
-  Check it with `docker info` and `docker compose version`.
-- For the native backend (beta): an Apple Silicon Mac. See
-  [Native backend (beta)](native/overview.md).
-- Local DNS and certificate trust are set up once per machine by `hack global
-  install` and can ask for native approval.
+v5 is in prerelease. Stable is still v4. A stable install does **not** install v5.
+The v5 prerelease bundle supports Apple Silicon macOS. Linux and Intel Macs stay
+on stable v4; see [platform support](../guides/prereleases.md).
+The [Linux host setup](../guides/linux-setup.md) and
+[Linux certificate trust](../guides/linux-certificate-trust.md) guides cover host
+configuration, not a Linux v5 candidate bundle.
 
-v5 prerelease bundles are published for Apple Silicon macOS only. Other platforms
-stay on stable v4 until 5.0.0.
+```mermaid
+---
+title: Choose an install channel
+---
+flowchart TD
+  Need{Which channel?} -->|Stable v4| Stable[Install hack]
+  Need -->|Try v5| Candidate[Install hack-next]
+  Candidate --> Compose[Select Compose]
+  Compose --> First[First project]
+  Stable --> V4[Follow v4 docs]
+```
 
-## Install the current prerelease
+## Install beside stable
 
-Each prerelease has an immutable tag, `v5.0.0-next.N`. Download the bootstrap
-from the release you want and run it:
+Download the installer from an exact release. Review it before running it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
@@ -29,57 +35,68 @@ curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
 less hack-next-install.sh
 sh hack-next-install.sh
 "$HOME/.hack-next/bin/hack-next" --version
+"$HOME/.hack-next/bin/hack-next" --manager status
 ```
 
-The bootstrap pins its manager checksum and release version. It installs into
-`~/.hack-next`, does not edit your PATH or shell profile, and leaves the stable
-`hack` executable and `~/.hack` untouched. Installing does not migrate projects,
-start a VM, or change DNS or trust.
+Expect the version you chose and a selected bundle in the manager's report.
+Newer releases are on [GitHub](https://github.com/hack-dance/hack/releases).
+Check a release's notes before replacing the tag above.
 
-Newer prereleases are listed on the [releases page](https://github.com/hack-dance/hack/releases).
-Replace the tag in the URL to install a different one. The
-[prerelease channel guide](../guides/prereleases.md) explains versioning, platform
-support and the installer in detail.
+| Channel | What it installs | Project state |
+| --- | --- | --- |
+| Stable `hack` | Homebrew's executable, or `~/.hack/bin/hack` with the release installer | Uses `~/.hack` |
+| Prerelease `hack-next` | Launcher and versioned bundles under `~/.hack-next` | Native uses private homes per version; Compose shares `~/.hack` with stable |
 
-## Choose a backend
+The prerelease installer leaves stable alone. It does not edit PATH, start a VM,
+or set up DNS or certificate trust. [Install details](../guides/candidate-install.md)
+cover custom roots, checksums and version changes.
 
-The `hack` CLI runs on Docker Compose unless you select native with
-`HACK_RUNTIME_BACKEND=native`. The `hack-next` launcher is the exception: it
-exists to test the native candidate, so it selects native by default and
-version-private homes. To run the prerelease CLI on Compose against your
-ordinary Hack home:
+For stable v4 on macOS, use `brew install hack-dance/tap/hack`; the
+[stable install instructions](https://github.com/hack-dance/hack/blob/main/README.md#install)
+cover the release installer too. Check it with `command hack --version`.
+
+## Select v5 on Compose
+
+Have a running Docker-compatible engine and Docker Compose. Check with
+`docker info` and `docker compose version`.
+
+`hack-next` selects **native** unless you select Compose. In this terminal:
 
 ```sh
 export HACK_RUNTIME_BACKEND=compose
-"$HOME/.hack-next/bin/hack-next" --version
-```
-
-The export applies to every later `hack-next` command in that shell. A one-off
-`HACK_RUNTIME_BACKEND=compose` prefix selects Compose for that command only; the
-next command without it runs native again. Unset the variable before native testing.
-
-On Compose, the prerelease shares project state with stable v4. Do not run both
-against the same home at the same time, including their daemons. The
-[prerelease install page](../guides/candidate-install.md#stop-stable-hackd-before-a-compose-run) gives
-the exact order: stop the stable daemon first, then run the prerelease.
-
-The rest of these docs write `hack` for the v5 CLI. During the prerelease, in the
-shell where you exported the backend, run the examples through the launcher:
-
-```sh
 hack() { "$HOME/.hack-next/bin/hack-next" "$@"; }
+hack --version
 ```
 
-This shell function lasts for the session and does not touch your PATH or the
-stable `hack` executable in other shells.
+The function makes `hack` mean the v5 candidate in this terminal only. It does not
+replace the stable executable. Keep this terminal for the next page. A new
+terminal needs these two setup lines again.
 
-## Set up local routing
+**Existing v4 users:** stop here and follow [the upgrade steps](upgrade.md).
+Stable and the candidate must not run against the shared home at the same time.
 
-Once per machine:
+For a new machine, set up Compose routing once:
 
 ```sh
 hack global install
 ```
 
-This configures shared local routing, DNS and certificate trust. Read its prompts.
-Continue with [Getting started](getting-started.md).
+Read the prompts for DNS and certificate trust. Host changes can require your
+approval. Then continue to [First project on Compose](getting-started.md).
+
+## Stop using or remove an install
+
+Stop its projects with `hack down` first. For a login daemon, use that install's
+`hack daemon stop` and `hack daemon uninstall` before removing its executable.
+
+- Homebrew: `brew uninstall hack-dance/tap/hack`.
+- Release installer: remove only the executable `~/.hack/bin/hack`. Keep the rest
+  of `~/.hack` if you need its configuration or keys.
+- Prerelease: stop every retained version's workloads, then run
+  `"$HOME/.hack-next/bin/hack-next" --manager stable` to deselect it. This keeps
+  the bundles and data. To remove the whole channel, save wanted data elsewhere
+  before removing `~/.hack-next`; that removes all its version-private homes too.
+
+Removing an executable does not undo host DNS/trust, project files or volumes.
+For a candidate rollback or return to stable, use
+[the full procedure](../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).

@@ -57,6 +57,24 @@ pub(super) fn cleanup_with_relay_expected(
     endpoint: &crate::provider::relay_owner::publication::PinnedEndpoint,
     expected_generation: Option<(&str, std::time::Instant)>,
 ) -> Result<Receipt, CandidateError> {
+    cleanup_with_relay_captured(
+        candidate,
+        run,
+        remove_data,
+        endpoint,
+        expected_generation,
+        None,
+    )
+}
+
+pub(super) fn cleanup_with_relay_captured(
+    candidate: &Candidate,
+    run: &str,
+    remove_data: bool,
+    endpoint: &crate::provider::relay_owner::publication::PinnedEndpoint,
+    expected_generation: Option<(&str, std::time::Instant)>,
+    failure: Option<startup_failure::Failure>,
+) -> Result<Receipt, CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::Coordinator;
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let (mut receipt, root) = load(candidate, &engine, run)?;
@@ -65,6 +83,11 @@ pub(super) fn cleanup_with_relay_expected(
     if let Some((expected, deadline)) = expected_generation {
         super::foreground::redelivery::check_generation(&receipt, expected)?;
         super::check_environment_deadline(deadline)?;
+    }
+    // Fold pre-stop evidence into cleanup's required journal commit. A separate
+    // diagnostic write must not leave state.pending and prevent the owned stop.
+    if failure.is_some_and(|failure| !startup_failure::capture_for_cleanup(&mut receipt, failure)) {
+        startup_failure::unrecorded();
     }
     cleanup_preflight(&engine, &receipt, &root, remove_data)?;
     if receipt
@@ -1151,6 +1174,7 @@ mod tests {
                     timeout_ms: 100,
                     retries: 1,
                     start_period_ms: 0,
+                    policy: None,
                 },
                 allocation: "1".repeat(32),
                 generation: "2".repeat(32),

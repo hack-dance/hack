@@ -8,6 +8,7 @@ import {
   NATIVE_EXIT_DRAIN_BOUND_MS,
   NativeRuntimeRequestError,
   nativeCodesReportRuntimeNotRunning,
+  nativeFailureDetail,
   resolveNativeRuntimeSelection,
 } from "../src/backends/native-runtime-client.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
@@ -149,6 +150,8 @@ async function fixture() {
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
 if (process.argv.includes("old-provider")) { console.error(JSON.stringify({code:"provider_pin_changed",message:"synthetic-secret-diagnostic"})); process.exit(2); }
 if (process.argv.includes("fixed-message")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,service:"web"})); process.exit(2); }
+if (process.argv.includes("bridge-socket-failure")) { console.error(JSON.stringify({code:"bridge_socket_timeout",message:"Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",message_fixed:true})); process.exit(2); }
+if (process.argv.includes("route-probe-failure")) { console.error(JSON.stringify({code:"graph_service_failed",message:"synthetic-private-response",service:"web",route_probe:{version:1,port:3000}})); process.exit(2); }
 if (process.argv.includes("unsafe-fixed")) { console.error(JSON.stringify({code:"graph_image",message:"synthetic-secret-diagnostic\\nsecond line",message_fixed:true,service:"../synthetic-secret-diagnostic"})); process.exit(2); }
 if (process.argv.includes("plan-change")) { console.error(JSON.stringify({code:"graph_plan_reconcile",message:"synthetic-secret-diagnostic",plan_change:{version:1,service:"deps",field:"dependency_cache_volume"}})); process.exit(23); }
 if (process.argv.includes("plan-change-unsafe")) { console.error(JSON.stringify({code:"graph_hostname_change",message:"synthetic-secret-diagnostic",plan_change:{version:1,service:"synthetic secret diagnostic",field:"hostnames"}})); process.exit(23); }
@@ -572,6 +575,19 @@ const LATE_WRITER_SELECTIONS = {
       RUN_ID,
       "--action",
       "status",
+      "--json",
+    ],
+    flags: { boundNativeStatusDrain: true },
+  },
+  observe: {
+    args: [
+      "graph",
+      "native",
+      "control",
+      "--run-id",
+      RUN_ID,
+      "--action",
+      "observe",
       "--json",
     ],
     flags: { boundNativeStatusDrain: true },
@@ -1000,6 +1016,19 @@ test("a runtime message marked fixed is shown with its validated service", async
   expect(String(unsafe)).not.toContain("synthetic-secret-diagnostic");
 });
 
+test("a failed bridge boot names its one recovery command through the runtime client", async () => {
+  const runtime = await fixture();
+  const error: unknown = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["bridge-socket-failure"],
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(error).toHaveProperty("nativeCode", "bridge_socket_timeout");
+  expect(String(error)).toContain("runtime recover --json");
+  expect(String(error)).not.toContain("nothing was started");
+});
+
 test("structured failures expose only a bounded code, never their message", async () => {
   const runtime = await fixture();
   await expect(
@@ -1007,6 +1036,53 @@ test("structured failures expose only a bounded code, never their message", asyn
   ).rejects.toThrow(
     "Native runtime request failed (source_conflict); inspect owned state before retrying."
   );
+});
+
+test("inferred route failures render only validated service and port guidance", async () => {
+  const reply = {
+    code: "graph_service_failed",
+    service: "web",
+    route_probe: { version: 1, port: 3000 },
+    message: "synthetic-private-response",
+  };
+  const expected = {
+    service: "web",
+    message:
+      "Inferred route probe on port 3000 is unhealthy. Check hack logs web in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.",
+  };
+  expect(nativeFailureDetail(reply)).toEqual(expected);
+  const longest = nativeFailureDetail({ ...reply, service: "w".repeat(128) });
+  expect(longest.message?.length).toBeLessThanOrEqual(400);
+  const runtime = await fixture();
+  const failure: unknown = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["route-probe-failure"],
+  }).catch((caught: unknown) => caught);
+  expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
+  expect((failure as Error).message).toContain(
+    `Service web: ${expected.message}`
+  );
+  expect((failure as Error).message).not.toContain(
+    "synthetic-private-response"
+  );
+  expect(
+    nativeFailureDetail({ ...reply, code: "graph_startup_application_failed" })
+  ).toEqual(expected);
+  for (const patch of [
+    { code: "graph_timeout" },
+    { route_probe: { version: 2, port: 3000 } },
+    { route_probe: { version: 1, port: 0 } },
+    { route_probe: { version: 1, port: 65_536 } },
+    { route_probe: { version: 1, port: 1.5 } },
+    { route_probe: { version: 1, port: "synthetic-private-value" } },
+    { route_probe: { version: 1, port: 3000, extra: "private" } },
+    { service: "web\nprivate" },
+  ]) {
+    const detail = nativeFailureDetail({ ...reply, ...patch });
+    expect(detail.message).toBeUndefined();
+    expect(JSON.stringify(detail)).not.toContain("private");
+  }
 });
 
 bunTest.each([

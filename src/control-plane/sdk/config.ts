@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { z } from "zod";
@@ -407,16 +408,24 @@ export function createDefaultControlPlaneConfig(): ControlPlaneConfig {
  */
 export async function readControlPlaneConfig(opts: {
   readonly projectDir?: string;
+  /**
+   * Throw when a configuration file exists but cannot be read, instead of
+   * treating it as empty (HACK-2165): for callers that must tell an absent
+   * setting from an unknown one, such as a removal deciding what is live.
+   */
+  readonly strict?: boolean;
 }): Promise<ControlPlaneConfigResult> {
   const globalLayer = await readControlPlaneLayer({
     path: resolveGlobalConfigPath(),
     label: "Global config",
+    strict: opts.strict === true,
   });
 
   const projectLayer = opts.projectDir
     ? await readControlPlaneLayer({
         path: resolve(opts.projectDir, PROJECT_CONFIG_FILENAME),
         label: "Project config",
+        strict: opts.strict === true,
       })
     : { config: {} };
 
@@ -440,8 +449,20 @@ type ControlPlaneConfigLayer = {
 async function readControlPlaneLayer(opts: {
   readonly path: string;
   readonly label: string;
+  readonly strict?: boolean;
 }): Promise<ControlPlaneConfigLayer> {
-  const text = await readTextFile(opts.path);
+  const text = opts.strict
+    ? await readFile(opts.path, "utf8").catch((error: unknown) => {
+        // Only a missing file is an empty layer; anything else is unknown.
+        if (
+          isRecord(error) &&
+          (error.code === "ENOENT" || error.code === "ENOTDIR")
+        ) {
+          return null;
+        }
+        throw new Error(`${opts.label} could not be read (${opts.path})`);
+      })
+    : await readTextFile(opts.path);
   if (text === null) {
     return { config: {} };
   }

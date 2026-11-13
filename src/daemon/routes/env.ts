@@ -525,7 +525,19 @@ async function handleUnsetEnv(opts: {
       }),
     });
   } catch {
-    secretDeleted = null;
+    return jsonResponse(
+      {
+        status: "partial_failure",
+        error: "secret_delete_unconfirmed",
+        message:
+          "The dotenv update completed, but secret deletion could not be confirmed. Inspect backend state and retry; values omitted.",
+        dotenvChanged: dotenvResult.changed,
+        secretDeleted: null,
+        backend: secretStore.descriptor.backend,
+        location: secretStore.descriptor.location,
+      },
+      500
+    );
   }
 
   return jsonResponse(

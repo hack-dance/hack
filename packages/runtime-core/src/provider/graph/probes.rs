@@ -1,4 +1,4 @@
-use super::super::http_probe::HttpProbe;
+use super::super::http_probe::{HttpProbe, HttpProbePolicy};
 use super::*;
 #[cfg(feature = "native-http-probe")]
 use {
@@ -17,6 +17,82 @@ pub struct Probe {
     pub exec_id: Option<String>,
     pub started_ms: u64,
     pub phase: String,
+}
+
+/// Only an inferred route's unhealthy observation gets route guidance. Explicit
+/// healthchecks, exits and deaths keep their existing diagnostic semantics.
+pub(super) fn service_failure(
+    code: &'static str,
+    name: &str,
+    observation: Observation,
+    probe: Option<&HttpProbe>,
+) -> CandidateError {
+    if let Some(probe) = probe.filter(|probe| {
+        probe.policy == Some(HttpProbePolicy::Route)
+            && matches!(
+                observation,
+                Observation::Running {
+                    health: execution::Health::Unhealthy
+                }
+            )
+    }) {
+        return error(
+            code,
+            format!(
+                "Owned graph service {name} is unhealthy on inferred route port {}; no further services will start. Check hack logs {name} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.",
+                probe.port
+            ),
+        )
+        .with_service(name)
+        .with_route_probe(probe.port);
+    }
+    execution::failed_service_error(code, name, observation)
+}
+
+#[cfg(test)]
+mod route_failure_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_unhealthy_inferred_probe_names_its_route_and_remedies() {
+        let inferred = HttpProbe::inferred_route(3000);
+        let unhealthy = Observation::Running {
+            health: execution::Health::Unhealthy,
+        };
+        for code in ["graph_service_failed", "graph_startup_application_failed"] {
+            let failure = service_failure(code, "web", unhealthy, Some(&inferred));
+            assert_eq!(failure.code, code);
+            assert_eq!(failure.service.as_deref(), Some("web"));
+            assert!(
+                failure
+                    .message
+                    .contains("web is unhealthy on inferred route port 3000")
+            );
+            assert!(failure.message.contains("hack logs web"));
+            assert!(failure.message.contains("healthcheck.x-hack-http"));
+            assert!(failure.message.contains("longer start_period_ms"));
+            let value = serde_json::to_value(failure).unwrap();
+            assert_eq!(value["route_probe"], json!({"version":1,"port":3000}));
+            assert!(value.get("message_fixed").is_none());
+        }
+        let mut explicit = inferred.clone();
+        explicit.policy = None;
+        for (observation, probe) in [
+            (unhealthy, None),
+            (unhealthy, Some(&explicit)),
+            (Observation::Dead, Some(&inferred)),
+            (Observation::Exited { code: 1 }, Some(&inferred)),
+        ] {
+            let failure = service_failure("graph_service_failed", "web", observation, probe);
+            assert!(!failure.message.contains("inferred route"));
+            assert!(
+                serde_json::to_value(failure)
+                    .unwrap()
+                    .get("route_probe")
+                    .is_none()
+            );
+        }
+    }
 }
 pub(super) fn token() -> Result<String, CandidateError> {
     use std::io::Read;
@@ -177,7 +253,7 @@ fn attach(config: &mut Value, p: &Probe) {
     mounts.push(json!({"Type":"bind","Source":format!("{}/state",path(p)),"Target":"/run/hack-http-probe-state","ReadOnly":false}));
 }
 fn exec(
-    engine: &Engine<'_>,
+    engine: &impl super::Inspection,
     receipt: &Receipt,
     name: &str,
 ) -> Result<Option<Value>, CandidateError> {
@@ -185,7 +261,7 @@ fn exec(
     let Some(id) = &p.exec_id else {
         return Ok(None);
     };
-    let value = match engine.request(Method::GET, &format!("/v1.53/exec/{id}/json"), None) {
+    let value = match engine.get(&format!("/v1.53/exec/{id}/json")) {
         Ok(v) => v,
         Err(e) if e.code == "engine_not_found" => return Ok(None),
         Err(e) => return Err(e),
@@ -210,7 +286,7 @@ fn exec(
     Ok(Some(value))
 }
 pub(super) fn observe(
-    engine: &Engine<'_>,
+    engine: &impl super::Inspection,
     receipt: &Receipt,
     name: &str,
     value: &Value,
@@ -280,6 +356,7 @@ mod observation_clock_tests {
                 timeout_ms: 40,
                 retries: 3,
                 start_period_ms: 0,
+                policy: None,
             },
             allocation: "a".repeat(32),
             generation: "b".repeat(32),

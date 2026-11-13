@@ -2,6 +2,7 @@ import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "../lib/hack-ownership-labels.ts";
 import { isIgnoredHackComposeLabel } from "../lib/native-hack-compose-conventions.ts";
+import { isInferredNativeRouteProbe } from "./native-http-probe-admission.ts";
 import { hasOnlyNativeCacheLabels } from "./native-project-cache.ts";
 
 const ROUTE_LABELS = new Set(["caddy", "caddy.reverse_proxy", "caddy.tls"]);
@@ -10,8 +11,52 @@ function refused(): Error {
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native routes require reviewed Caddy labels and existing matching native HTTP health probes; no probe or route was invented.",
+      "Native routes require reviewed Caddy labels and matching native route readiness; explicit healthchecks are never replaced.",
   });
+}
+
+const ROUTE_PROBE_REFUSALS = {
+  disabled: {
+    message: "The routed service explicitly disables its healthcheck.",
+    fix: "Replace the disabled healthcheck with an x-hack-http-only healthcheck on the route port, or remove the healthcheck declaration to use the inferred probe.",
+  },
+  command: {
+    message:
+      "The routed service has a command-only healthcheck; native route readiness requires an HTTP probe.",
+    fix: "Replace the command healthcheck with an x-hack-http-only healthcheck on the route port, or remove the healthcheck declaration to use the inferred probe.",
+  },
+  cache: {
+    message:
+      "The routed service also declares a dependency cache, which native routing does not support.",
+    fix: "Move the dependency cache to a separate non-routed service, or remove the dependency cache declaration.",
+  },
+  mismatch: {
+    message:
+      "The route has no valid reviewed HTTP probe matching its route port and authored healthcheck.",
+    fix: "Check the route port and healthcheck.x-hack-http; remove the authored healthcheck to infer readiness, or configure a valid explicit HTTP probe on that port. If the review still differs, update Hack and rerun native preflight.",
+  },
+} as const;
+
+/** Closed reasons shared by startup admission and preflight; no authored values. */
+class RouteProbeRefusal extends HackCliError {
+  readonly reason: keyof typeof ROUTE_PROBE_REFUSALS;
+  constructor(reason: keyof typeof ROUTE_PROBE_REFUSALS) {
+    const detail = ROUTE_PROBE_REFUSALS[reason];
+    super({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message: `${detail.message} ${detail.fix}`,
+    });
+    this.reason = reason;
+  }
+}
+
+export function nativeRouteProbeRefusalDetails(error: unknown): {
+  readonly message: string;
+  readonly fix: string;
+} {
+  return ROUTE_PROBE_REFUSALS[
+    error instanceof RouteProbeRefusal ? error.reason : "mismatch"
+  ];
 }
 /**
  * Hack's authored one-shot marker. Only this exact key with the literal value `true`
@@ -141,6 +186,28 @@ function requireRouteProbe(
   service: Readonly<Record<string, unknown>>,
   spec: Readonly<Record<string, unknown>> | undefined
 ): void {
+  if (
+    service.dependency_cache !== undefined &&
+    service.dependency_cache !== null
+  ) {
+    throw new RouteProbeRefusal("cache");
+  }
+  const authored = spec?.healthcheck;
+  if (
+    (isRecord(service.healthcheck) && service.healthcheck.disabled === true) ||
+    (isRecord(authored) &&
+      (authored.disable === true ||
+        (Array.isArray(authored.test) && authored.test[0] === "NONE")))
+  ) {
+    throw new RouteProbeRefusal("disabled");
+  }
+  if (
+    isRecord(authored) &&
+    !Object.hasOwn(authored, "x-hack-http") &&
+    Object.hasOwn(authored, "test")
+  ) {
+    throw new RouteProbeRefusal("command");
+  }
   const probe =
     spec && isRecord(spec.healthcheck)
       ? spec.healthcheck["x-hack-http"]
@@ -148,22 +215,28 @@ function requireRouteProbe(
   const reviewedProbe = isRecord(service.healthcheck)
     ? service.healthcheck.native_http
     : undefined;
+  const inferred =
+    spec !== undefined &&
+    !Object.hasOwn(spec, "healthcheck") &&
+    isRecord(service.routing) &&
+    isInferredNativeRouteProbe(reviewedProbe, service.routing.port);
   if (
     !(
       isRecord(service.routing) &&
-      isRecord(probe) &&
       isRecord(reviewedProbe) &&
       Number.isInteger(service.routing.port)
     ) ||
     Number(service.routing.port) < 1 ||
     Number(service.routing.port) > 65_535 ||
-    probe.port !== service.routing.port ||
-    reviewedProbe.port !== service.routing.port ||
-    (isRecord(service.healthcheck) && service.healthcheck.disabled === true) ||
-    (service.dependency_cache !== undefined &&
-      service.dependency_cache !== null)
+    !(
+      inferred ||
+      (isRecord(probe) &&
+        probe.port === service.routing.port &&
+        reviewedProbe.policy === undefined)
+    ) ||
+    reviewedProbe.port !== service.routing.port
   ) {
-    throw refused();
+    throw new RouteProbeRefusal("mismatch");
   }
 }
 export function reviewedNativeRoutes(opts: {

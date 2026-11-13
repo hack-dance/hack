@@ -221,10 +221,14 @@ later bundle that adds a file therefore needs the same `upgrade-manager` step
 first. Upgrading with that newer installer against such a channel also refuses
 until you run it, and leaves the channel unchanged.
 
-A truncated, interrupted or oversized official download is a refused installation.
-The installer removes only the staging directory that attempt created. It leaves
-the current selection, retained bundles and homes unchanged. Retry the same version
-after the network problem is resolved.
+Compiled-manager downloads share one total deadline and an inactivity limit. Connection
+interruptions and HTTP 502/503/504 receive up to three fresh attempts with bounded
+backoff. Checksums, signatures, URL/size refusals and uncertain cancellation never
+retry. There is no persistent byte-range resume: a rerun starts from byte zero.
+A refused installation preserves the selection, retained bundles and homes.
+The installer removes its stage; a later install under the exclusive manager lock
+also reclaims abandoned stages with the expected private ownership and name.
+Unsafe entries refuse before reclamation.
 
 An upgrade retains the previous bundle and home. Selection changes require the
 owning candidate CLI to confirm quiescence. A running runtime, timeout, malformed
@@ -237,6 +241,24 @@ keeps its own home; selecting a different one does not copy VM disks, credential
 or application data. Returning to stable selects the existing stable executable
 and its original Docker state. Preserve candidate data for a later retry rather
 than trying to make a v4 executable read v5 receipts.
+
+### Uninstall without deleting candidate data
+
+`hack-next --manager uninstall` previews removal without changing files or stopping
+applications. `hack-next --manager uninstall --apply` requires every retained
+version to confirm quiescence. It moves the complete channel, including its homes,
+to a private sibling and prints a rollback manifest. Stable Hack, its home and your
+shell PATH are unchanged. No candidate data is deleted.
+
+To undo it, run the retained `manager` executable with the original `--root` and
+`uninstall --rollback-manifest /path/to/manifest`. Rollback checks the retained
+channel identity and refuses to replace an occupied original path. Keep the
+manifest and retained directory together until you choose to dispose of them.
+
+For stable CLI installations, `bun run uninstall:local` from a checkout removes
+only `$HOME/.hack/bin/hack`; it can be repeated and retains user data. See
+[upgrading from v4](upgrading-from-v4.md) for the stable updater's integrity and
+backup boundaries.
 
 Before accepting a candidate for a project, verify normal start, status, logs,
 exec, run, restart and retaining shutdown, then exercise its browser sign-in,

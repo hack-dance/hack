@@ -4,6 +4,7 @@ import {
   requestNativeHookStop,
   serveNativeHookStop,
 } from "../src/backends/native-authored-hook-stop.ts";
+import { NativeAuthoredStopUnavailableError } from "../src/backends/native-authored-stop-errors.ts";
 
 const run = "a".repeat(32);
 test("authenticated concurrent stop requests share one owner operation", async () => {
@@ -72,9 +73,13 @@ test("client timeout retains a single running operation and a late client observ
     },
   });
   try {
-    await expect(
-      requestNativeHookStop({ ...owner, run, timeoutMs: 30 })
-    ).rejects.toThrow();
+    const outcome = await requestNativeHookStop({
+      ...owner,
+      run,
+      timeoutMs: 30,
+    }).catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(Error);
+    expect(outcome).not.toBeInstanceOf(NativeAuthoredStopUnavailableError);
     expect(calls).toBe(1);
     finish(true);
     await requestNativeHookStop({ ...owner, run, timeoutMs: 1000 });
@@ -83,6 +88,18 @@ test("client timeout retains a single running operation and a late client observ
     finish(false);
     await owner.close(true);
   }
+});
+
+test("a refused connection is distinguished from a dispatched stop", async () => {
+  const owner = await serveNativeHookStop({
+    run,
+    assertFresh: async () => undefined,
+    stop: async () => true,
+  });
+  await owner.close(true);
+  await expect(
+    requestNativeHookStop({ ...owner, run, timeoutMs: 1000 })
+  ).rejects.toBeInstanceOf(NativeAuthoredStopUnavailableError);
 });
 test("changed private owner refuses before a valid client can stop", async () => {
   let calls = 0;

@@ -75,10 +75,93 @@ export async function sweepStaleMuxEnvironments(opts: {
   }
 }
 
+function isMissing(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+/** A staged payload directory older than the time limit. */
+export type StaleMuxEnvironment = {
+  readonly root: string;
+  readonly dev: number;
+  readonly ino: number;
+};
+
+/**
+ * Payload directories under `tmpDir` (default: the OS temporary directory)
+ * that this user staged and that are older than {@link MUX_ENVIRONMENT_TTL_MS}.
+ * The doctor reports these and removes them on `--fix`; staging itself uses
+ * {@link sweepStaleMuxEnvironments}. Only
+ * private directories with Hack's prefix and owned by this user qualify;
+ * nothing is read. Roots are reported under the resolved `tmpDir`, the same
+ * spelling {@link stageMuxEnvironment} returns.
+ */
+export async function findStaleMuxEnvironments(opts?: {
+  readonly tmpDir?: string;
+  readonly now?: number;
+}): Promise<readonly StaleMuxEnvironment[]> {
+  // Resolved once, as staging resolves the directory it creates, so a
+  // payload has one spelling whichever function names it (macOS keeps the
+  // temporary directory behind /var -> /private/var).
+  const given = opts?.tmpDir ?? tmpdir();
+  const base = await realpath(given).catch(() => given);
+  const now = opts?.now ?? Date.now();
+  const names = await readdir(base).catch(() => [] as string[]);
+  const stale: StaleMuxEnvironment[] = [];
+  for (const name of names.filter((entry) => entry.startsWith(PREFIX))) {
+    const root = join(base, name);
+    const info = await lstat(root).catch(() => null);
+    if (
+      info?.isDirectory() &&
+      info.uid === process.getuid?.() &&
+      (info.mode & 0o077) === 0 &&
+      now - info.mtimeMs >= MUX_ENVIRONMENT_TTL_MS
+    ) {
+      stale.push({ root, dev: info.dev, ino: info.ino });
+    }
+  }
+  return stale;
+}
+
+/**
+ * Removes a stale payload directory while it is still the one found: its
+ * `env.json` (a regular file of this user's) and then the directory. Anything
+ * else inside it is left, and so is the directory.
+ */
+export async function removeStaleMuxEnvironment(
+  stale: StaleMuxEnvironment
+): Promise<boolean> {
+  const info = await lstat(stale.root).catch(() => null);
+  if (
+    !info?.isDirectory() ||
+    info.dev !== stale.dev ||
+    info.ino !== stale.ino
+  ) {
+    return false;
+  }
+  const path = join(stale.root, "env.json");
+  const file = await lstat(path).catch(() => null);
+  if (file?.isFile() && file.uid === process.getuid?.() && file.nlink === 1) {
+    await unlink(path).catch((error: unknown) => {
+      if (!isMissing(error)) {
+        throw error;
+      }
+    });
+  }
+  return await rmdir(stale.root).then(
+    () => true,
+    () => false
+  );
+}
+
 /** The pane consumes and deletes this one-shot, owner-only payload before spawning. */
 export async function stageMuxEnvironment(
-  env: Readonly<Record<string, string>>
+  env: Readonly<Record<string, string>>,
+  opts?: {
+    /** Parent of the payload directory; the OS temporary directory by default. */
+    readonly tmpDir?: string;
+  }
 ) {
+  const base = opts?.tmpDir ?? tmpdir();
   if (
     Object.entries(env).some(
       ([key, value]) => !KEY.test(key) || value.includes("\0")
@@ -90,8 +173,8 @@ export async function stageMuxEnvironment(
   if (Buffer.byteLength(bytes) > MAX_BYTES) {
     throw new Error("Mux environment exceeds the private input limit");
   }
-  await sweepStaleMuxEnvironments({});
-  const root = await realpath(await mkdtemp(join(tmpdir(), PREFIX)));
+  await sweepStaleMuxEnvironments({ parent: base });
+  const root = await realpath(await mkdtemp(join(base, PREFIX)));
   const path = join(root, "env.json");
   let identity: { dev: number; ino: number } | undefined;
   const cleanup = async () => {

@@ -121,12 +121,12 @@ fn stage_refused(code: &'static str) -> CandidateError {
 /// An owned service failed while dependency relays were attached. The stage code
 /// stays `graph_startup_application_failed`; the message and service name the
 /// failed service (exit code, death or health) instead of a validation failure.
-fn application_failed(name: &str, observation: Observation) -> CandidateError {
-    crate::project::execution::failed_service_error(
-        "graph_startup_application_failed",
-        name,
-        observation,
-    )
+fn application_failed(
+    name: &str,
+    observation: Observation,
+    probe: Option<&crate::provider::http_probe::HttpProbe>,
+) -> CandidateError {
+    probes::service_failure("graph_startup_application_failed", name, observation, probe)
 }
 // Fresh and restored graphs both provision a new container generation. Retained
 // stopped/ready receipts cannot authorize listener attachment.
@@ -181,6 +181,39 @@ fn verify_exited_listener(
         "graph_startup_listener_unexpected_exit"
     };
     Err(stage_refused(code))
+}
+
+// One classifier for live status and effectful verification. Only the caller's
+// callback may retain evidence; a presentation observation cannot write it.
+fn classify_exited_listener(
+    receipt: &mut Receipt,
+    name: &str,
+    observed: &Value,
+    observation: Observation,
+    mut record: impl FnMut(
+        &mut Receipt,
+        &str,
+        Observation,
+        Option<CandidateError>,
+    ) -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    if observation.failed() {
+        record(receipt, name, observation, None)?;
+        return Err(application_failed(
+            name,
+            observation,
+            receipt.probes.get(name).map(|probe| &probe.config),
+        ));
+    }
+    if let Err(error) = verify_exited_listener(receipt.readiness.get(name), observed) {
+        if error.code == "graph_startup_listener_unexpected_exit"
+            && observation == (Observation::Exited { code: 0 })
+        {
+            return record(receipt, name, observation, Some(error));
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 fn verify_endpoint_generations(
     dependencies: &BTreeMap<(String, String), Dependency>,
@@ -720,6 +753,29 @@ impl HostRelayRuntime {
         }
         let engine = Engine::connect_cleanup_wait(candidate)?;
         let (before, root) = crate::provider::graph::load(candidate, &engine, &run)?;
+        // Capture before stopping any listener. The next required cleanup
+        // journal commit retains the evidence; there is no advisory disk write
+        // that could strand state.pending and prevent stopping.
+        // Keep the persisted generation unchanged for rebind archival.
+        let mut captured = before.clone();
+        let classified = if captured.startup_failure.is_some() {
+            Ok(())
+        } else {
+            self.verify_listeners(
+                &engine,
+                &mut captured,
+                None,
+                |receipt, name, observation, failure| {
+                    if receipt.startup_failure.is_none() {
+                        startup_failure::record(receipt, name, observation)?;
+                    }
+                    failure.map_or(Ok(()), Err)
+                },
+            )
+        };
+        if classified.is_err() && captured.startup_failure.is_none() {
+            startup_failure::unrecorded();
+        }
         let boot = engine.guest().boot_id().to_owned();
         for name in self.children.keys().cloned().collect::<Vec<_>>() {
             let child = self.children.get_mut(&name).ok_or_else(refused)?;
@@ -729,8 +785,14 @@ impl HostRelayRuntime {
             self.children.remove(&name);
         }
         drop(engine);
-        let receipt =
-            host_relay::cleanup_with_relay(candidate, &run, remove_data, &self.endpoint())?;
+        let receipt = host_relay::cleanup_with_relay_captured(
+            candidate,
+            &run,
+            remove_data,
+            &self.endpoint(),
+            None,
+            captured.startup_failure,
+        )?;
         self.children.clear();
         let cleanup_engine = Engine::connect_cleanup_wait(candidate)?;
         startup::verify_cleanup(&cleanup_engine, &receipt)?;
@@ -747,18 +809,120 @@ impl HostRelayRuntime {
         }
         Ok(())
     }
-    fn check(&self, engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
+    fn check(&self, engine: &impl Inspection, receipt: &Receipt) -> Result<(), CandidateError> {
         self.managed.verify_alive()?;
-        let context = host_relay::context(engine.guest().incarnation(), engine.guest().boot_id())?;
+        let context = host_relay::context(engine.incarnation(), engine.boot_id()?)?;
         if context.runtime != self.context.runtime
             || context.boot != self.context.boot
-            || receipt.owner != engine.guest().incarnation()
+            || receipt.owner != engine.incarnation()
             || !matches_selected_run(self.selected_run.as_deref(), &receipt.run)
             || self.run.as_deref() != Some(&receipt.run)
         {
             return Err(refused());
         }
-        engine.guest().verify()
+        engine.verify()
+    }
+    /// The status caller supplies no persistence callback. Effects retain the
+    /// original failure-recording boundary under their exclusive Engine lease.
+    fn verify_with(
+        &mut self,
+        engine: &impl Inspection,
+        receipt: &mut Receipt,
+        root: &Path,
+        record: impl FnMut(
+            &mut Receipt,
+            &str,
+            Observation,
+            Option<CandidateError>,
+        ) -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        self.check(engine, receipt)?;
+        if matches!(
+            receipt.phase.as_str(),
+            "preparing" | "restoring" | "ready-observed"
+        ) {
+            rebind::require_complete(root, receipt)?;
+        }
+        if matches!(
+            receipt.phase.as_str(),
+            "preparing" | "restoring" | "ready-observed"
+        ) && !self.dependencies.is_empty()
+        {
+            verify_endpoint_generations(
+                &self.dependencies,
+                receipt
+                    .relay_startup
+                    .as_ref()
+                    .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?,
+            )?;
+        }
+        if let Some(startup) = &receipt.relay_startup {
+            for (name, service) in &startup.services {
+                if service.phase == Phase::Completed {
+                    let resource = receipt
+                        .resources
+                        .get(&format!("container:{name}"))
+                        .ok_or_else(refused)?;
+                    let observed =
+                        inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
+                    completed_generation(receipt, engine.boot_id()?, resource, &observed, service)?;
+                }
+            }
+        }
+        self.verify_listeners(engine, receipt, self.startup_cancelled, record)
+    }
+
+    // Called before cleanup stops any child. Cleanup passes no cancellation
+    // callback: cancellation requests stopping, not loss of exit evidence.
+    fn verify_listeners(
+        &mut self,
+        engine: &impl Inspection,
+        receipt: &mut Receipt,
+        cancelled: Option<fn() -> bool>,
+        mut record: impl FnMut(
+            &mut Receipt,
+            &str,
+            Observation,
+            Option<CandidateError>,
+        ) -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        for ((name, _), child) in &mut self.children {
+            if child.poll_exit()?.is_some() {
+                let resource = receipt
+                    .resources
+                    .get(&format!("container:{name}"))
+                    .ok_or_else(refused)?;
+                let observed = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
+                let observed = settle_exited_transport(
+                    observed,
+                    Instant::now() + LISTENER_EXIT_SETTLE,
+                    LISTENER_EXIT_POLL,
+                    || {
+                        if cancelled.is_some_and(|check| check()) {
+                            return Err(error(
+                                "graph_cancelled",
+                                "Foreground startup was cancelled; owned cleanup is required.",
+                            ));
+                        }
+                        inspect_resource(engine, receipt, resource)?.ok_or_else(refused)
+                    },
+                )?;
+                let observation = probes::observe(engine, receipt, name, &observed)?;
+                classify_exited_listener(receipt, name, &observed, observation, &mut record)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::provider::graph) fn check_readonly(
+        &mut self,
+        observer: &impl Inspection,
+        receipt: &Receipt,
+        root: &Path,
+    ) -> Result<(), CandidateError> {
+        self.verify_with(observer, &mut receipt.clone(), root, |_, _, _, failure| {
+            failure.map_or(Ok(()), Err)
+        })
     }
 }
 impl Driver for HostRelayRuntime {
@@ -795,96 +959,24 @@ impl Driver for HostRelayRuntime {
         receipt: &mut Receipt,
         root: &Path,
     ) -> Result<(), CandidateError> {
-        self.check(engine, receipt)?;
-        if matches!(
-            receipt.phase.as_str(),
-            "preparing" | "restoring" | "ready-observed"
-        ) {
-            rebind::require_complete(root, receipt)?;
-        }
-        if matches!(
-            receipt.phase.as_str(),
-            "preparing" | "restoring" | "ready-observed"
-        ) && !self.dependencies.is_empty()
-        {
-            verify_endpoint_generations(
-                &self.dependencies,
-                receipt
-                    .relay_startup
-                    .as_ref()
-                    .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?,
-            )?;
-        }
-        if let Some(startup) = &receipt.relay_startup {
-            for (name, service) in &startup.services {
-                if service.phase == Phase::Completed {
-                    let resource = receipt
-                        .resources
-                        .get(&format!("container:{name}"))
-                        .ok_or_else(refused)?;
-                    let observed =
-                        inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
-                    completed_generation(
+        self.verify_with(
+            engine,
+            receipt,
+            root,
+            |receipt, name, observation, failure| {
+                if let Some(error) = failure {
+                    return Err(startup_failure::preserve_listener_error(
+                        root,
                         receipt,
-                        engine.guest().boot_id(),
-                        resource,
-                        &observed,
-                        service,
-                    )?;
+                        name,
+                        observation,
+                        error,
+                    ));
                 }
-            }
-        }
-        let cancelled = self.startup_cancelled;
-        for ((name, _), child) in &mut self.children {
-            if child.poll_exit()?.is_some() {
-                let resource = receipt
-                    .resources
-                    .get(&format!("container:{name}"))
-                    .ok_or_else(refused)?;
-                let observed = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
-                let observed = settle_exited_transport(
-                    observed,
-                    Instant::now() + LISTENER_EXIT_SETTLE,
-                    LISTENER_EXIT_POLL,
-                    || {
-                        if cancelled.is_some_and(|check| check()) {
-                            return Err(error(
-                                "graph_cancelled",
-                                "Foreground startup was cancelled; owned cleanup is required.",
-                            ));
-                        }
-                        inspect_resource(engine, receipt, resource)?.ok_or_else(refused)
-                    },
-                )?;
-                let observation = probes::observe(engine, receipt, name, &observed)?;
-                if observation.failed() {
-                    // The relay often exits with its application. Preserve the owned
-                    // service's value-free failure before automatic cleanup removes it.
-                    startup_failure::record(receipt, name, observation)?;
-                    state::write(&root.join("state.json"), receipt)?;
-                    // Name the failed service, as a graph without dependency
-                    // bindings does, rather than a dependency validation failure.
-                    return Err(application_failed(name, observation));
-                }
-                if let Err(error) = verify_exited_listener(receipt.readiness.get(name), &observed) {
-                    if error.code == "graph_startup_listener_unexpected_exit"
-                        && observation == (Observation::Exited { code: 0 })
-                    {
-                        // A successful process exit can still lose a required
-                        // listener. Keep its identity before cleanup removes it.
-                        return Err(startup_failure::preserve_listener_error(
-                            root,
-                            receipt,
-                            name,
-                            observation,
-                            error,
-                        ));
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        Ok(())
+                startup_failure::record(receipt, name, observation)?;
+                state::write(&root.join("state.json"), receipt)
+            },
+        )
     }
 
     fn prepare(
@@ -1214,6 +1306,59 @@ fn relay_artifact(
 mod route_tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+    #[test]
+    fn status_and_cleanup_classify_the_same_exit_without_a_status_write() {
+        let fixture = super::super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let original: Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{"web":"started"},"resources":{"container:web":{"key":"web","kind":"container","name":format!("hkg-{}-container-0", "a".repeat(32)),"id":"e".repeat(64),"phase":"started","image":format!("sha256:{}", "f".repeat(64))}}})).unwrap();
+        state::write(&root.join("state.json"), &original).unwrap();
+        let bytes = fs::read(root.join("state.json")).unwrap();
+        for code in [0, 7] {
+            let observed = json!({"State":{"Running":false,"ExitCode":code,"OOMKilled":false}});
+            let observation = Observation::Exited { code };
+            let mut status = original.clone();
+            let live_error = classify_exited_listener(
+                &mut status,
+                "web",
+                &observed,
+                observation,
+                |_, _, _, error| error.map_or(Ok(()), Err),
+            )
+            .unwrap_err();
+            assert!(status.startup_failure.is_none());
+            assert_eq!(fs::read(root.join("state.json")).unwrap(), bytes);
+            let mut cleanup = original.clone();
+            let captured_error = classify_exited_listener(
+                &mut cleanup,
+                "web",
+                &observed,
+                observation,
+                |receipt, service, observation, error| {
+                    startup_failure::record(receipt, service, observation)?;
+                    error.map_or(Ok(()), Err)
+                },
+            )
+            .unwrap_err();
+            assert_eq!(live_error.code, captured_error.code);
+            assert_eq!(cleanup.startup_failure.unwrap().observation, observation);
+            // Cleanup capture also has no standalone persistence step that
+            // could strand state.pending before the required cleanup commit.
+            assert_eq!(fs::read(root.join("state.json")).unwrap(), bytes);
+            assert!(!root.join("state.pending").exists());
+        }
+        let mut completed = original;
+        completed
+            .readiness
+            .insert("web".into(), Condition::Completed);
+        classify_exited_listener(
+            &mut completed,
+            "web",
+            &json!({"State":{"Running":false,"ExitCode":0,"OOMKilled":false}}),
+            Observation::Exited { code: 0 },
+            |_, _, _, _| panic!("successful completion is not failure evidence"),
+        )
+        .unwrap();
+    }
     #[test]
     fn dependency_free_constructor_skips_artifact_but_required_artifact_uses_fixed_refusal() {
         let fixture = super::super::super::tests::Fixture::new();
@@ -1651,17 +1796,17 @@ mod application_failure_tests {
     use super::*;
     #[test]
     fn an_application_failure_names_the_service_not_dependency_validation() {
-        let error = application_failed("deps", Observation::Exited { code: 3 });
+        let error = application_failed("deps", Observation::Exited { code: 3 }, None);
         assert_eq!(error.code, "graph_startup_application_failed");
         assert_eq!(error.service.as_deref(), Some("deps"));
         let message = error.message.to_string();
         assert!(message.contains("deps exited with code 3"), "{message}");
         assert!(!message.contains("validation"), "{message}");
-        let dead = application_failed("deps", Observation::Dead);
+        let dead = application_failed("deps", Observation::Dead, None);
         assert!(dead.message.to_string().contains("dead or OOM-killed"));
         // An invalid service identifier is never echoed as the service.
         assert_eq!(
-            application_failed("bad name", Observation::Dead).service,
+            application_failed("bad name", Observation::Dead, None).service,
             None
         );
     }

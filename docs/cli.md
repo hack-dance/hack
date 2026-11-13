@@ -36,6 +36,42 @@ and errors expand with wrapped detail and recovery guidance. `hack doctor --json
 fully detailed automation surface. Generic macOS resolver setup is shown only when those resolver
 checks need attention.
 
+With the Compose proxy running, the `proxy ports` check tests its published IPv4 and
+IPv6 loopback bindings independently. An IPv4-only, IPv6-only or LAN bind does not
+imply a listener on the other loopback family. The running container's actual bound
+ports take precedence over requested publication intent, so IPv6-disabled hosts and
+IPv4-only forwarders do not gain an implied IPv6 listener. Requested bindings are
+used only when the runtime projection is absent. HTTPS must verify against the running
+proxy's internal CA using its
+schemas hostname; an unrelated TCP listener cannot pass. A warning names the failed
+port and any listener process visible without privilege. Check competing listeners,
+a VPN's serve feature, the container runtime's HTTPS setting, and local DNS overrides.
+This warning has no automatic repair. Hostnames resolving directly to the container
+address use a different path and can still work. For legacy Compose origins, `hack open` checks the selected URL's
+loopback path before opening it or printing JSON, and refuses when every checked
+loopback path fails and no non-loopback DNS alternative exists. A healthy family or a
+direct-container DNS alternative preserves browser fallback; doctor still warns about
+individual failed bindings. An unavailable runtime CA remains a doctor warning rather than
+proof that a listener is foreign.
+
+`hack open` also says when DNS for the selected host looks wrong. The URL is still printed
+or opened, because it is the right URL; text output adds one warning, and `--json` keeps
+`url` and adds `dns` and a `hint`:
+
+- `"dns": "unresolved"`: the system resolver definitely has no address for the host.
+- `"dns": "unconfigured"` (macOS): the lookup did not answer in time and the host is under
+  a suffix Hack installs DNS for, but this Mac has no resolver file for that suffix, so
+  the URL may not open.
+
+Either is the usual sign of a machine set up by an earlier version that only resolves the
+older suffix: run `hack global install`, or give the project a host under a suffix that
+already resolves with `hack config set dev_host <name>.<suffix>`. A lookup that fails or
+times out is never reported as unresolved. The macOS `unconfigured` hint applies only
+to Hack-managed suffixes; an unknown result for another host is left alone.
+
+Saved native origins retain their own routing behavior: opening them does not invoke
+the Compose proxy's system resolver, Docker inspections or CA-pinned TLS probe.
+
 On macOS, a healthy terminal connection does not establish browser connectivity.
 Use `hack doctor --browser-url https://your-service.hack.local --browser-result fails`
 to compare a manually observed browser failure with a verified CLI HTTPS request.

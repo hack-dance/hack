@@ -330,7 +330,7 @@ test(
     expect(detached.output).toContain(NATIVE_PROVIDER_PIN_MESSAGE);
     expect(detached.output).not.toContain("synthetic-private");
     await savedRun(f);
-    await f.fail("graph inspect", pin);
+    await f.fail("graph status", pin);
     const ps = await cli({ fixture: f, args: ["ps", "--json"] });
     expect(ps.code).toBe(0);
     expect(JSON.parse(ps.stdout)).toMatchObject({
@@ -464,13 +464,13 @@ test(
   async () => {
     const f = await fixture();
     await savedRun(f);
-    await f.reply("graph inspect", "not-json");
+    await f.reply("graph status", "not-json");
     const result = await cli({ fixture: f, args: ["ps"] });
     expectOneClosedLine(
       result,
       "Native runtime returned an invalid control response."
     );
-    expect(await f.calls()).toEqual(["graph inspect"]);
+    expect(await f.calls()).toEqual(["graph status"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -710,11 +710,13 @@ test.each([
   async (code) => {
     const f = await fixture();
     await savedRun(f);
-    await f.reply("graph inspect", {
+    const observed = {
       ...stoppedGraph,
       receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
       observations: { "container:web": { state: "running" } },
-    });
+    };
+    await f.reply("graph inspect", observed);
+    await f.reply("graph status", observed);
     await (
       await beginNativeProjectFinalization({ scope: f.scope, run })
     ).complete();
@@ -733,7 +735,8 @@ test.each([
     expect(refused.output).toContain("Run hack ps --json");
     const next = await cli({ fixture: f, args: ["ps", "--json"] });
     expect(next.code).toBe(0);
-    expect((await f.calls()).at(-1)).toBe("graph inspect");
+    expect(JSON.parse(next.stdout).data.status).toBe("observed");
+    expect((await f.calls()).at(-1)).toBe("graph status");
   },
   SPAWN_TIMEOUT_MS
 );
@@ -798,7 +801,11 @@ test(
   async () => {
     const f = await fixture();
     await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
     await f.reply("graph inspect", stoppedGraph);
+    await f.reply("graph status", stoppedGraph);
     await f.reply("graph foreground-owner", {
       version: 1,
       run: run.run,

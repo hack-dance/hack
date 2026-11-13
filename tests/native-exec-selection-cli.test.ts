@@ -105,7 +105,7 @@ async function fixture(opts: { readonly composeServices: readonly string[] }) {
 printf '%s\\n' "$*" >> "$HOME/native-calls"
 case "$4" in
   refresh-dependencies) printf '%s' '${refreshed}' ;;
-  inspect) printf '%s' '${snapshot}' ;;
+  status) printf '%s' '${snapshot}' ;;
   exec-selection) printf '%s' '${selection}' ;;
   *) printf '%s' '{"code":"unexpected_request"}' >&2; exit 1 ;;
 esac
@@ -186,7 +186,7 @@ test("fresh native exec reports a service removed since startup as a changed sel
   // Refused before any exec request reached the runtime.
   expect(await nativeCalls(f.root)).toEqual([
     "refresh-dependencies",
-    "inspect",
+    "status",
     "exec-selection",
   ]);
 }, 30_000);
@@ -207,7 +207,7 @@ test("fresh native exec reports unresolvable values apart from a changed selecti
   expect(result.output).not.toMatch(STACK_FRAME);
   expect(await nativeCalls(f.root)).toEqual([
     "refresh-dependencies",
-    "inspect",
+    "status",
     "exec-selection",
   ]);
 }, 30_000);

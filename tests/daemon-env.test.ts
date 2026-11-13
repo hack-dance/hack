@@ -341,6 +341,22 @@ describe("handleEnvRoutes", () => {
   });
 
   test("POST /v1/env/unset clears .hack/.env and shows as missing", async () => {
+    // A successful unset requires a backend that can confirm deletion/absence;
+    // an unavailable host keychain must now report an unconfirmed outcome.
+    process.env.HACK_SECRETS_FILE_KEY = "synthetic-plain-unset-key";
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+    await writeFile(
+      resolve(repoRoot, ".hack", PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        name: "env-test",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: { path: join(tempDir, "unset-store.json") },
+          },
+        },
+      })
+    );
     const setReq = mockRequest({
       method: "POST",
       path: "/v1/env/set",
@@ -376,6 +392,49 @@ describe("handleEnvRoutes", () => {
         (v as Record<string, unknown>).key === "FOO"
     ) as Record<string, unknown> | undefined;
     expect(foo?.hasValue).toBe(false);
+  });
+
+  test("unset reports an unconfirmed backend deletion and preserves its completed dotenv result", async () => {
+    const sentinel = "synthetic-delete-error-value";
+    process.env.HACK_SECRETS_FILE_KEY = "synthetic-delete-error-key";
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+    const storePath = join(tempDir, "broken-store.json");
+    await writeFile(storePath, `{"version": ${sentinel}}`);
+    await writeFile(
+      join(repoRoot, ".hack", PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        name: "env-test",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: { path: storePath },
+          },
+        },
+      })
+    );
+    await writeFile(
+      join(repoRoot, ".hack/.env"),
+      `FOO=${sentinel}\nKEEP=preserved\n`
+    );
+    const req = mockRequest({
+      method: "POST",
+      path: "/v1/env/unset",
+      body: { project: "env-test", key: "FOO" },
+    });
+    const response = await handleEnvRoutes({ req, url: new URL(req.url) });
+    expect(response?.status).toBe(500);
+    const text = await response?.text();
+    expect(text).not.toContain(sentinel);
+    expect(JSON.parse(text ?? "null")).toMatchObject({
+      status: "partial_failure",
+      error: "secret_delete_unconfirmed",
+      dotenvChanged: true,
+      secretDeleted: null,
+    });
+    expect(await readFile(join(repoRoot, ".hack/.env"), "utf8")).toBe(
+      "KEEP=preserved\n"
+    );
+    expect(await readFile(storePath, "utf8")).toContain(sentinel);
   });
 
   test("secret set/unset uses configured encrypted_file backend", async () => {

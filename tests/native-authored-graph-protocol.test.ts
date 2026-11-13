@@ -899,6 +899,23 @@ test("native ready and cleanup carry the same admitted binding through mutable p
   ).toThrow("invalid");
 });
 
+test("presentation observation cannot satisfy startup readiness status", () => {
+  const expected = parseNativeAuthoredReceipt(receipt());
+  const observed = status();
+  observed.result.outcome = "observed";
+  expect(
+    parseNativeAuthoredControl(observed, expected, "observe").observations?.[
+      "a.peer"
+    ]
+  ).toEqual({ state: "running", health: "healthy" });
+  expect(() =>
+    parseNativeAuthoredControl(observed, expected, "status")
+  ).toThrow("invalid");
+  expect(() =>
+    parseNativeAuthoredControl(status(), expected, "observe")
+  ).toThrow("invalid");
+});
+
 test("self-valid foreign images IDs readiness owner and boot refuse against original membership", () => {
   const expected = parseNativeAuthoredReceipt(receipt());
   for (const mutate of [

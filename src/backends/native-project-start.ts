@@ -9,6 +9,7 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  nativeDetachedUpFailedServices,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
 } from "../lib/native-detached-up.ts";
@@ -24,7 +25,10 @@ import {
   adaptNativeGcloudEnvironment,
   type NativeGcloudSelection,
 } from "./native-gcloud-environment.ts";
-import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
+import {
+  admitNativeHttpProbe,
+  isInferredNativeRouteProbe,
+} from "./native-http-probe-admission.ts";
 import {
   acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -288,14 +292,44 @@ async function acquireReadyHttps(opts: {
  * routed service without an enabled reviewed HTTP probe, or one hostname with
  * conflicting probes, is the configuration refusal.
  */
+function reviewedHttpsProbe(
+  healthcheck: unknown,
+  port: unknown
+): { path: string; inferred?: true } {
+  if (
+    !(
+      isRecord(healthcheck) &&
+      healthcheck.disabled !== true &&
+      isRecord(healthcheck.native_http) &&
+      isNativeHttpsProbePath(healthcheck.native_http.path)
+    )
+  ) {
+    throw refused();
+  }
+  const probe = healthcheck.native_http;
+  const path = healthcheck.native_http.path;
+  const inferred = isInferredNativeRouteProbe(probe, port);
+  if (probe.policy !== undefined && !inferred) {
+    throw refused();
+  }
+  return { path, ...(inferred ? { inferred: true as const } : {}) };
+}
 export function reviewedNativeHttpsRoutes(
   plan: unknown,
   services: ReadonlySet<string>
-): readonly { hostname: string; path: string; service: string }[] {
+): readonly {
+  hostname: string;
+  path: string;
+  service: string;
+  inferred?: true;
+}[] {
   if (!(isRecord(plan) && isRecord(plan.services))) {
     throw unconfirmed("the reviewed runtime plan");
   }
-  const names = new Map<string, { path: string; service: string }>();
+  const names = new Map<
+    string,
+    { path: string; service: string; inferred?: true }
+  >();
   for (const name of services) {
     const service = plan.services[name];
     if (
@@ -307,21 +341,12 @@ export function reviewedNativeHttpsRoutes(
     ) {
       throw unconfirmed("the reviewed runtime plan");
     }
-    if (
-      !(
-        isRecord(service.healthcheck) &&
-        service.healthcheck.disabled !== true &&
-        isRecord(service.healthcheck.native_http) &&
-        isNativeHttpsProbePath(service.healthcheck.native_http.path)
-      )
-    ) {
-      throw refused();
-    }
+    const probe = reviewedHttpsProbe(service.healthcheck, service.routing.port);
     for (const hostname of service.routing.hostnames) {
       if (typeof hostname !== "string") {
         throw unconfirmed("the reviewed runtime plan");
       }
-      const path = service.healthcheck.native_http.path;
+      const path = probe.path;
       if (
         names.has(hostname) &&
         (names.get(hostname)?.path !== path ||
@@ -329,7 +354,11 @@ export function reviewedNativeHttpsRoutes(
       ) {
         throw refused();
       }
-      names.set(hostname, { path, service: name });
+      names.set(hostname, {
+        path,
+        service: name,
+        ...(probe.inferred ? { inferred: true as const } : {}),
+      });
     }
   }
   return [...names]
@@ -843,6 +872,18 @@ function requireEnrollmentCompatible(plan: unknown): void {
 }
 const HTTPS_REDIRECTS = new Set([301, 302, 303, 307, 308]);
 type HttpsRoute = ReturnType<typeof reviewedNativeHttpsRoutes>[number];
+function httpsResponseReady(
+  route: HttpsRoute,
+  response: { statusCode: number; upstreamVerified?: true }
+): boolean {
+  if (route.inferred && response.upstreamVerified !== true) {
+    throw httpsVerificationFailed("UPSTREAM_RESPONSE_UNCONFIRMED");
+  }
+  return (
+    response.statusCode >= 200 &&
+    response.statusCode < (route.inferred ? 500 : 300)
+  );
+}
 function redirectHostname(
   location: string,
   hostname: string,
@@ -909,7 +950,7 @@ export async function verifyHttpsRoutes(
       if (!(response && Number.isInteger(response.statusCode))) {
         throw httpsVerificationFailed("NO_RESPONSE");
       }
-      if (response.statusCode >= 200 && response.statusCode < 300) {
+      if (httpsResponseReady(route, response)) {
         break;
       }
       if (!(HTTPS_REDIRECTS.has(response.statusCode) && response.location)) {
@@ -2464,6 +2505,9 @@ async function startNativeProjectAttempt(
                 nativeProcessRefusals = diagnostic.processRefusals;
               },
               onStartupLogs: (logs) => {
+                // Names only: a detached owner cannot show output, so the
+                // waiting command names the services and points at foreground up.
+                nativeDetachedUpFailedServices(logs.map((log) => log.service));
                 startupLogReport = formatNativeStartupLogReport({
                   logs,
                   managedEnvironment: input.managedEnvironment,

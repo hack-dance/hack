@@ -14,7 +14,7 @@ import { hash, jsonBytes } from "../scripts/installer/integrity.ts";
 import {
   TransferBudget,
   TransferCleanupUncertain,
-} from "../scripts/installer/transfer-budget.ts";
+} from "../src/lib/release-transfer-budget.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -95,7 +95,7 @@ test("download checks redirects before request and refuses short, oversized, int
     );
     await expect(
       download("https://github.com/file", join(root, "interrupted"), 10)
-    ).rejects.toThrow("interruption");
+    ).rejects.toThrow("interrupted");
     mock.mockImplementation(
       fetchMock((_url, options) => {
         expect(options?.redirect).toBe("manual");
@@ -584,8 +584,17 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
         (value) => ({ value, error: undefined as unknown }),
         (error) => ({ value: undefined, error })
       );
-      await drain();
       if (scenario === "stall" || scenario === "cleanup") {
+        // Advance the fake clock once asynchronous disk writes/close reach the
+        // request whose timeout and cancellation this case models.
+        for (
+          let spin = 0;
+          spin < 100 && calls < (scenario === "stall" ? 2 : 5);
+          spin++
+        ) {
+          await drain();
+        }
+        expect(calls).toBe(scenario === "stall" ? 2 : 5);
         clock.advance(31);
         await drain();
         if (scenario === "cleanup") {

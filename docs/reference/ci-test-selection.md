@@ -166,7 +166,8 @@ attempts cannot expose an older green result. Newer failed, cancelled or unfinis
 scoped attempts also block older full evidence; only successful scoped runs may
 be skipped. For a newer scoped push at the same SHA, the refusal also names the
 run and tells the operator to wait for success or use `gh run rerun RUN_ID`.
-A full dispatch alone cannot clear that newer red or unfinished evidence.
+An older full run cannot supersede that red or unfinished evidence. A new full
+dispatch can supersede it once that newer run succeeds.
 External app requirements retain
 their own exact-head/app identity checks. Stable release preparation remains
 push-only on `main` and rejects cancellation.

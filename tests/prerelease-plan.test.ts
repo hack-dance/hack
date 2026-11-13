@@ -259,6 +259,35 @@ describe("prerelease decision boundary", () => {
     ).toBe(77);
   });
 
+  test("a newer successful full dispatch supersedes failed scoped evidence", async () => {
+    const full = {
+      ...ciRun,
+      event: "workflow_dispatch",
+      updated_at: "2026-11-12T22:00:00Z",
+    };
+    const scoped = {
+      ...ciRun,
+      id: 78,
+      conclusion: "failure",
+      updated_at: "2026-11-12T21:00:00Z",
+    };
+    expect(
+      (
+        await selectPrereleaseCiRun({
+          api: gateApi({
+            [runListPath]: { workflow_runs: [scoped, full] },
+            "actions/runs/77": full,
+            "actions/runs/78": scoped,
+            "actions/runs/78/attempts/1/jobs?per_page=100&page=1": {
+              jobs: scopedJobs,
+            },
+          }),
+          sourceRevision: sha,
+        })
+      ).run.id
+    ).toBe(77);
+  });
+
   test("external required checks retain latest semantics across suites", async () => {
     const external = {
       ...testCheck,

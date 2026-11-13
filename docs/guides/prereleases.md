@@ -134,8 +134,9 @@ that evidence, the latest attempt and the selected run's required-check identiti
 Cancelled runs never qualify. If only scoped evidence exists, the plan refuses
 before building and prints this full-dispatch command. If a newer scoped push
 run at the same SHA is running, failed or cancelled, wait for it to succeed or
-rerun it with `gh run rerun RUN_ID` (the refusal names the run). A full dispatch
-alone cannot clear that newer evidence; only successful scoped runs are ignored.
+rerun it with `gh run rerun RUN_ID` (the refusal names the run). An older full run
+cannot supersede it. A new full dispatch can supersede it once that newer run
+succeeds; only successful scoped runs can be ignored in favor of older full evidence.
 Manual full runs have a
 separate concurrency group, so a new `next` push cannot cancel one; moving the
 head still invalidates its release eligibility.

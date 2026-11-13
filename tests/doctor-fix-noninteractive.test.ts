@@ -595,9 +595,14 @@ for (const repairCase of HACKD_REPAIR_CASES) {
     expect(daemonSteps).toEqual([]);
     expect(skipNote).toContain("(hackd is stale)");
     expect(skipNote).toContain(repairCase.reason);
-    expect(skipNote).toContain(
-      "To repair it yourself, run: hack daemon clear && hack daemon start"
-    );
+    if ("HACK_CANDIDATE_ENTRYPOINT" in repairCase.env) {
+      expect(skipNote).toContain("optional for candidate Compose workflows");
+      expect(skipNote).not.toContain("hack daemon");
+    } else {
+      expect(skipNote).toContain(
+        "To repair it yourself, run: hack daemon clear && hack daemon start"
+      );
+    }
   }, 30_000);
 }
 

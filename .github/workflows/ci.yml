@@ -18,10 +18,11 @@ on:
         default: true
 
 concurrency:
-  # Only the newest next push needs evidence. Main pushes and explicit release
-  # qualification keep unique groups; a pending main run must never be replaced.
+  # Let the active next run finish, including jobs waiting for macOS capacity.
+  # New next pushes replace only the pending run. PRs still cancel stale runs;
+  # main pushes and explicit release qualification keep unique groups.
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/next') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:

@@ -1,0 +1,15 @@
+stateDiagram-v2
+    direction TB
+    [*] --> Inspect
+    Inspect --> Accepted: complete proof
+    Inspect --> Refused: other failure
+    Inspect --> Waiting: member ID refused
+    Waiting --> Inspect: retry budget remains
+    Waiting --> Refused: budget ended or cancelled
+    Accepted --> [*]
+    Refused --> [*]
+    note right of Waiting
+        Two-second monotonic window.
+        Each probe remains bounded.
+        No placeholder grants authority.
+    end note

@@ -149,7 +149,7 @@ export async function fixture(
     `#!${process.execPath}
 import {createHash} from "node:crypto";
 await import("node:fs/promises").then(m=>m.appendFile("compiler-requests",process.argv[2]+"\\n"));
-if(process.argv[2]==="--protocol") console.log(JSON.stringify({...${JSON.stringify(PROTOCOL)},...((await Bun.file("restart-transient").exists()||await Bun.file("restart-finalization-gap").exists())?{process_plan_version:1}:{})}));
+if(process.argv[2]==="--protocol") console.log(JSON.stringify({...${JSON.stringify(PROTOCOL)},...((await Bun.file("restart-transient").exists()||await Bun.file("restart-finalization-gap").exists()||await Bun.file("restart-placeholder-next-query").exists())?{process_plan_version:1}:{})}));
 else {
  const operation=process.argv[2];const raw=await Bun.stdin.text();const request=operation==="compile"?{}:JSON.parse(raw);
  const text=operation==="compile"?raw:request.project;const source=JSON.parse(text);
@@ -201,6 +201,9 @@ const engine=root+"/engine";
 const volumes=root+"/volumes";
 ${opts.storage ? nativeComposeStorageDockerFixtureScript(root) : ""}
 const oneoff=${opts.oneoff === true};
+// Replay the ownership fixture's next-query placeholder at a chosen command boundary.
+const placeholderFile=Bun.file(root+"/restart-placeholder-next-query");
+const placeholder=await placeholderFile.exists()?await placeholderFile.json():null;
 const removed=oneoff && await Bun.file(root+"/oneoff-removed").exists();
 const oneoffName=oneoff && await Bun.file(root+"/oneoff-name").exists()?await Bun.file(root+"/oneoff-name").text():"";
 if(args[0]==="compose") {
@@ -249,13 +252,15 @@ if(args[0]==="volume" && args[1]==="inspect" && await Bun.file(volumes).exists()
 if(args[0]==="container" && args[1]==="inspect" && await Bun.file(engine).exists()) {
  const doc=await Bun.file(engine).json();const labels=doc.services.web.labels;
  if(oneoff) {console.log(JSON.stringify({id:"c".repeat(64),name:"/"+oneoffName,project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"True",state:"exited",exitCode:0,health:null,networks:{[doc.name+"_default"]:{NetworkID:"d".repeat(64),Aliases:[oneoffName]}}}));process.exit(0);}
- const transitional=await Bun.file(root+"/restart-transient").exists();const finalGap=await Bun.file(root+"/restart-finalization-gap").exists();const counter=root+"/restart-container-inspects";const count=(transitional||finalGap)&&await Bun.file(counter).exists()?Number(await Bun.file(counter).text()):0;if(transitional||finalGap)await Bun.write(counter,String(count+1));
- console.log(JSON.stringify({id:"c".repeat(64),name:"/"+doc.name+"-web-1",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"False",state:await Bun.file(root+"/unready").exists()?"exited":transitional&&count<2||finalGap&&count>=2?"restarting":"running",exitCode:0,health:null,networks:{[doc.name+"_default"]:{NetworkID:"d".repeat(64),Aliases:[doc.name+"-web-1","web"]}}}));process.exit(0);
+ const transitional=await Bun.file(root+"/restart-transient").exists();const finalGap=await Bun.file(root+"/restart-finalization-gap").exists();const counter=root+"/restart-container-inspects";const count=(transitional||finalGap||placeholder)&&await Bun.file(counter).exists()?Number(await Bun.file(counter).text()):0;if(transitional||finalGap||placeholder)await Bun.write(counter,String(count+1));
+ console.log(JSON.stringify({id:"c".repeat(64),name:"/"+doc.name+"-web-1",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"False",state:await Bun.file(root+"/unready").exists()?"exited":transitional&&count<2||finalGap&&count>=2||placeholder?.phase==="readiness"&&count===0?"restarting":"running",exitCode:0,health:null,networks:{[doc.name+"_default"]:{NetworkID:"d".repeat(64),Aliases:[doc.name+"-web-1","web"]}}}));process.exit(0);
 }
 if(args[0]==="network" && args[1]==="inspect" && await Bun.file(engine).exists()) {
  const doc=await Bun.file(engine).json();const labels=doc.networks.default.labels;
- const transitional=await Bun.file(root+"/restart-transient").exists();const finalGap=await Bun.file(root+"/restart-finalization-gap").exists();const counter=root+"/restart-network-inspects";const count=(transitional||finalGap)&&await Bun.file(counter).exists()?Number(await Bun.file(counter).text()):0;if(transitional||finalGap)await Bun.write(counter,String(count+1));
- console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],driver:removed&&await Bun.file(root+"/trace-post-remove-refusal").exists()?"foreign":"bridge",internal:false,containers:removed?{}:transitional&&count<2||finalGap&&count>=2?{}:{["c".repeat(64)]:{}}}));process.exit(0);
+ const transitional=await Bun.file(root+"/restart-transient").exists();const finalGap=await Bun.file(root+"/restart-finalization-gap").exists();const counter=root+"/restart-network-inspects";const count=(transitional||finalGap||placeholder)&&await Bun.file(counter).exists()?Number(await Bun.file(counter).text()):0;if(transitional||finalGap||placeholder)await Bun.write(counter,String(count+1));
+ const pendingMember=placeholder&&(placeholder.phase==="readiness"?count<2:count===2);
+ if(placeholder)await appendFile(root+"/restart-placeholder-scans",JSON.stringify({scan:count,shape:pendingMember?"placeholder":"member"})+"\\n");
+ console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],driver:removed&&await Bun.file(root+"/trace-post-remove-refusal").exists()?"foreign":"bridge",internal:false,containers:removed?{}:pendingMember?{["ep-"+"9".repeat(64)]:{Name:doc.name+"-web-1"}}:transitional&&count<2||finalGap&&count>=2?{}:{["c".repeat(64)]:{}}}));process.exit(0);
 }
 process.exit(99);
 `

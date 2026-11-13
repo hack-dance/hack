@@ -20,6 +20,7 @@ import {
   nativeComposeTopologyPredicate,
   observeNativeComposeStartupOwned,
   observeSavedNativeComposeOwned,
+  waitForNativeComposeNetworkMembers,
   waitNativeComposeStartupOwned,
 } from "../src/lib/native-compose-ownership.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -116,15 +117,22 @@ if (action === "ls") {
  if (fixture.mode === "restart-member-transition" && kind === "network" && count > 0) {
    rows[0].containers[${JSON.stringify(ID)}] = {};
  }
- if (fixture.mode === "restart-placeholder-transition" && kind === "container" && count > 0) {
+ if (["restart-placeholder-transition", "restart-placeholder-next-query"].includes(fixture.mode) && kind === "container" && count > 0) {
    for (const row of rows) if (row.state === "restarting") row.state = "running";
  }
- if (fixture.mode === "restart-placeholder-transition" && kind === "network" && count > 0) {
+ if (["restart-placeholder-transition", "restart-placeholder-next-query"].includes(fixture.mode) && kind === "network" && count > (fixture.mode === "restart-placeholder-next-query" ? 1 : 0)) {
    for (const row of rows) for (const [key, member] of Object.entries(row.containers)) {
      if (!key.startsWith("ep-")) continue;
      const owner = fixture.container.find(container => container.name === "/" + member.Name);
      delete row.containers[key];
      row.containers[owner.id] = member;
+   }
+ }
+ if (fixture.mode === "placeholder-to-foreign" && kind === "network" && count > 0) {
+   for (const row of rows) for (const key of Object.keys(row.containers)) {
+     if (!key.startsWith("ep-")) continue;
+     delete row.containers[key];
+     row.containers["f".repeat(64)] = {Name: "foreign-member"};
    }
  }
  const order = fixture.mode === "volume-order" && kind === "volume" && count > 0 ? [...selected].reverse() : selected;
@@ -2019,4 +2027,150 @@ test("active topology changes retain every old physical policy; verified stop pe
     })
   ).toThrow("Run hack down");
   expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+});
+
+/** Post-Compose retry: acquire a fresh complete strict proof, never admit an endpoint key. */
+async function afterComposeOwnership() {
+  let now = 0;
+  let reads = 0;
+  const value = await waitForNativeComposeNetworkMembers({
+    read: () => {
+      reads++;
+      return assertNativeComposeOwned(placeholderOptions);
+    },
+    now: () => now,
+    sleep: async () => {
+      now += 1000;
+    },
+  }).catch((error: unknown) => error);
+  return { value, reads };
+}
+
+test("after-Compose ownership re-reads three IDs plus one attaching endpoint before accepting", async () => {
+  const fixture = restartingPlaceholder();
+  fixture.mode = "restart-placeholder-transition";
+  await prepare(fixture);
+  const { value, reads } = await afterComposeOwnership();
+  expect(reads).toBe(2);
+  expect(value).toMatchObject({
+    containers: expect.arrayContaining([
+      expect.objectContaining({
+        id: RETRY_ID,
+        service: "retry",
+        state: "running",
+        generationId: GENERATION,
+        name: `${PROJECT}-retry-1`,
+        health: null,
+        oneoff: false,
+      }),
+    ]),
+  });
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("after-Compose ownership refuses an endpoint that stays unresolved at the bounded deadline", async () => {
+  await prepare(restartingPlaceholder());
+  const { value, reads } = await afterComposeOwnership();
+  expect(value).toBeInstanceOf(NativeComposeOwnershipError);
+  expect(nativeComposeTopologyPredicate(value)).toBe("network-member-id");
+  expect(reads).toBe(3);
+  expect(JSON.stringify(value)).not.toContain(PLACEHOLDER_KEY);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("after-Compose ownership refuses an endpoint that resolves to a named foreign member", async () => {
+  const fixture = restartingPlaceholder();
+  fixture.mode = "placeholder-to-foreign";
+  await prepare(fixture);
+  const { value, reads } = await afterComposeOwnership();
+  expect(value).toBeInstanceOf(NativeComposeOwnershipError);
+  expect(nativeComposeOwnershipRefusal(value)).toBe("topology");
+  expect(nativeComposeTopologyPredicate(value)).toBe(
+    "member-container-endpoint"
+  );
+  expect(reads).toBe(2);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("post-Compose retries never swallow probe failures or caller-forged topology errors", async () => {
+  for (const error of [
+    new NativeComposeOwnershipError("E_NATIVE_COMPOSE_PROBE"),
+    {
+      code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      topologyPredicate: "network-member-id",
+    },
+  ]) {
+    let reads = 0;
+    const value = await waitForNativeComposeNetworkMembers({
+      read: async () => {
+        reads++;
+        throw error;
+      },
+    }).catch((caught: unknown) => caught);
+    expect(value).toBe(error);
+    expect(reads).toBe(1);
+  }
+});
+
+test("post-Compose cancellation and an exhausted readiness deadline do not retry", async () => {
+  await prepare(restartingPlaceholder());
+  const refusal = await assertNativeComposeOwned(placeholderOptions).catch(
+    (error: unknown) => error
+  );
+  expect(nativeComposeTopologyPredicate(refusal)).toBe("network-member-id");
+  const controller = new AbortController();
+  controller.abort();
+  for (const bound of [{ signal: controller.signal }, { deadline: 0 }]) {
+    let reads = 0;
+    const value = await waitForNativeComposeNetworkMembers({
+      read: async () => {
+        reads++;
+        throw refusal;
+      },
+      ...bound,
+    }).catch((error: unknown) => error);
+    expect(value).toBe(refusal);
+    expect(reads).toBe(1);
+  }
+});
+
+test("member settlement window starts at the refusal rather than the beginning of a slow observation", async () => {
+  await prepare(restartingPlaceholder());
+  const refusal = await assertNativeComposeOwned(placeholderOptions).catch(
+    (error: unknown) => error
+  );
+  let now = 0;
+  let reads = 0;
+  const result = await waitForNativeComposeNetworkMembers({
+    read: async () => {
+      reads++;
+      if (reads === 1) {
+        now += 10_000;
+        throw refusal;
+      }
+      return "owned";
+    },
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms;
+    },
+  });
+  expect(result).toBe("owned");
+  expect(reads).toBe(2);
+});
+
+test("post-Compose readiness opts into re-acquisition without changing strict observations", async () => {
+  const fixture = restartingPlaceholder();
+  fixture.mode = "restart-placeholder-next-query";
+  await prepare(fixture);
+  const result = await waitNativeComposeStartupOwned({
+    ownership: placeholderOptions,
+    restartingServices: ["retry"],
+    deadline: Date.now() + 10_000,
+    settleNetworkMembers: true,
+    ready: (state) =>
+      state.containers.every((container) => container.state === "running"),
+  });
+  expect(result?.containers).toHaveLength(4);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });

@@ -56,6 +56,7 @@ import {
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokensForStatus } from "../control-plane/extensions/gateway/tokens.ts";
 import {
+  isCandidateRun,
   probeDaemonApi,
   resolveDaemonAutostartAccess,
 } from "../daemon/client.ts";
@@ -100,6 +101,10 @@ import {
   type ComposeBackendReport,
   composeBackendCheckResult,
 } from "../lib/doctor-compose-backend.ts";
+import {
+  buildDoctorDaemonCheck,
+  CANDIDATE_DAEMON_GUIDANCE,
+} from "../lib/doctor-daemon.ts";
 import {
   buildDaemonServiceCheck,
   DAEMON_SERVICE_CHECK,
@@ -864,10 +869,10 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()));
   results.push(await runCheck(s, "daemon", () => checkDaemonStatus()));
-  if (isLinux()) {
-    // The row is omitted when systemd management is disabled for this
-    // process (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); a failure to
-    // read it is reported, not thrown.
+  if (isLinux() && !isCandidateRun()) {
+    // Candidate trials do not manage the stable login service. Otherwise the
+    // row is omitted when systemd management is disabled for this process
+    // (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); read failures are reported.
     const serviceCheck = await resolveSystemdSummary({
       paths: resolveDaemonPaths({}),
     }).then(buildDaemonServiceCheck, (error: unknown) => ({
@@ -1943,43 +1948,7 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     }),
   });
 
-  if (report.status === "running") {
-    return {
-      name: "daemon",
-      status: "ok",
-      message: `hackd running (pid ${report.pid ?? "unknown"})`,
-    };
-  }
-
-  if (report.status === "starting") {
-    return {
-      name: "daemon",
-      status: "warn",
-      message: `hackd starting (pid ${report.pid ?? "unknown"}): API not responding`,
-    };
-  }
-
-  if (report.status === "incompatible") {
-    return {
-      name: "daemon",
-      status: "warn",
-      message: `hackd is running but incompatible (run: ${report.nextStep})`,
-    };
-  }
-
-  if (report.status === "stale") {
-    return {
-      name: "daemon",
-      status: "warn",
-      message: `hackd not running (stale pid/socket; run: ${report.nextStep})`,
-    };
-  }
-
-  return {
-    name: "daemon",
-    status: "warn",
-    message: "hackd not running (run: hack daemon start)",
-  };
+  return buildDoctorDaemonCheck({ report, candidate: isCandidateRun() });
 }
 
 async function checkGatewayConfig(): Promise<CheckResult> {
@@ -5209,7 +5178,9 @@ async function maybeRepairHackd(opts: {
     note(
       [
         `Skipped hackd repair (hackd is ${report.status}): ${autostart.message}`,
-        `To repair it yourself, run: ${hackdRepairCommand(report.status)}`,
+        isCandidateRun()
+          ? CANDIDATE_DAEMON_GUIDANCE
+          : `To repair it yourself, run: ${hackdRepairCommand(report.status)}`,
       ].join("\n"),
       "doctor fix"
     );
@@ -5254,6 +5225,10 @@ async function maybeRepairHackd(opts: {
  * TTY. Linger is reported by the check but never changed.
  */
 async function maybeInstallDaemonService(): Promise<DaemonServiceWrites> {
+  if (isCandidateRun()) {
+    note(CANDIDATE_DAEMON_GUIDANCE, "doctor fix");
+    return "refused";
+  }
   // Owner decision (HACK-2052): without a TTY, doctor --fix may start hackd
   // but never writes or reloads the unit; an interactive run that declines
   // the install carries the same refusal into the hackd repair below.

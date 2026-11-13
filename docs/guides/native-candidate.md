@@ -348,16 +348,16 @@ Compose backend. Native support for them is planned after v5.
 
 | Compose feature | Kept on the Compose backend when |
 | --- | --- |
-| External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
+| Foreign external network | Exact external names `hack-dev` and `hack-logging` map to fresh native-owned project bridges, including logical aliases; they do not attach to Docker networks or share cross-project container DNS. Native publishes routes independently of Docker’s global Caddy. Other external networks stay refused by name. A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
+| Duplicate Hack network aliases | Two logical declarations name the same `hack-dev` or `hack-logging` identity. Keep one declaration and attach its services to that declaration; native refuses instead of silently splitting connectivity. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
-| Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.`, `io.hack.native-config.`, `io.hack.native-file.` or `io.hack.storage-witness.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
 | Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. With `HACK_NATIVE_BUILDS=1` (see below), only a build field other than `context`, `dockerfile`, `target` and `args`, or `image` together with `build`, counts; native build admission reviews the values of those four fields itself. |
 | Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64. A missing or `null` `platform` is unset and passes. `linux/amd64` passes only for a service that the `HACK_NATIVE_ADAPTATION` selection opts in to [amd64 emulation](#amd64-emulation-with-rosetta-2); every other platform value stays on the Compose backend. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
 project and before branch, environment, lifecycle, storage or runtime work. They
 refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and one line that names each feature
-found, without network or volume names, label keys, paths or platform values.
+found. Foreign external network names are bounded and named; volume names, label values, paths and platform values are omitted.
 Nothing is started, stopped or written. Every service is checked, including
 services outside the selected profiles.
 
@@ -393,8 +393,7 @@ Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
 (`hack.dependencies.*`) labels are reviewed as before. Other ordinary labels, such
 as `com.example.team` or `org.opencontainers.image.*`, are plain metadata: native
 does not apply them to containers and reports the warning `labels_not_applied`.
-Router and runtime labels outside those forms (`traefik.*`, other `caddy.*`,
-`hack.*`) still refuse with `external_route_or_owner_label`.
+Foreign router directives (`traefik.*` and unsupported `caddy*` keys) and unknown semantic `hack.service.*` or `hack.dependencies.*` declarations still refuse. Their bounded label keys are named; label values are omitted. Generated Hack and Compose metadata is ignored with a warning. The Compose prune label `hack.cache.disposable` grants no native cleanup authority; declare native disposable cache subpaths with `x-hack-disposable-cache` instead.
 
 A `logging:` block with the `json-file`, `local` or `none` driver is accepted and
 not applied (warning `logging_not_applied`): native keeps its own bounded container
@@ -407,10 +406,7 @@ the label [`hack config import --dry-run`](../reference/native-config-import.md)
 reports as `compose_one_shot_job`, is reviewed natively as a one-shot: the review
 plan marks it `one_shot`, and native `up` waits for it to exit successfully
 instead of waiting for it to keep running. The marker adds no container label.
-Only that exact key is recognized. Any other `hack.*` key, including another
-`hack.service.*` key, is still refused (`external_route_or_owner_label` in the
-native review), and a marker next to a reserved ownership label does not exempt
-it. The native review also refuses a marker whose value is not the string
+Only that exact semantic key is recognized; unknown `hack.service.*` and `hack.dependencies.*` keys stay refused. Other Hack-generated and `com.docker.compose.*` metadata is ignored with a warning, including authored ownership labels. None is copied to native resources: ownership comes only from freshly generated Engine labels. The native review also refuses a marker whose value is not the string
 `true` (`invalid_one_shot_label`), a one-shot with `restart: always` or
 `unless-stopped` (`nonterminating_one_shot`), and a one-shot that also declares
 routing labels (`one_shot_route_conflict`).
@@ -955,11 +951,12 @@ compares successful replies' `Content-Length` with `size_bytes`. Only 404 and 41
 mean a file is no longer served. Timeouts, other HTTP errors (403, 429 or 5xx),
 and a missing `Content-Length` are transient failures
 and never reopen a closed issue by themselves. Size mismatches and policy
-refusals are reported separately. A size disagreement must repeat on a second HEAD
-from the original pinned URL before it can reopen an issue. The confirmation asks
-for cache revalidation and shares the first request's deadline; an inconsistent
-length or failed confirmation is transient. A second length matching the pin reports
-the file as available. The watch never changes pins or mirrors files;
+refusals are reported separately. A size disagreement must be confirmed by a
+one-byte GET from the original pinned URL before it can reopen an issue. The
+confirmation requests `Range: bytes=0-0` with identity encoding, asks for cache revalidation and shares the
+first request's deadline. It requires a valid one-byte Content-Range, one byte and
+EOF. An ignored range, inconsistent length or failed confirmation is transient.
+A range total matching the pin reports the file as available. The watch never changes pins or mirrors files;
 availability checks do not verify archive contents.
 The current pins do not record external signature/checksum files: the repository
 hashes decide acceptance, and the existing SmolVM prepare step also checks its
@@ -967,14 +964,16 @@ code signature. The qualification script's optional upstream checksum comparison
 remains a separate check.
 
 Successful `runtime setup --json` output includes `status`, `probe` and a `files`
-array. Each file has `name`, `outcome` (`downloaded`, `resumed` or `reused`),
+array. Each archive read has `name`, `outcome` (`downloaded`, `resumed`, `reused` or `offline`),
 `size_bytes`, `downloaded_bytes` and `reused_bytes`. The counts account for pinned
 artifacts this invocation, excluding HTTP headers and discarded prefixes.
 A resumed file counts only its new suffix as downloaded; a server that ignores
 Range restarts the download and counts the whole file as downloaded. Offline
-inputs, verified cache files and complete installed-home reuse report `reused`
-with zero downloaded bytes. Complete-home reuse verifies the installed tree rather
-than reading archive inputs; its reused count is the equivalent pinned archive size.
+inputs report `offline`; verified cache files report `reused`. Both have zero
+downloaded bytes. Complete-home reuse verifies the installed tree without reading
+archives and returns `status: "reused"` with an empty `files` list.
+If another process finishes installation after this run read archives, the result
+keeps those actual archive entries even though its final status is `reused`.
 No input paths appear in these entries.
 
 Setup calls the same three manual prepare functions in a private staging home,
@@ -1839,7 +1838,7 @@ Two native frontends exist. An authored `.hack/hack.project.json` project is own
 by `src/lib/native-authored-command.ts`, which admits only the bounded macOS slices
 in the [authored command contract](../reference/native-authored-commands.md):
 foreground `up` and `restart`, owner-mediated `down` and `down --recover`, saved-run
-`ps`, single-service `logs --follow`, finite `logs --no-follow`, noninteractive
+`ps`, single-service `logs --follow` (available under verification), finite `logs --no-follow`, noninteractive
 `exec` and bounded one-off `run`.
 One-off `run` refuses members with source, persistent-data or private-env mounts;
 `restart` requires a proven stop before a fresh foreground start. The
@@ -1864,12 +1863,13 @@ line naming the native backend as a beta for Apple Silicon macOS, delivered by t
 
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps`, for
-`hack status`, `hack logs SERVICE --follow` and bounded `logs --no-follow`. `hack status`
+`hack status`, `hack logs SERVICE --follow` (available under verification) and bounded `logs --no-follow`. `hack status`
 observes one project, the cwd project or `--project <name>`, with the same
 output and `--json` envelope as native `hack ps`; outside a project it refuses
 instead of listing Compose state, which cannot see native graphs (HACK-1988). They verify the project/branch run mapping
-against the current native graph. Live logs follow one admitted start generation
-without a mutation lease, with bounded buffers and explicit refusals for unsupported
+against the current native graph. Each live log reader follows one admitted start
+generation; project restart requires fresh admission within a bounded wait.
+Following holds no mutation lease, with bounded buffers and explicit refusals for unsupported
 flags or TTY services. Loki queries remain unsupported. See the
 [live log contract](../reference/native-authored-commands.md#followed-service-logs)
 for limits and stop behavior.

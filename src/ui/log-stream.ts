@@ -4,6 +4,7 @@ export type LogStreamBackend = "compose" | "loki" | "native";
 export type LogStreamEventType =
   | "start"
   | "log"
+  | "notice"
   | "heartbeat"
   | "error"
   | "end";
@@ -31,6 +32,7 @@ export type LogStreamEvent = {
   readonly entry?: LogJsonEntry;
   readonly message?: string;
   readonly reason?: string;
+  readonly phase?: string;
 };
 
 export function buildLogStreamStartEvent(opts: {
@@ -97,8 +99,10 @@ export function buildLogStreamErrorEvent(opts: {
 export function buildLogStreamEndEvent(opts: {
   readonly context: LogStreamContext;
   readonly reason?: string;
+  readonly phase?: string;
+  readonly message?: string;
 }): LogStreamEvent {
-  const { context, reason } = opts;
+  const { context, reason, phase, message } = opts;
   return {
     type: "end",
     ts: nowIso(),
@@ -106,6 +110,8 @@ export function buildLogStreamEndEvent(opts: {
     backend: context.backend,
     ...(context.branch ? { branch: context.branch } : {}),
     ...(reason ? { reason } : {}),
+    ...(phase ? { phase } : {}),
+    ...(message ? { message } : {}),
   };
 }
 

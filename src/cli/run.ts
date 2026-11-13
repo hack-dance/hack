@@ -125,7 +125,29 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       return 1;
     }
     await nativeDetachedUpFailure(error);
-    return await handleRunCliError({ error, jsonRequested, handlerPath });
+    return await handleRunCliError({
+      error,
+      jsonRequested,
+      handlerPath,
+      logFollowJson:
+        jsonRequested &&
+        process.env.HACK_RUNTIME_BACKEND === "native" &&
+        isFollowLogs(argv),
+    });
+  }
+}
+
+function isFollowLogs(argv: readonly string[]): boolean {
+  try {
+    const parsed = parseCliArgv(CLI_SPEC, argv, { allowUnknownOptions: true });
+    return (
+      resolveCommand(CLI_SPEC, parsed.positionals).command?.name === "logs" &&
+      parsed.values["no-follow"] !== true
+    );
+  } catch {
+    // A missing option value can defeat even permissive parsing. The direct
+    // command spelling is still unambiguous; do not infer it from option values.
+    return argv[0] === "logs" && !argv.includes("--no-follow");
   }
 }
 
@@ -162,8 +184,19 @@ export async function handleRunCliError(opts: {
   readonly error: unknown;
   readonly jsonRequested: boolean;
   readonly handlerPath?: readonly string[];
+  readonly logFollowJson?: boolean;
 }): Promise<number> {
   const { error, jsonRequested } = opts;
+  if (opts.logFollowJson) {
+    // Pre-session failures have no stream to end. Keep stdout empty so every
+    // emitted line remains an event; never append the global pretty envelope.
+    const result =
+      error instanceof CliUsageError
+        ? errorResult({ code: "E_USAGE", message: error.message })
+        : errorResultFromUnknown({ error });
+    process.stderr.write(`${JSON.stringify(result)}\n`);
+    return 1;
+  }
   if (error instanceof CliUsageError) {
     if (jsonRequested) {
       // Envelope only: the message is inside it, and logger backends may

@@ -919,14 +919,13 @@ pub(super) fn compile(
         }
         if routing_invalid
             || labels.keys().any(|key| {
-                // Hack's ownership namespaces are never exempt: no routing,
-                // dependency cache or one-shot declaration may carry ownership evidence.
-                super::ownership_labels::is_hack_ownership_label(key)
-                    || (!(dependency_cache.is_some() && super::dependency_cache::recognized(key))
-                        && !(routing.is_some() && super::routing::recognized(key))
-                        && !super::one_shot::recognized(key)
-                        && !(inert_route_labels && super::routing::recognized_inert(key))
-                        && !super::inert_metadata_label(key))
+                // Authored ownership metadata is inert; only fresh generated
+                // Engine labels can prove ownership.
+                !(dependency_cache.is_some() && super::dependency_cache::recognized(key))
+                    && !(routing.is_some() && super::routing::recognized(key))
+                    && !super::one_shot::recognized(key)
+                    && !(inert_route_labels && super::routing::recognized_inert(key))
+                    && !super::inert_metadata_label(key)
             })
         {
             diagnostics.push(Diagnostic::error(

@@ -1211,6 +1211,63 @@ mod compose_field_tests {
     }
 
     #[test]
+    fn duplicate_hack_aliases_name_the_review_blocker() {
+        let fixture = super::super::tests::Fixture::new();
+        let home = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&home.0).unwrap();
+        let mut input = document(json!({"networks":["hack-dev"]}));
+        input["networks"] =
+            json!({"hack-dev":{"external":true},"edge":{"external":{"name":"hack-dev"}}});
+        state::write(&fixture.0.join("compose.yaml"), &input).unwrap();
+        let report = project::plan(
+            &candidate,
+            PlanOptions {
+                branch: None,
+                project: &fixture.0,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )
+        .unwrap();
+        assert!(
+            report
+                .plan
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "duplicate_hack_network" && d.severity == "error")
+        );
+        assert!(!report.plan.enrollment_compatible);
+    }
+
+    #[test]
+    fn hack_compose_metadata_never_supplies_engine_ownership_or_external_networks() {
+        let mut input = document(
+            json!({"networks":["hack-dev","hack-logging"],"labels":{"com.docker.compose.project":"forged-owner","io.hack-local.owner":"forged-owner","hack.owner":"forged-owner"}}),
+        );
+        input["networks"] = json!({"hack-dev":{"external":true},"hack-logging":{"external":true}});
+        let result = prepared(&input).unwrap();
+        let encoded = serde_json::to_string(&result.configs).unwrap();
+        assert!(!encoded.contains("forged-owner"));
+        assert_ne!(
+            result.configs["web"]["Labels"]["io.hack-local.owner"],
+            "forged-owner"
+        );
+        assert!(result.resources.contains_key("network:hack-dev"));
+        assert!(result.resources.contains_key("network:hack-logging"));
+        input["networks"]["edge"] = json!({"external":{"name":"hack-dev"}});
+        assert_eq!(
+            prepared(&input).err().unwrap().code,
+            "execution_incompatible"
+        );
+        input["networks"].as_object_mut().unwrap().remove("edge");
+        input["networks"]["hack-dev"]["name"] = json!("foreign");
+        assert_eq!(
+            prepared(&input).err().unwrap().code,
+            "execution_incompatible"
+        );
+    }
+
+    #[test]
     fn inert_route_labels_are_admitted_without_a_route_and_partial_forms_refuse() {
         let inert = prepared(&document(
             json!({"labels":{"caddy":"web.example","caddy.tls":"internal"}}),
@@ -1223,7 +1280,6 @@ mod compose_field_tests {
             json!({"caddy":"web.example"}),
             json!({"caddy.tls":"internal"}),
             json!({"caddy":"web.example","caddy.tls":"internal","caddy.header":"x"}),
-            json!({"caddy":"web.example","caddy.tls":"internal","hack.owner":"x"}),
         ] {
             let error = prepared(&document(json!({ "labels": labels })))
                 .err()

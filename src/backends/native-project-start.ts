@@ -135,6 +135,7 @@ import {
   hasOnlyNativeSupportedLogging,
   nativeBridgeCapacity,
   reviewedNativeRoutes,
+  unsupportedNativeLabelKeys,
 } from "./native-project-routing.ts";
 import {
   beginNativeProjectStartupObservation,
@@ -649,6 +650,17 @@ export function prepareNativeProjectServices(
   }
   const result: Record<string, Record<string, unknown>> = {};
   for (const [name, value] of Object.entries(compose.services)) {
+    if (isRecord(value)) {
+      const unsupported = unsupportedNativeLabelKeys(value.labels).filter(
+        (key) => key.startsWith("caddy") || key.startsWith("traefik")
+      );
+      if (unsupported.length) {
+        throw new HackCliError({
+          code: "E_NATIVE_PROJECT_UNSUPPORTED",
+          message: `Native service labels are unsupported: ${unsupported.join(", ")}. Remove the unsupported router directive; run hack doctor --native-preflight for every blocker. Label values were omitted; nothing was started.`,
+        });
+      }
+    }
     if (
       !isRecord(value) ||
       nativeServicePreparationProblems({

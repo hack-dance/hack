@@ -8,11 +8,14 @@ import {
   realpath,
   rename,
   rm,
+  stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-graph-protocol.ts";
+import { serveNativeHookStop } from "../src/backends/native-authored-hook-stop.ts";
 import { readNativeAuthoredLiveStopRecovery } from "../src/backends/native-authored-live-stop.ts";
 import { captureNativeAuthoredProcessIncarnation } from "../src/backends/native-authored-process-incarnation.ts";
 import {
@@ -183,6 +186,142 @@ async function setup(
       root,
     });
   });
+}
+
+test("stop without admission never observes restart or creates native-home state", async () => {
+  const scope = await fixture();
+  let observations = 0;
+  await expect(
+    stopNativeAuthoredProject({
+      scope,
+      timeoutMs: 1000,
+      onStopping: async () => {
+        observations++;
+      },
+    })
+  ).rejects.toThrow();
+  expect(observations).toBe(0);
+  expect(await readdir(scope.nativeHome)).toEqual([]);
+  expect(await readdir(scope.projectDir)).toEqual([]);
+});
+
+for (const format of ["live", "legacy"] as const) {
+  for (const outcome of [
+    "success",
+    "observer-failed",
+    "abort",
+    "expired",
+    "drift",
+  ] as const) {
+    test(`${format} stop rechecks after one advisory observation: ${outcome}`, async () => {
+      const scope = await fixture();
+      await setup(scope, async (value) => {
+        const events: string[] = [];
+        let observedBudget = 0;
+        const controller = new AbortController();
+        const key = createHash("sha256")
+          .update(JSON.stringify(scope.branch))
+          .digest("hex");
+        const ownerPath = join(value.root, `${key}.hooks.json`);
+        const hookPath = join(value.root, `${"a".repeat(32)}.hook-stop.json`);
+        const stop = async () => {
+          events.push("request");
+          if (format === "live") {
+            await live?.retire(cleaned());
+          } else {
+            await unlink(hookPath);
+            await unlink(ownerPath);
+          }
+          await value.admission.retire({
+            expectedStart: value.start,
+            expectedRun: value.ready,
+            cleaned: cleaned(),
+          });
+          await value.source.remove();
+          return true;
+        };
+        const live =
+          format === "live"
+            ? await value.admission.publishLiveStop({
+                expectedStart: value.start,
+                expectedRun: value.ready,
+                source: value.source,
+                assertFresh: async () => undefined,
+                stop,
+              })
+            : undefined;
+        const legacy =
+          format === "legacy"
+            ? await serveNativeHookStop({
+                run: "a".repeat(32),
+                assertFresh: async () => undefined,
+                stop,
+              })
+            : undefined;
+        try {
+          if (legacy) {
+            const text = "{}";
+            await writeFile(ownerPath, text, { mode: 0o600 });
+            const info = await stat(ownerPath);
+            await writeFile(
+              hookPath,
+              JSON.stringify({
+                version: 1,
+                kind: "native-authored-hook-stop",
+                run: "a".repeat(32),
+                port: legacy.port,
+                token: legacy.token,
+                owner: {
+                  path: ownerPath,
+                  dev: info.dev,
+                  ino: info.ino,
+                  sha256: createHash("sha256").update(text).digest("hex"),
+                },
+              }),
+              { mode: 0o600 }
+            );
+          }
+          const result = stopNativeAuthoredProject({
+            scope,
+            timeoutMs: 2000,
+            signal: controller.signal,
+            onStopping: async ({ remainingMs }) => {
+              events.push("observe");
+              observedBudget = remainingMs;
+              if (outcome === "observer-failed") {
+                throw new Error("advisory failure");
+              }
+              if (outcome === "abort") {
+                controller.abort();
+              }
+              if (outcome === "expired") {
+                await Bun.sleep(remainingMs + 10);
+              }
+              if (outcome === "drift") {
+                await writeFile(
+                  value.path.replace(".live-stop.json", ".json"),
+                  "{}",
+                  { mode: 0o600 }
+                );
+              }
+            },
+          });
+          if (outcome === "success" || outcome === "observer-failed") {
+            await result;
+            expect(events).toEqual(["observe", "request"]);
+          } else {
+            await expect(result).rejects.toThrow();
+            expect(events).toEqual(["observe"]);
+          }
+          expect(observedBudget).toBeGreaterThan(0);
+          expect(observedBudget).toBeLessThanOrEqual(2000);
+        } finally {
+          await live?.close(true);
+          await legacy?.close(true);
+        }
+      });
+    });
+  }
 }
 test("no-host stop is one original operation and retires only matching Removed", async () => {
   const opts = await fixture();

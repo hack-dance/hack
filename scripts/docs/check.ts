@@ -107,6 +107,31 @@ console.log(
   "Manifest source containment and Markdown schema boundaries passed."
 );
 
+// Inline diagrams must be served assets. Remote repository pages remain links.
+for (const page of new Bun.Glob("**/*.md").scanSync({
+  cwd: resolve(repositoryRoot, "site/content/docs"),
+})) {
+  const text = await Bun.file(
+    resolve(repositoryRoot, "site/content/docs", page)
+  ).text();
+  if (/!\[[^\]\n]*\]\(\s*(?:https?:)?\/\//i.test(text)) {
+    throw new Error(`Remote image embed in published page: ${page}`);
+  }
+}
+for (const [page, image] of [
+  ["native/authored-commands", "docs/native/log-follow.svg"],
+  ["native/full-reference", "docs/diagrams/native-setup.svg"],
+  ["native/full-reference", "docs/reference/native-publisher-stop.svg"],
+] as const) {
+  const text = await Bun.file(
+    resolve(repositoryRoot, `site/content/docs/v5/${page}.md`)
+  ).text();
+  const target = `https://github.com/hack-dance/hack/blob/${versions.v5.revision}/${image}`;
+  if (!text.includes(`](${target})`)) {
+    throw new Error(`Pinned source image link lost: ${page}/${image}`);
+  }
+}
+
 for (const version of ["v4", "v5"]) {
   const cli = await Bun.file(
     resolve(repositoryRoot, `site/content/docs/${version}/reference/cli.md`)
@@ -508,6 +533,11 @@ for (const [file, facts] of [
   ["reference/cli.md", ["--native-preflight"]],
   ["native/preflight.md", ["runtime_review.status", "ready: false"]],
   ["guides/proxy-network-repair.md", ["hack global up", "ok: null"]],
+  ["native/setup.md", ["under verification", "runtime setup", "next.16"]],
+  [
+    "native/log-follow.md",
+    ["under verification", "--follow", "native_log_stopped_idle"],
+  ],
 ] as const) {
   const text = await Bun.file(resolve(v5Root, file)).text();
   for (const fact of facts) {

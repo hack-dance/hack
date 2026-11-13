@@ -74,7 +74,7 @@ provider contact. A refusal names no option value, path or project detail.
 | `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`, `--detach`, `--profile` and `--env` overrides, service subsets including an empty selection, single-service, command, workdir, follow, tail and format options |
 | `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
 | `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
-| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 0 through 1000 with follow, 1 through 1000 with no-follow (default 200), plain or `--json`; `--since` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
+| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 0 through 1000 with follow, 1 through 1000 with no-follow (default 200), plain or `--json`; `--since` and `--timestamps` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
 | `exec` | `exec SERVICE -- COMMAND ARG...` with closed stdin, no TTY and an optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, interactive or TTY input, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
 | `run` | `run SERVICE -- COMMAND ARG...` through a ready foreground owner, closed stdin, no TTY, optional absolute `--workdir`; member must have no mounts | The `exec` option refusals above; source, persistent-data or private-env mounts refuse before the one-off effect |
 | `restart` | Whole-project proven stop followed by fresh foreground `up`; `--branch`, `--profile` and `--env` select the fresh generation | Service subsets, `--json`, `--detach`, `--target`, recovery and other unsupported foreground options; missing or unproven stop prevents startup |
@@ -382,12 +382,15 @@ Follow is the default. `--tail` selects 0 through 1000
 initial lines (default 200); `--since` accepts a timestamp or duration such as
 `10m`. The default tail still limits that time window to the latest 200 lines;
 use `--tail` to select another supported bound, or `--tail 0` for only new lines. `--json` uses the same
-`start`, `log` and `end` event envelope as Compose, with `backend: "native"`.
+`start`, `log` and `end` event envelope as Compose, plus a `notice` event on restart, with `backend: "native"`.
 The optional `project` field is present only when `--project` was supplied;
 saved-run observation does not reload project configuration to derive a name.
 Each log event's `entry` contains `source: "native"`, `service`, `stream`,
-`message`, `raw`, and the Engine timestamp. Plain output uses
-`SERVICE | text` and preserves stdout/stderr. One service is required. Unsupported
+`message` and `raw`. Plain output contains the application text, matching the
+finite snapshot, and sends both service streams to stdout so pipes receive both.
+Hack notices go to stderr. `--timestamps` (follow only) requests Engine timestamps;
+they prefix plain lines and populate JSON `entry.timestamp` without using the
+64 Ki payload limit. Without it, Engine timestamps are disabled. One service is required. Unsupported
 flags are refused by name, and TTY-configured services report
 `native_log_tty_unsupported`.
 
@@ -397,27 +400,65 @@ journal refuses with `native_log_selection_changed`; it does not wait for startu
 Following holds no provider mutation lease and does not use the foreground
 owner's serial control loop. It cannot reserve the lifecycle lock against `up`,
 `down` or `restart`. The selected container ID and start generation stay pinned;
-the follower never switches to a replacement container. Ctrl-C stops only the
+each reader follows only that selection. Ctrl-C stops only the
 reader and exits 130. Actual stream EOF plus a confirmed service stop or removal
-ends the read with 0. If the stopped service's transport remains open for five idle
+ends the read with 0, one stderr line saying the service stopped, and JSON
+`end.reason: "native_log_service_stopped"`. If the stopped service's transport remains open for five idle
 seconds, the follower reports `native_log_stopped_idle` on stderr and in the JSON
 `end.reason`, exits 1 and warns that the final tail may be incomplete;
 unexplained transport loss reports `native_log_stream_uncertain`, while changed
 ownership or generation refuses explicitly. No stream result grants cleanup
 authority.
 
-A container restart also ends the follower. If the new start generation is
-already visible at the final observation, the result is
-`native_log_container_restarted`; if the stop is still visible, it is a clean
-stop. Start another follower for the restarted service. A local output pipe
-closing, such as `hack logs SERVICE | head -1`, stops the reader quietly with 0.
+Native follow failures retain their named JSON `end.reason`. When available,
+`end.phase` identifies admission, periodic or final inspection, or the decoder
+boundary; `end.message` and stderr include only the runtime's bounded, fixed
+diagnostic. Malformed mux headers report the invalid field and expected header
+layout, never raw bytes: a misframed header may actually contain log payload.
+An `engine_protocol` during inspection does not identify a mux-decoder failure.
+Inspection failures still end the follow; no retries or identity checks are relaxed.
+
+After a project restart, the frontend attempts a fresh Ready admission for the same
+project, branch, namespace and service. A fresh owner is allowed; the previous
+selection grants no authority. An advisory restart notice (authored projects) or
+the existing restart intent (adopted projects) allows up to 30 seconds of read-only
+waiting, without a mutation lease. A normal down does not enter this wait.
+Authored restart publishes its notice only after stop admission, before sending the
+stop request. Admission refusals create no notice state. After an admitted attempt,
+the empty notice directory may remain. Notices expire after the remaining stop budget plus 30 seconds (at most 330 seconds); publishing or retiring one never changes the
+lifecycle command result. A recent stale notice can cause a bounded wait, ending with `native_log_restart_unavailable`
+and exit 1. Reattachment requires a different container ID; an adopted restore may
+retain both its run ID and provider owner. The old reader supplies its admitted
+container, and a finite lease-free read selects the replacement. The new reader
+rechecks that exact container before requesting logs. A same-container Engine restart
+observed by the reader ends with `native_log_container_restarted`. If the reader
+already confirmed a stop before that restart, the follow ends as stopped; it never
+reattaches to the same container.
+
+Once the replacement Engine transport admits, one plain stderr marker line (or JSON
+`notice` with reason `native_log_restarted`) precedes the new container's output.
+The replacement requests logs since its pinned `StartedAt` converted to Unix seconds with nanosecond precision,
+capped at its latest 1000 lines, then follows; older lines from
+that new container may be omitted if startup output exceeded the bound. The initial
+`--since` applies only to the first attachment. No old-container lines are replayed.
+
+A closed output pipe stops the reader quietly with 0, including while idle or waiting
+for restart. Linux uses a non-writing poll; macOS uses kqueue's write-side EOF.
+If the native observation helper cannot load (including libc differences on musl),
+closure is detected on the next write. The compiled macOS binary still needs live
+acceptance for the kqueue path.
+Ordinary JSON endings wait for the consumer; only cancellation retains a 100 ms
+best-effort end. Session failures emit a named `end` and a stderr diagnostic, with
+no global error envelope appended to stdout. Native argument or dispatch errors before
+a session starts report on stderr only; Compose keeps its existing error contract.
 
 The runtime emits at most 4 KiB per envelope and waits for the frontend to consume
 output. The frontend retains at most 64 Ki characters per unfinished line per
 descriptor. Longer lines retain that prefix and discard bytes up to the next
 newline, then emit `[truncated]` and continue. A trailing line without a newline
 emits `[partial]`; JSON entries also set `truncated: true` or `partial: true`.
-Neither side accumulates
+A truncated Engine frame can deliver its validated payload prefix before refusing;
+that unfinished application line is marked partial. Neither side accumulates
 the stream's history. A lifetime pipe ends even an idle reader when its frontend
 dies. A slow output consumer may finish draining after the reader exits; the
 pipe-exit timeout bounds stalled child-pipe reads, not consumer writes.

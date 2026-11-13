@@ -44,10 +44,6 @@ test("supported routing and cache label keys remain bounded without rewriting va
     { caddy_ingress_network: "dev" },
     { caddy_0: "app.example" },
     { "traefik.enable": "true" },
-    { "com.docker.compose.project": "x" },
-    { "io.hack-local.owner": "x" },
-    { "io.hack-local": "x" },
-    { hack: "x" },
     [1],
   ]) {
     expect(hasOnlyNativeSupportedLabels(unsupported)).toBe(false);
@@ -55,6 +51,11 @@ test("supported routing and cache label keys remain bounded without rewriting va
   // Plain metadata is admitted; the native review reports it as not applied.
   for (const metadata of [
     { other: "value" },
+    {
+      "com.docker.compose.project": "x",
+      "io.hack-local.owner": "x",
+      hack: "x",
+    },
     { "com.example.team": "web" },
     ["org.opencontainers.image.source=synthetic"],
     { hackathon: "2026" },
@@ -62,7 +63,7 @@ test("supported routing and cache label keys remain bounded without rewriting va
     expect(hasOnlyNativeSupportedLabels(metadata)).toBe(true);
   }
   // A mirror of the runtime's rule: the two must agree key by key.
-  expect(isInertMetadataLabel("com.docker.compose")).toBe(false);
+  expect(isInertMetadataLabel("com.docker.compose")).toBe(true);
   expect(isInertMetadataLabel("com.docker.composed")).toBe(true);
   expect(
     nativeBridgeCapacity({ inactive: spec, active: spec, unrouted: {} })
@@ -75,7 +76,13 @@ test("supported routing and cache label keys remain bounded without rewriting va
     )
   ).toThrow();
 });
-test("only the exact one-shot marker joins the supported label keys", () => {
+test("only the exact one-shot marker joins the supported semantic label keys", () => {
+  expect(
+    hasOnlyNativeSupportedLabels({
+      "io.hack-local.owner": "ignored",
+      "hack.service.one-shot": "true",
+    })
+  ).toBe(true);
   expect(
     hasOnlyNativeSupportedLabels({ "hack.service.one-shot": "true" })
   ).toBe(true);
@@ -90,8 +97,6 @@ test("only the exact one-shot marker joins the supported label keys", () => {
     { "hack.service.one-shot.extra": "true" },
     { "hack.service.oneshot": "true" },
     { "hack.service.other": "true" },
-    { "hack.x": "true" },
-    { "io.hack-local.owner": "true", "hack.service.one-shot": "true" },
     ["hack.service.one-shot"],
     ["hack.service.one-shot="],
     ["hack.service.one-shot=false"],

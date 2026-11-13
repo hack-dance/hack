@@ -24,12 +24,14 @@ hook contract.
 On tmux foreground cleanup, Hack captures the owned lifecycle process groups before
 stopping their mux session. The recorded pane PID and UTC start time must match
 before any descendants are captured, and captured member identities are checked
-again before escalation. It waits for the detached commands to disappear before
+again before signalling. The wrapper forwards TERM to its main command group;
+Hack sends TERM to separately grouped descendants that the wrapper does not signal.
+It waits for the detached commands to disappear before
 retiring the FIFO wrapper and its reader. Each phase allows 5 seconds for graceful
 exit, escalates surviving groups once with SIGKILL, then waits up to 2 seconds for
 retirement (at most 14 seconds of group waiting across both phases, plus bounded mux
 and process-identity queries). The capture allows two 1-second group snapshots
-alongside a 2-second identity read; each escalation checks identities again with
+alongside a 2-second identity read; each signal batch checks identities again with
 bounded queries. Explicit `hack down` uses the same command-before-wrapper order
 after interrupting its owned lifecycle panes.
 Commands that finish their TERM handler sooner do not wait out the grace period.

@@ -84,6 +84,25 @@ test("mux-signalled groups get a reap grace without another TERM", async () => {
   ]);
 });
 
+test("only groups outside the wrapper's forwarded signal get TERM", async () => {
+  const os = runtime({ termExit: 1000 });
+  const batches: number[][] = [];
+  await terminateLifecycleProcessGroups({
+    processGroupIds: [42, 43],
+    alreadySignalledGroups: [42],
+    runtime: os,
+    beforeSignal: async (groups) => {
+      batches.push([...groups]);
+      return groups;
+    },
+  });
+  expect(os.now()).toBe(1000);
+  expect(batches).toEqual([[43]]);
+  expect(os.signals.filter((event) => event.signal !== 0)).toEqual([
+    { group: 43, signal: "SIGTERM", at: 0 },
+  ]);
+});
+
 test("a surviving group is reported after one escalation and a finite wait", async () => {
   const os = runtime({});
   await expect(

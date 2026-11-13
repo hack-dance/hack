@@ -247,8 +247,10 @@ export async function assertLifecycleProcessGroupRetired(opts: {
 export async function terminateLifecycleProcessGroups(opts: {
   readonly processGroupIds: readonly number[];
   readonly assertFresh?: () => Promise<void>;
-  /** The mux already delivered HUP; give its wrapper time to reap children. */
+  /** All groups already received their shutdown signal. */
   readonly alreadySignalled?: boolean;
+  /** Only these groups received shutdown through the mux/wrapper. */
+  readonly alreadySignalledGroups?: readonly number[];
   readonly beforeSignal?: (
     groups: readonly number[]
   ) => Promise<readonly number[]>;
@@ -319,10 +321,14 @@ export async function terminateLifecycleProcessGroups(opts: {
     return remaining;
   };
   const initial = await living(groups);
-  if (!opts.alreadySignalled && initial.length > 0) {
+  const signalled = new Set(opts.alreadySignalledGroups);
+  const needsTerm = opts.alreadySignalled
+    ? []
+    : initial.filter((group) => !signalled.has(group));
+  if (needsTerm.length > 0) {
     const targets = opts.beforeSignal
-      ? await opts.beforeSignal(initial)
-      : initial;
+      ? await opts.beforeSignal(needsTerm)
+      : needsTerm;
     for (const group of targets) {
       await opts.assertFresh?.();
       signal(group, "SIGTERM");
@@ -361,6 +367,7 @@ type RetirementBoundary = {
 type CapturedLifecycleGroups = {
   readonly groups: number[];
   readonly paneGroups: Set<number>;
+  readonly signalledGroups: number[];
   readonly members: Map<number, ProcessIdentityRow[]>;
 };
 
@@ -406,12 +413,12 @@ export function createLifecycleSessionRetirement(boundary?: {
         "Lifecycle mux stopped, but descendant retirement could not be confirmed because pane identity is unavailable"
       );
     }
-    const { groups, paneGroups, members } = captured;
+    const { groups, paneGroups, signalledGroups, members } = captured;
     const beforeSignal = (pending: readonly number[]) =>
       verifyRetirementGroups({ pending, members, os });
     await terminateLifecycleProcessGroups({
       processGroupIds: groups.filter((group) => !paneGroups.has(group)),
-      alreadySignalled: true,
+      alreadySignalledGroups: signalledGroups,
       beforeSignal,
       readIdentities: os.readIdentities,
       assertFresh: opts.assertFresh,
@@ -432,7 +439,12 @@ async function captureRetirementGroups(opts: {
   readonly os: RetirementBoundary;
 }): Promise<CapturedLifecycleGroups | "unknown" | "identity_unavailable"> {
   if (!opts.processes.some((process) => process.panePid)) {
-    return { groups: [], paneGroups: new Set(), members: new Map() };
+    return {
+      groups: [],
+      paneGroups: new Set(),
+      signalledGroups: [],
+      members: new Map(),
+    };
   }
   const [snapshot, identities] = await Promise.all([
     readRetirementSnapshot({ read: opts.os.readSnapshot }),
@@ -472,6 +484,11 @@ async function captureRetirementGroups(opts: {
       .filter((row) => roots.includes(row.pid))
       .map((row) => row.processGroupId)
   );
+  // The FIFO wrapper forwards TERM to its direct command child's group only.
+  // Other descendant groups need their own TERM, with the same identity fence.
+  const signalledGroups = snapshot
+    .filter((row) => roots.includes(row.ppid))
+    .map((row) => row.processGroupId);
   const members = new Map(
     groups.map((group) => [
       group,
@@ -484,7 +501,7 @@ async function captureRetirementGroups(opts: {
       ),
     ])
   );
-  return { groups, paneGroups, members };
+  return { groups, paneGroups, signalledGroups, members };
 }
 
 /** A captured PID/group number is not authority after its member's birth changes. */

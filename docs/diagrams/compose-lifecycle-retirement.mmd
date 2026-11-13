@@ -25,7 +25,8 @@ stateDiagram-v2
   note right of signalled
     Mux acknowledgement is not group exit
     FIFO EOF is not group absence
-    Revalidate member identity before KILL
+    TERM separately grouped descendants
+    Revalidate member identity before TERM or KILL
     Zombie-only groups are retired
     After KILL allow 2 s to confirm retirement
   end note

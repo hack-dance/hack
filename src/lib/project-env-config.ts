@@ -3755,9 +3755,10 @@ export async function inspectProjectEnvLayerKeys(opts: {
     string,
     { readonly envName: string | null; readonly local: boolean }
   >();
-  // The first label for a path wins: the default layers come first, so an
-  // overlay whose committed path is also a default layer (an overlay named
-  // `local` beside a non-legacy hack.env.local.yaml) never relabels it.
+  // The first label for a path wins, and the default layers come first.
+  // Defensive: overlay discovery already leaves out `local` in a non-legacy
+  // project, so no overlay path can collide with a default layer today;
+  // this keeps a default layer's `--local` advice correct if that changes.
   const addLayer = (
     path: string,
     layer: { readonly envName: string | null; readonly local: boolean }

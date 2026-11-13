@@ -274,9 +274,9 @@ test("a symlinked overlay layer inside the project is inspected", async () => {
   );
 });
 
-test("an overlay named local never relabels the local default layer", async () => {
-  // hack.env.local.local.yaml makes `local` an overlay name whose committed
-  // path is this project's local default layer.
+test("a stray hack.env.local.local.yaml never changes the local default layer's advice", async () => {
+  // In a non-legacy project `local` is not an overlay (runtime ignores this
+  // file too), so the local default layer keeps its --local advice.
   const repo = await createRepo();
   await setProjectEnvValue({
     projectRoot: repo.projectRoot,

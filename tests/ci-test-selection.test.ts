@@ -352,6 +352,76 @@ describe("conservative dependency selection", () => {
 });
 
 describe("PR matrix policy", () => {
+  test("light PRs defer every platform and Docker input until opt-in or integration", async () => {
+    const selection = {
+      mode: "selected",
+      reason: "fixture",
+      files: [
+        "packages/db/tests/smoke.test.ts",
+        "tests/native-authored-project-start.test.ts",
+      ],
+    } as const;
+    for (const changed of [
+      ["docs/a.md"],
+      ["src/a.ts"],
+      [".github/workflows/ci.yml"],
+      ["packages/runtime-core/src/main.rs"],
+    ]) {
+      const plan = await planPullRequest({
+        repoRoot,
+        changed,
+        draft: false,
+        full: false,
+        selection,
+      });
+      expect(plan).toMatchObject({
+        compiler_hosts: "[]",
+        runtime_core: false,
+        docker_suite: false,
+        defer_macos: true,
+        build_smoke: false,
+        test_shards: "[4,5,6,7,8]",
+        test_files: JSON.stringify(selection.files),
+      });
+    }
+    const input = {
+      repoRoot,
+      changed: [".github/workflows/ci.yml"],
+      draft: false,
+      full: false,
+      selection,
+    };
+    expect(await planPullRequest({ ...input, mac: true })).toMatchObject({
+      defer_macos: false,
+      runtime_core: true,
+      docker_suite: false,
+      build_smoke: false,
+      test_shards: "[1,2,3,4,5,6,7,8]",
+    });
+    expect(await planPullRequest({ ...input, e2e: true })).toMatchObject({
+      defer_macos: true,
+      runtime_core: false,
+      docker_suite: true,
+      build_smoke: false,
+      test_shards: "[4,5,6,7,8]",
+    });
+    expect(await planPullRequest({ ...input, full: true })).toMatchObject({
+      defer_macos: false,
+      runtime_core: true,
+      docker_suite: true,
+      build_smoke: true,
+      test_shards: "[1,2,3,4,5,6,7,8]",
+    });
+    expect(
+      await planPullRequest({ ...input, pullRequest: false })
+    ).toMatchObject({
+      defer_macos: false,
+      runtime_core: true,
+      docker_suite: true,
+      build_smoke: true,
+      test_shards: "[1,2,3,4,5,6,7,8]",
+    });
+  });
   test("drafts keep Linux shards but suppress native jobs, even with ci:full", async () => {
     const plan = await planPullRequest({
       repoRoot,
@@ -375,6 +445,7 @@ describe("PR matrix policy", () => {
       changed: ["src/lib/cli-result.ts"],
       draft: false,
       full: false,
+      mac: true,
     };
     const linux = await planPullRequest({
       ...input,
@@ -405,7 +476,26 @@ describe("PR matrix policy", () => {
       compiler_hosts: JSON.stringify(COMPILER_HOSTS),
     });
   });
-  test("empty PR diffs preserve the full native job fallback", async () => {
+  test("ordinary full runs defer Intel qualification to releases", () => {
+    expect(
+      JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts)
+    ).toEqual(COMPILER_HOSTS.filter((host) => host.os !== "macos-15-intel"));
+  });
+  test("coarse full fallbacks also respect nonrelease compiler hosts", async () => {
+    const plan = await planPullRequest({
+      repoRoot,
+      changed: ["other/rust-toolchain"],
+      draft: false,
+      full: false,
+      releaseHosts: false,
+      pullRequest: false,
+      selection: { mode: "full", reason: "fixture", files: [] },
+    });
+    expect(JSON.parse(plan.compiler_hosts)).toEqual(
+      COMPILER_HOSTS.filter((host) => host.os !== "macos-15-intel")
+    );
+  });
+  test("empty PR diffs preserve full selection within the light tier", async () => {
     const plan = await planPullRequest({
       repoRoot,
       changed: [],
@@ -413,8 +503,10 @@ describe("PR matrix policy", () => {
       full: false,
       selection: { mode: "full", reason: "empty diff", files: [] },
     });
-    expect(plan.runtime_core).toBe(true);
-    expect(JSON.parse(plan.compiler_hosts)).toEqual(COMPILER_HOSTS);
+    expect(plan.runtime_core).toBe(false);
+    expect(plan.compiler_hosts).toBe("[]");
+    expect(plan.defer_macos).toBe(true);
+    expect(plan.docker_suite).toBe(false);
   });
   test("candidate inputs include the compiler consumer dependency", () => {
     expect(touchesCandidate("packages/config-compiler/src/lib.rs")).toBe(true);

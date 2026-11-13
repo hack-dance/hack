@@ -9,6 +9,7 @@ import {
   pathKind,
   planScope,
   pullRequestPaths,
+  revisionPaths,
   scopeOutputs,
   touchesDocsSite,
 } from "../scripts/ci-change-scope.ts";
@@ -235,10 +236,19 @@ describe("pull request diff", () => {
     git(root, ["checkout", "--quiet", "base"]);
     // A base-only change must not count as the pull request's change.
     await commitFile(root, "src/later-on-base.ts");
+    const before = git(root, ["rev-parse", "HEAD"]);
+    const other = git(root, ["rev-parse", "topic"]);
+    expect(revisionPaths({ repoRoot: root, baseRevision: other })).toBeNull();
+    expect(
+      revisionPaths({ repoRoot: root, baseRevision: "0".repeat(40) })
+    ).toBeNull();
     // Not a merge commit yet: the diff is unavailable, so the scope is full.
     expect(pullRequestPaths(root)).toBeNull();
     git(root, ["merge", "--quiet", "--no-ff", "--no-edit", "topic"]);
     expect(pullRequestPaths(root)).toEqual(["docs/topic.md"]);
+    expect(revisionPaths({ repoRoot: root, baseRevision: before })).toEqual([
+      "docs/topic.md",
+    ]);
     expect(changeScope(pullRequestPaths(root) ?? [])).toBe("docs");
     await mkdir(join(root, "tests"), { recursive: true });
     await mkdir(join(root, "packages/db"), { recursive: true });
@@ -264,6 +274,30 @@ describe("pull request diff", () => {
     );
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     expect(result.stdout.toString()).toContain("scope=docs\n");
+    const push = Bun.spawnSync(
+      [
+        process.execPath,
+        resolve(repoRoot, "scripts/ci-change-scope.ts"),
+        "--event=push",
+        "--ref=refs/heads/next",
+        `--base-revision=${before}`,
+        `--repo-root=${root}`,
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: "",
+          GITHUB_STEP_SUMMARY: "",
+          PR_DRAFT: "false",
+          PR_FULL: "false",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    expect(push.exitCode, push.stderr.toString()).toBe(0);
+    expect(push.stdout.toString()).toContain("scope=docs\n");
   });
 
   test("the CLI requires an event and reports full scope outside pull requests", () => {
@@ -290,7 +324,7 @@ describe("pull request diff", () => {
 describe("CI workflow wiring", () => {
   test("the changes job exposes every scope output and checks out the merge parent", async () => {
     const changes = (await ciWorkflow()).jobs.changes;
-    const keys = Object.keys(fullPushPlan()).sort();
+    const keys = [...Object.keys(fullPushPlan()), "ci_evidence"].sort();
     expect(Object.keys(changes?.outputs ?? {}).sort()).toEqual(keys);
     for (const key of keys) {
       expect(changes?.outputs?.[key]).toBe(
@@ -300,7 +334,9 @@ describe("CI workflow wiring", () => {
     const checkout = changes?.steps?.find((step) =>
       String((step as { uses?: string }).uses).startsWith("actions/checkout")
     );
-    expect(checkout?.with?.["fetch-depth"]).toBe(2);
+    expect(checkout?.with?.["fetch-depth"]).toBe(
+      "${{ github.event_name == 'push' && github.ref == 'refs/heads/next' && '0' || '2' }}"
+    );
     expect(changes?.steps?.at(-1)?.run).toContain('git archive "$base"');
     expect(changes?.steps?.at(-1)?.run).toContain(
       '--repo-root="$GITHUB_WORKSPACE"'
@@ -355,7 +391,7 @@ describe("CI workflow wiring", () => {
       "${{ needs.changes.outputs.suite == 'true' }}"
     );
     expect(jobs["state-models"]?.if).toBe(
-      "${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}"
+      "${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'ci:full')) }}"
     );
     for (const name of ["secret-scan"]) {
       expect(jobs[name]?.needs, name).toBeUndefined();

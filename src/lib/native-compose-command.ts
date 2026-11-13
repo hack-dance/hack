@@ -173,6 +173,7 @@ export type NativeComposeCommandOptions = {
   readonly follow?: boolean;
   readonly tail?: number;
   readonly since?: string;
+  readonly timestamps?: boolean;
   readonly logFormat?: LogOutputFormat;
   readonly unsupportedOptions?: boolean;
 };

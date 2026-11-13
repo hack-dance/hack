@@ -17,6 +17,7 @@ import {
   followNativeLogs,
   nativeLogFollowOptions,
 } from "./native-log-follow.ts";
+import { hasLogRestart, resumeNativeLogs } from "./native-log-restart.ts";
 import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
@@ -46,28 +47,26 @@ export async function followNativeAuthoredProjectLogs(input: {
   readonly service: string;
   readonly tail?: number;
   readonly since?: string;
+  readonly timestamps?: boolean;
   readonly json?: boolean;
   readonly project?: string;
 }): Promise<number> {
   nativeLogFollowOptions(input);
-  if (input.runtime.home !== input.scope.nativeHome) {
-    return refused();
-  }
-  const receipt = await withNativeAuthoredProjectStatus(
-    input.scope,
-    async (saved) => {
-      const selected =
-        requireReadyServiceReceipt(saved, input.scope, input.service) ??
-        refused();
-      await saved.assertFresh();
-      return selected;
+  const select = async () => {
+    if (input.runtime.home !== input.scope.nativeHome) {
+      return refused();
     }
-  );
-  return await followNativeLogs({
-    ...input,
-    cwd: input.scope.projectRoot,
-    branch: input.scope.branch ?? undefined,
-    selection: {
+    const receipt = await withNativeAuthoredProjectStatus(
+      input.scope,
+      async (saved) => {
+        const selected =
+          requireReadyServiceReceipt(saved, input.scope, input.service) ??
+          refused();
+        await saved.assertFresh();
+        return selected;
+      }
+    );
+    return {
       run: receipt.review.provenance.run,
       owner: receipt.owner,
       namespace: receipt.review.provenance.namespace,
@@ -75,9 +74,23 @@ export async function followNativeAuthoredProjectLogs(input: {
       native: true,
       container:
         receipt.resources[`container:${input.service}`]?.id ?? undefined,
-    },
+    };
+  };
+  return await followNativeLogs({
+    ...input,
+    cwd: input.scope.projectRoot,
+    branch: input.scope.branch ?? undefined,
+    selection: select,
+    resume: (previous, signal) =>
+      resumeNativeLogs({
+        previous,
+        signal,
+        select,
+        restarting: () => hasLogRestart(input.scope),
+      }),
   });
 }
+
 export function nativeAuthoredLogsOptions(
   service: unknown,
   tail: unknown,

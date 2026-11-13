@@ -34,6 +34,7 @@ import {
 } from "../src/lib/compose-managed-env.ts";
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { runFixtureGit } from "./helpers/fixture-git.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 /**
@@ -595,9 +596,14 @@ for (const repairCase of HACKD_REPAIR_CASES) {
     expect(daemonSteps).toEqual([]);
     expect(skipNote).toContain("(hackd is stale)");
     expect(skipNote).toContain(repairCase.reason);
-    expect(skipNote).toContain(
-      "To repair it yourself, run: hack daemon clear && hack daemon start"
-    );
+    if ("HACK_CANDIDATE_ENTRYPOINT" in repairCase.env) {
+      expect(skipNote).toContain("optional for candidate Compose workflows");
+      expect(skipNote).not.toContain("hack daemon");
+    } else {
+      expect(skipNote).toContain(
+        "To repair it yourself, run: hack daemon clear && hack daemon start"
+      );
+    }
   }, 30_000);
 }
 
@@ -683,12 +689,74 @@ for (const docker of [
     expect(await readFile(layerPath, "utf8")).not.toContain(value);
     const notes = noteCalls.join("\n");
     expect(notes).toContain(`Wrote ${localPath}, ${layerPath}`);
+    expect(notes).toContain("Plaintext env keys remain (values omitted)");
+    expect(notes).toContain("hack env protect <KEY> [KEY...]");
+    expect(notes).toContain("LEGACY_SETTING");
     expect(notes).not.toContain(value);
     expect(notes.includes("Docker is not reachable")).toBe(
       docker.exitCode !== 0
     );
   }, 30_000);
 }
+
+test("doctor keeps completed repairs when the optional plaintext inventory is unreadable", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, "hack.env.default.yaml"),
+    "version: 1\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  const sentinel = "synthetic-malformed-protection-hint";
+  await writeFile(
+    resolve(projectDir, "hack.env.qa.yaml"),
+    `broken: [${sentinel}`
+  );
+  const { runCli } = await import("../src/cli/run.ts");
+  // Everything doctor prints, so no output can echo the malformed file.
+  const printed: string[] = [];
+  const capture =
+    (write: typeof process.stdout.write) =>
+    (chunk: unknown, ...rest: unknown[]): boolean => {
+      printed.push(String(chunk));
+      return (write as (...args: unknown[]) => boolean)(chunk, ...rest);
+    };
+  const stdoutWrite = process.stdout.write.bind(process.stdout);
+  const stderrWrite = process.stderr.write.bind(process.stderr);
+  process.stdout.write = capture(stdoutWrite) as typeof process.stdout.write;
+  process.stderr.write = capture(stderrWrite) as typeof process.stderr.write;
+  let code: number;
+  try {
+    code = await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ]);
+  } finally {
+    process.stdout.write = stdoutWrite;
+    process.stderr.write = stderrWrite;
+  }
+  // A layer the runtime refuses is a failing check (HACK-2169): doctor
+  // exits non-zero, while the completed repairs are kept and the optional
+  // plaintext inventory still says it could not inspect names.
+  expect(code).not.toBe(0);
+  const notes = noteCalls.join("\n");
+  expect(notes).toContain("Could not inspect plaintext env names");
+  // The repairs completed before the failing check are kept.
+  expect(
+    await readFile(resolve(projectDir, "docker-compose.yml"), "utf8")
+  ).not.toContain("env_file");
+  expect(await readFile(resolve(projectDir, ".gitignore"), "utf8")).not.toBe(
+    ""
+  );
+  const output = printed.join("");
+  expect(output).toContain("secret integrity");
+  expect(output).toContain(".hack/hack.env.qa.yaml exists but could not");
+  for (const text of [notes, output]) {
+    expect(text).not.toContain(sentinel);
+  }
+}, 30_000);
 
 test("doctor --migrate-env-config refuses a symlinked overlay with undelivered values and never writes through it (HACK-1370)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();
@@ -1097,7 +1165,9 @@ test("doctor keeps an encrypted store with an undeclared entry and its key file,
     const storePath = resolve(projectRoot, "secrets.enc.json");
     const keyPath = resolve(projectRoot, "store.key");
     const keyText = `${["synthetic", "store", "key", "51ab"].join("-")}\n`;
-    await writeFile(keyPath, keyText);
+    await writeFile(keyPath, keyText, { mode: 0o600 });
+    // Private, as Hack writes it: a key others can read is refused.
+    await chmod(keyPath, 0o600);
     const declared = ["synthetic", "declared", "51ab"].join("-");
     const undeclared = ["synthetic", "undeclared", "51ab"].join("-");
     const { resolveSecretStore } = await import("../src/lib/secret-store.ts");
@@ -1193,76 +1263,92 @@ test("doctor keeps an encrypted store with an undeclared entry and its key file,
   }
 }, 30_000);
 
-test("doctor removes a fully delivered encrypted store, its key file and its pointer (HACK-1715)", async () => {
-  const projectRoot = await createProjectWithStaleDaemonPid();
-  const projectDir = resolve(projectRoot, ".hack");
-  const saved = {
-    fileKey: process.env.HACK_SECRETS_FILE_KEY,
-    fallback: process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK,
-  };
-  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
-  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
-  try {
-    const configPath = resolve(projectDir, "hack.config.json");
-    await writeFile(
-      configPath,
-      JSON.stringify({
-        name: "store-delivered",
-        controlPlane: {
-          secrets: {
-            backend: "encrypted_file",
-            encryptedFile: { path: "secrets.enc.json", keyPath: "store.key" },
-          },
-        },
-      })
-    );
-    await writeFile(
-      resolve(projectDir, "hack.env.json"),
-      JSON.stringify({
-        version: 1,
-        vars: [{ key: "SEC", source: "keychain" }],
-      })
-    );
-    const storePath = resolve(projectRoot, "secrets.enc.json");
-    const keyPath = resolve(projectRoot, "store.key");
-    await writeFile(
-      keyPath,
-      `${["synthetic", "store", "key", "62cd"].join("-")}\n`
-    );
-    const declared = ["synthetic", "declared", "62cd"].join("-");
-    const { resolveSecretStore } = await import("../src/lib/secret-store.ts");
-    const store = await resolveSecretStore({
-      projectName: "store-delivered",
-      projectDir,
-    });
-    await store.set({ key: "SEC", value: declared });
-
-    const { runCli } = await import("../src/cli/run.ts");
-    expect(
-      await runCli([
-        "doctor",
-        "--migrate-env-config",
-        "--no-interactive",
-        "--accept-tracked-env-changes",
-        "--path",
-        projectRoot,
-      ])
-    ).toBe(0);
-
-    expect(existsSync(storePath)).toBe(false);
-    expect(existsSync(keyPath)).toBe(false);
-    const config = JSON.parse(await readFile(configPath, "utf8")) as {
-      readonly controlPlane?: unknown;
+for (const trackedStore of [false, true]) {
+  test(`doctor removes a fully delivered encrypted store (${trackedStore ? "tracked store, untracked key" : "untracked"}), its key file and its pointer (HACK-1715)`, async () => {
+    const projectRoot = await createProjectWithStaleDaemonPid();
+    const projectDir = resolve(projectRoot, ".hack");
+    const saved = {
+      fileKey: process.env.HACK_SECRETS_FILE_KEY,
+      fallback: process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK,
     };
-    expect(config.controlPlane).toBeUndefined();
-    const notes = noteCalls.join("\n");
-    expect(notes).toContain(
-      "Removed the encrypted secret store pointer from hack.config.json"
-    );
-    expect(notes).not.toContain("Kept the encrypted secret store pointer");
-    expect(notes).not.toContain(declared);
-  } finally {
-    restoreEnv("HACK_SECRETS_FILE_KEY", saved.fileKey);
-    restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", saved.fallback);
-  }
-}, 30_000);
+    Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+    try {
+      const configPath = resolve(projectDir, "hack.config.json");
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          name: "store-delivered",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: { path: "secrets.enc.json", keyPath: "store.key" },
+            },
+          },
+        })
+      );
+      await writeFile(
+        resolve(projectDir, "hack.env.json"),
+        JSON.stringify({
+          version: 1,
+          vars: [{ key: "SEC", source: "keychain" }],
+        })
+      );
+      const storePath = resolve(projectRoot, "secrets.enc.json");
+      const keyPath = resolve(projectRoot, "store.key");
+      await writeFile(
+        keyPath,
+        `${["synthetic", "store", "key", "62cd"].join("-")}\n`,
+        { mode: 0o600 }
+      );
+      // Private, as Hack writes it: a key others can read is refused.
+      await chmod(keyPath, 0o600);
+      const declared = ["synthetic", "declared", "62cd"].join("-");
+      const { resolveSecretStore } = await import("../src/lib/secret-store.ts");
+      const store = await resolveSecretStore({
+        projectName: "store-delivered",
+        projectDir,
+      });
+      await store.set({ key: "SEC", value: declared });
+
+      if (trackedStore) {
+        for (const args of [
+          ["init", "--quiet"],
+          ["add", "secrets.enc.json"],
+          ["commit", "--quiet", "-m", "fixture"],
+        ]) {
+          const result = await runFixtureGit({ cwd: projectRoot, args });
+          expect(result.exitCode, result.stderr).toBe(0);
+        }
+      }
+
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(
+        await runCli([
+          "doctor",
+          "--migrate-env-config",
+          "--no-interactive",
+          "--accept-tracked-env-changes",
+          "--path",
+          projectRoot,
+        ])
+      ).toBe(0);
+
+      expect(existsSync(storePath)).toBe(false);
+      expect(existsSync(keyPath)).toBe(false);
+      const config = JSON.parse(await readFile(configPath, "utf8")) as {
+        readonly controlPlane?: unknown;
+      };
+      expect(config.controlPlane).toBeUndefined();
+      const notes = noteCalls.join("\n");
+      expect(notes).toContain(
+        "Removed the encrypted secret store pointer from hack.config.json"
+      );
+      expect(notes).not.toContain("Kept the encrypted secret store pointer");
+      expect(notes).not.toContain(declared);
+    } finally {
+      restoreEnv("HACK_SECRETS_FILE_KEY", saved.fileKey);
+      restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", saved.fallback);
+    }
+  }, 30_000);
+}

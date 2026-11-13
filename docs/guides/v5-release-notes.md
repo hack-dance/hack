@@ -25,6 +25,10 @@ its original behavior.
 | **Native plain `logs SERVICE --follow` output changes.** It now prints application-text lines, matching a finite snapshot, instead of adding a `SERVICE \| ` prefix. Both service streams go to stdout; Hack notices go to stderr. | Stop parsing the old plain prefix. Use `--json` and the log event's `entry.service`, `entry.stream` and `entry.message` when a script needs those fields. Use `--timestamps` to request Engine timestamps. |
 | **Env listings hide values by default, including migrated plaintext.** Ordinary `env` / `env list` text and JSON output are metadata. JSON omits `value` and reports `has_value`. | Use `has_value` for availability checks. For a value a script actually needs, call `hack env get KEY` with the same `--env` and `--service`; that command prints plaintext. Bulk `--show-values` requires interactive stdin and stdout; `--show-secrets` remains an alias. |
 | **Migration cleanup preserves live keys (HACK-2172).** A legacy store's `keyPath` can no longer make the current project/shared key a cleanup target. Current config and YAML inputs are protected too. | Keep key and env backups before migration. On next.16 or an earlier prerelease, do not run `doctor --migrate-env-config` without a private readable copy of `.hack.secret.key`. The fix does not recover a key already removed. |
+| **Doctor fails when an env layer cannot be used by the runtime.** Unreadable, invalid or undecryptable layers no longer get an apparent all-clear. | Run `hack doctor` after upgrading. Fix the reported layer or recover the original key before starting; keep the encrypted file rather than generating a replacement key over it. |
+| **Doctor checks the Compose proxy's loopback ports.** A reachable container address no longer hides a broken published loopback path. | Read the `proxy ports` warning, check competing listeners and DNS/bind settings, then retry. HTTP success on port 80 is not HTTPS success on 443; the check applies no automatic repair. |
+| **Native route readiness can be inferred.** A complete standard Caddy route with no authored healthcheck gets a reviewed HTTP probe and 240 seconds of initial grace. | Review the route port and startup logs. Keep explicit healthchecks; they are not replaced. The grace does not extend the whole graph's deadline or prove the application works. |
+| **Native start waits for bridge sockets after a stopped pool resumes.** An immediate start no longer fails merely because provider readiness preceded the bridge listener. | Use normal native `up`; startup still requires a successful bridge connection within its deadline. Do not replace readiness checks with a fixed sleep. |
 
 ### Env scripts and migrated plaintext
 
@@ -50,11 +54,34 @@ legacy daemon set/unset routes refuse with HTTP 409
 
 See [the env command and script migration guidance](../env.md#common-commands)
 and [legacy migration and cleanup](../env.md#legacy-repos-and-migration).
-The live-key fix is merged in [#769](https://github.com/hack-dance/hack/pull/769).
-The env contract above is awaiting [#767](https://github.com/hack-dance/hack/pull/767)
-before this draft is opened for review. Cleanup receipts in
-[#768](https://github.com/hack-dance/hack/pull/768) are a separate pending change;
-they are not part of the merged key-preservation guarantee yet.
+The merged env contract and its migration wording are also in
+[`scripts/prerelease-plan.ts`](../../scripts/prerelease-plan.ts), alongside
+[#767](https://github.com/hack-dance/hack/pull/767) and the live-key fix in
+[#769](https://github.com/hack-dance/hack/pull/769).
+
+### Cleanup can finish partially
+
+Cleanup now keeps content and file-identity receipts and rechecks them under
+the existing writer locks before removal. If a source or its delivery changed,
+keep the remaining files and keys. Migration writes already completed are not
+rolled back. Reconcile chosen values through `env set KEY --value-stdin`, keeping
+the overlay and service scope, adding `--local` for machine-local values and
+`--secret` for secrets. Check delivery before removing any remaining copy.
+
+Explicit Doctor cleanup reports the failure and every confirmed removal.
+Implicit cleanup warns and allows the original command to continue. If a legacy
+store was removed before a later cleanup failure, Doctor reconciles its config
+pointer for that confirmed removal. If the store remains, its pointer remains.
+If the config cannot be updated, Doctor warns about that too; a failure is not
+proof that nothing changed. See [cleanup and reconciliation](../env.md#legacy-repos-and-migration),
+[#768](https://github.com/hack-dance/hack/pull/768) and
+[#783](https://github.com/hack-dance/hack/pull/783).
+
+An old global secret store whose key is lost still needs its original key for
+recovery. Keep the encrypted store and key backups; do not delete it or provision
+a new key just to clear Doctor. A separate retire path is being added in
+[#779](https://github.com/hack-dance/hack/pull/779); no retire command is promised
+by these notes until it merges.
 
 ## Highlights
 

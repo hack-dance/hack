@@ -232,6 +232,19 @@ is reported as `unavailable` with an update hint and cannot produce `ready: true
 Image acquisition, private delivery, verified source/cache bindings, retained
 ownership and actual service readiness are checked during `up`.
 
+Preflight and start use one file-local admission collector. Preflight lists its
+refusals; start returns its first refusal before acquiring runtime inputs. This
+can change which reason start reports first when a file has several problems.
+Review assumes routing is enrolled and cache initializers are admitted. The
+readiness defaults are checked against the CLI over shared fixtures. Managed env
+metadata and eligible shell references contribute service names only, so restart
+policies incompatible with private delivery are blockers even when no decryption
+key is available. Shell values and credentials are never read for this check.
+Credential adapters, image defaults, occupied ports and other inputs only known
+at start remain runtime boundaries.
+AWS/gcloud credentials are added after static review; a restart policy on a
+service receiving only those adapter credentials can still be refused at serve.
+
 With `--json` the report is the `data` of the standard result envelope:
 
 ```json
@@ -685,6 +698,31 @@ symlink to `<home>/.hack-local/run/smolvm/home` that keeps its Unix socket paths
 within the macOS length limit. A clean `runtime down` keeps this alias, so no other
 local user can take its name while the pool is stopped. It removes only the provider
 socket files the stop proved closed, through the real data directory.
+
+On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
+for every declared bridge socket to appear with the required private ownership and mode.
+The provider's guest-ready signal can arrive before its bridge threads bind. Native
+rechecks the same provider identity around each observation; it never accepts an unsafe
+socket, changes its permissions or removes it to make startup pass. Existing running-pool
+audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
+stop path and names the recovery command. Use the same selected executor and identical
+`--candidate-root` argument as the failed start, followed by `runtime recover --json`.
+If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
+`HACK_NATIVE_HOME`, use those same non-empty values:
+
+```sh
+"$HACK_NATIVE_BINARY" --candidate-root "$HACK_NATIVE_HOME" runtime recover --json
+```
+
+Otherwise use the bundled executor path and the selected home from the failed
+invocation; do not run this variable-based example with either variable unset.
+
+For a checkout-local executor, `--candidate-root` is the source checkout, not the native
+home or `.hack-local` directory; from that checkout run `./hack-local runtime recover --json`.
+Provider-verification failures during the wait carry this guidance too; recovery still
+independently proves ownership before stopping anything. Then retry. This preserves
+retained disks and records an unclean stop; it does not claim the guest shut down cleanly.
+`hack down` may say the project was not started because no project mapping was published.
 
 Host cleanup or a reboot can still remove the alias. For a clean stop, observation
 commands such as `runtime status` accept the absent alias and create nothing, and the
@@ -1542,6 +1580,10 @@ references separately. There is no consent prompt in this feature.
 | `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose. |
 | `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The service gets an empty value. Compose would leave it unset instead. |
 
+An entire `environment: null` declaration, including an `environment:` key with
+only comments beneath it, is empty. Preflight and start both accept it; managed
+keys are still added as private references when configured for the service.
+
 A value read from the shell is never written to the reviewed Compose document, a
 plan, a receipt, an env fingerprint or a log. The entry stays a reference and the
 value travels in the same private delivery as Hack managed env. Only the variables
@@ -2320,10 +2362,11 @@ Host dependencies use the equivalent `--minimum-dependency-sockets N` selection;
 an exact capacity or a minimum. The combined physical transport limit still applies
 to the pool's actual capacities, including any spare slots. A minimum does not resize
 an existing pool or guarantee that enough slots are currently free.
-Each routed service
-must already declare a matching `healthcheck.x-hack-http` (see
-[Native HTTP readiness probe](#native-http-readiness-probe)); command healthchecks
-and missing probes are not replaced or inferred. Native review still validates
+Each routed service needs a matching native route probe (see
+[Native HTTP readiness probe](#native-http-readiness-probe)). If no `healthcheck`
+key was authored, native infers one on the reviewed Caddy route port without
+changing the Compose file. Explicit healthchecks are never replaced; command-only
+or disabled checks on routed services still refuse in this increment. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
 retires Unix route publishers. Without explicit HTTPS selection, this enrollment does not start a hostname authority
 or Caddy HTTPS server. It never installs trust, configures DNS, or widens an existing pool.
@@ -2842,7 +2885,59 @@ shared-source mode; active project bind mounts still use the explicit project sh
 
 #### Native HTTP readiness probe
 
-`healthcheck.x-hack-http` declares the readiness probe native startup uses for a
+For a complete Caddy route with no authored `healthcheck`, native reviews a default
+probe: `GET /` on the route port, a 1000 ms timeout, three consecutive
+failures, and a 240000 ms initial startup grace. It checks every second until its
+first success, then every 30 seconds for the rest of that probe generation.
+This allows slow first-page compilation, including a server first answering after
+120 seconds. With a full timeout on each request, the grace plus three failed
+startup samples takes at most about 246 seconds of probe time, leaving about
+54 seconds of the usual 300-second graph budget for earlier startup work.
+An inferred probe observed unhealthy names its service and route port. For a
+missing listener or HTTP 5xx during boot, check `hack logs <service>` in the same
+project/branch, fix the route
+port, or declare `healthcheck.x-hack-http` with a longer `start_period_ms` and a
+readiness path that answers 2xx.
+
+The 300-second deadline belongs to the whole graph; it is not renewed when a
+service starts. Slow earlier services or `service_healthy` dependencies consume
+it too. A routed service started after a dependency taking 240 seconds can reach
+the graph deadline before its own probe finishes. That path still returns the
+generic `graph_timeout`, without naming the waiting services. Use `hack logs`
+and inspect the dependencies as well as the route. An explicit probe with a longer
+grace does not extend the whole-graph deadline.
+A successful TCP connection and complete HTTP/1.0 or HTTP/1.1 response headers are
+required. HTTP 200–499, including `/` returning 404, is ready; 5xx, EOF, non-HTTP
+bytes, a timeout or partial headers are not. Redirects are not followed. At most
+four interim 1xx responses may precede the final response, within the same 8 KiB
+header and timeout budgets. The request uses `Host: 127.0.0.1:<port>`.
+
+This proves endpoint readiness, not application correctness. After the first
+success, three consecutive failures at the 30-second interval make the service
+unhealthy. Status no longer exposes a ready route endpoint, and a new publication
+or rebind cannot proceed until healthy evidence returns. This does not stop or restart the
+container, withdraw an existing publication, or close its existing relay: route
+traffic continues to the application and may receive its error responses. A
+later successful check restores health; it does not resume one-second probing.
+An inferred probe does not satisfy `depends_on: condition: service_healthy`:
+that condition still requires an explicit enabled healthcheck, as on Compose.
+Final HTTPS publication verification accepts 2xx–4xx only with a fresh challenge added
+by the upstream proxy response handler. Authority denials and routing errors do
+not qualify as the application's 404. No readiness decision follows an external
+redirect. Explicit probes retain the stricter policy below. The generated
+`policy` field is internal and refuses in authored `x-hack-http` declarations.
+The native bundle embeds the matching guest probe; its content hash binds the
+published helper. An older helper refuses the new policy argument. These inferred
+defaults are retained-run compatibility values and cannot change without migration.
+
+Native reserves `X-Hack-Probe-Request` and `X-Hack-Upstream-Proof` for the HTTPS
+verification exchange. The challenge is stripped before either the authority or
+application sees it. Normal traffic has no challenge, so no non-empty proof
+header is emitted. The shared HTTPS reader permits up to four interim 1xx
+responses before the final status for both inferred and explicit routes; explicit
+final-status and reviewed-redirect rules remain unchanged.
+
+`healthcheck.x-hack-http` declares an explicit readiness probe native startup uses for a
 service. It must be the only key in that service's `healthcheck`: it cannot be
 combined with `test`, `disable`, `interval`, `timeout`, `start_period`,
 `start_interval` or `retries`. Docker Compose ignores the extension field. All six

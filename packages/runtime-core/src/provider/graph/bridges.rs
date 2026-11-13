@@ -1224,7 +1224,7 @@ mod tests {
         assert_eq!(persisted.slots[&0].run, "b".repeat(32));
     }
     #[test]
-    fn batch_commit_is_atomic_across_late_endpoint_failure_and_success() {
+    fn missing_ready_endpoints_refuse_new_routes_without_retiring_running_relays() {
         let fixture_root = super::super::tests::Fixture::new();
         let candidate = Candidate::discover(&fixture_root.0).unwrap();
         let owner = "a".repeat(32);
@@ -1233,6 +1233,17 @@ mod tests {
         initialize_registry(&candidate, &owner, 3).unwrap();
         let mut store = fixture();
         store.owner = owner.clone();
+        let existing = store.slots.get_mut(&0).unwrap();
+        existing.phase = "running".into();
+        existing.relay = Some(relay::Relay {
+            transport: relay::Transport::ReservationV1,
+            launch_serial: 1,
+            binary_sha256: "f".repeat(64),
+            target_pid: 42,
+            target_start: 123,
+            port: 3000,
+        });
+        store.next_launch_serial = 1;
         save(&candidate, &store).unwrap();
         let before = fs::read(root(&candidate).join("state.json")).unwrap();
         let requested = BTreeMap::from([
@@ -1303,6 +1314,8 @@ mod tests {
         assert_eq!(reserved["web"].slot, 2);
         let persisted = read_owner_registry(&candidate, &owner, 3, false).unwrap();
         assert_eq!(persisted.slots.len(), 3);
+        assert_eq!(persisted.slots[&0].phase, "running");
+        assert_eq!(persisted.slots[&0].relay.as_ref().unwrap().launch_serial, 1);
         for (service, route) in reserved {
             assert_eq!(persisted.slots[&route.slot].run, run);
             assert_eq!(persisted.slots[&route.slot].service, service);

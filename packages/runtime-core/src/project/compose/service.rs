@@ -390,6 +390,12 @@ fn health(
                     problem("invalid_healthcheck", "Invalid native HTTP declaration.")
                 })?;
             probe.validate()?;
+            if probe.policy.is_some() {
+                return Err(problem(
+                    "invalid_healthcheck",
+                    "Native HTTP policy is generated from routing, not authored in a healthcheck.",
+                ));
+            }
             if m.keys().any(|key| key != "x-hack-http") {
                 return Err(problem(
                     "invalid_healthcheck",
@@ -717,7 +723,7 @@ pub(super) fn compile(
     volumes: &BTreeMap<String, VolumePlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<BTreeMap<String, ServicePlan>, CandidateError> {
-    if values.is_empty() || values.len() > 64 {
+    if values.is_empty() || values.len() > super::super::MAX_COMPOSE_SERVICES {
         return Err(problem(
             "service_budget",
             "Compose requires 1 to 64 services in WU03.",
@@ -1101,6 +1107,31 @@ pub(super) fn compile(
                 "Dependency cache volume must be mounted by its declaring service; values omitted.",
             ));
         }
+        let mut healthcheck = health(
+            m.get("healthcheck"),
+            &format!("{field}.healthcheck"),
+            diagnostics,
+        )?;
+        if !m.contains_key("healthcheck") {
+            if let Some(route) = &routing {
+                healthcheck = Some(HealthPlan {
+                    native_http: Some(crate::provider::http_probe::HttpProbe::inferred_route(
+                        route.port,
+                    )),
+                    disabled: false,
+                    test: None,
+                    interval_nanos: None,
+                    timeout_nanos: None,
+                    start_period_nanos: None,
+                    start_interval_nanos: None,
+                    retries: None,
+                });
+                diagnostics.push(Diagnostic::warning(
+                    "inferred_route_probe", &format!("{field}.healthcheck"),
+                    "Native infers a route-port probe requiring TCP and complete HTTP 200-499 response headers. HTTP 5xx, EOF, timeouts and non-HTTP responses are not ready. No explicit healthcheck was changed.",
+                ));
+            }
+        }
         result.insert(name.clone(),ServicePlan {
             image,build,
             command:command(m.get("command"),&format!("{field}.command"))?,
@@ -1111,7 +1142,7 @@ pub(super) fn compile(
             environment:redacted_map(m.get("environment"),true)?,extra_hosts,
             environment_files:environment_files(project,base,m.get("env_file"),&format!("{field}.env_file"),diagnostics)?,
             environment_precedence:"Compose environment keys override explicitly listed env_file inputs; bare keys and references remain unresolved; no ambient/.env values are loaded".into(),
-            healthcheck:health(m.get("healthcheck"),&format!("{field}.healthcheck"),diagnostics)?,
+            healthcheck,
             ports:ports(m.get("ports"),&format!("{field}.ports"),diagnostics)?,exposed_ports,networks,network_aliases,network_mode:if ["project-networks", "none"].contains(&network_mode) {network_mode.into()} else {"[unsupported]".into()},
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,

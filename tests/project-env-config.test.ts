@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   unlink,
@@ -36,6 +37,7 @@ import {
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   listProjectEnvOverlayNames,
+  MACHINE_LOCAL_LAYER_REFUSALS,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
@@ -988,9 +990,14 @@ test("setProjectEnvValue writes local override ignore rules to the committed .ha
   expect(excludeText).not.toContain("hack.env");
 });
 
-test("setProjectEnvValue --local keeps a read-only outdated .hack/.gitignore and warns instead of failing (HACK-1363)", async () => {
+test("setProjectEnvValue --local keeps a read-only outdated .hack/.gitignore and warns while another rule ignores the layer (HACK-1363)", async () => {
   const repo = await createRepo();
   await initGitRepo(repo.projectRoot);
+  // HACK-2165: the write needs the layer to be ignored by some rule.
+  await writeFile(
+    resolve(repo.projectRoot, ".gitignore"),
+    ".hack/hack.env*.local.yaml\n"
+  );
   const gitignore = resolve(repo.projectDir, ".gitignore");
   await writeFile(gitignore, "my-own-entry\n");
   await chmod(gitignore, 0o444);
@@ -1029,6 +1036,98 @@ test("setProjectEnvValue --local keeps a read-only outdated .hack/.gitignore and
     stderr.mockRestore();
     await chmod(gitignore, 0o644);
   }
+});
+
+test("setProjectEnvValue --local refuses when no rule ignores the layer and .hack/.gitignore is read-only (HACK-2165)", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+  const gitignore = resolve(repo.projectDir, ".gitignore");
+  await writeFile(gitignore, "my-own-entry\n");
+  await chmod(gitignore, 0o444);
+  const layer = resolveProjectEnvLocalConfigPath({
+    projectDir: repo.projectDir,
+    envName: null,
+  });
+  const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    await expect(
+      setProjectEnvValue({
+        projectRoot: repo.projectRoot,
+        projectDir: repo.projectDir,
+        envName: null,
+        scope: "global",
+        key: "LOCAL_ONLY",
+        value: "synthetic-unignored",
+        secret: false,
+        local: true,
+      })
+    ).rejects.toThrow(MACHINE_LOCAL_LAYER_REFUSALS.notIgnored(layer));
+    expect(await Bun.file(layer).exists()).toBe(false);
+    expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
+  } finally {
+    stderr.mockRestore();
+    await chmod(gitignore, 0o644);
+  }
+});
+
+test("setProjectEnvValue --env qa --local refuses a tracked local overlay (HACK-2165)", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+  const layer = resolveProjectEnvLocalConfigPath({
+    projectDir: repo.projectDir,
+    envName: "qa",
+  });
+  const tracked =
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global: {}\n";
+  await writeFile(layer, tracked);
+  await runGit(["add", "-f", "--", layer], repo.projectRoot);
+  await expect(
+    setProjectEnvValue({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: "qa",
+      scope: "global",
+      key: "QA_TOKEN",
+      value: "synthetic-qa-token",
+      secret: false,
+      local: true,
+    })
+  ).rejects.toThrow(MACHINE_LOCAL_LAYER_REFUSALS.tracked(layer));
+  expect(await readFile(layer, "utf8")).toBe(tracked);
+});
+
+test("setProjectEnvValue --local refuses when git tracks a case variant of the layer (HACK-2165)", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+  const variant = resolve(repo.projectDir, "Hack.env.qa.local.yaml");
+  const tracked =
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global: {}\n";
+  await writeFile(variant, tracked);
+  await runGit(["add", "-f", "--", variant], repo.projectRoot);
+  const layer = resolveProjectEnvLocalConfigPath({
+    projectDir: repo.projectDir,
+    envName: "qa",
+  });
+  await expect(
+    setProjectEnvValue({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: "qa",
+      scope: "global",
+      key: "QA_TOKEN",
+      value: "synthetic-case-variant",
+      secret: false,
+      local: true,
+    })
+  ).rejects.toThrow(MACHINE_LOCAL_LAYER_REFUSALS.tracked(layer));
+  expect(await readFile(variant, "utf8")).toBe(tracked);
+  // Only the tracked spelling exists. On a case-insensitive filesystem the
+  // two names are one file, so this, not an existence check, is portable.
+  expect(
+    (await readdir(repo.projectDir)).filter(
+      (name) => name.toLowerCase() === "hack.env.qa.local.yaml"
+    )
+  ).toEqual(["Hack.env.qa.local.yaml"]);
 });
 
 test("materializeProjectEnv keeps .hack/.env out of git status through info/exclude", async () => {
@@ -1531,6 +1630,7 @@ test("migrateLegacyProjectEnv converts legacy base and overlay values into new c
   const removed = await removeLegacyProjectEnvArtifacts({
     projectRoot: repo.projectRoot,
     paths: [storePath],
+    context: migrated.cleanupContext,
   });
   expect(
     await dropRemovedLegacySecretStorePointer({

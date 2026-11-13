@@ -247,14 +247,20 @@ import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
+import {
+  resolveHackEnv,
+  selectHackEnvValues,
+  upsertDotEnvValue,
+} from "../lib/hack-env.ts";
 import { initProjectExistsError } from "../lib/init-existing-project.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
 import {
-  appendLifecycleLogRecord,
+  createLifecycleLogSink,
+  drainLifecycleOutput,
+  type LifecycleLogSink,
   readLifecycleState,
   resolveLifecycleComposeProjectName,
   resolveLifecycleLogPath,
@@ -356,6 +362,7 @@ import {
   readProjectsRegistry,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
+import { openProxyLoopbackWarning } from "../lib/proxy-loopback.ts";
 import {
   discoverDependencyBootstrapServices,
   discoverSuccessfulCompletionServices,
@@ -389,7 +396,6 @@ import {
   renderProjectEnvConfigYaml,
 } from "../templates.ts";
 import { display } from "../ui/display.ts";
-import { readLinesFromStream } from "../ui/lines.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
@@ -1557,7 +1563,7 @@ export async function resolveLifecycleEnvForProject(opts: {
       message: `Failed to parse ${envResolved.contractPath}: ${envResolved.contractParseError}`,
     });
   }
-  return envResolved.envForCompose;
+  return selectHackEnvValues({ resolved: envResolved });
 }
 
 async function resolveComposeEnvOverrides(opts: {
@@ -1665,7 +1671,7 @@ async function resolveComposeEnvOverrides(opts: {
     return {
       composeFiles: [],
       env: resolved.envForCompose,
-      lifecycleEnv: resolved.envForCompose,
+      lifecycleEnv: selectHackEnvValues({ resolved }),
       preflightEnvByService,
       effectiveEnvName: resolved.envSelection.effectiveEnv,
     };
@@ -1683,7 +1689,7 @@ async function resolveComposeEnvOverrides(opts: {
   return {
     composeFiles: [overridePath],
     env: resolved.envForCompose,
-    lifecycleEnv: resolved.envForCompose,
+    lifecycleEnv: selectHackEnvValues({ resolved }),
     preflightEnvByService,
     effectiveEnvName: resolved.envSelection.effectiveEnv,
   };
@@ -1860,24 +1866,33 @@ function runLifecycleChild(opts: {
   readonly composeProject: string;
   readonly service: string;
   readonly signal?: AbortSignal;
+  /** The hook's log sink, shared with its end record. */
+  readonly sink: LifecycleLogSink;
 }): Promise<number> {
+  const { sink } = opts;
   return runLifecycleCommandChild({
     command: opts.command,
     cwd: opts.cwd,
     env: opts.env,
     signal: opts.signal,
     drain: (stream, source) =>
-      streamLifecycleCommandOutput({
+      drainLifecycleOutput({
         stream,
         output: source === "stdout" ? opts.output : "stderr",
-        projectDir: opts.projectDir,
-        composeProject: opts.composeProject,
         service: opts.service,
+        sink,
       }),
   });
 }
 
-async function runLifecycleCommands(opts: {
+/**
+ * Run a lifecycle phase's commands in order. Exported for tests. A log that
+ * cannot be written (a refused path, an I/O error) changes only
+ * persistence: nothing is written through it, the problem is reported once
+ * per hook, and the hook's output and result, and the commands after it,
+ * are unaffected.
+ */
+export async function runLifecycleCommands(opts: {
   readonly title: string;
   readonly commands: readonly ProjectLifecycleCommand[] | undefined;
   readonly projectRoot: string;
@@ -1934,18 +1949,19 @@ async function runLifecycleCommands(opts: {
       cwd: cmd.cwd,
     });
 
-    await appendLifecycleLogRecord({
+    const sink = createLifecycleLogSink({
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
-      record: {
-        timestamp: new Date().toISOString(),
-        service: serviceName,
-        stream: "meta",
-        message: `[start] ${opts.title}: ${label}`,
-      },
+      warn: (message) => logger.warn({ message }),
     });
-
+    await sink.append({
+      timestamp: new Date().toISOString(),
+      service: serviceName,
+      stream: "meta",
+      message: `[start] ${opts.title}: ${label}`,
+    });
     const exitCode = await runLifecycleChild({
+      sink,
       command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
@@ -1956,15 +1972,11 @@ async function runLifecycleCommands(opts: {
       signal: opts.signal,
     });
 
-    await appendLifecycleLogRecord({
-      projectDir: opts.projectDir,
-      composeProject: opts.composeProject,
-      record: {
-        timestamp: new Date().toISOString(),
-        service: serviceName,
-        stream: "meta",
-        message: `[end] ${opts.title}: exit ${exitCode}`,
-      },
+    await sink.append({
+      timestamp: new Date().toISOString(),
+      service: serviceName,
+      stream: "meta",
+      message: `[end] ${opts.title}: exit ${exitCode}`,
     });
 
     if (exitCode !== 0) {
@@ -2729,35 +2741,6 @@ export async function startLifecycleProcesses(opts: {
       throw error;
     }
     throw new Error("Failed to start lifecycle processes");
-  }
-}
-
-async function streamLifecycleCommandOutput(opts: {
-  readonly stream: ReadableStream<Uint8Array> | number | null;
-  readonly output: "stdout" | "stderr";
-  readonly projectDir: string;
-  readonly composeProject: string;
-  readonly service: string;
-}): Promise<void> {
-  if (!opts.stream || typeof opts.stream === "number") {
-    return;
-  }
-  for await (const line of readLinesFromStream(opts.stream)) {
-    if (opts.output === "stderr") {
-      process.stderr.write(`${line}\n`);
-    } else {
-      process.stdout.write(`${line}\n`);
-    }
-    await appendLifecycleLogRecord({
-      projectDir: opts.projectDir,
-      composeProject: opts.composeProject,
-      record: {
-        timestamp: new Date().toISOString(),
-        service: opts.service,
-        stream: opts.output,
-        message: line,
-      },
-    });
   }
 }
 
@@ -10428,6 +10411,7 @@ async function handleOpen({
     return await emitOpenOrigin({
       url: nativeOrigin,
       json: args.options.json === true,
+      origin: "native",
     });
   }
   const project = await resolveProjectForArgs({
@@ -10493,13 +10477,24 @@ async function handleOpen({
   const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
   const url = resolveOpenUrl({ targetRaw, resolvedHost, grafanaHost });
 
-  return await emitOpenOrigin({ url, json });
+  return await emitOpenOrigin({ url, json, origin: "compose" });
 }
 
-async function emitOpenOrigin(opts: {
+export async function emitOpenOrigin(opts: {
   readonly url: string;
   readonly json: boolean;
+  readonly origin: "compose" | "native";
+  readonly checkLoopback?: typeof openProxyLoopbackWarning;
 }): Promise<number> {
+  const warning =
+    opts.origin === "compose"
+      ? await (opts.checkLoopback ?? openProxyLoopbackWarning)({
+          url: opts.url,
+        })
+      : null;
+  if (warning) {
+    throw new HackCliError({ code: "E_GLOBAL_INFRA_DOWN", message: warning });
+  }
   if (opts.json) {
     process.stdout.write(`${JSON.stringify({ url: opts.url }, null, 2)}\n`);
     noteBrowserTargetsForLocalNetworkHint([opts.url]);

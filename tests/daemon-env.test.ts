@@ -263,6 +263,40 @@ describe("handleEnvRoutes", () => {
     }
   });
 
+  test("GET /v1/env reports modern metadata without decrypting or presenting legacy state", async () => {
+    const sentinel = "synthetic-ciphertext-metadata-sentinel";
+    await writeFile(
+      join(repoRoot, ".hack/hack.env.default.yaml"),
+      `version: 1\nsecretsprovider: project_key\nvalues:\n  global:\n    MODERN_TOKEN:\n      secure: ${sentinel}\n`
+    );
+    await writeFile(
+      join(repoRoot, ".hack/.env"),
+      "FOO=synthetic-legacy-metadata-sentinel\n"
+    );
+    const req = mockRequest({
+      method: "GET",
+      path: "/v1/env?project=env-test",
+    });
+    const result = await handleEnvRoutes({ req, url: new URL(req.url) });
+    expect(result?.status).toBe(200);
+    const text = await result!.text();
+    const body = JSON.parse(text);
+    expect(body.format).toBe("project_env_config_v1");
+    expect(body.values).toContainEqual({
+      key: "MODERN_TOKEN",
+      scope: "global",
+      effectiveScope: "global",
+      secret: true,
+      hasValue: true,
+    });
+    expect(body).not.toHaveProperty("contract");
+    expect(text).not.toContain(sentinel);
+    expect(text).not.toContain("synthetic-legacy-metadata-sentinel");
+    expect(await Bun.file(join(repoRoot, ".hack.secret.key")).exists()).toBe(
+      false
+    );
+  });
+
   test("POST /v1/env/set writes to .hack/.env and shows as resolved when broker auth is unavailable", async () => {
     const previousAuthBrokerUrl = process.env.HACK_AUTH_BROKER_URL;
     process.env.HACK_AUTH_BROKER_URL = "http://127.0.0.1:9";
@@ -307,6 +341,22 @@ describe("handleEnvRoutes", () => {
   });
 
   test("POST /v1/env/unset clears .hack/.env and shows as missing", async () => {
+    // A successful unset requires a backend that can confirm deletion/absence;
+    // an unavailable host keychain must now report an unconfirmed outcome.
+    process.env.HACK_SECRETS_FILE_KEY = "synthetic-plain-unset-key";
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+    await writeFile(
+      resolve(repoRoot, ".hack", PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        name: "env-test",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: { path: join(tempDir, "unset-store.json") },
+          },
+        },
+      })
+    );
     const setReq = mockRequest({
       method: "POST",
       path: "/v1/env/set",
@@ -342,6 +392,49 @@ describe("handleEnvRoutes", () => {
         (v as Record<string, unknown>).key === "FOO"
     ) as Record<string, unknown> | undefined;
     expect(foo?.hasValue).toBe(false);
+  });
+
+  test("unset reports an unconfirmed backend deletion and preserves its completed dotenv result", async () => {
+    const sentinel = "synthetic-delete-error-value";
+    process.env.HACK_SECRETS_FILE_KEY = "synthetic-delete-error-key";
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+    const storePath = join(tempDir, "broken-store.json");
+    await writeFile(storePath, `{"version": ${sentinel}}`);
+    await writeFile(
+      join(repoRoot, ".hack", PROJECT_CONFIG_FILENAME),
+      JSON.stringify({
+        name: "env-test",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: { path: storePath },
+          },
+        },
+      })
+    );
+    await writeFile(
+      join(repoRoot, ".hack/.env"),
+      `FOO=${sentinel}\nKEEP=preserved\n`
+    );
+    const req = mockRequest({
+      method: "POST",
+      path: "/v1/env/unset",
+      body: { project: "env-test", key: "FOO" },
+    });
+    const response = await handleEnvRoutes({ req, url: new URL(req.url) });
+    expect(response?.status).toBe(500);
+    const text = await response?.text();
+    expect(text).not.toContain(sentinel);
+    expect(JSON.parse(text ?? "null")).toMatchObject({
+      status: "partial_failure",
+      error: "secret_delete_unconfirmed",
+      dotenvChanged: true,
+      secretDeleted: null,
+    });
+    expect(await readFile(join(repoRoot, ".hack/.env"), "utf8")).toBe(
+      "KEEP=preserved\n"
+    );
+    expect(await readFile(storePath, "utf8")).toContain(sentinel);
   });
 
   test("secret set/unset uses configured encrypted_file backend", async () => {

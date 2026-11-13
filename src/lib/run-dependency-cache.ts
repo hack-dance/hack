@@ -1,4 +1,4 @@
-import { withoutComposeEnvReferences } from "./compose-managed-env.ts";
+import { dockerHelperRunEnvironment } from "./docker-helper-environment.ts";
 import { isRecord } from "./guards.ts";
 import { exec } from "./shell.ts";
 
@@ -33,7 +33,7 @@ export async function canReuseRunningDependencyCache(opts: {
         timeoutMs: 15_000,
         cwd: opts.cwd,
         // `docker inspect` never reads the generated env override.
-        env: withoutComposeEnvReferences(opts.env),
+        ...dockerHelperRunEnvironment(opts.env),
       }
     );
     if (result.exitCode !== 0) {

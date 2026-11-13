@@ -23,6 +23,11 @@ terminal).
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
 - `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
+
+Candidate `hack-next doctor` and `hack-v5 doctor` report a missing hackd as optional
+for Compose workflows. They do not recommend starting the stable daemon or
+installing its login service. Candidate `doctor --fix` keeps daemon repair disabled;
+stale or incompatible daemon state is still reported without a repair command.
 - `hack agent onboard` — print an onboarding prompt for an existing project
 - Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](integrations.md)
 
@@ -30,6 +35,27 @@ Interactive diagnostics use compact status rows: healthy groups stay on one line
 and errors expand with wrapped detail and recovery guidance. `hack doctor --json` remains the stable,
 fully detailed automation surface. Generic macOS resolver setup is shown only when those resolver
 checks need attention.
+
+With the Compose proxy running, the `proxy ports` check tests its published IPv4 and
+IPv6 loopback bindings independently. An IPv4-only, IPv6-only or LAN bind does not
+imply a listener on the other loopback family. The running container's actual bound
+ports take precedence over requested publication intent, so IPv6-disabled hosts and
+IPv4-only forwarders do not gain an implied IPv6 listener. Requested bindings are
+used only when the runtime projection is absent. HTTPS must verify against the running
+proxy's internal CA using its
+schemas hostname; an unrelated TCP listener cannot pass. A warning names the failed
+port and any listener process visible without privilege. Check competing listeners,
+a VPN's serve feature, the container runtime's HTTPS setting, and local DNS overrides.
+This warning has no automatic repair. Hostnames resolving directly to the container
+address use a different path and can still work. For legacy Compose origins, `hack open` checks the selected URL's
+loopback path before opening it or printing JSON, and refuses when every checked
+loopback path fails and no non-loopback DNS alternative exists. A healthy family or a
+direct-container DNS alternative preserves browser fallback; doctor still warns about
+individual failed bindings. An unavailable runtime CA remains a doctor warning rather than
+proof that a listener is foreign.
+
+Saved native origins retain their own routing behavior: opening them does not invoke
+the Compose proxy's system resolver, Docker inspections or CA-pinned TLS probe.
 
 On macOS, a healthy terminal connection does not establish browser connectivity.
 Use `hack doctor --browser-url https://your-service.hack.local --browser-result fails`

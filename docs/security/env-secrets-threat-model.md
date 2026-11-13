@@ -4,8 +4,9 @@ This document describes how Hack protects project env values and secret keys on 
 developer machine. It lists the assets, the trust boundaries, the threats, the
 mitigations that are merged on `next`, and the gaps that are still open. It tracks
 Linear issue HACK-1127, with the HACK-2163 audit corrections below. Runtime
-claims were checked on 2026-11-13 at `c89f4fd7cc`. The three HACK-2163 gaps
-remain open until their fixes merge; this documentation change does not fix them.
+claims were audited on 2026-11-13 at `c89f4fd7cc`. HACK-2163's containment,
+diagnostic and ignore fixes subsequently merged in #756; the mitigations below
+describe those fixes while retaining the remaining custody limits.
 
 For day-to-day usage, see [Env & secrets](../env.md). This page does not change any
 behavior. Where it names code, the code is the source of truth.
@@ -35,25 +36,26 @@ node code is listed under [open gaps](#open-gaps) so that it is not lost.
 | `keychain` store | macOS keychain through `Bun.secrets`, one service per project | Legacy backend values. |
 | Values from an external manager (for example 1Password) | The manager's vault, until the user pipes a value into Hack or injects `HACK_ENV_SECRET_KEY` into a process | Hack has no first-party 1Password integration. Custody passes to Hack's stores at the moment of the pipe or injection. |
 | Local YAML layers | `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` | May hold plaintext; these are local-only, not safe to commit. New local files use 0600; an existing file keeps its mode. |
-| Multiplexer input | `$TMPDIR/hack-mux-env-*/env.json` (the OS temp directory when TMPDIR is unset) | A private plaintext env payload, consumed and removed by the pane wrapper or owned cleanup; it exists on disk before that cleanup. |
+| Multiplexer input | `$TMPDIR/hack-mux-env-*/env.json` (the OS temp directory when TMPDIR is unset) | A private plaintext env payload, consumed and removed by the pane wrapper or owned cleanup; it exists on disk before that cleanup. A payload older than 10 minutes is refused and removed by the next staging (HACK-2170). |
 | Background command output | `<HACK_HOME>/commands/<id>/stdout` and `stderr` | Output can contain injected values. Redaction is partial and delayed; withholding a read does not erase disk bytes. |
 | Background command arguments | `<HACK_HOME>/commands/<id>/meta.json` and `launch.json` | Automatic env maps are omitted, but caller argv is retained, including with metadata-only capture. Expanded values in argv are not redacted. |
-| Lifecycle output | `.hack/.internal/lifecycle/<project>.log` and `${TMPDIR:-/tmp}/hack-lifecycle.*` FIFOs | Hooks and persistent processes can emit injected values. Log and FIFO privacy gaps remain open (HACK-2170). |
+| Lifecycle output | `.hack/.internal/lifecycle/<project>.log` (and `<log>.before-private-*` kept history), and a FIFO in a private `${TMPDIR:-/tmp}/hack-lifecycle.*` directory | Hooks and persistent processes can emit injected values, stored verbatim. The log is private and owner-checked; remaining gaps are listed in gap 16 (HACK-2170). |
 | Decrypted values in flight | Process environments of the `docker compose` client, Compose containers, host commands, lifecycle processes and session shells; `.hack/.env` | The resolved plaintext, after decryption. `.hack/.internal/compose.env.override.yml` holds only `${HACK_ENV_...}` references (HACK-1273). |
 
 ## Where values travel
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="env-secrets-flow.dark.svg">
-  <img src="env-secrets-flow.light.svg" alt="Project env values reach child environments, mux input files and output stores; an environment key override is also inherited today.">
+  <img src="env-secrets-flow.light.svg" alt="Resolved values reach user-child environments after key filtering, mux input files and output stores; parser diagnostics expose only fixed kinds and locations.">
 </picture>
 
 [Diagram source](env-secrets-flow.mmd). Paths depend on the command: a child
 can print injected values, and a background capture stores output before its
 partial scan. A file-backed project key is a decryption input, not an application
-value; the dashed key edge is the open environment-override inheritance gap.
-Legacy JSON diagnostics can disclose input text. The modern YAML loader also
-forwards its parser's message without filtering it; see gap 14 for the distinction.
+value. User-child environments filter key material. Deliberate Hack re-execs
+receive keys explicitly and filter their own user children. Env-layer, legacy
+contract and store diagnostics report fixed kinds and numeric locations without
+source text; see audit items 13 and 14 for their remaining limits.
 
 ## Trust boundaries
 
@@ -69,6 +71,10 @@ forwards its parser's message without filtering it; see gap 14 for the distincti
 3. **Agents and MCP.** An agent acts with the user's rights, but its prompts,
    transcripts and tool output may leave the machine. Hack treats the agent context
    as a sink that must not receive secret values unless the user asks for one.
+   Metadata-only `env list` defaults and its terminal-only `--show-values` reveal
+   reduce accidental exposure in logs and transcripts. They are not access control
+   against a local process: a process can open a pseudo-terminal or loop over
+   `env get KEY` with the same filesystem and key access.
 4. **CI and managed containers.** CI receives the key only as `HACK_ENV_SECRET_KEY`
    from the CI secret store. The key file is never baked into an image.
 5. **Repository inputs.** A cloned repository is untrusted input. It may contain
@@ -125,7 +131,7 @@ HACK-2163 hardens three boundaries found in the env audit:
 | The key is committed. | The root `.gitignore` gets a `.hack.secret.key` entry before the key is created, so a failed entry write leaves no key; an existing checkout-local key git does not ignore is repaired or refused before a `--secret` write uses it, and `hack doctor` reports it as `env-key-unignored` (HACK-1375). Encryption refuses a git-tracked key, including an inherited primary key, before it is copied (#288). `hack doctor` reports `env-key-tracked` at any depth (#309) and the "generated files" check can untrack a root key with `--fix`. |
 | A key copy ships in build output or a static site. | `hack doctor` reports `env-key-public-path` for copies under `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` and `.output/` (#309). |
 | A weak, short or repetitive key. | `env-key-wrong-length` and `env-key-low-entropy` (#309). Generated keys are 32 random bytes in base64url. |
-| Materialized `.hack/.env` or local overrides are committed. | **Open / partial protection.** The managed `.hack/.gitignore` covers `.env` and local YAML names, but does not cover legacy `.env.<overlay>` files. Existing tracked files remain tracked. Do not treat local overrides as protected from commits merely because migration or ignore rules ran. Check the index and local layers yourself (`src/templates.ts`, `src/lib/project-env-config.ts`; see open gap 15). |
+| Materialized `.hack/.env` or local overrides are committed. | Managed ignores cover `.env`, `.env.*` and local YAML names, with exceptions for templates. Existing tracked files remain tracked; Doctor reports shared legacy overlays and directs migration without automatically removing them from the index. Check actual tracking and permissions; ignore rules do not erase Git history or other copies (`src/templates.ts`, `src/lib/project-env-config.ts`; see audit item 15). |
 | A secret leaks into a public artifact through a path nobody listed. | `tests/env-secret-sentinel-scan.test.ts` exercises encrypted-entry workflows with a recording Docker shim, a primary checkout and a worktree. Its fixture permits plaintext in a private `.hack/.env` and checks output, argv and Git artifacts. That is bounded evidence for those inputs, not a product-wide claim that plaintext exists only there. Plain local YAML, mux temporary payloads, application output and background stores need their own custody review. See open gap 12. |
 | A dependency vulnerability ships in Hack. | `bun install --frozen-lockfile`, and the read-only `scripts/dependabot-inventory.ts` lists open alerts (#309). Hack does not sandbox project dependencies that run under `hack host exec`; they receive the injected env by design. |
 
@@ -192,9 +198,20 @@ planned branch or a passing documentation check is not a mitigation.
    check names rollback, `hack up` and adopting again as the way to drop the values.
    A preparation that an earlier version made over a literal override is never
    published now (HACK-1318); until `hack config adopt --recover --rollback` releases
-   its journaled switch, it also keeps the file. Other internal files are not
-   value-free by definition: lifecycle logs can hold plaintext output, with
-   umask-dependent permissions (gap 16). The sentinel fixture does not prove otherwise.
+   its journaled switch, it also keeps the file. Lifecycle logs (`.hack/.internal/lifecycle/*.log`) are
+   the exception: they hold hook and lifecycle output verbatim and unredacted, so they are
+   written private (directory 0700, files 0600, owner-checked, never through a symlink;
+   an older broadly readable log is moved aside privately (`<log>.before-private-<time>`) and a
+   new private log started before appending, so an
+   already-open reader of the old file sees no new output) and persistent output passes through a
+   0600 FIFO in a private `mktemp -d` directory. Staged terminal-multiplexer environments
+   (`$TMPDIR/hack-mux-env-*/env.json`, 0600 in a 0700 directory) are refused after 10 minutes
+   and removed by the next staging if no session ran them. Remaining gaps: a persistent
+   session's shell appends with `>>`, so a same-user process that replaces the log during
+   the session can redirect or recreate it (the next Hack record makes it private again), and
+   ancestors of `.hack/.internal/` are not checked for other writers. Other generated files under
+   `.hack/.internal/` and `.hack/.branch/` are written with the process umask; they are
+   not value-free by definition, and the sentinel fixture does not prove otherwise (gap 16).
 5. **YAML env layer TOCTOU (narrowed, HACK-1685).** Base and overlay YAML layers,
    including local layers and init scaffold writes, may follow links only when the whole chain resolves inside
    `realpath(projectRoot)`. Component-aware resolution handles relative targets,
@@ -246,68 +263,54 @@ planned branch or a passing documentation check is not a mitigation.
     or the native runtime backend. A zero-hit result is evidence for those paths and
     encodings only; it is not a complete-redaction claim.
 
-13. **Open: project key inherited by child processes (HACK-2163).** When
-    `HACK_ENV_SECRET_KEY` is set in the CLI environment, child-env builders copy
-    it without removing it (`src/lib/shell.ts`, `src/commands/background-command-start.ts`,
-    `src/mux/private-environment.ts`). Child code can read the project key as well
-    as its selected application values. The legacy store's `HACK_SECRETS_FILE_KEY`
-    is also passed through these builders. Keep this open until the separate fix
-    merges; an environment override is not isolated key custody.
-14. **Open: unfiltered parser diagnostics (HACK-2163).**
-    `parseProjectEnvConfigText` keeps the YAML parser's error message, and env
-    loading includes it in a `ClosedCliError` (`src/lib/project-env-config.ts`).
-    Synthetic malformed-YAML probes with pinned Bun 1.4.4 returned fixed text,
-    not source lines. That observation is not a value-free diagnostic contract:
-    the message is still forwarded without filtering. Separately, malformed
-    legacy `hack.env.json` input can appear in a JSON parser error, retained as
-    `parseError` by `src/lib/hack-env.ts` and returned by daemon env routes in
-    `src/daemon/routes/env.ts`. Do not paste raw parse errors into an agent
-    transcript or public report. Keep this open until those boundaries are fixed;
-    an error's class name does not make its message value-free.
-15. **Open: legacy overlay dotenv files are not ignored by the managed rules
-    (HACK-2163).** `HACK_DIR_GITIGNORE_ENTRIES` in `src/templates.ts` includes
-    `.env`, but not `.env.<overlay>`. Such files can be added to Git unless the
-    project has its own matching rule. Local YAML ignore patterns also cannot
-    protect files already tracked. Check actual tracking and ignore behavior;
-    keep this open until the separate ignore fix merges.
-16. **Open: lifecycle log and FIFO custody (HACK-2170).** Hooks and persistent
-    processes copy unredacted output to `.hack/.internal/lifecycle/<project>.log`
-    (`src/commands/project.ts`, `src/lib/lifecycle-runtime.ts`). Log creation uses
-    the process umask, and appending follows a final-path symlink; with umask 022,
-    a new log can be 0644. Persistent output also crosses a FIFO named with
-    `mktemp -u` and then created with `mkfifo` in `${TMPDIR:-/tmp}`, without a private
-    directory, explicit private mode or checked creation failure
-    (`src/lib/project-lifecycle-controller.ts`). Name reservation is racy, and
-    other readers may access output when ancestor permissions allow it. Keep this
-    open until the log and FIFO fix merges.
-17. **Open: secret-store and key integrity (HACK-2169).** In
-    `src/lib/secret-store.ts`, an unreadable encrypted store can be treated as empty
-    by `readEncryptedEntries`; a later mutation can replace it with only the new
-    entry. The process-global key cache is not bound to a store/key path, so a
-    cached key can be reused for another store whose key is absent. Explicit key
-    provisioning can replace an existing key without authenticating and re-encrypting
-    the store under the new one. Separately, project env add/set can create a file
-    key despite a working environment-only project key; file precedence then hides
-    that environment key from reads (`src/lib/project-env-config.ts`,
-    `src/commands/env.ts`). These are integrity and recoverability gaps, not safe
-    rotation paths. Keep them open until the corresponding fixes merge.
-18. **Open: local-layer symlinks, ignores and modes (HACK-2165).** Hydration checks
-    whether the logical local path is tracked before resolving an allowed
-    in-project symlink; the writer can then replace its tracked shared target.
-    Ordinary local add/set and hydrate can warn about failed ignore setup and
-    still write, and named local layers can already be tracked
-    (`src/lib/project-env-config.ts`, `src/lib/project-env-layer-path.ts`,
-    `src/lib/fs.ts`). Existing local-layer modes are preserved. Legacy dotenv
-    inspection also follows symlinks through `readTextFile`, including links
-    outside the project (`src/lib/hack-env.ts`); mutation checks do not protect
-    that read path. Keep these gaps open until the hygiene fixes merge; an
-    in-project target or local filename is not proof of private storage.
-19. **Open: migration cleanup recheck (HACK-2171).** Cleanup removes the current
-    path after an earlier migration/consent decision without rechecking the
-    selected file's current bytes and identity under a lock
-    (`removeLegacyProjectEnvArtifacts` in `src/lib/project-env-config.ts`,
-    cleanup callers in `src/commands/doctor.ts`). Edits made between that decision
-    and removal can be lost. Keep this open until cleanup revalidation merges.
+13. **Mitigated: project keys inherited by child processes (HACK-2163).**
+    Shared child-environment filtering removes Hack key material, including
+    `HACK_ENV_SECRET_KEY` and `HACK_SECRETS_FILE_KEY`, from ordinary children and
+    the Compose client. Deliberate Hack re-execs retain keys and filter their own
+    user children. Already-running multiplexer servers can retain their earlier
+    environment; filtering a new child does not erase previously copied keys.
+14. **Mitigated: parser diagnostics reflecting values (HACK-2163).** Env-layer,
+    legacy contract and secret-store diagnostics use fixed error kinds and numeric
+    locations rather than raw parser messages. CLI, JSON and daemon regressions
+    check sentinel omission. Do not extend that contract to arbitrary application
+    output or unrelated parsers.
+15. **Mitigated: legacy dotenv copies offered for commit (HACK-2163).** Managed
+    rules ignore `.env.*` with template exceptions. Doctor reports tracked or
+    unignored overlays and directs migration; it does not automatically untrack
+    shared overlays or templates. Ignore rules cannot remove already-tracked
+    plaintext from Git history or another copy.
+16. **Narrowed: lifecycle log and FIFO custody (HACK-2170).** Hooks and persistent
+    processes copy unredacted output to `.hack/.internal/lifecycle/<project>.log`.
+    The directory is now 0700 and the log 0600, owner-checked and never written by
+    Hack through a symlink; an older broadly readable log is moved aside privately
+    and a new log started; a log that cannot be written changes only persistence.
+    Persistent output crosses a 0600 FIFO in a `mktemp -d` directory, and the
+    process is not started if either cannot be created. Remaining: a persistent
+    session's shell appends with `>>`, so a same-user replacement during the
+    session is followed until Hack's next record; ancestors of `.hack/.internal/`
+    are not checked for other writers; staged multiplexer payloads are removed by
+    the next staging, not by an independent reaper.
+17. **Narrowed: secret-store and key integrity (HACK-2169, #766).** Unreadable or
+    malformed stores refuse mutation instead of becoming an empty store. Configured
+    file-key lookup does not borrow a cached key from another path; provisioning
+    refuses to replace a different existing key. An environment-only project key
+    is retained without creating a shadowing file key. Shared key-writer locks
+    serialize provisioning and cleanup. These are preservation checks, not a
+    rotation or recovery mechanism for keys already lost.
+18. **Narrowed: local-layer symlinks and Git privacy (HACK-2165, #762).**
+    Machine-local writes refuse linked or tracked destinations, unknown tracking
+    inside a checkout and ineffective ignore rules. Legacy dotenv inspection uses
+    no-follow reads. Local naming and ignores still do not prove private historical
+    permissions or erase earlier copies; inspect Doctor's findings and retain the
+    remaining filesystem-race limits described above.
+19. **Mitigated: stale migration cleanup decisions (HACK-2171).** Cleanup carries
+    content and file-identity receipts from before migration, then rechecks them
+    and current scoped delivery under writer locks after consent. Each unlink
+    rechecks its target. Refusals preserve remaining files and report confirmed
+    removals; automatic cleanup warns and continues the original command. Writers
+    outside Hack's cooperative locks can still race the final unlink. The daemon
+    also reports unconfirmed secret deletion as HTTP 500 `partial_failure`,
+    retaining the completed dotenv result instead of claiming success.
 
 ### Plaintext on disk outside materialization
 
@@ -319,8 +322,11 @@ hand; a local filename is not proof of encryption or private permissions.
 `stageMuxEnvironment` writes resolved values to `$TMPDIR/hack-mux-env-*/env.json`
 with mode 0600; the pane wrapper consumes and removes that payload
 (`src/mux/private-environment.ts`). During its lifetime, the same user and a
-backup or temp-file collector can read it. Interrupted consumption or cleanup
-needs an ownership-aware check, not a blanket temp-directory deletion.
+backup or temp-file collector can read it. A payload older than 10 minutes is
+refused by the wrapper, and each new staging sweeps this user's stale private
+payloads (an ownership-aware check, not a blanket temp-directory deletion). A
+payload left by a crash stays until the next staging; there is no independent
+reaper.
 
 Background output reaches `<HACK_HOME>/commands/<id>/stdout` and `stderr` before
 the supervisor scans it (`src/lib/background-command/journal.ts`,

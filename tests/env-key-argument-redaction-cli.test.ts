@@ -88,6 +88,7 @@ async function runHack(input: {
   readonly args: readonly string[];
   readonly cwd?: string;
   readonly stdin?: string;
+  readonly noInteractive?: boolean;
 }): Promise<RunResult> {
   const base = requireRoot();
   const spawnLog = join(base, `spawn-${crypto.randomUUID()}.jsonl`);
@@ -101,6 +102,8 @@ async function runHack(input: {
         TMPDIR: join(base, "home"),
         HACK_GLOBAL_CONFIG_PATH: join(base, "home", "hack-config.json"),
         HACK_LOGGER: "console",
+        HACK_NO_INTERACTIVE: input.noInteractive ? "1" : "0",
+        CI: "0",
         HACK_SECRETS_FILE_KEY: SECRETS_FILE_KEY,
         HACK_TEST_SPAWN_ARGV_LOG: spawnLog,
       },
@@ -233,15 +236,20 @@ test(
       ["env", "unset", dottedAssignment],
       ["env", "explain", assignment],
     ];
-    for (const args of cases) {
-      const raw = args[2] ?? "";
-      const result = await runHack({ args: [...args, "--path", projectRoot] });
-      expectRefusedWithoutEcho({
-        result,
-        message: ASSIGNMENT_KEY,
-        canary: CANARY,
-        rawArgument: raw,
-      });
+    for (const noInteractive of [false, true]) {
+      for (const args of cases) {
+        const raw = args[2] ?? "";
+        const result = await runHack({
+          args: [...args, "--path", projectRoot],
+          noInteractive,
+        });
+        expectRefusedWithoutEcho({
+          result,
+          message: ASSIGNMENT_KEY,
+          canary: CANARY,
+          rawArgument: raw,
+        });
+      }
     }
     expect(await readTree(modernFiles(projectRoot))).toBe(before);
   },

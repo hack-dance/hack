@@ -8,12 +8,18 @@ import {
   classifyComposeBackendReading,
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
 } from "../lib/native-compose-backend-features.ts";
-import { projectEnvConfigExists } from "../lib/project-env-config.ts";
+import {
+  projectEnvConfigExists,
+  resolveProjectEnvMetadata,
+} from "../lib/project-env-config.ts";
 import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { admitNativeProjectBuild } from "./native-project-builds.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
-import { readNativeComposeBytes } from "./native-project-input.ts";
+import {
+  nativeServiceEnvironment,
+  readNativeComposeBytes,
+} from "./native-project-input.ts";
 import {
   applyNativeInternalHostAliases,
   type NativeHostAliasSource,
@@ -24,6 +30,7 @@ import {
 } from "./native-project-ports.ts";
 import {
   nativeBridgeCapacity,
+  nativeRouteProbeRefusalDetails,
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
 import {
@@ -36,6 +43,7 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { shellReference } from "./native-shell-environment.ts";
 import { NATIVE_START_REFUSAL_ENTRIES } from "./native-start-refusal-entries.ts";
 import { readNativeStartRefusals } from "./native-start-refusals.ts";
 
@@ -425,7 +433,12 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   route_binding_required: {
     message:
       "The service declares a route, which needs native HTTPS to be set up.",
-    fix: "Set up native HTTPS (see the guide) and give the service a healthcheck with x-hack-http.",
+    fix: "Set up native HTTPS (see the guide). A route without an authored healthcheck gets a default route-port probe.",
+  },
+  inferred_route_probe: {
+    message:
+      "Native checks TCP and HTTP on the route port because no healthcheck was authored. HTTP 2xx-4xx counts as ready; 5xx does not.",
+    fix: "Nothing to do. Declare an explicit x-hack-http healthcheck if this route needs a different path or timing.",
   },
   inert_route_declaration: {
     message:
@@ -564,6 +577,7 @@ export const REVIEW_FAILURE_CODES: ReadonlySet<string> = new Set([
   "incomplete_enrollment",
   "invalid_enrollment",
   "invalid_plan_id",
+  "invalid_start_review_context",
   "invalid_source_manifest",
   "live_source_contract",
   "native_graph_compile",
@@ -814,8 +828,53 @@ type AdaptedProject = {
     readonly emulated: ReadonlySet<string>;
     /** False when the adaptation was refused and the document is unadapted. */
     readonly adaptationValid: boolean;
+    readonly managedServices: readonly string[];
   };
 };
+
+/**
+ * Normalize the same managed keys and shell references as start, without a
+ * decryption key or access to process.env. Only service names leave this helper.
+ * An unset shell reference is still private delivery (of an empty value) at start.
+ */
+async function preflightEnvironment(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly effectiveEnvName: string | null;
+  readonly services: Record<string, unknown>;
+}): Promise<readonly string[]> {
+  const metadata = await resolveProjectEnvMetadata({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    envName: opts.effectiveEnvName,
+    serviceNames: Object.keys(opts.services),
+  });
+  const delivered: string[] = [];
+  for (const [name, service] of Object.entries(opts.services)) {
+    if (!isRecord(service)) {
+      continue;
+    }
+    const managed = new Set(
+      Object.keys(metadata?.effectiveMetadata[name] ?? {})
+    );
+    const environment = nativeServiceEnvironment(service.environment, name);
+    let hasDelivery = managed.size > 0;
+    for (const key of managed) {
+      environment[key] = null;
+    }
+    for (const [key, value] of Object.entries(environment)) {
+      if (shellReference({ key, value, managed }) !== undefined) {
+        environment[key] = null;
+        hasDelivery = true;
+      }
+    }
+    if (hasDelivery) {
+      service.environment = environment;
+      delivered.push(name);
+    }
+  }
+  return delivered.sort(byCodePoint);
+}
 
 /**
  * Applies the selected native adaptation and the project-wide host aliases to
@@ -824,6 +883,8 @@ type AdaptedProject = {
  * from before that step is kept so later checks still run.
  */
 async function adaptForPreflight(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
   readonly composeBytes: Buffer | null;
   readonly composeFile: string;
   readonly adaptationFile: string | undefined;
@@ -852,11 +913,33 @@ async function adaptForPreflight(opts: {
     };
   }
   const findings: NativePreflightFinding[] = [];
+  const normalized = {
+    ...structuredClone(compose),
+    services: structuredClone(compose.services),
+  };
+  let managedServices: readonly string[] = [];
+  try {
+    managedServices = await preflightEnvironment({
+      ...opts,
+      services: normalized.services,
+    });
+  } catch {
+    findings.push(
+      finding(
+        { ...blocker, code: "managed_env_unreadable" },
+        {
+          message:
+            "The project's service environment declarations or Hack managed env metadata could not be read.",
+          fix: "Check the service environment declarations and run hack env list to see the problem.",
+        }
+      )
+    );
+  }
   // Only the public document is adapted; no private value is involved. Every
   // field is named so a helper that starts reading one fails the type check.
   let input: NativeProjectInput = {
     originalSha256: createHash("sha256").update(bytes).digest("hex"),
-    normalizedComposeJson: JSON.stringify(compose),
+    normalizedComposeJson: JSON.stringify(normalized),
     managedEnvironment: {},
     managedSecretValues: [],
     lifecycleHostEnvironment: {},
@@ -920,6 +1003,7 @@ async function adaptForPreflight(opts: {
     document: {
       originalSha256: input.originalSha256,
       originalCompose: compose,
+      managedServices,
       normalizedComposeJson: input.normalizedComposeJson,
       services:
         isRecord(adapted) && isRecord(adapted.services) ? adapted.services : {},
@@ -1192,6 +1276,10 @@ async function collectNativeRuntimeFindings(opts: {
         opts.adapted.originalSha256,
         "--expect-namespace",
         namespace,
+        ...opts.adapted.managedServices.flatMap((name) => [
+          "--start-managed-service",
+          name,
+        ]),
         "--json",
       ],
     });
@@ -1316,7 +1404,7 @@ function routeFindings(opts: {
         specs,
         capacity: 1,
       });
-    } catch {
+    } catch (error) {
       found.push(
         finding(
           {
@@ -1326,11 +1414,7 @@ function routeFindings(opts: {
             service: name,
             field: "healthcheck.x-hack-http",
           },
-          {
-            message:
-              "The service has caddy routing labels but no enabled native HTTP probe on its route port, or it also declares a dependency cache.",
-            fix: "Give the service a healthcheck with x-hack-http on the port its route proxies to, or add one under httpProbes in the native adaptation.",
-          }
+          nativeRouteProbeRefusalDetails(error)
         )
       );
     }
@@ -1431,7 +1515,17 @@ export async function collectNativePreflight(
     cli.map((found) => `${found.code}\0${found.service ?? ""}`)
   );
   const exact = new Set<string>();
-  const all = [...cli];
+  const projectCodes = new Set<string>();
+  const all = cli.filter((found) => {
+    if (found.service !== undefined) {
+      return true;
+    }
+    if (projectCodes.has(found.code)) {
+      return false;
+    }
+    projectCodes.add(found.code);
+    return true;
+  });
   for (const found of runtime.findings) {
     const key = `${found.severity}\0${found.code}\0${found.service ?? ""}\0${found.field ?? ""}`;
     if (

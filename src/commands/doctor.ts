@@ -56,6 +56,7 @@ import {
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokensForStatus } from "../control-plane/extensions/gateway/tokens.ts";
 import {
+  isCandidateRun,
   probeDaemonApi,
   resolveDaemonAutostartAccess,
 } from "../daemon/client.ts";
@@ -101,6 +102,10 @@ import {
   composeBackendCheckResult,
 } from "../lib/doctor-compose-backend.ts";
 import {
+  buildDoctorDaemonCheck,
+  CANDIDATE_DAEMON_GUIDANCE,
+} from "../lib/doctor-daemon.ts";
+import {
   buildDaemonServiceCheck,
   DAEMON_SERVICE_CHECK,
   decideDaemonServiceFix,
@@ -134,6 +139,7 @@ import {
   NATIVE_SOURCE_CHECK,
   type NativeSourceReport,
 } from "../lib/doctor-native-source.ts";
+import { inspectSecretIntegrity } from "../lib/doctor-secret-integrity.ts";
 import {
   findCrossCheckoutInstances,
   inspectWorktreeSecretKeys,
@@ -209,6 +215,7 @@ import {
   nativeProcessCheckFromCompose,
 } from "../lib/native-process-wrappers.ts";
 import { isLinux, isMac } from "../lib/os.ts";
+import { readPrivateEnvFile } from "../lib/private-env-file.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -232,7 +239,9 @@ import {
   isGitTrackedOrUnknownProjectPath,
   type LegacyComposeEnvFileReference,
   LegacyDotenvMigrationRefusalError,
+  LegacyEnvCleanupError,
   type LegacyProjectEnvMigration,
+  listProjectEnvPlaintextEntries,
   migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
   planTrackedEnvMigrationChanges,
@@ -254,6 +263,7 @@ import {
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
+import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import {
@@ -860,10 +870,10 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()));
   results.push(await runCheck(s, "daemon", () => checkDaemonStatus()));
-  if (isLinux()) {
-    // The row is omitted when systemd management is disabled for this
-    // process (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); a failure to
-    // read it is reported, not thrown.
+  if (isLinux() && !isCandidateRun()) {
+    // Candidate trials do not manage the stable login service. Otherwise the
+    // row is omitted when systemd management is disabled for this process
+    // (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); read failures are reported.
     const serviceCheck = await resolveSystemdSummary({
       paths: resolveDaemonPaths({}),
     }).then(buildDaemonServiceCheck, (error: unknown) => ({
@@ -997,10 +1007,10 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     });
   }
 
-  // Check proxy port forwarding (detects VPN/Tailscale conflicts)
+  // Authenticate loopback independently of direct container reachability.
   results.push(
-    await runCheck(s, "proxy ports", () => checkProxyPortForwarding(), {
-      timeoutMs: 5000,
+    await runCheck(s, "proxy ports", () => inspectProxyLoopback(), {
+      timeoutMs: 8000,
     })
   );
   results.push(
@@ -1308,6 +1318,14 @@ async function handleNativeDoctor(opts: {
         progress,
         ENV_KEY_CHECK,
         () => checkProjectEnvKey({ startDir: opts.startDir }),
+        { timeoutMs: 5000 }
+      )
+    );
+    results.push(
+      await runCheck(
+        progress,
+        SECRET_INTEGRITY_CHECK,
+        () => checkSecretIntegrity({ startDir: opts.startDir }),
         { timeoutMs: 5000 }
       )
     );
@@ -1931,43 +1949,7 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     }),
   });
 
-  if (report.status === "running") {
-    return {
-      name: "daemon",
-      status: "ok",
-      message: `hackd running (pid ${report.pid ?? "unknown"})`,
-    };
-  }
-
-  if (report.status === "starting") {
-    return {
-      name: "daemon",
-      status: "warn",
-      message: `hackd starting (pid ${report.pid ?? "unknown"}): API not responding`,
-    };
-  }
-
-  if (report.status === "incompatible") {
-    return {
-      name: "daemon",
-      status: "warn",
-      message: `hackd is running but incompatible (run: ${report.nextStep})`,
-    };
-  }
-
-  if (report.status === "stale") {
-    return {
-      name: "daemon",
-      status: "warn",
-      message: `hackd not running (stale pid/socket; run: ${report.nextStep})`,
-    };
-  }
-
-  return {
-    name: "daemon",
-    status: "warn",
-    message: "hackd not running (run: hack daemon start)",
-  };
+  return buildDoctorDaemonCheck({ report, candidate: isCandidateRun() });
 }
 
 async function checkGatewayConfig(): Promise<CheckResult> {
@@ -2618,90 +2600,6 @@ async function checkGrafanaReachable(): Promise<CheckResult> {
   }
 }
 
-/**
- * Checks if proxy port forwarding is working correctly.
- * Detects the specific issue where IPv4 port 443 fails while IPv6 works,
- * which is often caused by VPN software (e.g., Tailscale) interfering
- * with Docker/OrbStack port forwarding.
- */
-async function checkProxyPortForwarding(): Promise<CheckResult> {
-  const { createConnection } = await import("node:net");
-
-  const testTcpConnect = (
-    host: string,
-    port: number,
-    timeoutMs: number
-  ): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const socket = createConnection({ host, port, timeout: timeoutMs });
-      socket.on("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.on("error", () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.on("timeout", () => {
-        socket.destroy();
-        resolve(false);
-      });
-    });
-  };
-
-  // Test container IP directly (primary method - bypasses port forwarding)
-  const containerPort443 = await testTcpConnect(DEFAULT_CADDY_IP, 443, 2000);
-
-  // If container IP works, everything is fine
-  if (containerPort443) {
-    return {
-      name: "proxy ports",
-      status: "ok",
-      message: `Caddy reachable (${DEFAULT_CADDY_IP}:443)`,
-    };
-  }
-
-  // Container IP failed, check localhost as fallback
-  const [ipv4Port80, ipv4Port443] = await Promise.all([
-    testTcpConnect("127.0.0.1", 80, 2000),
-    testTcpConnect("127.0.0.1", 443, 2000),
-  ]);
-
-  // If localhost port 443 works, still OK
-  if (ipv4Port443) {
-    return {
-      name: "proxy ports",
-      status: "ok",
-      message: "Port 80 and 443 forwarding OK (127.0.0.1)",
-    };
-  }
-
-  // Both container IP and localhost fail - Caddy probably isn't running
-  if (!(ipv4Port80 || ipv4Port443)) {
-    return {
-      name: "proxy ports",
-      status: "warn",
-      message: "Caddy not reachable (run: hack global up)",
-    };
-  }
-
-  // Port 80 works but 443 fails - OrbStack port forwarding issue
-  if (ipv4Port80 && !ipv4Port443) {
-    return {
-      name: "proxy ports",
-      status: "warn",
-      message:
-        "Port 443 not forwarding properly. Fix: hack global install (configures DNS to use container IP)",
-    };
-  }
-
-  return {
-    name: "proxy ports",
-    status: "warn",
-    message: `Port forwarding partial: container=${containerPort443}, localhost:443=${ipv4Port443}`,
-  };
-}
-
 async function checkProject({
   startDir,
   adopted,
@@ -3220,6 +3118,64 @@ async function checkWorktreeSecretKeys({
 }
 
 const ENV_KEY_CHECK = "env key";
+const SECRET_INTEGRITY_CHECK = "secret integrity";
+
+/**
+ * Stores and env layers whose secrets cannot all be read with the key in
+ * use (HACK-2169): an unreadable store, a missing or refused store key, and
+ * an env layer holding secrets under more than one key. Value-free; each
+ * finding says how to recover.
+ */
+async function checkSecretIntegrity({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const project = await findProjectContext(startDir);
+  if (!project) {
+    return {
+      name: SECRET_INTEGRITY_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const cfg = await readProjectConfig(project);
+  const projectName = (
+    cfg.name ??
+    project.projectRoot.split("/").at(-1) ??
+    "project"
+  ).trim();
+  let findings: Awaited<ReturnType<typeof inspectSecretIntegrity>>;
+  try {
+    findings = await inspectSecretIntegrity({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      projectName,
+    });
+  } catch {
+    // Not inspected is not fine (HACK-2169); fixed text, no values.
+    return {
+      name: SECRET_INTEGRITY_CHECK,
+      status: "error",
+      message:
+        "The secret store and env layers could not be checked (the secrets configuration or a layer could not be read). Make the project and global Hack config and the env layer files readable and valid, then re-run hack doctor.",
+    };
+  }
+  if (findings.length === 0) {
+    return {
+      name: SECRET_INTEGRITY_CHECK,
+      status: "ok",
+      message: "Every stored secret opens with the key in use",
+    };
+  }
+  return {
+    name: SECRET_INTEGRITY_CHECK,
+    status: findings.some((finding) => finding.status === "error")
+      ? "error"
+      : "warn",
+    message: findings.map((finding) => finding.message).join("\n"),
+  };
+}
 
 /** Doctor check result for an env key inspection; message and data stay value-free. */
 export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
@@ -3726,6 +3682,14 @@ async function runProjectChecks(opts: {
   results.push(
     await runCheck(
       s,
+      SECRET_INTEGRITY_CHECK,
+      () => checkSecretIntegrity({ startDir }),
+      { timeoutMs: 5000 }
+    )
+  );
+  results.push(
+    await runCheck(
+      s,
       "generated files",
       () => checkTrackedGeneratedFiles({ startDir }),
       {
@@ -4015,7 +3979,9 @@ async function checkComposeNetworkHygiene({
 }
 
 async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
-  const envText = await readTextFile(envFile);
+  // No-follow (HACK-2165): a linked .hack/.env is not read, so its values
+  // are never printed.
+  const envText = await readPrivateEnvFile({ envFile }).catch(() => null);
   if (!envText) {
     return null;
   }
@@ -4345,6 +4311,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
       projectDir: project.projectDir,
       acceptTrackedChanges: opts.acceptTrackedChanges,
     });
+    await printMigrationProtectionHint(project);
     return;
   }
 
@@ -4398,6 +4365,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
   });
   if (migrated.wroteFiles.length === 0) {
     note("Legacy env migration found nothing to write.", "doctor");
+    await printMigrationProtectionHint(project);
     return;
   }
   note(
@@ -4479,8 +4447,41 @@ async function maybeMigrateProjectEnvConfig(opts: {
     projectDir: project.projectDir,
     projectName,
     paths: cleanupCandidates,
+    context: migrated.cleanupContext,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
+  await printMigrationProtectionHint(project);
+}
+
+/** End migration with names-only guidance for encrypting plaintext values in place. */
+async function printMigrationProtectionHint(project: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<void> {
+  let entries: Awaited<ReturnType<typeof listProjectEnvPlaintextEntries>>;
+  try {
+    entries = await listProjectEnvPlaintextEntries(project);
+  } catch {
+    note(
+      "Could not inspect plaintext env names. Check env layers, then run hack env protect to inspect names and choose keys (values omitted).",
+      "env protection"
+    );
+    return;
+  }
+  const keys = [...new Set(entries.map((entry) => entry.key))].sort();
+  if (keys.length === 0) {
+    note("No plaintext env entries remain.", "env protection");
+    return;
+  }
+  note(
+    [
+      "Plaintext env keys remain (values omitted):",
+      ...keys.map((key) => `- ${key}`),
+      "Encrypt chosen keys in their current scopes and overlays:",
+      "hack env protect <KEY> [KEY...]",
+    ].join("\n"),
+    "env protection"
+  );
 }
 
 /**
@@ -4493,6 +4494,7 @@ async function offerDoctorEnvCleanup(opts: {
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
   readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
   const untracked: string[] = [];
@@ -4505,6 +4507,17 @@ async function offerDoctorEnvCleanup(opts: {
       ? tracked
       : untracked
     ).push(path);
+  }
+
+  // A key cannot be removed while its tracked store still exists. Include an
+  // untracked key in that store's later consent batch, keeping the dependency
+  // intact whether tracked cleanup is accepted, declined or refused.
+  const store = opts.context?.store;
+  if (store && tracked.includes(store.path)) {
+    const keyIndex = untracked.indexOf(store.keyPath);
+    if (keyIndex !== -1) {
+      tracked.push(...untracked.splice(keyIndex, 1));
+    }
   }
 
   if (untracked.length > 0) {
@@ -4527,6 +4540,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: untracked,
+        context: opts.context,
       });
     }
   }
@@ -4534,7 +4548,7 @@ async function offerDoctorEnvCleanup(opts: {
   if (tracked.length > 0) {
     note(
       [
-        "These legacy env files are tracked by git and can now be removed. Teammates share them, so commit the removal together with the new env layers:",
+        "These legacy env files are tracked by git, or are keys kept with a tracked store, and can now be removed. Teammates share the tracked files, so commit their removal together with the new env layers:",
         ...tracked.map((path) => `- ${path}`),
       ].join("\n"),
       "env cleanup"
@@ -4550,6 +4564,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: tracked,
+        context: opts.context,
       });
     } else {
       note(
@@ -4563,18 +4578,41 @@ async function offerDoctorEnvCleanup(opts: {
 /**
  * Removes confirmed legacy env files. Once the encrypted secret store itself is
  * gone, its pointer leaves `hack.config.json` too; the migration kept it so a
- * declined or failed removal leaves the store readable.
+ * declined removal keeps the store readable. Partial failures reconcile the
+ * pointer against confirmed removals before the cleanup error is rethrown.
  */
-async function removeDoctorEnvCleanup(opts: {
+export async function removeDoctorEnvCleanup(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
 }): Promise<void> {
-  const removed = await removeLegacyProjectEnvArtifacts({
-    paths: opts.paths,
-    projectRoot: opts.projectRoot,
-  });
+  let removed: readonly string[];
+  try {
+    removed = await removeLegacyProjectEnvArtifacts({
+      paths: opts.paths,
+      projectRoot: opts.projectRoot,
+      context: opts.context,
+    });
+  } catch (error) {
+    if (error instanceof LegacyEnvCleanupError) {
+      try {
+        await dropRemovedLegacySecretStorePointer({
+          projectRoot: opts.projectRoot,
+          projectDir: opts.projectDir,
+          projectName: opts.projectName,
+          removed: error.removedPaths,
+        });
+      } catch {
+        note(
+          "Could not reconcile the legacy secret store pointer. Check hack.config.json for a pointer to the removed store before retrying cleanup (values omitted).",
+          "env cleanup"
+        );
+      }
+    }
+    throw error;
+  }
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
   }
@@ -5179,7 +5217,9 @@ async function maybeRepairHackd(opts: {
     note(
       [
         `Skipped hackd repair (hackd is ${report.status}): ${autostart.message}`,
-        `To repair it yourself, run: ${hackdRepairCommand(report.status)}`,
+        isCandidateRun()
+          ? CANDIDATE_DAEMON_GUIDANCE
+          : `To repair it yourself, run: ${hackdRepairCommand(report.status)}`,
       ].join("\n"),
       "doctor fix"
     );
@@ -5224,6 +5264,10 @@ async function maybeRepairHackd(opts: {
  * TTY. Linger is reported by the check but never changed.
  */
 async function maybeInstallDaemonService(): Promise<DaemonServiceWrites> {
+  if (isCandidateRun()) {
+    note(CANDIDATE_DAEMON_GUIDANCE, "doctor fix");
+    return "refused";
+  }
   // Owner decision (HACK-2052): without a TTY, doctor --fix may start hackd
   // but never writes or reloads the unit; an interactive run that declines
   // the install carries the same refusal into the hackd repair below.

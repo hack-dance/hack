@@ -1,0 +1,23 @@
+---
+title: Native bridge startup
+---
+flowchart TD
+    ready[Guest ready] --> check[Verify provider]
+    check --> inspect[Inspect all sockets]
+    check -->|identity changed| fail[Refuse startup]
+    inspect -->|unsafe identity| fail
+    inspect -->|ready or pending| recheck[Recheck provider]
+    recheck -->|identity changed| fail
+    recheck --> deadline{Before 10 seconds?}
+    deadline -->|no| fail
+    deadline -->|yes| complete{All sockets private?}
+    complete -->|no| wait[Wait up to 50ms]
+    wait --> check
+    complete -->|yes| audit[Full audit then adoption]
+    fail --> stop[Verified provider stop]
+    stop --> retained[Retain failure evidence]
+    class ready,check,inspect,recheck live
+    class wait wait
+    class audit ok
+    class fail fail
+    class retained idle

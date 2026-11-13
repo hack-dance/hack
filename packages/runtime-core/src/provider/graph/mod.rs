@@ -65,7 +65,7 @@ pub mod foreground;
 #[cfg(any(target_os = "macos", test))]
 mod owner_loop;
 mod startup;
-pub(crate) use config::compose_start_refusals;
+pub(crate) use config::{compose_start_readiness, compose_start_refusals};
 mod startup_failure;
 #[cfg(any(target_os = "macos", test))]
 mod startup_logs;
@@ -992,6 +992,15 @@ impl Session<'_, '_> {
     }
 }
 impl Driver for Session<'_, '_> {
+    fn service_failure(&self, name: &str, observation: Observation) -> CandidateError {
+        probes::service_failure(
+            "graph_service_failed",
+            name,
+            observation,
+            self.receipt.probes.get(name).map(|probe| &probe.config),
+        )
+    }
+
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         if let Some(startup) = &self.startup {
             startup.check_cancelled()?;

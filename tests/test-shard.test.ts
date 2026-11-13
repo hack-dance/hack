@@ -8,16 +8,19 @@ import {
   bunFilesRan,
   bunTestFile,
   classifyFileRun,
+  deferredMacosSummary,
   type FileResult,
   formatDuration,
   formatDurationTable,
   measuredDurations,
   mergeDurationTables,
+  prioritizeSlowFiles,
   type RunFile,
   runShardFiles,
   type ShardState,
   stopReport,
   summaryReport,
+  testFileTimeoutMs,
 } from "../scripts/test-shard.ts";
 import {
   assertShardCoverage,
@@ -745,7 +748,7 @@ function hangingRun(hang: ReadonlySet<string>): RunFile {
 async function runFixture(opts: {
   readonly files: readonly string[];
   readonly runFile: RunFile;
-  readonly fileTimeoutMs?: number;
+  readonly fileTimeoutMs?: number | ((file: string) => number);
   readonly deadlineMs?: number;
   readonly interrupt?: AbortSignal;
 }) {
@@ -766,6 +769,74 @@ async function runFixture(opts: {
 
 describe("test shard runner", () => {
   const files = ["tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts"];
+
+  test("the slow activation file has a bounded exception and runs before its shard siblings", () => {
+    const slow = "tests/native-compose-storage-activation-command.test.ts";
+    expect(
+      testFileTimeoutMs({
+        file: slow,
+        defaultTimeoutMs: 720_000,
+        explicit: false,
+      })
+    ).toBe(1_200_000);
+    expect(
+      testFileTimeoutMs({
+        file: "tests/a.test.ts",
+        defaultTimeoutMs: 720_000,
+        explicit: false,
+      })
+    ).toBe(720_000);
+    expect(
+      testFileTimeoutMs({ file: slow, defaultTimeoutMs: 1000, explicit: true })
+    ).toBe(1000);
+    expect(
+      prioritizeSlowFiles(["tests/a.test.ts", slow, "tests/b.test.ts"])
+    ).toEqual([slow, "tests/a.test.ts", "tests/b.test.ts"]);
+  });
+
+  test("per-file budgets change the enforced timer while the shard deadline still wins", async () => {
+    const delayed: RunFile = ({ signal }) =>
+      new Promise((resolve) => {
+        const done = setTimeout(
+          () => resolve({ exitCode: 0, filesRan: 1, stopped: false }),
+          100
+        );
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(done);
+            resolve({ exitCode: null, filesRan: null, stopped: true });
+          },
+          { once: true }
+        );
+      });
+    const { state } = await runFixture({
+      files: ["tests/a.test.ts", "tests/b.test.ts"],
+      runFile: delayed,
+      fileTimeoutMs: (file) => (file === files[0] ? 20 : 1000),
+    });
+    expect(state.results.map((result) => result.outcome)).toEqual([
+      "timeout",
+      "pass",
+    ]);
+    const deadline = await runFixture({
+      files: ["tests/a.test.ts"],
+      runFile: delayed,
+      fileTimeoutMs: () => 1000,
+      deadlineMs: 20,
+    });
+    expect(deadline.ended).toBe("deadline");
+    expect(deadline.state.results[0]?.outcome).toBe("deadline");
+  });
+
+  test("deferred file summary names the selected macOS evidence gap", () => {
+    const macos = "tests/native-authored-project-start.test.ts";
+    const summary = deferredMacosSummary([macos]);
+    expect(summary).toContain("deferred to the integration run");
+    expect(summary).toContain(macos);
+    expect(summary).toContain("1 selected");
+    expect(summary).not.toContain("packages/db/tests/smoke.test.ts");
+  });
 
   test("prints a start and a result line naming each file", async () => {
     const { state, lines, ended } = await runFixture({
@@ -1091,6 +1162,55 @@ describe("test shard per-file bun test process", () => {
 });
 
 describe("hosted test CI fan-in", () => {
+  test("light planning executes only the Linux portion and reports the selected macOS files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hack-ci-deferred-"));
+    owned.push(root);
+    const linux = "packages/db/tests/smoke.test.ts";
+    const macos = "tests/native-authored-project-start.test.ts";
+    const env = {
+      ...process.env,
+      HACK_TEST_SELECTION: JSON.stringify([linux, macos]),
+      HACK_TEST_DRAFT: "true",
+      HACK_TEST_DEFER_MACOS: "true",
+      GITHUB_STEP_SUMMARY: join(root, "summary"),
+    };
+    const files: string[] = [];
+    for (let index = 4; index <= 8; index++) {
+      const child = Bun.spawnSync(
+        [
+          process.execPath,
+          "scripts/test-shard.ts",
+          "plan",
+          `--shard=${index}/8`,
+          "--layout=pooled",
+        ],
+        { cwd: repoRoot, env, stdout: "pipe", stderr: "pipe" }
+      );
+      expect(child.exitCode, child.stderr.toString()).toBe(0);
+      files.push(...child.stdout.toString().trim().split("\n").filter(Boolean));
+    }
+    expect(files).toEqual([linux]);
+    const report = Bun.spawnSync(
+      [process.execPath, "scripts/test-shard.ts", "report-deferred"],
+      { cwd: repoRoot, env, stdout: "pipe", stderr: "pipe" }
+    );
+    expect(report.exitCode, report.stderr.toString()).toBe(0);
+    const summary = await Bun.file(env.GITHUB_STEP_SUMMARY).text();
+    expect(summary).toContain(macos);
+    expect(summary).not.toContain(linux);
+    expect(summary).toContain("deferred to the integration run");
+    const wrong = Bun.spawnSync(
+      [
+        process.execPath,
+        "scripts/test-shard.ts",
+        "plan",
+        "--shard=1/8",
+        "--layout=pooled",
+      ],
+      { cwd: repoRoot, env, stdout: "pipe", stderr: "pipe" }
+    );
+    expect(wrong.exitCode).toBe(2);
+  }, 30_000);
   test("the shard matrix covers 1..n, keeps the suite setup and runs its own slice", async () => {
     const shardJob = (await ciWorkflow()).jobs["test-shard"];
     expect(shardJob?.strategy?.matrix?.shard).toBe(
@@ -1111,6 +1231,21 @@ describe("hosted test CI fan-in", () => {
     );
     expect(shardJob?.["timeout-minutes"]).toBeLessThan(60);
     const steps = shardJob?.steps ?? [];
+    const reportIndex = steps.findIndex(
+      (step) => step.run === "bun scripts/test-shard.ts report-deferred"
+    );
+    expect(reportIndex).toBeGreaterThan(-1);
+    expect(reportIndex).toBeLessThan(
+      steps.findIndex((step) => step.name === "Typecheck (Turbo)")
+    );
+    expect(steps[reportIndex]?.if).toBe(
+      "matrix.shard == 8 && needs.changes.outputs.defer_macos == 'true'"
+    );
+    for (const name of ["Build CLI", "Build release smoke (no tests)"]) {
+      expect(steps.find((step) => step.name === name)?.if).toBe(
+        "matrix.shard == 8 && needs.changes.outputs.build_smoke == 'true'"
+      );
+    }
     const run = steps.find((step) => step.name === "Tests (shard)");
     expect(run?.env?.HACK_TEST_SHARD).toBe(`\${{ matrix.shard }}/${count}`);
     expect(run?.env?.HACK_TEST_LAYOUT).toBe(
@@ -1166,7 +1301,12 @@ describe("hosted test CI fan-in", () => {
     const workflow = await ciWorkflow();
     const fanIn = workflow.jobs.test;
     expect(fanIn?.name ?? "test").toBe("test");
-    expect(fanIn?.needs).toEqual(["changes", "test-shard", "test-focus"]);
+    expect(fanIn?.needs).toEqual([
+      "changes",
+      "test-shard",
+      "test-focus",
+      "linux-process-lifetime",
+    ]);
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
       (step) => step.name === "Reject failed or skipped test shards"
@@ -1174,6 +1314,12 @@ describe("hosted test CI fan-in", () => {
     expect(gate?.env?.SHARD_RESULT).toBe("${{ needs.test-shard.result }}");
     expect(gate?.env?.FOCUS_RESULT).toBe("${{ needs.test-focus.result }}");
     expect(gate?.env?.CHANGES_RESULT).toBe("${{ needs.changes.result }}");
+    expect(gate?.env?.LIFETIME_RESULT).toBe(
+      "${{ needs.linux-process-lifetime.result }}"
+    );
+    expect(gate?.env?.LIFETIME_ENABLED).toBe(
+      "${{ needs.changes.outputs.docker_suite }}"
+    );
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
     expect(gate?.run).toContain("exit 1");
     if (!gate?.run) {
@@ -1212,6 +1358,8 @@ describe("hosted test CI fan-in", () => {
           TEST_FOCUS: focus,
           SHARD_RESULT: shards,
           FOCUS_RESULT: focused,
+          LIFETIME_ENABLED: "false",
+          LIFETIME_RESULT: "skipped",
         },
         stdout: "ignore",
         timeout: 5000,
@@ -1220,6 +1368,36 @@ describe("hosted test CI fan-in", () => {
         run.exitCode,
         `changes=${changes} suite=${suite} focus=${focus} shards=${shards} focused=${focused}`
       ).toBe(exitCode);
+    }
+    for (const [enabled, result, exitCode] of [
+      ["true", "success", 0],
+      ["true", "failure", 1],
+      ["true", "cancelled", 1],
+      ["true", "skipped", 1],
+      ["true", "", 1],
+      ["false", "skipped", 0],
+      ["false", "failure", 1],
+      ["false", "success", 1],
+      ["", "skipped", 1],
+    ] as const) {
+      const run = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
+        env: {
+          ...process.env,
+          PR_DRAFT: "false",
+          CHANGES_RESULT: "success",
+          SCOPE: "fixture",
+          SUITE: "true",
+          SHARD_RESULT: "success",
+          FOCUS_RESULT: "success",
+          LIFETIME_ENABLED: enabled,
+          LIFETIME_RESULT: result,
+        },
+        stdout: "ignore",
+        timeout: 5000,
+      });
+      expect(run.exitCode, `lifetime enabled=${enabled} result=${result}`).toBe(
+        exitCode
+      );
     }
     const named = Object.entries(workflow.jobs).filter(
       ([key, job]) => (job.name ?? key) === "test"

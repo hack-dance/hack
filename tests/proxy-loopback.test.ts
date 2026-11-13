@@ -418,37 +418,50 @@ let key: string;
 let certificate: string;
 let wrongHostname: string;
 let rootPem: string;
+let opensslVersion = "unknown";
 const sockets = new Set<Socket>();
 const servers: ReturnType<typeof createTcpServer>[] = [];
 
-async function openssl(args: readonly string[]): Promise<void> {
+async function openssl(args: readonly string[]): Promise<string> {
   const child = Bun.spawn(["openssl", ...args], {
     cwd: root,
     stdin: "ignore",
-    stdout: "ignore",
+    stdout: "pipe",
     stderr: "pipe",
   });
-  const [, exit] = await Promise.all([
+  const [stdout, stderr, exit] = await Promise.all([
+    new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ]);
   if (exit !== 0) {
-    throw new Error("Synthetic TLS fixture generation failed");
+    throw new Error(
+      `Synthetic TLS fixture generation failed (${opensslVersion}, ${args[0]}, exit ${exit}): ${stderr.slice(0, 1500)}`
+    );
   }
+  return stdout;
 }
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "proxy-loopback-tls-"));
+  opensslVersion = (await openssl(["version"])).trim().slice(0, 200);
+  // LibreSSL requires a distinguished_name section even when -subj is explicit.
+  await Bun.write(
+    join(root, "fixture.cnf"),
+    "[req]\ndistinguished_name=fixture_dn\nprompt=no\n[fixture_dn]\nCN=Fixture\n"
+  );
   await openssl([
     "req",
     "-config",
-    "/dev/null",
+    "fixture.cnf",
     "-sha256",
     "-x509",
     "-newkey",
     "ec",
     "-pkeyopt",
     "ec_paramgen_curve:P-256",
+    "-pkeyopt",
+    "ec_param_enc:named_curve",
     "-nodes",
     "-keyout",
     "ca.key",
@@ -470,13 +483,15 @@ beforeAll(async () => {
   await openssl([
     "req",
     "-config",
-    "/dev/null",
+    "fixture.cnf",
     "-sha256",
     "-new",
     "-newkey",
     "ec",
     "-pkeyopt",
     "ec_paramgen_curve:P-256",
+    "-pkeyopt",
+    "ec_param_enc:named_curve",
     "-nodes",
     "-keyout",
     "leaf.key",
@@ -592,12 +607,18 @@ async function explainTlsFixture(host: string, port: number): Promise<string> {
       })
     );
     socket.once("error", (error: NodeJS.ErrnoException) =>
-      done({ event: "error", code: error.code })
+      done({
+        event: "error",
+        code: error.code,
+        name: error.name,
+        message: error.message.slice(0, 200),
+      })
     );
   });
   return JSON.stringify({
     platform: process.platform,
     bun: Bun.version,
+    openssl: opensslVersion,
     host,
     now: new Date().toISOString(),
     rootCa: ca.ca,

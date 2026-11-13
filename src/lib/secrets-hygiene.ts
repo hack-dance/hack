@@ -326,11 +326,24 @@ async function gitFindings(opts: {
   }
   if ((await isGitIgnoredProjectEnvPath(target)) === false) {
     const rel = relative(ignore.projectRoot, ignore.gitignorePath);
+    const where = isOutside(rel) ? ignore.gitignorePath : rel;
+    // A name ending in a space can't be written as an entry that survives
+    // the ignore-file writer's trimming; leave that one to the user.
+    if (ignore.entry.endsWith("\\ ")) {
+      return [
+        {
+          status: "warn",
+          path: candidate.path,
+          message: `git does not ignore ${name}, which holds ${candidate.holds}; its name ends with a space, so add an ignore entry for it to ${where} by hand.`,
+          fix: null,
+        },
+      ];
+    }
     return [
       {
         status: "warn",
         path: candidate.path,
-        message: `git does not ignore ${name}, which holds ${candidate.holds}; --fix adds '${ignore.entry}' to ${rel}.`,
+        message: `git does not ignore ${name}, which holds ${candidate.holds}; --fix adds '${ignore.entry}' to ${where}.`,
         fix: {
           kind: "ignore",
           gitignorePath: ignore.gitignorePath,

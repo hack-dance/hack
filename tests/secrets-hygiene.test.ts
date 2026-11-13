@@ -441,3 +441,22 @@ test("an ignore entry for a path with glob characters is literal and verified (g
   ).toEqual({ applied: 1, skipped: 0 });
   expect(await inspectSecretsHygiene(scope)).toEqual([]);
 });
+
+test("a store whose name ends with a space is reported with no automatic ignore entry", async () => {
+  const f = await fixture();
+  const keyPath = join(f.projectRoot, "store.key ");
+  await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+  const findings = await inspectSecretsHygiene({
+    ...f.scope,
+    stores: [{ storePath: join(f.projectRoot, "absent.enc.json"), keyPath }],
+  });
+  expect(findings).toEqual([
+    expect.objectContaining({ status: "warn", path: keyPath, fix: null }),
+  ]);
+  expect(findings[0]?.message).toContain("by hand");
+  const before = await readFile(join(f.projectRoot, ".gitignore"), "utf8");
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect(await readFile(join(f.projectRoot, ".gitignore"), "utf8")).toBe(
+    before
+  );
+});

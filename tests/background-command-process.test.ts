@@ -1285,3 +1285,31 @@ describe("background command processes", () => {
     TEST_TIMEOUT_MS
   );
 });
+
+test(
+  "background command strips caller and explicit Hack decryption keys",
+  async () => {
+    const sentinel = "synthetic-background-key-sentinel";
+    const keys = {
+      HACK_ENV_SECRET_KEY: sentinel,
+      HACK_SECRETS_FILE_KEY: sentinel,
+    };
+    const launched = await launch({
+      argv: [
+        "sh",
+        "-c",
+        'printf "%s|%s\\n" "${HACK_ENV_SECRET_KEY-unset}" "${HACK_SECRETS_FILE_KEY-unset}"',
+      ],
+      extraEnv: keys,
+      childEnv: keys,
+    });
+    expect(launched.envelope.ok).toBe(true);
+    if (!launched.journal) {
+      throw new Error("Missing journal");
+    }
+    const read = await readUntilEnded({ journal: launched.journal });
+    expect(read.exitCode).toBe(0);
+    expect(stdoutText(read.events)).toBe("unset|unset\n");
+  },
+  TEST_TIMEOUT_MS
+);

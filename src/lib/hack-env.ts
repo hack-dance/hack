@@ -1,5 +1,4 @@
 import { dirname, resolve } from "node:path";
-
 import {
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
@@ -7,6 +6,7 @@ import {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
+import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import { readOptionalTextFile, readTextFile } from "./fs.ts";
 import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { getString, isRecord } from "./guards.ts";
@@ -213,8 +213,8 @@ export async function readHackEnvContract(opts: {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Invalid JSON";
+  } catch {
+    const message = envParseDiagnostic({ format: "JSON", text });
     return {
       path,
       exists: true,

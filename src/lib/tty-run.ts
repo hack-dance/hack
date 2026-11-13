@@ -1,4 +1,8 @@
 import { fileURLToPath } from "node:url";
+import {
+  childEnvironment,
+  hackReexecEnvironment,
+} from "./child-environment.ts";
 import type { RunExitEvent, RunOptions } from "./shell.ts";
 import { openTerminalControl, signalOwnedGroup } from "./tty-process-group.ts";
 import { TTY_SUPERVISOR_ARGUMENT } from "./tty-supervisor.ts";
@@ -6,6 +10,7 @@ import { TTY_SUPERVISOR_ARGUMENT } from "./tty-supervisor.ts";
 /** Own descendants before starting the command while preserving its real TTY. */
 export async function runWithTerminalGroup(opts: {
   readonly command: readonly string[];
+  readonly hackReexec?: boolean;
   readonly cwd?: string;
   readonly env: Record<string, string>;
   readonly stdout?: RunOptions["stdout"];
@@ -57,7 +62,9 @@ export async function runWithTerminalGroup(opts: {
   }
   const child = Bun.spawn([...invocation, TTY_SUPERVISOR_ARGUMENT], {
     cwd: options.cwd,
-    env: options.env,
+    env: options.hackReexec
+      ? hackReexecEnvironment(options.env)
+      : childEnvironment(options.env),
     stdin: options.stdin ?? "inherit",
     stdout: options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit"),
     stderr: options.stderr ?? "inherit",
@@ -126,7 +133,11 @@ export async function runWithTerminalGroup(opts: {
       cancel("SIGTERM", 1, true);
       return;
     }
-    child.send({ kind: "start", command: [...options.command] });
+    child.send({
+      kind: "start",
+      command: [...options.command],
+      hackReexec: options.hackReexec === true,
+    });
   }
   function cancel(
     signal: "SIGINT" | "SIGTERM",

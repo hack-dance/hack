@@ -17,6 +17,7 @@ import {
   withoutBunRuntimeEnv,
 } from "../lib/background-command/launch.ts";
 import { pruneStore } from "../lib/background-command/store.ts";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
@@ -121,13 +122,7 @@ export function collectRedactionValues(opts: {
 function spawnEnv(
   overrides: Readonly<Record<string, string>> | undefined
 ): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") {
-      env[key] = value;
-    }
-  }
-  return { ...env, ...overrides };
+  return childEnvironment(process.env, overrides);
 }
 
 function randomToken(): string {

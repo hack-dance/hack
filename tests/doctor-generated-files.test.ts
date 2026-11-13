@@ -13,7 +13,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { checkHackDirGitignore } from "../src/commands/doctor.ts";
+import {
+  checkHackDirGitignore,
+  checkTrackedGeneratedFiles,
+} from "../src/commands/doctor.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import {
   buildGeneratedFilePathspecs,
@@ -22,6 +25,7 @@ import {
   untrackGeneratedFiles,
 } from "../src/lib/doctor-generated-files.ts";
 import { ensureGitignoreEntry, pathExists } from "../src/lib/fs.ts";
+import { ensureHackGitInfoExclude } from "../src/lib/git-info-exclude.ts";
 import {
   ensureHackDirGitignore,
   HackDirGitignoreRefusalError,
@@ -386,4 +390,62 @@ test("a project root outside git is still skipped", async () => {
     status: "ok",
     message: "Skipped (not a git checkout)",
   });
+});
+
+test("legacy dotenv overlays are reported when tracked or unignored and existing ignores upgrade", async () => {
+  const repoRoot = await createLeakedRepo();
+  const projectDir = join(repoRoot, ".hack");
+  const overlay = join(projectDir, ".env.qa");
+  await writeFile(overlay, "TOKEN=synthetic-overlay-sentinel\n");
+  const before = await inspectTrackedGeneratedFiles({
+    projectRoot: repoRoot,
+    projectDirName: ".hack",
+  });
+  expect(before?.unignoredOverlayPaths).toContain(".hack/.env.qa");
+  const unignoredCheck = await checkTrackedGeneratedFiles({
+    startDir: repoRoot,
+  });
+  expect(unignoredCheck.status).not.toBe("ok");
+  expect(unignoredCheck.message).toContain(".hack/.env.qa");
+  expect(unignoredCheck.message).not.toContain("synthetic-overlay-sentinel");
+  await ensureHackGitInfoExclude({ projectDir });
+  expect(
+    (
+      await inspectTrackedGeneratedFiles({
+        projectRoot: repoRoot,
+        projectDirName: ".hack",
+      })
+    )?.unignoredOverlayPaths
+  ).toEqual([]);
+  await writeFile(join(projectDir, ".gitignore"), ".env\n.env.state.json\n");
+  await ensureHackDirGitignore({ projectDir });
+  expect(
+    (await readFile(join(projectDir, ".gitignore"), "utf8")).split("\n")
+  ).toContain(".env.*");
+  const after = await inspectTrackedGeneratedFiles({
+    projectRoot: repoRoot,
+    projectDirName: ".hack",
+  });
+  expect(after?.unignoredOverlayPaths).toEqual([]);
+  expect(
+    await runGit(
+      ["check-ignore", ".hack/.env.qa", ".hack/.env.state.json"],
+      repoRoot
+    )
+  ).toContain(".hack/.env.qa");
+  await runGit(["add", "-f", ".hack/.env.qa"], repoRoot);
+  expect(
+    (await checkTrackedGeneratedFiles({ startDir: repoRoot })).message
+  ).toContain(".hack/.env.qa");
+  expect(
+    (
+      await inspectTrackedGeneratedFiles({
+        projectRoot: repoRoot,
+        projectDirName: ".hack",
+      })
+    )?.trackedPaths
+  ).toContain(".hack/.env.qa");
+  expect(await readFile(overlay, "utf8")).toBe(
+    "TOKEN=synthetic-overlay-sentinel\n"
+  );
 });

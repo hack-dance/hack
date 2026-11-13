@@ -12,6 +12,8 @@ export type TrackedGeneratedFilesInspection = {
   readonly trackedPaths: readonly string[];
   /** True when the project env secret key itself is tracked (committed secret). */
   readonly secretKeyTracked: boolean;
+  /** Legacy plaintext overlay files git currently offers for addition. */
+  readonly unignoredOverlayPaths: readonly string[];
 };
 
 /**
@@ -31,6 +33,7 @@ export function buildGeneratedFilePathspecs(opts: {
     `${dir}/.internal`,
     `${dir}/.branch`,
     `${dir}/.env`,
+    `${dir}/.env.*`,
     `${dir}/.env.state.json`,
     `${dir}/tickets`,
     `${dir}/hack.env.*.local.yaml`,
@@ -70,9 +73,33 @@ export async function inspectTrackedGeneratedFiles(opts: {
     .filter((path) => path.length > 0)
     .sort((a, b) => a.localeCompare(b));
 
+  let unignored: Awaited<ReturnType<typeof exec>>;
+  try {
+    unignored = await exec(
+      [
+        "git",
+        "-C",
+        opts.projectRoot,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        `${opts.projectDirName}/.env.*`,
+      ],
+      { stdin: "ignore" }
+    );
+  } catch {
+    return null;
+  }
+  if (unignored.exitCode !== 0) {
+    return null;
+  }
+
   return {
     trackedPaths,
     secretKeyTracked: trackedPaths.includes(PROJECT_ENV_KEY_FILENAME),
+    unignoredOverlayPaths: unignored.stdout.split("\0").filter(Boolean).sort(),
   };
 }
 

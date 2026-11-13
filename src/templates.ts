@@ -478,6 +478,7 @@ export const HACK_DIR_GITIGNORE_ENTRIES = [
   ".internal/",
   ".branch/",
   ".env",
+  ".env.*",
   ".env.state.json",
   "hack.env.local.yaml",
   "hack.env.*.local.yaml",

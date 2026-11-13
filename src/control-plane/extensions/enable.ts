@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { PROJECT_CONFIG_FILENAME } from "../../constants.ts";
+import { hackReexecEnvironment } from "../../lib/child-environment.ts";
 import { resolveGlobalConfigPath } from "../../lib/config-paths.ts";
 import { resolveHackInvocation } from "../../lib/hack-cli.ts";
 import { gumConfirm, isGumAvailable } from "../../ui/gum.ts";
@@ -164,6 +165,7 @@ export async function maybeEnableExtension(opts: {
   const proc = Bun.spawn(
     [invocation.bin, ...invocation.args, ...instructions.enableCommand.argv],
     {
+      env: hackReexecEnvironment(),
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",

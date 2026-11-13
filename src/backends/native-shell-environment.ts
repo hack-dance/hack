@@ -1,3 +1,4 @@
+import { HACK_KEY_MATERIAL_VARIABLES } from "../lib/child-environment.ts";
 import { COMPOSE_PROJECT_NAME_VARIABLE } from "./native-compose-project-name.ts";
 
 /**
@@ -72,6 +73,7 @@ const UNREADABLE_NAME_PREFIXES = [
 /** Whether `name` may be read from the caller's shell. */
 export function shellVariableReadable(name: string): boolean {
   return !(
+    HACK_KEY_MATERIAL_VARIABLES.has(name) ||
     RUNTIME_SUPPLIED_NAMES.has(name) ||
     UNREADABLE_NAME_PREFIXES.some((prefix) => name.startsWith(prefix))
   );

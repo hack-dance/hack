@@ -1,5 +1,6 @@
 import type { Writable } from "node:stream";
 import { CliUsageError } from "../cli/command.ts";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { parseTimeInput } from "../lib/time.ts";
@@ -508,7 +509,7 @@ export async function followNativeLogs(input: FollowInput): Promise<number> {
           ],
           {
             cwd: input.cwd,
-            env,
+            env: childEnvironment(env),
             stdin: "pipe",
             stdout: "pipe",
             stderr: "pipe",

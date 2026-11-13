@@ -14,6 +14,7 @@ import {
   serializeEnvStorageForJson,
 } from "../../lib/hack-env-status.ts";
 import { parseEnvConfigSelection } from "../../lib/project.ts";
+import { projectEnvConfigExistsForMutation } from "../../lib/project-env-config.ts";
 import type { RegisteredProject } from "../../lib/projects-registry.ts";
 import {
   readProjectsRegistry,
@@ -251,6 +252,31 @@ async function handleSetEnv(opts: {
 
   const { project, registration } = resolvedProject.value;
   const secret = parsed.value.secret === true;
+  try {
+    if (
+      await projectEnvConfigExistsForMutation({
+        projectDir: project.projectDir,
+      })
+    ) {
+      return jsonResponse(
+        {
+          error: "yaml_env_mutation_unsupported",
+          message:
+            "This project uses YAML env layers. Use hack env set or hack env add instead.",
+        },
+        409
+      );
+    }
+  } catch {
+    return jsonResponse(
+      {
+        error: "yaml_env_layer_invalid",
+        message:
+          "Env layer paths could not be validated; no legacy env file was written.",
+      },
+      409
+    );
+  }
   const sourceValidation = await validateHackEnvMutationSource({
     projectDir: project.projectDir,
     key: parsed.value.key,

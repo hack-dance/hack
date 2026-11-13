@@ -70,6 +70,7 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.internal/`
 - `.branch/`
 - `.env`
+- `.env.*` (legacy plaintext overlays such as `.env.qa`)
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
@@ -80,6 +81,7 @@ How it is maintained:
 
 - created by `hack init` for a new project, and refreshed when you write
   machine-local env overrides (`hack env set --local`, `hack env hydrate`)
+
 - in an existing project without it (for example one an earlier Hack version
   initialized), `hack doctor` reports the "hack gitignore" check as a warning,
   and `hack doctor --fix` creates the file, or restores its managed block,
@@ -144,6 +146,14 @@ How it is maintained:
   refused
 - older repos that added `.hack/.internal/` to the root `.gitignore` keep
   working; the entries are equivalent and nothing is removed
+
+Existing projects gain the `.env.*` entry on the next operation that maintains
+these rules, including the local `info/exclude` maintenance on runtime commands
+and legacy env writes. `.env.state.json` remains ignored and is still reported
+when tracked. `hack doctor` also reports tracked or unignored legacy overlays;
+ignore rules do not remove files that Git already tracks. The legacy daemon
+`POST /v1/env/set` route refuses projects with YAML env layers with
+`yaml_env_mutation_unsupported`; use `hack env set` or `hack env add` for them.
 
 Leak detection and repair:
 

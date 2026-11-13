@@ -9291,21 +9291,62 @@ async function readLegacyDotenvText(opts: {
 }
 
 /** Keys and YAML inputs remain live after legacy migration, even if a backend named them. */
+/**
+ * The git-named inputs' locations: the shared key and the primary worktree.
+ * With the family known, the primary worktree comes from the same common
+ * directory (as resolveGitPrimaryWorktreeRoot derives it), never from a second
+ * git call that could fail on its own. With `strictGit`, a checkout whose
+ * family git cannot name throws instead of naming nothing.
+ */
+async function liveInputGitFamily(opts: {
+  readonly projectRoot: string;
+  readonly strictGit?: boolean;
+}): Promise<{
+  readonly shared: ProjectEnvSharedKeyLocation | null;
+  readonly primaryRoot: string | null;
+}> {
+  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  if (shared) {
+    const commonDir = dirname(shared.path);
+    return {
+      shared,
+      primaryRoot: commonDir.endsWith("/.git") ? dirname(commonDir) : null,
+    };
+  }
+  if (opts.strictGit !== true) {
+    return {
+      shared: null,
+      primaryRoot: await resolveGitPrimaryWorktreeRoot({
+        repoRoot: opts.projectRoot,
+      }),
+    };
+  }
+  if (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot })) {
+    throw new Error(
+      "Project env inputs are unknown: git could not name this checkout's shared inputs"
+    );
+  }
+  return { shared: null, primaryRoot: null };
+}
+
 async function legacyCleanupLiveInputs(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
+  /**
+   * Refuse instead of omitting git-named inputs (HACK-2165): in a checkout (a
+   * `.git` marker, failing closed) git must name the repository family, and
+   * that one answer names both the shared key and the primary worktree.
+   */
+  readonly strictGit?: boolean;
 }): Promise<{
   readonly paths: ReadonlySet<string>;
   readonly identities: ReadonlySet<string>;
 }> {
   const paths = new Set([resolveProjectEnvKeyPath(opts)]);
-  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  const { shared, primaryRoot } = await liveInputGitFamily(opts);
   if (shared) {
     paths.add(shared.path);
   }
-  const primaryRoot = await resolveGitPrimaryWorktreeRoot({
-    repoRoot: opts.projectRoot,
-  });
   const directories = new Set([
     opts.projectDir,
     resolve(opts.projectRoot, HACK_PROJECT_DIR_PRIMARY),
@@ -9355,18 +9396,7 @@ export async function projectEnvLiveInputPaths(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
 }): Promise<ReadonlySet<string>> {
-  // Git names the shared and primary-worktree inputs. In a checkout (a `.git`
-  // marker, failing closed) where git cannot name them, the set is unknown,
-  // not smaller; a project outside git has none to name.
-  if (
-    (await resolveProjectEnvSharedKeyLocation(opts)) === null &&
-    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
-  ) {
-    throw new Error(
-      "Project env inputs are unknown: git could not name this checkout's shared inputs"
-    );
-  }
-  return (await legacyCleanupLiveInputs(opts)).paths;
+  return (await legacyCleanupLiveInputs({ ...opts, strictGit: true })).paths;
 }
 
 async function legacyCleanupInputStat(opts: {

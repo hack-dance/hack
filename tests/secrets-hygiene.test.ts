@@ -1,10 +1,11 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   chmod,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -14,12 +15,14 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { STAGING_LEFTOVER_MIN_AGE_MS } from "../src/lib/private-staging.ts";
+import { projectEnvLiveInputPaths } from "../src/lib/project-env-config.ts";
 import {
   applySecretsHygieneFixes,
   inspectSecretsHygiene,
   type SecretsHygieneFinding,
   type SecretsHygieneScope,
 } from "../src/lib/secrets-hygiene.ts";
+import * as shell from "../src/lib/shell.ts";
 import { stageMuxEnvironment } from "../src/mux/private-environment.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -889,4 +892,43 @@ test("a configured name that looks like git pathspec magic is checked as a liter
       (finding) => finding.path === keyPath && finding.status === "error"
     )
   ).toBe(true);
+});
+
+test("git lookups that fail after the first ones never shrink the live set", async () => {
+  const f = await fixture();
+  const project = f.scope.project;
+  if (!project) {
+    throw new Error("Missing project");
+  }
+  const sharedKey = join(
+    await realpath(join(f.projectRoot, ".git")),
+    ".hack.secret.key"
+  );
+  expect(await projectEnvLiveInputPaths(project)).toContain(sharedKey);
+  // Let the first two git calls answer, then fail every later one (a
+  // transient child failure): the set either names the shared key or the
+  // call rejects, never a smaller set.
+  const original = shell.exec;
+  let gitCalls = 0;
+  const spy = spyOn(shell, "exec").mockImplementation((async (
+    cmd: readonly string[],
+    options?: Parameters<typeof shell.exec>[1]
+  ) => {
+    if (cmd[0] === "git") {
+      gitCalls += 1;
+      if (gitCalls > 2) {
+        return { exitCode: 128, stdout: "", stderr: "" };
+      }
+    }
+    return await original(cmd, options);
+  }) as typeof shell.exec);
+  try {
+    const live = await projectEnvLiveInputPaths(project).catch(() => null);
+    expect(gitCalls).toBeGreaterThan(0);
+    if (live !== null) {
+      expect(live).toContain(sharedKey);
+    }
+  } finally {
+    spy.mockRestore();
+  }
 });

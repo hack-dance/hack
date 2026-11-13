@@ -414,6 +414,14 @@ export async function writeTextFileAtomicIfChanged(
     readonly validatePath?: (path: string) => Promise<void>;
     /** Permission bits for a file this write creates; an existing file keeps its own. */
     readonly createMode?: number;
+    /**
+     * Never resolve the destination through a symlink (HACK-2165): a link
+     * at `absolutePath` is refused, and the commit renames onto
+     * `absolutePath` itself, so the file replaced is the one the caller's
+     * checks admitted. A link swapped in after the check is replaced by the
+     * rename, never written through.
+     */
+    readonly noFollowTarget?: boolean;
   } = {}
 ): Promise<{ readonly changed: boolean }> {
   await options.validatePath?.(absolutePath);
@@ -425,8 +433,19 @@ export async function writeTextFileAtomicIfChanged(
   if (existing.kind === "existing" && existing.text === content) {
     return { changed: false };
   }
+  if (options.noFollowTarget === true) {
+    const entry = await lstat(absolutePath).catch(() => null);
+    if (entry?.isSymbolicLink()) {
+      throw new AtomicWriteRefusedError({
+        path: absolutePath,
+        reason: "not_regular_file",
+      });
+    }
+  }
   const target =
-    existing.kind === "absent" ? absolutePath : await realpath(absolutePath);
+    existing.kind === "absent" || options.noFollowTarget === true
+      ? absolutePath
+      : await realpath(absolutePath);
   await options.validatePath?.(target);
   if (existing.kind === "existing") {
     try {

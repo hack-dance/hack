@@ -707,7 +707,21 @@ message that names the file and no value:
   the managed `.hack/.gitignore` block (a read-only file, or a later rule that
   re-includes the layer, leaves it unignored).
 
-Outside a Git checkout nothing can commit the layer, so these checks pass.
+Outside a Git checkout nothing can commit the layer, so these checks pass. Hack decides
+"outside a checkout" only on confirmed absence: it looks for a `.git` entry above both the
+project path you gave and its resolved path, and treats an entry it cannot inspect, or a
+path it cannot resolve, as inside. The same checks apply to a legacy `.hack/.env` (or
+overlay) that `hack env set` or `unset` rewrites in a project without env layers, after
+Hack adds its `info/exclude` entry. A machine-local write replaces the checked path
+itself: it never resolves the destination through a symbolic link.
+
+**What these protections cover.** Hack protects machine-local values and keys against
+accidental collection by Git and against other users of the machine: it refuses or
+reports a file Git tracks, cannot report on, or does not ignore; it keeps files private
+to your user; and it binds each check to the file it actually opens or replaces. A
+process already running as your user is out of scope: it can read the key and every
+machine-local file directly, so Hack adds no machinery whose only purpose is to defeat
+such a process racing its checks.
 Without `hack.env.json`, `set --local` still writes `.hack/.env`; if a contract is
 added later, migration keeps those values machine-local too.
 

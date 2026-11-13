@@ -810,6 +810,13 @@ export async function isGitIgnoredProjectEnvPath(opts: {
  * Whether `startDir` or an ancestor holds a `.git` entry (directory, linked
  * worktree file or symlink), or `GIT_DIR` points git elsewhere. It does not ask
  * git, so it still answers when git itself refuses to run in the checkout.
+ *
+ * Fails closed (HACK-2165): the ancestors of both the given spelling and its
+ * resolved path are walked, so an alias outside a repository that names a
+ * project inside one is still inside; a start directory that can't be
+ * resolved, or an ancestor whose `.git` entry can't be inspected (anything
+ * but "absent"), counts as inside, since only confirmed absence may exempt a
+ * write from git's privacy checks.
  */
 async function isInsideGitCheckoutMarker(opts: {
   readonly startDir: string;
@@ -817,10 +824,30 @@ async function isInsideGitCheckoutMarker(opts: {
   if ((process.env.GIT_DIR ?? "").trim().length > 0) {
     return true;
   }
-  let current = resolve(opts.startDir);
+  const resolvedStart = await realpath(opts.startDir).catch(() => null);
+  if (resolvedStart === null) {
+    return true;
+  }
+  for (const start of new Set([resolve(opts.startDir), resolvedStart])) {
+    if (await hasGitMarkerAncestor(start)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function hasGitMarkerAncestor(start: string): Promise<boolean> {
+  let current = start;
   while (true) {
-    const marker = await lstat(resolve(current, ".git")).catch(() => null);
-    if (marker !== null) {
+    const marker = await lstat(resolve(current, ".git")).then(
+      () => true,
+      (error: unknown) =>
+        !(
+          isRecord(error) &&
+          (error.code === "ENOENT" || error.code === "ENOTDIR")
+        )
+    );
+    if (marker) {
       return true;
     }
     const parent = dirname(current);
@@ -3749,7 +3776,9 @@ async function writeProjectEnvConfigFile(opts: {
       ...(opts.expectedExisting === undefined
         ? {}
         : { expectedExisting: opts.expectedExisting }),
-      ...(opts.machineLocal === true ? { createMode: 0o600 } : {}),
+      ...(opts.machineLocal === true
+        ? { createMode: 0o600, noFollowTarget: true }
+        : {}),
       validatePath: async (path) => {
         await assertProjectEnvLayerPath({
           projectRoot: opts.projectRoot,
@@ -3851,6 +3880,32 @@ async function machineLocalLayerGitProblem(opts: {
     return null;
   }
   return "not_ignored";
+}
+
+/**
+ * Refuses, without any repair, a machine-local file (for example a legacy
+ * `.hack/.env`) that git tracks, whose tracking git can't report inside a
+ * checkout, or that no effective rule ignores (HACK-2165). Callers repair
+ * ignore rules first, the way their write path does.
+ */
+export async function assertMachineLocalFileGitPrivate(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<void> {
+  const problem = await machineLocalLayerGitProblem(opts);
+  if (problem === "tracked") {
+    throw new ClosedCliError(MACHINE_LOCAL_LAYER_REFUSALS.tracked(opts.path));
+  }
+  if (problem === "tracking_unknown") {
+    throw new ClosedCliError(
+      MACHINE_LOCAL_LAYER_REFUSALS.trackingUnknown(opts.path)
+    );
+  }
+  if (problem === "not_ignored") {
+    throw new ClosedCliError(
+      MACHINE_LOCAL_LAYER_REFUSALS.notIgnored(opts.path)
+    );
+  }
 }
 
 /**

@@ -32,6 +32,7 @@ import {
   readEnvValueFromStdin,
 } from "../lib/env-value-stdin.ts";
 import { readTextFile } from "../lib/fs.ts";
+import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import type {
@@ -74,6 +75,7 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  assertMachineLocalFileGitPrivate,
   assertProjectEnvLayerPaths,
   assertValidProjectEnvScopeName,
   describeUnmigratedLegacyDotenv,
@@ -731,6 +733,24 @@ async function resolveConfiguredSecretStore(input: {
         : "Unable to resolve secret store.";
     throw new CliUsageError(message);
   }
+}
+
+/**
+ * The legacy `.hack/.env` (or overlay) a set or unset rewrites holds
+ * plaintext values, so it gets the machine-local git gate (HACK-2165): after
+ * the same `info/exclude` repair the writer makes, a file git tracks, can't
+ * report on, or does not ignore is refused before any value is written. A
+ * file that does not exist yet is checked by name too.
+ */
+async function assertLegacyDotenvGitPrivate(opts: {
+  readonly project: ProjectContext;
+  readonly envFile: string;
+}): Promise<void> {
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
+  await assertMachineLocalFileGitPrivate({
+    projectRoot: opts.project.projectRoot,
+    path: opts.envFile,
+  });
 }
 
 async function loadModernProjectEnv(input: {
@@ -1969,6 +1989,7 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     projectDir: project.projectDir,
     envName,
   });
+  await assertLegacyDotenvGitPrivate({ project, envFile });
   const [result, mirroredToBackend] = await Promise.all([
     upsertDotEnvValue({ envFile, key, value }),
     runtimeConfig.storePlaintextInBackend
@@ -2383,6 +2404,7 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
       projectDir: project.projectDir,
       envName,
     });
+    await assertLegacyDotenvGitPrivate({ project, envFile });
     const [dotenvResult, secretDeleted] = await Promise.all([
       removeDotEnvKey({ envFile, key }),
       store.delete({

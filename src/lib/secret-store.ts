@@ -844,9 +844,10 @@ async function provisionEnvKey(input: {
  * provisioning, keychain persistence and first-use bootstrap (HACK-2169),
  * so no writer can land between another's check and write. Key writers
  * take no store lock while holding it, and store writers resolve their key
- * before taking the store lock, so the two locks never nest.
+ * before taking the store lock. Migration cleanup can hold both locks in
+ * sorted path order while rechecking receipts before deletion.
  */
-async function withEncryptedFileKeyLock<T>(input: {
+export async function withEncryptedFileKeyLock<T>(input: {
   readonly keyPath: string;
   readonly run: () => Promise<T>;
 }): Promise<T> {

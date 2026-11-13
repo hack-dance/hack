@@ -128,6 +128,7 @@ import {
 import {
   type FileSecretStoreListing,
   listFileSecretStoreEntries,
+  withEncryptedFileKeyLock,
   withEncryptedStoreMutation,
 } from "./secret-store.ts";
 import {
@@ -9490,10 +9491,9 @@ async function removeLegacyProjectEnvArtifactsUnderLocks(opts: {
     ...opts.paths,
     ...context.receipts.map((receipt) => receipt.path),
   ]);
-  // Legacy key material belongs to the store's mutation boundary, not an env
-  // layer lock beside the key (which would create .internal at the repo root).
+  // Key writers have their own shared <key>.lock (HACK-2169). Take it as well
+  // as the store lock; env-layer locks would create .internal beside the key.
   if (context.store && layers.has(context.store.keyPath)) {
-    layers.delete(context.store.keyPath);
     layers.add(context.store.path);
   }
   for (const envName of [null, ...context.overlayNames]) {
@@ -9548,6 +9548,9 @@ async function removeLegacyProjectEnvArtifactsUnderLocks(opts: {
       return opts.removed;
     }
     const run = () => locked(index + 1);
+    if (path === context.store?.keyPath) {
+      return await withEncryptedFileKeyLock({ keyPath: path, run });
+    }
     return path === context.store?.path
       ? await withEncryptedStoreMutation({ filePath: path, run })
       : await withEnvLayerLock({ layerPath: path, run });

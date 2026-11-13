@@ -936,7 +936,9 @@ plaintext key names and a `hack env protect` command after migration.
 Migration cleanup keeps content and file-identity receipts from its source
 inventory. After confirmation, it takes the source writer locks, checks those
 receipts and rechecks current YAML delivery and Compose references before
-removing anything. Changed sources or delivery refuse cleanup with reconciliation
+removing anything. A legacy store and its key use their separate owner locks,
+including the key lock shared by every store using that path.
+Changed sources or delivery refuse cleanup with reconciliation
 advice; migration writes already completed remain. Confirmed removals before a
 failure are named. Implicit cleanup warns and lets the original command continue
 even if a lock times out, a key is unavailable or a file is unreadable.

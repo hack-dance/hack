@@ -20,7 +20,10 @@ import {
   repairLegacyComposeEnvFileReferences,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
-import { resolveSecretStore } from "../src/lib/secret-store.ts";
+import {
+  resolveSecretStore,
+  withEncryptedFileKeyLock,
+} from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const SENTINEL = "synthetic-cleanup-value";
@@ -249,7 +252,7 @@ test.skipIf(process.getuid?.() === 0)(
   }
 );
 
-test("cleanup uses the store lock for its legacy key without a root .internal directory", async () => {
+test("cleanup uses store/key owner locks without a root .internal directory", async () => {
   await withMigratedStore(async (options) => {
     await expect(
       lstat(join(options.projectRoot, ".internal"))
@@ -263,6 +266,49 @@ test("cleanup uses the store lock for its legacy key without a root .internal di
     await expect(
       lstat(join(options.projectRoot, ".internal"))
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+test("cleanup waits for the key writer and preserves its completed change", async () => {
+  await withMigratedStore(async (options) => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const keyText = "synthetic-concurrent-key-change\n";
+    const writer = withEncryptedFileKeyLock({
+      keyPath: options.keyPath,
+      run: async () => {
+        entered.resolve();
+        await release.promise;
+        await writeFile(options.keyPath, keyText);
+      },
+    });
+    await entered.promise;
+    let settled = false;
+    const removal = removeLegacyProjectEnvArtifacts({
+      ...options,
+      paths: [options.storePath, options.keyPath],
+    }).then(
+      () => {
+        settled = true;
+        return null;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      }
+    );
+    try {
+      await Bun.sleep(200);
+      expect(settled).toBe(false);
+    } finally {
+      release.resolve();
+      await writer;
+      const error = await removal;
+      expect(error).toBeInstanceOf(LegacyEnvCleanupError);
+      expect(String(error)).not.toContain(keyText.trim());
+    }
+    expect(await readFile(options.keyPath, "utf8")).toBe(keyText);
+    expect(await Bun.file(options.storePath).exists()).toBe(true);
   });
 });
 

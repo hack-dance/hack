@@ -121,7 +121,7 @@ type McpRefusalCode = Extract<HackErrorCode, "E_USAGE" | "E_PROJECT_NOT_FOUND">;
  */
 export const PROJECT_SELECTOR_DESCRIPTIONS = Object.freeze({
   projectName:
-    "Registered project name (see hack.projects.list). Use at most one of projectName, repoRoot or path; omit all three to use the project at the server's working directory.",
+    "Registered project name (see hack.projects.list). Use at most one of projectName, repoRoot or path; with none, the project at the server's working directory is used, so check it is the one you mean.",
   repoRoot:
     "Root of a registered project (absolute, or relative to the server's working directory). Running hack status or hack init in a project registers it.",
   path: "Path inside a registered project (absolute, or relative to the server's working directory).",
@@ -163,7 +163,7 @@ export const MCP_REFUSALS = Object.freeze({
   path_not_registered: {
     code: "E_PROJECT_NOT_FOUND",
     message:
-      "Path is outside registered hack projects. Omit projectName, repoRoot and path to use the project at the server's working directory, or run 'hack status' (or 'hack init') in the project to register it.",
+      "Path is outside registered hack projects. Omit projectName, repoRoot and path only if the project at the server's working directory is the one you mean (check hack.projects.list); otherwise run 'hack status' (or 'hack init') in the project to register it.",
   },
   no_project_context: {
     code: "E_PROJECT_NOT_FOUND",
@@ -1432,7 +1432,7 @@ function registerBackgroundCommandTools(opts: {
     name: "hack.project.command.start",
     title: "Start a background command",
     description:
-      'Start `exec` (in a running service container) or `run` (one-off container) in the background and return a commandId and cursor at once; then call hack.project.command.read with the cursor until it reports ended. Uses the same validation and argv handling as hack.project.exec/run. Output is stored in private files under the Hack home and is not readable after its retention time (at most 24 hours after the end; expiresAt is the latest expiry, for a command that runs to its timeout; files are removed at a later sweep, not on a timer; capture: "metadata" stores none); redaction of values Hack injected is partial, not a safety guarantee. Unlike the foreground tools, reaching the 8 MiB capture limit stops capture but the command keeps running. requestKey makes retries safe: the same key with the same inputs returns the existing command and never runs it twice.',
+      'Start `exec` (in a running service container) or `run` (one-off container) in the background and return a commandId and cursor at once; then call hack.project.command.read with the cursor until it reports ended. Uses the same validation and argv handling as hack.project.exec/run. Output is stored in private files under the Hack home and is not readable after its retention time (at most 24 hours after the end; expiresAt is the planned expiry for a command that runs to its timeout, and storage limits can expire a result earlier; files are removed at a later sweep, not on a timer; capture: "metadata" stores none); redaction of values Hack injected is partial, not a safety guarantee. Unlike the foreground tools, reaching the 8 MiB capture limit stops capture but the command keeps running. requestKey makes retries safe: the same key with the same inputs returns the existing command and never runs it twice.',
     annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
     inputSchema: {
       ...scopeInput,
@@ -1474,7 +1474,7 @@ function registerBackgroundCommandTools(opts: {
         .string()
         .regex(REQUEST_KEY_PATTERN)
         .describe(
-          "Caller-chosen idempotency key, scoped to the project: the same key with the same inputs returns the existing command (reused: true) for 7 days instead of running it again; the same key with different inputs is refused (E_REQUEST_CONFLICT)"
+          "Caller-chosen idempotency key, scoped to the project: the same key with the same inputs returns the existing command (reused: true) while its result is kept; after the result expires the key is refused (E_RESULT_EXPIRED) for 7 days, then forgotten. The same key with different inputs is refused (E_REQUEST_CONFLICT)"
         ),
     },
     handler: async (input, extra) => {
@@ -1622,7 +1622,7 @@ function registerBackgroundCommandTools(opts: {
     name: "hack.project.command.cancel",
     title: "Cancel a background command",
     description:
-      "Cancel a background command. The supervisor and the command's process group are signalled only after their pid, birth time and group are verified. The result says what was confirmed: supervisorSignalled and childGroupSignalled (who Hack signalled; a live supervisor stops the group itself), childExited, containerProcess ('stopped' only when what ran in the container is confirmed gone; stopping a docker compose exec or run client alone does not prove it) and descendants. alreadyEnded: true means the command had ended before this call; outcome is then its recorded outcome, not this call's doing. Read the end event for the outcome and exit code (a client stopped by SIGTERM usually reports 143).",
+      "Cancel a background command. The supervisor and the command's process group are signalled only after their pid, birth time and group are verified. The result says what was confirmed: supervisorSignalled and childGroupSignalled (who Hack signalled; a live supervisor stops the group itself), childExited, containerProcess ('stopped' only when what ran in the container is confirmed gone; stopping a docker compose exec or run client alone does not prove it) and descendants. alreadyEnded: true means the command had ended before this call; outcome is then its recorded outcome, not this call's doing. Read the end event for the outcome and exit code (exitCode is null and signal is set when the client died of the signal; a client that handles SIGTERM may exit 143).",
     annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
     inputSchema: { ...scopeInput, commandId: COMMAND_ID_INPUT },
     handler: async (input, extra) => {

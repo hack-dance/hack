@@ -66,8 +66,10 @@ nothing is selected, maps to the registered project whose repo root or project
 directory contains it. When registrations are nested, the deepest one wins. Two
 different registrations at the same root are refused as `ambiguous_project`. A
 project that has a `.hack/` directory but no registration is refused; run
-`hack projects`, `hack status` or `hack init` in it to register it (`hack ps`,
-`hack exec` and `hack commands` do not register). A `repoRoot` or `path` outside
+a registering command in it, for example `hack status`, `hack projects` or
+`hack init` (`hack up`, `down`, `ps`, `run`, `exec`, `logs`, `open` and
+`commands` do not register). With no selection the server's working directory
+is used, so check that it is the project you mean before a destructive call. A `repoRoot` or `path` outside
 every registered project is refused as `path_not_registered`.
 
 ## Inputs and identifiers
@@ -175,11 +177,14 @@ other way round.
   `capture` (`full` or `metadata`). Validation, argv handling and refusals are
   those of `hack.project.exec` and `hack.project.run`. `data` is
   `{ commandId, cursor, state, expiresAt, reused, capture, liveOutput,
-  stallDetection, limits }`. `expiresAt` is the latest the result can expire
-  (acceptance + `timeoutMs` + retention); a command that ends earlier expires
-  its retention time after its end. Retrying with the same `requestKey` and the same
-  inputs returns the existing command (`reused: true`) and never runs it again;
-  the same key with different inputs is refused (`E_REQUEST_CONFLICT`). Keys are
+  stallDetection, limits }`. `expiresAt` is the planned expiry for a command that
+  runs to its timeout (acceptance + `timeoutMs` + retention); one that ends
+  earlier is kept for its retention time after its end. Storage limits can
+  expire a result earlier. Retrying with the same `requestKey` and the same
+  inputs returns the existing command (`reused: true`) while its result is kept;
+  after the result expires the key is refused (`E_RESULT_EXPIRED`) for 7 days,
+  then forgotten. The same key with different inputs is refused
+  (`E_REQUEST_CONFLICT`). Keys are
   scoped to the project, whichever selector named it.
   The MCP session is the caller for the admission limit of 4 active commands.
 - `read`: required `commandId`. Optional: project selection, `branch`, `after`
@@ -239,8 +244,9 @@ Client notes, from qualifying the tools with Claude Code and the Codex CLI:
   'mcp_servers.<name>.default_tools_approval_mode="approve"'` (or answer the
   prompt in an interactive session). Claude Code in `-p` mode needs the tools
   allowed, for example `--allowedTools mcp__hack`.
-- Claude Code loads the tools on demand through its tool search; their names
-  appear with dots replaced (`mcp__hack__hack_project_command_start`).
+- Observed in Claude Code 2.1.322: it loads the tools on demand through its
+  tool search, and their names appear with dots replaced
+  (`mcp__hack__hack_project_command_start`).
 
 ## `hack.project.doctor`
 

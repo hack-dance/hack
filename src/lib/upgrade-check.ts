@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { isCandidateRun } from "../daemon/client.ts";
 import { quoteShellWord } from "./logs.ts";
@@ -12,7 +12,7 @@ import {
   resolveFileSecretStorePaths,
 } from "./secret-store.ts";
 import {
-  listProjectsUsingSecretStore,
+  listSecretStoreReaders,
   secretStoreSelectionProblem,
 } from "./secret-store-retire.ts";
 import type { UpgradeCheckProbes } from "./upgrade-check-probes.ts";
@@ -794,15 +794,53 @@ async function inspectGlobalSecretStore(opts: {
         "hack doctor asks the OS keychain and reports whether the key is there.",
     };
   }
-  const users = await listProjectsUsingSecretStore({
+  // Each reader's own key decides whether it is stranded: a project may
+  // share this store but name a key file of its own that works.
+  const readers = await readerKeyStates({
     storePath: location.storePath,
+    globalKeyPath: location.keyPath,
+    globalState: state,
+    env: opts.env,
   });
+  return storeFailureFinding({ state, readers, retiredNote });
+}
+
+/** The finding for a global store whose own key does not open it, given each reader's key. */
+function storeFailureFinding(opts: {
+  readonly state: Exclude<
+    Awaited<ReturnType<typeof inspectStoreKeyState>>,
+    { kind: "no-store" | "opens" | "store-unreadable" | "key-uninspected" }
+  >;
+  readonly readers: { readonly failing: string[]; readonly opening: string[] };
+  readonly retiredNote: string;
+}): UpgradeFinding {
+  const { state, readers, retiredNote } = opts;
+  const base = { id: "secret-store" } as const;
+  if (readers.failing.length === 0 && readers.opening.length > 0) {
+    return {
+      ...base,
+      status: "warn",
+      summary: `The global secret store's own key does not open it, but every registered project that reads it (${readers.opening.join(", ")}) opens it with its own key.${retiredNote}`,
+      args: ["doctor"],
+      action: null,
+    };
+  }
   const usedBy =
-    users.names.length > 0
-      ? ` Read by: ${users.names.join(", ")}.`
+    readers.failing.length > 0
+      ? ` Read by: ${readers.failing.join(", ")}.`
       : " No registered project reads it.";
   const blocking: UpgradeFindingStatus =
-    users.names.length > 0 ? "blocker" : "warn";
+    readers.failing.length > 0 ? "blocker" : "warn";
+  if (readers.opening.length > 0) {
+    // Retiring is refused while another configured key opens the store.
+    return {
+      ...base,
+      status: blocking,
+      summary: `The global secret store does not open with the key${readers.failing.length === 1 ? "" : "s"} of ${readers.failing.join(", ")}, though ${readers.opening.join(", ")} open${readers.opening.length === 1 ? "s" : ""} it with another key.`,
+      args: ["doctor"],
+      action: `Give ${readers.failing.join(", ")} the key that opens the store (the keyPath ${readers.opening.join(", ")} use${readers.opening.length === 1 ? "s" : ""}), or HACK_SECRETS_FILE_KEY.`,
+    };
+  }
   if (state.kind === "key-refused") {
     return {
       ...base,
@@ -830,6 +868,34 @@ async function inspectGlobalSecretStore(opts: {
     action:
       "Or restore the store's key file (or set HACK_SECRETS_FILE_KEY) instead of retiring it.",
   };
+}
+
+/**
+ * Splits the store's readers by whether the key their own configuration
+ * selects (with this shell's HACK_SECRETS_FILE_KEY first, as at runtime)
+ * opens it. Read-only; never the keychain.
+ */
+async function readerKeyStates(opts: {
+  readonly storePath: string;
+  readonly globalKeyPath: string;
+  readonly globalState: Awaited<ReturnType<typeof inspectStoreKeyState>>;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): Promise<{ readonly failing: string[]; readonly opening: string[] }> {
+  const found = await listSecretStoreReaders({ storePath: opts.storePath });
+  const failing = new Set<string>();
+  const opening = new Set<string>();
+  for (const reader of found.readers) {
+    const state =
+      resolve(reader.keyPath) === resolve(opts.globalKeyPath)
+        ? opts.globalState
+        : await inspectStoreKeyState({
+            storePath: opts.storePath,
+            keyPath: reader.keyPath,
+            env: opts.env,
+          });
+    (state.kind === "opens" ? opening : failing).add(reader.name);
+  }
+  return { failing: [...failing].sort(), opening: [...opening].sort() };
 }
 
 // ---------------------------------------------------------------------------

@@ -605,6 +605,52 @@ test("the global key is audited with the runtime's rules, not only by decrypting
   expect(tracked?.action).toContain("git tracks it");
 });
 
+test("a project that names its own working key is not blocked by a broken global key", async () => {
+  // Codex review: the global key file decided for every reader, though a
+  // project may select the global store with its own keyPath.
+  const reader = await liveProject("app-own-key");
+  await writeRegistry([reader]);
+  const { storePath, keyPath } = await globalStore({ reader });
+  const ownKey = join(root, "own.key");
+  await writeFile(ownKey, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(ownKey, 0o600);
+  await writeFile(
+    join(reader.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-own-key",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath: ownKey },
+        },
+      },
+    })}\n`
+  );
+  // The global key file is now wrong.
+  await writeFile(keyPath, "synthetic-wrong-global-key\n", { mode: 0o600 });
+  const report = await check(healthyProbes());
+  const store = report.machine.find((f) => f.id === "secret-store");
+  expect(store?.status).toBe("warn");
+  expect(store?.summary).toContain("app-own-key");
+  expect(report.ready).toBe(true);
+
+  // A second reader on the broken global key is blocked, and retiring is
+  // not suggested while another configured key opens the store.
+  const other = await liveProject("app-global-key");
+  await writeFile(
+    join(other.projectDir, "hack.env.json"),
+    `${JSON.stringify({ version: 1, vars: [{ key: "TOKEN", source: "keychain" }] })}\n`
+  );
+  await writeRegistry([reader, other]);
+  const blocked = await check(healthyProbes());
+  const blocking = blocked.machine.find((f) => f.id === "secret-store");
+  expect(blocking?.status).toBe("blocker");
+  expect(blocking?.summary).toContain("app-global-key");
+  expect(blocking?.args).toEqual(["doctor"]);
+  expect(blocking?.action).toContain("app-global-key");
+  expect(JSON.stringify(blocked)).not.toContain(STORE_KEY);
+});
+
 test("the global store's states: no store, an env key, a keychain not asked", async () => {
   const reader = await liveProject("app-reader");
   await writeRegistry([reader]);

@@ -202,6 +202,36 @@ export async function listProjectsUsingSecretStore(opts: {
 }
 
 /**
+ * The registered checkouts that read the store at `storePath`, each with the
+ * key file its own configuration selects (HACK-2189): a project may share a
+ * store but name its own key. From configuration only; no store is opened.
+ */
+export async function listSecretStoreReaders(opts: {
+  readonly storePath: string;
+}): Promise<{
+  readonly readers: readonly {
+    readonly name: string;
+    readonly projectDir: string;
+    readonly keyPath: string;
+  }[];
+  readonly registryRead: boolean;
+  readonly unchecked: number;
+}> {
+  const found = await storeContexts(opts);
+  const readers: { name: string; projectDir: string; keyPath: string }[] = [];
+  for (const context of found.contexts) {
+    if (await projectUsesSecretStore({ projectDir: context.projectDir })) {
+      readers.push(context);
+    }
+  }
+  return {
+    readers,
+    registryRead: found.registryRead,
+    unchecked: found.unchecked,
+  };
+}
+
+/**
  * Why retiring this store would take it from another registered checkout
  * that can still open it, or null when none can (HACK-2177). A checkout
  * selecting the same store file with a different key file is asked whether

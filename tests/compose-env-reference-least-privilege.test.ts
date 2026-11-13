@@ -12,6 +12,23 @@ import { canReuseRunningDependencyCache } from "../src/lib/run-dependency-cache.
  */
 const CANARY = "g5-least-privilege-canary";
 const ID = "c".repeat(64);
+const TRANSPORT_SETTINGS = Object.fromEntries(
+  [
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
+    "CONTAINER_HOST",
+    "CONTAINER_CONNECTION",
+    "CONTAINER_SSHKEY",
+    "PODMAN_CONNECTIONS_CONF",
+    "CONTAINERS_CONF",
+    "CONTAINERS_CONF_OVERRIDE",
+    "XDG_RUNTIME_DIR",
+    "SSH_AUTH_SOCK",
+  ].map((name) => [name, `synthetic-transport-${name}`])
+);
 const dirs: string[] = [];
 
 afterEach(async () => {
@@ -60,7 +77,7 @@ function composeEnv(dir: string): Record<string, string> {
   return {
     PATH: `${dir}:/usr/bin:/bin`,
     GLOBAL_FLAG: CANARY,
-    DOCKER_CONTEXT: "fixture-context",
+    ...TRANSPORT_SETTINGS,
     HACK_ENV_0123456789AB_SECRET: CANARY,
     HACK_ENV_0123456789AB: CANARY,
   };
@@ -70,7 +87,9 @@ function expectNoReferenceValues(calls: readonly Recorded[]): void {
   expect(calls.length).toBeGreaterThan(0);
   for (const call of calls) {
     expect(call.env.GLOBAL_FLAG).toBeUndefined();
-    expect(call.env.DOCKER_CONTEXT).toBe("fixture-context");
+    for (const [name, value] of Object.entries(TRANSPORT_SETTINGS)) {
+      expect(call.env[name]).toBe(value);
+    }
     expect(
       Object.keys(call.env).filter((key) => key.startsWith("HACK_ENV_"))
     ).toEqual([]);

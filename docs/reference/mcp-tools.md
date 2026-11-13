@@ -260,8 +260,9 @@ dropped whole.
 
 ### Value-free output
 
-`hack env list --json` prints plaintext values, and CLI errors can quote env
-files. Both env tools therefore withhold the child's output:
+`hack env list --json` defaults to metadata without values. Both env tools also
+enforce an independent value-free boundary and withhold the child's raw output,
+including on errors:
 
 - `stdout` is always `""`.
 - `stderr` is `""` on success. On failure it is a fixed message that tells you

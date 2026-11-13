@@ -6378,7 +6378,7 @@ function legacyOverlayFileList(names: readonly string[]): string {
     .join(", ");
 }
 
-function isExcludedLegacyDotenvName(name: string): boolean {
+export function isExcludedLegacyDotenvName(name: string): boolean {
   return (
     name === LEGACY_DOTENV_STATE_OVERLAY ||
     LEGACY_DOTENV_NON_OVERLAY_NAMES.has(name)

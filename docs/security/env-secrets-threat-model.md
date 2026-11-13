@@ -48,6 +48,10 @@ node code is listed under [open gaps](#open-gaps) so that it is not lost.
 3. **Agents and MCP.** An agent acts with the user's rights, but its prompts,
    transcripts and tool output may leave the machine. Hack treats the agent context
    as a sink that must not receive secret values unless the user asks for one.
+   Metadata-only `env list` defaults and its terminal-only `--show-values` reveal
+   reduce accidental exposure in logs and transcripts. They are not access control
+   against a local process: a process can open a pseudo-terminal or loop over
+   `env get KEY` with the same filesystem and key access.
 4. **CI and managed containers.** CI receives the key only as `HACK_ENV_SECRET_KEY`
    from the CI secret store. The key file is never baked into an image.
 5. **Repository inputs.** A cloned repository is untrusted input. It may contain

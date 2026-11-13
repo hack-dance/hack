@@ -3,9 +3,10 @@
 This is a working upgrade checklist, not a completed migration report. It was
 audited against `next` at `26a142921c` and the v4.3.0 reference on `main` at
 `b36275575c`, with the merged Linux daemon service update at `5e017fddd3`.
-The site itself is pinned to **next.15**. Sections about newer
-source builds do not mean those features ship in next.15. Real-machine results
-are **to be confirmed in the dogfood run**.
+The site targets **next.16**. This guide is an editorial skeleton merged after
+that release tag, not a completed upgrade report. Native setup and log following
+remain **under verification**. Real-machine results are
+**to be confirmed in the dogfood run**.
 
 ```mermaid
 ---
@@ -155,7 +156,7 @@ to try the prerelease.
 | Older 4.x, including 4.2.1 | Use the same backup and isolated-candidate sequence; inspect legacy env before any env-consuming command. Do not assume every project needs the same migration. | Direct 4.2.1 upgrade, or any need for an intermediate version: **to be confirmed in the dogfood run**. |
 | Homebrew install | Keep the installed v4 formula during the trial. `brew upgrade hack-dance/tap/hack` is the stable-release path, not the native-candidate installer. | Stable v5 formula availability and replacement/rollback: **to be confirmed in the dogfood run**. |
 | Script install | Use the separate reviewed candidate bootstrap on supported Macs. For stable software, the release downloader accepts `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION`. | Replacing an installed v4 with a stable v5 archive: **to be confirmed in the dogfood run**. |
-| Linux 4.x or a fresh Linux host | next.15 publishes no Linux candidate bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
+| Linux 4.x or a fresh Linux host | next.16 publishes no Linux candidate bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
 | Intel macOS or a fresh host | Native is unavailable. A fresh stable installation uses the normal Homebrew/release installer and Compose; use the candidate only on its supported host. | First stable v5 install and project initialization: **to be confirmed in the dogfood run**. |
 
 After backups and stable-daemon quiescence, read the migration section below
@@ -181,7 +182,8 @@ after restart. Record what failed, not just a green health endpoint.
 For a **current-source** Linux CLI, DNS and CA trust setup are implemented. Follow
 the [Linux DNS setup source](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-setup.md)
 and [Linux trust guide](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-certificate-trust.md).
-They postdate next.15. DNS host integration is bounded to a rootful Linux Docker
+These sources are included in next.16; its published candidate bundle is still
+Apple Silicon only. DNS host integration is bounded to a rootful Linux Docker
 bridge/systemd-resolved setup; trust has separate host and browser handling.
 Review the printed privileged steps and confirm them yourself.
 
@@ -198,7 +200,7 @@ Real-machine service setup and upgrade are **to be confirmed in the dogfood run*
 
 Sources: [stable installation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/README.md#install),
 [release asset generation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/scripts/build-release.ts),
-[next.15 artifact contract](https://github.com/hack-dance/hack/blob/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/docs/guides/candidate-install.md),
+[next.16 artifact contract](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/docs/guides/candidate-install.md),
 [Linux service and detached-start contract](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/docs/architecture.md#keeping-hackd-running),
 [service regression tests](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/tests/daemon-systemd-cli.test.ts).
 Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/project.ts),
@@ -206,6 +208,43 @@ Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a1
 [session env resolution](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/session.ts).
 
 ## 4. What changes for a project
+
+### Env command changes: what to change
+
+These changes apply to builds containing HACK-2163/HACK-2166, after the next.16
+snapshot used above. Check the chosen binary's help before changing scripts.
+
+- Replace `env list --json --show-secrets` in noninteractive scripts with
+  explicit `hack env get KEY` reads for the keys needed, using the same `--env`
+  and `--service`. Those reads return plaintext; do not log it. Use ordinary
+  `env list --json` and `has_value` for availability checks; `value` is absent
+  by default even for migrated plaintext entries.
+- Pipe secret writes through `hack env add KEY --secret --value-stdin` or
+  `hack env set KEY --secret --value-stdin`, or use the hidden terminal prompt.
+  Positional secret values are refused. The unsafe argv compatibility flag is
+  for controlled fixtures, not real values.
+- Legacy lifecycle hooks and processes now receive only global contract values.
+  Review hooks that previously depended on another service's values; put only
+  the values they need into global scope. Service values remain service-scoped.
+- Update text parsers: modern rows are `KEY`, `SCOPE`, `set`, `LAYER` separated
+  by tabs (a fifth value column appears only with explicit reveal). Legacy rows
+  replace the seventh value column with set state by default and add layer as
+  column eight. Prefer JSON metadata or explicit single-key reads.
+- Run `hack env protect` for a names-only inventory of plaintext entries, then
+  `hack env protect KEY...` for chosen entries. Values, scopes and overlays stay
+  in place; omitted `--env` covers all overlays. Protecting YAML does not erase
+  legacy copies. Back up existing keys and values first; never replace a missing
+  recovery key with a newly generated key. A legacy store without its key must
+  stay intact until its original key is recovered.
+- YAML projects now return HTTP 409 `yaml_env_mutation_unsupported` from the
+  legacy daemon `POST /v1/env/set` and `/unset` routes. Use canonical CLI env
+  commands instead of writing a second legacy store through those endpoints.
+
+The terminal reveal gate reduces accidental logging and transcript exposure;
+it is not access control against a local process that can open a pseudo-terminal
+or use `env get`. Updating an existing encrypted key without `--secret` can still
+downgrade it to plaintext; HACK-2173 tracks that follow-up. Continue using
+`--secret --value-stdin` for secret updates.
 
 ### Config and env migration
 
@@ -335,17 +374,17 @@ The complete 4.2.1 automation/exit/JSON transcript is **to be confirmed in the d
 ## 6. Try native, then return to Compose
 
 Only after the Compose pilot passes, use a disposable project and read
-[the limits](../native/limits.md). A build containing the merged runtime-setup
-feature provides one explicit preparation command:
+[the limits](../native/limits.md). next.16 provides one explicit preparation
+command, [under verification](../native/setup.md):
 
 ```sh
 /absolute/bundle/hack-native --candidate-root /absolute/private/native-home runtime setup
 ```
 
 Setup previews the pinned downloads and asks for consent; ordinary `up` does not
-fetch provider artifacts. Do not assume a previously installed next.15 binary
-has this newer command. Use the [current setup instructions and older-build
-alternative](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/native/try-it.md).
+fetch provider artifacts. Check `hack-next --manager status` for the selected
+version; older installed prereleases can lack this command. Use the
+[setup instructions and offline alternative](../native/setup.md).
 Setup success does not prove a project works. Native project admission, mounts,
 images and command support still have their own limits.
 

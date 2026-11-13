@@ -242,7 +242,7 @@ const MODERN_LOCAL_SECRET_CLASSIFICATION = {
 
 const listSpec = defineCommand({
   name: "list",
-  summary: "List resolved env values for the selected overlay",
+  summary: "List env names, scopes, layers and set state",
   group: "Project",
   options: [
     optPath,

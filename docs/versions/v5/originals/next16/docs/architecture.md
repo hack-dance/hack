@@ -12,42 +12,34 @@ machine-local generated files that Hack keeps ignored.
 
 ## System overview
 
+The Compose view separates executable responsibilities: the CLI controls the engine,
+while DNS resolves proxy addresses, Caddy proxies requests and the optional daemon
+reads runtime state for cached queries.
+
 ```mermaid
 ---
-title: Hack on one developer machine
+title: Compose container responsibilities
 ---
-flowchart LR
-  Agent["Coding agent"] -->|"same CLI, --json"| CLI["hack CLI"]
-
-  subgraph Project["Project (.hack/ in the repo)"]
-    direction TB
-    Config["Compose file,<br/>config, env YAML"]
-    Services["Service containers"]
-    Helpers["Host helpers<br/>(tunnels, hooks)"]
-    Config -->|"Compose backend"| Services
-    Config -->|"lifecycle"| Helpers
-  end
-
-  subgraph Global["Global infrastructure (~/.hack)"]
-    direction TB
-    Caddy["Caddy proxy<br/>TLS + routing"]
-    CoreDNS["CoreDNS"]
-    Logs["Alloy → Loki → Grafana"]
-    Hackd["hackd (optional)"]
-  end
-
-  CLI -->|"hack up"| Config
-  CLI -->|"hack global install"| Global
-  Services -->|"labels"| Caddy
-  Services -->|"stdout/stderr"| Logs
-  CoreDNS -.->|"*.hack.local → Caddy"| Services
-  Hackd -.->|"docker events"| Services
-  Caddy -->|"https://myapp.hack.local"| Browser["Browser"]
-  Logs -->|"https://logs.hack.local"| Browser
-
-  classDef idle stroke-width:1.6px
-  class Hackd idle
+C4Container
+  Container_Boundary(local, "Local machine") {
+    Container(cli, "Hack CLI", "Bun", "Project commands")
+    Container(engine, "Compose engine", "Docker", "Container runtime")
+    Container(services, "Project services", "Containers", "Application workloads")
+    Container(proxy, "Caddy proxy", "Caddy", "TLS and routing")
+    Container(dns, "Container DNS", "CoreDNS", "Local hostnames")
+    Container(daemon, "Optional daemon", "hackd", "Runtime cache")
+  }
+  Rel(cli, engine, "Starts services")
+  Rel(engine, services, "Runs")
+  Rel(proxy, services, "Proxies HTTP")
+  Rel(dns, proxy, "Resolves names to")
+  Rel(daemon, engine, "Inspects runtime")
+  UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
 ```
+
+C4 containers here mean executable units, not only Docker containers. The CLI and
+optional daemon run on the host; Caddy and CoreDNS belong to global setup. The
+native backend has its own explicitly prepared routing path, described below.
 
 - **Caddy** terminates TLS with a locally trusted CA and routes
   `https://<service>.<project>.hack.local` to containers by their Docker labels.
@@ -114,7 +106,7 @@ in these docs does not imply native support.
 - Global scope (`~/.hack`)
   - Caddy proxy on 80/443, routing by Docker labels
   - CoreDNS for container DNS (`*.hack.local` and legacy `*.hack` → Caddy)
-  - macOS DNS helper: dnsmasq plus `/etc/resolver` entries pointing at Caddy
+  - macOS DNS helper: dnsmasq plus `/etc/resolver` entries selecting the local resolver
   - Logging stack (Alloy → Loki → Grafana)
   - Global config `hack.config.json` and the project registry `projects.json`
   - Networks `hack-dev` (ingress) and `hack-logging`
@@ -136,39 +128,9 @@ declared in `.hack/hack.config.json` run around the services, inside a dedicated
 tmux or zellij session that Hack owns and can tear down. The exact ordering is in
 [Lifecycle](lifecycle.md).
 
-```mermaid
----
-title: hack up and hack down
----
-stateDiagram-v2
-  direction TB
-  [*] --> ResolveEnv : hack up
-  ResolveEnv --> UpBefore : env contract ok
-  UpBefore --> Processes : hooks done
-  Processes --> ComposeUp : session owned
-  ComposeUp --> UpAfter : services started
-  UpAfter --> Running
-  state failure <<choice>>
-  UpBefore --> failure : hook failed
-  ComposeUp --> failure : compose failed
-  UpAfter --> failure : hook failed
-  failure --> Failed : own session removed
-  Running --> DownBefore : hack down
-  DownBefore --> ComposeDown : hooks done
-  DownBefore --> Running : hook failed, abort
-  ComposeDown --> StopProcesses : services stopped
-  StopProcesses --> DownAfter : session killed
-  DownAfter --> [*]
-  note right of Processes
-    Adopts a session only when its
-    ownership token, definition hash
-    and live windows all match.
-  end note
-  classDef live stroke-width:1.6px
-  classDef fail stroke-width:1.6px
-  class Running live
-  class Failed fail
-```
+The [lifecycle outcome and phase diagrams](lifecycle.md#runtime-behavior) distinguish
+failed startup, owned helper cleanup and an unconfirmed stop. They describe
+whole-project Compose operations; native limits and service-scoped commands differ.
 
 Lifecycle state is checkout-local at `.hack/.internal/lifecycle/state.json`, one
 entry per instance. A random token mirrored in the mux session and in that state
@@ -188,32 +150,9 @@ Compose, host commands and lifecycle processes. Nothing decrypted rests on disk:
 the generated Compose override holds only `${HACK_ENV_...}` references and the
 values travel through the `docker compose` process environment.
 
-```mermaid
----
-title: Env resolution order
----
-flowchart LR
-  subgraph Committed["Committed with the repo"]
-    direction TB
-    D["hack.env.default.yaml"] --> O["hack.env.&lt;overlay&gt;.yaml<br/>(--env)"]
-  end
-  subgraph Local["Machine-local overrides"]
-    direction TB
-    PL["primary checkout<br/>hack.env.local.yaml"] --> POL["primary checkout<br/>hack.env.&lt;overlay&gt;.local.yaml"]
-    POL --> L["this checkout<br/>hack.env.local.yaml"]
-    L --> OL["this checkout<br/>hack.env.&lt;overlay&gt;.local.yaml"]
-  end
-  subgraph Scope["Scope"]
-    direction TB
-    G["values.global"] --> S["values.&lt;service&gt;"]
-    S --> H["host values<br/>(host exec, hooks)"]
-  end
-  O --> PL
-  OL --> G
-  H --> R["Effective env"]
-  classDef idle stroke-width:1.6px
-  class PL,POL idle
-```
+The [environment resolution diagram](env.md#merge-rules) applies scopes inside each
+ordered file layer. A later file wins even when it supplies a global value over a
+service value from an earlier file; host scope is not delivered to containers.
 
 Later layers win. The primary-checkout layers apply only in a linked git worktree,
 which also inherits the primary checkout's secret key through the shared git
@@ -239,9 +178,12 @@ can then take the reserved address. `hack doctor` (`proxy network`) and
 takes the proxy stack down, moves any project container off the reserved
 addresses, and starts the stack again.
 
+A container resolves its peer through CoreDNS and receives the HTTPS response
+through Caddy, which forwards the request to the peer's service port.
+
 ```mermaid
 ---
-title: A request from one service to another
+title: Container HTTPS request
 ---
 sequenceDiagram
   autonumber
@@ -250,40 +192,54 @@ sequenceDiagram
   participant Caddy
   participant Api as api container
   Web->>DNS: resolve api.myapp.hack.local
-  DNS-->>Web: A record = Caddy IP
-  Web->>Caddy: HTTPS request (local CA trusted)
-  Caddy->>Api: route by container labels
-  Api-->>Web: response
+  DNS-->>Web: Proxy address
+  Web->>Caddy: HTTPS with verification
+  Caddy->>Api: Route by labels
+  Api-->>Caddy: Service response
+  Caddy-->>Web: HTTPS response
 ```
 
 ## Workflow: init, up, logs
 
+For detached Compose startup, the CLI owns sequencing while proxy discovery and the optional daemon
+observe the engine independently rather than coordinating the start.
+
 ```mermaid
 ---
-title: First run of a project
+title: Compose startup responsibilities
 ---
-sequenceDiagram
-  autonumber
-  participant User
-  participant CLI as hack
-  participant Docker
-  participant Caddy
-  participant Loki
-  User->>CLI: hack init
-  CLI-->>User: wrote .hack/ files
-  User->>CLI: hack up --detach
-  CLI->>CLI: resolve env, run up.before hooks
-  CLI->>Docker: docker compose up -d
-  Docker->>Caddy: labels → routes
-  Docker->>Loki: logs via Alloy
-  CLI-->>User: https://myapp.hack.local
-  User->>CLI: hack logs
-  alt compose backend
-    CLI->>Docker: docker compose logs
-  else loki backend
-    CLI->>Loki: LogQL query or tail
+swimlane-beta TB
+  subgraph CLI
+    Env[Resolve env]
+    Before[Before hooks]
+    Processes[Host processes]
+    Up[Start detached]
+    After[After hooks]
+    Verify[Check states]
+    Env --> Before --> Processes --> Up --> After --> Verify
   end
+  subgraph Engine
+    Services[Containers]
+  end
+  subgraph Proxy
+    Labels[Read labels]
+    Routes[Routes]
+    Labels --> Routes
+  end
+  subgraph Daemon
+    Events[Events]
+    Cache[Cache]
+    Events --> Cache
+  end
+  Up --> Services
+  Services -->|labels| Labels
+  Services -->|events| Events
 ```
+
+The daemon lane is optional. Observer arrows indicate metadata and event inputs,
+not a readiness acknowledgement: successful startup does not prove that a browser
+can reach a route. After hooks run before service-state verification; an after-hook
+failure ends startup there (see [Lifecycle](lifecycle.md#hack-up)).
 
 ## Branch instances
 
@@ -376,6 +332,205 @@ never autostart it either, because autostart would run the stable daemon on PATH
 `hack doctor --fix` under those launchers skips its hackd repair and names the
 command to run yourself. On macOS the launchd service belongs to the default
 `~/.hack` root only; an isolated `HACK_HOME` runs hackd directly.
+
+### Keeping hackd running
+
+`hack daemon start` runs hackd in its own session and process group, with its
+output going only to `~/.hack/daemon/hackd.log`. hackd's local API has no
+authentication, so before it binds its sockets hackd makes `~/.hack/daemon`
+owner-only (`0700`), and it sets each socket to `0600`. It changes the mode only
+after checking that `daemon` is a real directory you own (not a link) under
+directories others cannot replace, and it refuses to start when the directory
+cannot be made private. Closing the terminal, or an agent
+harness killing the process group that ran the command, does not stop it. It does
+not survive logout or reboot. For that, install it as a login service with
+`hack daemon install`:
+
+- **macOS**: a launchd agent (`~/Library/LaunchAgents/dance.hack.hackd.plist`).
+- **Linux**: a systemd user unit, `hackd.service`, written to
+  `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`, enabled for `default.target` and
+  started with `systemctl --user`. `hack daemon uninstall` stops, disables and
+  removes it.
+
+On Linux, once the unit is installed, `hack daemon start` and `hack daemon stop`
+go through `systemctl --user`, so a single manager owns the socket and pid file.
+`stop` goes through systemd even when the pid file is missing or stale, which also
+cancels a restart systemd has scheduled after a crash. When systemd runs or is
+about to restart `hackd.service` but the managed unit file is gone (or the unit
+is loaded from another directory), `stop` refuses and prints the
+`systemctl --user` commands to review and stop it, instead of reporting hackd as
+stopped. `uninstall` does the same in that case instead of reporting
+that nothing was installed. If systemd cannot report the unit's state at all (the query
+fails or times out), both refuse in the same way: only a unit systemd reports
+as inactive or not found counts as nothing to do. `start` and `stop` act on the unit only when its effective environment
+serves the shell's Hack home. A unit that serves another Hack home is left alone:
+`start` starts this home's hackd directly (its socket, pid file and lock live in
+this home's `daemon/` directory), and `stop` stops only this home's own hackd.
+When the Hack home cannot be read with certainty (for example an
+`EnvironmentFile=`, an `ExecSearchPath=`, a `PassEnvironment=` naming
+`HACK_HOME`, `HOME` or `PATH`, a relative `HOME`, or an escaped quote or
+backslash in `Environment=`), both exit 1 and print the `systemctl --user`
+command to use by hand. The effective environment is built the way systemd
+builds it: the user manager's environment, then the unit's `Environment=`
+(drop-ins included), then `UnsetEnvironment=` last; with no `HOME` left, the
+account's home from the password database is used, as hackd does. `start`, `stop` and `clear` remove stale pid and socket
+files only while they are still stale: the socket is removed only if, right
+before removal, the pid file is still the stale one, the socket is the same file
+that was checked, and nothing answers on it. So they never delete the files of a
+daemon that another start or a systemd restart just wrote. `install` stops a
+hackd that was started directly and lets systemd start it.
+
+Every signal Hack sends to a hackd goes through one proof, whether it comes from
+`stop`, `restart`, `install`, replacing an incompatible hackd, or the sweep for
+untracked ("orphan") daemons in `start` and `clear`. The proof needs all of:
+
+- the exact argument list and the resolved executable (Linux `/proc`, macOS
+  `KERN_PROCARGS2` and `proc_pidpath`), never `ps` text. The executable must be
+  a Hack binary (named `hack` or `hack-*` once symlinks are resolved) or `bun`
+  running this checkout's entry file, and the arguments must be a
+  `daemon start --foreground` in any option order. A script named `hack` that
+  runs another interpreter does not count;
+- an open socket in this `HACK_HOME`'s daemon directory;
+- a start time that does not change while it is checked (clock ticks on Linux).
+
+The whole proof runs again immediately before each signal, SIGKILL included, and
+must give the same executable, arguments and start time, so a reused pid or a
+process that `exec`ed another program is never signalled. A process that fails
+the proof is reported with its pid and left running. When a proven hackd cannot
+be confirmed stopped, `stop` exits 1 and says it is still running, and `restart`,
+`start` and the `install` handover stop there. A pid file that survived an unclean
+shutdown and now names another program does not count as a running hackd. If
+systemd runs an incompatible hackd from a unit that points at another `hack`,
+`hack daemon status`, `hack doctor` and `hack daemon restart` all point to
+`hack daemon install`, because a restart would start the same version again.
+`install` reports success only when systemd runs the hackd that answers. The unit:
+
+- runs `<hack> daemon start --foreground`, where `<hack>` is the absolute path of
+  the `hack` found on `PATH` at install time. Symlinks are kept as they are, so a
+  stable link such as `~/.local/bin/hack` keeps working when an upgrade moves the
+  real binary;
+- restarts hackd after a crash (`Restart=on-failure`), at most five times a
+  minute, but not after `hack daemon stop`. After a crash loop,
+  `hack daemon start` clears the failed state before starting it again;
+- keeps systemd's default `KillMode=control-group`: stopping or restarting the
+  service also stops the processes hackd started;
+- sends stderr to the journal (`journalctl --user -u hackd.service`); hackd's own
+  log stays in `~/.hack/daemon/hackd.log`.
+
+`hack daemon install` writes the whole unit file. Before writing it, it makes
+sure `$XDG_CONFIG_HOME`, `systemd/` and `systemd/user/` are directories you own
+that your group and other users cannot write: it creates them `0755` whatever
+the umask and removes group or other write from ones you own, and it refuses
+(with the `chmod` to run) when that is not possible, because whoever can replace
+the enabled unit runs code as you at the next login. For the same reason,
+`install` and `start` check `hackd.service.d/` and `service.d/`: every drop-in
+there must be a file you own that others cannot write, or they refuse to use the
+unit until you review it. `start` (and autostart) also runs the unit only when
+`hackd.service` is a regular file you own that others cannot write, in
+directories that pass the same check; a symlinked unit is refused. A unit or
+drop-in file that others could write is refused, not repaired, since its contents
+may already be someone else's; `install` replaces such a unit file with a fresh
+one. The
+directories above `$XDG_CONFIG_HOME`, up to `/` and through any symlinks, must not
+be writable by your group or others either (Hack refuses and prints the
+`chmod go-w` to run; it does not change your home directory). Right before
+it starts or restarts the unit, Hack asks systemd which files it loads
+(`FragmentPath` and `DropInPaths`, which cover every user-unit load directory,
+`$XDG_DATA_HOME` included): the fragment must be the unit Hack manages, and
+every drop-in and its directory must belong to you or root and not be writable
+by others. Every directory systemd loads user units from (its `UnitPath`) gets
+the same check, even when it is empty or does not exist yet (then its nearest
+existing parent is checked), because another account that can write one could
+add a drop-in for the next login. The program the unit runs gets the same check when you install the
+unit and before each start: the `hack` binary, the file it resolves to, and every
+directory above them must belong to you or root and not be writable by your
+group or others (sticky directories such as `/tmp` excepted). Hack does not
+repair these, even inside `HACK_HOME`: a program or directory others could
+write may already have been changed, so it refuses and prints the
+`chmod go-w` to run. Another regular user's program is never trusted; a file
+owned by a system account (below `UID_MIN`) is accepted only in a root-owned
+directory nobody else can write, as package managers install setuid tools.
+
+What systemd runs for the unit is an allowlist: exactly one `ExecStart` running
+`<hack> daemon start --foreground`, and no other `Exec*` setting. The program
+must be a hack executable: named `hack` or `hack-*`, resolving to a binary named
+the same way or to a `#!` launcher whose interpreter is an absolute path that
+passes the same ownership check (with no argument, or `env <program>`, which
+is looked up through the checked `PATH`). Any other program, such as an interpreter
+that would run a script named `daemon`, is unknown, and the unit is left as it is. A drop-in that
+adds `ExecStartPre=`, `ExecStop=`, an interpreter wrapper or a second
+`ExecStart` makes `install` and `start` refuse. `hack daemon stop` and
+`hack daemon uninstall` first make the same unit-file, load-directory and drop-in checks
+as `start` (a stop also starts units a drop-in names, such as `OnSuccess=`),
+and refuse while an `ExecStop`/`ExecStopPost` hook is loaded, because stopping
+runs it (systemd runs stop hooks even after `systemctl kill`); remove it and run `systemctl --user daemon-reload` first. A
+unit whose `hack` was removed can still be stopped and uninstalled. `install`
+also refuses to enable a unit that a drop-in points at another `HACK_HOME`. Before it
+writes anything, `install` also refuses to replace a unit systemd is running
+(wherever it was loaded from) that serves
+another Hack home, or whose Hack home it cannot read, since its restart would
+stop that daemon. hackd runs helpers such as `docker` and `git` through its
+`PATH`, so every directory on the service's `PATH` (the one Hack writes at install,
+and the effective one the service gets before each start, including a `PATH`
+inherited from the user manager) must not let other users
+add or create programs there either. Variables that load code before the checked program
+(`LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `SHELLOPTS`, `NODE_OPTIONS`,
+`BUN_OPTIONS` and similar) are removed by an `UnsetEnvironment=` line in the unit
+Hack writes, so values from the user manager's environment never reach hackd,
+at login either. If a drop-in brings one back, `install` and `start` refuse. A unit
+that runs in another file namespace (`RootDirectory=`, `RootImage=`, bind mounts,
+images) is refused as well, because the paths Hack checked on the host need not
+be what systemd runs there. Put local settings, such as
+`DOCKER_HOST` for rootless Docker, in a drop-in (`systemctl --user edit hackd`).
+`install` writes the `hack` it was run from, and warns when that path is in a
+temporary directory, a package cache or a source checkout.
+
+`hack daemon start` reads `ExecStart` only when it is a single plain absolute
+path. A prefix (`-`, `@`, `:`, `+`, `!`), a specifier such as `%h`, an escape or
+several `ExecStart=` lines make the program unknown: `start` leaves that unit as
+it is and says so, and `hack daemon status` and `hack doctor` report it. An unknown
+program is never treated as a missing one.
+
+`hack daemon start` and autostart never rewrite a unit whose program still exists,
+even when the `hack` on the current `PATH` is a different one: they say so, and
+`hack daemon install` switches the service. If systemd runs an incompatible
+hackd from such a unit, `start` reports it instead of replacing it, because
+systemd would only start the same version again. Only when the unit's program no
+longer exists may `start` repair it, and only to a durable location: the path
+and the file it resolves to must both be outside temporary directories, package
+caches and source checkouts. The unit keeps the path as written. It then replaces just the
+program in `ExecStart` and keeps every other line, including your edits;
+otherwise it reports the problem and asks you to run `hack daemon install`. If an
+earlier `daemon-reload` failed (`NeedDaemonReload=yes`), `start` and `install`
+reload before they start. Other edits to the file show up as drift in
+`hack daemon status` and `hack doctor`, and `hack daemon install` replaces them.
+
+A systemd user manager runs only while you have a login session, unless linger is
+on. `hack daemon install` and `hack daemon status` report linger. When it is off,
+they print the command, `loginctl enable-linger`, which keeps your user services
+running without a session and starts them at boot. Hack never turns linger on for
+you.
+
+Where `systemctl --user` cannot be used (no systemd, a container, WSL without
+systemd, or an SSH session with no user bus), `hack daemon install` explains why,
+writes nothing, starts hackd directly instead and exits 1.
+
+`hack daemon status` reports who manages hackd: `managed_by` (`launchd`,
+`systemd` or `null`) and a `service` object in `--json`, and a `systemd:` line in
+the text output on Linux. The text and JSON give the same next step. On Linux,
+`hack doctor` adds a `daemon service` check. It warns when the unit is missing,
+has drifted or is disabled (fix: `hack daemon install`); when the unit has failed,
+or the running hackd was started directly rather than by systemd (fix:
+`hack daemon restart`); or when linger is off. `hack doctor --fix` offers
+`hack daemon install` only interactively, because it writes outside the project
+and enables a login service. It skips the install without a TTY, and also skips it
+under the same conditions that skip the hackd repair. Without a TTY, or when you
+decline the install, its hackd repair may still start hackd, but it never writes
+or reloads the unit (`hack daemon` runs with `HACK_DAEMON_SERVICE_READ_ONLY=1`).
+`hack daemon uninstall` exits 1 and says what it already did when the final
+`daemon-reload` fails. The unit belongs to the
+default `~/.hack` root: an isolated `HACK_HOME` or `HACK_SYSTEMD_DISABLE=1` turns
+systemd management off (`HACK_SYSTEMD_ALLOW_ISOLATED_HOME=1` opts in).
 
 ## Native backend internals
 

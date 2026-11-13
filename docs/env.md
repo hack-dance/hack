@@ -70,7 +70,8 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.internal/`
 - `.branch/`
 - `.env`
-- `.env.*` (legacy plaintext overlays such as `.env.qa`)
+- `.env.*` (legacy plaintext overlays such as `.env.qa`; `.env.example`,
+  `.env.sample`, `.env.template` and `.env.dist` remain visible as shared templates)
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
@@ -78,6 +79,11 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `tickets/` (retained only to contain retired machine-local ticket caches during upgrades)
 
 How it is maintained:
+
+Tracked legacy overlays are shared project inputs. `hack doctor --fix` leaves
+their index entries and tracked templates/backups alone. Run
+`hack doctor --migrate-env-config` to preserve overlay values before considering
+removal; committing an automatic index removal would delete teammates' copies.
 
 - created by `hack init` for a new project, and refreshed when you write
   machine-local env overrides (`hack env set --local`, `hack env hydrate`)
@@ -506,6 +512,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose exec and native-runtime exec (Compose-file and authored native projects) warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
 | `hack env list` | `--env`, `--service` | Per invocation, read-only metadata; values require `--show-values` in a terminal. | Not needed. | Reads files; no runtime required. |
 | `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
+| `hack env protect` | `--env`, `--service` | Per invocation; lists plaintext names or encrypts chosen keys in their original scopes and layers. Omitted `--env` covers all overlays. | Runtime values stay the same. | Requires YAML layers; mutates this checkout only. |
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
 | `hack env apply` | `--env`, `--service` | Runs `hack restart <service>` with the same `--env`, recreating one service. | This is the refresh path for one service. | `--service` is required. |
 | `hack env add` | `--env`, `--service` | Selects the file written (`hack.env.<name>.yaml`, or the base file for `base`/`default`/`none`; `--local` writes the local variant). | Running workloads keep old values until `hack env apply` or `hack restart`. | Mutates only env files. |
@@ -594,6 +601,35 @@ hack env apply --service api --env qa
 `env list` prints names, scopes, source layers and whether each value is set. It hides **all** values, including plaintext entries migrated from legacy dotenv files. JSON omits the `value` field and includes `has_value`. Modern listings do not acquire a decryption key. Legacy backend inspection may require backend access to determine availability.
 
 `--show-values` reveals resolved values only when both stdin and stdout are terminals and interaction is enabled. The older `--show-secrets` spelling is an alias. Redirecting or piping the output refuses the reveal, including with `--json`; ordinary `--json` is metadata only. Use `env get KEY` for an explicit single-value read in a script.
+
+This prevents accidental exposure in logs and transcripts; it is **not an access
+control against a local process**. A process can open a pseudo-terminal or call
+`env get` for each key. Both commands run with the caller's filesystem and key
+access. Treat explicit reads as plaintext sinks.
+
+### Updating scripts and lifecycle hooks
+
+- Replace non-interactive `env list --json --show-secrets` with explicit
+  `hack env get KEY` reads for the keys the script needs. Keep the same `--env`
+  and `--service` selection; do not log the resulting plaintext. For availability
+  checks, use ordinary `env list --json` and `has_value` instead of `value`.
+- Send secret writes through `--value-stdin` or the hidden terminal prompt;
+  positional values with `--secret` are refused.
+- Legacy lifecycle hooks and processes now receive **only global contract
+  values**, rather than every service's values. Put only the values those hooks
+  actually need in global scope. Service-scoped values remain with their service.
+- Stop parsing the old tab column positions. Modern text rows are
+  `KEY<TAB>SCOPE<TAB>set<TAB>LAYER`, with a fifth value column only on explicit
+  reveal. Legacy rows keep their metadata columns, replace the seventh value
+  column with `set`/`unset` by default, and add the source layer as column eight.
+  Prefer JSON metadata or an explicit single-key read to positional parsing.
+- Run `hack env protect` to list plaintext names, then choose keys to encrypt in
+  place. This covers all overlays unless `--env` narrows it; it does not erase
+  legacy compatibility copies or make ordinary config entries secret by itself.
+
+The existing `env set KEY value` path can still replace an encrypted entry with
+plaintext when `--secret` is omitted; HACK-2173
+tracks that follow-up. Use `--secret --value-stdin` when updating secrets.
 
 Read one value explicitly:
 

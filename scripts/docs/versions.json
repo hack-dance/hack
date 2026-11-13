@@ -4618,7 +4618,7 @@
       },
       {
         "slug": "native/log-follow",
-        "title": "Follow native logs (under verification)",
+        "title": "Follow native service logs (under verification)",
         "sourceRevision": "b21c3b189841c1a3cbb8af2b76414fa347dc7057",
         "sourceLabel": "v5.0.0-next.16 under verification",
         "sourceFile": "docs/reference/native-authored-commands.md"

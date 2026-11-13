@@ -26,9 +26,11 @@ generation; it does not switch to a replacement after restart.
 | Ctrl-C, exit 130 | Stops the reader only; the project keeps running. |
 | Stream EOF with a confirmed stop/removal, exit 0 | The selected service's read has ended. |
 | `native_log_stopped_idle`, exit 1 | The stopped service's stream stayed open for five idle seconds; its final tail may be incomplete. |
+| `native_log_stream_uncertain` | Transport ended without proof of a confirmed service stop. |
 | `native_log_container_restarted` | A different start generation was observed; start a new follower. |
 | `native_log_selection_changed` | The saved selection or readiness changed; it does not wait for startup. |
 | `native_log_tty_unsupported` | Following a TTY-configured service is refused. |
+| Output pipe closes, exit 0 | Stops the reader quietly, for example when piping to `head -1`. |
 
 The reader holds no mutation lease and does not reserve the lifecycle lock
 against `up`, `down` or `restart`. No stream result grants cleanup authority.

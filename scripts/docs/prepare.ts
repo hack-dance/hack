@@ -100,9 +100,16 @@ async function rewriteLinks(content: string, source: string): Promise<string> {
           continue;
         }
         const replacement = await rewriteTarget(target, source);
+        const prefix = match[1] ?? "";
+        // Repository blob pages are navigable sources, not browser image assets.
+        // Keep the source available without publishing a broken image embed.
+        const publishedPrefix =
+          prefix.startsWith("!") && external.test(replacement)
+            ? `View image: ${prefix.slice(1)}`
+            : prefix;
         rewritten = rewritten.replace(
           match[0],
-          `${match[1]}${replacement}${match[3]}`
+          `${publishedPrefix}${replacement}${match[3]}`
         );
       }
     }

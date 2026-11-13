@@ -23,7 +23,7 @@ Each prerelease has an immutable tag, `v5.0.0-next.N`. Download the bootstrap
 from the release you want and run it:
 
 ```sh
-curl --fail --location --proto '=https' --tlsv1.2 \
+curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
   https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh

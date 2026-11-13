@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 
 import { isCandidateRun } from "../daemon/client.ts";
 import { quoteShellWord } from "./logs.ts";
+import { withProcessDeadline } from "./process-deadline.ts";
 import {
   readProjectsRegistryStrict,
   resolveProjectsRegistryPath,
@@ -765,10 +766,26 @@ async function inspectGlobalSecretStore(opts: {
     };
   }
   if (state.kind === "opens") {
+    // A reader may name its own key file: it must open the store too.
+    const readers = await readerKeyStates({
+      storePath: location.storePath,
+      globalKeyPath: location.keyPath,
+      globalState: state,
+      env: opts.env,
+    });
+    if (readers.failing.length > 0) {
+      return {
+        ...base,
+        status: "blocker",
+        summary: `The global secret store opens with ${state.source === "env" ? "HACK_SECRETS_FILE_KEY" : "its key file"}, but not with the key ${readers.failing.join(", ")} ${readers.failing.length === 1 ? "selects" : "select"} (their own encryptedFile.keyPath).`,
+        args: ["doctor"],
+        action: `Give ${readers.failing.join(", ")} the key that opens the store, or remove their own keyPath to use the global key.`,
+      };
+    }
     return {
       ...base,
       status: "ok",
-      summary: `The global secret store opens with ${state.source === "env" ? "HACK_SECRETS_FILE_KEY from this shell" : "its key file"}.${retiredNote}`,
+      summary: `The global secret store opens with ${state.source === "env" ? "HACK_SECRETS_FILE_KEY from this shell" : "its key file"}${readers.opening.length > 0 ? `, and with the key of every project that reads it (${readers.opening.join(", ")})` : ""}.${retiredNote}`,
       args: null,
       action: null,
     };
@@ -1034,11 +1051,10 @@ async function probe<T, F>(
   fallback: F,
   deadline: number
 ): Promise<T | F> {
+  const limit = Math.min(deadline, Date.now() + PROBE_TIMEOUT_MS);
   try {
-    const result = await withDeadline(
-      run(),
-      Math.min(deadline, Date.now() + PROBE_TIMEOUT_MS)
-    );
+    // Every child process the probe starts ends by the probe's own limit.
+    const result = await withDeadline(withProcessDeadline(limit, run), limit);
     return result === "timeout" ? fallback : result;
   } catch {
     return fallback;

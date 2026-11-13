@@ -651,6 +651,33 @@ test("a project that names its own working key is not blocked by a broken global
   expect(JSON.stringify(blocked)).not.toContain(STORE_KEY);
 });
 
+test("a reader whose own key does not open the store blocks even when the global key works", async () => {
+  // Codex review: reader keys were checked only when the global key failed.
+  const reader = await liveProject("app-wrong-own-key");
+  await writeRegistry([reader]);
+  const { storePath } = await globalStore({ reader });
+  const ownKey = join(root, "wrong-own.key");
+  await writeFile(ownKey, "synthetic-wrong-own-key\n", { mode: 0o600 });
+  await chmod(ownKey, 0o600);
+  await writeFile(
+    join(reader.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-wrong-own-key",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath: ownKey },
+        },
+      },
+    })}\n`
+  );
+  const report = await check(healthyProbes());
+  const store = report.machine.find((f) => f.id === "secret-store");
+  expect(store?.status).toBe("blocker");
+  expect(store?.summary).toContain("app-wrong-own-key");
+  expect(report.ready).toBe(false);
+});
+
 test("the global store's states: no store, an env key, a keychain not asked", async () => {
   const reader = await liveProject("app-reader");
   await writeRegistry([reader]);
@@ -775,6 +802,51 @@ test("a hanging git leaves the required check incomplete, and its children are e
   }
   expect(await alive()).toEqual([]);
 }, 40_000);
+
+test("a host probe's children end with the probe, not after the report", async () => {
+  // Codex review: the probe deadline stopped waiting but left children.
+  const pids = join(root, "probe-pids");
+  const bin = join(root, "probe-bin");
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(bin, "slow-probe"),
+    `#!/bin/sh\necho "$$" >> '${pids}'\nexec sleep 60\n`,
+    { mode: 0o755 }
+  );
+  await chmod(join(bin, "slow-probe"), 0o755);
+  const { exec } = await import("../src/lib/shell.ts");
+  const started = Date.now();
+  await runUpgradeCheck({
+    cliVersion: "5.0.0-next.17",
+    homeDir: home,
+    budgetMs: 3000,
+    probes: healthyProbes({
+      // A probe that runs a hanging command with no limit of its own.
+      daemon: async () => {
+        await exec([join(bin, "slow-probe")], { stdin: "ignore" });
+        throw new Error("unreachable");
+      },
+    }),
+  });
+  expect(Date.now() - started).toBeLessThan(8000);
+  const until = Date.now() + 3000;
+  const alive = async () =>
+    (await readFile(pids, "utf8").catch(() => ""))
+      .split("\n")
+      .filter((pid) => pid.trim() !== "")
+      .filter((pid) => {
+        try {
+          process.kill(Number(pid), 0);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+  while ((await alive()).length > 0 && Date.now() < until) {
+    await Bun.sleep(200);
+  }
+  expect(await alive()).toEqual([]);
+}, 20_000);
 
 test("candidate commands keep a path with spaces, quotes and ' hack ' intact", async () => {
   const name = "my hack repo's";

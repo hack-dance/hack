@@ -240,6 +240,7 @@ import {
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
+  resolveProjectEnvSharedKeyPath,
   type TrackedEnvMigrationChange,
 } from "../lib/project-env-config.ts";
 import {
@@ -255,6 +256,13 @@ import {
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
+import { resolveFileSecretStorePaths } from "../lib/secret-store.ts";
+import {
+  applySecretsHygieneFixes,
+  inspectSecretsHygiene,
+  type SecretsHygieneFinding,
+  type SecretsHygieneScope,
+} from "../lib/secrets-hygiene.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import {
   type PausableProgress,
@@ -3114,7 +3122,7 @@ async function checkProjectEnvOverlayWarnings({
   return {
     name: "env overlay warnings",
     status: "warn",
-    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack doctor --migrate-env-config" or "hack env add --env ${cfg.defaultEnvConfig} --secret KEY VALUE".`,
+    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack doctor --migrate-env-config" or "<value-source> | hack env add --env ${cfg.defaultEnvConfig} KEY --secret --value-stdin".`,
   };
 }
 
@@ -3559,6 +3567,87 @@ export async function checkHackDirGitignore({
   }
 }
 
+const SECRETS_HYGIENE_CHECK = "secrets hygiene";
+
+/**
+ * What the "secrets hygiene" section covers from `startDir`: the project, when
+ * there is a legacy (not adopted) one, its shared key, and the encrypted-file
+ * stores the global and project configuration name. Reads configuration and
+ * git only.
+ */
+async function resolveSecretsHygieneScope(opts: {
+  readonly startDir: string;
+}): Promise<SecretsHygieneScope> {
+  const project = await findDoctorLegacyProjectContext(opts.startDir).catch(
+    () => null
+  );
+  const stores = new Map<string, { storePath: string; keyPath: string }>();
+  for (const projectDir of [undefined, project?.projectDir]) {
+    const paths = await resolveFileSecretStorePaths({ projectDir }).catch(
+      () => null
+    );
+    if (paths) {
+      stores.set(`${paths.storePath}\0${paths.keyPath}`, paths);
+    }
+  }
+  return {
+    project: project
+      ? { projectRoot: project.projectRoot, projectDir: project.projectDir }
+      : null,
+    sharedKeyPath: project
+      ? await resolveProjectEnvSharedKeyPath({
+          projectRoot: project.projectRoot,
+        }).catch(() => null)
+      : null,
+    stores: [...stores.values()],
+    storeKeyFromEnvironment:
+      (process.env.HACK_SECRETS_FILE_KEY ?? "").trim().length > 0,
+  };
+}
+
+/**
+ * Secret-bearing files at rest for the project and the global Hack home
+ * (HACK-2165): loose modes, links, tracked or unignored files, leftover
+ * staging copies and terminal-session payloads, and a store whose key is
+ * missing. File names only, never values; `hack doctor --fix` applies the
+ * safe fixes (see `secrets-hygiene.ts`).
+ */
+export async function checkSecretsHygiene(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const findings = await inspectSecretsHygiene(
+    await resolveSecretsHygieneScope(opts)
+  );
+  return { name: SECRETS_HYGIENE_CHECK, ...describeSecretsHygiene(findings) };
+}
+
+function describeSecretsHygiene(findings: readonly SecretsHygieneFinding[]): {
+  readonly status: "ok" | "warn" | "error";
+  readonly message: string;
+} {
+  if (findings.length === 0) {
+    return {
+      status: "ok",
+      message:
+        "Env files, keys and stores are private, ignored by git, and no staging copies are left behind",
+    };
+  }
+  const fixable = findings.some((finding) => finding.fix !== null);
+  return {
+    status: findings.some((finding) => finding.status === "error")
+      ? "error"
+      : "warn",
+    message: [
+      ...findings.map((finding) => finding.message),
+      ...(fixable
+        ? [
+            "Run 'hack doctor --fix' to tighten modes, add the ignore entries and remove Hack's leftovers; it never deletes a store, a key or a file you wrote.",
+          ]
+        : []),
+    ].join("\n"),
+  };
+}
+
 const COMPOSE_ENV_AT_REST_CHECK = "compose env at rest";
 
 /**
@@ -3652,6 +3741,15 @@ async function runProjectChecks(opts: {
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
       durationMs: 0,
     });
+    // The global Hack home is covered without a project.
+    results.push(
+      await runCheck(
+        s,
+        SECRETS_HYGIENE_CHECK,
+        () => checkSecretsHygiene({ startDir }),
+        { timeoutMs: 10_000 }
+      )
+    );
     return results;
   }
   if (dockerOk) {
@@ -3730,6 +3828,14 @@ async function runProjectChecks(opts: {
       checkComposeEnvOverrideAtRest({ startDir })
     )
   );
+  results.push(
+    await runCheck(
+      s,
+      SECRETS_HYGIENE_CHECK,
+      () => checkSecretsHygiene({ startDir }),
+      { timeoutMs: 10_000 }
+    )
+  );
   if (dockerOk) {
     results.push(
       await runCheck(
@@ -3782,6 +3888,12 @@ async function runAdoptedProjectChecks(opts: {
     ),
     await runCheck(progress, COMPOSE_ENV_AT_REST_CHECK, () =>
       checkComposeEnvOverrideAtRest({ startDir: opts.startDir })
+    ),
+    await runCheck(
+      progress,
+      SECRETS_HYGIENE_CHECK,
+      () => checkSecretsHygiene({ startDir: opts.startDir }),
+      { timeoutMs: 10_000 }
     ),
     ...adoptedProjectNotApplicableResults().map((result) => ({
       ...result,
@@ -4041,6 +4153,7 @@ async function runDoctorFix(opts: {
     await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
+  await maybeFixSecretsHygiene({ startDir: opts.startDir });
   const serviceWrites = await maybeInstallDaemonService();
   await maybeRepairHackd({ serviceWrites });
   // Env migration changes project files only, so it runs before the Docker
@@ -4867,6 +4980,28 @@ async function maybeUntrackGeneratedFiles(opts: {
  * never write it, and `hack init` refuses or rescaffolds an existing project.
  * Lines outside the managed markers are kept. An unreadable file is left alone.
  */
+/**
+ * `hack doctor --fix` step: applies the "secrets hygiene" fixes and prints
+ * each change. Safe by construction (modes, ignore entries, Hack's own
+ * leftovers), so it needs no confirmation of its own.
+ */
+async function maybeFixSecretsHygiene(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const findings = await inspectSecretsHygiene(
+    await resolveSecretsHygieneScope(opts)
+  );
+  if (!findings.some((finding) => finding.fix !== null)) {
+    return;
+  }
+  const lines: string[] = [];
+  await applySecretsHygieneFixes({
+    findings,
+    report: (line) => lines.push(line),
+  });
+  note(lines.join("\n"), SECRETS_HYGIENE_CHECK);
+}
+
 async function maybeEnsureHackDirGitignore(opts: {
   readonly startDir: string;
 }): Promise<void> {

@@ -1190,3 +1190,28 @@ function buildEncryptedBackendKeyRecoveryMessage(input: {
 
   return `Missing encrypted backend key${location}. ${recovery} Hack will not fall back to plaintext .hack/.env or ambient process env.`;
 }
+
+/**
+ * The encrypted-file store and key paths the configuration names (global
+ * config, overridden by the project's when `projectDir` is given), resolved
+ * the way the store resolves them. Reads configuration only: never the
+ * store, the key or the keychain. Used by `hack doctor`'s secrets hygiene.
+ */
+export async function resolveFileSecretStorePaths(input: {
+  readonly projectDir?: string;
+}): Promise<{ readonly storePath: string; readonly keyPath: string }> {
+  const controlPlane = await readControlPlaneConfig({
+    projectDir: input.projectDir,
+  });
+  const configured = controlPlane.config.secrets.encryptedFile;
+  return {
+    storePath: resolveConfiguredPath({
+      path: configured.path,
+      projectDir: input.projectDir,
+    }),
+    keyPath: resolveConfiguredPath({
+      path: configured.keyPath ?? DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+      projectDir: input.projectDir,
+    }),
+  };
+}

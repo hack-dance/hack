@@ -1,0 +1,250 @@
+import { afterEach, expect, test } from "bun:test";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { STAGING_LEFTOVER_MIN_AGE_MS } from "../src/lib/private-staging.ts";
+import {
+  applySecretsHygieneFixes,
+  inspectSecretsHygiene,
+  type SecretsHygieneFinding,
+  type SecretsHygieneScope,
+} from "../src/lib/secrets-hygiene.ts";
+import { stageMuxEnvironment } from "../src/mux/private-environment.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+
+const dirs: string[] = [];
+
+afterEach(async () => {
+  for (const dir of dirs.splice(0)) {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const UUID = "0f0e0d0c-0b0a-4908-8706-050403020100";
+const SENTINEL = "synthetic-hygiene-sentinel";
+
+async function git(cwd: string, args: readonly string[]): Promise<void> {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd,
+    env: fixtureGitEnv({
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: cwd,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+    }),
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  expect(await proc.exited).toBe(0);
+}
+
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), "hack-secrets-hygiene-"));
+  dirs.push(root);
+  const projectRoot = join(root, "repo");
+  const projectDir = join(projectRoot, ".hack");
+  const home = join(root, "home");
+  const muxDir = join(root, "mux");
+  await mkdir(projectDir, { recursive: true });
+  await mkdir(home);
+  await mkdir(muxDir);
+  await git(projectRoot, ["init", "-q", "-b", "main"]);
+  await writeFile(
+    join(projectDir, ".gitignore"),
+    ".env\nhack.env.local.yaml\nhack.env.*.local.yaml\n"
+  );
+  await writeFile(join(projectRoot, ".gitignore"), ".hack.secret.key\n");
+  const scope: SecretsHygieneScope = {
+    project: { projectRoot, projectDir },
+    sharedKeyPath: null,
+    stores: [
+      {
+        storePath: join(home, "secrets.enc.json"),
+        keyPath: join(home, "secrets-file.key"),
+      },
+    ],
+    tmpDir: muxDir,
+    storeKeyFromEnvironment: false,
+  };
+  return { root, projectRoot, projectDir, home, muxDir, scope };
+}
+
+async function backdate(path: string): Promise<void> {
+  const old = (Date.now() - STAGING_LEFTOVER_MIN_AGE_MS - 60_000) / 1000;
+  await utimes(path, old, old);
+}
+
+const paths = (findings: readonly SecretsHygieneFinding[]) =>
+  findings.map((finding) => finding.path).sort();
+
+test("a clean project and home report nothing", async () => {
+  const f = await fixture();
+  await writeFile(join(f.projectDir, "hack.env.local.yaml"), "x: 1\n", {
+    mode: 0o600,
+  });
+  expect(await inspectSecretsHygiene(f.scope)).toEqual([]);
+});
+
+test("loose modes on env layers, plaintext env, keys and stores are tightened by --fix", async () => {
+  const f = await fixture();
+  const files = [
+    join(f.projectDir, "hack.env.local.yaml"),
+    join(f.projectDir, ".env"),
+    join(f.projectRoot, ".hack.secret.key"),
+    join(f.home, "secrets.enc.json"),
+    join(f.home, "secrets-file.key"),
+  ];
+  for (const path of files) {
+    await writeFile(path, `${SENTINEL}\n`);
+    await chmod(path, 0o644);
+  }
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(paths(findings)).toEqual([...files].sort());
+  for (const finding of findings) {
+    expect(finding.status).toBe("warn");
+    expect(finding.message).toContain("mode 0644");
+    expect(finding.message).not.toContain(SENTINEL);
+  }
+  const lines: string[] = [];
+  expect(
+    await applySecretsHygieneFixes({ findings, report: (l) => lines.push(l) })
+  ).toEqual({ applied: files.length, skipped: 0 });
+  for (const path of files) {
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    expect(await readFile(path, "utf8")).toBe(`${SENTINEL}\n`);
+  }
+  expect(lines).toHaveLength(files.length);
+  expect(lines.join("\n")).not.toContain(SENTINEL);
+  expect(await inspectSecretsHygiene(f.scope)).toEqual([]);
+});
+
+test("an unignored overlay gets an ignore entry; a tracked layer and a link are errors without a fix", async () => {
+  const f = await fixture();
+  const overlay = join(f.projectDir, ".env.qa");
+  await writeFile(overlay, `QA=${SENTINEL}\n`, { mode: 0o600 });
+  const tracked = join(f.projectDir, "hack.env.qa.local.yaml");
+  await writeFile(tracked, "x: 1\n", { mode: 0o600 });
+  await git(f.projectRoot, ["add", "-f", "--", tracked]);
+  const outside = join(f.root, "outside.env");
+  await writeFile(outside, `OUT=${SENTINEL}\n`, { mode: 0o600 });
+  await symlink(outside, join(f.projectDir, "hack.env.local.yaml"));
+
+  const findings = await inspectSecretsHygiene(f.scope);
+  const byPath = new Map(findings.map((finding) => [finding.path, finding]));
+  expect(byPath.get(overlay)?.fix).toEqual({
+    kind: "ignore",
+    gitignorePath: join(f.projectDir, ".gitignore"),
+    entry: ".env.qa",
+  });
+  expect(byPath.get(tracked)).toMatchObject({ status: "error", fix: null });
+  expect(byPath.get(join(f.projectDir, "hack.env.local.yaml"))).toMatchObject({
+    status: "error",
+    fix: null,
+  });
+
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect(await readFile(join(f.projectDir, ".gitignore"), "utf8")).toContain(
+    "\n.env.qa\n"
+  );
+  // The link and its target are left alone.
+  expect(
+    (await lstat(join(f.projectDir, "hack.env.local.yaml"))).isSymbolicLink()
+  ).toBe(true);
+  expect(await readFile(outside, "utf8")).toBe(`OUT=${SENTINEL}\n`);
+  expect(paths(await inspectSecretsHygiene(f.scope))).toEqual(
+    [tracked, join(f.projectDir, "hack.env.local.yaml")].sort()
+  );
+});
+
+test("old staging leftovers are removed; recent ones and user files are kept", async () => {
+  const f = await fixture();
+  const oldEnvCopy = join(f.projectDir, `..env.${UUID}.tmp`);
+  const oldLayerCopy = join(f.projectDir, `.hack.env.local.yaml.${UUID}.tmp`);
+  const oldKeyCopy = join(f.projectRoot, `..hack.secret.key.${UUID}.tmp`);
+  const oldStoreCopy = join(f.home, `.secrets-file.key.${UUID}.tmp`);
+  const recentCopy = join(f.projectDir, `..env.qa.${UUID}.tmp`);
+  const userFile = join(f.projectDir, `.notes.${UUID}.tmp`);
+  for (const path of [
+    oldEnvCopy,
+    oldLayerCopy,
+    oldKeyCopy,
+    oldStoreCopy,
+    recentCopy,
+    userFile,
+  ]) {
+    await writeFile(path, `${SENTINEL}\n`, { mode: 0o600 });
+  }
+  for (const path of [
+    oldEnvCopy,
+    oldLayerCopy,
+    oldKeyCopy,
+    oldStoreCopy,
+    userFile,
+  ]) {
+    await backdate(path);
+  }
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(paths(findings)).toEqual(
+    [oldEnvCopy, oldLayerCopy, oldKeyCopy, oldStoreCopy].sort()
+  );
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  for (const path of [oldEnvCopy, oldLayerCopy, oldKeyCopy, oldStoreCopy]) {
+    expect(await lstat(path).catch(() => null)).toBeNull();
+  }
+  expect(await readFile(recentCopy, "utf8")).toBe(`${SENTINEL}\n`);
+  expect(await readFile(userFile, "utf8")).toBe(`${SENTINEL}\n`);
+});
+
+test("a store whose key is missing is reported and never deleted", async () => {
+  const f = await fixture();
+  const store = join(f.home, "secrets.enc.json");
+  await writeFile(store, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o644 });
+
+  const findings = await inspectSecretsHygiene(f.scope);
+  const missing = findings.find((finding) =>
+    finding.message.includes("store present, key missing, cannot be read")
+  );
+  expect(missing).toMatchObject({ status: "error", path: store, fix: null });
+  expect(missing?.message).not.toContain(SENTINEL);
+
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect(await readFile(store, "utf8")).toContain(SENTINEL);
+  expect((await stat(store)).mode & 0o777).toBe(0o600);
+
+  const withEnvKey = await inspectSecretsHygiene({
+    ...f.scope,
+    storeKeyFromEnvironment: true,
+  });
+  expect(
+    withEnvKey.some((finding) => finding.message.includes("key missing"))
+  ).toBe(false);
+});
+
+test("a stale terminal-session payload is reported and removed", async () => {
+  const f = await fixture();
+  const payload = await stageMuxEnvironment(
+    { FAKE_KEY: SENTINEL },
+    { tmpDir: f.muxDir }
+  );
+  const root = payload.path.slice(0, payload.path.lastIndexOf("/"));
+  expect(await inspectSecretsHygiene(f.scope)).toEqual([]);
+  const old = (Date.now() - 11 * 60_000) / 1000;
+  await utimes(root, old, old);
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(paths(findings)).toEqual([root]);
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect(await lstat(root).catch(() => null)).toBeNull();
+});

@@ -422,6 +422,33 @@ or `docker compose down` run, so a failed hook, a remote target or a failed Comp
 does not keep it. `hack doctor` reports such a file in its "compose env at rest" check
 (counts only, never values), and `hack doctor --fix` removes it.
 
+### Secrets at rest: the "secrets hygiene" check
+
+`hack doctor` checks the files that hold env values or keys, for the project and for the
+global Hack home, in its "secrets hygiene" section. It names files, never values:
+
+- machine-local layers (`hack.env.local.yaml`, `hack.env.<overlay>.local.yaml`),
+  `.hack/.env` files, the project key (checkout-local and shared) and the encrypted
+  store and its key, when other users can read them, when they are links, or when they
+  belong to another user;
+- those files when git tracks them, or (inside the project) when git does not ignore
+  them;
+- staging copies an interrupted write left behind, and env values staged for a terminal
+  session that never ran (older than 10 minutes);
+- an encrypted store whose key file is missing: "store present, key missing, cannot be
+  read".
+
+`hack doctor --fix` sets the files it reports to mode 0600, adds missing ignore
+entries, and removes Hack's own leftovers, and prints each change. It never deletes a
+store, a key or a file you wrote, and never untracks a file.
+
+Hack writes a file that holds a secret by staging the complete contents first. Those
+staging copies live in a private directory next to the file, `.hack-staging/`, which
+holds a `.gitignore` of `*`, so git never lists anything in it; the next write there
+removes copies older than 10 minutes. A machine-local layer that a write changes, or
+leaves unchanged, is set to 0600 if other users could read it. Commands that read env
+layers warn on stderr about a machine-local file other users can read.
+
 A legacy adoption (`hack config adopt`) pins the override's exact bytes and file
 identity for as long as the adoption exists, and adopted commands never rewrite it. So:
 

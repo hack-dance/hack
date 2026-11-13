@@ -64,6 +64,30 @@ repository but are unsupported; see [unsupported retained surfaces](../extension
 When 5.0.0 ships, `brew upgrade hack` or the release installer moves the stable
 executable to v5. Projects need no changes to keep running on Compose.
 
+## After upgrading, check secrets at rest
+
+Earlier versions could leave env values and keys more exposed than v5 does:
+machine-local env files created by hand or by an older release with mode 0644,
+staging copies of `.hack/.env` or the project key under names git does not
+ignore, env values staged for a terminal session that never ran, or an
+encrypted secret store whose key file is gone. After upgrading, run this once
+in each project, and once outside any project for the global Hack home:
+
+```bash
+hack doctor          # read the "secrets hygiene" section
+hack doctor --fix    # apply its safe fixes
+```
+
+The "secrets hygiene" section names each file and what it holds, never a value.
+`hack doctor --fix` sets loose env layers, `.hack/.env` files, keys and stores to
+mode 0600, adds a missing ignore entry for a secret-bearing file, and removes
+staging copies and terminal-session payloads that Hack left behind. It prints
+each change. It never deletes a store, a key or a file you wrote, and it does not
+untrack a file git already tracks: the section names the `git rm --cached`
+command, and what that file held should be treated as exposed. A store reported
+as "store present, key missing, cannot be read" stays where it is: restore its
+key file to read it, or remove the store yourself once you no longer need it.
+
 ## The daemon after an upgrade
 
 Installing 5.0.0 over a running 4.x does not replace the daemon. On Linux the old

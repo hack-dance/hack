@@ -18,6 +18,7 @@ import {
   listProjectsUsingSecretStore,
   missingRegisteredProjectsHint,
   projectUsesSecretStore,
+  type SecretStoreReader,
   type SecretStoreUsers,
 } from "./secret-store-retire.ts";
 import { escapeTerminalControls } from "./terminal-text.ts";
@@ -169,6 +170,46 @@ async function keylessStoreFinding(opts: {
   };
 }
 
+const LISTED_WORKTREES = 3;
+
+/**
+ * Readers for one sentence: a project with many worktrees is one entry with
+ * a count and a few examples, not one entry per worktree. Up to
+ * {@link LISTED_WORKTREES} worktrees are still listed by name. Grouping uses
+ * the reader's project identity and worktree field, never its display name,
+ * so a project whose name looks like a worktree label stays its own entry.
+ */
+export function summarizeStoreReaders(
+  readers: readonly SecretStoreReader[]
+): string[] {
+  const worktrees = new Map<string, SecretStoreReader[]>();
+  const summary: string[] = [];
+  for (const reader of readers) {
+    if (reader.worktree === undefined) {
+      summary.push(reader.name);
+      continue;
+    }
+    const listed = worktrees.get(reader.project) ?? [];
+    listed.push(reader);
+    worktrees.set(reader.project, listed);
+  }
+  for (const listed of worktrees.values()) {
+    const first = listed[0];
+    if (!first || listed.length <= LISTED_WORKTREES) {
+      summary.push(...listed.map((reader) => reader.name));
+      continue;
+    }
+    const examples = listed
+      .slice(0, LISTED_WORKTREES)
+      .map((reader) => reader.worktree)
+      .join(", ");
+    summary.push(
+      `${first.projectName} (${listed.length} worktrees, including ${examples})`
+    );
+  }
+  return summary.sort();
+}
+
 /**
  * Which registered projects read the store, saying plainly when the scan
  * could not check every one (never "no project reads it" on a guess).
@@ -176,7 +217,7 @@ async function keylessStoreFinding(opts: {
 function describeStoreUsers(users: SecretStoreUsers): string {
   const named =
     users.names.length > 0
-      ? `Registered projects that read it: ${users.names.join(", ")}.`
+      ? `Registered projects that read it: ${summarizeStoreReaders(users.readers).join(", ")}.`
       : null;
   if (!users.registryRead) {
     return "The projects registry could not be read or is not valid, so which registered projects read it is unknown.";

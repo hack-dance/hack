@@ -87,3 +87,12 @@ and data again. A native trial's data never moves into Compose volumes by itself
 If Doctor blocks the trial, use [Troubleshooting](troubleshooting.md).
 The detailed [machine upgrade checklist](guides/upgrade-from-v4.md) keeps the
 backup scripts, source evidence and checks still awaiting real-machine trials.
+
+## The daemon after an upgrade
+
+Installing a CLI does not replace a running daemon. After choosing a durable v5
+install, use `hack daemon restart` for an unmanaged incompatible daemon. If a
+login service still points at the old executable, use the chosen install's
+`hack daemon install`. Keep this outside the shared-home candidate trial;
+[daemon and service details](guides/upgrade-from-v4.md#daemon-old-lock-and-missing-checkouts)
+explain the difference.

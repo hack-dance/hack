@@ -117,6 +117,8 @@ and returning to Compose. Neither entrypoint prepares the provider, migrates a
 project or falls back to Docker for an unsupported native command. An unversioned
 local build reports its repository version; only a versioned bundle includes
 candidate version provenance. The entrypoint alone does not identify a release.
+`hack-v5` passes arguments, exit codes and signals through `exec`; it never replaces
+the installed stable executable.
 
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
 worktree when its exact source root can be shared with a fresh or matching pool.
@@ -917,6 +919,8 @@ surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
 `--accept-downloads` explicitly consents. No provider download happens from `up`,
 the installer, the probe or any other implicit path. The optional BuildKit client
 is still prepared separately below.
+Setup lists the pinned SmolVM, Docker engine and four Alpine guest packages,
+including exact compressed sizes, hosts, hashes, private cache and destinations.
 
 The executable embeds `provider-pins.json` and checks its hashes against the
 manual preparation pins. HTTPS redirects may use only the original host and the

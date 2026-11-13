@@ -3,6 +3,8 @@
 Start here: **1. Install** → [2. First project](getting-started.md).
 Already using v4? Read [3. Upgrade from v4](upgrade.md) before running v5 in a project.
 
+## Prerequisites
+
 v5 is in prerelease. Stable is still v4. A stable install does **not** install v5.
 The v5 prerelease bundle supports Apple Silicon macOS. Linux and Intel Macs stay
 on stable v4; see [platform support](../guides/prereleases.md).

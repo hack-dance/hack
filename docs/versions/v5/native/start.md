@@ -61,7 +61,8 @@ interrupted download, use [setup and recovery details](setup.md).
 
 Add the project's `--profile` selection if needed. Preflight reads the Compose
 project and lists blockers with fixes. It starts no VM or service. Continue only
-when there are no blockers **and** the runtime review completed with `ready: true`.
+when there are no blockers **and** the report says `Runtime review: completed`.
+In JSON, this means `ready: true` and `runtime_review.status: "completed"`.
 An exit of 0 alone is not enough: runtime review can be skipped or unavailable.
 
 If blocked, fix the named field and rerun. Do not remove a check or delete state

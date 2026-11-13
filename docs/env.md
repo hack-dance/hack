@@ -1516,8 +1516,9 @@ Some older surfaces are still compatibility-oriented:
   so a write never replaces it. The key file is read without following a link and is
   refused when other users can read or write it (use mode `0600`) or when git tracks
   it. Inside a git work tree whose git cannot answer (it fails, is missing, or takes
-  more than 5 s), the key is refused too, rather than guessed untracked; outside any
-  repository git is not run. A key file Hack wrote has always been `0600`, so this refuses only key files
+  more than 5 s), the key is refused too, rather than guessed untracked. Whether the
+  key is in a work tree is decided from its real directory (symlinks resolved, as
+  git does); outside any repository git is not run. A key file Hack wrote has always been `0600`, so this refuses only key files
   made or changed by hand, and the error gives the `chmod`. Explicit key
   provisioning (`--provision-key`) with `HACK_SECRETS_FILE_KEY` set never replaces
   a different existing key, or one it cannot read: a key path can serve more than
@@ -1526,8 +1527,9 @@ Some older surfaces are still compatibility-oriented:
   move a key file aside yourself (keeping a copy) only once no store needs it.
   With no key file, it writes the key only when the configured store is absent or
   empty, or opens under that key; a store it cannot read, or a symlinked one, is
-  refused, since a new key file could shadow the key that opens it. Provisioning
-  holds the key file's own lock, and each key write checks the file again just
+  refused, since a new key file could shadow the key that opens it. Every key
+  writer (explicit provisioning, keychain persistence and the first-use key)
+  holds the key file's own `<key>.lock`, and each write checks the file again just
   before it lands, so a concurrent writer's key is kept, never overwritten. The
   process-wide key cache holds only keychain material, so one store's key file never
   stands in for another store's key. `hack doctor` reports an unreadable or refused

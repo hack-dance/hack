@@ -4,7 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { lstat, stat } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import type {
@@ -813,9 +813,8 @@ async function provisionEnvKey(input: {
   readonly key: string;
 }): Promise<void> {
   await ensureDir(dirname(input.keyPath));
-  await withProjectsRegistryLock({
-    lockPath: `${input.keyPath}.lock`,
-    label: "encrypted secret key",
+  await withEncryptedFileKeyLock({
+    keyPath: input.keyPath,
     run: async () => {
       const existing = await readKeyForProvisioning(input.keyPath);
       if (existing !== null && existing !== input.key) {
@@ -830,11 +829,31 @@ async function provisionEnvKey(input: {
           key: input.key,
         });
       }
-      await writeEncryptedFileKeyIfUnchanged({
+      await writeEncryptedFileKeyIfUnchangedLocked({
         keyPath: input.keyPath,
         key: input.key,
       });
     },
+  });
+}
+
+/**
+ * Runs `run` holding the key file's own lock (`<key>.lock`, shared by every
+ * store using that path). Every writer of a key file takes it: explicit
+ * provisioning, keychain persistence and first-use bootstrap (HACK-2169),
+ * so no writer can land between another's check and write. Key writers
+ * take no store lock while holding it, and store writers resolve their key
+ * before taking the store lock, so the two locks never nest.
+ */
+async function withEncryptedFileKeyLock<T>(input: {
+  readonly keyPath: string;
+  readonly run: () => Promise<T>;
+}): Promise<T> {
+  await ensureDir(dirname(input.keyPath));
+  return await withProjectsRegistryLock({
+    lockPath: `${input.keyPath}.lock`,
+    label: "encrypted secret key",
+    run: input.run,
   });
 }
 
@@ -883,9 +902,10 @@ class EncryptedFileKeyChangedError extends Error {}
 /**
  * Writes `key` to the key file (0600) only while the file is absent, empty
  * or already holds `key`, checked again immediately before the write lands.
- * Refuses, writing nothing, when another key is there by then.
+ * Refuses, writing nothing, when another key is there by then. The caller
+ * holds {@link withEncryptedFileKeyLock}.
  */
-async function writeEncryptedFileKeyIfUnchanged(input: {
+async function writeEncryptedFileKeyIfUnchangedLocked(input: {
   readonly keyPath: string;
   readonly key: string;
 }): Promise<void> {
@@ -1073,9 +1093,11 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   }
   if (existing) {
     if (allowKeyProvisioning && configuredKeyPath) {
-      await writeEncryptedFileKeyIfUnchanged({
-        keyPath: configuredKeyPath,
-        key: existing,
+      const keyPath = configuredKeyPath;
+      await withEncryptedFileKeyLock({
+        keyPath,
+        run: () =>
+          writeEncryptedFileKeyIfUnchangedLocked({ keyPath, key: existing }),
       });
     }
     cachedKeychainEncryptedFileKey = existing;
@@ -1208,21 +1230,36 @@ async function readEncryptedFileKey(input: {
 /** Bound on the git tracking probe; a slower git counts as unknown. */
 const GIT_TRACKING_TIMEOUT_MS = 5000;
 
-/** Whether some directory at or above `dir` holds a `.git` entry. */
-async function isInsideGitWorkTree(dir: string): Promise<boolean> {
-  let current = resolve(dir);
+/**
+ * Whether the real directory of `dir` (symlinks resolved, as git resolves
+ * its working directory) or one of its ancestors holds a `.git` entry:
+ * `inside`, `outside`, or `unknown` when that cannot be read.
+ */
+async function gitWorkTreeState(
+  dir: string
+): Promise<"inside" | "outside" | "unknown"> {
+  let current: string;
+  try {
+    current = await realpath(dir);
+  } catch {
+    return "unknown";
+  }
   for (;;) {
-    if (
-      await lstat(resolve(current, ".git")).then(
-        () => true,
-        () => false
-      )
-    ) {
-      return true;
+    try {
+      await lstat(resolve(current, ".git"));
+      return "inside";
+    } catch (error: unknown) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { readonly code?: unknown }).code
+          : undefined;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        return "unknown";
+      }
     }
     const parent = dirname(current);
     if (parent === current) {
-      return false;
+      return "outside";
     }
     current = parent;
   }
@@ -1230,14 +1267,18 @@ async function isInsideGitWorkTree(dir: string): Promise<boolean> {
 
 /**
  * True when git tracks `path`, false when it does not: either no `.git`
- * is at or above it (no repository to track it, and git is not run), or
- * git says so. Null when the key is inside a work tree but git cannot say
+ * is at or above its real directory (no repository to track it, and git is
+ * not run), or git says so. Null when the key is inside a work tree but git cannot say
  * (it fails to run, exits unexpectedly, or exceeds the time bound): the
  * caller refuses that key rather than guess.
  */
 async function isKeyFileTrackedByGit(path: string): Promise<boolean | null> {
-  if (!(await isInsideGitWorkTree(dirname(path)))) {
+  const workTree = await gitWorkTreeState(dirname(path));
+  if (workTree === "outside") {
     return false;
+  }
+  if (workTree === "unknown") {
+    return null;
   }
   let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
   try {
@@ -1303,7 +1344,17 @@ async function createOrAdoptEncryptedFileKey(input: {
   readonly keyPath: string;
   readonly key: string;
 }): Promise<string> {
-  await ensureDir(dirname(input.keyPath));
+  return await withEncryptedFileKeyLock({
+    keyPath: input.keyPath,
+    run: () => createOrAdoptEncryptedFileKeyLocked(input),
+  });
+}
+
+/** {@link createOrAdoptEncryptedFileKey}, holding the key file's lock. */
+async function createOrAdoptEncryptedFileKeyLocked(input: {
+  readonly keyPath: string;
+  readonly key: string;
+}): Promise<string> {
   const options = encryptedFileKeyOptions(input);
   if (
     await publishPrivateFileExclusive({ ...options, text: `${input.key}\n` })

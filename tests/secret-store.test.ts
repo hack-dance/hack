@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import {
   listFileSecretStoreEntries,
   provisionEncryptedFileKey,
@@ -1158,4 +1159,66 @@ test("the encrypted_file key must be a private, untracked regular file (HACK-203
     "git could not report whether it tracks it"
   );
   await rm(join(tempDir, ".git"));
+});
+
+test("first-use bootstrap waits for the key file's lock and adopts a key written meanwhile (HACK-2169)", async () => {
+  // Second-family review: the automatic bootstrap over an empty key file
+  // took no key lock, so it could overwrite a key that explicit
+  // provisioning had just written under that lock.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  const keyPath = join(tempDir, "boot.key");
+  const storePath = join(tempDir, "boot.enc.json");
+  await writeFile(keyPath, "", { mode: 0o600 });
+  await encryptedFileConfig({ storePath, keyPath });
+  let bootstrap: ReturnType<typeof resolveSecretStore> | undefined;
+  await withProjectsRegistryLock({
+    lockPath: `${keyPath}.lock`,
+    label: "test key writer",
+    run: async () => {
+      bootstrap = resolveSecretStore({ projectName: "app" });
+      await Bun.sleep(300);
+      // Still waiting for the lock: nothing written yet.
+      expect(await readFile(keyPath, "utf8")).toBe("");
+      await writeFile(keyPath, "held-key\n", { mode: 0o600 });
+    },
+  });
+  if (!bootstrap) {
+    throw new Error("bootstrap not started");
+  }
+  const store = await bootstrap;
+  await store.set({ key: "TOKEN", value: "under-held-key" });
+  expect(await readFile(keyPath, "utf8")).toBe("held-key\n");
+  expect(await store.get({ key: "TOKEN" })).toBe("under-held-key");
+});
+
+test("a git-tracked key reached through a directory symlink is refused (HACK-2169)", async () => {
+  // Second-family review: the repository preflight walked the symlinked
+  // path, found no .git, and accepted a tracked key.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  const repo = join(tempDir, "tracked-repo");
+  const keys = join(repo, "keys");
+  await mkdir(keys, { recursive: true });
+  await privateKey(join(keys, "store.key"), "tracked-key");
+  for (const args of [
+    ["init", "-q"],
+    ["add", "keys/store.key"],
+  ]) {
+    expect(runFixtureGitSync({ cwd: repo, args }).exitCode).toBe(0);
+  }
+  const alias = join(tempDir, "keys-alias");
+  await symlink(keys, alias);
+  await encryptedFileConfig({
+    storePath: join(tempDir, "alias.enc.json"),
+    keyPath: join(alias, "store.key"),
+  });
+  await expect(resolveSecretStore({ projectName: "app" })).rejects.toThrow(
+    "git tracks it"
+  );
 });

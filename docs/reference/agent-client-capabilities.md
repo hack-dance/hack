@@ -11,8 +11,11 @@ rules.
 
 - **verified**: a named test file observed the client load the component, at
   `isolated-fixture` or `authenticated-session` strength.
-- **untested**: Hack ships the component, but no fixture or session has observed
-  a client load it at the recorded version. Each untested cell names its open gate.
+- **untested**: Hack ships the component, but no named test file has observed a
+  client load it at the recorded version. A cell may still record a session
+  observation (`authenticated-session`) that does not qualify it, for example
+  one that passed the launch entry per run instead of loading the installed
+  configuration. Each untested cell names its open gate.
 - **unsupported**: Hack does not ship the component for that client. This says
   nothing about what the client itself supports.
 
@@ -40,7 +43,7 @@ named test passes against the recorded client version.
 
 <!-- BEGIN GENERATED: agent-client-capabilities -->
 
-Matrix version 3, latest observation 2026-10-18. Older cells retain their recorded source and client versions.
+Matrix version 4, latest observation 2026-11-13. Older cells retain their recorded source and client versions.
 
 ### Clients
 
@@ -83,7 +86,7 @@ Matrix version 3, latest observation 2026-10-18. Older cells retain their record
 | codex | Skill discovery | untested | schema | `plugins/hack/.codex-plugin/plugin.json` | codex-cli 0.162.1 | `macos-arm64-contributor` | `ec56769bdc04` | Manifest declares `skills: ./skills/`; skill content matches the canonical renderers. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |
 | codex | Hooks | unsupported | source-read | `plugins/hack/.codex-plugin/plugin.json` | codex-cli 0.162.1 | `macos-arm64-contributor` | `ec56769bdc04` | Hack ships no Codex plugin hooks; the manifest declares no `hooks` key. This says nothing about Codex's own hook support. | none |
 | codex | Plugin MCP | untested | schema | `plugins/hack-mcp/.mcp.json` | codex-cli 0.162.1 | `macos-arm64-contributor` | `3e261d517ed7` | The opt-in `hack-mcp` manifest points `mcpServers` at `.mcp.json` (`hack mcp serve`); the default `hack` plugin declares no MCP. No plugin session started the server. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |
-| codex | Standalone MCP | untested | authenticated-session | `docs/reference/mcp-tools.md` | codex-cli 0.168.0 | `linux-x64-contributor` | `ab29d491302b` | A `codex exec` model session loaded `hack mcp serve` (entry passed with `-c mcp_servers.hack.*`, same command and args as the installer writes) and called the tools: background start, cursor reads, inspect, cancel and request-key reuse; a foreground exec of 90 s and of 200 s completed (no per-tool limit applied by default at this version). With `tool_timeout_sec = 30` Codex reported `timed out awaiting tools/call after 30s` and Hack stopped the command (exit 143). `start` and `cancel` are destructive: a headless run needs `default_tools_approval_mode` or refuses them. | Replay this as a repository fixture (tests/mcp-bundle-client.test.ts end to end, with the entry written by `hack mcp install` in an isolated client home); an authenticated session is evidence but not a repeatable test. |
+| codex | Standalone MCP | untested | authenticated-session | `docs/reference/mcp-tools.md` | codex-cli 0.168.0 | `linux-x64-contributor` | `ab29d491302b` | A `codex exec` model session loaded `hack mcp serve` (entry passed with `-c mcp_servers.hack.*`, same command and args as the installer writes) and called the tools: background start, cursor reads, inspect, cancel and request-key reuse; with default settings no client limit interrupted a foreground exec of 90 s or of 200 s (longer calls not measured). With `tool_timeout_sec = 30` Codex reported `timed out awaiting tools/call after 30s` and Hack stopped the command (exit 143). `start` and `cancel` are destructive: a headless run needs `default_tools_approval_mode` or refuses them. | Replay this as a repository fixture (tests/mcp-bundle-client.test.ts end to end, with the entry written by `hack mcp install` in an isolated client home); an authenticated session is evidence but not a repeatable test. |
 | codex | Rules | unsupported | source-read | `plugins/hack/.codex-plugin/plugin.json` | codex-cli 0.162.1 | `macos-arm64-contributor` | `ec56769bdc04` | Hack ships no Codex plugin rule file. Project AGENTS.md snippets are standalone setup, not a plugin component. | none |
 | codex | UI | untested | schema | `plugins/hack/.codex-plugin/plugin.json` | codex-cli 0.162.1 | `macos-arm64-contributor` | `ec56769bdc04` | Manifest declares an `interface` block (display name, default prompts, brand color); rendering was not observed. | Observe the installed plugin's presentation in the Codex UI for this client version. |
 | claude | Packaging | untested | schema | `plugins/hack/.claude-plugin/plugin.json` | Claude Code 2.1.296 | `macos-arm64-contributor` | `ec56769bdc04` | Manifest is generated and parsed by tests/agent-plugin-generation.test.ts; no client installed it. | Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count. |

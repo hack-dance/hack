@@ -1881,7 +1881,7 @@ function buildToolResult(opts: {
   readonly result: HackCommandResult;
   readonly data?: unknown;
 }): CallToolResult {
-  const ok = opts.result.exitCode === 0;
+  const ok = opts.result.exitCode === 0 && opts.result.timedOut !== true;
   const payload: ToolResultPayload = {
     ok,
     command: opts.result.command,
@@ -2532,6 +2532,12 @@ async function runHackCommand(opts: {
     }
     const timedOut = (stopReason as string | null) === "timeout";
     if (timedOut) {
+      // A child that handles SIGTERM by exiting 0, or a leader that exited 0
+      // while a descendant held the output open, did not finish its work:
+      // a timeout is never a success. 124 is timeout(1)'s status.
+      if (exitCode === 0) {
+        exitCode = 124;
+      }
       // Exit 143 alone does not say who stopped it: name the server's limit.
       stderr += `\nStopped by the MCP server after timeoutMs (${timeoutMs} ms). Pass a larger timeoutMs (at most ${MCP_INPUT_CEILINGS.timeoutMs}) or start it in the background with hack.project.command.start.\n`;
     }

@@ -131,11 +131,18 @@ test("Codex inventory parses quoted tables and rejects malformed input without m
     scope: "project" as const,
     projectRoot: root,
   };
-  const quoted = '[mcp_servers."hack"]\ncommand = "custom"\n';
+  const quoted =
+    '[mcp_servers."hack"]\ncommand = "custom"\ntool_timeout_sec = 120\n';
   await Bun.write(path, quoted);
   expect((await checkMcpConfig(opts))[0]?.status).toBe("present");
   expect((await installMcpConfig(opts))[0]?.status).toBe("noop");
   expect(await Bun.file(path).text()).toBe(quoted);
+  // A quoted entry without a tool-call limit gets one; the custom command stays.
+  await Bun.write(path, '[mcp_servers."hack"]\ncommand = "custom"\n');
+  expect((await installMcpConfig(opts))[0]?.status).toBe("updated");
+  expect(Bun.TOML.parse(await Bun.file(path).text())).toEqual({
+    mcp_servers: { hack: { command: "custom", tool_timeout_sec: 660 } },
+  });
   const string = 'note = """\n[mcp_servers.hack]\n"""\n';
   await Bun.write(path, string);
   expect((await checkMcpConfig(opts))[0]?.status).toBe("missing");

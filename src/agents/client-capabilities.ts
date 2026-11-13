@@ -21,10 +21,10 @@
  */
 
 /** Increment when cells are reclassified or the cell shape changes. */
-export const AGENT_CLIENT_CAPABILITY_MATRIX_VERSION = 3;
+export const AGENT_CLIENT_CAPABILITY_MATRIX_VERSION = 4;
 
 /** Latest observation date (UTC); older cells retain their own provenance. */
-export const AGENT_CLIENT_CAPABILITY_OBSERVED_ON = "2026-10-18";
+export const AGENT_CLIENT_CAPABILITY_OBSERVED_ON = "2026-11-13";
 
 export const AGENT_CLIENTS = [
   "codex",
@@ -246,7 +246,7 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     observedClientVersion: "codex-cli 0.168.0",
     sourceSha: SESSION_SOURCE_SHA,
     hostLabel: SESSION_HOST,
-    note: "A `codex exec` model session loaded `hack mcp serve` (entry passed with `-c mcp_servers.hack.*`, same command and args as the installer writes) and called the tools: background start, cursor reads, inspect, cancel and request-key reuse; a foreground exec of 90 s and of 200 s completed (no per-tool limit applied by default at this version). With `tool_timeout_sec = 30` Codex reported `timed out awaiting tools/call after 30s` and Hack stopped the command (exit 143). `start` and `cancel` are destructive: a headless run needs `default_tools_approval_mode` or refuses them.",
+    note: "A `codex exec` model session loaded `hack mcp serve` (entry passed with `-c mcp_servers.hack.*`, same command and args as the installer writes) and called the tools: background start, cursor reads, inspect, cancel and request-key reuse; with default settings no client limit interrupted a foreground exec of 90 s or of 200 s (longer calls not measured). With `tool_timeout_sec = 30` Codex reported `timed out awaiting tools/call after 30s` and Hack stopped the command (exit 143). `start` and `cancel` are destructive: a headless run needs `default_tools_approval_mode` or refuses them.",
     openGate: SESSION_GATE,
   },
   {

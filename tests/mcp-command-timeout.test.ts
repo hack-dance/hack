@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -12,6 +13,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { replaceCodexLaunch } from "../src/mcp/codex-launch.ts";
+import { installMcpConfig } from "../src/mcp/install.ts";
 import { createMcpServer } from "../src/mcp/server.ts";
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,32 @@ test("a foreground command stopped by its timeoutMs says so, not just exit 143",
   expect(String(payload.stderr)).toContain("hack.project.command.start");
 });
 
+for (const [name, body] of [
+  // The child handles SIGTERM by exiting 0.
+  [
+    "a child that exits 0 on SIGTERM",
+    "trap 'exit 0' TERM; echo start; sleep 30 & wait",
+  ],
+  // The leader exits 0 at once; a descendant keeps the output open.
+  [
+    "a leader that exits 0 before a descendant holding the output",
+    "echo start; sleep 30 & exit 0",
+  ],
+] as const) {
+  test(`a timeout is an error even for ${name}`, async () => {
+    const client = await startServer(body);
+    const result = await client.callTool({
+      name: "hack.project.exec",
+      arguments: { service: "api", cmd: ["true"], timeoutMs: 1000 },
+    });
+    const payload = result.structuredContent as Record<string, unknown>;
+    expect(payload.timedOut).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(payload.ok).toBe(false);
+    expect(payload.exitCode).not.toBe(0);
+  });
+}
+
 test("a command that ends on its own carries no timedOut field", async () => {
   const client = await startServer("echo fine");
   const result = await client.callTool({
@@ -107,4 +135,49 @@ test("Codex setup gives Hack's tools a call limit above Hack's own, keeping one 
     })
   ) as { mcp_servers: { hack: Record<string, unknown> } };
   expect(custom.mcp_servers.hack.tool_timeout_sec).toBe(900);
+});
+
+test("reinstalling Codex adds the limit to an entry written without one and keeps everything else", async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "hack-mcp-tmo-")));
+  roots.push(home);
+  const path = join(home, ".codex", "config.toml");
+  await mkdir(join(home, ".codex"));
+  const before = [
+    'model = "m"',
+    "",
+    "[mcp_servers.other]",
+    'command = "other"',
+    "",
+    "[mcp_servers.hack]",
+    'command = "hack"',
+    'args = ["mcp", "serve"]',
+    "",
+    "[mcp_servers.hack.env]",
+    'HACK_X = "1"',
+    "",
+  ].join("\n");
+  await writeFile(path, before);
+  const install = () =>
+    installMcpConfig({ targets: ["codex"], scope: "user", home });
+  expect((await install())[0]?.status).toBe("updated");
+  const parsed = Bun.TOML.parse(await readFile(path, "utf8"));
+  expect(parsed).toEqual({
+    ...(Bun.TOML.parse(before) as Record<string, unknown>),
+    mcp_servers: {
+      other: { command: "other" },
+      hack: {
+        command: "hack",
+        args: ["mcp", "serve"],
+        env: { HACK_X: "1" },
+        tool_timeout_sec: 660,
+      },
+    },
+  });
+  expect((await install())[0]?.status).toBe("noop");
+
+  const custom =
+    '[mcp_servers.hack]\ncommand = "hack"\nargs = ["mcp", "serve"]\ntool_timeout_sec = 30\n';
+  await writeFile(path, custom);
+  expect((await install())[0]?.status).toBe("noop");
+  expect(await readFile(path, "utf8")).toBe(custom);
 });

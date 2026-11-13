@@ -10,6 +10,7 @@ import {
   prepareMcpBundleLaunch,
 } from "./bundle-launch.ts";
 import {
+  addCodexToolTimeout,
   CODEX_TOOL_TIMEOUT_SEC,
   hasCodexLaunch,
   removeCodexLaunch,
@@ -393,12 +394,29 @@ async function installCodexConfig(opts: {
     const result = await writeTextFileIfChanged(opts.path, next);
     return { status: result.changed ? "updated" : "noop" };
   }
+  let present: boolean;
   try {
-    if (hasCodexLaunch(existing)) {
-      return { status: "noop" };
-    }
+    present = hasCodexLaunch(existing);
   } catch {
     return { status: "error", message: "Invalid Codex MCP configuration" };
+  }
+  if (present) {
+    // An entry from before the tool-call limit existed gets it; any other
+    // value, including a limit the user set, is kept.
+    let next: string;
+    try {
+      next = addCodexToolTimeout(existing);
+    } catch (error: unknown) {
+      return {
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Cannot update Codex MCP configuration",
+      };
+    }
+    const result = await writeTextFileIfChanged(opts.path, next);
+    return { status: result.changed ? "updated" : "noop" };
   }
 
   const block = renderCodexTomlBlock();

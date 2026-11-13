@@ -3,7 +3,9 @@
 This document describes how Hack protects project env values and secret keys on a
 developer machine. It lists the assets, the trust boundaries, the threats, the
 mitigations that are merged on `next`, and the gaps that are still open. It tracks
-Linear issue HACK-1127.
+Linear issue HACK-1127, with the HACK-2163 audit corrections below. Runtime
+claims were checked on 2026-11-13 at `c89f4fd7cc`. The three HACK-2163 gaps
+remain open until their fixes merge; this documentation change does not fix them.
 
 For day-to-day usage, see [Env & secrets](../env.md). This page does not change any
 behavior. Where it names code, the code is the source of truth.
@@ -28,11 +30,30 @@ node code is listed under [open gaps](#open-gaps) so that it is not lost.
 | Asset | Where it lives | What it protects |
 | --- | --- | --- |
 | Project env key | `.hack.secret.key` in the checkout, a shared key under the git common dir, the primary checkout's key (linked worktrees), or `HACK_ENV_SECRET_KEY` | Every `secure: v1:...` value in `.hack/hack.env.*.yaml`. The AES-256-GCM key is the SHA-256 of the key text. |
-| Encrypted YAML values (`project_key`) | `.hack/hack.env.<overlay>.yaml`, usually committed | Secret values at rest in git. Plaintext scalars in the same files are not secret. |
+| Encrypted YAML values (`project_key`) | `.hack/hack.env.<overlay>.yaml`, usually committed | Secret values at rest in git. Plaintext scalars in the same files are not encrypted and may still be sensitive. |
 | `encrypted_file` store and its key | Store file chosen in config; key from `HACK_SECRETS_FILE_KEY`, `~/.hack/secrets-file.key`, or the keychain service `hack-secrets-backend` | Legacy backend values, including the `cloud` shim. |
 | `keychain` store | macOS keychain through `Bun.secrets`, one service per project | Legacy backend values. |
 | Values from an external manager (for example 1Password) | The manager's vault, until the user pipes a value into Hack or injects `HACK_ENV_SECRET_KEY` into a process | Hack has no first-party 1Password integration. Custody passes to Hack's stores at the moment of the pipe or injection. |
+| Local YAML layers | `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` | May hold plaintext; these are local-only, not safe to commit. New local files use 0600; an existing file keeps its mode. |
+| Multiplexer input | `$TMPDIR/hack-mux-env-*/env.json` (the OS temp directory when TMPDIR is unset) | A private plaintext env payload, consumed and removed by the pane wrapper or owned cleanup; it exists on disk before that cleanup. |
+| Background command output | `<HACK_HOME>/commands/<id>/stdout` and `stderr` | Output can contain injected values. Redaction is partial and delayed; withholding a read does not erase disk bytes. |
+| Background command arguments | `<HACK_HOME>/commands/<id>/meta.json` and `launch.json` | Automatic env maps are omitted, but caller argv is retained, including with metadata-only capture. Expanded values in argv are not redacted. |
+| Lifecycle output | `.hack/.internal/lifecycle/<project>.log` and `${TMPDIR:-/tmp}/hack-lifecycle.*` FIFOs | Hooks and persistent processes can emit injected values. Log and FIFO privacy gaps remain open (HACK-2170). |
 | Decrypted values in flight | Process environments of the `docker compose` client, Compose containers, host commands, lifecycle processes and session shells; `.hack/.env` | The resolved plaintext, after decryption. `.hack/.internal/compose.env.override.yml` holds only `${HACK_ENV_...}` references (HACK-1273). |
+
+## Where values travel
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="env-secrets-flow.dark.svg">
+  <img src="env-secrets-flow.light.svg" alt="Project env values reach child environments, mux input files and output stores; an environment key override is also inherited today.">
+</picture>
+
+[Diagram source](env-secrets-flow.mmd). Paths depend on the command: a child
+can print injected values, and a background capture stores output before its
+partial scan. A file-backed project key is a decryption input, not an application
+value; the dashed key edge is the open environment-override inheritance gap.
+Legacy JSON diagnostics can disclose input text. The modern YAML loader also
+forwards its parser's message without filtering it; see gap 14 for the distinction.
 
 ## Trust boundaries
 
@@ -82,11 +103,11 @@ HACK-2163 hardens three boundaries found in the env audit:
 | --- | --- |
 | A repository's contract names a variable exported in the developer's shell, so the migration saves it to disk. | `migrateLegacyProjectEnv` refuses, naming the key only, when a `plain_env` value resolves from the process environment (HACK-1688). A value in a regular `.hack/.env` migrates to the gitignored machine-local layer, never a tracked one (HACK-1712). |
 | A repository plants `.hack.secret.key` as a symlink (dangling or not) so that Hack reads or writes a file it should not. | Key reads go through `readBoundedPrivateFile` (`lstat`, `O_NOFOLLOW`, descriptor and path identity checks, 1 MiB bound, fatal UTF-8). New keys are created with `createPrivateFileExclusive` (`O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, `fchmod`, `fsync`). Both are in `src/lib/private-file.ts`, used by `resolveProjectEnvKey`, `ensureProjectEnvSecretKey` and `resolveInheritedProjectEnvKey` in `src/lib/project-env-config.ts` (#288). |
-| A symlinked `.hack/.env`, overlay file or `.hack` directory redirects a write, or a reader sees a partial file. | `src/lib/private-env-file.ts` (`readPrivateEnvFile`, `writePrivateEnvFileIfChanged`) and `replacePrivateFileAtomic` in `src/lib/private-file.ts`: a private sibling is written and fsynced, then renamed over the target; symlinks and non-regular entries are refused with one fixed message (#302). Used by `src/lib/hack-env.ts` and `materializeProjectEnv`. |
+| A symlinked `.hack/.env`, overlay file or `.hack` directory redirects a write, or a reader sees a partial file. | `src/lib/private-env-file.ts` (`readPrivateEnvFile`, `writePrivateEnvFileIfChanged`) and `replacePrivateFileAtomic` in `src/lib/private-file.ts`: a private sibling is written and fsynced, then renamed over the target; symlinks and non-regular entries are refused with one fixed message (#302). Used by mutation paths in `src/lib/hack-env.ts` and `materializeProjectEnv`. Legacy inspection still follows links through `readTextFile`; see gap 18. |
 | A world-readable env file or store. | `.hack/.env`, overlays and the `encrypted_file` store are written 0600, and a same-content file with group or other access is tightened (#302). The `hack doctor` env key check reports `env-key-weak-permissions` and `env-key-wrong-owner` (#309). |
-| The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so no Compose command writes a value to disk, whatever way it ends (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down` (before its hooks, remote target and Compose down, so none of them can skip it), and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Removal moves the file aside atomically and classifies what it moved, so a value-free file written concurrently is put back rather than deleted (the path is absent for that moment; see gap 4). An aside left by a crash between the move and the delete is reported by the doctor check by count and removed by a later removal, `hack doctor --fix` or a Compose command that renders the override, once it is more than a minute old. The doctor check, every removal and the aside sweep apply the writer's no-follow check to `.hack` and `.hack/.internal` first (and recheck them before each move or delete): a symlinked or non-directory `.hack` or `.hack/.internal`, or a symlinked or non-regular override, is a closed, value-free refusal, and nothing behind it is listed, read, moved or deleted (HACK-1316). Legacy adoption gives the reference values only to its Compose config-hash probe at preview and preparation; a saved recheck runs without values and binds each container's config-hash label to the hash proven at preparation. `hack config adopt` (with or without `--stop`) and its preview refuse a literal override before preparation, because an adoption pins the file's bytes and inode for its life. Recovery acts on an existing preparation, so the store refuses instead: publication (`--recover --stop`) and switch completion (`--recover`) refuse a generation bound to a literal override before any original moves, and name `hack config adopt --recover --rollback` (HACK-1318). Rollback stays allowed. While a prepared, active or pending adoption exists, no removal touches the file (removal would make the adoption unloadable); an adoption that an earlier version made over a literal file therefore keeps its values at rest until `hack config adopt --rollback`, and the doctor check names that next step (see gap 4). The per-service `HACK_ENV_*` values go only to `docker compose` invocations that read the override; the `docker inspect`, `logs` and `events` children for dependency cache progress and reuse get the environment without them (`withoutComposeEnvReferences`). Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts`, `tests/compose-env-at-rest.test.ts`, `tests/compose-env-reference-least-privilege.test.ts`, `tests/doctor-fix-noninteractive.test.ts`, `tests/native-compose-adoption-generation-managed.test.ts`, `tests/native-compose-adoption-generation-recovery.test.ts` and the sentinel scan `tests/env-secret-sentinel-scan.test.ts` (HACK-1273, HACK-1318). |
+| The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so the generated override does not persist resolved values (command output can still contain them) (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down` (before its hooks, remote target and Compose down, so none of them can skip it), and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Removal moves the file aside atomically and classifies what it moved, so a value-free file written concurrently is put back rather than deleted (the path is absent for that moment; see gap 4). An aside left by a crash between the move and the delete is reported by the doctor check by count and removed by a later removal, `hack doctor --fix` or a Compose command that renders the override, once it is more than a minute old. The doctor check, every removal and the aside sweep apply the writer's no-follow check to `.hack` and `.hack/.internal` first (and recheck them before each move or delete): a symlinked or non-directory `.hack` or `.hack/.internal`, or a symlinked or non-regular override, is a closed, value-free refusal, and nothing behind it is listed, read, moved or deleted (HACK-1316). Legacy adoption gives the reference values only to its Compose config-hash probe at preview and preparation; a saved recheck runs without values and binds each container's config-hash label to the hash proven at preparation. `hack config adopt` (with or without `--stop`) and its preview refuse a literal override before preparation, because an adoption pins the file's bytes and inode for its life. Recovery acts on an existing preparation, so the store refuses instead: publication (`--recover --stop`) and switch completion (`--recover`) refuse a generation bound to a literal override before any original moves, and name `hack config adopt --recover --rollback` (HACK-1318). Rollback stays allowed. While a prepared, active or pending adoption exists, no removal touches the file (removal would make the adoption unloadable); an adoption that an earlier version made over a literal file therefore keeps its values at rest until `hack config adopt --rollback`, and the doctor check names that next step (see gap 4). The `HACK_ENV_*` references, shared for global scope and distinct for service overrides, go only to `docker compose` invocations that read the override; the `docker inspect`, `logs` and `events` children for dependency cache progress and reuse get the environment without them (`withoutComposeEnvReferences`). Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts`, `tests/compose-env-at-rest.test.ts`, `tests/compose-env-reference-least-privilege.test.ts`, `tests/doctor-fix-noninteractive.test.ts`, `tests/native-compose-adoption-generation-managed.test.ts`, `tests/native-compose-adoption-generation-recovery.test.ts` and the sentinel scan `tests/env-secret-sentinel-scan.test.ts` (HACK-1273, HACK-1318). |
 | Two writers of the `encrypted_file` store lose an update. | An in-process queue plus a cooperative `<store>.lock` using the owner protocol from `src/lib/projects-registry-lock.ts`; a symlinked store path is refused for writes (`src/lib/secret-store.ts`, #302). |
-| Concurrent first users of the `encrypted_file` store each generate a key; the last key file wins and the store, already encrypted under another key, can no longer be decrypted. | The generated key is published with `publishPrivateFileExclusive` (`src/lib/private-file.ts`): a fsynced 0600 sibling is linked into place only when no key file exists, so losers adopt the published key. A store found non-empty after the first key read re-reads the key file before the keychain fallback. Proven across eight worker processes by `tests/secret-key-provisioning-convergence.test.ts`. |
+| Concurrent first users of the `encrypted_file` store each generate a key; the last key file wins and the store, already encrypted under another key, can no longer be decrypted. | The generated key is published with `publishPrivateFileExclusive` (`src/lib/private-file.ts`): a fsynced 0600 sibling is linked into place only when no key file exists, so losers adopt the published key. A store found non-empty after the first key read re-reads the key file before the keychain fallback. Proven across eight worker processes by `tests/secret-key-provisioning-convergence.test.ts`. This does not cover the process-global cache and explicit provisioning gaps in gap 17. |
 | Concurrent first secrets in the primary checkout and a linked worktree create two different project keys (checkout-local and shared), so values do not decrypt across checkouts; or a reader refuses a key file that another process is still publishing. | When no key exists, `ensureProjectEnvSecretKey` (`src/lib/project-env-config.ts`) creates it under a cooperative lock at `<git common dir>/.hack.secret.key.lock` and repeats the lookup under the lock. Key files are published complete with `publishPrivateFileExclusive`, and a key read that overlaps a publication is retried for about a quarter second while the entry is a regular file. Proven by `tests/secret-key-provisioning-convergence.test.ts`. Hack v4 writers do not take the lock. |
 
 ### Malformed or hostile ciphertext
@@ -104,24 +125,29 @@ HACK-2163 hardens three boundaries found in the env audit:
 | The key is committed. | The root `.gitignore` gets a `.hack.secret.key` entry before the key is created, so a failed entry write leaves no key; an existing checkout-local key git does not ignore is repaired or refused before a `--secret` write uses it, and `hack doctor` reports it as `env-key-unignored` (HACK-1375). Encryption refuses a git-tracked key, including an inherited primary key, before it is copied (#288). `hack doctor` reports `env-key-tracked` at any depth (#309) and the "generated files" check can untrack a root key with `--fix`. |
 | A key copy ships in build output or a static site. | `hack doctor` reports `env-key-public-path` for copies under `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` and `.output/` (#309). |
 | A weak, short or repetitive key. | `env-key-wrong-length` and `env-key-low-entropy` (#309). Generated keys are 32 random bytes in base64url. |
-| Materialized `.hack/.env` or local overrides are committed. | Hack owns a committed `.hack/.gitignore` block, and `hack doctor` flags tracked generated files (see [ignore rules](../env.md#ignore-rules-committed-hackgitignore)). Contract migration puts legacy `plain_env` values in the ignored machine-local layer, refuses a tracked destination, and reports only keys and destination paths (HACK-1712/1713). |
-| A secret leaks into a public artifact through a path nobody listed. | `tests/env-secret-sentinel-scan.test.ts` runs in one of the hosted CI `test shard i/8` jobs (in the macOS pool); the required `test` check accepts success or cancelled-only results, while failure or skipped shard results still fail unless the pull request's change scope replaces the shards with a focused run (`scripts/ci-change-scope.ts`). It gives a primary checkout and a linked worktree random synthetic secrets through `env add --secret --value-stdin` (shared and `--local`), runs materialize, exec, up (Compose generation), env apply, logs, list, explain and doctor, then commits everything with `git add -A`. It requires zero occurrences of any value or the project key, raw or hex/base64/base64url encoded, in CLI output, recorded child argv, tracked files, every Git object, HACK_HOME, the private HOME and its caches, and generated Compose and runtime files. Plaintext may exist only in `.hack/.env`, and key text only in key files; each must be git-ignored, untracked and mode 0600. `.hack/.internal/compose.env.override.yml` must hold `${HACK_ENV_...}` references and no value, and must also be private and ignored. Values may reach a child's environment only for the exec'd command and `docker compose`. Positive controls prove delivery and that the scanner finds planted encodings in files and Git objects. Docker is a recording shim; no engine, keychain or installed Hack is reached. |
+| Materialized `.hack/.env` or local overrides are committed. | **Open / partial protection.** The managed `.hack/.gitignore` covers `.env` and local YAML names, but does not cover legacy `.env.<overlay>` files. Existing tracked files remain tracked. Do not treat local overrides as protected from commits merely because migration or ignore rules ran. Check the index and local layers yourself (`src/templates.ts`, `src/lib/project-env-config.ts`; see open gap 15). |
+| A secret leaks into a public artifact through a path nobody listed. | `tests/env-secret-sentinel-scan.test.ts` exercises encrypted-entry workflows with a recording Docker shim, a primary checkout and a worktree. Its fixture permits plaintext in a private `.hack/.env` and checks output, argv and Git artifacts. That is bounded evidence for those inputs, not a product-wide claim that plaintext exists only there. Plain local YAML, mux temporary payloads, application output and background stores need their own custody review. See open gap 12. |
 | A dependency vulnerability ships in Hack. | `bun install --frozen-lockfile`, and the read-only `scripts/dependabot-inventory.ts` lists open alerts (#309). Hack does not sandbox project dependencies that run under `hack host exec`; they receive the injected env by design. |
 
 ### Agent and MCP exfiltration
 
 | Threat | Mitigation on `next` |
 | --- | --- |
-| An agent puts a secret in a prompt, an argument or a log. | Canonical agent guidance in `src/agents/instruction-source.ts` says to pipe secrets with `--value-stdin` or use the hidden prompt, to treat `hack env get` and `--show-secrets` as plaintext sinks, and never to repeat their output (#308). The generated plugin bundle and checked-in examples render the same text. |
+| An agent puts a secret in a prompt, an argument or a log. | Canonical guidance in `src/agents/instruction-source.ts` directs stdin/hidden-prompt input, identifies plaintext value commands and secret-bearing logs/MCP/background reads, and keeps local YAML out of Git. Generated plugins and repository examples render that text. Guidance is not output filtering. |
 | An MCP tool returns secret values. | `hack.project.env.keys` and `hack.project.env.explain` in `src/mcp/server.ts` return names and provenance only; `buildEnvKeysArgs` never emits `--show-secrets`, and child stdout and stderr are withheld. |
 | A compromised dependency or agent reads the key file. | Out of reach for Hack inside the same user account (boundary 1). File modes and the symlink rules above only stop other users and redirected writes. |
 
 ## Open gaps
 
-These gaps are known and not closed on `next`. Each one needs its own change.
+These gaps are open at the audit revision above. Each needs a merged fix; a
+planned branch or a passing documentation check is not a mitigation.
 
-1. **Crash-safe key rotation.** Rotation is manual: move the key aside and re-add each
-   secret. A crash or a partial run leaves files encrypted under two different keys,
+1. **Crash-safe key rotation.** Rotation is manual: preserve the old key in private
+   storage outside the worktree, then re-add each secret. Do not leave a
+   `.hack.secret.key.old` copy in the worktree: that name is not ignored by the
+   managed rules (`src/templates.ts`). Preserve a recoverable key/ciphertext
+   generation before changing the active key. A crash or a partial run leaves
+   files encrypted under two different keys,
    and Hack has no journal or resume step for this. There is also no command that
    rotates the `encrypted_file` store key.
 2. **Independent crypto review.** The KDF (a single SHA-256 of the key text), the
@@ -139,13 +165,17 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    enforces that. It still holds decrypted values by design, so backups, file sync and
    anything running as the user can read it. `.hack/.internal/compose.env.override.yml`
    no longer holds values (HACK-1273), but the `docker compose` client process now
-   carries one `HACK_ENV_*` variable per service and key. Like every injected env, it is
-   readable by the same user (for example `ps eww`) for the life of that process. Each
-   service gets its own copy of each value, so the size grows with services times keys.
-   A project whose resolved values exceed the platform's argument and environment limit
-   (about 1 MiB in total on macOS; on Linux also 128 KiB, `MAX_ARG_STRLEN`, for one
-   `NAME=value` string such as a large PEM bundle) cannot start through Compose; the
-   start fails with `E2BIG`. Existing containers keep their values in `docker inspect`
+   carries `HACK_ENV_*` references shared by services whose winning scope is global.
+   Service-scoped overrides keep distinct references. The renderer uses scope metadata,
+   with a separate reference if inconsistent input gives a service a different value
+   (`src/lib/compose-managed-env.ts`). Global values also reach Compose under their own
+   names for interpolation. These values are readable by the same user for the life of
+   the process. Hack preflights the merged shell and managed environment, reserving
+   space for arguments, before writing the override or launching Compose. An oversized
+   environment is refused with `E_ENV_TOO_LARGE` and byte counts, not names or values
+   (`src/lib/spawn-env-limit.ts`). See the maintained
+   [Compose delivery and size contract](../env.md#runtime-behavior).
+   Existing containers keep their values in `docker inspect`
    (gap 9). A direct `docker compose -f` run of the override outside Hack gets blank
    values. Legacy adoption resolves the values at preview and preparation and checks
    each container's config-hash label against Compose's hash computed with them; a
@@ -162,8 +192,9 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    check names rollback, `hack up` and adopting again as the way to drop the values.
    A preparation that an earlier version made over a literal override is never
    published now (HACK-1318); until `hack config adopt --recover --rollback` releases
-   its journaled switch, it also keeps the file. Other generated files under `.hack/.internal/` and `.hack/.branch/` are
-   written with the process umask; the scan shows they hold no values today.
+   its journaled switch, it also keeps the file. Other internal files are not
+   value-free by definition: lifecycle logs can hold plaintext output, with
+   umask-dependent permissions (gap 16). The sentinel fixture does not prove otherwise.
 5. **YAML env layer TOCTOU (narrowed, HACK-1685).** Base and overlay YAML layers,
    including local layers and init scaffold writes, may follow links only when the whole chain resolves inside
    `realpath(projectRoot)`. Component-aware resolution handles relative targets,
@@ -189,10 +220,12 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    identity rechecks, not `openat`/`renameat`. A swap of `.hack` between the recheck
    and `rename(2)` is not fully closed. The store lock is cooperative, and v4 writers
    do not honor it.
-8. **MCP command output.** `hack.project.run`, `hack.project.exec` and the log tools
+8. **MCP command output and logs.** `hack.project.run`, `hack.project.exec` and the log tools
    return child output. A command such as `printenv`, or an app that logs its env,
-   puts injected values into the agent context. The only gates are the client's
-   approval for destructive tools and the agent guidance.
+   puts injected values into the agent context. `hack logs`, background-command
+   reads and `hack secrets get` can disclose values too. The env keys/explain
+   tools' withholding rule does not apply to arbitrary command output. Client
+   approvals and guidance are not a general redaction boundary.
 9. **Container env visibility.** Values in container environments are visible to
    anyone with Docker engine access (`docker inspect`). This is inherent to env
    injection.
@@ -212,6 +245,98 @@ These gaps are known and not closed on `next`. Each one needs its own change.
     reports, session archives, the keychain backend or 1Password, other CLI commands,
     or the native runtime backend. A zero-hit result is evidence for those paths and
     encodings only; it is not a complete-redaction claim.
+
+13. **Open: project key inherited by child processes (HACK-2163).** When
+    `HACK_ENV_SECRET_KEY` is set in the CLI environment, child-env builders copy
+    it without removing it (`src/lib/shell.ts`, `src/commands/background-command-start.ts`,
+    `src/mux/private-environment.ts`). Child code can read the project key as well
+    as its selected application values. The legacy store's `HACK_SECRETS_FILE_KEY`
+    is also passed through these builders. Keep this open until the separate fix
+    merges; an environment override is not isolated key custody.
+14. **Open: unfiltered parser diagnostics (HACK-2163).**
+    `parseProjectEnvConfigText` keeps the YAML parser's error message, and env
+    loading includes it in a `ClosedCliError` (`src/lib/project-env-config.ts`).
+    Synthetic malformed-YAML probes with pinned Bun 1.4.4 returned fixed text,
+    not source lines. That observation is not a value-free diagnostic contract:
+    the message is still forwarded without filtering. Separately, malformed
+    legacy `hack.env.json` input can appear in a JSON parser error, retained as
+    `parseError` by `src/lib/hack-env.ts` and returned by daemon env routes in
+    `src/daemon/routes/env.ts`. Do not paste raw parse errors into an agent
+    transcript or public report. Keep this open until those boundaries are fixed;
+    an error's class name does not make its message value-free.
+15. **Open: legacy overlay dotenv files are not ignored by the managed rules
+    (HACK-2163).** `HACK_DIR_GITIGNORE_ENTRIES` in `src/templates.ts` includes
+    `.env`, but not `.env.<overlay>`. Such files can be added to Git unless the
+    project has its own matching rule. Local YAML ignore patterns also cannot
+    protect files already tracked. Check actual tracking and ignore behavior;
+    keep this open until the separate ignore fix merges.
+16. **Open: lifecycle log and FIFO custody (HACK-2170).** Hooks and persistent
+    processes copy unredacted output to `.hack/.internal/lifecycle/<project>.log`
+    (`src/commands/project.ts`, `src/lib/lifecycle-runtime.ts`). Log creation uses
+    the process umask, and appending follows a final-path symlink; with umask 022,
+    a new log can be 0644. Persistent output also crosses a FIFO named with
+    `mktemp -u` and then created with `mkfifo` in `${TMPDIR:-/tmp}`, without a private
+    directory, explicit private mode or checked creation failure
+    (`src/lib/project-lifecycle-controller.ts`). Name reservation is racy, and
+    other readers may access output when ancestor permissions allow it. Keep this
+    open until the log and FIFO fix merges.
+17. **Open: secret-store and key integrity (HACK-2169).** In
+    `src/lib/secret-store.ts`, an unreadable encrypted store can be treated as empty
+    by `readEncryptedEntries`; a later mutation can replace it with only the new
+    entry. The process-global key cache is not bound to a store/key path, so a
+    cached key can be reused for another store whose key is absent. Explicit key
+    provisioning can replace an existing key without authenticating and re-encrypting
+    the store under the new one. Separately, project env add/set can create a file
+    key despite a working environment-only project key; file precedence then hides
+    that environment key from reads (`src/lib/project-env-config.ts`,
+    `src/commands/env.ts`). These are integrity and recoverability gaps, not safe
+    rotation paths. Keep them open until the corresponding fixes merge.
+18. **Open: local-layer symlinks, ignores and modes (HACK-2165).** Hydration checks
+    whether the logical local path is tracked before resolving an allowed
+    in-project symlink; the writer can then replace its tracked shared target.
+    Ordinary local add/set and hydrate can warn about failed ignore setup and
+    still write, and named local layers can already be tracked
+    (`src/lib/project-env-config.ts`, `src/lib/project-env-layer-path.ts`,
+    `src/lib/fs.ts`). Existing local-layer modes are preserved. Legacy dotenv
+    inspection also follows symlinks through `readTextFile`, including links
+    outside the project (`src/lib/hack-env.ts`); mutation checks do not protect
+    that read path. Keep these gaps open until the hygiene fixes merge; an
+    in-project target or local filename is not proof of private storage.
+19. **Open: migration cleanup recheck (HACK-2171).** Cleanup removes the current
+    path after an earlier migration/consent decision without rechecking the
+    selected file's current bytes and identity under a lock
+    (`removeLegacyProjectEnvArtifacts` in `src/lib/project-env-config.ts`,
+    cleanup callers in `src/commands/doctor.ts`). Edits made between that decision
+    and removal can be lost. Keep this open until cleanup revalidation merges.
+
+### Plaintext on disk outside materialization
+
+Local YAML can hold plain values, including values migrated from a v4 dotenv
+file. `writeProjectEnvConfigFile` creates new local layers mode 0600 but keeps an
+existing layer's mode (`src/lib/project-env-config.ts`). Check older files by
+hand; a local filename is not proof of encryption or private permissions.
+
+`stageMuxEnvironment` writes resolved values to `$TMPDIR/hack-mux-env-*/env.json`
+with mode 0600; the pane wrapper consumes and removes that payload
+(`src/mux/private-environment.ts`). During its lifetime, the same user and a
+backup or temp-file collector can read it. Interrupted consumption or cleanup
+needs an ownership-aware check, not a blanket temp-directory deletion.
+
+Background output reaches `<HACK_HOME>/commands/<id>/stdout` and `stderr` before
+the supervisor scans it (`src/lib/background-command/journal.ts`,
+`src/lib/background-command/supervisor.ts`). Values below six UTF-8 bytes are
+never redacted. If the supervisor dies, unscanned bytes can remain plaintext for
+the whole retention period or longer until a sweep; reads withholding those
+bytes do not delete them. Native background output has no redaction. See
+[background output custody](../guides/background-commands.md#stored-output-retention-and-redaction).
+
+Background metadata is not an env-value-free store: `meta.json` and `launch.json`
+retain caller argv, and `commands show` returns it, even with `--capture metadata`
+(`src/lib/background-command/launch.ts`, `src/lib/background-command/store.ts`,
+`src/lib/background-command/reader.ts`). Output redaction does not sanitize argv.
+Foreground MCP command audit records also retain formatted command arguments
+(`src/mcp/server.ts`). Keep sensitive values out of arguments; managed env
+injection does not require putting them there.
 
 ## Cross-context substitution accepted under v1
 

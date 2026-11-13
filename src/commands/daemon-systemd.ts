@@ -11,6 +11,7 @@ import {
   describeDaemonProcessRefusal,
   proveOwnedDaemonProcess,
 } from "../daemon/process.ts";
+import { readLinuxParentPid } from "../daemon/process-image.ts";
 import {
   type DaemonServiceSummary,
   summarizeSystemdService,
@@ -459,6 +460,8 @@ export async function stopViaSystemdIfInstalled(opts: {
   readonly proveDaemon?: (pid: number) => Promise<DaemonProcessProof>;
   /** Test seam for the default proof's observations. */
   readonly probe?: DaemonProcessProbe;
+  /** Test seam: a process's parent pid (defaults to /proc). */
+  readonly parentPid?: (pid: number) => Promise<number | null>;
 }): Promise<{
   readonly handled: boolean;
   readonly ownedPid: boolean;
@@ -512,6 +515,7 @@ export async function stopViaSystemdIfInstalled(opts: {
     probe: opts.probe,
     homePid: opts.pid,
     isPidInUnit: opts.isPidInUnit,
+    parentPid: opts.parentPid,
   });
   if (mainProcess.kind === "refused") {
     return { ...none, refused: mainProcess.message };
@@ -632,6 +636,8 @@ async function checkMainProcessServesHome(opts: {
   /** This home's hackd per its pid file, if one is running. */
   readonly homePid: number | null;
   readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
+  /** Defaults to {@link readLinuxParentPid}; tests pin it. */
+  readonly parentPid?: (pid: number) => Promise<number | null>;
 }): Promise<
   | { readonly kind: "ours" | "none" }
   | { readonly kind: "refused"; readonly message: string }
@@ -665,8 +671,10 @@ async function checkMainProcessServesHome(opts: {
   }
   // A `#!` launcher that runs hackd as a child (no `exec`) is the main
   // process itself: then the hackd named by this home's pid file must be
-  // proven this home's and be in the unit (its cgroup), still from process
-  // evidence, not configuration.
+  // proven this home's, be in the unit (its cgroup) and be the launcher's
+  // direct child. The cgroup alone also holds whatever the unit's processes
+  // started, such as this home's hackd started detached from a job of
+  // another home's daemon; still process evidence, not configuration.
   if (
     proof.reason === "not-hackd" &&
     opts.homePid !== null &&
@@ -675,7 +683,8 @@ async function checkMainProcessServesHome(opts: {
     (await (
       opts.isPidInUnit ??
       ((child: number) => isPidInSystemdUnit({ pid: child }))
-    )(opts.homePid)) === true
+    )(opts.homePid)) === true &&
+    (await (opts.parentPid ?? readLinuxParentPid)(opts.homePid)) === pid
   ) {
     return { kind: "ours" };
   }

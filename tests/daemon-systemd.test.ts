@@ -4071,6 +4071,7 @@ linuxTest(
     const child = 5555;
     let childProof: "owned" | "foreign-socket" = "owned";
     let inUnit: boolean | null = true;
+    let parent: number | null = 4242;
     const proveDaemon = (pid: number): Promise<DaemonProcessProof> =>
       Promise.resolve(
         pid === child && childProof === "owned"
@@ -4089,12 +4090,19 @@ linuxTest(
       stopViaSystemdIfInstalled({
         proveDaemon,
         isPidInUnit: () => Promise.resolve(inUnit),
+        parentPid: () => Promise.resolve(parent),
         pid,
         hackHome: join(root, ".hack"),
         deps: fake.deps,
       });
     fake.active = true;
     expect((await stop(child)).handled).toBe(true);
+    // In the unit but not the launcher's child (started detached from a job
+    // inside it, then re-parented): refused.
+    fake.active = true;
+    parent = 1;
+    expect((await stop(child)).refused).toContain("not proven");
+    parent = 4242;
     // The child is not in the unit: not this unit's daemon.
     fake.active = true;
     inUnit = false;

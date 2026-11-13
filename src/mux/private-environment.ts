@@ -3,6 +3,7 @@ import {
   lstat,
   mkdtemp,
   open,
+  readdir,
   realpath,
   rmdir,
   unlink,
@@ -14,10 +15,101 @@ const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PREFIX = "hack-mux-env-";
 const MAX_BYTES = 1024 * 1024;
 
+/**
+ * How long a staged payload stays usable (HACK-2165). A pane that has not
+ * consumed it by then refuses it; the staging process removes it when this
+ * elapses, and the next staging (or `hack doctor --fix`) sweeps any older
+ * payload a process left behind, so values never outlive a session that
+ * never ran.
+ */
+export const MUX_ENV_TTL_MS = 10 * 60_000;
+
+function isMissing(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+/** A staged payload directory older than the time limit. */
+export type StaleMuxEnvironment = {
+  readonly root: string;
+  readonly dev: number;
+  readonly ino: number;
+};
+
+/**
+ * Payload directories under `tmpDir` (default: the OS temporary directory)
+ * that this user staged and that are older than {@link MUX_ENV_TTL_MS}. Only
+ * private directories with Hack's prefix and owned by this user qualify;
+ * nothing is read.
+ */
+export async function findStaleMuxEnvironments(opts?: {
+  readonly tmpDir?: string;
+  readonly now?: number;
+}): Promise<readonly StaleMuxEnvironment[]> {
+  const base = opts?.tmpDir ?? tmpdir();
+  const now = opts?.now ?? Date.now();
+  const names = await readdir(base).catch(() => [] as string[]);
+  const stale: StaleMuxEnvironment[] = [];
+  for (const name of names.filter((entry) => entry.startsWith(PREFIX))) {
+    const root = join(base, name);
+    const info = await lstat(root).catch(() => null);
+    if (
+      info?.isDirectory() &&
+      info.uid === process.getuid?.() &&
+      (info.mode & 0o077) === 0 &&
+      now - info.mtimeMs > MUX_ENV_TTL_MS
+    ) {
+      stale.push({ root, dev: info.dev, ino: info.ino });
+    }
+  }
+  return stale;
+}
+
+/**
+ * Removes a stale payload directory while it is still the one found: its
+ * `env.json` (a regular file of this user's) and then the directory. Anything
+ * else inside it is left, and so is the directory.
+ */
+export async function removeStaleMuxEnvironment(
+  stale: StaleMuxEnvironment
+): Promise<boolean> {
+  const info = await lstat(stale.root).catch(() => null);
+  if (
+    !info?.isDirectory() ||
+    info.dev !== stale.dev ||
+    info.ino !== stale.ino
+  ) {
+    return false;
+  }
+  const path = join(stale.root, "env.json");
+  const file = await lstat(path).catch(() => null);
+  if (file?.isFile() && file.uid === process.getuid?.()) {
+    await unlink(path).catch((error: unknown) => {
+      if (!isMissing(error)) {
+        throw error;
+      }
+    });
+  }
+  return await rmdir(stale.root).then(
+    () => true,
+    () => false
+  );
+}
+
 /** The pane consumes and deletes this one-shot, owner-only payload before spawning. */
 export async function stageMuxEnvironment(
-  env: Readonly<Record<string, string>>
+  env: Readonly<Record<string, string>>,
+  opts?: {
+    /** Parent of the payload directory; the OS temporary directory by default. */
+    readonly tmpDir?: string;
+  }
 ) {
+  const base = opts?.tmpDir ?? tmpdir();
+  // Best effort: payloads of sessions that never ran.
+  for (const stale of await findStaleMuxEnvironments({ tmpDir: base }).catch(
+    () => []
+  )) {
+    await removeStaleMuxEnvironment(stale).catch(() => false);
+  }
   if (
     Object.entries(env).some(
       ([key, value]) => !KEY.test(key) || value.includes("\0")
@@ -29,7 +121,7 @@ export async function stageMuxEnvironment(
   if (Buffer.byteLength(bytes) > MAX_BYTES) {
     throw new Error("Mux environment exceeds the private input limit");
   }
-  const root = await realpath(await mkdtemp(join(tmpdir(), PREFIX)));
+  const root = await realpath(await mkdtemp(join(base, PREFIX)));
   const path = join(root, "env.json");
   let identity: { dev: number; ino: number } | undefined;
   const cleanup = async () => {
@@ -113,6 +205,12 @@ export async function runMuxEnvironment(
       (info.mode & 0o077) !== 0 ||
       info.size > MAX_BYTES
     ) {
+      return 1;
+    }
+    if (Date.now() - info.mtimeMs > MUX_ENV_TTL_MS) {
+      // Expired: never deliver it; remove it like a consumed payload.
+      await unlink(path).catch(() => undefined);
+      await rmdir(root).catch(() => undefined);
       return 1;
     }
     const bytes = Buffer.alloc(MAX_BYTES + 1);

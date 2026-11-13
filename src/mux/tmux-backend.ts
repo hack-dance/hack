@@ -8,7 +8,7 @@ import {
   type MuxSessionCreateResult,
   runMuxCommand,
 } from "./mux-backend.ts";
-import { stageMuxEnvironment } from "./private-environment.ts";
+import { MUX_ENV_TTL_MS, stageMuxEnvironment } from "./private-environment.ts";
 
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
 const LIFECYCLE_OWNER_ENV = "HACK_LIFECYCLE_OWNER_TOKEN";
@@ -331,6 +331,12 @@ export function createTmuxBackend(): MuxBackend {
       ]);
       if (result.exitCode !== 0) {
         await privateInput?.cleanup();
+      } else if (privateInput) {
+        // A pane that never runs the command must not keep the values: remove
+        // the payload once its time limit passes, if this process still runs.
+        setTimeout(() => {
+          privateInput.cleanup().catch(() => undefined);
+        }, MUX_ENV_TTL_MS).unref();
       }
       return result;
     } catch (error) {

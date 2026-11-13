@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { X509Certificate } from "node:crypto";
 
 import { inspectCaddyCaIdentity } from "../src/lib/caddy-ca-identity.ts";
+import { inspectProxyLoopback } from "../src/lib/proxy-loopback.ts";
 import {
   EXEC_STDOUT_OVERFLOW_EXIT,
   type ExecOptions,
@@ -80,6 +81,7 @@ function fixture(
     readonly now?: number;
     readonly timeoutMs?: number;
     readonly ports?: unknown;
+    readonly requestedPorts?: unknown;
   } = {}
 ) {
   const calls: {
@@ -138,6 +140,9 @@ function fixture(
                     project: "hack-dev-proxy",
                     service: "caddy",
                     ...(opts.ports === undefined ? {} : { ports: opts.ports }),
+                    ...(opts.requestedPorts === undefined
+                      ? {}
+                      : { requestedPorts: opts.requestedPorts }),
                   }
                 : opts.metadata
             ),
@@ -183,7 +188,7 @@ test("unchanged CA uses exact owned running container and bounded public-certifi
     "--format",
   ]);
   expect(f.calls[1]?.cmd[5]).toContain(".HostConfig.PortBindings");
-  expect(f.calls[1]?.cmd[5]).not.toContain(".NetworkSettings.Ports");
+  expect(f.calls[1]?.cmd[5]).toContain(".NetworkSettings.Ports");
   expect(f.calls[2]?.cmd).toEqual([
     "docker",
     "cp",
@@ -236,6 +241,58 @@ test("runtime port metadata distinguishes wildcard, single-family, LAN and remap
   ).toBeUndefined();
   expect(
     (await fixture({ ports: "invalid" }).run()).loopbackPorts
+  ).toBeUndefined();
+});
+
+test("an IPv6-disabled host uses its actual IPv4 binding instead of default dual-family intent", async () => {
+  await expectActualIpv4Only("0.0.0.0");
+});
+
+test("an IPv4-only runtime forwarder does not acquire an implied IPv6 listener", async () => {
+  await expectActualIpv4Only("127.0.0.1");
+});
+
+async function expectActualIpv4Only(HostIp: string): Promise<void> {
+  const ports = {
+    "80/tcp": [{ HostIp, HostPort: "80" }],
+    "443/tcp": [{ HostIp, HostPort: "443" }],
+  };
+  const requestedPorts = {
+    "80/tcp": [{ HostIp: "", HostPort: "80" }],
+    "443/tcp": [{ HostIp: "", HostPort: "443" }],
+  };
+  const identity = await fixture({ ports, requestedPorts }).run();
+  expect(identity.loopbackPorts).toEqual({ 80: [HostIp], 443: [HostIp] });
+  const called: string[] = [];
+  const report = await inspectProxyLoopback({
+    loadCa: async () => identity,
+    probe: async ({ address, port }) => {
+      called.push(`${address}/${port}`);
+      expect(address).toBe("127.0.0.1");
+      return "ok";
+    },
+    listListeners: async () => {
+      throw new Error("healthy IPv4 publication must not warn");
+    },
+  });
+  expect(report.status).toBe("ok");
+  expect(called).toEqual(["127.0.0.1/80", "127.0.0.1/443"]);
+}
+
+test("publication intent is a fallback only when the runtime port projection is absent", async () => {
+  const requestedPorts = { "443/tcp": [{ HostIp: "", HostPort: "443" }] };
+  expect((await fixture({ requestedPorts }).run()).loopbackPorts).toEqual({
+    80: [],
+    443: ["0.0.0.0", "::"],
+  });
+  expect(
+    (await fixture({ ports: null, requestedPorts }).run()).loopbackPorts
+  ).toEqual({ 80: [], 443: ["0.0.0.0", "::"] });
+  expect(
+    (await fixture({ ports: {}, requestedPorts }).run()).loopbackPorts
+  ).toEqual({ 80: [], 443: [] });
+  expect(
+    (await fixture({ ports: "malformed", requestedPorts }).run()).loopbackPorts
   ).toBeUndefined();
 });
 

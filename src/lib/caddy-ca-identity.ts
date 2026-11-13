@@ -16,7 +16,7 @@ const SINGLE_CERTIFICATE =
   /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----$/;
 const ROOT_PATH = "/data/caddy/pki/authorities/local/root.crt";
 const INSPECT_FORMAT =
-  '{"id":{{json .Id}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .HostConfig.PortBindings}}}';
+  '{"id":{{json .Id}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .NetworkSettings.Ports}},"requestedPorts":{{json .HostConfig.PortBindings}}}';
 /**
  * Select Hack's Caddy by its Compose labels with the project fixed, never
  * through the user-writable Compose file: a file whose top-level `name:` was
@@ -38,7 +38,7 @@ export type CaddyCaIdentity = {
   readonly message: string;
   /** Present only when a current runtime CA was validated and export comparison succeeded. */
   readonly currentPem?: string;
-  /** Loopback addresses selected by the running container's 80/443 publication configuration. */
+  /** Actual loopback publications; requested bindings are a fallback when runtime projection is absent. */
   readonly loopbackPorts?: Readonly<Record<80 | 443, readonly string[]>>;
 };
 
@@ -93,7 +93,7 @@ function loopbackBindings(
   return [...addresses];
 }
 
-/** Default publication intent survives a runtime's IPv4-only status projection. */
+/** Decode publication bindings, including unspecified-host intent in older runtime fallbacks. */
 function loopbackBindTargets(address: string): readonly string[] {
   if (address === "") {
     return ["0.0.0.0", "::"];
@@ -121,7 +121,10 @@ function parseCa(pem: string): X509Certificate | null {
   }
 }
 
-function matchesRunningCaddy(value: unknown, id: string): boolean {
+function matchesRunningCaddy(
+  value: unknown,
+  id: string
+): value is Record<string, unknown> {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
@@ -216,9 +219,9 @@ export async function inspectCaddyCaIdentity(opts: {
     if (inspected.exitCode !== 0 || !matchesRunningCaddy(metadata, id)) {
       return unavailable;
     }
-    loopbackPorts = isRecord(metadata)
-      ? publishedLoopbackPorts(metadata.ports)
-      : undefined;
+    loopbackPorts = publishedLoopbackPorts(
+      metadata.ports ?? metadata.requestedPorts
+    );
     const copied = await copyRuntimeRoot({ id, execute, timeoutMs });
     if (copied === null) {
       return unavailable;

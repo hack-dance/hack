@@ -1,6 +1,6 @@
 flowchart TD
   D[Doctor: published loopback bindings] --> C[Read proxy CA/publications]
-  O[Open: loopback-only DNS candidates] --> C
+  O[Compose open: loopback candidates] --> C
   C -->|Unavailable| U[Doctor warns; open proceeds]
   C -->|Verified runtime root| B{Published on loopback?}
   B -->|No| K[Skip intentional binds]

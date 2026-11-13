@@ -9,6 +9,7 @@ test("open refuses a confirmed loopback failure before JSON or browser output", 
         emitOpenOrigin({
           url: "https://app.example.test",
           json,
+          origin: "compose",
           checkLoopback: async () =>
             "port 443 on loopback is not reaching the Hack proxy",
         })
@@ -20,5 +21,29 @@ test("open refuses a confirmed loopback failure before JSON or browser output", 
     } finally {
       write.mockRestore();
     }
+  }
+});
+
+test("native loopback origin bypasses Compose DNS, Docker and CA probes even if a proxy failure would be reported", async () => {
+  const write = spyOn(process.stdout, "write").mockImplementation(() => true);
+  let checks = 0;
+  try {
+    expect(
+      await emitOpenOrigin({
+        url: "https://127.0.0.1",
+        json: true,
+        origin: "native",
+        checkLoopback: async () => {
+          checks += 1;
+          return "port 443 on loopback is not reaching the Hack proxy";
+        },
+      })
+    ).toBe(0);
+    expect(checks).toBe(0);
+    expect(write).toHaveBeenCalledWith(
+      `${JSON.stringify({ url: "https://127.0.0.1" }, null, 2)}\n`
+    );
+  } finally {
+    write.mockRestore();
   }
 });

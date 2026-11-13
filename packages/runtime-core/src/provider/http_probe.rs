@@ -12,6 +12,14 @@ pub struct HttpProbe {
     pub timeout_ms: u64,
     pub retries: u32,
     pub start_period_ms: u64,
+    /// Generated route readiness only; absent for authored HTTP healthchecks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<HttpProbePolicy>,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProbePolicy {
+    Route,
 }
 fn invalid() -> CandidateError {
     CandidateError::new(
@@ -26,6 +34,21 @@ fn generation_valid(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 impl HttpProbe {
+    /// A reviewed route without an authored healthcheck gets a bounded localhost
+    /// TCP connection followed by a complete HTTP response from that endpoint.
+    pub fn inferred_route(port: u16) -> Self {
+        // These defaults are part of retained route admission in Rust and
+        // TypeScript. Changing them requires a compatibility migration.
+        Self {
+            port,
+            path: "/".into(),
+            interval_ms: 30_000,
+            timeout_ms: 1_000,
+            retries: 3,
+            start_period_ms: 240_000,
+            policy: Some(HttpProbePolicy::Route),
+        }
+    }
     pub fn validate(&self) -> Result<(), CandidateError> {
         if self.port == 0
             || !self.path.starts_with('/')
@@ -56,7 +79,7 @@ impl HttpProbe {
         {
             return Err(invalid());
         }
-        Ok(vec![
+        let mut arguments = vec![
             self.port.to_string(),
             self.path.clone(),
             self.interval_ms.to_string(),
@@ -65,7 +88,11 @@ impl HttpProbe {
             self.start_period_ms.to_string(),
             directory.into(),
             generation.into(),
-        ])
+        ];
+        if self.policy == Some(HttpProbePolicy::Route) {
+            arguments.push("route".into());
+        }
+        Ok(arguments)
     }
     /// A historical healthy sample cannot outlive its exec, generation, or freshness window.
     pub fn health(
@@ -125,6 +152,8 @@ impl HttpProbe {
 }
 #[cfg(feature = "native-http-probe")]
 pub fn guest_binary() -> &'static [u8] {
+    // Built from this crate's guest source by build.rs and embedded in the same
+    // runtime as the planner; publication addresses it by its content hash.
     include_bytes!(concat!(env!("OUT_DIR"), "/http-probe"))
 }
 
@@ -140,6 +169,7 @@ mod tests {
             timeout_ms: 40,
             retries: 3,
             start_period_ms: 0,
+            policy: None,
         }
     }
     #[test]
@@ -202,6 +232,46 @@ mod tests {
         assert!(p.validate().is_err());
     }
 
+    #[test]
+    fn inferred_policy_is_reviewed_while_explicit_serialization_and_arguments_stay_unchanged() {
+        let explicit = config();
+        assert!(
+            serde_json::to_value(&explicit)
+                .unwrap()
+                .get("policy")
+                .is_none()
+        );
+        assert_eq!(
+            explicit
+                .arguments("/private/probe", GENERATION)
+                .unwrap()
+                .len(),
+            8
+        );
+        let inferred = HttpProbe::inferred_route(3000);
+        inferred.validate().unwrap();
+        // Even a timeout on every startup sample exhausts grace and retries
+        // before the frontend's 300-second graph budget. Startup cadence is at
+        // most one second; the steady interval is thirty seconds.
+        assert_eq!(inferred.interval_ms, 30_000);
+        assert!(
+            inferred.start_period_ms + u64::from(inferred.retries) * (1_000 + inferred.timeout_ms)
+                < 300_000
+        );
+        assert_eq!(serde_json::to_value(&inferred).unwrap()["policy"], "route");
+        assert_eq!(
+            inferred
+                .arguments("/private/probe", GENERATION)
+                .unwrap()
+                .last()
+                .unwrap(),
+            "route"
+        );
+        let mut invalid = serde_json::to_value(&inferred).unwrap();
+        invalid["policy"] = serde_json::json!("anything");
+        assert!(serde_json::from_value::<HttpProbe>(invalid).is_err());
+    }
+
     #[cfg(feature = "native-http-probe")]
     mod native {
         use super::*;
@@ -235,6 +305,23 @@ mod tests {
                 Self::with_timeout(mode, grace, 40)
             }
             fn with_timeout(mode: usize, grace: u64, timeout: u64) -> Self {
+                Self::with_policy(mode, grace, timeout, None)
+            }
+            fn with_policy(
+                mode: usize,
+                grace: u64,
+                timeout: u64,
+                policy: Option<HttpProbePolicy>,
+            ) -> Self {
+                Self::with_cadence(mode, grace, timeout, policy, 100)
+            }
+            fn with_cadence(
+                mode: usize,
+                grace: u64,
+                timeout: u64,
+                policy: Option<HttpProbePolicy>,
+                interval: u64,
+            ) -> Self {
                 let listener = TcpListener::bind("127.0.0.1:0").unwrap();
                 let port = listener.local_addr().unwrap().port();
                 listener.set_nonblocking(true).unwrap();
@@ -274,6 +361,19 @@ mod tests {
                                 }
                                 continue;
                             }
+                            7 => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                            8 => b"HTTP/1.1 499 Client Closed\r\n\r\n",
+                            9 => b"HTTP/1.1 500 Failed\r\n\r\n",
+                            10 => b"HTTP/",
+                            11 => b"",
+                            12 => b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\n\r\n",
+                            13 => b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 503 Failed\r\n\r\n",
+                            14 => b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\n\r\n",
+                            15 => {
+                                let response = format!("HTTP/1.1 200 OK\r\nX-Large: {}\r\n\r\n", "x".repeat(8192));
+                                let _ = stream.write_all(response.as_bytes());
+                                continue;
+                            }
                             _ => b"NOT-HTTP 200 OK\r\n\r\n",
                         };
                         let _ = stream.write_all(response);
@@ -294,6 +394,11 @@ mod tests {
                 config.port = port;
                 config.start_period_ms = grace;
                 config.timeout_ms = timeout;
+                config.interval_ms = interval;
+                config.policy = policy;
+                if policy == Some(HttpProbePolicy::Route) {
+                    config.path = "/".into();
+                }
                 let mut fixture = Self {
                     root,
                     process: None,
@@ -332,7 +437,10 @@ mod tests {
                 Some((health, raw.split(' ').nth(2).unwrap().parse().unwrap()))
             }
             fn wait(&mut self, health: Health, after: u64) -> u64 {
-                let deadline = Instant::now() + Duration::from_secs(4);
+                self.wait_for(health, after, Duration::from_secs(4))
+            }
+            fn wait_for(&mut self, health: Health, after: u64, budget: Duration) -> u64 {
+                let deadline = Instant::now() + budget;
                 loop {
                     assert!(
                         self.process.as_mut().unwrap().try_wait().unwrap().is_none(),
@@ -358,7 +466,9 @@ mod tests {
                     let _ = p.wait();
                 }
                 self.stop.store(1, Ordering::SeqCst);
-                self.server.take().unwrap().join().unwrap();
+                if let Some(server) = self.server.take() {
+                    server.join().unwrap();
+                }
                 fs::remove_dir_all(&self.root).unwrap();
             }
         }
@@ -472,6 +582,118 @@ mod tests {
                 fs::read(f.root.join("status.pending")).unwrap(),
                 b"retained publication"
             );
+        }
+        #[test]
+        fn inferred_boot_failures_name_the_service_before_the_graph_deadline() {
+            use crate::project::execution::{
+                self, Condition, Driver, Event, Graph, Observation, Service,
+            };
+            use std::collections::BTreeMap;
+            struct Probed(Fixture);
+            impl Driver for Probed {
+                fn record(&mut self, _: Event<'_>) -> Result<(), CandidateError> {
+                    Ok(())
+                }
+                fn start(&mut self, _: &str) -> Result<(), CandidateError> {
+                    Ok(())
+                }
+                fn observe(&mut self, _: &str) -> Result<Observation, CandidateError> {
+                    Ok(Observation::Running {
+                        health: self.0.sample().map_or(Health::Starting, |s| s.0),
+                    })
+                }
+            }
+            for listening in [false, true] {
+                // Exercise the compiled production helper, with the same grace
+                // and retry rules scaled down; one case has no TCP listener,
+                // the other keeps answering HTTP 500 through startup.
+                let mut fixture = Fixture::with_policy(9, 200, 40, Some(HttpProbePolicy::Route));
+                if !listening {
+                    fixture.stop.store(1, Ordering::SeqCst);
+                    fixture.server.take().unwrap().join().unwrap();
+                }
+                let mut driver = Probed(fixture);
+                let graph = Graph::from_services(BTreeMap::from([(
+                    "web".into(),
+                    Service {
+                        dependencies: BTreeMap::new(),
+                        ready: Condition::Healthy,
+                    },
+                )]))
+                .unwrap();
+                let failure =
+                    execution::run(&graph, &mut driver, Duration::from_secs(3)).unwrap_err();
+                assert_eq!(failure.code, "graph_service_failed");
+                assert_eq!(failure.service.as_deref(), Some("web"));
+                assert!(failure.message.contains("web") && failure.message.contains("unhealthy"));
+                if listening {
+                    assert!(driver.0.accepted.load(Ordering::SeqCst) >= 3);
+                }
+            }
+        }
+
+        #[test]
+        fn inferred_probe_slows_after_first_success_and_does_not_resume_fast_polling() {
+            // Shorten only the steady interval to keep this real-helper test
+            // bounded. Production admission pins it to 30 seconds.
+            let mut f = Fixture::with_cadence(9, 20_000, 40, Some(HttpProbePolicy::Route), 6_000);
+            let starting = f.wait(Health::Starting, 1);
+            f.mode.store(7, Ordering::SeqCst);
+            let ready = f.wait(Health::Healthy, starting);
+            f.mode.store(9, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(1_250));
+            assert_eq!(f.sample().unwrap(), (Health::Healthy, ready));
+            let down = f.wait_for(Health::Unhealthy, ready, Duration::from_secs(22));
+            assert!(down >= ready + 3);
+            // Unhealthy status does not return to the one-second startup loop.
+            thread::sleep(Duration::from_millis(1_250));
+            assert_eq!(f.sample().unwrap(), (Health::Unhealthy, down));
+            f.mode.store(7, Ordering::SeqCst);
+            f.wait_for(Health::Healthy, down, Duration::from_secs(8));
+        }
+
+        #[test]
+        fn inferred_route_accepts_http_2xx_through_4xx_but_never_tcp_only_or_http_5xx() {
+            for (mode, expected) in [
+                (1, Health::Healthy),
+                (2, Health::Unhealthy), // TCP without HTTP is not a ready route.
+                (3, Health::Healthy),   // Redirect is observed, never followed.
+                (5, Health::Unhealthy),
+                (7, Health::Healthy),
+                (8, Health::Healthy),
+                (11, Health::Unhealthy),
+                (0, Health::Unhealthy),
+                (4, Health::Unhealthy),
+                (6, Health::Unhealthy), // Slowly delivered partial HTTP cannot fall back to TCP.
+                (9, Health::Unhealthy),
+                (10, Health::Unhealthy),
+                (12, Health::Healthy),
+                (13, Health::Unhealthy),
+                (14, Health::Unhealthy),
+                (15, Health::Unhealthy),
+            ] {
+                let mut f = Fixture::with_policy(mode, 0, 40, Some(HttpProbePolicy::Route));
+                f.wait(expected, 0);
+                assert!(f.accepted.load(Ordering::SeqCst) > 0);
+            }
+            for mode in [2, 3, 5, 7, 8, 11] {
+                let mut f = Fixture::new(mode, 0);
+                f.wait(Health::Unhealthy, 0);
+            }
+        }
+
+        #[test]
+        fn inferred_route_requires_tcp_and_later_5xx_revokes_readiness() {
+            let mut f = Fixture::with_policy(7, 0, 40, Some(HttpProbePolicy::Route));
+            let ready = f.wait(Health::Healthy, 0);
+            f.mode.store(9, Ordering::SeqCst);
+            let down = f.wait(Health::Unhealthy, ready);
+            assert!(down >= ready + 3);
+            f.mode.store(7, Ordering::SeqCst);
+            let ready = f.wait(Health::Healthy, down);
+            f.stop.store(1, Ordering::SeqCst);
+            f.server.take().unwrap().join().unwrap();
+            f.wait(Health::Unhealthy, ready);
         }
         #[test]
         fn first_sample_survives_recovery_without_overriding_live_health() {

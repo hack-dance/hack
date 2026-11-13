@@ -363,6 +363,7 @@ import {
   readProjectsRegistry,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
+import { openProxyLoopbackWarning } from "../lib/proxy-loopback.ts";
 import {
   discoverDependencyBootstrapServices,
   discoverSuccessfulCompletionServices,
@@ -10415,6 +10416,7 @@ async function handleOpen({
     return await emitOpenOrigin({
       url: nativeOrigin,
       json: args.options.json === true,
+      origin: "native",
     });
   }
   const project = await resolveProjectForArgs({
@@ -10480,13 +10482,24 @@ async function handleOpen({
   const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
   const url = resolveOpenUrl({ targetRaw, resolvedHost, grafanaHost });
 
-  return await emitOpenOrigin({ url, json });
+  return await emitOpenOrigin({ url, json, origin: "compose" });
 }
 
-async function emitOpenOrigin(opts: {
+export async function emitOpenOrigin(opts: {
   readonly url: string;
   readonly json: boolean;
+  readonly origin: "compose" | "native";
+  readonly checkLoopback?: typeof openProxyLoopbackWarning;
 }): Promise<number> {
+  const warning =
+    opts.origin === "compose"
+      ? await (opts.checkLoopback ?? openProxyLoopbackWarning)({
+          url: opts.url,
+        })
+      : null;
+  if (warning) {
+    throw new HackCliError({ code: "E_GLOBAL_INFRA_DOWN", message: warning });
+  }
   if (opts.json) {
     process.stdout.write(`${JSON.stringify({ url: opts.url }, null, 2)}\n`);
     noteBrowserTargetsForLocalNetworkHint([opts.url]);

@@ -103,6 +103,7 @@ for (const configuredKeyPath of [".hack.secret.key", "link/.hack.secret.key"]) {
     await removeLegacyProjectEnvArtifacts({
       projectRoot: options.projectRoot,
       paths: migrated.cleanupCandidates,
+      context: migrated.cleanupContext,
     });
     const resolved = await resolveProjectEnvConfig({
       ...options,
@@ -208,12 +209,15 @@ test("an unrelated .dev file does not block cleanup in a .hack project", async (
   );
   const ordinary = join(options.projectRoot, "legacy-artifact");
   await writeFile(ordinary, "fixture\n");
-  expect(
-    await removeLegacyProjectEnvArtifacts({
-      projectRoot: options.projectRoot,
-      paths: [ordinary],
-    })
-  ).toEqual([ordinary]);
+  const candidates = await collectLegacyProjectEnvCleanupCandidates({
+    ...options,
+    overlayNames: [],
+    materialize: false,
+    deliveredValues: new Map(),
+    configCleanupCandidates: [ordinary],
+    composeEnvFileReferences: [],
+  });
+  expect(candidates.allowed).toEqual([ordinary]);
   expect(await readFile(join(options.projectRoot, ".dev"), "utf8")).toBe(
     "unrelated fixture file\n"
   );

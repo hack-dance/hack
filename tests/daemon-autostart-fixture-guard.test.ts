@@ -56,9 +56,13 @@ async function writeStub(path: string, body: string): Promise<void> {
 }
 
 async function runDoctorRepair(opts: {
-  readonly flag: string;
+  readonly flag?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
-}): Promise<{ readonly hackCalls: string[]; readonly output: string }> {
+}): Promise<{
+  readonly hackCalls: string[];
+  readonly output: string;
+  readonly stdout: string;
+}> {
   const fixture = await fixtureRoot();
   const tools = join(fixture, "tools");
   const project = join(fixture, "project");
@@ -79,7 +83,7 @@ async function runDoctorRepair(opts: {
       process.execPath,
       ENTRYPOINT,
       "doctor",
-      opts.flag,
+      ...(opts.flag ? [opts.flag] : []),
       "--no-interactive",
       "--path",
       project,
@@ -103,7 +107,41 @@ async function runDoctorRepair(opts: {
   return {
     hackCalls: log.split("\n").filter((line) => line.length > 0),
     output: stdout + stderr,
+    stdout,
   };
+}
+
+for (const entrypoint of ["hack-next", "hack-v5"]) {
+  for (const flag of [undefined, "--json"]) {
+    test(
+      `candidate doctor ${entrypoint} ${flag ?? "human"} never recommends the stable daemon`,
+      async () => {
+        const { output, stdout, hackCalls } = await runDoctorRepair({
+          flag,
+          env: { HACK_CANDIDATE_ENTRYPOINT: entrypoint },
+        });
+        expect(output).not.toContain("hack daemon start");
+        expect(output).not.toContain("hack daemon install");
+        expect(hackCalls).toEqual([]);
+        if (flag === "--json") {
+          expect(output).toContain("optional for candidate Compose workflows");
+          const parsed = JSON.parse(stdout);
+          expect(parsed.data.checks).toContainEqual(
+            expect.objectContaining({
+              id: "daemon",
+              status: "ok",
+            })
+          );
+          expect(
+            parsed.data.checks.some(
+              (check: { id: string }) => check.id === "daemon service"
+            )
+          ).toBe(false);
+        }
+      },
+      DOCTOR_REPAIR_TIMEOUT_MS
+    );
+  }
 }
 
 test("the private env names the variable the client reads", () => {

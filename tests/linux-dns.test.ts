@@ -1425,109 +1425,118 @@ describe("review round two", () => {
     expect(parseNeedDaemonReload("")).toBeNull();
   });
 
-  test("the printed manual plan pastes into a shell as is", async () => {
-    const home = await mkdtemp(join(tmpdir(), "hack-linux-dns-paste-"));
-    const saved = {
-      HOME: process.env.HOME,
-      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
-      XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-    };
-    process.env.HOME = home;
-    process.env.XDG_CONFIG_HOME = join(home, ".config");
-    process.env.XDG_DATA_HOME = join(home, ".local", "share");
-    try {
-      const { bootstrapLinuxGlobalDns } = await import(
-        "../src/commands/global-linux-dns.ts"
-      );
-      const { managedLocalDomains, resolveDefaultDomain } = await import(
-        "../src/lib/default-domain.ts"
-      );
-      const domains = managedLocalDomains(await resolveDefaultDomain());
-      const { host } = createFakeHost();
-      let printed = "";
-      const result = await bootstrapLinuxGlobalDns({
-        useStaticIps: true,
-        host,
-        print: (text) => {
-          printed += text;
-        },
-        prompt: {
-          canPrompt: false,
-          confirm: async () => {
-            throw new Error("must not prompt");
+  // Runs the real root installer script with GNU coreutils (`install`,
+  // `mv -T`, `head -c`, `timeout`, `sha256sum`), as on the Linux hosts this
+  // plan is printed for; the BSD tools on macOS reject those flags
+  // (HACK-2174).
+  test.skipIf(process.platform !== "linux")(
+    "the printed manual plan pastes into a shell as is",
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "hack-linux-dns-paste-"));
+      const saved = {
+        HOME: process.env.HOME,
+        XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+        XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+      };
+      process.env.HOME = home;
+      process.env.XDG_CONFIG_HOME = join(home, ".config");
+      process.env.XDG_DATA_HOME = join(home, ".local", "share");
+      try {
+        const { bootstrapLinuxGlobalDns } = await import(
+          "../src/commands/global-linux-dns.ts"
+        );
+        const { managedLocalDomains, resolveDefaultDomain } = await import(
+          "../src/lib/default-domain.ts"
+        );
+        const domains = managedLocalDomains(await resolveDefaultDomain());
+        const { host } = createFakeHost();
+        let printed = "";
+        const result = await bootstrapLinuxGlobalDns({
+          useStaticIps: true,
+          host,
+          print: (text) => {
+            printed += text;
           },
-        },
-      });
-      expect(result).toBe("skipped");
-      // Raw: the heredoc terminator sits at column 0.
-      expect(printed.split("\n")).toContain("HACK_DNS_FILE_END");
+          prompt: {
+            canPrompt: false,
+            confirm: async () => {
+              throw new Error("must not prompt");
+            },
+          },
+        });
+        expect(result).toBe("skipped");
+        // Raw: the heredoc terminator sits at column 0.
+        expect(printed.split("\n")).toContain("HACK_DNS_FILE_END");
 
-      const lines = printed.split("\n");
-      expect(lines.some((line) => line.startsWith("sudo tee"))).toBe(false);
-      expect(lines.some((line) => line.startsWith("sudo install"))).toBe(false);
+        const lines = printed.split("\n");
+        expect(lines.some((line) => line.startsWith("sudo tee"))).toBe(false);
+        expect(lines.some((line) => line.startsWith("sudo install"))).toBe(
+          false
+        );
 
-      // The fake sudo runs each pasted installer command unchanged except that
-      // the destination moves under `sandbox`: the real root stdin script
-      // installs (as this user: chown, the ownership find and install's owner
-      // flags are faked, as in tests/privileged-install.test.ts).
-      const bin = join(home, "bin");
-      const sandbox = join(home, "root");
-      const log = join(home, "sudo.log");
-      await mkdir(bin);
-      await mkdir(sandbox);
-      await writeFile(join(bin, "chown"), "#!/bin/sh\nexit 0\n", {
-        mode: 0o755,
-      });
-      await writeFile(join(bin, "find"), "#!/bin/sh\nexit 0\n", {
-        mode: 0o755,
-      });
-      await writeFile(
-        join(bin, "install"),
-        [
-          "#!/bin/sh",
-          'for a; do shift; case "$skip$a" in -o|-g) skip=1;; 1*) skip=;; *) set -- "$@" "$a";; esac; done',
-          'exec /usr/bin/install "$@"',
-          "",
-        ].join("\n"),
-        { mode: 0o755 }
-      );
-      await writeFile(
-        join(bin, "sudo"),
-        [
-          "#!/bin/sh",
-          'if [ "$1" = /bin/sh ] && [ "$2" = -c ] && [ "$4" = hack-install ]; then',
-          `  echo "install $7" >> "${log}"`,
-          `  exec /bin/sh -c "$3" "$4" "$5" "$6" "${sandbox}$7" "$8"`,
-          "fi",
-          `echo "$*" >> "${log}"`,
-          "",
-        ].join("\n"),
-        { mode: 0o755 }
-      );
-      const pasted = Bun.spawn(["sh", "-e"], {
-        stdin: new Blob([printed]),
-        env: { PATH: `${bin}:/usr/bin:/bin` },
-        stderr: "pipe",
-      });
-      expect(await pasted.exited).toBe(0);
-      expect(await readFile(join(sandbox, LINUX_DNS_UNIT_PATH), "utf8")).toBe(
-        renderLinuxDnsUnit({ domains })
-      );
-      expect(
-        await readFile(join(sandbox, LINUX_DNS_UDEV_RULE_PATH), "utf8")
-      ).toBe(renderLinuxDnsUdevRule());
-      expect((await readFile(log, "utf8")).trim().split("\n")).toEqual([
-        `install ${LINUX_DNS_UNIT_PATH}`,
-        `install ${LINUX_DNS_UDEV_RULE_PATH}`,
-        "systemctl daemon-reload",
-        "udevadm control --reload",
-        `systemctl restart -- hack-dns@${BRIDGE}.service`,
-      ]);
-    } finally {
-      restoreEnv("HOME", saved.HOME);
-      restoreEnv("XDG_CONFIG_HOME", saved.XDG_CONFIG_HOME);
-      restoreEnv("XDG_DATA_HOME", saved.XDG_DATA_HOME);
-      await rm(home, { recursive: true, force: true });
+        // The fake sudo runs each pasted installer command unchanged except that
+        // the destination moves under `sandbox`: the real root stdin script
+        // installs (as this user: chown, the ownership find and install's owner
+        // flags are faked, as in tests/privileged-install.test.ts).
+        const bin = join(home, "bin");
+        const sandbox = join(home, "root");
+        const log = join(home, "sudo.log");
+        await mkdir(bin);
+        await mkdir(sandbox);
+        await writeFile(join(bin, "chown"), "#!/bin/sh\nexit 0\n", {
+          mode: 0o755,
+        });
+        await writeFile(join(bin, "find"), "#!/bin/sh\nexit 0\n", {
+          mode: 0o755,
+        });
+        await writeFile(
+          join(bin, "install"),
+          [
+            "#!/bin/sh",
+            'for a; do shift; case "$skip$a" in -o|-g) skip=1;; 1*) skip=;; *) set -- "$@" "$a";; esac; done',
+            'exec /usr/bin/install "$@"',
+            "",
+          ].join("\n"),
+          { mode: 0o755 }
+        );
+        await writeFile(
+          join(bin, "sudo"),
+          [
+            "#!/bin/sh",
+            'if [ "$1" = /bin/sh ] && [ "$2" = -c ] && [ "$4" = hack-install ]; then',
+            `  echo "install $7" >> "${log}"`,
+            `  exec /bin/sh -c "$3" "$4" "$5" "$6" "${sandbox}$7" "$8"`,
+            "fi",
+            `echo "$*" >> "${log}"`,
+            "",
+          ].join("\n"),
+          { mode: 0o755 }
+        );
+        const pasted = Bun.spawn(["sh", "-e"], {
+          stdin: new Blob([printed]),
+          env: { PATH: `${bin}:/usr/bin:/bin` },
+          stderr: "pipe",
+        });
+        expect(await pasted.exited).toBe(0);
+        expect(await readFile(join(sandbox, LINUX_DNS_UNIT_PATH), "utf8")).toBe(
+          renderLinuxDnsUnit({ domains })
+        );
+        expect(
+          await readFile(join(sandbox, LINUX_DNS_UDEV_RULE_PATH), "utf8")
+        ).toBe(renderLinuxDnsUdevRule());
+        expect((await readFile(log, "utf8")).trim().split("\n")).toEqual([
+          `install ${LINUX_DNS_UNIT_PATH}`,
+          `install ${LINUX_DNS_UDEV_RULE_PATH}`,
+          "systemctl daemon-reload",
+          "udevadm control --reload",
+          `systemctl restart -- hack-dns@${BRIDGE}.service`,
+        ]);
+      } finally {
+        restoreEnv("HOME", saved.HOME);
+        restoreEnv("XDG_CONFIG_HOME", saved.XDG_CONFIG_HOME);
+        restoreEnv("XDG_DATA_HOME", saved.XDG_DATA_HOME);
+        await rm(home, { recursive: true, force: true });
+      }
     }
-  });
+  );
 });

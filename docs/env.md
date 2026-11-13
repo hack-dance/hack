@@ -966,6 +966,22 @@ copies remain until migration cleanup or explicit removal; encrypting a YAML ent
 does not erase those copies. `doctor --migrate-env-config` prints the remaining
 plaintext key names and a `hack env protect` command after migration.
 
+Migration cleanup keeps content and file-identity receipts from its source
+inventory. After confirmation, it takes the source writer locks, checks those
+receipts and rechecks current YAML delivery and Compose references before
+removing anything. A legacy store and its key use their separate owner locks,
+including the key lock shared by every store using that path.
+Changed sources or delivery refuse cleanup with reconciliation
+advice; migration writes already completed remain. Confirmed removals before a
+failure are named. Implicit cleanup warns and lets the original command continue
+even if a lock times out, a key is unavailable or a file is unreadable.
+Once YAML layers exist, rerunning migration may not import changed legacy
+values. Keep the copies and keys, reconcile chosen values with `env set KEY
+--value-stdin` (use `--local` for machine-local values, add `--secret` for secrets
+and preserve scope/overlay), check
+delivery, then remove only copies confirmed obsolete. Editors and older writers
+that do not take Hack's locks can still race a filesystem operation.
+
 ### Concurrent writes to one env file
 
 Hack env commands that change an env file never silently lose another command's change.
@@ -1562,6 +1578,8 @@ only, so it runs even when Docker is not reachable; the other `--migrate-env-con
 repairs still need Docker. As with any migration, `hack doctor` then offers to remove the
 legacy `.hack/.env*` files that Compose no longer references (a non-interactive run
 accepts for untracked files, and for git-tracked ones only with `--accept-tracked-env-changes`).
+An untracked legacy store key joins its tracked store's confirmation batch, so
+declining tracked cleanup keeps both files and the store remains readable.
 Files Compose still names as `env_file` are offered only when the Compose repair
 removed those references. Without `hack.env.json`, a legacy file that git tracks, or one
 whose status git cannot report in a git checkout, is never offered, because the migrated
@@ -1700,6 +1718,7 @@ Some older surfaces are still compatibility-oriented:
   bound to a path, project or variable name beyond the scoped key inside the
   encrypted store plaintext
 - the daemon env GET response identifies the format. For YAML projects it returns names, scopes, encryption flags and availability without decrypting or presenting legacy state. Legacy projects keep the dotenv-shaped metadata response. Legacy set/unset mutations refuse YAML projects until those endpoints use canonical YAML mutation helpers; use the CLI instead.
+- legacy daemon unset reports HTTP 500 with `secret_delete_unconfirmed` and `secretDeleted: null` if backend deletion throws, including an unknown outcome. It preserves `dotenvChanged` for the completed dotenv update; this operation is not atomic across both stores. A failure does not confirm that a backend value is absent.
 
 If you are writing new docs or new project setup flows, document the YAML overlay model first and treat `.hack/hack.env.json` as legacy migration context.
 

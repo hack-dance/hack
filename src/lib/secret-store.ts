@@ -4,7 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { lstat, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import type {
@@ -790,19 +790,22 @@ export async function provisionEncryptedFileKey(input: {
 
 /**
  * Explicit provisioning of `HACK_SECRETS_FILE_KEY` into the key file
- * (HACK-2169, S3). Replacing a different key must never leave a store's
- * entries under a key kept nowhere, so:
+ * (HACK-2169, S3). A key file may serve more than one store (the default
+ * path is shared), and failing to open one store is no evidence that a key
+ * is unused elsewhere, so provisioning never replaces a different key:
  *
- * - no key file: the key is published exclusively; if another process
- *   published one first (a first-use bootstrap), that one is judged below;
- * - the same key, or an empty file: rewritten as a private regular file;
- * - a key file that exists but cannot be read: refused (it may be the only
- *   copy of the store's key);
- * - a different key: replaced only as a repair, when the store has entries
- *   that the environment key opens and the existing key does not. That is
- *   decided under the store's mutation lock, and the key file must still
- *   hold what was checked. Otherwise refused: the key may serve this store
- *   or another one, and changing it is a rotation, which re-encrypts.
+ * - no key file (or an empty one): the key is written only when the
+ *   configured store is confirmed absent or empty, or opens under it. A
+ *   store that cannot be read or is refused is unknown, so nothing is
+ *   written: a new file would shadow the key that opens it today;
+ * - the same key: rewritten as a private (0600) regular file;
+ * - a different key, or a key file that cannot be read: refused, with the
+ *   manual steps. Changing a key is a rotation, which re-encrypts.
+ *
+ * Every branch runs under the key file's own lock (`<key>.lock`, shared by
+ * every store using that path), and each write re-checks the file just
+ * before it lands (the replacement's `beforeRename`), so a stale
+ * observation never overwrites a key written meanwhile.
  */
 async function provisionEnvKey(input: {
   readonly keyPath: string;
@@ -810,56 +813,107 @@ async function provisionEnvKey(input: {
   readonly key: string;
 }): Promise<void> {
   await ensureDir(dirname(input.keyPath));
-  const options = encryptedFileKeyOptions(input);
-  const text = `${input.key}\n`;
-  if (
-    (await readKeyForProvisioning(input.keyPath)) === null &&
-    !(await storeOpensOrIsEmpty({ storePath: input.storePath, key: input.key }))
-  ) {
-    // The store's entries are under another key (for example the keychain
-    // key of an older setup): a key file would shadow that key for readers.
+  await withProjectsRegistryLock({
+    lockPath: `${input.keyPath}.lock`,
+    label: "encrypted secret key",
+    run: async () => {
+      const existing = await readKeyForProvisioning(input.keyPath);
+      if (existing !== null && existing !== input.key) {
+        throw new SecretStoreKeyUnavailableError(
+          `Refused to replace the encrypted secret key at ${input.keyPath}: ${ENCRYPTED_FILE_KEY_ENV} holds a different key, and the existing key may be the only one that opens this or another store using that path (values omitted). Unset ${ENCRYPTED_FILE_KEY_ENV} to keep the current key. Changing a store's key is a rotation that re-encrypts it, which provisioning does not do. If you have confirmed that no store needs the current key, move the key file aside yourself (keep a copy) and retry.`
+        );
+      }
+      if (existing === null) {
+        await refuseUnlessStoreAcceptsKey({
+          keyPath: input.keyPath,
+          storePath: input.storePath,
+          key: input.key,
+        });
+      }
+      await writeEncryptedFileKeyIfUnchanged({
+        keyPath: input.keyPath,
+        key: input.key,
+      });
+    },
+  });
+}
+
+/**
+ * Refuses writing `key` to a missing key file unless the store is
+ * confirmed absent or empty, or opens under `key` (HACK-2169). Anything
+ * else is refused: a store under another key (an older keychain key), or
+ * one that cannot be read or is refused, which may open with that other
+ * key once repaired.
+ */
+async function refuseUnlessStoreAcceptsKey(input: {
+  readonly keyPath: string;
+  readonly storePath: string | undefined;
+  readonly key: string;
+}): Promise<void> {
+  if (input.storePath === undefined) {
+    return;
+  }
+  const store = await readEncryptedStoreText(input.storePath);
+  if (store.kind === "absent") {
+    return;
+  }
+  if (store.kind === "text") {
+    if (
+      store.text.length === 0 ||
+      encryptedStoreOpensUnder({
+        storePath: input.storePath,
+        text: store.text,
+        key: input.key,
+      })
+    ) {
+      return;
+    }
     throw new SecretStoreKeyUnavailableError(
       `Refused to write the encrypted secret key at ${input.keyPath}: ${ENCRYPTED_FILE_KEY_ENV} does not open the store at ${input.storePath}, which has entries, and readers would use the key file instead of the key that does (values omitted). Unset ${ENCRYPTED_FILE_KEY_ENV}, or set it to the key that opens the store, and retry.`
     );
   }
+  throw new SecretStoreKeyUnavailableError(
+    `Refused to write the encrypted secret key at ${input.keyPath}: the store at ${input.storePath} ${store.kind === "refused" ? "is a symlink or not a regular file" : "exists but cannot be read"}, so it cannot be checked against ${ENCRYPTED_FILE_KEY_ENV}, and a new key file could shadow the key that opens it (values omitted). Make the store a regular file this user can read and write, then retry.`
+  );
+}
+
+/** Thrown inside a key write's `beforeRename` when the file changed. */
+class EncryptedFileKeyChangedError extends Error {}
+
+/**
+ * Writes `key` to the key file (0600) only while the file is absent, empty
+ * or already holds `key`, checked again immediately before the write lands.
+ * Refuses, writing nothing, when another key is there by then.
+ */
+async function writeEncryptedFileKeyIfUnchanged(input: {
+  readonly keyPath: string;
+  readonly key: string;
+}): Promise<void> {
+  await ensureDir(dirname(input.keyPath));
+  const options = encryptedFileKeyOptions(input);
+  const text = `${input.key}\n`;
   if (await publishPrivateFileExclusive({ ...options, text })) {
     return;
   }
-  const existing = await readKeyForProvisioning(input.keyPath);
-  if (existing === null || existing === input.key) {
-    await replacePrivateFileAtomic({ ...options, text });
-    return;
+  try {
+    await replacePrivateFileAtomic({
+      ...options,
+      text,
+      beforeRename: async () => {
+        const current = await readKeyForProvisioning(input.keyPath);
+        if (current !== null && current !== input.key) {
+          throw new EncryptedFileKeyChangedError();
+        }
+      },
+    });
+  } catch (error: unknown) {
+    if (error instanceof EncryptedFileKeyChangedError) {
+      throw new SecretStoreKeyUnavailableError(
+        `Refused to write the encrypted secret key at ${input.keyPath}: another key was written there meanwhile, and it is kept (values omitted). Check which key the store needs, then retry.`
+      );
+    }
+    throw error;
   }
-  const refuse = (why: string) =>
-    new SecretStoreKeyUnavailableError(
-      `Refused to replace the encrypted secret key at ${input.keyPath}: ${ENCRYPTED_FILE_KEY_ENV} holds a different key, and ${why} (values omitted). Unset ${ENCRYPTED_FILE_KEY_ENV} to keep the current key. Changing a store's key is a rotation that re-encrypts it, which provisioning does not do; if nothing uses the current key, remove the key file yourself and retry.`
-    );
-  const storePath = input.storePath;
-  if (storePath === undefined) {
-    throw refuse("no store is configured to check it against");
-  }
-  await withEncryptedStoreMutation({
-    filePath: storePath,
-    run: async () => {
-      const store = await readEncryptedStoreText(storePath);
-      if (store.kind !== "text" || store.text.length === 0) {
-        throw refuse(
-          `the store at ${storePath} has no entries to show which key is right`
-        );
-      }
-      const opens = (key: string) =>
-        encryptedStoreOpensUnder({ storePath, text: store.text, key });
-      if (opens(existing) || !opens(input.key)) {
-        throw refuse(
-          `the store at ${storePath} has entries the environment key does not open in its place`
-        );
-      }
-      if ((await readKeyForProvisioning(input.keyPath)) !== existing) {
-        throw refuse("the key file changed while it was being checked");
-      }
-      await replacePrivateFileAtomic({ ...options, text });
-    },
-  });
 }
 
 /** True when `key` decrypts the store text. */
@@ -878,30 +932,6 @@ function encryptedStoreOpensUnder(input: {
   } catch {
     return false;
   }
-}
-
-/**
- * False only when the store has entries that `key` does not open; a
- * store that is absent, empty, unconfigured or unreadable is judged by the
- * paths that use it.
- */
-async function storeOpensOrIsEmpty(input: {
-  readonly storePath: string | undefined;
-  readonly key: string;
-}): Promise<boolean> {
-  if (input.storePath === undefined) {
-    return true;
-  }
-  const store = await readEncryptedStoreText(input.storePath);
-  return (
-    store.kind !== "text" ||
-    store.text.length === 0 ||
-    encryptedStoreOpensUnder({
-      storePath: input.storePath,
-      text: store.text,
-      key: input.key,
-    })
-  );
 }
 
 /**
@@ -942,13 +972,9 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   const allowKeyProvisioning = input?.allowKeyProvisioning !== false;
   const envValue = (process.env[ENCRYPTED_FILE_KEY_ENV] ?? "").trim();
   if (envValue.length > 0) {
+    // Persisting the environment key is provisionEnvKey's job (explicit
+    // provisioning handles it before reaching here); never written here.
     encryptedFileKeyFailureCooldownUntilMs = 0;
-    if (allowKeyProvisioning && input?.persistResolvedKey && input.keyPath) {
-      await writeEncryptedFileKey({
-        keyPath: input.keyPath,
-        key: envValue,
-      });
-    }
     return {
       key: envValue,
       source: "env",
@@ -1047,7 +1073,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   }
   if (existing) {
     if (allowKeyProvisioning && configuredKeyPath) {
-      await writeEncryptedFileKey({
+      await writeEncryptedFileKeyIfUnchanged({
         keyPath: configuredKeyPath,
         key: existing,
       });
@@ -1165,16 +1191,54 @@ async function readEncryptedFileKey(input: {
       `Refused the encrypted secret key at ${input.keyPath}: other users can read or write it (mode ${(read.mode & 0o777).toString(8)}; values omitted). Run: chmod 600 ${input.keyPath}`
     );
   }
-  if ((await isKeyFileTrackedByGit(input.keyPath)) === true) {
+  const tracked = await isKeyFileTrackedByGit(input.keyPath);
+  if (tracked === true) {
     throw new SecretStoreKeyRefusedError(
       `Refused the encrypted secret key at ${input.keyPath}: git tracks it, so it would be shared with the encrypted values (values omitted). Remove it from the repository (git rm --cached), rotate the key, then retry.`
+    );
+  }
+  if (tracked === null) {
+    throw new SecretStoreKeyRefusedError(
+      `Refused the encrypted secret key at ${input.keyPath}: it is inside a git work tree, but git could not report whether it tracks it (git failed, is missing, or took longer than ${GIT_TRACKING_TIMEOUT_MS / 1000} s; values omitted). Make git status work there, or move the key outside the repository and update keyPath, then retry.`
     );
   }
   return key;
 }
 
-/** True when git tracks `path`; null when that cannot be established. */
+/** Bound on the git tracking probe; a slower git counts as unknown. */
+const GIT_TRACKING_TIMEOUT_MS = 5000;
+
+/** Whether some directory at or above `dir` holds a `.git` entry. */
+async function isInsideGitWorkTree(dir: string): Promise<boolean> {
+  let current = resolve(dir);
+  for (;;) {
+    if (
+      await lstat(resolve(current, ".git")).then(
+        () => true,
+        () => false
+      )
+    ) {
+      return true;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return false;
+    }
+    current = parent;
+  }
+}
+
+/**
+ * True when git tracks `path`, false when it does not: either no `.git`
+ * is at or above it (no repository to track it, and git is not run), or
+ * git says so. Null when the key is inside a work tree but git cannot say
+ * (it fails to run, exits unexpectedly, or exceeds the time bound): the
+ * caller refuses that key rather than guess.
+ */
 async function isKeyFileTrackedByGit(path: string): Promise<boolean | null> {
+  if (!(await isInsideGitWorkTree(dirname(path)))) {
+    return false;
+  }
   let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
   try {
     proc = Bun.spawn({
@@ -1195,7 +1259,17 @@ async function isKeyFileTrackedByGit(path: string): Promise<boolean | null> {
   } catch {
     return null;
   }
-  const exitCode = await proc.exited;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const exitCode = await Promise.race([
+    proc.exited,
+    new Promise<null>((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout(null), GIT_TRACKING_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (exitCode === null) {
+    proc.kill();
+    return null;
+  }
   if (exitCode === 0) {
     return true;
   }
@@ -1213,18 +1287,6 @@ function encryptedFileKeyOptions(input: {
         "Refused encrypted secret key write: the key path or its directory is aliased or not a regular file; values omitted."
       ),
   };
-}
-
-/** Explicit provisioning: replaces the key file atomically (0600). */
-async function writeEncryptedFileKey(input: {
-  readonly keyPath: string;
-  readonly key: string;
-}): Promise<void> {
-  await ensureDir(dirname(input.keyPath));
-  await replacePrivateFileAtomic({
-    ...encryptedFileKeyOptions(input),
-    text: `${input.key}\n`,
-  });
 }
 
 /**
@@ -1252,7 +1314,24 @@ async function createOrAdoptEncryptedFileKey(input: {
   if (existing) {
     return existing;
   }
-  await replacePrivateFileAtomic({ ...options, text: `${input.key}\n` });
+  try {
+    await replacePrivateFileAtomic({
+      ...options,
+      text: `${input.key}\n`,
+      // Only while still empty: a key published meanwhile is adopted.
+      beforeRename: async () => {
+        if ((await readReplaceablePrivateFile(options))?.text.trim()) {
+          throw new EncryptedFileKeyChangedError();
+        }
+      },
+    });
+  } catch (error: unknown) {
+    const adopted = (await readReplaceablePrivateFile(options))?.text.trim();
+    if (error instanceof EncryptedFileKeyChangedError && adopted) {
+      return adopted;
+    }
+    throw error;
+  }
   return input.key;
 }
 

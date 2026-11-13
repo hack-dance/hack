@@ -976,12 +976,12 @@ test("explicit key provisioning never replaces a different key a store could sti
   await privateKey(keyPath, "published-key");
   process.env.HACK_SECRETS_FILE_KEY = "different-key";
   await expect(provisionEncryptedFileKey({ keyPath })).rejects.toThrow(
-    "no store is configured to check it against"
+    "holds a different key"
   );
   const storePath = join(tempDir, "empty.enc.json");
   await expect(
     provisionEncryptedFileKey({ keyPath, storePath })
-  ).rejects.toThrow("has no entries to show which key is right");
+  ).rejects.toThrow("holds a different key");
   expect(await readFile(keyPath, "utf8")).toBe("published-key\n");
 
   // A key file that exists but cannot be read may be the only copy.
@@ -1025,31 +1025,95 @@ test("explicit key provisioning never writes a key file that shadows the key a s
   expect(await readFile(keyPath, "utf8")).toBe("store-key\n");
 });
 
-test("explicit key provisioning repairs a key file the store's entries do not open (HACK-2169)", async () => {
-  // The environment key opens the store and the key file's does not: the
-  // key file is wrong, and provisioning the right one is a repair.
+test("explicit key provisioning never replaces a key another store sharing its path needs (HACK-2169)", async () => {
+  // Second-family review blocker: store B opens under the environment key
+  // and not the key file's, but store A, sharing the key path, opens only
+  // under the file's key. Failing to open B is no evidence the key is
+  // disposable, so it is never replaced.
   if (!tempDir) {
     throw new Error("Missing temp dir");
   }
   Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
-  const storePath = join(tempDir, "repair.enc.json");
-  const keyPath = join(tempDir, "repair.key");
-  await privateKey(keyPath, "right-key");
-  await encryptedFileConfig({ storePath, keyPath });
+  const keyPath = join(tempDir, "shared.key");
+  const storeA = join(tempDir, "a.enc.json");
+  const storeB = join(tempDir, "b.enc.json");
+  await privateKey(keyPath, "key-of-a");
+  await encryptedFileConfig({ storePath: storeA, keyPath });
   await (await resolveSecretStore({ projectName: "app" })).set({
     key: "TOKEN",
-    value: "under-right-key",
+    value: "under-key-of-a",
   });
-  await privateKey(keyPath, "wrong-key");
-  process.env.HACK_SECRETS_FILE_KEY = "right-key";
-  await provisionEncryptedFileKey({ keyPath, storePath });
-  expect(await readFile(keyPath, "utf8")).toBe("right-key\n");
+  process.env.HACK_SECRETS_FILE_KEY = "key-of-b";
+  await encryptedFileConfig({ storePath: storeB, keyPath });
+  await (await resolveSecretStore({ projectName: "app" })).set({
+    key: "TOKEN",
+    value: "under-key-of-b",
+  });
+  await expect(
+    provisionEncryptedFileKey({ keyPath, storePath: storeB })
+  ).rejects.toThrow("may be the only one that opens this or another store");
+  expect(await readFile(keyPath, "utf8")).toBe("key-of-a\n");
   Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  await encryptedFileConfig({ storePath: storeA, keyPath });
   expect(
     await (await resolveSecretStore({ projectName: "app" })).get({
       key: "TOKEN",
     })
-  ).toBe("under-right-key");
+  ).toBe("under-key-of-a");
+});
+
+test("explicit key provisioning never writes a key over a store it cannot check (HACK-2169)", async () => {
+  // Second-family review: with no key file, a store that cannot be read or
+  // is refused may open under an older key once repaired; a new key file
+  // would shadow that key.
+  if (!tempDir || process.getuid?.() === 0) {
+    return;
+  }
+  const keyPath = join(tempDir, "unchecked.key");
+  const storePath = join(tempDir, "unchecked.enc.json");
+  await writeFile(storePath, "{}", { mode: 0o600 });
+  process.env.HACK_SECRETS_FILE_KEY = "env-key";
+  await chmod(storePath, 0o000);
+  try {
+    await expect(
+      provisionEncryptedFileKey({ keyPath, storePath })
+    ).rejects.toThrow("exists but cannot be read");
+  } finally {
+    await chmod(storePath, 0o600);
+  }
+  await expect(access(keyPath)).rejects.toThrow();
+  const linked = join(tempDir, "linked.enc.json");
+  await symlink(storePath, linked);
+  await expect(
+    provisionEncryptedFileKey({ keyPath, storePath: linked })
+  ).rejects.toThrow("is a symlink or not a regular file");
+  await expect(access(keyPath)).rejects.toThrow();
+});
+
+test("concurrent explicit provisioning of different keys writes exactly one (HACK-2169)", async () => {
+  // Second-family review: provisioning is serialized by the key file, and
+  // a write re-checks the file just before it lands, so one call wins and
+  // the other refuses instead of overwriting it.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  const keyPath = join(tempDir, "race.key");
+  const storePath = join(tempDir, "race.enc.json");
+  const calls: Promise<unknown>[] = [];
+  for (const key of ["race-key-one", "race-key-two", "race-key-three"]) {
+    process.env.HACK_SECRETS_FILE_KEY = key;
+    calls.push(provisionEncryptedFileKey({ keyPath, storePath }));
+  }
+  const results = await Promise.allSettled(calls);
+  const written = (await readFile(keyPath, "utf8")).trim();
+  const winners = results.filter((result) => result.status === "fulfilled");
+  expect(winners).toHaveLength(1);
+  expect(["race-key-one", "race-key-two", "race-key-three"]).toContain(written);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      expect(String(result.reason)).toContain("holds a different key");
+    }
+  }
 });
 
 test("the encrypted_file key must be a private, untracked regular file (HACK-2036)", async () => {
@@ -1086,4 +1150,12 @@ test("the encrypted_file key must be a private, untracked regular file (HACK-203
   await expect(resolveSecretStore({ projectName: "app" })).rejects.toThrow(
     "git tracks it"
   );
+  // Inside a work tree whose git cannot answer (a `.git` file naming a
+  // missing directory): refused, not guessed untracked.
+  await rm(join(tempDir, ".git"), { recursive: true, force: true });
+  await writeFile(join(tempDir, ".git"), "gitdir: /nonexistent/git-dir\n");
+  await expect(resolveSecretStore({ projectName: "app" })).rejects.toThrow(
+    "git could not report whether it tracks it"
+  );
+  await rm(join(tempDir, ".git"));
 });

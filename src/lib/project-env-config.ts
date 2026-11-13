@@ -3692,8 +3692,15 @@ async function listProjectEnvInspectedOverlayNames(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
   const localSuffix = `.${PROJECT_ENV_LOCAL_SEGMENT}`;
+  // Only a missing directory has no layers; any other listing failure
+  // throws, so the caller reports it instead of finding nothing.
   const entries = await readdir(opts.projectDir, { withFileTypes: true }).catch(
-    () => []
+    (error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
   );
   return entries
     .filter((entry) => entry.isFile() || entry.isSymbolicLink())
@@ -3725,14 +3732,19 @@ async function listProjectEnvInspectedOverlayNames(opts: {
  * this project, how many secrets it holds and how many open under the key
  * readers would use (key file, else `HACK_ENV_SECRET_KEY`). Nothing is
  * created, copied or decrypted into the result: it carries counts and the
- * names of secrets that do not open, never a value.
- * Layers with no secrets, or that cannot be read or parsed, are left out
- * (other checks report those).
+ * names of secrets that do not open, never a value. Absent layers and
+ * layers without secrets are left out. A layer that exists but cannot be
+ * read or parsed, a directory that cannot be listed, and inheritance that
+ * cannot be resolved are returned as `failures`, never as "no secrets",
+ * so a caller cannot report success for what it did not inspect.
  */
 export async function inspectProjectEnvLayerKeys(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
-}): Promise<readonly ProjectEnvLayerKeyReport[]> {
+}): Promise<{
+  readonly reports: readonly ProjectEnvLayerKeyReport[];
+  readonly failures: readonly ProjectEnvLayerInspectionFailure[];
+}> {
   let fileKey: string | null = null;
   try {
     fileKey = await readExistingProjectEnvKeyFileText({
@@ -3745,20 +3757,51 @@ export async function inspectProjectEnvLayerKeys(opts: {
   const readerKey =
     fileKey ?? (process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() || null);
   const reports: ProjectEnvLayerKeyReport[] = [];
-  for (const layer of await listInspectedProjectEnvLayers(opts)) {
-    // Each layer is read the way runtime reads it; one it would refuse, or
-    // that cannot be read or parsed, is skipped (other checks report it).
-    const text = await layer.read().catch(() => null);
-    const report =
-      text === null
-        ? null
-        : projectEnvLayerKeyReport({ ...layer, text, readerKey });
-    if (report !== null) {
+  const listed = await listInspectedProjectEnvLayers(opts);
+  const failures: ProjectEnvLayerInspectionFailure[] = [...listed.failures];
+  for (const layer of listed.layers) {
+    // Each layer is read the way runtime reads it. Absent is nothing to
+    // check; one that exists but runtime refuses or cannot read is a
+    // failure, as is one that does not parse.
+    let text: string | null;
+    try {
+      text = await layer.read();
+    } catch {
+      failures.push({
+        path: layer.path,
+        inherited: layer.inherited,
+        what: "layer",
+      });
+      continue;
+    }
+    if (text === null) {
+      continue;
+    }
+    const report = projectEnvLayerKeyReport({ ...layer, text, readerKey });
+    if (report === "unparsed") {
+      failures.push({
+        path: layer.path,
+        inherited: layer.inherited,
+        what: "layer",
+      });
+    } else if (report !== null) {
       reports.push(report);
     }
   }
-  return reports;
+  return { reports, failures };
 }
+
+/**
+ * What the layer inspection could not check (HACK-2169), value-free: a
+ * layer that exists but cannot be read or parsed, a directory whose layers
+ * cannot be listed, or a linked worktree whose inherited layers cannot be
+ * resolved.
+ */
+export type ProjectEnvLayerInspectionFailure = {
+  readonly path: string;
+  readonly inherited: boolean;
+  readonly what: "layer" | "directory" | "inheritance";
+};
 
 type InspectedProjectEnvLayer = {
   readonly path: string;
@@ -3777,17 +3820,31 @@ type InspectedProjectEnvLayer = {
 async function listInspectedProjectEnvLayers(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
-}): Promise<readonly InspectedProjectEnvLayer[]> {
+}): Promise<{
+  readonly layers: readonly InspectedProjectEnvLayer[];
+  readonly failures: readonly ProjectEnvLayerInspectionFailure[];
+}> {
+  const failures: ProjectEnvLayerInspectionFailure[] = [];
+  const listingFailed = () => {
+    if (!failures.some((failure) => failure.path === opts.projectDir)) {
+      failures.push({
+        path: opts.projectDir,
+        inherited: false,
+        what: "directory",
+      });
+    }
+    return [] as readonly string[];
+  };
   const committedOverlays = await listProjectEnvOverlayNames({
     projectDir: opts.projectDir,
-  }).catch(() => [] as readonly string[]);
+  }).catch(listingFailed);
   // An overlay may exist only as its machine-local layer (`env set --env
   // <name> --local` writes no committed file), or as a symlinked layer;
   // inspect those too.
   const overlays = [
     ...new Set([
       ...committedOverlays,
-      ...(await listProjectEnvInspectedOverlayNames(opts)),
+      ...(await listProjectEnvInspectedOverlayNames(opts).catch(listingFailed)),
     ]),
   ];
   const layers = new Map<string, InspectedProjectEnvLayer>();
@@ -3835,10 +3892,11 @@ async function listInspectedProjectEnvLayers(opts: {
       inherited: false,
     });
   }
-  return [
-    ...layers.values(),
-    ...(await listInheritedProjectEnvLayers({ ...opts, overlays })),
-  ];
+  const inherited = await listInheritedProjectEnvLayers({ ...opts, overlays });
+  return {
+    layers: [...layers.values(), ...inherited.layers],
+    failures: [...failures, ...inherited.failures],
+  };
 }
 
 /**
@@ -3851,16 +3909,32 @@ async function listInheritedProjectEnvLayers(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly overlays: readonly string[];
-}): Promise<readonly InspectedProjectEnvLayer[]> {
-  const primaryDir = await resolvePrimaryLocalProjectDir(opts).catch(
-    () => null
-  );
+}): Promise<{
+  readonly layers: readonly InspectedProjectEnvLayer[];
+  readonly failures: readonly ProjectEnvLayerInspectionFailure[];
+}> {
+  let primaryDir: string | null;
+  try {
+    primaryDir = await resolvePrimaryLocalProjectDir(opts);
+  } catch {
+    // Runtime refuses the same way; what it would inherit is unknown.
+    return {
+      layers: [],
+      failures: [
+        { path: opts.projectDir, inherited: true, what: "inheritance" },
+      ],
+    };
+  }
   if (primaryDir === null) {
-    return [];
+    return { layers: [], failures: [] };
   }
   const primaryRoot = dirname(primaryDir);
+  const failures: ProjectEnvLayerInspectionFailure[] = [];
   const primaryOverlays = await listProjectEnvInspectedOverlayNames({
     projectDir: primaryDir,
+  }).catch(() => {
+    failures.push({ path: primaryDir, inherited: true, what: "directory" });
+    return [] as readonly string[];
   });
   const read = (path: string) => async () => {
     await assertProjectEnvLayerPath({ projectRoot: primaryRoot, path });
@@ -3897,10 +3971,13 @@ async function listInheritedProjectEnvLayers(opts: {
       read: read(path),
     });
   }
-  return layers;
+  return { layers, failures };
 }
 
-/** One layer's secret counts against the readers' key; null without secrets. */
+/**
+ * One layer's secret counts against the readers' key; null without
+ * secrets, `unparsed` when the text is not a valid env layer.
+ */
 function projectEnvLayerKeyReport(opts: {
   readonly path: string;
   readonly envName: string | null;
@@ -3908,14 +3985,14 @@ function projectEnvLayerKeyReport(opts: {
   readonly inherited: boolean;
   readonly text: string;
   readonly readerKey: string | null;
-}): ProjectEnvLayerKeyReport | null {
+}): ProjectEnvLayerKeyReport | "unparsed" | null {
   const read = parseProjectEnvConfigText({
     path: opts.path,
     environment: "default",
     text: opts.text,
   });
   if (read.parseError !== undefined) {
-    return null;
+    return "unparsed";
   }
   const secrets = Object.entries(read.config.values).flatMap(
     ([scope, scopeValues]) =>

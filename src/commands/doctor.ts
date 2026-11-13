@@ -3256,11 +3256,22 @@ async function checkSecretIntegrity({
     project.projectRoot.split("/").at(-1) ??
     "project"
   ).trim();
-  const findings = await inspectSecretIntegrity({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
-    projectName,
-  });
+  let findings: Awaited<ReturnType<typeof inspectSecretIntegrity>>;
+  try {
+    findings = await inspectSecretIntegrity({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      projectName,
+    });
+  } catch {
+    // Not inspected is not fine (HACK-2169); fixed text, no values.
+    return {
+      name: SECRET_INTEGRITY_CHECK,
+      status: "error",
+      message:
+        "The secret store and env layers could not be checked (the secrets configuration or a layer could not be read). Make the project and global Hack config and the env layer files readable and valid, then re-run hack doctor.",
+    };
+  }
   if (findings.length === 0) {
     return {
       name: SECRET_INTEGRITY_CHECK,

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
   chmod,
   mkdir,
@@ -23,6 +23,7 @@ import {
   PROJECT_ENV_SECRET_KEY_ENV,
   resolveProjectEnvConfig,
   resolveProjectEnvConfigPath,
+  resolveProjectEnvValue,
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
@@ -36,16 +37,42 @@ import { runFixtureGit } from "./helpers/fixture-git.ts";
  */
 
 const tempDirs = new Set<string>();
-const previousEnvKey = process.env[PROJECT_ENV_SECRET_KEY_ENV];
-const previousStoreKey = process.env.HACK_SECRETS_FILE_KEY;
-const previousCI = process.env.CI;
-const previousMode = process.env.HACK_EXECUTION_MODE;
+/**
+ * Every variable these tests set or clear. The global Hack config, Hack
+ * home and keychain fallback point into each test's own root, and both key
+ * variables start cleared, so no test reads the developer's real global
+ * secret store or key (second-family review).
+ */
+const ISOLATED_ENV = [
+  PROJECT_ENV_SECRET_KEY_ENV,
+  "HACK_SECRETS_FILE_KEY",
+  "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK",
+  "HOME",
+  "HACK_HOME",
+  "HACK_GLOBAL_CONFIG_PATH",
+  "CI",
+  "HACK_EXECUTION_MODE",
+] as const;
+const savedEnv = new Map<string, string | undefined>();
+
+beforeEach(async () => {
+  for (const key of ISOLATED_ENV) {
+    savedEnv.set(key, process.env[key]);
+  }
+  const home = await mkdtemp(join(tmpdir(), "hack-secret-integrity-home-"));
+  tempDirs.add(home);
+  process.env.HOME = home;
+  process.env.HACK_HOME = join(home, ".hack");
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(home, ".hack", "hack.config.json");
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  Reflect.deleteProperty(process.env, PROJECT_ENV_SECRET_KEY_ENV);
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+});
 
 afterEach(async () => {
-  restoreEnv(PROJECT_ENV_SECRET_KEY_ENV, previousEnvKey);
-  restoreEnv("HACK_SECRETS_FILE_KEY", previousStoreKey);
-  restoreEnv("CI", previousCI);
-  restoreEnv("HACK_EXECUTION_MODE", previousMode);
+  for (const key of ISOLATED_ENV) {
+    restoreEnv(key, savedEnv.get(key));
+  }
   for (const dir of tempDirs) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -142,14 +169,33 @@ test("a layer holding secrets under two keys is reported, value-free", async () 
   ]) {
     expect(findings[0]?.message).not.toContain(secret);
   }
-  // It names the secrets that do not open, and its advice works: set
-  // refuses while another of them remains, unset needs no key, and the
-  // re-entered values leave one key.
+  // It names the secrets that do not open, and its advice works end to
+  // end: read them with the key that encrypted them (here the other
+  // checkout's key file), set refuses while the layer mixes keys, unset
+  // needs no key, and the re-entered values leave one key.
   expect(findings[0]?.message).toContain(
     "Secrets that do not open: SECOND, THIRD."
   );
+  const currentKey = await readFile(repo.keyFile, "utf8");
+  await writeFile(repo.keyFile, await readFile(other.keyFile, "utf8"), {
+    mode: 0o600,
+  });
+  const recovered = new Map<string, string | null>();
+  for (const key of ["SECOND", "THIRD"]) {
+    const read = await resolveProjectEnvValue({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api"],
+      key,
+    });
+    recovered.set(key, read?.value ?? null);
+  }
+  await writeFile(repo.keyFile, currentKey, { mode: 0o600 });
+  expect(recovered.get("SECOND")).toBe("synthetic-second-77d0");
+  expect(recovered.get("THIRD")).toBe("synthetic-third-e5b9");
   await expect(
-    setSecret(repo, "SECOND", "synthetic-again-41e8")
+    setSecret(repo, "SECOND", recovered.get("SECOND") ?? "")
   ).rejects.toThrow("nothing was written");
   for (const key of ["SECOND", "THIRD"]) {
     await unsetProjectEnvValue({
@@ -160,8 +206,8 @@ test("a layer holding secrets under two keys is reported, value-free", async () 
       key,
     });
   }
-  await setSecret(repo, "SECOND", "synthetic-again-41e8");
-  await setSecret(repo, "THIRD", "synthetic-again-90fa");
+  await setSecret(repo, "SECOND", recovered.get("SECOND") ?? "");
+  await setSecret(repo, "THIRD", recovered.get("THIRD") ?? "");
   expect(await inspect(repo)).toEqual([]);
   const resolved = await resolveProjectEnvConfig({
     projectRoot: repo.projectRoot,
@@ -170,8 +216,8 @@ test("a layer holding secrets under two keys is reported, value-free", async () 
     serviceNames: ["api"],
   });
   expect(resolved?.globalEnv.FIRST).toBe("synthetic-first-a19c");
-  expect(resolved?.globalEnv.SECOND).toBe("synthetic-again-41e8");
-  expect(resolved?.globalEnv.THIRD).toBe("synthetic-again-90fa");
+  expect(resolved?.globalEnv.SECOND).toBe("synthetic-second-77d0");
+  expect(resolved?.globalEnv.THIRD).toBe("synthetic-third-e5b9");
 });
 
 test("the local default layer --local writes is the one inspected, legacy-compatible included", async () => {
@@ -449,4 +495,46 @@ test("a linked worktree's inherited primary local layer is inspected", async () 
   expect(findings[0]?.message).toContain('the "worktree keys" check');
   expect(findings[0]?.message).toContain("more than one key: 1 of 3");
   expect(findings[0]?.message).toContain("SECOND (--local), THIRD (--local)");
+});
+
+test("a layer that exists but cannot be read or parsed is an error, not success", async () => {
+  // Second-family review: a discovered layer whose read failed was
+  // dropped, and the check reported every secret fine.
+  const repo = await createRepo();
+  await setSecret(repo, "FIRST", "synthetic-first-77aa");
+  const staging = resolve(repo.projectDir, "hack.env.staging.yaml");
+  await writeFile(staging, "values: [unterminated\n");
+  const unparsed = await inspect(repo);
+  expect(unparsed).toHaveLength(1);
+  expect(unparsed[0]?.status).toBe("error");
+  expect(unparsed[0]?.message).toContain(
+    ".hack/hack.env.staging.yaml exists but could not be read or parsed"
+  );
+  if (process.getuid?.() === 0) {
+    return;
+  }
+  await writeFile(
+    staging,
+    "version: 1\nenvironment: staging\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  await chmod(staging, 0o000);
+  try {
+    const unreadable = await inspect(repo);
+    expect(unreadable).toHaveLength(1);
+    expect(unreadable[0]?.message).toContain("exists but could not be read");
+  } finally {
+    await chmod(staging, 0o600);
+  }
+  // A project directory whose layers cannot be listed is an error too.
+  await chmod(repo.projectDir, 0o300);
+  try {
+    const unlisted = await inspect(repo);
+    expect(
+      unlisted.some((finding) =>
+        finding.message.includes("could not be listed")
+      )
+    ).toBe(true);
+  } finally {
+    await chmod(repo.projectDir, 0o755);
+  }
 });

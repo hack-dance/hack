@@ -5,6 +5,7 @@ import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
 import {
   inspectProjectEnvLayerKeys,
   PROJECT_ENV_SECRET_KEY_ENV,
+  type ProjectEnvLayerInspectionFailure,
   type ProjectEnvLayerKeyReport,
 } from "./project-env-config.ts";
 import { listFileSecretStoreEntries } from "./secret-store.ts";
@@ -136,13 +137,43 @@ function mixedLayerRecovery(layer: ProjectEnvLayerKeyReport): string {
   return `Secrets that do not open: ${names}. To recover, read each of their values with the key that encrypted them, remove each with hack env unset <name> (with the options shown; unset needs no key), then store it again with hack env set <name> --secret.`;
 }
 
+/**
+ * What could not be inspected, so its secrets are unknown, not fine
+ * (HACK-2169). Fixed text and paths only.
+ */
+function inspectionFailureMessage(opts: {
+  readonly failure: ProjectEnvLayerInspectionFailure;
+  readonly path: string;
+}): string {
+  const where = opts.failure.inherited
+    ? " (in the primary checkout, which this worktree inherits)"
+    : "";
+  switch (opts.failure.what) {
+    case "layer":
+      return `The env layer ${opts.path}${where} exists but could not be read or parsed, so its secrets were not checked. Make it a readable, valid env file inside the project (no link leading outside it), then re-run hack doctor.`;
+    case "directory":
+      return `The env layers in ${opts.path}${where} could not be listed, so their secrets were not checked. Make the directory readable by this user, then re-run hack doctor.`;
+    default:
+      return `The local env layers this linked worktree inherits from its primary checkout could not be determined (its project config or git linkage could not be read), so their secrets were not checked. Fix the project config in ${opts.path}, or turn inheritance off with worktree.inherit_local: false, then re-run hack doctor.`;
+  }
+}
+
 /** Findings for env layers whose secrets do not all open under one key. */
 async function inspectEnvLayers(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
 }): Promise<SecretIntegrityFinding[]> {
-  const findings: SecretIntegrityFinding[] = [];
-  for (const layer of await inspectProjectEnvLayerKeys(opts)) {
+  const inspected = await inspectProjectEnvLayerKeys(opts);
+  const findings: SecretIntegrityFinding[] = inspected.failures.map(
+    (failure) => ({
+      status: "error",
+      message: inspectionFailureMessage({
+        failure,
+        path: displayPath({ ...opts, path: failure.path }),
+      }),
+    })
+  );
+  for (const layer of inspected.reports) {
     const shown = displayPath({ ...opts, path: layer.path });
     // An inherited layer lives in the primary checkout: say so, since
     // `hack env` here does not change it.

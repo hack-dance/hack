@@ -35,15 +35,16 @@ flowchart TD
 Keep v4 when stability is required; otherwise back up, try one project on
 Compose, check the application, and only then consider an eligible native trial.
 
-**next.16 migration warning (HACK-2172): do not run
+**next.16 and earlier migration warning (HACK-2172): do not run
 `hack doctor --migrate-env-config` without a private, readable copy of
 `.hack.secret.key`.** If a legacy encrypted store's `keyPath` names that file,
 explicit Doctor cleanup can remove the key that the migrated values still need.
 Implicit migration also writes files, so back up before it too; the key-removal
 defect described here is in the explicit Doctor cleanup. See
 [Config and env migration](#config-and-env-migration) before any env-consuming
-command. Keep this warning until a published fix replaces it with the verified
-cleanup contract.
+command. The live-key preservation fix is merged for a later prerelease;
+next.16 and earlier bundles still need this warning. A new build cannot recover
+a key already removed by an older cleanup.
 
 ## 1. Who should upgrade now
 
@@ -248,7 +249,7 @@ Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a1
 The project still uses `.hack/`, but this does **not** mean legacy env files are
 left untouched.
 
-**Stop before migration on next.16 unless the project key is backed up.**
+**Stop before migration on next.16 or earlier prereleases unless the project key is backed up.**
 HACK-2172 affects a legacy encrypted store configured with a `keyPath` pointing
 at `.hack.secret.key`: migration cleanup can delete that same file after using
 it for the new encrypted YAML values. The values then cannot be decrypted.
@@ -259,8 +260,14 @@ dotenv files, not the store's `keyPath`, but it still writes project state: keep
 the backup before env-consuming commands that can migrate automatically too.
 The section 2 template already saves the key privately as
 `$BACKUP/project-.hack.secret.key`, outside the working tree. A published fix
-for explicit Doctor cleanup is still required; a planned fix is not protection
-for next.16.
+for explicit Doctor cleanup is merged in
+[#769](https://github.com/hack-dance/hack/pull/769), intended for next.17.
+In a build containing that fix, project/shared env keys and current config/YAML
+inputs are not cleanup targets, even when an old backend configuration names
+one; cleanup refuses instead. Eligible obsolete contract/dotenv files, stores
+and separate backend keys still need the documented delivery and consent
+checks before removal. This does not repair an installed next.16 bundle
+or recover a key removed earlier. Keep the backup until recovery is verified.
 
 After those prerequisites, the explicit migration command is:
 
@@ -421,6 +428,24 @@ Sources for behavior beyond the generated tables: [parser/error handling](https:
 The Linux daemon additions are specified in the
 [merged service contract](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/docs/architecture.md#keeping-hackd-running).
 The complete 4.2.1 automation/exit/JSON transcript is **to be confirmed in the dogfood run**.
+
+### Native followed-log format in next.17
+
+The merged [#747](https://github.com/hack-dance/hack/pull/747) changes native
+plain `logs SERVICE --follow` output for the next prerelease. Application-text
+lines no longer get the old `SERVICE | ` prefix; the shape matches a finite
+snapshot. Both service stdout and stderr reach the reader's stdout, while Hack
+notices use stderr. This applies to native followed logs.
+
+Update a script that parsed the plain prefix to use `--json` and the log event's
+`entry.service`, `entry.stream` and `entry.message`. Add `--timestamps` only when
+Engine timestamps are wanted; in JSON they populate `entry.timestamp`. JSON
+follow remains a stream of session events, including a named `end` on failure;
+check both that event and the command exit status. Do not expect a second global
+error envelope after the session. Log output can contain application secrets in
+either format; do not paste raw output into reports.
+
+Source: [merged native log output contract](https://github.com/hack-dance/hack/blob/e7a70393e1bae3d3e453ac82bf20fad6273277b3/docs/reference/native-authored-commands.md#followed-service-logs).
 
 ## 6. Try native, then return to Compose
 
@@ -583,7 +608,7 @@ next.16 bundle.
 | HTTP on port 80 works but routed HTTPS on 443 times out | On one Mac, another program listened on 443 on all addresses, including loopback; affected project hostnames resolved to `127.0.0.1`. Check listener ownership and hostname resolution. Hostnames resolving to the proxy container's address were not affected in that trial. A VPN's “serve” feature is one possible conflicting listener. Doctor does not yet detect this case. |
 | Candidate Doctor suggests `hack daemon start` | That command names the stable CLI. Keep the stable daemon and its launchd service stopped during the shared-home candidate run; the candidate hint is being corrected. |
 | `env list --json` reveals plain values | This is next.16 behavior. Review the breaking listing changes in [#767](https://github.com/hack-dance/hack/pull/767) before updating scripts for the next prerelease. |
-| Explicit Doctor migration cleanup can remove `.hack.secret.key` | Keep a private readable key backup before any migration, including `doctor --migrate-env-config`. HACK-2172 remains a next.16 warning until the fix ships. |
+| next.16 or earlier explicit Doctor migration cleanup can remove `.hack.secret.key` | Keep a private readable key backup before any migration, including `doctor --migrate-env-config`. The merged [#769](https://github.com/hack-dance/hack/pull/769) live-input protection is intended for next.17; an older bundle retains the bug, and upgrading does not recover an already removed key. |
 | An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. Open PR [#764](https://github.com/hack-dance/hack/pull/764) adds the broader secrets-hygiene report and fixes intended for the next prerelease. |
 
 Sources for startup failures: [next.16 lifecycle and startup handling](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/project.ts).

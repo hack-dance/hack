@@ -8,6 +8,7 @@ import {
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { nativeSetupScriptReply } from "./helpers/native-setup-inspection.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 // `hack up` on the native backend must hand startNativeProject the public runtime
@@ -92,6 +93,11 @@ async function nativeProject(config: Record<string, unknown>) {
   process.env.HACK_HOME = join(root, ".global-hack");
   process.env.HACK_RUNTIME_BACKEND = "native";
   process.env.HACK_NATIVE_BINARY = join(root, "hack-local");
+  await writeFile(
+    process.env.HACK_NATIVE_BINARY,
+    `#!${process.execPath}\n${nativeSetupScriptReply()}\nprocess.exit(91);\n`,
+    { mode: 0o700 }
+  );
   process.env.HACK_NATIVE_HOME = join(root, "native-home");
   return root;
 }

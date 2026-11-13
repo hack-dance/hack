@@ -23,6 +23,7 @@ import {
   saveNativeEnvFingerprint,
 } from "../src/lib/native-env-fingerprint-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { nativeSetupScriptReply } from "./helpers/native-setup-inspection.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 // HACK-1140 command wiring: `hack up` / `hack restart` on the native image
@@ -176,6 +177,11 @@ async function nativeProject(): Promise<{
   process.env.HACK_HOME = join(root, ".global-hack");
   process.env.HACK_RUNTIME_BACKEND = "native";
   process.env.HACK_NATIVE_BINARY = join(root, "hack-local");
+  await writeFile(
+    process.env.HACK_NATIVE_BINARY,
+    `#!${process.execPath}\n${nativeSetupScriptReply()}\nprocess.exit(91);\n`,
+    { mode: 0o700 }
+  );
   process.env.HACK_NATIVE_HOME = join(root, "native-home");
   process.env.HACK_NATIVE_SHARED_SOURCE = "1";
   return {

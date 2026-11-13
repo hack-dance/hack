@@ -201,6 +201,27 @@ export async function readProcessSnapshot(
 }
 
 /** Terminate ownership-proven lifecycle groups with a bounded TERM/KILL sequence. */
+export const LIFECYCLE_TERM_GRACE_MS = 5000;
+
+/** A zombie holds a PID but runs no code; only live members keep a group active. */
+export function selectLiveLifecycleGroups(opts: {
+  readonly groups: readonly number[];
+  readonly identities: readonly ProcessIdentityRow[];
+}): number[] {
+  if (
+    opts.identities.length === 0 ||
+    opts.identities.some((row) => row.processGroupId === undefined)
+  ) {
+    throw new Error("Could not inspect live lifecycle process-group members");
+  }
+  const live = new Set(
+    opts.identities
+      .filter((row) => !row.zombie)
+      .map((row) => row.processGroupId)
+  );
+  return opts.groups.filter((group) => live.has(group));
+}
+
 export async function terminateLifecycleProcessGroups(opts: {
   readonly processGroupIds: readonly number[];
   readonly assertFresh?: () => Promise<void>;
@@ -209,11 +230,15 @@ export async function terminateLifecycleProcessGroups(opts: {
   readonly beforeSignal?: (
     groups: readonly number[]
   ) => Promise<readonly number[]>;
+  readonly readIdentities?: typeof readProcessIdentities;
   /** OS/time boundary, injectable for deterministic settlement tests. */
   readonly runtime?: {
     readonly signal: (group: number, signal: NodeJS.Signals | 0) => void;
     readonly now: () => number;
     readonly sleep: (ms: number) => Promise<void>;
+    readonly liveGroups: (
+      groups: readonly number[]
+    ) => Promise<readonly number[]>;
   };
 }): Promise<void> {
   const groups = [...new Set(opts.processGroupIds)].filter(
@@ -231,6 +256,11 @@ export async function terminateLifecycleProcessGroups(opts: {
     sleep: async (ms: number) => {
       await Bun.sleep(ms);
     },
+    liveGroups: async (groups: readonly number[]) =>
+      selectLiveLifecycleGroups({
+        groups,
+        identities: await (opts.readIdentities ?? readProcessIdentities)(),
+      }),
   };
   const signal = (group: number, name: NodeJS.Signals | 0): boolean => {
     try {
@@ -246,28 +276,37 @@ export async function terminateLifecycleProcessGroups(opts: {
       );
     }
   };
+  const living = async (pending: readonly number[]): Promise<number[]> => {
+    const existing = pending.filter((group) => signal(group, 0));
+    if (existing.length === 0) {
+      return [];
+    }
+    const live = new Set(await runtime.liveGroups(existing));
+    return existing.filter((group) => live.has(group));
+  };
   const wait = async (
     pending: readonly number[],
     timeoutMs: number
   ): Promise<number[]> => {
     const deadline = runtime.now() + timeoutMs;
-    let remaining = pending.filter((group) => signal(group, 0));
+    let remaining = await living(pending);
     while (remaining.length > 0 && runtime.now() < deadline) {
-      await runtime.sleep(Math.min(25, deadline - runtime.now()));
-      remaining = remaining.filter((group) => signal(group, 0));
+      await runtime.sleep(Math.min(100, deadline - runtime.now()));
+      remaining = await living(remaining);
     }
     return remaining;
   };
-  if (!opts.alreadySignalled) {
+  const initial = await living(groups);
+  if (!opts.alreadySignalled && initial.length > 0) {
     const targets = opts.beforeSignal
-      ? await opts.beforeSignal(groups)
-      : groups;
+      ? await opts.beforeSignal(initial)
+      : initial;
     for (const group of targets) {
       await opts.assertFresh?.();
       signal(group, "SIGTERM");
     }
   }
-  const remaining = await wait(groups, 500);
+  const remaining = await wait(initial, LIFECYCLE_TERM_GRACE_MS);
   const targets =
     remaining.length > 0 && opts.beforeSignal
       ? await opts.beforeSignal(remaining)
@@ -352,12 +391,14 @@ export function createLifecycleSessionRetirement(boundary?: {
       processGroupIds: groups.filter((group) => !paneGroups.has(group)),
       alreadySignalled: true,
       beforeSignal,
+      readIdentities: os.readIdentities,
       assertFresh: opts.assertFresh,
     });
     await terminateLifecycleProcessGroups({
       processGroupIds: groups.filter((group) => paneGroups.has(group)),
       alreadySignalled: true,
       beforeSignal,
+      readIdentities: os.readIdentities,
       assertFresh: opts.assertFresh,
     });
     return true;
@@ -383,7 +424,7 @@ async function captureRetirementGroups(opts: {
       (process) =>
         process.panePid &&
         !process.paneBirth &&
-        identities.some((row) => row.pid === process.panePid)
+        identities.some((row) => !row.zombie && row.pid === process.panePid)
     )
   ) {
     return "identity_unavailable";
@@ -392,7 +433,10 @@ async function captureRetirementGroups(opts: {
     process.panePid &&
     process.paneBirth &&
     identities.some(
-      (row) => row.pid === process.panePid && row.birth === process.paneBirth
+      (row) =>
+        !row.zombie &&
+        row.pid === process.panePid &&
+        row.birth === process.paneBirth
     )
       ? [process.panePid]
       : []
@@ -409,10 +453,12 @@ async function captureRetirementGroups(opts: {
   const members = new Map(
     groups.map((group) => [
       group,
-      identities.filter((identity) =>
-        snapshot.some(
-          (row) => row.pid === identity.pid && row.processGroupId === group
-        )
+      identities.filter(
+        (identity) =>
+          !identity.zombie &&
+          snapshot.some(
+            (row) => row.pid === identity.pid && row.processGroupId === group
+          )
       ),
     ])
   );
@@ -425,25 +471,22 @@ async function verifyRetirementGroups(opts: {
   readonly members: ReadonlyMap<number, readonly ProcessIdentityRow[]>;
   readonly os: RetirementBoundary;
 }): Promise<readonly number[]> {
-  const [current, births] = await Promise.all([
-    opts.os.readSnapshot(),
-    opts.os.readIdentities(),
-  ]);
-  if (current.length === 0 || births.length === 0) {
-    throw new Error(
-      "Could not revalidate lifecycle process identities before signalling"
-    );
-  }
+  const births = await opts.os.readIdentities();
+  const active = new Set(
+    selectLiveLifecycleGroups({ groups: opts.pending, identities: births })
+  );
   return opts.pending.filter((group) => {
-    const live = current.filter((row) => row.processGroupId === group);
-    if (live.length === 0) {
+    if (!active.has(group)) {
       return false;
     }
+    const live = births.filter(
+      (row) => !row.zombie && row.processGroupId === group
+    );
     if (
       !(opts.members.get(group) ?? []).some(
         (member) =>
-          live.some((row) => row.pid === member.pid) &&
-          births.some(
+          !member.zombie &&
+          live.some(
             (row) => row.pid === member.pid && row.birth === member.birth
           )
       )

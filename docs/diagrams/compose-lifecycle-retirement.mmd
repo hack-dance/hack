@@ -1,21 +1,21 @@
 ---
-title: Compose lifecycle retirement
+title: Compose tmux lifecycle retirement
 ---
 stateDiagram-v2
   direction TB
   [*] --> attached
   attached --> captured : Compose exits
   captured --> signalled : owned mux stop
-  signalled --> commandsAbsent : command groups absent
+  signalled --> commandsRetired : no live command members
   signalled --> retained : observation unknown
-  signalled --> escalated : grace expires
-  escalated --> commandsAbsent : absence confirmed
+  signalled --> escalated : 5 s grace expires
+  escalated --> commandsRetired : no live command members
   escalated --> retained : deadline or probe error
-  commandsAbsent --> wrappersAbsent : wrapper groups absent
-  commandsAbsent --> wrapperEscalated : grace expires
-  wrapperEscalated --> wrappersAbsent : absence confirmed
+  commandsRetired --> wrappersRetired : no live wrapper members
+  commandsRetired --> wrapperEscalated : 5 s grace expires
+  wrapperEscalated --> wrappersRetired : no live wrapper members
   wrapperEscalated --> retained : deadline or probe error
-  wrappersAbsent --> retired : remove owned record
+  wrappersRetired --> retired : remove owned record
   retired --> [*]
   note right of retained
     INV unknown is retained
@@ -26,12 +26,14 @@ stateDiagram-v2
     Mux acknowledgement is not group exit
     FIFO EOF is not group absence
     Revalidate member identity before KILL
+    Zombie-only groups are retired
+    After KILL allow 2 s to confirm retirement
   end note
   note right of captured
     Capture roots only with matching PID and birth
   end note
   classDef live stroke-width:1.6px
   class attached live
-  class signalled,escalated,commandsAbsent,wrapperEscalated wait
-  class wrappersAbsent,retired ok
+  class signalled,escalated,commandsRetired,wrapperEscalated wait
+  class wrappersRetired,retired ok
   class retained fail

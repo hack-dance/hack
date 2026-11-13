@@ -254,6 +254,49 @@ test("doctor repair cannot remove ownership or return before ordered retirement"
   }
 });
 
+test("doctor repair ignores matching zombie pane and leader identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-repair-zombie-"));
+  try {
+    const f = await fixture({
+      root,
+      processes: [
+        {
+          name: "exited",
+          windowName: "exited",
+          logPath: join(root, "exited.log"),
+          panePid: 42,
+          paneBirth: "exited",
+          processGroupId: 42,
+          processGroupBirth: "exited",
+        },
+      ],
+    });
+    const result = await repairProjectLifecycleSessions({
+      projectDir: root,
+      projectRoot: root,
+      boundary: {
+        ...f.boundary,
+        readIdentities: async () => [
+          {
+            pid: 42,
+            parentPid: 1,
+            processGroupId: 42,
+            birth: "exited",
+            zombie: true,
+          },
+        ],
+      },
+    });
+    expect(result).toEqual({
+      repairedSessions: [f.entry.sessionName],
+      failures: [],
+    });
+    expect(await readLifecycleState({ projectDir: root })).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("doctor repair reports unconfirmed retirement and keeps ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-repair-unknown-"));
   try {
@@ -350,9 +393,9 @@ for (const legacy of [false, true]) {
       }
     );
     let group: number | undefined;
-    const watchdog = setTimeout(() => child.kill("SIGKILL"), 8000);
+    const watchdog = setTimeout(() => child.kill("SIGKILL"), 25_000);
     try {
-      const deadline = performance.now() + 3000;
+      const deadline = performance.now() + 10_000;
       while (
         !(await Bun.file(ready).exists()) &&
         child.exitCode === null &&
@@ -363,6 +406,11 @@ for (const legacy of [false, true]) {
       expect(await Bun.file(ready).exists()).toBe(true);
       group = Number.parseInt(await Bun.file(commandPidPath).text(), 10);
       expect(group).toBeGreaterThan(1);
+      expect(
+        (await readProcessIdentities()).find((row) => row.pid === group)
+          ?.processGroupId,
+        "the fixture requires a real dedicated command process group"
+      ).toBe(group);
       const paneBirth = (await readProcessIdentities()).find(
         (row) => row.pid === child.pid
       )?.birth;
@@ -415,5 +463,5 @@ for (const legacy of [false, true]) {
       await child.exited;
       await rm(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 30_000);
 }

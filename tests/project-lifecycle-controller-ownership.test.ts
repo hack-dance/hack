@@ -264,9 +264,10 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
     );
   // hack down's stop path, against the same backend.
   const stop = (options?: {
-    readonly retireSession: Parameters<
+    readonly retireSession?: Parameters<
       typeof stopLifecycleProcessController
     >[0]["retireSession"];
+    readonly readIdentities?: typeof readProcessIdentities;
   }) =>
     stopLifecycleProcessController({
       project: { projectRoot: root, projectDir },
@@ -276,6 +277,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
       composeProject: COMPOSE_PROJECT,
       mux: resolvedMux,
       retireSession: options?.retireSession,
+      readIdentities: options?.readIdentities,
     });
   const newOwnership = () =>
     createSharedHelperSessionOwnership({
@@ -397,6 +399,44 @@ test("unconfirmed foreground group retirement keeps ownership and helper retenti
   await starter.finalize();
   expect(await starter.getOperationCleanup()?.()).toBe("session-retained");
   expect(await entries()).toHaveLength(1);
+});
+
+test("a missing mux retires matching unreaped zombie identities without signals", async () => {
+  const { controller, entries, mux, projectDir, stop } = await fixture();
+  const starter = controller({ sessionOwnership: undefined });
+  await starter.startMany({ processes: [PROCESS] });
+  await starter.finalize();
+  const entry = (await entries())[0];
+  if (!entry) {
+    throw new Error("fixture ownership unavailable");
+  }
+  await upsertLifecycleStateEntry({
+    projectDir,
+    entry: {
+      ...entry,
+      processes: entry.processes.map((process) => ({
+        ...process,
+        panePid: 42,
+        paneBirth: "exited",
+        processGroupId: 42,
+        processGroupBirth: "exited",
+      })),
+    },
+  });
+  mux.sessions.delete(SESSION);
+  await stop({
+    readIdentities: async () => [
+      {
+        pid: 42,
+        parentPid: 1,
+        processGroupId: 42,
+        birth: "exited",
+        zombie: true,
+      },
+    ],
+  });
+  expect(await entries()).toEqual([]);
+  expect(mux.killed).toEqual([]);
 });
 
 for (const related of [false, true]) {

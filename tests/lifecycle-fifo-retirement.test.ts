@@ -14,8 +14,9 @@ for (const ignoresTerm of [false, true]) {
     const logPath = join(root, "lifecycle.log");
     const commandPidPath = join(root, "command.pid");
     const ready = join(root, "ready");
+    const cleanExit = join(root, "clean-exit");
     await ensurePrivateLifecycleLog({ root, logPath });
-    const code = `process.on("SIGTERM", () => { ${ignoresTerm ? "" : "setTimeout(() => process.exit(0), 150);"} }); await Bun.write(${JSON.stringify(ready)}, "yes"); setInterval(() => {}, 1000);`;
+    const code = `process.on("SIGTERM", () => { ${ignoresTerm ? "" : `setTimeout(async () => { await Bun.write(${JSON.stringify(cleanExit)}, "clean"); process.exit(0); }, 1000);`} }); await Bun.write(${JSON.stringify(ready)}, "yes"); setInterval(() => {}, 1000);`;
     const command = `${quoteShellWord(process.execPath)} --no-env-file -e ${quoteShellWord(code)}`;
     const child = Bun.spawn(
       [
@@ -37,9 +38,9 @@ for (const ignoresTerm of [false, true]) {
       }
     );
     let group: number | undefined;
-    const watchdog = setTimeout(() => child.kill("SIGKILL"), 8000);
+    const watchdog = setTimeout(() => child.kill("SIGKILL"), 25_000);
     try {
-      const deadline = performance.now() + 3000;
+      const deadline = performance.now() + 10_000;
       while (
         !(await Bun.file(ready).exists()) &&
         child.exitCode === null &&
@@ -50,6 +51,12 @@ for (const ignoresTerm of [false, true]) {
       expect(await Bun.file(ready).exists()).toBe(true);
       group = Number.parseInt(await Bun.file(commandPidPath).text(), 10);
       expect(group).toBeGreaterThan(1);
+      expect(
+        (await readProcessIdentities()).find((row) => row.pid === group)
+          ?.processGroupId,
+        "the fixture requires a real dedicated command process group"
+      ).toBe(group);
+      expect(group).not.toBe(child.pid);
       const retire = createLifecycleSessionRetirement();
       const paneBirth = (await readProcessIdentities()).find(
         (row) => row.pid === child.pid
@@ -65,6 +72,7 @@ for (const ignoresTerm of [false, true]) {
         })
       ).toBe(true);
       expect(await child.exited).toBe(130);
+      expect(await Bun.file(cleanExit).exists()).toBe(!ignoresTerm);
       expect(() => process.kill(-(group ?? 0), 0)).toThrow();
       expect(() => process.kill(-child.pid, 0)).toThrow();
       expect(
@@ -82,10 +90,10 @@ for (const ignoresTerm of [false, true]) {
         }
       }
       if (child.exitCode === null) {
-        child.kill("SIGKILL");
+        process.kill(-child.pid, "SIGKILL");
       }
       await child.exited;
       await rm(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 30_000);
 }

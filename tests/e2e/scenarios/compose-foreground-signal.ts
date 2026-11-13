@@ -5,6 +5,10 @@ import { quoteShellWord } from "../../../src/lib/logs.ts";
 import { readProjectRuntimeState } from "../../../src/lib/project-runtime-state.ts";
 import { createMonorepoFixture } from "../fixture.ts";
 import {
+  bothForegroundServicesLogged,
+  waitForForegroundContainers,
+} from "../foreground-readiness.ts";
+import {
   buildCliEnv,
   expect,
   expectExit,
@@ -29,6 +33,11 @@ export const composeForegroundSignalScenario: Scenario = {
       ctx.skip("docker daemon unavailable");
     }
     for (const persistentUpBefore of [false, true]) {
+      const cleanExit = join(
+        ctx.tempRoot,
+        `lifecycle-clean-exit-${persistentUpBefore}`
+      );
+      const writer = `process.on("SIGTERM", () => setTimeout(async () => { await Bun.write(${JSON.stringify(cleanExit)}, "clean"); process.exit(0); }, 1000)); setInterval(() => {}, 60000)`;
       const fixture = await createMonorepoFixture({
         parentDir: ctx.tempRoot,
         withHackConfig: true,
@@ -37,24 +46,23 @@ export const composeForegroundSignalScenario: Scenario = {
           persistentUpBefore,
           // A cooperative writer can take time to exit after TERM. Keep that
           // interval visible so mux acknowledgement cannot masquerade as exit.
-          persistentUpBeforeCommand:
-            "bun -e 'process.on(\"SIGTERM\", () => setTimeout(() => process.exit(0), 1000)); setInterval(() => {}, 60000)'",
+          persistentUpBeforeCommand: `bun -e ${quoteShellWord(writer)}`,
         },
       });
-      const service = {
+      const service = (name: "app" | "worker") => ({
         image: "alpine:3.20",
         command: [
           "sh",
           "-c",
-          "echo foreground-ready; trap 'sleep 3; exit 0' TERM; while :; do sleep 1; done",
+          `echo foreground-ready:${name}; trap 'sleep 3; exit 0' TERM; while :; do sleep 1; done`,
         ],
         stop_grace_period: "8s",
-      };
+      });
       await Bun.write(
         join(fixture.hackDir, "docker-compose.yml"),
         JSON.stringify({
           name: fixture.name,
-          services: { app: service, worker: service },
+          services: { app: service("app"), worker: service("worker") },
         })
       );
       const logPath = join(ctx.tempRoot, `${fixture.name}.stdout.log`);
@@ -112,17 +120,18 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
         stderr: errorLog,
       });
       const timeout = setTimeout(() => child.kill("SIGKILL"), 120_000);
-      const containers = () =>
+      const containers = (timeoutMs = 15_000) =>
         runCommand({
           argv: [
             "docker",
             "ps",
-            "-q",
+            "--format",
+            '{{.ID}}\t{{.Label "com.docker.compose.service"}}',
             "--filter",
             `label=com.docker.compose.project=${fixture.name}`,
           ],
           cwd: fixture.root,
-          timeoutMs: 15_000,
+          timeoutMs,
         });
       try {
         await expectServicesReady({
@@ -130,15 +139,9 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
           stdout: logPath,
           stderr: errorLog.name,
         });
-        const before = await containers();
-        expectExit({
-          result: before,
-          codes: [0],
-          message: "container inspection before Ctrl-C",
-        });
-        expect({
-          that: before.stdout.trim().split("\n").length === 2,
-          message: "two project containers must be running before Ctrl-C",
+        await waitForForegroundContainers({
+          read: containers,
+          alive: () => child.exitCode === null,
         });
         const lifecycleBefore = await readLifecycleState({
           projectDir: fixture.hackDir,
@@ -161,6 +164,13 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
           released: cleanupReleased,
         });
         const code = await child.exited;
+        if (persistentUpBefore) {
+          expect({
+            that: await Bun.file(cleanExit).exists(),
+            message:
+              "persistent lifecycle command must finish its one-second TERM handler without SIGKILL",
+          });
+        }
         const after = await containers();
         ctx.log(
           `persistent lifecycle=${persistentUpBefore}; foreground exit=${code}; running project containers=${after.stdout.trim() || "none"}; output:\n${await Bun.file(logPath).text()}\n${await errorLog.text()}`
@@ -306,7 +316,7 @@ async function expectServicesReady(opts: {
     output =
       (await Bun.file(opts.stdout).text()) +
       (opts.stderr ? await Bun.file(opts.stderr).text() : "");
-    if ((output.match(/foreground-ready/g) ?? []).length >= 2) {
+    if (bothForegroundServicesLogged(output)) {
       ready = true;
       break;
     }

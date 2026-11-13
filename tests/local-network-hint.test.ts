@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isRecord } from "../src/lib/guards.ts";
 import {
   browserHostFromTarget,
   createLocalNetworkHintEmitter,
@@ -101,10 +102,11 @@ test("host extraction normalizes case and the root dot", () => {
   expect(isLocalSuffixTarget("https://app.local.example.com")).toBe(false);
 });
 
-// Real CLI boundary: isolated HOME/state, no daemon, no Docker.
-const cli = process.env.HACK_NAME_TEST_BINARY
-  ? [resolve(process.env.HACK_NAME_TEST_BINARY)]
-  : [process.execPath, resolve(import.meta.dir, "../index.ts")];
+// Source CLI: isolated HOME/state and substituted resolver transport. Optional
+// compiled qualification observes the platform's actual DNS diagnostics.
+const compiledCli = process.env.HACK_NAME_TEST_BINARY
+  ? resolve(process.env.HACK_NAME_TEST_BINARY)
+  : null;
 let cleanupRoot: string | null = null;
 
 afterEach(async () => {
@@ -117,6 +119,35 @@ afterEach(async () => {
 async function openJson(devHost: string | null) {
   const fixture = await projectNameFixture();
   cleanupRoot = fixture.root;
+  const preload = resolve(fixture.root, "resolver-preload.ts");
+  const shellPath = resolve(import.meta.dir, "../src/lib/shell.ts");
+  // Source CLI tests must not depend on the host's resolver or Docker. This
+  // boundary also catches macOS's absolute /usr/bin/dscacheutil invocation.
+  await writeFile(
+    preload,
+    `import { mock } from "bun:test";
+const shell = { ...await import(${JSON.stringify(shellPath)}) };
+const execute = shell.exec;
+mock.module(${JSON.stringify(shellPath)}, () => ({
+  ...shell,
+  exec: async (command, options) => {
+    if (command[0] === "getent" || command[0] === "/usr/bin/dscacheutil") {
+      return {
+        exitCode: 0,
+        stdout: command[0] === "getent"
+          ? "192.0.2.10 STREAM fixture\\n"
+          : "name: fixture\\nip_address: 192.0.2.10\\n",
+        stderr: "",
+      };
+    }
+    if (command[0] === "docker") {
+      throw new Error("Local Network hint fixture must not read real Docker");
+    }
+    return execute(command, options);
+  },
+}));
+`
+  );
   const target = await fixture.createProject("app", "my-app");
   if (devHost) {
     await writeFile(
@@ -128,7 +159,22 @@ async function openJson(devHost: string | null) {
     devHost ? { ...target.entry, devHost } : target.entry,
   ]);
   const child = Bun.spawn(
-    [...cli, "open", "--json", "--prefer", "dev", "--project", "my-app"],
+    [
+      ...(compiledCli
+        ? [compiledCli]
+        : [
+            process.execPath,
+            "--preload",
+            preload,
+            resolve(import.meta.dir, "../index.ts"),
+          ]),
+      "open",
+      "--json",
+      "--prefer",
+      "dev",
+      "--project",
+      "my-app",
+    ],
     {
       cwd: fixture.root,
       env: fixture.env,
@@ -148,13 +194,29 @@ function countHints(text: string): number {
   return text.split(LOCAL_NETWORK_HINT_MESSAGE).length - 1;
 }
 
-test("open --json keeps the hint out of the JSON payload", async () => {
+/** Compiled qualification may include the platform's separate DNS notice. */
+function expectUrlPayload(stdout: string, url: string): void {
+  const payload: unknown = JSON.parse(stdout);
+  if (compiledCli && isRecord(payload) && "dns" in payload) {
+    expect(payload.dns === "unresolved" || payload.dns === "unconfigured").toBe(
+      true
+    );
+    expect(payload).toEqual({
+      url,
+      dns: payload.dns,
+      hint: expect.any(String),
+    });
+  } else {
+    // The source fixture resolves positively to a non-loopback documentation IP.
+    expect(payload).toEqual({ url });
+  }
+  expect(stdout).not.toContain("Local Network");
+}
+
+test("open --json keeps the Local Network permission hint out of the JSON payload", async () => {
   const result = await openJson(null);
   expect(result.code, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({
-    url: "https://name-fixture.hack.local",
-  });
-  expect(result.stdout).not.toContain("Local Network");
+  expectUrlPayload(result.stdout, "https://name-fixture.hack.local");
   // Shown once on macOS, never elsewhere.
   expect(countHints(result.stderr)).toBe(process.platform === "darwin" ? 1 : 0);
 }, 15_000);
@@ -162,8 +224,6 @@ test("open --json keeps the hint out of the JSON payload", async () => {
 test("open --json does not hint for a non-.local host", async () => {
   const result = await openJson("name-fixture.hack.gy");
   expect(result.code, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({
-    url: "https://name-fixture.hack.gy",
-  });
+  expectUrlPayload(result.stdout, "https://name-fixture.hack.gy");
   expect(countHints(result.stderr)).toBe(0);
 }, 15_000);

@@ -56,5 +56,5 @@ for (const reusedAt of ["capture", "signal"] as const) {
       }
       await child.exited;
     }
-  }, 10_000);
+  }, 20_000);
 }

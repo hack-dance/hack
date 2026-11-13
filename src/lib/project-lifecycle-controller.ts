@@ -1109,6 +1109,7 @@ export async function stopLifecycleProcessController(opts: {
   /** Mux backends; defaults to the installed tmux/zellij backends. */
   readonly mux?: () => Promise<ResolvedMux>;
   readonly retireSession?: ReturnType<typeof createLifecycleSessionRetirement>;
+  readonly readIdentities?: typeof readProcessIdentities;
 }): Promise<void> {
   await opts.assertFresh?.();
   const sessionName = resolveLifecycleSessionName({
@@ -1151,7 +1152,10 @@ export async function stopLifecycleProcessController(opts: {
 
   const matchedLiveSession = inspection.classification !== "absent";
   if (!matchedLiveSession) {
-    await assertAbsentSessionGroupsRetired({ entry: lifecycleEntry });
+    await assertAbsentSessionGroupsRetired({
+      entry: lifecycleEntry,
+      readIdentities: opts.readIdentities,
+    });
   }
   await opts.assertFresh?.();
   if (matchedLiveSession && backend.name === "tmux") {
@@ -1205,6 +1209,7 @@ export async function stopLifecycleProcessController(opts: {
 /** Missing mux state grants no authority to kill a possibly reused group ID. */
 async function assertAbsentSessionGroupsRetired(opts: {
   readonly entry: LifecycleStateEntry;
+  readonly readIdentities?: typeof readProcessIdentities;
 }): Promise<void> {
   const recordedGroups = new Set(
     opts.entry.processes.flatMap((process) =>
@@ -1222,7 +1227,7 @@ async function assertAbsentSessionGroupsRetired(opts: {
   if (identified.length === 0) {
     return;
   }
-  const identities = await readProcessIdentities();
+  const identities = await (opts.readIdentities ?? readProcessIdentities)();
   if (identities.length === 0) {
     throw new Error(
       "Could not inspect retained lifecycle wrapper identities; kept ownership state"
@@ -1234,6 +1239,7 @@ async function assertAbsentSessionGroupsRetired(opts: {
         process.processGroupBirth !== undefined &&
         identities.some(
           (row) =>
+            !row.zombie &&
             row.pid === process.processGroupId &&
             row.birth === process.processGroupBirth
         )
@@ -1245,7 +1251,10 @@ async function assertAbsentSessionGroupsRetired(opts: {
   }
   const roots = identified.flatMap((process) =>
     identities.some(
-      (row) => row.pid === process.panePid && row.birth === process.paneBirth
+      (row) =>
+        !row.zombie &&
+        row.pid === process.panePid &&
+        row.birth === process.paneBirth
     ) && process.panePid
       ? [process.panePid]
       : []
@@ -1254,8 +1263,14 @@ async function assertAbsentSessionGroupsRetired(opts: {
     return;
   }
   const snapshot = await readProcessSnapshot();
+  const zombies = new Set(
+    identities.filter((row) => row.zombie).map((row) => row.pid)
+  );
   const descendants = new Set(
-    collectDescendantProcessGroupIds({ snapshot, rootPids: roots })
+    collectDescendantProcessGroupIds({
+      snapshot: snapshot.filter((row) => !zombies.has(row.pid)),
+      rootPids: roots,
+    })
   );
   if (
     snapshot.length === 0 ||

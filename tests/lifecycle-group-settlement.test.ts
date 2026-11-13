@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   createLifecycleSessionRetirement,
+  selectLiveLifecycleGroups,
   terminateLifecycleProcessGroups,
 } from "../src/lib/project-lifecycle-processes.ts";
 
@@ -19,6 +20,7 @@ function runtime(opts: {
   return {
     signals,
     absent: () => now >= exitAt,
+    liveGroups: (groups: readonly number[]) => Promise.resolve(groups),
     now: () => now,
     sleep: (ms: number) => {
       now += ms;
@@ -51,7 +53,8 @@ test("TERM delivery does not release cleanup until absence is observed", async (
     runtime: os,
   });
   expect(os.absent()).toBe(true);
-  expect(os.now()).toBe(75);
+  expect(os.now()).toBeGreaterThanOrEqual(75);
+  expect(os.now()).toBeLessThan(200);
   expect(os.signals.filter((event) => event.signal !== 0)).toEqual([
     { group: 42, signal: "SIGTERM", at: 0 },
   ]);
@@ -61,10 +64,10 @@ test("KILL delivery is not exit: await the final disappearance before returning"
   const os = runtime({ killExit: 100 });
   await terminateLifecycleProcessGroups({ processGroupIds: [42], runtime: os });
   expect(os.absent()).toBe(true);
-  expect(os.now()).toBe(600);
+  expect(os.now()).toBe(5100);
   expect(os.signals.filter((event) => event.signal !== 0)).toEqual([
     { group: 42, signal: "SIGTERM", at: 0 },
-    { group: 42, signal: "SIGKILL", at: 500 },
+    { group: 42, signal: "SIGKILL", at: 5000 },
   ]);
 });
 
@@ -77,7 +80,7 @@ test("mux-signalled groups get a reap grace without another TERM", async () => {
   });
   expect(os.absent()).toBe(true);
   expect(os.signals.filter((event) => event.signal !== 0)).toEqual([
-    { group: 42, signal: "SIGKILL", at: 500 },
+    { group: 42, signal: "SIGKILL", at: 5000 },
   ]);
 });
 
@@ -88,10 +91,77 @@ test("a surviving group is reported after one escalation and a finite wait", asy
   ).rejects.toThrow(
     "Could not confirm lifecycle process groups stopped after SIGKILL: 42"
   );
-  expect(os.now()).toBe(2500);
+  expect(os.now()).toBe(7000);
   expect(os.signals.filter((event) => event.signal === "SIGKILL")).toHaveLength(
     1
   );
+});
+
+test("a cooperative command gets its one-second TERM handler without KILL", async () => {
+  const os = runtime({ termExit: 1000 });
+  await terminateLifecycleProcessGroups({ processGroupIds: [42], runtime: os });
+  expect(os.now()).toBe(1000);
+  expect(os.signals.filter((event) => event.signal !== 0)).toEqual([
+    { group: 42, signal: "SIGTERM", at: 0 },
+  ]);
+});
+
+test("an unreaped zombie-only group is retired without TERM or KILL", async () => {
+  const os = runtime({});
+  await terminateLifecycleProcessGroups({
+    processGroupIds: [42],
+    runtime: {
+      ...os,
+      liveGroups: async (groups) =>
+        selectLiveLifecycleGroups({
+          groups,
+          identities: [
+            {
+              pid: 42,
+              parentPid: 1,
+              processGroupId: 42,
+              birth: "exited",
+              zombie: true,
+            },
+          ],
+        }),
+    },
+  });
+  expect(os.now()).toBe(0);
+  expect(os.signals.filter((event) => event.signal !== 0)).toEqual([]);
+});
+
+test("a zombie leader does not hide another live group member", async () => {
+  const os = runtime({ killExit: 0 });
+  await terminateLifecycleProcessGroups({
+    processGroupIds: [42],
+    runtime: {
+      ...os,
+      liveGroups: async (groups) =>
+        selectLiveLifecycleGroups({
+          groups,
+          identities: [
+            {
+              pid: 42,
+              parentPid: 1,
+              processGroupId: 42,
+              birth: "exited",
+              zombie: true,
+            },
+            {
+              pid: 43,
+              parentPid: 1,
+              processGroupId: 42,
+              birth: "running",
+              zombie: false,
+            },
+          ],
+        }),
+    },
+  });
+  expect(os.signals.filter((event) => event.signal === "SIGKILL")).toEqual([
+    { group: 42, signal: "SIGKILL", at: 5000 },
+  ]);
 });
 
 test("permission errors cannot become absence or grant a kill", async () => {

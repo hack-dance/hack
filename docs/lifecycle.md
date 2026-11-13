@@ -21,17 +21,21 @@ or `down.after`; use explicit `hack down` or `hack restart` for those hooks.
 This ordering is inherited from v4.3.0. The native backend has its own documented
 hook contract.
 
-On foreground cleanup, Hack captures the owned lifecycle process groups before
+On tmux foreground cleanup, Hack captures the owned lifecycle process groups before
 stopping their mux session. The recorded pane PID and UTC start time must match
 before any descendants are captured, and captured member identities are checked
 again before escalation. It waits for the detached commands to disappear before
-retiring the FIFO wrapper and its reader. Each phase allows 500 ms for graceful
+retiring the FIFO wrapper and its reader. Each phase allows 5 seconds for graceful
 exit, escalates surviving groups once with SIGKILL, then waits up to 2 seconds for
-absence (at most 5 seconds of group waiting across both phases, plus bounded mux
+retirement (at most 14 seconds of group waiting across both phases, plus bounded mux
 and process-identity queries). The capture allows two 1-second group snapshots
 alongside a 2-second identity read; each escalation checks identities again with
 bounded queries. Explicit `hack down` uses the same command-before-wrapper order
 after interrupting its owned lifecycle panes.
+Commands that finish their TERM handler sooner do not wait out the grace period.
+An unreaped zombie has exited and runs no code: a group containing only zombies
+counts as retired. A live member in the same group still requires shutdown;
+failed process observation remains unconfirmed.
 `hack doctor --fix` also captures groups before mux teardown and waits for
 commands before wrappers when repairing an ownership-proven orphan. An
 unconfirmed retirement keeps that entry and is reported while repair continues
@@ -47,6 +51,13 @@ alone does not block cleanup: a matching command leader PID and UTC start time
 keeps the record even after its wrapper exits. Matching wrapper identity plus
 descendant lineage also keeps the record. Older records without that identity do not
 grant signal authority or make an unrelated live group count as retained work.
+
+Zellij does not yet record pane process identities. Its foreground mux cleanup
+does not wait for process-group retirement and can remove state before commands
+finish; use tmux when confirmed retirement is required. Zellij process tracking
+is a follow-up on HACK-2184. Retrying missing launch-time identity observations
+during owned foreground cleanup is also a follow-up: a missing start time can
+currently leave cleanup unconfirmed.
 
 ![Foreground lifecycle retirement](diagrams/compose-lifecycle-retirement.svg)
 

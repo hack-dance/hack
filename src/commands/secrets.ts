@@ -12,6 +12,7 @@ import {
 import { keychain } from "../lib/keychain.ts";
 import { quoteShellWord } from "../lib/logs.ts";
 import { findProjectContext, readProjectConfig } from "../lib/project.ts";
+import { resolveFileSecretStorePaths } from "../lib/secret-store.ts";
 import { retireSecretStore } from "../lib/secret-store-retire.ts";
 import { logger } from "../ui/logger.ts";
 
@@ -277,11 +278,14 @@ async function handleSecretsRetireStore({
       "project"
     ).trim();
   }
+  // Name the resolved file in the prompt: the configured path is project input.
+  const target = await resolveFileSecretStorePaths({
+    projectDir: project?.projectDir,
+  }).catch(() => null);
   const ok =
     args.options.yes === true ||
     (await confirmSafe({
-      message:
-        "Move the encrypted secret store aside? Its entries stay in the moved file, which can be put back.",
+      message: `Move the encrypted secret store ${target?.storePath ?? "(unknown path)"} aside? Its entries stay in the moved file, which can be put back.`,
       initialValue: false,
       nonInteractive: "fail",
       hint: "Pass --yes to confirm (`hack secrets retire-store --yes`), or run it in a terminal.",

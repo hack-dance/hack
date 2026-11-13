@@ -10,6 +10,7 @@ import {
   type ProjectEnvLayerKeyReport,
 } from "./project-env-config.ts";
 import {
+  isEncryptedStoreFile,
   listFileSecretStoreEntries,
   listRetiredEncryptedStores,
 } from "./secret-store.ts";
@@ -103,7 +104,13 @@ async function inspectSecretStore(opts: {
     projectDir: opts.projectDir,
   });
   return [
-    ...storeFindings({ reason: listing.reason, store, key }).map(
+    ...storeFindings({
+      reason: listing.reason,
+      store,
+      key,
+      storePath: listing.storePath,
+      keyPath: listing.keyPath,
+    }).map(
       (finding): SecretIntegrityFinding =>
         usedHere || finding.status !== "error"
           ? finding
@@ -134,6 +141,14 @@ async function keylessStoreFinding(opts: {
   const usedHere = await projectUsesSecretStore({
     projectDir: opts.projectDir,
   });
+  if (!(await isEncryptedStoreFile(opts.storePath))) {
+    // The configured path is project input and may name any file: never
+    // suggest retiring something that is not a Hack store.
+    return {
+      status: usedHere ? "error" : "warn",
+      message: `The configured encrypted secret store path ${opts.store} does not hold a Hack encrypted secret store (no store envelope), so Hack does not read, change or retire it. Check controlPlane.secrets.encryptedFile.path in the Hack config.`,
+    };
+  }
   const users = await listProjectsUsingSecretStore({
     storePath: opts.storePath,
   });
@@ -201,14 +216,19 @@ function storeFindings(opts: {
   >;
   readonly store: string;
   readonly key: string;
+  /** Absolute paths, shell-quoted wherever a command is printed. */
+  readonly storePath: string;
+  readonly keyPath: string;
 }): SecretIntegrityFinding[] {
   const { store, key } = opts;
+  const storeArg = quoteShellWord(opts.storePath);
+  const keyArg = quoteShellWord(opts.keyPath);
   switch (opts.reason) {
     case "store_unreadable":
       return [
         {
           status: "error",
-          message: `The encrypted secret store ${store} exists but cannot be read; Hack will not read or change it. Make it a regular file this user owns and can read and write (chmod 600 ${store}), then re-run hack doctor.`,
+          message: `The encrypted secret store ${store} exists but cannot be read; Hack will not read or change it. Make it a regular file this user owns and can read and write (chmod 600 ${storeArg}), then re-run hack doctor.`,
         },
       ];
     case "store_refused":
@@ -229,14 +249,14 @@ function storeFindings(opts: {
       return [
         {
           status: "error",
-          message: `The key ${key} for ${store} exists but cannot be read by this user. Fix its owner and permissions (chmod 600 ${key}, owned by this user), then re-run hack doctor. Do not retire the store or provision a new key: the existing key may still open it.`,
+          message: `The key ${key} for ${store} exists but cannot be read by this user. Fix its owner and permissions (chmod 600 ${keyArg}, owned by this user), then re-run hack doctor. Do not retire the store or provision a new key: the existing key may still open it.`,
         },
       ];
     case "key_refused":
       return [
         {
           status: "error",
-          message: `The key ${key} for ${store} is refused: it is a symlink, other users can read or write it, or git tracks it. Replace it with a regular, untracked file this user owns (chmod 600 ${key}; git rm --cached if tracked, then rotate it).`,
+          message: `The key ${key} for ${store} is refused: it is a symlink, other users can read or write it, or git tracks it. Replace it with a regular, untracked file this user owns (chmod 600 ${keyArg}; git rm --cached ${keyArg} if tracked, then rotate it).`,
         },
       ];
     case "incomplete_config":

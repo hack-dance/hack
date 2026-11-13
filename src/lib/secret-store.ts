@@ -441,6 +441,27 @@ function errorCode(error: unknown): string {
     : "unknown";
 }
 
+/**
+ * Whether the file at `storePath` is a Hack encrypted secret store: a
+ * regular file (read without following a link) holding the store's JSON
+ * envelope. Nothing is decrypted. A configured store path is project
+ * input, so anything else (any other file) is never treated as a store to
+ * retire (HACK-2177).
+ */
+export async function isEncryptedStoreFile(
+  storePath: string
+): Promise<boolean> {
+  const read = await readEncryptedStoreText(storePath);
+  if (read.kind !== "text") {
+    return false;
+  }
+  try {
+    return parseEncryptedEnvelope(JSON.parse(read.text)) !== null;
+  } catch {
+    return false;
+  }
+}
+
 /** Retired copies of `storePath` in its directory, oldest first. */
 export async function listRetiredEncryptedStores(
   storePath: string

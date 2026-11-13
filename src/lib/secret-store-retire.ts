@@ -9,6 +9,7 @@ import { readHackEnvContract, readHackEnvRuntimeConfig } from "./hack-env.ts";
 import { readProjectsRegistry } from "./projects-registry.ts";
 import {
   type FileSecretStoreListing,
+  isEncryptedStoreFile,
   listFileSecretStoreEntries,
   resolveFileSecretStorePaths,
   retireEncryptedStoreFile,
@@ -203,7 +204,8 @@ export async function retireSecretStore(opts: {
     };
   }
   const listing = await storeLocation(opts);
-  const refusal = retireRefusal(listing);
+  const refusal =
+    retireRefusal(listing) ?? (await notAStoreRefusal(listing.storePath));
   if (refusal !== null) {
     return { kind: "refused", message: refusal };
   }
@@ -223,7 +225,8 @@ export async function retireSecretStore(opts: {
         if (current.storePath !== listing.storePath) {
           return "The secret store configuration changed while retiring; nothing was moved. Run hack doctor, then retry.";
         }
-        const changed = retireRefusal(current);
+        const changed =
+          retireRefusal(current) ?? (await notAStoreRefusal(current.storePath));
         return changed === null
           ? null
           : `${changed} (It changed while retiring.)`;
@@ -236,6 +239,16 @@ export async function retireSecretStore(opts: {
     }
     throw error;
   }
+}
+
+/**
+ * Refuses a configured store path that does not hold a Hack encrypted
+ * store envelope: the path is project input and may name any file.
+ */
+async function notAStoreRefusal(storePath: string): Promise<string | null> {
+  return (await isEncryptedStoreFile(storePath))
+    ? null
+    : `${storePath} is not a Hack encrypted secret store (it does not hold the store's encrypted envelope), so it is not retired; nothing was moved. Check controlPlane.secrets.encryptedFile.path in the Hack config.`;
 }
 
 /**

@@ -692,3 +692,80 @@ test("a keychain that cannot be asked is not a missing key: the store is not ret
     Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   }
 });
+
+test("a configured store path that is not a Hack store is never offered for retirement or retired", async () => {
+  // Codex security review: the path is project input; any non-empty file
+  // with no key counted as a keyless store, so a project could point it at
+  // a host file (such as an authorized_keys file) and have it moved aside.
+  const fixture = await setUp();
+  const hostFile = join(fixture.home, ".ssh", "authorized_keys");
+  await mkdir(join(fixture.home, ".ssh"), { recursive: true });
+  await writeFile(hostFile, "synthetic-authorized-key-line\n");
+  await writeFile(
+    join(fixture.hackHome, "hack.config.json"),
+    `${JSON.stringify({
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: hostFile, keyPath: fixture.keyPath },
+        },
+      },
+    })}\n`
+  );
+  const findings = await inspect(fixture.bystander, "app-b");
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.message).toContain(
+    "does not hold a Hack encrypted secret store"
+  );
+  expect(findings[0]?.message).not.toContain("hack secrets retire-store");
+  const outcome = await retireSecretStore({
+    projectName: "app-b",
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+    "is not a Hack encrypted secret store"
+  );
+  expect(await readFile(hostFile, "utf8")).toBe(
+    "synthetic-authorized-key-line\n"
+  );
+  expect(
+    (await readdir(join(fixture.home, ".ssh"))).filter((name) =>
+      name.includes(".retired-")
+    )
+  ).toEqual([]);
+});
+
+test("printed chmod and git rm guidance quotes a hostile key path", async () => {
+  // Codex security review: the key path is project input; the new
+  // key_unreadable guidance printed `chmod 600 <path>` unquoted.
+  if (process.getuid?.() === 0) {
+    return;
+  }
+  const fixture = await setUp();
+  const hostileKey = join(fixture.hackHome, "key'; touch PWNED; #'");
+  await writeFile(hostileKey, `${STORE_KEY}\n`, { mode: 0o600 });
+  await writeFile(
+    join(fixture.hackHome, "hack.config.json"),
+    `${JSON.stringify({
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: fixture.storePath, keyPath: hostileKey },
+        },
+      },
+    })}\n`
+  );
+  const quoted = `'${hostileKey.replaceAll("'", "'\\''")}'`;
+  await chmod(hostileKey, 0o000);
+  try {
+    const unreadable = (await inspect(fixture.reader, "app-a"))[0];
+    expect(unreadable?.message).toContain(`chmod 600 ${quoted}`);
+  } finally {
+    await chmod(hostileKey, 0o600);
+  }
+  // Open to others: refused, with quoted chmod and git rm.
+  await chmod(hostileKey, 0o644);
+  const refused = (await inspect(fixture.reader, "app-a"))[0];
+  expect(refused?.message).toContain(`chmod 600 ${quoted}`);
+  expect(refused?.message).toContain(`git rm --cached ${quoted}`);
+});

@@ -942,7 +942,11 @@ mod tests {
     }
     /// Runs the guest member-staging function on the host shell against a scratch root.
     /// `stat -c` is avoided there so the same body runs on macOS and the Linux guest.
-    fn stage_members(layout: &str, input: &[u8]) -> (bool, std::path::PathBuf) {
+    fn stage_members(
+        layout: &str,
+        input: &[u8],
+        wait_for_refusal: bool,
+    ) -> (bool, std::path::PathBuf) {
         use std::{
             io::Write,
             process::{Command, Stdio},
@@ -977,10 +981,29 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(input).unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        if wait_for_refusal {
+            // Exercise the scheduler order where malformed layout is refused
+            // before the parent gets to write, without a timing-dependent sleep.
+            assert!(!child.wait().unwrap().success());
+        }
+        let written = stdin.write_all(input);
+        drop(stdin);
         let output = child.wait_with_output().unwrap();
+        if let Err(error) = written {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+        }
         assert!(output.stderr.is_empty());
         (output.stdout == b"staged\n", root)
+    }
+    #[test]
+    fn staging_refusal_before_input_is_reaped_and_never_reports_success() {
+        let (ok, root) = stage_members("x a:1:1", b"synthetic-only", true);
+        assert!(!ok);
+        assert!(!root.join("values.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn member_staging_reads_exact_lengths_and_refuses_malformed_input() {
@@ -999,7 +1022,7 @@ mod tests {
         let staged =
             PendingEnvironment::until_with_files("web", &values, &files, deadline).unwrap();
         let (layout, input) = staged.staging_input();
-        let (ok, root) = stage_members(&layout, input.as_bytes());
+        let (ok, root) = stage_members(&layout, input.as_bytes(), false);
         assert!(ok);
         assert_eq!(
             std::fs::read(root.join("values.json")).unwrap(),
@@ -1055,7 +1078,7 @@ mod tests {
                 bytes.to_vec(),
             ),
         ] {
-            let (ok, root) = stage_members(&layout, &input);
+            let (ok, root) = stage_members(&layout, &input, false);
             assert!(!ok, "{layout}");
             for name in ["files/a.json", "files/b.bin", "files/a", "files/b"] {
                 let _ = std::fs::set_permissions(

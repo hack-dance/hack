@@ -1,4 +1,4 @@
-import { realpath, stat } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { PROJECT_CONFIG_FILENAME } from "../constants.ts";
@@ -262,6 +262,10 @@ export async function planSecretStoreRetire(opts: {
         "No encrypted file secret store is configured here (the backend is the OS keychain); nothing was moved.",
     };
   }
+  const leafRefusal = await symlinkedStoreRefusal(location.storePath);
+  if (leafRefusal !== null) {
+    return { kind: "refused", message: leafRefusal };
+  }
   const canonical = await realpath(location.storePath).catch(() => null);
   if (canonical === null) {
     return {
@@ -380,6 +384,10 @@ async function lockedRecheck(input: {
   ) {
     return "The secret store configuration changed; nothing was moved. Run hack doctor, then retry.";
   }
+  const leafRefusal = await symlinkedStoreRefusal(plan.configured);
+  if (leafRefusal !== null) {
+    return leafRefusal;
+  }
   if ((await realpath(plan.configured).catch(() => null)) !== plan.canonical) {
     return `${plan.configured} no longer leads to ${plan.canonical}; nothing was moved.`;
   }
@@ -388,6 +396,21 @@ async function lockedRecheck(input: {
     storePath: plan.canonical,
     keyPath: plan.keyPath,
   });
+}
+
+/**
+ * Refuses a configured store path whose last component is a symlink (a
+ * symlinked directory on the way is fine). Runtime, doctor and the store's
+ * own reads refuse such a store; retiring its target would leave a
+ * dangling link at the configured path.
+ */
+async function symlinkedStoreRefusal(
+  configured: string
+): Promise<string | null> {
+  const leaf = await lstat(configured).catch(() => null);
+  return leaf?.isSymbolicLink() === true
+    ? `The configured store path ${configured} is itself a symlink, which Hack refuses as a store; nothing was moved. Replace it with the regular store file it points to, or point controlPlane.secrets.encryptedFile.path at that file.`
+    : null;
 }
 
 /**

@@ -1104,3 +1104,38 @@ test("control characters in a configured store path are shown, never sent to the
   expect(retired.output).toContain("lin\\x0d\\x1b[2Kked");
   expect(raw.test(retired.output.replaceAll("\u001b[", "ESC["))).toBe(false);
 });
+
+test("a configured store path that is itself a symlink is not retired", async () => {
+  // Codex review: resolving a final-component symlink moved its target
+  // and left a dangling link at the configured path, which runtime and
+  // doctor refuse as a store.
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  const link = join(fixture.bystander.projectRoot, "store-link.enc.json");
+  await symlink(fixture.storePath, link);
+  await writeFile(
+    join(fixture.bystander.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-b",
+      dev_host: "app-b.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: link, keyPath: fixture.keyPath },
+        },
+      },
+    })}\n`
+  );
+  const planned = await planSecretStoreRetire({
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(planned.kind === "refused" ? planned.message : "").toContain(
+    "is itself a symlink"
+  );
+  const outcome = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(outcome.kind).toBe("refused");
+  expect(await readFile(fixture.storePath)).toEqual(before);
+  expect((await lstat(link)).isSymbolicLink()).toBe(true);
+});

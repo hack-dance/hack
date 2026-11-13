@@ -7,7 +7,7 @@ import {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
-import { readOptionalTextFile, readTextFile } from "./fs.ts";
+import { readOptionalTextFile } from "./fs.ts";
 import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import { getString, isRecord } from "./guards.ts";
 import {
@@ -21,6 +21,17 @@ import {
   resolveSecretStoreDescriptor,
   SecretStoreKeyUnavailableError,
 } from "./secret-store.ts";
+
+/**
+ * Text of a legacy `.hack/.env` or `.hack/.env.<overlay>` file, or null when
+ * it is absent. Read without following a symlink (HACK-2165): resolution and
+ * inspection (`hack env list`) refuse a redirected file before reading it, as
+ * mutations already did, so a link to a dotenv file outside the project is
+ * never parsed or printed.
+ */
+async function readLegacyDotenvText(path: string): Promise<string | null> {
+  return await readPrivateEnvFile({ envFile: path });
+}
 
 export const HACK_ENV_VERSION = 1 as const;
 const HACK_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
@@ -269,13 +280,13 @@ export async function resolveHackEnvValue(opts: {
   const secretStore = needsStore
     ? await resolveSecretStore({ ...opts, allowKeyProvisioning: false })
     : { get: async () => null };
-  const baseText = await readTextFile(
+  const baseText = await readLegacyDotenvText(
     resolve(opts.projectDir, PROJECT_ENV_FILENAME)
   );
   const overlayText =
     selection.overlayPath === null
       ? null
-      : await readTextFile(selection.overlayPath);
+      : await readLegacyDotenvText(selection.overlayPath);
   const state = await resolveHackEnvValueState({
     contractVar,
     preserveEmpty: true,
@@ -317,7 +328,7 @@ export async function findProcessOnlyContractValues(opts: {
   const { contract } = await readHackEnvContract({
     projectDir: opts.projectDir,
   });
-  const baseText = await readTextFile(
+  const baseText = await readLegacyDotenvText(
     resolve(opts.projectDir, PROJECT_ENV_FILENAME)
   );
   const baseDotenv = baseText === null ? {} : parseDotEnv(baseText);
@@ -338,7 +349,7 @@ export async function findProcessOnlyContractValues(opts: {
     readonly dotenv: Readonly<Record<string, string>>;
   }[] = [];
   for (const name of opts.overlayNames) {
-    const text = await readTextFile(
+    const text = await readLegacyDotenvText(
       resolveEnvFilePath({ projectDir: opts.projectDir, envName: name })
     );
     overlays.push({ name, dotenv: text === null ? {} : parseDotEnv(text) });
@@ -434,13 +445,13 @@ export async function resolveHackEnv(opts: {
   });
 
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
-  const envText = await readTextFile(envPath);
+  const envText = await readLegacyDotenvText(envPath);
   const envExists = envText !== null;
   const baseDotenv = envText ? parseDotEnv(envText) : {};
   const overlayText =
     envSelection.overlayPath === null
       ? null
-      : await readTextFile(envSelection.overlayPath);
+      : await readLegacyDotenvText(envSelection.overlayPath);
   const overlayDotenv = overlayText ? parseDotEnv(overlayText) : {};
   const warnings = collectOverlayPlaintextWarnings({
     contract,
@@ -564,7 +575,7 @@ export async function inspectHackEnvOverlayWarnings(opts: {
           envName: opts.envName,
         });
   const overlayText =
-    overlayPath === null ? null : await readTextFile(overlayPath);
+    overlayPath === null ? null : await readLegacyDotenvText(overlayPath);
   const overlayDotenv = overlayText ? parseDotEnv(overlayText) : {};
   return collectOverlayPlaintextWarnings({
     contract: read.contract,
@@ -1007,7 +1018,9 @@ async function resolveHackEnvSelection(opts: {
           envName: effectiveEnv,
         });
   const overlayExists =
-    overlayPath === null ? false : (await readTextFile(overlayPath)) !== null;
+    overlayPath === null
+      ? false
+      : (await readLegacyDotenvText(overlayPath)) !== null;
 
   return {
     requestedEnv: requestedEnv ?? null,

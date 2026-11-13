@@ -707,7 +707,13 @@ test("doctor keeps completed repairs when the optional plaintext inventory is un
   );
   const { runCli } = await import("../src/cli/run.ts");
   expect(
-    await runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot])
+    await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ])
   ).toBe(0);
   const notes = noteCalls.join("\n");
   expect(notes).toContain("Could not inspect plaintext env names");

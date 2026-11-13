@@ -14,6 +14,7 @@ import { join, relative, resolve } from "node:path";
 import { nativeBuildsDisabledRefusal } from "../src/backends/native-project-builds.ts";
 import { NATIVE_CONFIGURATION_REFUSAL } from "../src/backends/native-project-start.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { foreignComposeNetworkNames } from "../src/lib/native-hack-compose-conventions.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -41,8 +42,6 @@ const ADMITTED_START_REQUESTS = [
   "project plan",
   "runtime up",
 ];
-const RESERVED_LABEL =
-  "a label in a reserved ownership namespace (com.docker.compose.*, io.hack-local.*, io.hack.native-config.*, io.hack.native-file.* or io.hack.storage-witness.*)";
 const SELECTION =
   "this project runs on the Compose backend. Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too) and run the command again. Nothing was started or stopped.";
 
@@ -199,13 +198,17 @@ async function expectComposeBackendRefusal(opts: {
   readonly secrets?: readonly string[];
 }): Promise<void> {
   const f = await fixture(opts.compose);
+  const names = foreignComposeNetworkNames(opts.compose);
+  const networkDetail = names.length
+    ? ` Foreign external networks: ${names.join(", ")}.`
+    : "";
   // Building the child env creates the private HOME and Docker client config.
   f.env({});
   const before = await tree(f.root);
   const result = await cli(f, opts.args ?? ["up"], opts.env);
   expectOneClosedLine(
     result,
-    `E_NATIVE_PROJECT_UNSUPPORTED: Native \`${opts.command ?? "hack up"}\` does not support ${opts.phrase}; ${SELECTION}`
+    `E_NATIVE_PROJECT_UNSUPPORTED: Native \`${opts.command ?? "hack up"}\` does not support ${opts.phrase}; ${SELECTION}${networkDetail}`
   );
   for (const secret of opts.secrets ?? []) {
     expect(result.output).not.toContain(secret);
@@ -223,45 +226,45 @@ test(
         networks: { "shared-dev-net": { external: true } },
       },
       phrase: "an external Compose network",
-      secrets: ["shared-dev-net"],
     });
   },
   SPAWN_TIMEOUT_MS
 );
 
 test(
-  "a reserved ownership label refuses native up before any request or write",
+  "generated ownership labels pass admission without exposing or borrowing their values",
   async () => {
-    await expectComposeBackendRefusal({
-      compose: {
+    for (const key of [
+      "io.hack-local.owner",
+      "io.hack.storage-witness.owner",
+      "com.docker.compose.project",
+    ]) {
+      const f = await fixture({
         services: {
-          web: {
-            image: IMAGE,
-            labels: { "io.hack-local.owner": "borrowed-owner-token" },
-          },
+          web: { image: IMAGE, labels: { [key]: "borrowed-owner-token" } },
         },
-      },
-      phrase: RESERVED_LABEL,
-      secrets: ["borrowed-owner-token", "io.hack-local.owner"],
-    });
+      });
+      const result = await cli(f, ["up"]);
+      expect(result.output).not.toContain("borrowed-owner-token");
+      expect(result.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+      expect(await f.calls()).toEqual(ADMITTED_START_REQUESTS);
+    }
   },
   SPAWN_TIMEOUT_MS
 );
 
 test(
-  "a storage witness ownership label refuses native up before any request or write",
+  "two aliases of one Hack network refuse before a request or write",
   async () => {
     await expectComposeBackendRefusal({
       compose: {
-        services: {
-          web: {
-            image: IMAGE,
-            labels: { "io.hack.storage-witness.owner": "borrowed-witness" },
-          },
+        services: { web: { image: IMAGE, networks: ["hack-dev"] } },
+        networks: {
+          "hack-dev": { external: true },
+          edge: { external: { name: "hack-dev" } },
         },
       },
-      phrase: RESERVED_LABEL,
-      secrets: ["borrowed-witness", "io.hack.storage-witness.owner"],
+      phrase: "multiple logical aliases of one Hack shared network",
     });
   },
   SPAWN_TIMEOUT_MS
@@ -330,7 +333,8 @@ test(
         volumes: { cache: { external: true } },
       },
       env: {},
-      phrase: `an external Compose network, an external Compose volume, ${RESERVED_LABEL}, a Compose build outside the basic context, dockerfile and target form and a service platform other than linux/arm64`,
+      phrase:
+        "an external Compose network, an external Compose volume, a Compose build outside the basic context, dockerfile and target form and a service platform other than linux/arm64",
     });
   },
   SPAWN_TIMEOUT_MS
@@ -365,6 +369,7 @@ test(
         },
       },
       { image: IMAGE, labels: ["com.example.team=web"] },
+      { image: IMAGE, labels: { "hack.custom": "x" } },
       { image: IMAGE, logging: { driver: "json-file" } },
       { image: IMAGE, logging: { options: { "max-size": "10m" } } },
       { image: IMAGE, logging: { driver: "none" } },
@@ -389,10 +394,6 @@ test(
         NATIVE_CONFIGURATION_REFUSAL,
       ],
       [
-        { image: IMAGE, labels: { "hack.custom": "x" } },
-        NATIVE_CONFIGURATION_REFUSAL,
-      ],
-      [
         { image: IMAGE, labels: { "caddy.handle": "x" } },
         NATIVE_CONFIGURATION_REFUSAL,
       ],
@@ -406,7 +407,14 @@ test(
     ] as const) {
       const f = await fixture({ services: { web: service } });
       const result = await cli(f, ["up"]);
-      expectOneClosedLine(result, `E_NATIVE_PROJECT_UNSUPPORTED: ${refusal}`);
+      const label =
+        typeof service === "object" && "labels" in service
+          ? Object.keys(service.labels)[0]
+          : undefined;
+      const expected = label
+        ? `Native service labels are unsupported: ${label}. Remove the unsupported router directive; run hack doctor --native-preflight for every blocker. Label values were omitted; nothing was started.`
+        : refusal;
+      expectOneClosedLine(result, `E_NATIVE_PROJECT_UNSUPPORTED: ${expected}`);
       expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
       // The check passed: native up went on to its own source preflight.
       expect(await f.calls()).toEqual(["runtime check-project-share"]);
@@ -517,10 +525,10 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
-/** The documented `isolatedNetworks` adaptation for an external `hack-dev`. */
+/** The documented `isolatedNetworks` adaptation for an external `foreign-dev`. */
 const HACK_DEV_COMPOSE = {
-  services: { web: { image: IMAGE, networks: ["hack-dev"] } },
-  networks: { "hack-dev": { external: true } },
+  services: { web: { image: IMAGE, networks: ["foreign-dev"] } },
+  networks: { "foreign-dev": { external: true } },
 };
 
 async function adaptation(f: Fixture, selection: unknown): Promise<string> {
@@ -543,7 +551,7 @@ test(
     const f = await fixture(HACK_DEV_COMPOSE);
     const path = await adaptation(f, {
       version: 1,
-      isolatedNetworks: ["hack-dev"],
+      isolatedNetworks: ["foreign-dev"],
     });
     const result = await cli(f, ["up"], {
       HACK_NATIVE_SHARED_SOURCE: "1",
@@ -566,7 +574,7 @@ test(
     const f = await fixture(HACK_DEV_COMPOSE);
     const path = await adaptation(f, {
       version: 1,
-      isolatedNetworks: ["hack-dev"],
+      isolatedNetworks: ["foreign-dev"],
     });
     const result = await cli(f, ["restart"], {
       HACK_NATIVE_SHARED_SOURCE: "1",
@@ -598,7 +606,7 @@ test(
     });
     expectOneClosedLine(
       result,
-      `E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION}`
+      `E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION} Foreign external networks: foreign-dev.`
     );
     expect(await f.calls()).toEqual([]);
     expect(await tree(f.root)).toEqual(before);
@@ -613,7 +621,7 @@ test(
     f.env({});
     const path = await adaptation(f, {
       version: 2,
-      isolatedNetworks: ["hack-dev"],
+      isolatedNetworks: ["foreign-dev"],
     });
     const before = await tree(f.root);
     const result = await cli(f, ["up"], {
@@ -636,7 +644,7 @@ test(
     const f = await fixture(HACK_DEV_COMPOSE);
     const path = await adaptation(f, {
       version: 1,
-      isolatedNetworks: ["hack-dev"],
+      isolatedNetworks: ["foreign-dev"],
     });
     const result = await cli(f, ["doctor", "--json"], {
       HACK_NATIVE_ADAPTATION: path,

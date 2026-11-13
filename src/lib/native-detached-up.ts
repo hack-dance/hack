@@ -284,6 +284,7 @@ export async function startNativeDetachedUp(opts: {
   let failed = false;
   let cancellationCode: number | undefined;
   let shellVariablesReported = false;
+  let exitGrace: ReturnType<typeof setTimeout> | undefined;
   const fail = () => {
     if (committed || failed) {
       return;
@@ -314,13 +315,19 @@ export async function startNativeDetachedUp(opts: {
   const interrupt = () => cancel(130);
   const terminate = () => cancel(143);
   child.on("error", fail);
-  // Exit may precede buffered IPC. A closed channel has drained its messages.
-  child.on("close", fail);
-  child.on("disconnect", () => {
-    if (!committed) {
-      fail();
+  // Drain buffered IPC after exit, but don't wait for a descendant that
+  // inherited the channel descriptor to release it on the full startup timer.
+  child.on("exit", () => {
+    if (!(committed || failed)) {
+      exitGrace = setTimeout(fail, 1500);
     }
   });
+  const channelClosed = () => {
+    clearTimeout(exitGrace);
+    fail();
+  };
+  child.on("close", channelClosed);
+  child.on("disconnect", channelClosed);
   child.on("message", (value: unknown) => {
     if (failed) {
       return;
@@ -402,6 +409,7 @@ export async function startNativeDetachedUp(opts: {
     return cancellationCode;
   } finally {
     clearTimeout(timer);
+    clearTimeout(exitGrace);
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", terminate);
     // Before commit this disconnect triggers graceful shutdown in the exact

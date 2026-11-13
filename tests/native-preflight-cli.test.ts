@@ -1094,6 +1094,48 @@ test("preflight supplies names-only private-delivery context without decrypting 
   expect(document.services.shell.environment).toEqual({ TOKEN: null });
 });
 
+test("preflight reports the Compose budget before sending context for more than 128 services", async () => {
+  const services = Object.fromEntries(
+    Array.from({ length: 130 }, (_, index) => [
+      `service-${index}`,
+      { image: IMAGE, ...(index === 0 ? {} : { profiles: ["optional"] }) },
+    ])
+  );
+  const f = await fixture({ services });
+  await writeFile(
+    join(f.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: { TOKEN: PRIVATE } },
+    })
+  );
+  await f.reviewStops("service_budget");
+  const result = await preflight(f, f.native);
+  expect(result.code).toBe(1);
+  expect(
+    result.report.blockers.some((entry) => entry.code === "service_budget")
+  ).toBe(true);
+  const args = await f.argv();
+  expect(args).toHaveLength(1);
+  expect(args.join("\n")).not.toContain("--start-managed-service");
+  expect(args.join("\n")).not.toContain(PRIVATE);
+});
+
+test("preflight reports one project-wide managed env metadata error", async () => {
+  const f = await fixture({ services: { web: { image: IMAGE } } });
+  await writeFile(join(f.projectDir, "hack.env.default.yaml"), "values: [");
+  await f.review([]);
+  const result = await preflight(f, f.native);
+  expect(result.code).toBe(1);
+  expect(
+    result.report.blockers.filter(
+      (entry) => entry.code === "managed_env_unreadable"
+    )
+  ).toHaveLength(1);
+});
+
 test(
   "foreground, detached and JSON native up retain the fixed UDP refusal and omit unrelated runtime text",
   async () => {

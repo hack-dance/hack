@@ -274,17 +274,14 @@ fn project_plan_reports_shared_start_refusals_without_runtime_effects() {
 }
 
 #[test]
-fn preflight_readiness_matches_the_actual_cli_start_helpers() {
+fn preflight_readiness_and_cli_plan_fields_match_shared_fixtures() {
     use hack_runtime_core::{
         Candidate,
         project::{self, PlanOptions},
     };
-    use std::io::Write;
-    use std::process::Stdio;
     let fixture = Fixture::new();
     let project = fixture.directory("project");
     let candidate_root = fixture.directory("candidate");
-    let home = fixture.directory("home");
     let candidate = Candidate::discover(&candidate_root).unwrap();
     let cases: Vec<Value> = serde_json::from_str(include_str!(
         "../../../tests/fixtures/native-start-readiness.json"
@@ -325,47 +322,27 @@ fn preflight_readiness_matches_the_actual_cli_start_helpers() {
             "{}",
             case["name"]
         );
-        let mut child = Command::new("bun")
-            .arg("--no-env-file")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/native-start-readiness.ts"
-            ))
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", &home)
-            .env("TMPDIR", &fixture.0)
-            .env("XDG_CONFIG_HOME", &home)
-            .env("XDG_STATE_HOME", &home)
-            .env("XDG_DATA_HOME", &home)
-            .env("XDG_CACHE_HOME", &home)
-            .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .env("HACK_NO_INTERACTIVE", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(
-                &serde_json::to_vec(
-                    &serde_json::json!({"specs": compose["services"], "plan": report.plan}),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}: {}",
-            case["name"],
-            String::from_utf8_lossy(&output.stderr)
+        // Snapshot exactly the reviewed fields the CLI's readiness/cache/route
+        // helpers consume. The Bun suite feeds this same snapshot to those
+        // helpers, so neither job needs the other language's toolchain.
+        let snapshot: serde_json::Map<String, Value> = report.plan.services.iter().map(|(name, service)| {
+            (name.clone(), serde_json::json!({
+                "active": service.active,
+                "one_shot": service.one_shot,
+                "dependency_cache": service.dependency_cache.as_ref().map(|_| serde_json::json!({})),
+                "routing": service.routing.as_ref().map(|route| serde_json::json!({"port": route.port})),
+                "healthcheck": service.healthcheck.as_ref().map(|health| serde_json::json!({
+                    "disabled": health.disabled,
+                    "native_http": health.native_http.as_ref().map(|probe| serde_json::json!({"port": probe.port})),
+                })),
+            }))
+        }).collect();
+        assert_eq!(
+            Value::Object(snapshot),
+            case["reviewed_services"],
+            "{}",
+            case["name"]
         );
-        let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(cli, case["goals"], "{}", case["name"]);
         assert_eq!(std::fs::read_dir(&candidate_root).unwrap().count(), 0);
     }
 }
@@ -422,4 +399,67 @@ fn plan_delivery_context_is_names_only_action_scoped_and_outside_identity() {
     assert!(!capture.status.success());
     assert!(String::from_utf8_lossy(&capture.stderr).contains("invalid_arguments"));
     assert_eq!(fs::read_dir(&candidate).unwrap().count(), 0);
+}
+
+#[test]
+fn delivery_context_admits_the_full_compose_budget_and_oversized_files_refuse_before_context() {
+    let fixture = Fixture::new();
+    let project = fixture.directory("project");
+    let candidate = fixture.directory("candidate");
+    let image = format!("sha256:{}", "a".repeat(64));
+    for count in [hack_runtime_core::project::MAX_COMPOSE_SERVICES, 130] {
+        let services: serde_json::Map<String, Value> = (0..count)
+        .map(|index| {
+            (
+                format!("service-{index}"),
+                serde_json::json!({
+                    "image": image, "profiles": if index == 0 { vec![] } else { vec!["optional"] },
+                    "environment": {"TOKEN": null}
+                }),
+            )
+        })
+        .collect();
+        fs::write(
+            project.join("compose.json"),
+            serde_json::to_vec(&serde_json::json!({"services": services})).unwrap(),
+        )
+        .unwrap();
+        let mut args = vec![
+            "project",
+            "plan",
+            "--project",
+            project.to_str().unwrap(),
+            "--file",
+            "compose.json",
+            "--json",
+        ];
+        // The CLI's first review has no delivery context. An over-budget project
+        // stops there before the normalized review and cannot hit the context cap.
+        if count == hack_runtime_core::project::MAX_COMPOSE_SERVICES {
+            for name in services.keys() {
+                args.extend(["--start-managed-service", name.as_str()]);
+            }
+        }
+        let output = invoke(
+            Path::new(env!("CARGO_BIN_EXE_hack-native")),
+            &candidate,
+            &project,
+            &args,
+        );
+        if count == hack_runtime_core::project::MAX_COMPOSE_SERVICES {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["start_refusals"], serde_json::json!([]));
+            assert_eq!(report["plan"]["services"].as_object().unwrap().len(), count);
+        } else {
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(error["code"], "service_budget");
+        }
+        assert_eq!(fs::read_dir(&candidate).unwrap().count(), 0);
+    }
 }

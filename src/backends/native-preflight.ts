@@ -1508,7 +1508,17 @@ export async function collectNativePreflight(
     cli.map((found) => `${found.code}\0${found.service ?? ""}`)
   );
   const exact = new Set<string>();
-  const all = [...cli];
+  const projectCodes = new Set<string>();
+  const all = cli.filter((found) => {
+    if (found.service !== undefined) {
+      return true;
+    }
+    if (projectCodes.has(found.code)) {
+      return false;
+    }
+    projectCodes.add(found.code);
+    return true;
+  });
   for (const found of runtime.findings) {
     const key = `${found.severity}\0${found.code}\0${found.service ?? ""}\0${found.field ?? ""}`;
     if (

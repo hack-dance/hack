@@ -1,4 +1,4 @@
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -73,9 +73,76 @@ function deliverExitBeforeMessages(): () => void {
   };
 }
 
-if (role === "launcher") {
+/** Force the valid delayed-close order, even on hosts that promptly close IPC. */
+function deferChannelClosure(): () => void {
+  const emit = ChildProcess.prototype.emit;
+  ChildProcess.prototype.emit = function (
+    this: ChildProcess,
+    event: string | symbol,
+    ...args: unknown[]
+  ): boolean {
+    return event === "close" || event === "disconnect"
+      ? true
+      : emit.call(this, event, ...args);
+  };
+  return () => {
+    ChildProcess.prototype.emit = emit;
+  };
+}
+
+/** The exact spawned descendant retains fd 3 until its private stop endpoint is called. */
+async function leaveChannelWithDescendant(opts: {
+  readonly root: string;
+  readonly mode: string;
+}): Promise<never> {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) =>
+        !["NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"].includes(key)
+    )
+  );
+  const holder = spawn(
+    process.execPath,
+    [import.meta.filename, "channel-holder", opts.root, opts.mode],
+    {
+      env,
+      stdio: ["ignore", "ignore", "ignore", 3],
+    }
+  );
+  const deadline = performance.now() + 3000;
+  while (!(await Bun.file(join(opts.root, "holder-ready")).exists())) {
+    if (performance.now() > deadline) {
+      holder.kill("SIGTERM");
+      throw new Error("Channel holder did not start.");
+    }
+    await Bun.sleep(10);
+  }
+  holder.unref();
+  process.exit(1);
+}
+
+if (role === "channel-holder") {
+  const done = Promise.withResolvers<void>();
+  const server = Bun.serve({
+    unix: join(root, "holder.sock"),
+    fetch: () => {
+      setTimeout(() => done.resolve(), 25);
+      return new Response("held");
+    },
+  });
+  const timeout = setTimeout(() => done.resolve(), 12_000);
+  await publish(join(root, "holder-ready"), "ready");
+  await done.promise;
+  clearTimeout(timeout);
+  server.stop(true);
+  await publish(join(root, "holder-stopped"), "stopped");
+} else if (role === "launcher") {
   const restore =
-    mode === "exit-first-failure" ? deliverExitBeforeMessages() : undefined;
+    mode === "held-channel"
+      ? deferChannelClosure()
+      : mode === "exit-first-failure"
+        ? deliverExitBeforeMessages()
+        : undefined;
   try {
     process.exitCode = await startNativeDetachedUp({
       cwd: root,
@@ -124,6 +191,10 @@ if (role === "launcher") {
         },
       });
       await publish(join(root, "owner.pid"), String(process.pid));
+      if (mode === "held-channel") {
+        server.stop(true);
+        return await leaveChannelWithDescendant({ root, mode });
+      }
       process.stdout.write(
         "synthetic hook output must not reach launcher stdout\n"
       );

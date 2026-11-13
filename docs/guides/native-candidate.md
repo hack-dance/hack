@@ -242,6 +242,8 @@ policies incompatible with private delivery are blockers even when no decryption
 key is available. Shell values and credentials are never read for this check.
 Credential adapters, image defaults, occupied ports and other inputs only known
 at start remain runtime boundaries.
+AWS/gcloud credentials are added after static review; a restart policy on a
+service receiving only those adapter credentials can still be refused at serve.
 
 With `--json` the report is the `data` of the standard result envelope:
 

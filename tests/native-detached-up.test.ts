@@ -260,3 +260,43 @@ test("detached immediate exit drains its fixed failure before reporting an uncon
     }
   }
 }, 30_000);
+
+test("detached owner exit has a short grace even when its descendant holds the IPC descriptor", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-detached-channel-"));
+  const started = performance.now();
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "held-channel"],
+    {
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 6000,
+    }
+  );
+  try {
+    await waitForFile(join(root, "holder-ready"));
+    const code = await launcher.exited;
+    expect(code).toBe(1);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(1000);
+    expect(performance.now() - started).toBeLessThan(5000);
+    // The descendant still owns its endpoint when the launcher has returned.
+    const held = await fetch("http://localhost/stop", {
+      unix: join(root, "holder.sock"),
+    });
+    expect(await held.text()).toBe("held");
+    await waitForFile(join(root, "holder-stopped"));
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await fetch("http://localhost/stop", {
+      unix: join(root, "holder.sock"),
+    }).catch(() => undefined);
+    if (await Bun.file(join(root, "holder-ready")).exists()) {
+      await waitForFile(join(root, "holder-stopped"));
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}, 12_000);

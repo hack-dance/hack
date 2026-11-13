@@ -1237,7 +1237,8 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
             "--expect-plan" if expected.is_none() => expected = Some(*value),
             "--profile" if profiles.len() < 64 => profiles.push((*value).to_owned()),
             "--start-managed-service"
-                if *action == "plan" && start_managed_services.len() < 128 =>
+                if *action == "plan"
+                    && start_managed_services.len() < project::MAX_COMPOSE_SERVICES =>
             {
                 start_managed_services.push((*value).to_owned());
             }

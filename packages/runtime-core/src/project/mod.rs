@@ -440,13 +440,15 @@ pub struct PlanReport {
     pub start_readiness: BTreeMap<String, execution::Condition>,
 }
 
-/// Add names-only private-delivery context to read-only start admission. Values
-/// must never enter this context; it neither changes the plan nor authorizes effects.
+/// Maximum declared Compose services, including inactive profiles and review context.
+pub const MAX_COMPOSE_SERVICES: usize = 64;
+
+/// Apply names-only delivery context without changing the plan or its identity.
 pub fn review_start_delivery(
     report: &mut PlanReport,
     services: &[String],
 ) -> Result<(), CandidateError> {
-    if services.len() > 128
+    if services.len() > report.plan.services.len()
         || services
             .iter()
             .any(|name| !report.plan.services.contains_key(name))

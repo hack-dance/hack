@@ -4,10 +4,24 @@
     "compose": {
       "services": {
         "plain": {},
-        "empty": { "healthcheck": {} },
-        "disabled": { "healthcheck": { "disable": true } },
-        "none": { "healthcheck": { "test": ["NONE"] } },
-        "exec": { "healthcheck": { "test": ["CMD", "true"] } }
+        "empty": {
+          "healthcheck": {}
+        },
+        "disabled": {
+          "healthcheck": {
+            "disable": true
+          }
+        },
+        "none": {
+          "healthcheck": {
+            "test": ["NONE"]
+          }
+        },
+        "exec": {
+          "healthcheck": {
+            "test": ["CMD", "true"]
+          }
+        }
       }
     },
     "goals": {
@@ -16,6 +30,55 @@
       "disabled": "healthy",
       "none": "healthy",
       "exec": "healthy"
+    },
+    "reviewed_services": {
+      "disabled": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": true,
+          "native_http": null
+        }
+      },
+      "empty": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": false,
+          "native_http": null
+        }
+      },
+      "exec": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": false,
+          "native_http": null
+        }
+      },
+      "none": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": true,
+          "native_http": null
+        }
+      },
+      "plain": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": null
+      }
     }
   },
   {
@@ -24,15 +87,31 @@
       "services": {
         "app": {
           "depends_on": {
-            "job": { "condition": "service_completed_successfully" },
-            "db": { "condition": "service_healthy" }
+            "job": {
+              "condition": "service_completed_successfully"
+            },
+            "db": {
+              "condition": "service_healthy"
+            }
           }
         },
-        "db": { "healthcheck": { "test": ["CMD", "true"] } },
-        "job": { "healthcheck": { "test": ["CMD", "true"] } },
+        "db": {
+          "healthcheck": {
+            "test": ["CMD", "true"]
+          }
+        },
+        "job": {
+          "healthcheck": {
+            "test": ["CMD", "true"]
+          }
+        },
         "one": {
-          "labels": { "hack.service.one-shot": "true" },
-          "healthcheck": { "test": ["CMD", "true"] }
+          "labels": {
+            "hack.service.one-shot": "true"
+          },
+          "healthcheck": {
+            "test": ["CMD", "true"]
+          }
         }
       }
     },
@@ -41,6 +120,45 @@
       "db": "healthy",
       "job": "completed",
       "one": "completed"
+    },
+    "reviewed_services": {
+      "app": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": null
+      },
+      "db": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": false,
+          "native_http": null
+        }
+      },
+      "job": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": false,
+          "native_http": null
+        }
+      },
+      "one": {
+        "active": true,
+        "one_shot": true,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": false,
+          "native_http": null
+        }
+      }
     }
   },
   {
@@ -49,14 +167,44 @@
       "services": {
         "deps": {
           "volumes": ["modules:/app/node_modules"],
-          "labels": { "hack.dependencies.cache-volume": "modules" },
-          "healthcheck": { "test": ["CMD", "true"] }
+          "labels": {
+            "hack.dependencies.cache-volume": "modules"
+          },
+          "healthcheck": {
+            "test": ["CMD", "true"]
+          }
         },
-        "app": { "depends_on": ["deps"] }
+        "app": {
+          "depends_on": ["deps"]
+        }
       },
-      "volumes": { "modules": {} }
+      "volumes": {
+        "modules": {}
+      }
     },
-    "goals": { "deps": "completed", "app": "started" }
+    "goals": {
+      "deps": "completed",
+      "app": "started"
+    },
+    "reviewed_services": {
+      "app": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": null
+      },
+      "deps": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": {},
+        "routing": null,
+        "healthcheck": {
+          "disabled": false,
+          "native_http": null
+        }
+      }
+    }
   },
   {
     "name": "routed HTTP service is healthy and inert labels are not routed",
@@ -80,11 +228,40 @@
           }
         },
         "inert": {
-          "labels": { "caddy": "inert.example.test", "caddy.tls": "internal" }
+          "labels": {
+            "caddy": "inert.example.test",
+            "caddy.tls": "internal"
+          }
         }
       }
     },
-    "goals": { "web": "healthy", "inert": "started" }
+    "goals": {
+      "web": "healthy",
+      "inert": "started"
+    },
+    "reviewed_services": {
+      "inert": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": null
+      },
+      "web": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": {
+          "port": 3000
+        },
+        "healthcheck": {
+          "disabled": false,
+          "native_http": {
+            "port": 3000
+          }
+        }
+      }
+    }
   },
   {
     "name": "inactive profile edges and optional targets do not raise goals",
@@ -92,34 +269,103 @@
       "services": {
         "app": {
           "depends_on": {
-            "db": { "condition": "service_healthy", "required": false }
+            "db": {
+              "condition": "service_healthy",
+              "required": false
+            }
           }
         },
         "db": {
           "profiles": ["database"],
-          "healthcheck": { "test": ["CMD", "true"] }
+          "healthcheck": {
+            "test": ["CMD", "true"]
+          }
         },
         "job": {
           "profiles": ["database"],
-          "labels": { "hack.service.one-shot": "true" },
-          "depends_on": { "app": { "condition": "service_healthy" } }
+          "labels": {
+            "hack.service.one-shot": "true"
+          },
+          "depends_on": {
+            "app": {
+              "condition": "service_healthy"
+            }
+          }
         }
       }
     },
-    "goals": { "app": "started" }
+    "goals": {
+      "app": "started"
+    },
+    "reviewed_services": {
+      "app": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": null
+      },
+      "db": {
+        "active": false,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": false,
+          "native_http": null
+        }
+      },
+      "job": {
+        "active": false,
+        "one_shot": true,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": null
+      }
+    }
   },
   {
     "name": "selected profiles participate in readiness",
     "profiles": ["database"],
     "compose": {
       "services": {
-        "app": { "depends_on": { "db": { "condition": "service_healthy" } } },
+        "app": {
+          "depends_on": {
+            "db": {
+              "condition": "service_healthy"
+            }
+          }
+        },
         "db": {
           "profiles": ["database"],
-          "healthcheck": { "test": ["CMD", "true"] }
+          "healthcheck": {
+            "test": ["CMD", "true"]
+          }
         }
       }
     },
-    "goals": { "app": "started", "db": "healthy" }
+    "goals": {
+      "app": "started",
+      "db": "healthy"
+    },
+    "reviewed_services": {
+      "app": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": null
+      },
+      "db": {
+        "active": true,
+        "one_shot": false,
+        "dependency_cache": null,
+        "routing": null,
+        "healthcheck": {
+          "disabled": false,
+          "native_http": null
+        }
+      }
+    }
   }
 ]

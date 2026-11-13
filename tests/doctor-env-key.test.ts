@@ -918,6 +918,17 @@ describe("printed key recovery commands leave nothing git can collect (HACK-2165
       "a discovery ceiling",
       (root: string) => ({ GIT_CEILING_DIRECTORIES: join(root, "home") }),
     ],
+    [
+      "a stale GIT_OBJECT_DIRECTORY",
+      (root: string) => ({ GIT_OBJECT_DIRECTORY: join(root, "gone-objects") }),
+    ],
+    [
+      "a stale GIT_DIR and GIT_OBJECT_DIRECTORY together",
+      (root: string) => ({
+        GIT_DIR: join(root, "gone.git"),
+        GIT_OBJECT_DIRECTORY: join(root, "gone-objects"),
+      }),
+    ],
     ["a stray GIT_WORK_TREE", (root: string) => ({ GIT_WORK_TREE: root })],
   ] as const) {
     test(`rotation finds a home checkout despite ${label} in the shell`, async () => {

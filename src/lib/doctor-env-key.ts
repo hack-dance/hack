@@ -236,15 +236,18 @@ const READD_SECRET =
  * removes it. The command copies only when git itself answers that the
  * directory is not in a repository; inside a work tree (a home directory
  * kept in git, say), or when git is missing or cannot tell, it stops before
- * copying anything. Git asks with its discovery overrides removed (a stale
- * `GIT_DIR`, a work tree or ceiling set in the shell) and across file
- * systems, so the answer is about the directory itself as plain discovery in
- * any shell would find it. mktemp gives each copy its own name
+ * copying anything. Git is asked with every repository-selecting variable
+ * removed: the set git itself clears when it enters another repository
+ * (`git rev-parse --local-env-vars`: `GIT_DIR`, `GIT_OBJECT_DIRECTORY`,
+ * `GIT_WORK_TREE` and the rest) plus the discovery ceiling, and with
+ * discovery across file systems, so a stale value in the shell cannot turn a
+ * checkout into "not a git repository". If git cannot list those variables
+ * the command stops. mktemp gives each copy its own name
  * (0600), so a later rotation never overwrites an earlier one; the key is
  * removed only once its copy is written.
  */
 export function retiredKeyCopyCommand(key: string): string {
-  return `install -d -m 700 ${RETIRED_KEY_DIR} && case "$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM=1 LC_ALL=C git -C ${RETIRED_KEY_DIR} rev-parse --is-inside-work-tree 2>&1)" in *"not a git repository"*) true ;; *) false ;; esac && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
+  return `install -d -m 700 ${RETIRED_KEY_DIR} && v="$(git rev-parse --local-env-vars)" && [ -n "$v" ] && case "$(unset $v GIT_CEILING_DIRECTORIES; GIT_DISCOVERY_ACROSS_FILESYSTEM=1 LC_ALL=C git -C ${RETIRED_KEY_DIR} rev-parse --is-inside-work-tree 2>&1)" in *"not a git repository"*) true ;; *) false ;; esac && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
 }
 
 /**

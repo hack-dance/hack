@@ -1,5 +1,6 @@
 import { realpath } from "node:fs/promises";
 
+import { runMuxCommand } from "../mux/mux-backend.ts";
 import { getMuxBackends } from "../mux/mux-resolver.ts";
 import type {
   LifecycleBackend,
@@ -9,6 +10,7 @@ import {
   readLifecycleState,
   removeLifecycleStateEntryIfMatching,
 } from "./lifecycle-runtime.ts";
+import { readProcessIdentities } from "./process-tree.ts";
 import {
   createLifecycleSessionRetirement,
   type ProcessSnapshotRow,
@@ -213,6 +215,7 @@ export async function repairProjectLifecycleSessions(opts: {
     readonly inspect?: typeof inspectProjectLifecycleHygiene;
     readonly backends?: typeof getMuxBackends;
     readonly inspectSession?: typeof inspectLifecycleSession;
+    readonly readPanePids?: typeof readRepairPanePids;
     readonly retireSession?: ReturnType<
       typeof createLifecycleSessionRetirement
     >;
@@ -222,6 +225,7 @@ export async function repairProjectLifecycleSessions(opts: {
     inspect = inspectProjectLifecycleHygiene,
     backends = getMuxBackends,
     inspectSession = inspectLifecycleSession,
+    readPanePids = readRepairPanePids,
     retireSession,
   } = opts.boundary ?? {};
   const initial = await inspect(opts);
@@ -262,8 +266,12 @@ export async function repairProjectLifecycleSessions(opts: {
     }
     let killed: boolean;
     try {
+      const processes = await readRepairPaneIdentities({
+        entry: orphan.entry,
+        readPanePids,
+      });
       killed = await (retireSession ?? createLifecycleSessionRetirement())({
-        processes: orphan.entry.processes,
+        processes,
         stopSession: () =>
           killInspectedLifecycleSession({ backend, inspection }),
         assertFresh: () =>
@@ -274,7 +282,7 @@ export async function repairProjectLifecycleSessions(opts: {
       });
     } catch (error: unknown) {
       failures.push(
-        `${orphan.entry.sessionName}: ${error instanceof Error ? error.message : "process-group retirement unconfirmed"}; kept ownership state`
+        `${orphan.entry.sessionName}: ${repairFailureMessage(error)}; kept ownership state`
       );
       continue;
     }
@@ -296,6 +304,68 @@ export async function repairProjectLifecycleSessions(opts: {
   }
 
   return { repairedSessions, failures };
+}
+
+function repairFailureMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : "process-group retirement unconfirmed";
+}
+
+/** Refresh only panes belonging to the already ownership-proven mux windows. */
+async function readRepairPaneIdentities(opts: {
+  readonly entry: LifecycleStateEntry;
+  readonly readPanePids: typeof readRepairPanePids;
+}): Promise<
+  readonly { readonly panePid?: number; readonly paneBirth?: string }[]
+> {
+  if (opts.entry.backend !== "tmux") {
+    return opts.entry.processes;
+  }
+  const panes = await Promise.all(
+    opts.entry.processes.map((process) =>
+      opts.readPanePids({
+        sessionName: opts.entry.sessionName,
+        windowName: process.windowName,
+      })
+    )
+  );
+  const identities = await readProcessIdentities();
+  return panes.flatMap((pids) =>
+    pids.map((panePid) => ({
+      panePid,
+      paneBirth: identities.find((row) => row.pid === panePid)?.birth,
+    }))
+  );
+}
+
+async function readRepairPanePids(opts: {
+  readonly sessionName: string;
+  readonly windowName: string;
+}): Promise<readonly number[]> {
+  const result = await runMuxCommand([
+    "tmux",
+    "list-panes",
+    "-t",
+    `${opts.sessionName}:${opts.windowName}`,
+    "-F",
+    "#{pane_pid}",
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      "Could not read current lifecycle pane identity before repair"
+    );
+  }
+  const pids = result.stdout
+    .split("\n")
+    .map((line) => Number(line.trim()))
+    .filter((pid) => Number.isInteger(pid) && pid > 1);
+  if (pids.length === 0) {
+    throw new Error(
+      "Current lifecycle pane identity is unavailable before repair"
+    );
+  }
+  return pids;
 }
 
 /** Retained group identities cannot authorize signals after their owner changes. */

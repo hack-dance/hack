@@ -35,7 +35,8 @@ after interrupting its owned lifecycle panes.
 `hack doctor --fix` also captures groups before mux teardown and waits for
 commands before wrappers when repairing an ownership-proven orphan. An
 unconfirmed retirement keeps that entry and is reported while repair continues
-with other candidates.
+with other candidates. Repair refreshes pane identities from the owned mux, so
+older records without start-time metadata can also be retired safely.
 Signal delivery and FIFO EOF alone do not confirm group exit. If confirmation
 fails, Hack reports it and retains the ownership record and dependent helpers;
 it does not silently report completed cleanup.

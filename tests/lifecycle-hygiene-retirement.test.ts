@@ -64,6 +64,14 @@ async function fixture(opts: {
   const boundary = {
     inspect: () => Promise.resolve(inspection),
     backends: () => new Map([["tmux" as const, backend]]),
+    readPanePids: (args: { readonly windowName: string }) =>
+      Promise.resolve(
+        entry.processes.flatMap((process) =>
+          process.windowName === args.windowName && process.panePid
+            ? [process.panePid]
+            : []
+        )
+      ),
     inspectSession: (args: { readonly entry: LifecycleStateEntry | null }) => {
       if (!args.entry) {
         throw new Error("Repair must inspect its recorded entry");
@@ -194,91 +202,98 @@ test("an unconfirmed doctor repair does not skip subsequent orphan candidates", 
   }
 });
 
-test("doctor repair reaps a TERM-resistant FIFO command before its wrapper", async () => {
-  const root = await mkdtemp(join(tmpdir(), "hack-repair-fifo-"));
-  const logPath = join(root, "lifecycle.log");
-  const commandPidPath = join(root, "command.pid");
-  const ready = join(root, "ready");
-  await ensurePrivateLifecycleLog({ root, logPath });
-  const code = `process.on("SIGTERM", () => {}); await Bun.write(${JSON.stringify(ready)}, "yes"); setInterval(() => {}, 1000);`;
-  const child = Bun.spawn(
-    [
-      "sh",
-      "-c",
-      wrapLifecyclePersistentCommand({
-        command: `${quoteShellWord(process.execPath)} --no-env-file -e ${quoteShellWord(code)}`,
-        commandPidPath,
-        logPath,
-        serviceName: "writer",
-      }),
-    ],
-    {
-      detached: true,
-      env: { PATH: "/usr/bin:/bin", TMPDIR: root },
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    }
-  );
-  let group: number | undefined;
-  const watchdog = setTimeout(() => child.kill("SIGKILL"), 8000);
-  try {
-    const deadline = performance.now() + 3000;
-    while (
-      !(await Bun.file(ready).exists()) &&
-      child.exitCode === null &&
-      performance.now() < deadline
-    ) {
-      await Bun.sleep(10);
-    }
-    expect(await Bun.file(ready).exists()).toBe(true);
-    group = Number.parseInt(await Bun.file(commandPidPath).text(), 10);
-    expect(group).toBeGreaterThan(1);
-    const paneBirth = (await readProcessIdentities()).find(
-      (row) => row.pid === child.pid
-    )?.birth;
-    expect(paneBirth).toBeDefined();
-    const f = await fixture({
-      root,
-      stop: () => process.kill(-child.pid, "SIGHUP"),
-      processes: [
-        {
-          name: "writer",
-          windowName: "writer",
+for (const legacy of [false, true]) {
+  test(`doctor repair reaps a TERM-resistant FIFO command before its wrapper (${legacy ? "old record without birth" : "current record"})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "hack-repair-fifo-"));
+    const logPath = join(root, "lifecycle.log");
+    const commandPidPath = join(root, "command.pid");
+    const ready = join(root, "ready");
+    await ensurePrivateLifecycleLog({ root, logPath });
+    const code = `process.on("SIGTERM", () => {}); await Bun.write(${JSON.stringify(ready)}, "yes"); setInterval(() => {}, 1000);`;
+    const child = Bun.spawn(
+      [
+        "sh",
+        "-c",
+        wrapLifecyclePersistentCommand({
+          command: `${quoteShellWord(process.execPath)} --no-env-file -e ${quoteShellWord(code)}`,
+          commandPidPath,
           logPath,
-          panePid: child.pid,
-          paneBirth,
-          processGroupId: group,
-        },
+          serviceName: "writer",
+        }),
       ],
-    });
-    expect(
-      await repairProjectLifecycleSessions({
-        projectDir: root,
-        projectRoot: root,
-        boundary: f.boundary,
-      })
-    ).toEqual({ repairedSessions: [f.entry.sessionName], failures: [] });
-    expect(await child.exited).toBe(130);
-    expect(() => process.kill(-(group ?? 0), 0)).toThrow();
-    expect(() => process.kill(-child.pid, 0)).toThrow();
-    expect(await readLifecycleState({ projectDir: root })).toEqual([]);
-    expect(
-      (await readdir(root)).filter((name) => name.startsWith("hack-lifecycle."))
-    ).toEqual([]);
-  } finally {
-    clearTimeout(watchdog);
-    if (group !== undefined && group > 1) {
-      try {
-        process.kill(-group, "SIGKILL");
-      } catch {
-        /* already absent */
+      {
+        detached: true,
+        env: { PATH: "/usr/bin:/bin", TMPDIR: root },
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
       }
+    );
+    let group: number | undefined;
+    const watchdog = setTimeout(() => child.kill("SIGKILL"), 8000);
+    try {
+      const deadline = performance.now() + 3000;
+      while (
+        !(await Bun.file(ready).exists()) &&
+        child.exitCode === null &&
+        performance.now() < deadline
+      ) {
+        await Bun.sleep(10);
+      }
+      expect(await Bun.file(ready).exists()).toBe(true);
+      group = Number.parseInt(await Bun.file(commandPidPath).text(), 10);
+      expect(group).toBeGreaterThan(1);
+      const paneBirth = (await readProcessIdentities()).find(
+        (row) => row.pid === child.pid
+      )?.birth;
+      expect(paneBirth).toBeDefined();
+      const f = await fixture({
+        root,
+        stop: () => process.kill(-child.pid, "SIGHUP"),
+        processes: [
+          {
+            name: "writer",
+            windowName: "writer",
+            logPath,
+            panePid: child.pid,
+            ...(legacy ? {} : { paneBirth }),
+            processGroupId: group,
+          },
+        ],
+      });
+      expect(
+        await repairProjectLifecycleSessions({
+          projectDir: root,
+          projectRoot: root,
+          boundary: f.boundary,
+        })
+      ).toEqual({ repairedSessions: [f.entry.sessionName], failures: [] });
+      expect(await child.exited).toBe(130);
+      expect(() => process.kill(-(group ?? 0), 0)).toThrow();
+      expect(() => process.kill(-child.pid, 0)).toThrow();
+      expect(await readLifecycleState({ projectDir: root })).toEqual([]);
+      expect(
+        (await readdir(root)).filter((name) =>
+          name.startsWith("hack-lifecycle.")
+        )
+      ).toEqual([]);
+    } finally {
+      clearTimeout(watchdog);
+      if (group !== undefined && group > 1) {
+        try {
+          process.kill(-group, "SIGKILL");
+        } catch {
+          /* already absent */
+        }
+      }
+      if (child.exitCode === null) {
+        await Promise.race([child.exited, Bun.sleep(1000)]);
+      }
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+      }
+      await child.exited;
+      await rm(root, { recursive: true, force: true });
     }
-    if (child.exitCode === null) {
-      child.kill("SIGKILL");
-    }
-    await child.exited;
-    await rm(root, { recursive: true, force: true });
-  }
-}, 10_000);
+  }, 10_000);
+}

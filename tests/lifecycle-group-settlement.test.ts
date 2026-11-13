@@ -187,3 +187,27 @@ test("failed process inspection still stops the owned mux and retains uncertaint
   expect(reads).toBe(2);
   expect(stops).toBe(2);
 });
+
+test("missing pane identity is reported separately from failed process inspection", async () => {
+  let stops = 0;
+  const retire = createLifecycleSessionRetirement({
+    readSnapshot: () =>
+      Promise.resolve([{ pid: 42, ppid: 1, processGroupId: 42 }]),
+    readIdentities: () =>
+      Promise.resolve([
+        { pid: 42, parentPid: 1, birth: "live-pane", zombie: false },
+      ]),
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(
+      retire({
+        processes: [{ panePid: 42 }],
+        stopSession: () => {
+          stops += 1;
+          return Promise.resolve(true);
+        },
+      })
+    ).rejects.toThrow("because pane identity is unavailable");
+  }
+  expect(stops).toBe(2);
+});

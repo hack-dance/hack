@@ -313,7 +313,11 @@ export function createLifecycleSessionRetirement(boundary?: {
   readonly readSnapshot: () => Promise<ProcessSnapshotRow[]>;
   readonly readIdentities?: () => Promise<ProcessIdentityRow[]>;
 }): (opts: LifecycleSessionRetirementOptions) => Promise<boolean> {
-  let captured: CapturedLifecycleGroups | "unknown" | undefined;
+  let captured:
+    | CapturedLifecycleGroups
+    | "unknown"
+    | "identity_unavailable"
+    | undefined;
   const os: RetirementBoundary = {
     readSnapshot:
       boundary?.readSnapshot ??
@@ -334,6 +338,11 @@ export function createLifecycleSessionRetirement(boundary?: {
     if (captured === "unknown") {
       throw new Error(
         "Lifecycle mux stopped, but descendant retirement could not be confirmed because process inspection failed"
+      );
+    }
+    if (captured === "identity_unavailable") {
+      throw new Error(
+        "Lifecycle mux stopped, but descendant retirement could not be confirmed because pane identity is unavailable"
       );
     }
     const { groups, paneGroups, members } = captured;
@@ -358,7 +367,7 @@ export function createLifecycleSessionRetirement(boundary?: {
 async function captureRetirementGroups(opts: {
   readonly processes: readonly LifecyclePaneIdentity[];
   readonly os: RetirementBoundary;
-}): Promise<CapturedLifecycleGroups | "unknown"> {
+}): Promise<CapturedLifecycleGroups | "unknown" | "identity_unavailable"> {
   if (!opts.processes.some((process) => process.panePid)) {
     return { groups: [], paneGroups: new Set(), members: new Map() };
   }
@@ -366,9 +375,10 @@ async function captureRetirementGroups(opts: {
     readRetirementSnapshot({ read: opts.os.readSnapshot }),
     opts.os.readIdentities().catch(() => []),
   ]);
+  if (snapshot.length === 0 || identities.length === 0) {
+    return "unknown";
+  }
   if (
-    snapshot.length === 0 ||
-    identities.length === 0 ||
     opts.processes.some(
       (process) =>
         process.panePid &&
@@ -376,7 +386,7 @@ async function captureRetirementGroups(opts: {
         identities.some((row) => row.pid === process.panePid)
     )
   ) {
-    return "unknown";
+    return "identity_unavailable";
   }
   const roots = opts.processes.flatMap((process) =>
     process.panePid &&

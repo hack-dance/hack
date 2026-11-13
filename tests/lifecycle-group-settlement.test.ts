@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { terminateLifecycleProcessGroups } from "../src/lib/project-lifecycle-processes.ts";
+import {
+  createLifecycleSessionRetirement,
+  terminateLifecycleProcessGroups,
+} from "../src/lib/project-lifecycle-processes.ts";
 
 function runtime(opts: {
   readonly termExit?: number;
@@ -114,4 +117,55 @@ test("a lost freshness fence prevents escalation", async () => {
     })
   ).rejects.toThrow("owner changed");
   expect(os.signals.filter((event) => event.signal !== 0)).toEqual([]);
+});
+
+test("one failed foreground snapshot is retried before the owned mux stop", async () => {
+  let reads = 0;
+  let stopped = false;
+  const retire = createLifecycleSessionRetirement({
+    readSnapshot: () => {
+      reads++;
+      if (reads === 1) {
+        return Promise.reject(new Error("slow ps"));
+      }
+      return Promise.resolve([{ pid: 7, ppid: 0, processGroupId: 7 }]);
+    },
+  });
+  expect(
+    await retire({
+      processes: [{ panePid: 42 }],
+      stopSession: () => {
+        stopped = true;
+        return Promise.resolve(true);
+      },
+    })
+  ).toBe(true);
+  expect(reads).toBe(2);
+  expect(stopped).toBe(true);
+});
+
+test("failed process inspection still stops the owned mux and retains uncertainty on retries", async () => {
+  let reads = 0;
+  let stops = 0;
+  const retire = createLifecycleSessionRetirement({
+    readSnapshot: () => {
+      reads++;
+      return Promise.resolve([]);
+    },
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(
+      retire({
+        processes: [{ panePid: 42 }],
+        stopSession: () => {
+          stops++;
+          return Promise.resolve(true);
+        },
+      })
+    ).rejects.toThrow(
+      "Lifecycle mux stopped, but descendant retirement could not be confirmed"
+    );
+  }
+  expect(reads).toBe(2);
+  expect(stops).toBe(2);
 });

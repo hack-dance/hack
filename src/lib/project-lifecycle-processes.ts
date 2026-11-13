@@ -183,10 +183,12 @@ export function resolveLifecycleStopProcessGroupIds(opts: {
 }
 
 /** Read a process snapshot suitable for lifecycle cleanup and hygiene checks. */
-export async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
+export async function readProcessSnapshot(
+  opts: { readonly timeoutMs?: number } = {}
+): Promise<ProcessSnapshotRow[]> {
   const result = await exec(["ps", "-axo", "pid=,ppid=,pgid="], {
     stdin: "ignore",
-    timeoutMs: 1000,
+    ...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
   });
   if (result.exitCode !== 0) {
     return [];
@@ -279,21 +281,26 @@ type LifecycleSessionRetirementOptions = {
  * the detached command before escalating against the wrapper's own group. Keep
  * the captured groups across a retry if the mux exited but retirement failed.
  */
-export function createLifecycleSessionRetirement(): (
-  opts: LifecycleSessionRetirementOptions
-) => Promise<boolean> {
-  let captured: { groups: number[]; paneGroups: Set<number> } | undefined;
+export function createLifecycleSessionRetirement(boundary?: {
+  readonly readSnapshot: () => Promise<ProcessSnapshotRow[]>;
+}): (opts: LifecycleSessionRetirementOptions) => Promise<boolean> {
+  let captured:
+    | { groups: number[]; paneGroups: Set<number> }
+    | "unknown"
+    | undefined;
   return async (opts) => {
     if (!captured) {
       const roots = opts.processes.flatMap((process) =>
         process.panePid ? [process.panePid] : []
       );
-      const snapshot = roots.length > 0 ? await readProcessSnapshot() : [];
-      if (roots.length > 0 && snapshot.length === 0) {
-        throw new Error(
-          "Could not inspect lifecycle process groups before session teardown"
-        );
-      }
+      const snapshot =
+        roots.length > 0
+          ? await readRetirementSnapshot({
+              read:
+                boundary?.readSnapshot ??
+                (() => readProcessSnapshot({ timeoutMs: 1000 })),
+            })
+          : [];
       const groups = collectDescendantProcessGroupIds({
         snapshot,
         rootPids: roots,
@@ -303,11 +310,19 @@ export function createLifecycleSessionRetirement(): (
           .filter((row) => roots.includes(row.pid))
           .map((row) => row.processGroupId)
       );
-      captured = { groups, paneGroups };
+      captured =
+        roots.length > 0 && snapshot.length === 0
+          ? "unknown"
+          : { groups, paneGroups };
     }
     if (!(await opts.stopSession())) {
       captured = undefined;
       return false;
+    }
+    if (captured === "unknown") {
+      throw new Error(
+        "Lifecycle mux stopped, but descendant retirement could not be confirmed because process inspection failed"
+      );
     }
     const { groups, paneGroups } = captured;
     await terminateLifecycleProcessGroups({
@@ -320,4 +335,21 @@ export function createLifecycleSessionRetirement(): (
     });
     return true;
   };
+}
+
+/** Retry one transient foreground observation; neither failure proves absence. */
+async function readRetirementSnapshot(opts: {
+  readonly read: () => Promise<ProcessSnapshotRow[]>;
+}): Promise<ProcessSnapshotRow[]> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const snapshot = await opts.read();
+      if (snapshot.length > 0) {
+        return snapshot;
+      }
+    } catch {
+      // Still attempt the owned mux stop, but retain descendant uncertainty.
+    }
+  }
+  return [];
 }

@@ -24,12 +24,14 @@ import {
   resolveLifecycleLogPath,
   upsertLifecycleStateEntry,
 } from "./lifecycle-runtime.ts";
+import { readProcessIdentities } from "./process-tree.ts";
 import {
   type ProjectLifecycleCommand,
   type ProjectLifecycleProcess,
   sanitizeBranchSlug,
 } from "./project.ts";
 import {
+  collectDescendantProcessGroupIds,
   createLifecycleSessionRetirement,
   readProcessSnapshot,
   resolveLifecycleProcessGroupIdsForTmuxState,
@@ -59,6 +61,7 @@ type StartedLifecycleProcess = {
   readonly windowName: string;
   readonly logPath: string;
   readonly panePid?: number;
+  readonly paneBirth?: string;
   readonly processGroupId?: number;
 };
 /**
@@ -952,6 +955,7 @@ async function startLifecycleProcess(opts: {
   readonly windowName: string;
   readonly logPath: string;
   readonly panePid?: number;
+  readonly paneBirth?: string;
   readonly processGroupId?: number;
 }> {
   const windowNameRaw = sanitizeBranchSlug(opts.process.name);
@@ -1006,6 +1010,11 @@ async function startLifecycleProcess(opts: {
       windowName,
     });
     const panePid = panePids[0];
+    const paneBirth =
+      panePid === undefined
+        ? undefined
+        : (await readProcessIdentities()).find((row) => row.pid === panePid)
+            ?.birth;
     let processGroupId: number | null = null;
     try {
       processGroupId = await waitForLifecycleCommandProcessGroupId({
@@ -1032,6 +1041,7 @@ async function startLifecycleProcess(opts: {
       windowName,
       logPath,
       ...(panePid !== undefined ? { panePid } : {}),
+      ...(paneBirth ? { paneBirth } : {}),
       ...(processGroupId ? { processGroupId } : {}),
     };
   }
@@ -1199,10 +1209,38 @@ async function assertAbsentSessionGroupsRetired(opts: {
   if (recordedGroups.size === 0) {
     return;
   }
+  const identified = opts.entry.processes.filter(
+    (process) =>
+      process.panePid !== undefined && process.paneBirth !== undefined
+  );
+  // Legacy records have no incarnation proof. A number alone may have been
+  // reused after reboot, so it cannot veto forgetting an absent session.
+  if (identified.length === 0) {
+    return;
+  }
+  const identities = await readProcessIdentities();
+  if (identities.length === 0) {
+    throw new Error(
+      "Could not inspect retained lifecycle wrapper identities; kept ownership state"
+    );
+  }
+  const roots = identified.flatMap((process) =>
+    identities.some(
+      (row) => row.pid === process.panePid && row.birth === process.paneBirth
+    ) && process.panePid
+      ? [process.panePid]
+      : []
+  );
+  if (roots.length === 0) {
+    return;
+  }
   const snapshot = await readProcessSnapshot();
+  const descendants = new Set(
+    collectDescendantProcessGroupIds({ snapshot, rootPids: roots })
+  );
   if (
     snapshot.length === 0 ||
-    snapshot.some((row) => recordedGroups.has(row.processGroupId))
+    [...recordedGroups].some((group) => descendants.has(group))
   ) {
     throw new Error(
       "Lifecycle mux session is absent but recorded process-group retirement is unconfirmed; kept ownership state. Inspect the recorded groups before retrying cleanup."

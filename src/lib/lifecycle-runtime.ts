@@ -16,6 +16,7 @@ export type LifecycleStateProcess = {
   readonly windowName: string;
   readonly logPath: string;
   readonly panePid?: number;
+  readonly paneBirth?: string;
   readonly processGroupId?: number;
 };
 
@@ -329,6 +330,7 @@ function parseLifecycleStateProcess(
     return null;
   }
   const panePid = parseLifecycleOptionalPositiveInteger(value.panePid);
+  const paneBirth = getString(value, "paneBirth")?.trim();
   const processGroupId = parseLifecycleOptionalPositiveInteger(
     value.processGroupId
   );
@@ -337,6 +339,7 @@ function parseLifecycleStateProcess(
     windowName,
     logPath,
     ...(panePid ? { panePid } : {}),
+    ...(paneBirth ? { paneBirth } : {}),
     ...(processGroupId ? { processGroupId } : {}),
   };
 }

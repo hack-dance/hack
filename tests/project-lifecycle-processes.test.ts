@@ -75,6 +75,7 @@ test("readLifecycleState preserves lifecycle pane and process group metadata", a
                 windowName: "proxy",
                 logPath: "/tmp/example-app.log",
                 panePid: "12345",
+                paneBirth: "Wed Apr 1 14:00:00 2026",
                 processGroupId: 67_890,
               },
             ],
@@ -95,6 +96,7 @@ test("readLifecycleState preserves lifecycle pane and process group metadata", a
       windowName: "proxy",
       logPath: "/tmp/example-app.log",
       panePid: 12_345,
+      paneBirth: "Wed Apr 1 14:00:00 2026",
       processGroupId: 67_890,
     },
   ]);

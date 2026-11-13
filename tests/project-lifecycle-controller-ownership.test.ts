@@ -12,6 +12,7 @@ import {
   readLifecycleState,
   upsertLifecycleStateEntry,
 } from "../src/lib/lifecycle-runtime.ts";
+import { readProcessIdentities } from "../src/lib/process-tree.ts";
 import {
   createLifecycleProcessController,
   LifecycleSessionDisplacedError,
@@ -349,37 +350,50 @@ test("unconfirmed foreground group retirement keeps ownership and helper retenti
   expect(await entries()).toHaveLength(1);
 });
 
-test("a missing mux cannot erase a retained record while a recorded group exists", async () => {
-  const { controller, entries, mux, projectDir, stop } = await fixture();
-  const starter = controller({ sessionOwnership: undefined });
-  await starter.startMany({ processes: [PROCESS] });
-  await starter.finalize();
-  const entry = (await entries())[0];
-  expect(entry).toBeDefined();
-  const group = (await readProcessSnapshot()).find(
-    (row) => row.pid === process.pid
-  )?.processGroupId;
-  expect(group).toBeDefined();
-  if (!(entry && group)) {
-    throw new Error("fixture ownership unavailable");
-  }
-  await upsertLifecycleStateEntry({
-    projectDir,
-    entry: {
-      ...entry,
-      processes: entry.processes.map((process) => ({
-        ...process,
-        processGroupId: group,
-      })),
-    },
+for (const related of [false, true]) {
+  test(`a missing mux ${related ? "keeps a group still descending from its recorded wrapper" : "does not mistake an unrelated live group for a retained process"}`, async () => {
+    const { controller, entries, mux, projectDir, stop } = await fixture();
+    const starter = controller({ sessionOwnership: undefined });
+    await starter.startMany({ processes: [PROCESS] });
+    await starter.finalize();
+    const entry = (await entries())[0];
+    expect(entry).toBeDefined();
+    const group = (await readProcessSnapshot()).find(
+      (row) => row.pid === process.pid
+    )?.processGroupId;
+    expect(group).toBeDefined();
+    if (!(entry && group)) {
+      throw new Error("fixture ownership unavailable");
+    }
+    const birth = (await readProcessIdentities()).find(
+      (row) => row.pid === process.pid
+    )?.birth;
+    expect(birth).toBeDefined();
+    await upsertLifecycleStateEntry({
+      projectDir,
+      entry: {
+        ...entry,
+        processes: entry.processes.map((process) => ({
+          ...process,
+          processGroupId: group,
+          panePid: globalThis.process.pid,
+          paneBirth: related ? birth : "synthetic-old-wrapper-birth",
+        })),
+      },
+    });
+    mux.sessions.delete(SESSION);
+    if (related) {
+      await expect(stop()).rejects.toThrow(
+        "recorded process-group retirement is unconfirmed"
+      );
+      expect(await entries()).toHaveLength(1);
+    } else {
+      await stop();
+      expect(await entries()).toEqual([]);
+    }
+    expect(mux.killed).toEqual([]);
   });
-  mux.sessions.delete(SESSION);
-  await expect(stop()).rejects.toThrow(
-    "recorded process-group retirement is unconfirmed"
-  );
-  expect(await entries()).toHaveLength(1);
-  expect(mux.killed).toEqual([]);
-});
+}
 
 test("a failed session epoch record stops the created session before removing its entry", async () => {
   const { mux, ownership, controller, entries } = await fixture();

@@ -988,3 +988,18 @@ jobs:
         env:
           HACK_TEST_REQUIRE_INSTALL_FLOWS: "1"
         run: bun test tests/daemon-systemd-cli.test.ts
+      - name: Mount a full-disk and a quota filesystem
+        # Real small filesystems for the background command journal: a
+        # size-limited tmpfs (ENOSPC) and a tmpfs with a user block quota
+        # (EDQUOT, tmpfs quotas need Linux 6.6+). Both belong to the runner
+        # user; mounting needs root, so this only runs here.
+        run: |
+          small="$RUNNER_TEMP/hack-small-fs"
+          quota="$RUNNER_TEMP/hack-quota-fs"
+          mkdir -p "$small" "$quota"
+          sudo mount -t tmpfs -o "size=4m,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$small"
+          sudo mount -t tmpfs -o "size=64m,mode=0700,uid=$(id -u),gid=$(id -g),usrquota,usrquota_block_hardlimit=2m" tmpfs "$quota"
+          echo "HACK_TEST_SMALL_FS=$small" >> "$GITHUB_ENV"
+          echo "HACK_TEST_QUOTA_FS=$quota" >> "$GITHUB_ENV"
+      - name: Run background command full-disk and quota regressions
+        run: bun test tests/background-command-full-disk.test.ts

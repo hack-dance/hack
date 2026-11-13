@@ -3062,6 +3062,67 @@ export async function listProjectEnvPlaintextEntries(
   return entries;
 }
 
+/** Validate the project's existing ciphertext before any conversion can split its key. */
+async function protectionKey(
+  opts: ProtectionOptions & {
+    readonly targets: readonly {
+      readonly key: string;
+      readonly scope?: string;
+    }[];
+  }
+): Promise<string | null> {
+  const matched = new Set<number>();
+  const ciphertexts: string[] = [];
+  let hasPlaintext = false;
+  for (const layer of await protectionLayers({ ...opts, envName: undefined })) {
+    const { read } = await readProjectEnvLayerForMutation({
+      projectRoot: opts.projectRoot,
+      path: layer.filePath,
+      environment: layer.environment ?? "default",
+    });
+    for (const [scope, entries] of Object.entries(read.config.values)) {
+      for (const [key, value] of Object.entries(entries)) {
+        if (isProjectEnvSecretValue(value)) {
+          ciphertexts.push(value.secure);
+        }
+        if (opts.envName !== undefined && opts.envName !== layer.environment) {
+          continue;
+        }
+        for (const [index, target] of opts.targets.entries()) {
+          if (
+            target.key === key &&
+            (target.scope === undefined || target.scope === scope)
+          ) {
+            matched.add(index);
+            hasPlaintext ||= value !== null && !isProjectEnvSecretValue(value);
+          }
+        }
+      }
+    }
+  }
+  if (matched.size !== opts.targets.length) {
+    throw new ClosedCliError(
+      "One or more requested env keys do not exist in the selected layers. Run hack env protect to inspect plaintext names, then retry (values omitted)."
+    );
+  }
+  if (!hasPlaintext) {
+    return null;
+  }
+  const existing = await resolveProjectEnvKey({
+    projectRoot: opts.projectRoot,
+    required: false,
+    forEncryption: true,
+  });
+  if (!existing && ciphertexts.length > 0) {
+    throw new ProjectEnvKeyMissingError(missingProjectEnvKeyHint());
+  }
+  const keyText = existing ?? (await ensureProjectEnvSecretKey(opts)).keyText;
+  for (const ciphertext of ciphertexts) {
+    decryptProjectEnvValue({ ciphertext, keyText });
+  }
+  return keyText;
+}
+
 /**
  * Encrypt chosen plaintext entries in place, preserving every scope and overlay.
  * Each file is re-read under its writer lock and published with a content CAS.
@@ -3085,7 +3146,10 @@ export async function protectProjectEnvEntries(
     }
   }
   // Refuse malformed layers before changing any file or acquiring key material.
-  await listProjectEnvPlaintextEntries(opts);
+  const keyText = await protectionKey(opts);
+  if (keyText === null) {
+    return [];
+  }
   const protectedEntries: ProjectEnvPlaintextEntry[] = [];
   for (const layer of await protectionLayers(opts)) {
     const changed = await withEnvLayerLock({
@@ -3109,15 +3173,13 @@ export async function protectProjectEnvEntries(
         if (selected.length === 0) {
           return [];
         }
-        const existingKey = await resolveProjectEnvKey({
-          projectRoot: opts.projectRoot,
-          required: false,
-          forEncryption: true,
-        });
-        const keyText =
-          existingKey ??
-          (await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot }))
-            .keyText;
+        for (const entries of Object.values(read.config.values)) {
+          for (const value of Object.values(entries)) {
+            if (isProjectEnvSecretValue(value)) {
+              decryptProjectEnvValue({ ciphertext: value.secure, keyText });
+            }
+          }
+        }
         const values: ProjectEnvValuesByScope = Object.fromEntries(
           Object.entries(read.config.values).map(([scope, entries]) => [
             scope,

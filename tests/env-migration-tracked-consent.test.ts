@@ -208,7 +208,8 @@ for (const backend of ["compose", "native"] as const) {
 
       const run = await runDoctor({ project, backend, accept: true });
 
-      expect(run.output).toContain(`hack env protect ${KEY}`);
+      expect(run.output).toContain("hack env protect <KEY> [KEY...]");
+      expect(run.output).toContain(KEY);
       expect(run.output).not.toContain(VALUE);
       expect(run.output).not.toContain("E_INTERACTIVE_REQUIRED");
       expect(run.output).toContain(

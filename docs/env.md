@@ -850,6 +850,8 @@ An unqualified key covers every matching scope and overlay in this checkout.
 The value, scope and overlay remain the same; only its YAML representation changes
 to an encrypted entry. Already encrypted entries and null removals are unchanged.
 The command re-reads each layer under its write lock and refuses conflicting edits.
+It refuses a missing or incorrect key when existing encrypted entries cannot be
+decrypted, and refuses unknown keys before converting any entries.
 Files commit independently: if a later file fails, retry to finish the remaining
 entries. Inventory and conversion do not require typing or copying values.
 

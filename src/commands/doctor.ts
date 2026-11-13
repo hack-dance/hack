@@ -4484,7 +4484,16 @@ async function printMigrationProtectionHint(project: {
   readonly projectRoot: string;
   readonly projectDir: string;
 }): Promise<void> {
-  const entries = await listProjectEnvPlaintextEntries(project);
+  let entries: Awaited<ReturnType<typeof listProjectEnvPlaintextEntries>>;
+  try {
+    entries = await listProjectEnvPlaintextEntries(project);
+  } catch {
+    note(
+      "Could not inspect plaintext env names. Check env layers, then run hack env protect to inspect names and choose keys (values omitted).",
+      "env protection"
+    );
+    return;
+  }
   const keys = [...new Set(entries.map((entry) => entry.key))].sort();
   if (keys.length === 0) {
     note("No plaintext env entries remain.", "env protection");
@@ -4495,7 +4504,7 @@ async function printMigrationProtectionHint(project: {
       "Plaintext env keys remain (values omitted):",
       ...keys.map((key) => `- ${key}`),
       "Encrypt chosen keys in their current scopes and overlays:",
-      `hack env protect ${keys.join(" ")}`,
+      "hack env protect <KEY> [KEY...]",
     ].join("\n"),
     "env protection"
   );

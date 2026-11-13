@@ -1357,6 +1357,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     scopeName: args.options.service,
   });
   const relevant = (value: { readonly services: readonly string[] | null }) =>
+    args.options.service === undefined ||
     value.services === null ||
     (selectedScope !== "global" && value.services.includes(selectedScope));
   const selectedResolved = {

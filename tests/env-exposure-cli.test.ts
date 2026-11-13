@@ -60,10 +60,21 @@ test("env list never exposes migrated plaintext in text or JSON and refuses non-
         join(root, ".hack/hack.env.json"),
         JSON.stringify({
           version: 1,
-          vars: [{ key: "TOKEN", source: "plain_env", required: false }],
+          vars: [
+            { key: "TOKEN", source: "plain_env", required: false },
+            {
+              key: "SERVICE_ONLY",
+              source: "plain_env",
+              required: false,
+              services: ["app"],
+            },
+          ],
         })
       );
-      await writeFile(join(root, ".hack/.env"), `TOKEN=${SENTINEL}\n`);
+      await writeFile(
+        join(root, ".hack/.env"),
+        `TOKEN=${SENTINEL}\nSERVICE_ONLY=${SENTINEL}\n`
+      );
     }
     for (const json of [false, true]) {
       const result = await cli(root, [
@@ -73,6 +84,9 @@ test("env list never exposes migrated plaintext in text or JSON and refuses non-
       ]);
       expect(result.code).toBe(0);
       expect(result.stdout).toContain("TOKEN");
+      if (!modern) {
+        expect(result.stdout).toContain("SERVICE_ONLY");
+      }
       expect(result.stdout + result.stderr).not.toContain(SENTINEL);
       if (json) {
         const body = JSON.parse(result.stdout);

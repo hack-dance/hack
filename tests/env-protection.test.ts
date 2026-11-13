@@ -203,3 +203,50 @@ test("protection uses the encryption owner's refusal for a tracked key", async (
     restoreEnv("HACK_ENV_SECRET_KEY", saved);
   }
 });
+
+test("protection refuses missing and wrong keys for existing ciphertext before converting any layer", async () => {
+  const options = await fixture();
+  const saved = process.env.HACK_ENV_SECRET_KEY;
+  process.env.HACK_ENV_SECRET_KEY = "synthetic-original-protection-key";
+  try {
+    await protectProjectEnvEntries({
+      ...options,
+      envName: "qa",
+      targets: [{ key: "TOKEN" }],
+    });
+    const file = join(options.projectDir, "hack.env.default.yaml");
+    const before = await readFile(file, "utf8");
+    for (const key of [undefined, "synthetic-wrong-protection-key"]) {
+      restoreEnv("HACK_ENV_SECRET_KEY", key);
+      const error = await protectProjectEnvEntries({
+        ...options,
+        envName: null,
+        targets: [{ key: "TOKEN" }],
+      }).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).not.toContain(SENTINEL);
+      expect(await readFile(file, "utf8")).toBe(before);
+      expect(
+        await Bun.file(join(options.projectRoot, ".hack.secret.key")).exists()
+      ).toBe(false);
+    }
+  } finally {
+    restoreEnv("HACK_ENV_SECRET_KEY", saved);
+  }
+});
+
+test("a mistyped protection key refuses before changing a matching key", async () => {
+  const options = await fixture();
+  const file = join(options.projectDir, "hack.env.default.yaml");
+  const before = await readFile(file, "utf8");
+  await expect(
+    protectProjectEnvEntries({
+      ...options,
+      targets: [{ key: "TOKEN" }, { key: "TYPO" }],
+    })
+  ).rejects.toThrow("do not exist");
+  expect(await readFile(file, "utf8")).toBe(before);
+});

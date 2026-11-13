@@ -178,9 +178,15 @@ describe("env key doctor diagnostic", () => {
     const inspection = await inspect(root);
 
     expect(codes(inspection)).toEqual(["env-key-wrong-length"]);
-    expect(inspection.findings[0]?.remedy).toContain(
-      `mv ${KEY_FILE} ${KEY_FILE}.old`
+    // HACK-2165: the old key leaves the worktree (never a committable
+    // `.old` sibling) and secrets are re-added without argv values.
+    const remedy = inspection.findings[0]?.remedy ?? "";
+    expect(remedy).toContain(
+      `install -m 600 ${KEY_FILE} ~/.hack/retired-keys/`
     );
+    expect(remedy).toContain("--value-stdin");
+    expect(remedy).not.toContain(".old");
+    expect(remedy).not.toContain("KEY VALUE");
     expectValueFree({ output: serialized(inspection), root, secrets: [key] });
   });
 

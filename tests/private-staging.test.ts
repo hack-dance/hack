@@ -1,0 +1,203 @@
+import { afterEach, expect, test } from "bun:test";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { replacePrivateFileAtomic } from "../src/lib/private-file.ts";
+import {
+  findStagingLeftovers,
+  PRIVATE_STAGING_DIRNAME,
+  preparePrivateStaging,
+  STAGING_LEFTOVER_MIN_AGE_MS,
+} from "../src/lib/private-staging.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+
+const dirs: string[] = [];
+
+afterEach(async () => {
+  for (const dir of dirs.splice(0)) {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function tempDir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "hack-private-staging-"));
+  dirs.push(dir);
+  return dir;
+}
+
+const refusal = () => new Error("synthetic staging refusal");
+const UUID = "0f0e0d0c-0b0a-4908-8706-050403020100";
+
+async function git(cwd: string, args: readonly string[]): Promise<string> {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd,
+    env: fixtureGitEnv({
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: cwd,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+    }),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = await new Response(proc.stdout).text();
+  expect(await proc.exited).toBe(0);
+  return out;
+}
+
+async function backdate(path: string): Promise<void> {
+  const old = (Date.now() - STAGING_LEFTOVER_MIN_AGE_MS - 60_000) / 1000;
+  await utimes(path, old, old);
+}
+
+test("the staging directory is private and ignores itself before any staging file exists", async () => {
+  const root = await tempDir();
+  const target = join(root, PROJECT_ENV_KEY_FILENAME);
+  const prepared = await preparePrivateStaging({ target, refusal });
+  const staging = join(root, PRIVATE_STAGING_DIRNAME);
+  expect(prepared.path.startsWith(`${staging}/`)).toBe(true);
+  expect((await lstat(staging)).mode & 0o777).toBe(0o700);
+  expect(await readFile(join(staging, ".gitignore"), "utf8")).toBe("*\n");
+  expect(await readdir(staging)).toEqual([".gitignore"]);
+});
+
+test("an interrupted key publication leaves nothing git can stage (HACK-2165 F1)", async () => {
+  const root = await tempDir();
+  await git(root, ["init", "-q", "-b", "main"]);
+  await writeFile(join(root, ".gitignore"), `${PROJECT_ENV_KEY_FILENAME}\n`);
+  const target = join(root, PROJECT_ENV_KEY_FILENAME);
+  // A process killed after writing its staging copy, before the publish.
+  const prepared = await preparePrivateStaging({ target, refusal });
+  await writeFile(prepared.path, "synthetic-staged-key\n", { mode: 0o600 });
+  await writeFile(target, "synthetic-published-key\n", { mode: 0o600 });
+
+  await git(root, ["add", "-A"]);
+  const staged = await git(root, ["diff", "--cached", "--name-only"]);
+  expect(staged.split("\n").filter(Boolean)).toEqual([".gitignore"]);
+  const status = await git(root, [
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
+  ]);
+  expect(status).not.toContain(PRIVATE_STAGING_DIRNAME);
+  expect(status).not.toContain(".tmp");
+});
+
+test("a write stages in the private directory and leaves only its .gitignore", async () => {
+  const root = await tempDir();
+  const target = join(root, ".env");
+  await replacePrivateFileAtomic({
+    path: target,
+    directories: [root],
+    refusal,
+    text: "SYNTHETIC=1\n",
+  });
+  expect(await readFile(target, "utf8")).toBe("SYNTHETIC=1\n");
+  expect((await readdir(root)).sort()).toEqual([
+    ".env",
+    PRIVATE_STAGING_DIRNAME,
+  ]);
+  expect(await readdir(join(root, PRIVATE_STAGING_DIRNAME))).toEqual([
+    ".gitignore",
+  ]);
+
+  // A failure before the rename removes the staging copy too.
+  await expect(
+    replacePrivateFileAtomic({
+      path: target,
+      directories: [root],
+      refusal,
+      text: "SYNTHETIC=2\n",
+      beforeRename: async () => {
+        throw new Error("synthetic abort");
+      },
+    })
+  ).rejects.toThrow("synthetic abort");
+  expect(await readFile(target, "utf8")).toBe("SYNTHETIC=1\n");
+  expect(await readdir(join(root, PRIVATE_STAGING_DIRNAME))).toEqual([
+    ".gitignore",
+  ]);
+});
+
+test("the sibling option keeps the previous staging location", async () => {
+  const root = await tempDir();
+  const target = join(root, "claim.json");
+  await replacePrivateFileAtomic({
+    path: target,
+    directories: [root],
+    refusal,
+    text: "{}\n",
+    staging: "sibling",
+  });
+  expect(await readdir(root)).toEqual(["claim.json"]);
+});
+
+test("old leftovers are swept by the next staging write; recent ones are kept", async () => {
+  const root = await tempDir();
+  const target = join(root, ".env");
+  const staging = join(root, PRIVATE_STAGING_DIRNAME);
+  await preparePrivateStaging({ target, refusal });
+  const oldStaged = join(staging, `.env.${UUID}.tmp`);
+  const recentStaged = join(staging, `.env.${UUID.replace("0f", "1f")}.tmp`);
+  const oldSibling = join(root, `..env.${UUID}.tmp`);
+  const otherFile = join(root, `..envx.${UUID}.tmp`);
+  for (const path of [oldStaged, recentStaged, oldSibling, otherFile]) {
+    await writeFile(path, "SYNTHETIC_LEFTOVER=1\n", { mode: 0o600 });
+  }
+  for (const path of [oldStaged, oldSibling, otherFile]) {
+    await backdate(path);
+  }
+
+  const found = await findStagingLeftovers({
+    directory: root,
+    names: [".env"],
+    now: Date.now(),
+  });
+  expect(found.map((leftover) => leftover.path).sort()).toEqual(
+    [oldSibling, oldStaged].sort()
+  );
+
+  await preparePrivateStaging({ target, refusal });
+  expect((await readdir(staging)).sort()).toEqual(
+    [".gitignore", `.env.${UUID.replace("0f", "1f")}.tmp`].sort()
+  );
+  // Only this target's legacy sibling is swept; another name is left alone.
+  expect((await readdir(root)).sort()).toEqual(
+    [PRIVATE_STAGING_DIRNAME, `..envx.${UUID}.tmp`].sort()
+  );
+});
+
+test("a linked or shared staging directory is refused before anything is staged", async () => {
+  const root = await tempDir();
+  const elsewhere = join(root, "elsewhere");
+  await mkdir(elsewhere);
+  const linked = join(root, "linked");
+  await mkdir(linked);
+  await symlink(elsewhere, join(linked, PRIVATE_STAGING_DIRNAME));
+  await expect(
+    preparePrivateStaging({ target: join(linked, ".env"), refusal })
+  ).rejects.toThrow("synthetic staging refusal");
+  expect(await readdir(elsewhere)).toEqual([]);
+
+  const shared = join(root, "shared");
+  await mkdir(join(shared, PRIVATE_STAGING_DIRNAME), { recursive: true });
+  await chmod(join(shared, PRIVATE_STAGING_DIRNAME), 0o777);
+  await expect(
+    preparePrivateStaging({ target: join(shared, ".env"), refusal })
+  ).rejects.toThrow("synthetic staging refusal");
+  expect(await readdir(join(shared, PRIVATE_STAGING_DIRNAME))).toEqual([]);
+});

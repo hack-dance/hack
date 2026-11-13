@@ -220,8 +220,19 @@ async function lstatOrNull(path: string): Promise<EntryStats | null> {
   }
 }
 
+/**
+ * Where a rotation keeps the retired key: outside every worktree, in a
+ * private directory, so git can never collect it and values encrypted with
+ * it stay recoverable until every secret is re-added (HACK-2165).
+ */
+const RETIRED_KEY_DIR = "~/.hack/retired-keys";
+
+/** How a secret is re-added without its value in argv or shell history. */
+const READD_SECRET =
+  "re-add each secret with '<value-source> | hack env add KEY --secret --value-stdin' (or omit the value in a terminal for a hidden prompt)";
+
 function rotateRemedy(path: (suffix?: string) => string): string {
-  return `mv ${path()} ${path(".old")}, then re-add each secret with 'hack env add --secret KEY VALUE' (Hack generates a new 256-bit key).`;
+  return `keep a recoverable copy of the old key outside the worktree first ('install -d -m 700 ${RETIRED_KEY_DIR} && install -m 600 ${path()} ${RETIRED_KEY_DIR}/'), then 'rm ${path()}' and ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
 }
 
 async function inspectCandidate(opts: {
@@ -578,7 +589,7 @@ export async function inspectProjectEnvKey(
           code: strength,
           status: "warn",
           subject: `$${ENV_KEY_ENV_NAME}`,
-          remedy: `set ${ENV_KEY_ENV_NAME} to a 256-bit key such as the output of 'openssl rand -base64 32', then re-add each secret with 'hack env add --secret KEY VALUE'.`,
+          remedy: `keep the current value somewhere private until every secret is re-added, set ${ENV_KEY_ENV_NAME} to a 256-bit key such as the output of 'openssl rand -base64 32', then ${READD_SECRET}.`,
         });
       }
     }

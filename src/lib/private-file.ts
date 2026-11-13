@@ -12,6 +12,7 @@ import { basename, dirname, join } from "node:path";
 import { publishFileExclusive } from "./exclusive-publish.ts";
 import { closedFileWriteError } from "./fs.ts";
 import { isRecord } from "./guards.ts";
+import { preparePrivateStaging } from "./private-staging.ts";
 
 /**
  * Bounded, no-follow reads and exclusive creates for private key material.
@@ -208,6 +209,14 @@ export async function createPrivateFileExclusive(opts: {
 export type ReplaceablePrivateFileOptions = {
   readonly path: string;
   /**
+   * Where a replace or publish stages the complete contents. `"ignored"`
+   * (the default) uses the private, self-ignoring staging directory next to
+   * the target (see `private-staging.ts`), so a copy left by a crash is
+   * never visible to git; `"sibling"` uses a `.<name>.<uuid>.tmp` sibling,
+   * for files outside any checkout whose directory must hold nothing else.
+   */
+  readonly staging?: "ignored" | "sibling";
+  /**
    * Directories (normally the file's parent inside the project) that must be
    * real directories rather than symlinks, with a stable identity across the
    * operation. Ancestors outside this list are not inspected.
@@ -252,6 +261,30 @@ async function recheckRealDirectories(opts: {
     ) {
       throw opts.refusal();
     }
+  }
+}
+
+/** A staging path for `opts.path` and the check to run before publishing it. */
+async function stagingFor(opts: ReplaceablePrivateFileOptions): Promise<{
+  readonly path: string;
+  readonly recheck: () => Promise<void>;
+}> {
+  if (opts.staging === "sibling") {
+    return {
+      path: join(
+        dirname(opts.path),
+        `.${basename(opts.path)}.${randomUUID()}.tmp`
+      ),
+      recheck: async () => undefined,
+    };
+  }
+  try {
+    return await preparePrivateStaging({
+      target: opts.path,
+      refusal: opts.refusal,
+    });
+  } catch (error: unknown) {
+    throw closedFileWriteError({ error, path: opts.path, operation: "write" });
   }
 }
 
@@ -368,8 +401,9 @@ async function readReplaceableTargetOnce(
  * Replaces `path` with `text` atomically and durably, leaving mode 0600 (or
  * `mode`, for a non-secret file such as a committed ignore file).
  *
- * A uniquely named sibling is created with O_CREAT|O_EXCL|O_NOFOLLOW and mode
- * 0600, fchmod 0600, written and fsynced, then renamed over `path`; readers see
+ * A uniquely named staging file (see `staging`) is created with
+ * O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600, fchmod 0600, written and fsynced,
+ * then renamed over `path`; readers see
  * either the previous or the complete new contents, never a partial file. A
  * symlink (dangling or not) or non-regular entry at `path`, or a symlinked or
  * replaced directory from `directories`, throws `refusal()` before any write
@@ -393,10 +427,8 @@ export async function replacePrivateFileAtomic(
   const mode = (opts.mode ?? 0o600) & 0o777;
   const directories = await captureRealDirectories(opts);
   await observeReplaceableTarget(opts);
-  const staging = join(
-    dirname(opts.path),
-    `.${basename(opts.path)}.${randomUUID()}.tmp`
-  );
+  const prepared = await stagingFor(opts);
+  const staging = prepared.path;
   const file = await openForPrivateWrite({ path: opts.path, open: staging });
   let committed = false;
   try {
@@ -405,6 +437,7 @@ export async function replacePrivateFileAtomic(
     await file.writeFile(opts.text, "utf8");
     await file.sync();
     await recheckRealDirectories({ directories, refusal: opts.refusal });
+    await prepared.recheck();
     await observeReplaceableTarget(opts);
     await opts.beforeRename?.();
     await rename(staging, opts.path);
@@ -424,8 +457,8 @@ export async function replacePrivateFileAtomic(
  * Publishes `text` at `path` only when no entry exists there, and reports
  * whether this call published it.
  *
- * The complete contents are staged in a private (0600, fsynced) sibling and
- * published with link(2), which fails with EEXIST instead of replacing an
+ * The complete contents are staged in a private (0600, fsynced) file (see
+ * `staging`) and published with link(2), which fails with EEXIST instead of replacing an
  * existing entry. Unlike {@link createPrivateFileExclusive}, readers never see
  * a partial file, so a concurrent loser can adopt the winner's file
  * immediately. An existing regular file returns false untouched; a symlink
@@ -446,10 +479,8 @@ export async function publishPrivateFileExclusive(
   if (await observeReplaceableTarget(opts)) {
     return false;
   }
-  const staging = join(
-    dirname(opts.path),
-    `.${basename(opts.path)}.${randomUUID()}.tmp`
-  );
+  const prepared = await stagingFor(opts);
+  const staging = prepared.path;
   const file = await openForPrivateWrite({ path: opts.path, open: staging });
   let published = false;
   try {
@@ -458,6 +489,7 @@ export async function publishPrivateFileExclusive(
     await file.writeFile(opts.text, "utf8");
     await file.sync();
     await recheckRealDirectories({ directories, refusal: opts.refusal });
+    await prepared.recheck();
     published = await publishFileExclusive({
       source: staging,
       target: opts.path,

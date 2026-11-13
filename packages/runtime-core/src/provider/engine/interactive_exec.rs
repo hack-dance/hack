@@ -34,17 +34,23 @@ pub(in crate::provider) struct Attached {
 }
 
 #[cfg(target_os = "macos")]
+pub(in crate::provider) struct Command<'a> {
+    pub argv: &'a [String],
+    pub workdir: Option<&'a str>,
+    pub console_size: [u16; 2],
+}
+
+#[cfg(target_os = "macos")]
 impl Engine<'_> {
     pub(in crate::provider) fn interactive_start(
         &self,
         candidate: &Candidate,
         binding: Binding,
-        argv: &[String],
-        workdir: Option<&str>,
+        command: Command<'_>,
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<Attached, CandidateError> {
-        if self.cleanup_only || !binding.valid() {
+        if self.cleanup_only || !binding.valid() || command.console_size.contains(&0) {
             return Err(uncertain());
         }
         fresh()?;
@@ -63,8 +69,8 @@ impl Engine<'_> {
         };
         let result: Result<Attached, CandidateError> = (|| {
             effect()?;
-            let mut body = serde_json::json!({"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Tty":true,"Privileged":false,"DetachKeys":"ctrl-p,ctrl-q","Cmd":argv});
-            if let Some(path) = workdir {
+            let mut body = serde_json::json!({"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Tty":true,"ConsoleSize":command.console_size,"Privileged":false,"DetachKeys":"ctrl-p,ctrl-q","Cmd":command.argv});
+            if let Some(path) = command.workdir {
                 body["WorkingDir"] = Value::String(path.into());
             }
             let transport = Transport::new(&self.guest.engine_socket()?, remaining(deadline)?)?;
@@ -94,7 +100,7 @@ impl Engine<'_> {
                     .map_err(|_| uncertain())?;
             // Recheck after connect, immediately before the non-replayed start.
             effect()?;
-            super::relay_exec::start_mode(&mut stream, id, deadline, true)?;
+            super::relay_exec::start_mode(&mut stream, id, deadline, Some(command.console_size))?;
             fresh()?;
             self.guest.verify()?;
             Ok(Attached { receipt, stream })

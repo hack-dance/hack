@@ -122,18 +122,20 @@ pub(super) fn start(
     id: &str,
     deadline: Instant,
 ) -> Result<(), CandidateError> {
-    start_mode(stream, id, deadline, false)
+    start_mode(stream, id, deadline, None)
 }
 pub(super) fn start_mode(
     stream: &mut UnixStream,
     id: &str,
     deadline: Instant,
-    tty: bool,
+    console_size: Option<[u16; 2]>,
 ) -> Result<(), CandidateError> {
-    let body = if tty {
-        r#"{"Detach":false,"Tty":true}"#
-    } else {
-        r#"{"Detach":false,"Tty":false}"#
+    let body = match console_size {
+        Some([rows, cols]) if rows > 0 && cols > 0 => {
+            format!(r#"{{"Detach":false,"Tty":true,"ConsoleSize":[{rows},{cols}]}}"#)
+        }
+        Some(_) => return Err(refused()),
+        None => r#"{"Detach":false,"Tty":false}"#.into(),
     };
     let request = format!(
         "POST /v1.53/exec/{id}/start HTTP/1.1\r\nHost: hack-local\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -250,24 +252,44 @@ mod tests {
         bytes
     }
     #[test]
-    fn interactive_upgrade_preserves_output_in_the_header_read() {
+    fn interactive_start_sets_console_size_before_coalesced_first_output() {
         let (mut client, mut server) = UnixStream::pair().unwrap();
         let worker = std::thread::spawn(move || {
             let wire = request(&mut server);
-            assert!(wire.ends_with(br#"{"Detach":false,"Tty":true}"#));
+            assert!(wire.ends_with(br#"{"Detach":false,"Tty":true,"ConsoleSize":[43,91]}"#));
             server.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nfirst-output").unwrap();
         });
         start_mode(
             &mut client,
             &"a".repeat(64),
             Instant::now() + Duration::from_secs(2),
-            true,
+            Some([43, 91]),
         )
         .unwrap();
         let mut output = Vec::new();
         client.read_to_end(&mut output).unwrap();
         assert_eq!(output, b"first-output");
         worker.join().unwrap();
+    }
+    #[test]
+    fn invalid_initial_console_size_sends_no_start_request() {
+        for size in [[0, 91], [43, 0], [0, 0]] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            assert!(
+                start_mode(
+                    &mut client,
+                    &"a".repeat(64),
+                    Instant::now() + Duration::from_secs(1),
+                    Some(size)
+                )
+                .is_err()
+            );
+            server.set_nonblocking(true).unwrap();
+            assert_eq!(
+                server.read(&mut [0u8; 1]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
     }
     #[test]
     fn real_upgrade_keeps_private_stdin_out_of_http_and_reads_fragmented_output() {
@@ -277,6 +299,7 @@ mod tests {
             assert!(request.starts_with(
                 format!("POST /v1.53/exec/{}/start HTTP/1.1", "a".repeat(64)).as_bytes()
             ));
+            assert!(request.ends_with(br#"{"Detach":false,"Tty":false}"#));
             assert!(!request.windows(8).any(|v| v == b"HKRP0001"));
             server
                 .write_all(b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")

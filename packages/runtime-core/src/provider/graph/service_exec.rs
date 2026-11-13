@@ -71,6 +71,7 @@ fn validate(options: &ServiceExecOptions<'_>) -> Result<(), CandidateError> {
 pub(super) fn interactive(
     candidate: &Candidate,
     options: &ServiceExecOptions<'_>,
+    console_size: [u16; 2],
     managed: Option<&crate::provider::managed_environment::Managed>,
     live: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<crate::provider::engine::interactive_exec::Attached, CandidateError> {
@@ -182,8 +183,11 @@ pub(super) fn interactive(
             generation: generation.clone(),
             service: options.service.to_owned(),
         },
-        &argv,
-        options.workdir,
+        crate::provider::engine::interactive_exec::Command {
+            argv: &argv,
+            workdir: options.workdir,
+            console_size,
+        },
         deadline,
         &fresh,
     )?;

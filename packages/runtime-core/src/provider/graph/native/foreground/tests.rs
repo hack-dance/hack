@@ -1038,6 +1038,53 @@ fn finite_logs_wire_authenticates_the_live_native_owner_and_exact_member() {
     assert!(logs(&fixture.candidate, RUN, "web", 17).is_err());
 }
 #[test]
+fn initial_console_size_is_required_only_for_interactive_owner_requests() {
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    let wire = json!({
+        "version": 2, "kind": "native-graph-control", "run": RUN,
+        "review": receipt.review.review_id(), "action": "interactive-exec",
+        "exec": {"service":"web", "argv":["stty", "size"], "workdir":null},
+        "console_size": [43, 91]
+    });
+    let input: Request = serde_json::from_value(wire.clone()).unwrap();
+    input.validate(&receipt.review).unwrap();
+    assert_eq!(input.console_size, Some([43, 91]));
+    assert_eq!(
+        serde_json::to_value(input).unwrap()["console_size"],
+        json!([43, 91])
+    );
+    for size in [
+        json!(null),
+        json!([0, 91]),
+        json!([43, 0]),
+        json!([43]),
+        json!([43, 91, 1]),
+        json!([-1, 91]),
+        json!([65536, 91]),
+    ] {
+        let mut invalid = wire.clone();
+        invalid["console_size"] = size;
+        if let Ok(input) = serde_json::from_value::<Request>(invalid) {
+            assert!(input.validate(&receipt.review).is_err());
+        }
+    }
+    let mut finite = wire;
+    finite["action"] = json!("exec");
+    assert!(
+        serde_json::from_value::<Request>(finite.clone())
+            .unwrap()
+            .validate(&receipt.review)
+            .is_err()
+    );
+    finite.as_object_mut().unwrap().remove("console_size");
+    serde_json::from_value::<Request>(finite)
+        .unwrap()
+        .validate(&receipt.review)
+        .unwrap();
+}
+
+#[test]
 fn finite_exec_wire_authenticates_owner_member_and_binary_nonzero_completion() {
     let fixture = Fixture::new();
     let mut receipt = fixture.receipt();

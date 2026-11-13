@@ -71,12 +71,18 @@ struct Request {
     exec: Option<runtime::ExecSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     one_off: Option<runtime::RunSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    console_size: Option<[u16; 2]>,
 }
 impl Request {
     fn validate(&self, review: &native_input::Review) -> Result<(), CandidateError> {
         if self.version != 2
             || self.run != review.scope().run
             || self.review != review.review_id()
+            || match self.console_size {
+                Some(size) => self.action != Action::InteractiveExec || size.contains(&0),
+                None => self.action == Action::InteractiveExec,
+            }
             || match (&self.action, &self.logs, &self.exec, &self.one_off) {
                 (Action::Logs, Some(logs), None, None) => !logs.valid(),
                 (Action::Exec | Action::InteractiveExec, None, Some(exec), None) => !exec.valid(),
@@ -410,7 +416,13 @@ pub fn serve_with_storage_tool(
                     }
                     read_pin.verify(candidate)
                 };
-                match runtime::interactive_exec(candidate, &receipt, selected, &check) {
+                match runtime::interactive_exec(
+                    candidate,
+                    &receipt,
+                    selected,
+                    request.console_size.ok_or_else(refused)?,
+                    &check,
+                ) {
                     Ok(session) => {
                         attached = Some(session.stream);
                         Ok(Outcome::Interactive {
@@ -581,13 +593,13 @@ pub fn one_off(
 /// connected fd. The caller streams without retaining an owner/provider lease.
 pub(in crate::provider) fn interactive(
     candidate: &Candidate,
-    run: &str,
-    service: &str,
-    argv: &[String],
-    workdir: Option<&str>,
-    pins: (&str, &str, &str),
+    options: &crate::provider::graph::interactive_exec::Options<'_>,
+    console_size: [u16; 2],
     leash: &crate::provider::interactive_terminal::Leash,
 ) -> Result<crate::provider::engine::interactive_exec::Attached, CandidateError> {
+    let (run, service, argv, workdir) =
+        (options.run, options.service, options.argv, options.workdir);
+    let pins = (options.owner, options.plan, options.namespace);
     let selected = runtime::ExecSelection {
         service: service.into(),
         argv: argv.to_vec(),
@@ -615,6 +627,7 @@ pub(in crate::provider) fn interactive(
         run: run.into(),
         review: review.review_id().into(),
         action: Action::InteractiveExec,
+        console_size: Some(console_size),
         logs: None,
         exec: Some(selected.clone()),
         one_off: None,
@@ -665,6 +678,7 @@ fn request_selected(
         run: run.into(),
         review: review.review_id().into(),
         action,
+        console_size: None,
         logs: selected.clone(),
         exec: exec_selected.clone(),
         one_off: one_off_selected.clone(),

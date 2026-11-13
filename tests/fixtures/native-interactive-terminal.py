@@ -14,6 +14,8 @@ import struct
 
 def run(mode):
     master, slave = pty.openpty()
+    # Unknown dimensions must produce a usable default before admission.
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
     original = termios.tcgetattr(slave)
     control, child_control = socket.socketpair()
     engine, child_engine = socket.socketpair()

@@ -536,6 +536,9 @@ run `hack down` for a project with retained sessions to release its receipts.
 This includes normally exited commands whose background descendants remain
 unproven. The command's known exit status is still preserved.
 
+The initial terminal size is supplied before the guest command starts.
+If the host reports an unknown (zero) dimension, Hack uses 24 rows or 80 columns
+for that dimension until the terminal supplies a size.
 Terminal output combines the command's stdout and stderr. Ctrl-C, Ctrl-Z and other
 terminal bytes go to the guest PTY; window-size changes are forwarded. Docker's
 Ctrl-P Ctrl-Q sequence disconnects the transport. Disconnecting does not prove

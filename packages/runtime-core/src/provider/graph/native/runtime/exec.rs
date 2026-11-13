@@ -178,6 +178,7 @@ pub(in crate::provider::graph::native) fn interactive(
     candidate: &Candidate,
     expected: &Receipt,
     selected: &ExecSelection,
+    console_size: [u16; 2],
     guard: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<crate::provider::engine::interactive_exec::Attached, CandidateError> {
     use crate::provider::interactive_session::{Backend as SessionBackend, Binding};
@@ -236,8 +237,11 @@ pub(in crate::provider::graph::native) fn interactive(
             generation: generation.clone(),
             service: selected.service.clone(),
         },
-        &selected.argv,
-        selected.workdir.as_deref(),
+        crate::provider::engine::interactive_exec::Command {
+            argv: &selected.argv,
+            workdir: selected.workdir.as_deref(),
+            console_size,
+        },
         deadline,
         &fresh,
     )

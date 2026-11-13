@@ -4024,6 +4024,8 @@ changed boot alone are not cleanup proof. No uncertain command is replayed.
 On the built current-branch runtime and CLI, exercise authored and adopted services:
 
 - A shell with foreground/background jobs; Ctrl-C, Ctrl-Z, `fg` and resize.
+- `hack exec SERVICE -- stty size` reports the host terminal's dimensions on its
+  first output, before any subsequent window resize.
 - Ctrl-P Ctrl-Q disconnect, retaining its UUID and cleanup remedy.
 - A background process that survives shell exit; receipt remains until `down`.
 - `down` and restart from another terminal while the session is active; the owner

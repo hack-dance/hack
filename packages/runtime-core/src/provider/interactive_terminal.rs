@@ -312,7 +312,10 @@ impl Terminal {
         if unsafe { libc::ioctl(self.file.as_raw_fd(), libc::TIOCGWINSZ, &mut size) } != 0 {
             return Err(refused());
         }
-        Ok((size.ws_row.max(1), size.ws_col.max(1)))
+        Ok((
+            if size.ws_row == 0 { 24 } else { size.ws_row },
+            if size.ws_col == 0 { 80 } else { size.ws_col },
+        ))
     }
     pub fn restore(&mut self) -> Result<(), CandidateError> {
         if self.raw {
@@ -505,6 +508,7 @@ mod tests {
         let mut report = File::from(control.try_clone().unwrap());
         let mut engine = unsafe { UnixStream::from_raw_fd(engine) };
         let mut terminal = Terminal::open().unwrap();
+        assert_eq!(terminal.size().unwrap(), (24, 80));
         let (leash, payload) = Leash::receive(control).unwrap();
         assert!(payload.is_empty());
         let mut resized = false;

@@ -118,18 +118,14 @@ fn native(
     drop(payload);
     leash.check()?;
     let _ = interactive_session::reconcile_observed(candidate);
+    // Capture before either owner admission or Engine create/start, so even a
+    // command which exits immediately observes the initial terminal dimensions.
+    let (rows, cols) = terminal.size()?;
+    let console_size = [rows, cols];
     let admission = if options.native {
         #[cfg(feature = "native-config-plan")]
         {
-            super::native::foreground::interactive(
-                candidate,
-                options.run,
-                options.service,
-                options.argv,
-                options.workdir,
-                (options.owner, options.plan, options.namespace),
-                &leash,
-            )
+            super::native::foreground::interactive(candidate, options, console_size, &leash)
         }
         #[cfg(not(feature = "native-config-plan"))]
         {
@@ -161,6 +157,7 @@ fn native(
                 workdir: options.workdir,
                 timeout: Duration::from_secs(30),
             },
+            console_size,
             managed.as_ref(),
             &|| leash.check(),
         )

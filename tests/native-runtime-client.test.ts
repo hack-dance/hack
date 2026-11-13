@@ -149,6 +149,7 @@ async function fixture() {
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
 if (process.argv.includes("old-provider")) { console.error(JSON.stringify({code:"provider_pin_changed",message:"synthetic-secret-diagnostic"})); process.exit(2); }
 if (process.argv.includes("fixed-message")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,service:"web"})); process.exit(2); }
+if (process.argv.includes("bridge-socket-failure")) { console.error(JSON.stringify({code:"bridge_socket_timeout",message:"Native bridge sockets did not become private and owned before the startup deadline. Run the selected native executor with --candidate-root set to this native home and runtime down --recover --json before retrying.",message_fixed:true})); process.exit(2); }
 if (process.argv.includes("unsafe-fixed")) { console.error(JSON.stringify({code:"graph_image",message:"synthetic-secret-diagnostic\\nsecond line",message_fixed:true,service:"../synthetic-secret-diagnostic"})); process.exit(2); }
 if (process.argv.includes("plan-change")) { console.error(JSON.stringify({code:"graph_plan_reconcile",message:"synthetic-secret-diagnostic",plan_change:{version:1,service:"deps",field:"dependency_cache_volume"}})); process.exit(23); }
 if (process.argv.includes("plan-change-unsafe")) { console.error(JSON.stringify({code:"graph_hostname_change",message:"synthetic-secret-diagnostic",plan_change:{version:1,service:"synthetic secret diagnostic",field:"hostnames"}})); process.exit(23); }
@@ -998,6 +999,19 @@ test("a runtime message marked fixed is shown with its validated service", async
     "Native runtime request failed (graph_image); inspect owned state before retrying."
   );
   expect(String(unsafe)).not.toContain("synthetic-secret-diagnostic");
+});
+
+test("a failed bridge boot names its one recovery command through the runtime client", async () => {
+  const runtime = await fixture();
+  const error: unknown = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["bridge-socket-failure"],
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(error).toHaveProperty("nativeCode", "bridge_socket_timeout");
+  expect(String(error)).toContain("runtime down --recover --json");
+  expect(String(error)).not.toContain("nothing was started");
 });
 
 test("structured failures expose only a bounded code, never their message", async () => {

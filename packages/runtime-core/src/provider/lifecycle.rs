@@ -1707,6 +1707,14 @@ fn finish_boot(
         lock,
         super::disk_template::Stage::AfterFirstStart,
     )?;
+    // The provider's agent-ready signal can precede expose-thread socket binds.
+    // Wait before adoption, without weakening the immediate audit used by
+    // running-pool commands. Failure keeps the existing verified-stop path.
+    if let Some(bridge) = owner.application_bridge {
+        super::bridge::wait_for_sockets(&owner.real_data_dir(candidate)?, bridge, || {
+            verify_live(candidate, owner)
+        })?;
+    }
     audit_boot(candidate, owner)?;
     let dir = owner.real_data_dir(candidate)?;
     let storage = identity::disk(&dir.join("storage.raw"))?;

@@ -581,6 +581,28 @@ digest is. A mismatch refuses with `disk_template_untrusted` and changes no file
 removing the refused file lets SmolVM re-expand it from the verified compressed template. After a
 start, the boot is stopped as a failed boot without adopting its disks and needs manual recovery.
 
+Guest control readiness does not mean exposed bridge sockets have bound. The pinned
+[SmolVM 1.34.1 guest](https://github.com/smol-machines/smolvm/blob/v1.34.1/crates/smolvm-agent/src/main.rs#L642)
+starts [independent expose threads](https://github.com/smol-machines/smolvm/blob/v1.34.1/crates/smolvm-agent/src/publish_socket.rs#L57)
+before signalling ready, without joining them. The pinned
+[launcher removes old expose paths first](https://github.com/smol-machines/smolvm/blob/v1.34.1/src/agent/launcher.rs#L1955);
+freshness depends on that ordering, because private socket metadata alone does not identify
+its binder. A provider-pin upgrade must re-check that contract. Fresh boot waits up to 10 seconds
+for all declared bridge sockets, before disk adoption and the full boot audit. Each poll
+checks the retained provider identity before and after the socket observation. Missing
+nodes and same-user, single-link sockets awaiting private mode can converge; a different
+type, user, link count or unreadable identity refuses immediately. Only a complete private
+socket set observed before the deadline succeeds. The wait never chmods, removes or connects
+to sockets. Running-pool audits remain immediate. The existing failed-boot path stops only
+the verified provider, records its absence and retains `failed-boot-stopped`, without
+claiming a clean guest shutdown. Socket failures name the selected executor's
+`runtime down --recover --json` on the same native home before retry; a project may not yet
+have a mapping for ordinary `hack down`. The clock-driven real-socket regression reproduces
+the ready-before-bind ordering without a VM, but cannot qualify actual provider scheduling.
+HACK-2175's live gate is ten consecutive Mac Ctrl-C scenarios including pool stop/start.
+The wait adds no signal handler: interruption retains the existing `booting` receipt
+and stop/recovery rules, so that live gate also qualifies the extended startup window.
+
 A start interrupted before the pool records its provider process (for example, `up` is killed)
 leaves the pool `creating` or `booting`, and `up` refuses. Each start clears the previous
 provider's already-dead identity before `booting`, so this covers every start, not only the

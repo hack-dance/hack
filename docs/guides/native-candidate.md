@@ -699,6 +699,17 @@ within the macOS length limit. A clean `runtime down` keeps this alias, so no ot
 local user can take its name while the pool is stopped. It removes only the provider
 socket files the stop proved closed, through the real data directory.
 
+On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
+for every declared bridge socket to appear with the required private ownership and mode.
+The provider's guest-ready signal can arrive before its bridge threads bind. Native
+rechecks the same provider identity around each observation; it never accepts an unsafe
+socket, changes its permissions or removes it to make startup pass. Existing running-pool
+audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
+stop path and names the recovery command: run the selected native executor's
+`--candidate-root "$HACK_NATIVE_HOME" runtime down --recover --json`, then retry. This preserves
+retained disks and records an unclean stop; it does not claim the guest shut down cleanly.
+`hack down` may say the project was not started because no project mapping was published.
+
 Host cleanup or a reboot can still remove the alias. For a clean stop, observation
 commands such as `runtime status` accept the absent alias and create nothing, and the
 next `runtime up`, `runtime recover` or approved-host update restores the exact alias

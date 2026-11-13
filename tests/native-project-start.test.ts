@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -59,6 +60,7 @@ import {
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
 import {
+  invokeNativeRuntime,
   NativeRuntimeRequestError,
   nativeRuntimeFailure,
 } from "../src/backends/native-runtime-client.ts";
@@ -419,6 +421,38 @@ test("foreground saves after readiness and retains mapping after confirmed stop"
     "graph inspect",
     "cleanup",
   ]);
+});
+
+test("a pool bridge boot failure reaches foreground up with recovery guidance before any project mapping", async () => {
+  const { opts, events } = await fixture(false);
+  const message =
+    "Native bridge sockets did not become private and owned before the startup deadline. Run the selected native executor with --candidate-root set to this native home and runtime down --recover --json before retrying.";
+  await writeFile(
+    opts.runtime.binary,
+    `#!/usr/bin/env bun
+console.error(JSON.stringify({ code: "bridge_socket_timeout", message: ${JSON.stringify(message)}, message_fixed: true, private_detail: "synthetic-secret" }));
+process.exit(2);
+`
+  );
+  await chmod(opts.runtime.binary, 0o755);
+  const invoke = opts.dependencies.invoke;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      return await invokeNativeRuntime(request);
+    }
+    return await invoke?.(request);
+  };
+  const failure: unknown = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(ClosedCliError);
+  expect(String(failure)).toContain("runtime down --recover --json");
+  expect(String(failure)).toContain("--candidate-root");
+  expect(String(failure)).not.toContain("synthetic-secret");
+  expect(nativeRuntimeFailure(failure)?.code).toBe("bridge_socket_timeout");
+  expect(events).not.toContain("save");
+  expect(events).not.toContain("ready");
+  expect(events).toContain("cleanup");
 });
 test("foreground reports value-free digests of the selected env after publishing the mapping", async () => {
   const { opts, events } = await fixture();

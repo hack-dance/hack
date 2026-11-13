@@ -91,32 +91,118 @@ pub(super) fn verify_sockets(
     directory: &std::path::Path,
     intent: BridgeIntent,
 ) -> Result<(), CandidateError> {
+    if sockets_ready(directory, intent)? {
+        Ok(())
+    } else {
+        Err(socket_identity())
+    }
+}
+
+fn socket_identity() -> CandidateError {
+    CandidateError::new(
+        "bridge_socket_identity",
+        "Expected a private owned bridge socket.",
+    )
+}
+
+fn private_socket(metadata: &std::fs::Metadata, uid: u32) -> Result<bool, CandidateError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    if !metadata.file_type().is_socket() || metadata.uid() != uid || metadata.nlink() != 1 {
+        return Err(socket_identity());
+    }
+    Ok(metadata.mode() & 0o077 == 0)
+}
+
+/// Missing nodes and not-yet-private owned sockets may converge during boot.
+/// A different type, owner, link count or unreadable identity is never pending.
+fn sockets_ready(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+) -> Result<bool, CandidateError> {
+    let mut ready = true;
     for path in intent.guest_paths() {
         let path = directory.join(
             std::path::Path::new(&path)
                 .file_name()
                 .expect("fixed socket name"),
         );
-        let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ready = false;
+                continue;
+            }
+            Err(_) => return Err(socket_identity()),
+        };
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        ready &= private_socket(&metadata, unsafe { libc::geteuid() })?;
+    }
+    Ok(ready)
+}
+
+const BOOT_SOCKET_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const BOOT_SOCKET_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn startup_socket_timeout() -> CandidateError {
+    CandidateError::new(
+        "bridge_socket_timeout",
+        "Native bridge sockets did not become private and owned before the startup deadline. Run the selected native executor with --candidate-root set to this native home and runtime down --recover --json before retrying.",
+    )
+}
+
+/// Only fresh boot waits: SmolVM's guest-ready signal does not join its expose
+/// threads. Caller holds the pool lease and rechecks its retained provider on
+/// both sides of each complete socket observation. No socket is changed here.
+/// Socket freshness also relies on the pinned launcher's removal of old expose
+/// paths before guest-ready; see the upgrade contract at `artifact::VERSION`.
+pub(super) fn wait_for_sockets(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+    verify_provider: impl FnMut() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    wait_for_sockets_with(
+        directory,
+        intent,
+        verify_provider,
+        &super::process::MonotonicClock::new(),
+        BOOT_SOCKET_WAIT,
+    )
+}
+
+fn wait_for_sockets_with(
+    directory: &std::path::Path,
+    intent: BridgeIntent,
+    mut verify_provider: impl FnMut() -> Result<(), CandidateError>,
+    clock: &impl super::process::Clock,
+    budget: std::time::Duration,
+) -> Result<(), CandidateError> {
+    let deadline = clock.now().saturating_add(budget);
+    loop {
+        if clock.now() >= deadline {
+            return Err(startup_socket_timeout());
+        }
+        verify_provider()?;
+        let ready = sockets_ready(directory, intent).map_err(|_| {
             CandidateError::new(
                 "bridge_socket_identity",
-                "Expected a private owned bridge socket.",
+                "Bridge socket identity is unsafe; startup was refused. Run the selected native executor with --candidate-root set to this native home and runtime down --recover --json before retrying.",
             )
         })?;
-        if !metadata.file_type().is_socket()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o077 != 0
-            || metadata.nlink() != 1
-        {
-            return Err(CandidateError::new(
-                "bridge_socket_identity",
-                "Expected a private owned bridge socket.",
-            ));
+        verify_provider()?;
+        let remaining = deadline.saturating_sub(clock.now());
+        if remaining.is_zero() {
+            return Err(startup_socket_timeout());
         }
+        if ready {
+            return Ok(());
+        }
+        clock.sleep(remaining.min(BOOT_SOCKET_POLL));
     }
-    Ok(())
 }
+
+#[cfg(test)]
+#[path = "bridge_startup_tests.rs"]
+mod startup_tests;
 
 #[cfg(test)]
 mod tests {

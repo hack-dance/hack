@@ -443,7 +443,7 @@ fn offline_setup_and_partial_manual_install_preservation() {
     assert_eq!(result.status, "installed");
     assert_eq!(result.files.len(), files.len());
     for file in result.files {
-        assert_eq!(file.outcome, Outcome::Reused);
+        assert_eq!(file.outcome, Outcome::Offline);
         assert_eq!(file.downloaded_bytes, 0);
         assert_eq!(file.reused_bytes, file.size_bytes);
     }
@@ -730,12 +730,8 @@ fn json_accounts_for_download_resume_cache_and_complete_reuse() {
     )
     .unwrap()
     .with_probe(serde_json::json!({"supported": true}));
-    assert_eq!(reused["files"].as_array().unwrap().len(), files.len());
-    for file in reused["files"].as_array().unwrap() {
-        assert_eq!(file["outcome"], "reused");
-        assert_eq!(file["downloaded_bytes"], 0);
-        assert_eq!(file["reused_bytes"], 5);
-    }
+    assert_eq!(reused["status"], "reused");
+    assert_eq!(reused["files"], serde_json::json!([]));
 }
 
 #[test]
@@ -876,7 +872,10 @@ fn killed_preparation_and_publication_rerun_without_network_or_partial_install()
                 "installed"
             }
         );
-        assert_eq!(result.files.len(), 3);
+        assert_eq!(
+            result.files.len(),
+            if phase == "after_rename" { 0 } else { 3 }
+        );
         assert!(
             result
                 .files

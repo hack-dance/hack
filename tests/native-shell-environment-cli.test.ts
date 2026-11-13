@@ -16,7 +16,6 @@ import {
   prepareNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
 import { nativeEnvironmentDelivery } from "../src/backends/native-project-start.ts";
-import { resolveShellEnvironment } from "../src/backends/native-shell-environment.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -190,7 +189,7 @@ for (const mode of ["foreground", "detached", "json"] as const) {
       if (!detached) {
         expect(
           output.split(
-            "Service web: REGION is empty because FIXTURE_REGION is not set in your shell.\n"
+            "Service web: REGION is empty because FIXTURE_REGION is not set in the interpolation context.\n"
           )
         ).toHaveLength(2);
       }
@@ -254,28 +253,43 @@ test("shell values travel only in the private stdin payload, never in the public
   });
 });
 
-test("a variable named like an Object.prototype property is an ordinary variable", () => {
-  const resolution = resolveShellEnvironment({
-    service: "web",
-    environment: Object.fromEntries([
-      ["__proto__", reference("FIXTURE_SET")],
-      ["constructor", null],
-      ["PLAIN", reference("toString")],
-    ]),
+test("a variable named like an Object.prototype property is an ordinary variable", async () => {
+  const f = await fixture();
+  await writeFile(
+    f.composeFile,
+    JSON.stringify({
+      services: {
+        web: {
+          image: IMAGE,
+          environment: Object.fromEntries([
+            ["__proto__", reference("FIXTURE_SET")],
+            ["constructor", null],
+            ["PLAIN", reference("toString")],
+          ]),
+        },
+      },
+    })
+  );
+  const resolution = await prepareNativeProjectInput({
+    ...f,
+    projectRoot: f.project,
     env: { FIXTURE_SET: PRIVATE },
-    managed: new Set(),
   });
-  expect(Object.entries(resolution?.delivered ?? {})).toEqual([
+  expect(Object.entries(resolution.shellEnvironment?.web ?? {})).toEqual([
     ["__proto__", PRIVATE],
     // Not set in this shell; never the inherited function.
-    ["constructor", ""],
     ["PLAIN", ""],
   ]);
-  expect(Object.keys(resolution?.environment ?? {})).toEqual([
-    "__proto__",
-    "constructor",
-    "PLAIN",
-  ]);
+  expect(
+    Object.keys(
+      JSON.parse(resolution.normalizedComposeJson).services.web.environment
+    )
+  ).toEqual(["__proto__", "PLAIN"]);
+  expect(
+    JSON.parse(resolution.normalizedComposeJson).services.web[
+      "x-hack-unset-environment"
+    ]
+  ).toEqual(["constructor"]);
 });
 
 async function regularFiles(directory: string): Promise<string[]> {
@@ -305,7 +319,7 @@ async function regularFiles(directory: string): Promise<string[]> {
   return result;
 }
 
-test("only source names referenced by Compose are read and reported, never the ambient environment", () => {
+test("only source names referenced by Compose are read and reported, never the ambient environment", async () => {
   const caller = Object.defineProperties(
     { REFERENCED: PRIVATE },
     {
@@ -317,16 +331,30 @@ test("only source names referenced by Compose are read and reported, never the a
       },
     }
   );
-  const resolved = resolveShellEnvironment({
-    service: "web",
-    environment: {
-      API_KEY: reference("REFERENCED"),
-      COPY: reference("REFERENCED"),
-    },
+  const f = await fixture();
+  await writeFile(
+    f.composeFile,
+    JSON.stringify({
+      services: {
+        web: {
+          image: IMAGE,
+          environment: {
+            API_KEY: reference("REFERENCED"),
+            COPY: reference("REFERENCED"),
+          },
+        },
+      },
+    })
+  );
+  const resolved = await prepareNativeProjectInput({
+    ...f,
+    projectRoot: f.project,
     env: caller,
-    managed: new Set(),
   });
-  expect(resolved?.delivered).toEqual({ API_KEY: PRIVATE, COPY: PRIVATE });
-  expect(resolved?.forwardedNames).toEqual(["REFERENCED"]);
-  expect(JSON.stringify(resolved?.environment)).not.toContain(PRIVATE);
+  expect(resolved.shellEnvironment?.web).toEqual({
+    API_KEY: PRIVATE,
+    COPY: PRIVATE,
+  });
+  expect(resolved.forwardedShellVariables?.web).toEqual(["REFERENCED"]);
+  expect(resolved.normalizedComposeJson).not.toContain(PRIVATE);
 });

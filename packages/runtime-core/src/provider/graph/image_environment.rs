@@ -33,7 +33,27 @@ pub(super) fn compose(
     public: &Value,
 ) -> Result<BTreeMap<String, String>, CandidateError> {
     let mut expected = entries(image)?;
-    expected.extend(entries(public)?);
+    if !public.is_null() {
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in public.as_array().ok_or_else(refused)? {
+            let entry = entry.as_str().ok_or_else(refused)?;
+            let (key, value) = entry
+                .split_once('=')
+                .map_or((entry, None), |(key, value)| (key, Some(value)));
+            if key.is_empty()
+                || key.contains('\0')
+                || value.is_some_and(|value| value.contains('\0'))
+                || !seen.insert(key)
+            {
+                return Err(refused());
+            }
+            if let Some(value) = value {
+                expected.insert(key.to_owned(), value.to_owned());
+            } else {
+                expected.remove(key);
+            }
+        }
+    }
     Ok(expected)
 }
 pub(super) fn verify(
@@ -83,7 +103,6 @@ mod tests {
     fn malformed_or_duplicate_fields_refuse_without_value_diagnostics() {
         for bad in [
             json!(["KEY=canary", "KEY=second"]),
-            json!(["MISSING"]),
             json!(["=canary"]),
             json!(["KEY\u{0000}=canary"]),
             json!(["KEY=canary\u{0000}"]),
@@ -96,5 +115,23 @@ mod tests {
             }
             assert!(verify(&BTreeMap::new(), &bad).is_err());
         }
+        assert!(compose(&json!(["MISSING"]), &Value::Null).is_err());
+        assert!(verify(&BTreeMap::new(), &json!(["MISSING"])).is_err());
+    }
+    #[test]
+    fn explicit_bare_names_remove_image_defaults_but_empty_values_remain() {
+        let expected = compose(
+            &json!(["PATH=/bin", "REMOVE=image-default", "EMPTY=image-default"]),
+            &json!(["REMOVE", "EMPTY=", "MISSING"]),
+        )
+        .unwrap();
+        verify(&expected, &json!(["EMPTY=", "PATH=/bin"])).unwrap();
+        for actual in [
+            json!(["EMPTY=", "PATH=/bin", "REMOVE=image-default"]),
+            json!(["EMPTY=", "PATH=/bin", "REMOVE="]),
+        ] {
+            assert!(verify(&expected, &actual).is_err());
+        }
+        assert!(compose(&Value::Null, &json!(["REMOVE", "REMOVE=second"])).is_err());
     }
 }

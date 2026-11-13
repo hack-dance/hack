@@ -402,7 +402,7 @@ test("a build arg equal to a managed secret value refuses without showing it", (
   // HACK-1925: the refusal names the service and the argument, never the value,
   // and does not point at the Compose backend, which would bake it into history.
   expect(error.message).toContain(
-    "cannot build service web: build arg TOKEN equals a hack env secret value"
+    "cannot build service web: build arg TOKEN equals a privately delivered environment value"
   );
   expect(error.message).not.toContain(secret);
   expect(error.message).not.toContain("HACK_RUNTIME_BACKEND");

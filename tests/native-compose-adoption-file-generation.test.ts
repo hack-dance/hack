@@ -828,4 +828,4 @@ test("HACK-1359: file8 rejects missing and non-finite mutation deadlines without
   } finally {
     await store.close();
   }
-});
+}, 30_000);

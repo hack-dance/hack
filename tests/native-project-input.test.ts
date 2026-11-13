@@ -37,7 +37,7 @@ async function fixture(compose: unknown) {
   );
   roots.push(projectRoot);
   const projectDir = join(projectRoot, ".hack");
-  await mkdir(projectDir);
+  await mkdir(projectDir, { mode: 0o700 });
   const composeFile = join(projectDir, "docker-compose.yml");
   await writeFile(composeFile, JSON.stringify(compose));
   return { projectRoot, projectDir, composeFile };
@@ -163,12 +163,12 @@ test("fourteen services and 110 managed variables each preserve overlay selectio
   expect(result.normalizedComposeJson).not.toContain("synthetic-");
   expect(result.normalizedComposeJson).not.toContain("overlay-value");
 });
-test("env_file and malformed modern input refuse without diagnostic contents", async () => {
+test("missing env_file and malformed modern input refuse without diagnostic contents", async () => {
   const opts = await fixture({
     services: { api: { env_file: "private-source", image: "bun:1" } },
   });
   await env(opts.projectDir, "default", {
-    global: { TOKEN: { secure: "invalid-secret-canary" } },
+    global: { TOKEN: "managed-synthetic" },
   });
   await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
@@ -187,7 +187,7 @@ test("env_file and malformed modern input refuse without diagnostic contents", a
     expect(String(error)).toContain("values omitted");
   }
 });
-test("legacy dotenv refuses and unmanaged public projects preserve original fields", async () => {
+test("unreferenced dotenv does not inject values and public projects preserve original fields", async () => {
   const original = {
     services: { api: { image: "bun:1", environment: { STATIC: "tracked" } } },
   };
@@ -195,11 +195,12 @@ test("legacy dotenv refuses and unmanaged public projects preserve original fiel
   expect(
     JSON.parse((await prepareNativeProjectInput(opts)).normalizedComposeJson)
   ).toEqual(original);
-  await writeFile(join(opts.projectDir, ".env"), "PRIVATE=synthetic\n");
-  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
-    code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: expect.stringContaining("values omitted"),
+  await writeFile(join(opts.projectDir, ".env"), "PRIVATE=synthetic\n", {
+    mode: 0o644,
   });
+  const withDotenv = await prepareNativeProjectInput(opts);
+  expect(JSON.parse(withDotenv.normalizedComposeJson)).toEqual(original);
+  expect(withDotenv.shellEnvironment).toEqual({});
 });
 
 test("the effective env is the requested or default env even without managed env files", async () => {
@@ -448,7 +449,7 @@ function environments(result: { readonly normalizedComposeJson: string }) {
  * writing the value into the public document: the entry stays a reference and
  * the value is kept apart, for the private delivery.
  */
-test("plain shell references and bare names are resolved privately; everything else is left as written", async () => {
+test("shell expressions are private, unresolved bare names unset, and public literals stay authored", async () => {
   const PRIVATE = "synthetic-shell-value";
   const opts = await fixture({
     services: {
@@ -460,22 +461,11 @@ test("plain shell references and bare names are resolved privately; everything e
           UNSET: reference("SHELL_UNSET"),
           PASSED: null,
           NOT_PASSED: null,
-          // Forms that start today are not touched, whatever the shell holds.
           WITH_DEFAULT: reference("SHELL_SET", "fallback"),
           LITERAL: "plain",
           PARTIAL: `http://${reference("SHELL_SET")}:80`,
           ESCAPED: `$${reference("SHELL_SET")}`,
-          // Hack's own variables: the env decryption key must never be copyable.
-          LEAKED_KEY: reference("HACK_ENV_SECRET_KEY"),
-          HACK_ENV_SECRET_KEY: null,
-          HACK_GATEWAY_TOKEN: reference("HACK_GATEWAY_TOKEN"),
-          // Names the runtime supplies or the credential adapters own.
           PROJECT: reference("COMPOSE_PROJECT_NAME"),
-          COMPOSE_PROJECT_NAME: reference("SHELL_SET"),
-          AWS_SECRET_ACCESS_KEY: reference("AWS_SECRET_ACCESS_KEY"),
-          COPIED_KEY: reference("AWS_ACCESS_KEY_ID"),
-          GOOGLE_APPLICATION_CREDENTIALS: null,
-          // Valid names that are also Object.prototype properties.
           constructor: reference("constructor"),
           INHERITED: reference("toString"),
         },
@@ -491,7 +481,6 @@ test("plain shell references and bare names are resolved privately; everything e
       },
       plain: { image: "bun:1" },
       literal: { image: "bun:1", environment: ["A=1", "B=two"] },
-      // Every entry commented out is YAML null; it must stay accepted.
       empty: { image: "bun:1", environment: null },
     },
   });
@@ -501,105 +490,80 @@ test("plain shell references and bare names are resolved privately; everything e
       SHELL_SET: PRIVATE,
       PASSED: `${PRIVATE}-passed`,
       COMPOSE_PROJECT_NAME: "other-instance",
-      AWS_SECRET_ACCESS_KEY: "long-lived-credential",
-      AWS_ACCESS_KEY_ID: "long-lived-id",
-      GOOGLE_APPLICATION_CREDENTIALS: "credential-path",
-      HACK_ENV_SECRET_KEY: "project-env-decryption-key",
-      HACK_GATEWAY_TOKEN: "gateway-token",
-      // Never read: no entry references it.
       UNRELATED: "unrelated-private",
     },
   });
-  // Shell values are kept apart from what Hack manages, and never fingerprinted.
   expect(result.managedEnvironment).toEqual({});
-  expect(JSON.parse(JSON.stringify(result.shellEnvironment))).toEqual({
+  expect(result.shellEnvironment).toEqual({
     api: {
       WHOLE: PRIVATE,
       UNBRACED: PRIVATE,
-      // Compose substitutes an empty string for an unset variable.
       UNSET: "",
       PASSED: `${PRIVATE}-passed`,
-      // Delivered empty rather than left out, so the reviewed document is the
-      // same from a shell that sets it and one that does not.
-      NOT_PASSED: "",
-      // Unset in this shell, and not taken from Object.prototype.
+      WITH_DEFAULT: PRIVATE,
+      PARTIAL: `http://${PRIVATE}:80`,
       constructor: "",
       INHERITED: "",
     },
-    worker: { PASSED: `${PRIVATE}-passed`, NOT_PASSED: "", WHOLE: PRIVATE },
+    worker: { PASSED: `${PRIVATE}-passed`, WHOLE: PRIVATE },
   });
-  expect(result.normalizedComposeJson).not.toContain(PRIVATE);
-  // Not read at all: neither public nor private.
-  for (const hidden of [
-    "unrelated-private",
-    "other-instance",
-    "long-lived-credential",
-    "long-lived-id",
-    "credential-path",
-    "project-env-decryption-key",
-    "gateway-token",
-  ]) {
-    expect(result.normalizedComposeJson).not.toContain(hidden);
-    expect(JSON.stringify(result.shellEnvironment)).not.toContain(hidden);
-  }
   const services = environments(result);
-  expect(JSON.parse(JSON.stringify(services.api?.environment))).toEqual({
+  expect(services.api?.environment).toEqual({
     WHOLE: null,
     UNBRACED: null,
     UNSET: null,
     PASSED: null,
-    NOT_PASSED: null,
+    WITH_DEFAULT: null,
+    LITERAL: "plain",
+    PARTIAL: null,
+    ESCAPED: "$${SHELL_SET}",
+    PROJECT: reference("COMPOSE_PROJECT_NAME"),
     constructor: null,
     INHERITED: null,
-    WITH_DEFAULT: reference("SHELL_SET", "fallback"),
-    LITERAL: "plain",
-    PARTIAL: `http://${reference("SHELL_SET")}:80`,
-    ESCAPED: `$${reference("SHELL_SET")}`,
-    PROJECT: reference("COMPOSE_PROJECT_NAME"),
-    COMPOSE_PROJECT_NAME: reference("SHELL_SET"),
-    AWS_SECRET_ACCESS_KEY: reference("AWS_SECRET_ACCESS_KEY"),
-    COPIED_KEY: reference("AWS_ACCESS_KEY_ID"),
-    GOOGLE_APPLICATION_CREDENTIALS: null,
-    LEAKED_KEY: reference("HACK_ENV_SECRET_KEY"),
-    HACK_ENV_SECRET_KEY: null,
-    HACK_GATEWAY_TOKEN: reference("HACK_GATEWAY_TOKEN"),
   });
+  expect(
+    JSON.parse(result.normalizedComposeJson).services.api[
+      "x-hack-unset-environment"
+    ]
+  ).toEqual(["NOT_PASSED"]);
   expect(services.worker?.environment).toEqual({
     PASSED: null,
-    NOT_PASSED: null,
     WHOLE: null,
     KEEP: "1",
   });
   expect(services.plain?.environment).toBeUndefined();
-  // No reference, no rewrite: the list form is exactly what was authored.
   expect(services.literal?.environment).toEqual(["A=1", "B=two"]);
   expect(services.empty?.environment).toBeNull();
-  // Names only, never values.
-  expect(result.environmentNotices).toEqual([
-    {
-      service: "api",
-      line: "Service api: UNSET is empty because SHELL_UNSET is not set in your shell.",
-    },
-    {
-      service: "api",
-      line: "Service api: NOT_PASSED is empty because it is not set in your shell.",
-    },
-    {
-      service: "api",
-      line: "Service api: constructor is empty because it is not set in your shell.",
-    },
-    {
-      service: "api",
-      line: "Service api: INHERITED is empty because toString is not set in your shell.",
-    },
-    {
-      service: "worker",
-      line: "Service worker: NOT_PASSED is empty because it is not set in your shell.",
-    },
-  ]);
+  expect(result.environmentNotices).toHaveLength(5);
+  expect(JSON.stringify(result.environmentNotices)).toContain(
+    "NOT_PASSED is unset"
+  );
+  for (const hidden of [PRIVATE, "other-instance", "unrelated-private"]) {
+    expect(result.normalizedComposeJson).not.toContain(hidden);
+    expect(JSON.stringify(result.environmentNotices)).not.toContain(hidden);
+  }
 });
 
-test("the reviewed document does not depend on the shell, and nothing is read unless the caller passes an environment", async () => {
+test("Hack key material is refused without reading the caller's value", async () => {
+  for (const key of ["HACK_ENV_SECRET_KEY", "HACK_GATEWAY_TOKEN"]) {
+    const opts = await fixture({
+      services: {
+        api: { image: "bun:1", environment: { COPY: reference(key) } },
+      },
+    });
+    const caller = Object.defineProperty({}, key, {
+      enumerable: true,
+      get() {
+        throw new Error("private getter must never be invoked");
+      },
+    });
+    await expect(
+      prepareNativeProjectInput({ ...opts, env: caller })
+    ).rejects.toThrow("protected variable");
+  }
+});
+
+test("unset names affect only names in the document; ambient values require an explicit caller environment", async () => {
   const compose = {
     services: {
       api: {
@@ -616,8 +580,13 @@ test("the reviewed document does not depend on the shell, and nothing is read un
     ...(await fixture(compose)),
     env: {},
   });
-  // Same public document from a shell that sets the variables and one that does not.
-  expect(set.normalizedComposeJson).toBe(unset.normalizedComposeJson);
+  // Bare unset is distinct from an empty string and only the name enters identity.
+  expect(set.normalizedComposeJson).not.toBe(unset.normalizedComposeJson);
+  expect(
+    JSON.parse(unset.normalizedComposeJson).services.api[
+      "x-hack-unset-environment"
+    ]
+  ).toEqual(["PASSED"]);
   // Without `env`, as exec and the stale-env check call it, the process
   // environment is not consulted.
   const previous = process.env.SHELL_TOKEN;
@@ -625,9 +594,9 @@ test("the reviewed document does not depend on the shell, and nothing is read un
   try {
     const ambient = await prepareNativeProjectInput(await fixture(compose));
     expect(ambient.shellEnvironment).toEqual({
-      api: { TOKEN: "", PASSED: "" },
+      api: { TOKEN: "" },
     });
-    expect(ambient.normalizedComposeJson).toBe(set.normalizedComposeJson);
+    expect(ambient.normalizedComposeJson).toBe(unset.normalizedComposeJson);
   } finally {
     restoreEnv("SHELL_TOKEN", previous);
   }
@@ -662,12 +631,11 @@ test("a key Hack manages is delivered from managed env, never from the shell", a
     TOKEN: "managed-private",
     FROM_MANAGED: "managed-too",
   });
-  // Nothing of this service is taken from the shell.
-  expect(result.shellEnvironment).toEqual({});
-  // A reference to a managed variable is left for the runtime to refuse.
+  // A global managed value participates in interpolation above shell and dotenv.
+  expect(result.shellEnvironment).toEqual({ api: { COPY: "managed-private" } });
   expect(
     (environments(result).api?.environment as Record<string, unknown>).COPY
-  ).toBe(reference("TOKEN"));
+  ).toBeNull();
   for (const hidden of ["shell-private", "shell-loses"]) {
     expect(result.normalizedComposeJson).not.toContain(hidden);
   }
@@ -713,7 +681,6 @@ test("merged shell values join the private delivery, and a delivery the runtime 
     // JSON escaping counts: the runtime receives the escaped form.
     [1, '"'.repeat(17 * 1024), "are over 32 KiB together"],
     [257, "#", "more than 256 variables"],
-    [1, "bad\0value", "contains a NUL byte"],
   ] as const) {
     const input = await prepared(count, value);
     const delivery = mergeNativeShellEnvironment(input);

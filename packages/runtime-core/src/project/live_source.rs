@@ -461,6 +461,73 @@ mod tests {
     }
 
     #[test]
+    fn optional_env_file_created_after_review_stays_out_of_live_source() {
+        let (_fixture, candidate, source) = fixture();
+        let path = source.join("compose.yaml");
+        let mut original = super::super::yaml::parse(&fs::read(&path).unwrap()).unwrap();
+        original["services"]["deps"]["env_file"] = serde_json::json!([
+            {"path":"secrets/private.txt", "required":false, "format":"raw"}
+        ]);
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        fs::write(&path, &original_bytes).unwrap();
+        original["services"]["deps"]
+            .as_object_mut()
+            .unwrap()
+            .remove("env_file");
+        let normalized = serde_json::to_vec(&original).unwrap();
+        let namespace = candidate.plan(&source).unwrap().namespace;
+        let original_hash = format!("{:x}", Sha256::digest(&original_bytes));
+        let capture = || {
+            let plan = project::plan_normalized(
+                &candidate,
+                project::NormalizedComposeOptions {
+                    branch: None,
+                    project: &source,
+                    compose_file: Path::new("compose.yaml"),
+                    profiles: &[],
+                    expected_namespace: &namespace,
+                    expected_compose_sha256: &original_hash,
+                    compose_bytes: &normalized,
+                },
+            )
+            .unwrap();
+            let snapshot = snapshot::capture_plan(&plan.plan).unwrap();
+            assert!(
+                snapshot
+                    .receipt()
+                    .entries
+                    .iter()
+                    .all(|entry| entry.path != "secrets/private.txt" && entry.path != ".env")
+            );
+            (plan, snapshot)
+        };
+        let (initial, snapshot) = capture();
+        let contract = Contract::from_plan(&initial.plan, snapshot.receipt()).unwrap();
+        fs::create_dir(source.join("secrets")).unwrap();
+        fs::write(source.join("secrets/private.txt"), "PRIVATE_FUTURE_CANARY").unwrap();
+        fs::write(source.join(".env"), "PRIVATE_DOTENV_CANARY").unwrap();
+        let (with_file, snapshot) = capture();
+        contract
+            .verify(&with_file.plan, snapshot.receipt())
+            .unwrap();
+        fs::write(
+            source.join("secrets/private.txt"),
+            "PRIVATE_CHANGED_CANARY_LONGER",
+        )
+        .unwrap();
+        let (changed_value, snapshot) = capture();
+        assert_eq!(with_file.plan_id, changed_value.plan_id);
+        contract
+            .verify(&changed_value.plan, snapshot.receipt())
+            .unwrap();
+        assert!(
+            !serde_json::to_string(&changed_value)
+                .unwrap()
+                .contains("CANARY")
+        );
+    }
+
+    #[test]
     fn content_add_remove_and_excluded_secrets_do_not_freeze_plan_identity() {
         let (_fixture, candidate, source) = fixture();
         let (initial, snapshot) = capture(&candidate, &source);

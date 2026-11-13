@@ -3967,21 +3967,22 @@ test("pending retained restart refuses fresh startup before effects", async () =
   expect(events).toEqual([]);
 });
 
-test("startup prepares mapping storage before input and plan review", async () => {
+test("startup admits private input before storage and prepares storage before plan effects", async () => {
   const { opts, events } = await fixture(false);
   const prepare = opts.dependencies.prepare!;
   const review = opts.dependencies.review!;
   opts.dependencies.prepareStorage = async (scope) => {
     expect(scope).toEqual(opts.scope);
+    expect(events).toContain("input");
     events.push("storage");
   };
   opts.dependencies.prepare = async (request) => {
-    expect(events[0]).toBe("storage");
+    expect(events).not.toContain("storage");
     events.push("input");
     return await prepare(request);
   };
   opts.dependencies.review = async (request) => {
-    expect(events.indexOf("storage")).toBeLessThan(events.indexOf("input"));
+    expect(events.indexOf("input")).toBeLessThan(events.indexOf("storage"));
     return await review(request);
   };
   expect(await startNativeProject(opts)).toBe(0);

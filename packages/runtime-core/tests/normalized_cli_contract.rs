@@ -280,3 +280,113 @@ fn normalized_capture_keeps_removed_original_credential_files_excluded() {
             .contains("PRIVATE_CLI_CANARY")
     );
 }
+
+#[test]
+fn optional_raw_and_repeated_env_files_keep_future_secret_paths_excluded() {
+    let mut fixture = Fixture::new();
+    let original = ORIGINAL.replace("    image:", "    env_file:\n      - {path: future/private.txt, required: false, format: raw}\n      - {path: future/private.txt, required: false}\n    image:");
+    fs::write(fixture.project.join("compose.yml"), &original).unwrap();
+    fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+    for exists in [false, true] {
+        if exists {
+            fs::create_dir(fixture.project.join("future")).unwrap();
+            fs::write(
+                fixture.project.join("future/private.txt"),
+                "TOKEN=OPTIONAL_INPUT_CANARY",
+            )
+            .unwrap();
+            fs::write(fixture.project.join(".env"), "TOKEN=DOTENV_INPUT_CANARY").unwrap();
+        }
+        let output = fixture.invoke(&["project", "plan"], &["--json"]);
+        assert!(output.status.success(), "{output:?}");
+        let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            plan["plan"]["original_environment_files"],
+            serde_json::json!(["future/private.txt"])
+        );
+        let output = fixture.invoke(
+            &["project", "capture"],
+            &["--expect-plan", plan["plan_id"].as_str().unwrap(), "--json"],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let capture: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            capture["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["path"] != "future/private.txt" && entry["path"] != ".env")
+        );
+        assert!(
+            !String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("INPUT_CANARY")
+        );
+    }
+}
+
+#[test]
+fn removed_inactive_required_env_file_retains_ownership_while_absent() {
+    let mut fixture = Fixture::new();
+    fs::create_dir(fixture.project.join("future")).unwrap();
+    let original = format!(
+        "{ORIGINAL}  inactive:\n    image: alpine:3.20\n    profiles: [extra]\n    env_file: future/inactive.txt\n"
+    );
+    fs::write(fixture.project.join("compose.yml"), &original).unwrap();
+    fs::write(
+        &fixture.normalized,
+        original.replace("    env_file: future/inactive.txt\n", ""),
+    )
+    .unwrap();
+    fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+    let output = fixture.invoke(&["project", "plan"], &["--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        plan["plan"]["original_environment_files"],
+        serde_json::json!(["future/inactive.txt"])
+    );
+    assert_eq!(plan["plan"]["services"]["inactive"]["active"], false);
+    fs::write(
+        fixture.project.join("future/inactive.txt"),
+        "TOKEN=INACTIVE_FILE_CANARY",
+    )
+    .unwrap();
+    // File presence changes source metadata; an old review still must refuse.
+    assert_eq!(
+        error(fixture.invoke(
+            &["project", "capture"],
+            &["--expect-plan", plan["plan_id"].as_str().unwrap(), "--json"]
+        )),
+        "stale_plan"
+    );
+    let current = fixture.invoke(&["project", "plan"], &["--json"]);
+    assert!(current.status.success(), "{current:?}");
+    let current: Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(
+        current["plan"]["original_environment_files"],
+        plan["plan"]["original_environment_files"]
+    );
+    let output = fixture.invoke(
+        &["project", "capture"],
+        &[
+            "--expect-plan",
+            current["plan_id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let capture: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        !capture["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "future/inactive.txt")
+    );
+    assert!(
+        !String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("INACTIVE_FILE_CANARY")
+    );
+}

@@ -1927,26 +1927,23 @@ async function startNativeProjectAttempt(
     });
     requireActiveStartup(opts.signal);
   }
-  // A down hook of an earlier generation with unknown completion blocks this
-  // one before any hook runs; any other leftover record is superseded.
-  await deps.admitDownHooks(opts.scope);
   const profiles = selection.profiles;
   progress({ phase: "input" });
-  await preflightNativeProjectSource({
-    runtime: opts.runtime,
-    projectRoot: opts.scope.projectRoot,
-    signal: opts.signal,
-    invoke: deps.invoke,
-  });
-  await deps.prepareStorage(opts.scope);
+  // Keep ps aware of this frontend while input is read. This advisory marker
+  // carries no values and is retired even if admission refuses the input.
   await observeStartup();
+  // Read and admit private project inputs before any pool-share or storage
+  // mutation. An unsafe env file or public interpolation must have no effects.
   let input = await deps.prepare({
     ...opts.scope,
     composeFile: opts.composeFile,
     envName: selection.envName,
-    // Service `environment` references are resolved from the caller's shell.
+    profiles,
     env: process.env,
   });
+  // A down hook of an earlier generation with unknown completion blocks this
+  // one before any hook runs; any other leftover record is superseded.
+  await deps.admitDownHooks(opts.scope);
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady
     ? withComposeServiceEnvFingerprints({
@@ -2020,6 +2017,13 @@ async function startNativeProjectAttempt(
     invoke: deps.invoke,
     signal: opts.signal,
   });
+  await preflightNativeProjectSource({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    signal: opts.signal,
+    invoke: deps.invoke,
+  });
+  await deps.prepareStorage(opts.scope);
   // A graph that captures source (bind mounts or a dependency cache) measures it
   // before hooks, image work or runtime start, so an oversized project refuses with
   // its size and largest paths. An image-only graph never reads source content.

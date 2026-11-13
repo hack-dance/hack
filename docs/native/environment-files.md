@@ -2,68 +2,126 @@
 
 Design for HACK-2062. The Compose backend keeps its existing behavior.
 
+![Public admission and private delivery paths](environment-files.svg)
+
+[Diagram source](environment-files.mmd).
+
 Native accepts service `env_file` as a path string, a list of path strings or
 long-form entries (`path`, optional `required`, optional `format`). `required`
-defaults to true; false skips an absent file, but never an unreadable or unsafe
-file. The default format uses Compose dotenv quoting, comments and interpolation;
-`format: raw` preserves value text, including quotes and dollar signs. Unknown
-options and formats refuse before hooks, image acquisition or VM work.
+defaults to true; false skips an absent file, never an unreadable or unsafe file.
+Omitted or empty `format` follows Compose dotenv syntax; the literal `default`
+is not a Compose format. `format: raw` does not unquote
+or interpolate values. Unknown options and formats refuse before hooks, image
+acquisition or VM work. Repeating a file is allowed and preserves list order.
+Files of inactive-profile services are not acquired; their paths remain excluded
+from snapshots and live sharing, including missing required paths.
+The reviewed runtime active set must agree before private delivery or effects;
+an active service with unprepared file inputs refuses.
 
-Files are resolved relative to the Compose file, within the current project root.
-Absolute paths inside that root are accepted; escaping the root is refused. Every
-path component inside the root is checked without following symlinks. Files must
-be regular, single-link, owned by the current user, owner-readable and grant no
-group or other permissions. Directories must be owned by the current user and not
-group/other-writable. Reads are bounded and recheck file and directory identities,
-size and timestamps. Native does not change permissions or migrate files.
+Paths are literal and relative to the Compose file, within the current canonical
+project root. Absolute paths inside that root are accepted. Escaping the root or
+following a symlink inside it is refused. Files must be regular, single-link,
+owned by the current user, owner-readable and not writable by group or others;
+ordinary 0644 checkouts work. Directories inside the root must be owned by the
+current user and not writable by group or others. Reads are bounded and recheck
+file and directory identities, size, permissions and timestamps. Native changes
+no file or permission. Bounds: 256 KiB and 4,096 lines per file; 64 file references
+and 1 MiB total source text per preparation. Existing private delivery limits
+(32 services, 256 keys and 32 KiB per service, 256 KiB complete stdin) also apply.
+
+The automatic interpolation file is `.env` beside the selected Compose file:
+normally `.hack/.env`, matching Hack's Compose project directory. An adjacent
+`.env.state.json` marks possible Hack-materialized output; native refuses to use
+that `.env`, whether the state is current, stale or unreadable, rather than copy
+another selection's materialized values. The operator can use current Hack env
+layers and remove obsolete materialized output deliberately. A root `.env` outside
+the Compose directory is not read or refused solely for existing. Native does not
+search another worktree or overlay dotenv. Every `.env` uses the same guards.
 
 Container precedence, highest first:
 
 1. Hack-managed environment, matching Hack's generated Compose environment override.
-2. Explicit service `environment`, including empty values.
-3. `env_file`, read in list order; the last declaration for a name wins.
+2. Explicit service `environment`, including empty values and unresolved bare keys.
+3. `env_file`, in list order; the last resolved declaration for a name wins.
 4. Image environment defaults for names not otherwise declared.
 
-Interpolation uses the caller's allowed shell variables before the Compose
-project directory's `.env`. Native's Compose project directory is the directory
-of its selected Compose file. It does not search a primary worktree or load a
-second root `.env`, and `.env` alone does not inject variables into containers.
-Within an env file, earlier entries are available to later entries; service env
-files may also refer to values established by earlier files. Managed values win
-the final service destination; service-scoped managed values are not an ambient
-interpolation source. Hack key material and adapter-owned credential names cannot
-be copied from the caller's shell or files around the managed delivery boundary.
+A bare env-file name inherits from the interpolation context if present; otherwise
+it leaves earlier file assignments intact. A bare service environment key resolves
+from the interpolation context; when unresolved it removes that key, including an
+image default. Native removes the key from normalized `environment`, then carries its name in
+explicit normalized metadata and public engine unset entries, separate from private
+value delivery. The runtime must echo the exact unset names during review;
+ordinary missing private bindings must continue to refuse.
 
-The first unit resolves references only in service `environment` and env-file
-values. It supports `$NAME`, `${NAME}`, defaults (`-`, `:-`), alternatives (`+`,
-`:+`), required references (`?`, `:?`), nesting and `$$`. Required-reference errors
-never echo the authored error word. `.env` references in public fields (images,
-commands, ports, labels, mounts and builds) remain unsupported: materializing such
-values would put private data in plans, argv or receipts. Paths must be literal.
-Unresolved bare declarations that require removal of an image ENV entry refuse
-rather than silently becoming an empty value. Explicit empty assignments work.
+Interpolation lookup order is Hack-managed global values, the caller's allowed
+shell variables, then `.env`. Service-scoped managed values win the final service
+destination but are not ambient interpolation sources. For env-file expansion,
+that project context wins over resolved service `environment`, then current and
+earlier file assignments. A current file assignment replaces the previous file's
+assignment before the next line is read. `.env` alone injects no container variables.
 
-Start and `doctor --native-preflight` call the same file parser, permission checks
-and environment normalizer. Preflight reads these inputs only for validation and
-names; it returns no values. Missing required files, malformed input and unsafe
-reads produce closed diagnostics with the service, field and source path only.
-Optional missing files produce no blocker. Parser excerpts, interpolated error
-words and operating-system error text are never included.
+Support includes export prefixes, `=` and `:` separators in default format,
+comments, single-quoted literals, double-quoted escapes, multiline quoted values,
+`$NAME`, `${NAME}`, defaults (`-`, `:-`), alternatives (`+`, `:+`), required references
+(`?`, `:?`), nesting to four levels, and `$$`. An unset `${NAME}` yields empty with a
+names-only notice; required-reference errors omit the authored error word. Raw
+format follows the separately qualified Compose raw parser. Hack key material and
+`HACK_*` cannot enter containers via files or shell references. Authored public
+runtime-metadata literals keep their existing behavior. Cloud credential
+names are not read from the shell; explicit literal file entries remain available
+unless the selected credential adapter owns that service's name. Compose control
+names (`COMPOSE_FILE`, `COMPOSE_PROFILES`, `COMPOSE_PROJECT_NAME`, `COMPOSE_ENV_FILES`,
+`COMPOSE_DISABLE_ENV_FILE`)
+in `.env` refuse with names only rather than silently change the selected project.
 
-All file-derived service values become bare name declarations in the normalized
-Compose document. Values stay in memory outside the managed-env fingerprint and
-travel through the existing bounded private stdin envelope, then the expiring
-guest environment allocation and launcher. They never enter CLI argv, public JSON,
-plans, plan identities, receipts, logs or generated files. Changing file values
-without changing declarations must leave normalized Compose and its plan identity
-unchanged. Preflight never writes the values to its temporary review document.
-Existing private-delivery service/key/byte limits apply before effects.
+The approved first unit resolves file values only in service `environment` and
+env-file values. If a public field references a name defined by `.env`, managed
+global env or allowed shell input, it refuses before effects, even if the reference
+has a default. It must never silently select a different fallback. Public fields
+include images, commands, ports, labels, mounts, users, healthchecks and builds.
+The lead approved this privacy boundary: materializing such values would otherwise
+put them in plans, argv or receipts.
 
-Out of scope: Compose override/include/extends support, CLI `--env-file`, dotenv
-selection of Compose files or profiles, command substitution, shell execution,
-interpolation in public fields, arbitrary external files, changes to Compose
-backend semantics, and automatic permission repair. Tests compare precedence with
-[Compose's environment-file rules](https://compose-spec.github.io/compose-spec/05-services.html#env_file)
-and [interpolation rules](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/),
-with sentinel values checked against public output, diagnostics, normalized
-plans and identity inputs. Actual guest delivery is qualified separately on a Mac.
+Start and `doctor --native-preflight` use the same parser, lookup, permissions and
+normalizer, including the same allow-listed shell environment and managed values.
+Preflight may therefore need the same project decryption key as start. It returns
+only names and paths. Missing required files, malformed input, unsafe reads and
+unsupported public interpolation produce closed diagnostics with service, field
+and source path only. Optional absent files produce no blocker. Parser excerpts,
+interpolated error words and raw OS diagnostics never leave the boundary.
+
+The normalized document removes `env_file` and replaces file-derived environment
+values with bare name declarations. Values remain in memory outside managed-env
+fingerprints, then travel through the bounded private stdin envelope and the
+expiring guest allocation/launcher. They never enter CLI argv, public JSON, plans,
+plan identities, receipts, logs or generated files. Original env-file declarations
+remain source exclusions in Rust even when normalization removes them, including
+absent optional targets, inactive-service files, raw inputs
+and duplicate paths. `.env*` remain excluded by the existing source policy. Tests
+must cover snapshot and live-share exclusion when an optional file appears later.
+
+Private delivery retains its existing limitations: it cannot use automatic
+restart policies, and fresh values need a new incarnation. A file-value-only edit
+has no public fingerprint; the operator must run `hack restart` to deliver it to
+an existing run. Literal/default-only expressions that consult no private source
+stay on the existing public path and retain their restart behavior and identity.
+Fresh `hack exec` resolves the selected service's file values again using the
+same allowed caller context and delivers them privately to that exec process.
+These fresh values may differ from the running container's startup values.
+Managed-env stale checks remain advisory and do not read ephemeral file inputs;
+file-value-only changes are not detected by their managed fingerprints.
+
+Unused Compose `x-*` extensions are ignored; Hack-consumed `x-hack-*` fields
+still receive admission checks. Exact AWS/ADC mounts recognized by the credential
+adapters keep their private adapter path and are never expanded into public plans.
+Unreadable reserved bare names remain runtime/adapter-owned, rather than becoming
+explicit image-default removals.
+
+Out of scope: override/include/extends support, CLI `--env-file`, dotenv selection
+of Compose files or profiles, shell execution/command substitution, public-field
+interpolation without an explicit future public-data contract, external files,
+automatic permission repair, Compose-backend changes and automatic secret-value
+change detection. Tests use sentinel values and recorded Docker Compose v5.6.1 /
+compose-go v2.16.1 results, alongside the documented [environment-file rules](https://compose-spec.github.io/compose-spec/05-services.html#env_file)
+and [interpolation rules](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/).
+Actual guest delivery is qualified separately on a Mac.

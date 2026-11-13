@@ -185,6 +185,27 @@ pub fn resolve(
     value: &str,
     allow_credentials: bool,
 ) -> Result<PathBuf, CandidateError> {
+    resolve_inner(project, base, value, allow_credentials, false)
+}
+
+/// Resolve ownership of an optional env-file path, including a currently absent
+/// tail. This grants no read or mount authority: callers must retain the path as
+/// a source exclusion even if the file or its parent appears after review.
+pub(super) fn resolve_optional_env_file(
+    project: &Path,
+    base: &Path,
+    value: &str,
+) -> Result<PathBuf, CandidateError> {
+    resolve_inner(project, base, value, true, true)
+}
+
+fn resolve_inner(
+    project: &Path,
+    base: &Path,
+    value: &str,
+    allow_credentials: bool,
+    optional: bool,
+) -> Result<PathBuf, CandidateError> {
     if value.is_empty() || value.contains('$') || value.contains('\0') || value.contains('~') {
         return Err(problem(
             "unresolved_source_path",
@@ -224,12 +245,18 @@ pub fn resolve(
     let mut current = project.to_owned();
     for part in relative.components() {
         current.push(part);
-        let metadata = fs::symlink_metadata(&current).map_err(|_| {
-            problem(
-                "missing_source",
-                "Declared source does not exist or cannot be inspected.",
-            )
-        })?;
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(resolved);
+            }
+            Err(_) => {
+                return Err(problem(
+                    "missing_source",
+                    "Declared source does not exist or cannot be inspected.",
+                ));
+            }
+        };
         if metadata.file_type().is_symlink() {
             return Err(problem(
                 "source_symlink",

@@ -66,8 +66,8 @@ move receipts, disks or project data. Keep each home with its matching executor.
 
 If you ran next.16's `runtime setup` and never started a project, finish setup,
 run `up` then `down` with that same next.16 launcher, and confirm its runtime is
-`stopped` before upgrading. Older executors cannot prove setup-only quiescence;
-do not delete receipts to bypass an upgrade refusal. See the
+`stopped` before upgrading or uninstalling. Older executors cannot prove
+setup-only quiescence; do not delete receipts to bypass a refusal. See the
 [upgrade and recovery reference](full-reference.md#manual-candidate-upgrade-and-rollback).
 
 The frontend command above is intended for next.17; installed next.16 retains

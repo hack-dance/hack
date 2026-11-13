@@ -104,7 +104,7 @@ exit 1
     { mode: 0o700 }
   );
   await writeFile(
-    join(stub, "graph-inspect.out"),
+    join(stub, "graph-status.out"),
     JSON.stringify({
       journal_incomplete: false,
       receipt: {
@@ -285,7 +285,7 @@ test(
     });
     // Only read-only observations: nothing was started, stopped or reviewed.
     for (const call of await f.calls()) {
-      expect(["graph inspect", "graph owner-status"]).toContain(call);
+      expect(["graph status", "graph owner-status"]).toContain(call);
     }
   },
   SPAWN_TIMEOUT_MS
@@ -318,7 +318,7 @@ test(
       error: { code: "E_STARTUP_INCOMPLETE" },
     });
     for (const call of await f.calls()) {
-      expect(["graph inspect", "graph owner-status"]).toContain(call);
+      expect(["graph status", "graph owner-status"]).toContain(call);
     }
   },
   SPAWN_TIMEOUT_MS
@@ -481,7 +481,7 @@ test(
         expect(result.output).not.toContain('"alreadyRunning": true');
       }
       for (const call of await f.calls()) {
-        expect(["graph inspect", "graph owner-status"]).toContain(call);
+        expect(["graph status", "graph owner-status"]).toContain(call);
       }
     }
   },

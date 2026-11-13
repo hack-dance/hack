@@ -147,9 +147,9 @@ test("native ps reports a stopped runtime as a status, not a failure", async () 
   expect(output).toContain("NATIVE SERVICE");
   expect(output).not.toContain("Native runtime request failed");
   expect(output).not.toMatch(STACK_FRAME);
-  // The read reached the runtime exactly once (graph inspect for the mapping).
+  // The read reached the runtime exactly once (graph status for the mapping).
   expect(await nativeCalls(f.root)).toEqual([
-    `--candidate-root ${join(f.root, "native-home")} graph inspect --run-id ${run.run} --json`,
+    `--candidate-root ${join(f.root, "native-home")} graph status --run-id ${run.run} --json`,
   ]);
 });
 

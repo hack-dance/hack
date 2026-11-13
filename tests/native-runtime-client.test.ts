@@ -579,6 +579,19 @@ const LATE_WRITER_SELECTIONS = {
     ],
     flags: { boundNativeStatusDrain: true },
   },
+  observe: {
+    args: [
+      "graph",
+      "native",
+      "control",
+      "--run-id",
+      RUN_ID,
+      "--action",
+      "observe",
+      "--json",
+    ],
+    flags: { boundNativeStatusDrain: true },
+  },
   read: {
     args: ["graph", "native", "inspect", "--run-id", RUN_ID, "--json"],
     flags: { boundNativeAuthoredReadDrain: true },

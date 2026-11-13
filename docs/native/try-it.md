@@ -30,10 +30,18 @@ virtual machine, or change DNS or certificate trust. Newer prereleases are on th
 ## 2. Prepare the runtime
 
 The native backend needs its virtual machine software set up once per installed
-version. Run the explicit setup command; `up` never downloads provider files.
+version. In next.17, use the same frontend for setup and project commands:
 
-A `hack-next` install keeps each version in its own folder. The two paths you need
-are the native program and its private home:
+```sh
+"$HOME/.hack-next/bin/hack-next" native setup
+```
+
+Noninteractive `up` refuses until setup is complete. Interactive `up` can offer
+setup, ask for download consent, and continue after success. See the
+[first-use guide](../versions/v5/native/setup.md) for default homes and scripts.
+
+Installed next.16 needs the older command below. A `hack-next` install keeps each
+version in its own folder; these paths also support the manual alternatives:
 
 ```sh
 V=5.0.0-next.16   # the version you installed; `hack-next --manager status` shows it
@@ -52,7 +60,8 @@ profile probe. It needs no administrator password or keychain access. Rerun afte
 an interrupted download to resume or restart safely. A complete matching install
 is verified before consent and reused without prompting, downloading or preparing again.
 
-For scripts, use `runtime setup --no-interactive --accept-downloads`. Without
+For next.17 scripts, use `hack-next native setup --accept-downloads`; with the
+older executor, use `runtime setup --no-interactive --accept-downloads`. Without
 `--accept-downloads`, a noninteractive run needing preparation fails with
 `E_INTERACTIVE_REQUIRED`. Complete matching installs need no flag.
 Add `--json` for per-file `downloaded`, `resumed`, `reused` or `offline` outcomes and exact

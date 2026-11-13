@@ -988,7 +988,7 @@ export function parseNativeAuthoredReady(
 export function parseNativeAuthoredControl(
   value: unknown,
   expected: NativeAuthoredReceipt,
-  action: "status" | "cleanup"
+  action: "status" | "observe" | "cleanup"
 ): {
   readonly receipt: NativeAuthoredReceipt;
   readonly observations?: Readonly<Record<string, Observation | null>>;
@@ -1019,9 +1019,9 @@ export function parseNativeAuthoredControl(
     return { receipt };
   }
   if (
-    action !== "status" ||
+    (action !== "status" && action !== "observe") ||
     !fields(result, ["outcome", "snapshot"]) ||
-    result.outcome !== "status"
+    result.outcome !== (action === "observe" ? "observed" : "status")
   ) {
     return refused();
   }

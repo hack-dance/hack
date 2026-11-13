@@ -130,7 +130,7 @@ test("a lease-busy ps still reports an authenticated pending publisher exit with
   let response: unknown = owner;
   const invoke: typeof import("../src/backends/native-runtime-client.ts").invokeNativeRuntime =
     async (request) => {
-      if (request.args[1] === "inspect") {
+      if (request.args[1] === "status") {
         throw new NativeRuntimeRequestError({
           nativeCode: "provider_busy",
           message: "busy",
@@ -183,6 +183,27 @@ test("ps returns current native observations and refuses each ownership mismatch
     nativeProjectPs({ ...opts, invoke: async () => value })
   ).rejects.toThrow();
 });
+test("an owner journal transition returns busy without stale service rows", async () => {
+  const opts = await fixture();
+  const result = await nativeProjectPs({
+    ...opts,
+    invoke: async ({ args }) =>
+      args[1] === "status"
+        ? snapshot(true)
+        : {
+            ok: false,
+            code: "graph_status_changed",
+          },
+  });
+  expect(result).toEqual({
+    backend: "native",
+    status: "runtime_busy",
+    run: run.run,
+    phase: null,
+    items: [],
+  });
+});
+
 test("ps distinguishes a live foreground owner from historical ready containers", async () => {
   const opts = await fixture();
   const calls: string[] = [];
@@ -196,17 +217,17 @@ test("ps distinguishes a live foreground owner from historical ready containers"
   };
   const invoke = async (request: { args: readonly string[] }) => {
     calls.push(request.args[1]!);
-    return request.args[1] === "inspect" ? snapshot(true) : owner;
+    return request.args[1] === "status" ? snapshot(true) : owner;
   };
   expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
     status: "observed",
     phase: "ready-observed",
   });
-  expect(calls).toEqual(["inspect", "owner-status"]);
+  expect(calls).toEqual(["status", "owner-status"]);
   const failed = await nativeProjectPs({
     ...opts,
     invoke: async (request) => {
-      if (request.args[1] === "inspect") {
+      if (request.args[1] === "status") {
         return snapshot(true);
       }
       throw new Error("graph_owner_recovery");
@@ -221,7 +242,7 @@ test("ps distinguishes a live foreground owner from historical ready containers"
     await nativeProjectPs({
       ...opts,
       invoke: async (request) =>
-        request.args[1] === "inspect"
+        request.args[1] === "status"
           ? snapshot(true)
           : { ...owner, runtime_verified: false },
     })
@@ -230,7 +251,7 @@ test("ps distinguishes a live foreground owner from historical ready containers"
     await nativeProjectPs({
       ...opts,
       invoke: async (request) =>
-        request.args[1] === "inspect"
+        request.args[1] === "status"
           ? snapshot(true)
           : { ...owner, run: "foreign" },
     })
@@ -257,7 +278,7 @@ test("ps keeps current service rows and marks the reaped publisher's port down",
     ...opts,
     includeReadiness: true,
     invoke: async (request) =>
-      request.args[1] === "inspect"
+      request.args[1] === "status"
         ? value
         : {
             ok: true,
@@ -507,7 +528,7 @@ test("plain native ps warns when the foreground owner has died despite running c
   await writeFile(
     binary,
     `#!/bin/sh
-if [ "$3" = graph ] && [ "$4" = inspect ]; then
+if [ "$3" = graph ] && { [ "$4" = inspect ] || [ "$4" = status ]; }; then
   cat <<'JSON'
 ${JSON.stringify(snapshot(true))}
 JSON
@@ -666,7 +687,7 @@ test("ps reports a stopped runtime for an owned mapping instead of failing", asy
     items: [],
   });
   // One inspect; no owner-status or other follow-up request.
-  expect(calls).toEqual([`graph inspect --run-id ${run.run} --json`]);
+  expect(calls).toEqual([`graph status --run-id ${run.run} --json`]);
 });
 test("ps still fails on every other native refusal", async () => {
   const opts = await fixture();
@@ -711,7 +732,7 @@ test("logs refuse a stopped runtime with a closed, coded error", async () => {
     })
   ).rejects.toThrow("(engine_protocol)");
 });
-test("ps reports a busy runtime after bounded lease retries instead of failing", async () => {
+test("ps reports a changing snapshot without taking or retrying a lease", async () => {
   const opts = await fixture();
   let calls = 0;
   const started = performance.now();
@@ -720,7 +741,7 @@ test("ps reports a busy runtime after bounded lease retries instead of failing",
       ...opts,
       invoke: () => {
         calls++;
-        return Promise.reject(nativeRefusal("provider_busy"));
+        return Promise.reject(nativeRefusal("graph_status_changed"));
       },
     })
   ).toEqual({
@@ -730,8 +751,8 @@ test("ps reports a busy runtime after bounded lease retries instead of failing",
     phase: null,
     items: [],
   });
-  // Read-only inspection retried lease contention for its bounded budget only.
-  expect(calls).toBeGreaterThan(1);
+  // One status read, then the existing pending-publisher observation.
+  expect(calls).toBe(2);
   expect(performance.now() - started).toBeLessThan(10_000);
 });
 test("ps and logs observe after brief lease contention without failing", async () => {
@@ -741,7 +762,7 @@ test("ps and logs observe after brief lease contention without failing", async (
     if (request.args[1] === "inspect" && busy-- > 0) {
       throw nativeRefusal("provider_busy");
     }
-    if (request.args[1] === "inspect") {
+    if (["inspect", "status"].includes(request.args[1] ?? "")) {
       return snapshot();
     }
     return { container: id, stdout: "out\n", stderr: "", truncated: false };
@@ -787,7 +808,7 @@ if [ -e '${marker}' ]; then
   echo '{"code":"provider_busy","message":"Another candidate operation holds the provider lock."}' >&2
   exit 2
 fi
-if [ "$3" = graph ] && [ "$4" = inspect ]; then
+if [ "$3" = graph ] && { [ "$4" = inspect ] || [ "$4" = status ]; }; then
   cat <<'JSON'
 ${JSON.stringify(exited)}
 JSON

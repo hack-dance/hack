@@ -1795,7 +1795,7 @@ async function readEncryptedFileKey(input: {
   }
   if ((read.mode & 0o077) !== 0) {
     throw new SecretStoreKeyRefusedError(
-      `Refused the encrypted secret key at ${input.keyPath}: other users can read or write it (mode ${(read.mode & 0o777).toString(8)}; values omitted). Run: chmod 600 ${input.keyPath}`
+      `Refused the encrypted secret key at ${input.keyPath}: other users can read or write it (mode ${(read.mode & 0o777).toString(8)}; values omitted). Run: chmod 600 ${quoteShellWord(input.keyPath)}`
     );
   }
   const tracked = await isKeyFileTrackedByGit(input.keyPath);

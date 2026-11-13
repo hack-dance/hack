@@ -980,6 +980,60 @@ test("a project's own secret store is checked with the key it selects", async ()
   expect(JSON.stringify(bad)).not.toContain(STORE_KEY);
 });
 
+test("a refused project key's remedy quotes a hostile path", async () => {
+  // Second-family review: the runtime's "Run: chmod 600 <path>" interpolated a
+  // repo-controlled key path into shell text.
+  const project = await liveProject("app-hostile-key");
+  const storePath = join(project.projectDir, "secrets.enc.json");
+  const keyPath = join(
+    project.repoRoot,
+    "key it's here; printf REVIEW_MARKER; #"
+  );
+  await writeFile(
+    join(project.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-hostile-key",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath },
+        },
+      },
+    })}\n`
+  );
+  await writeFile(
+    join(project.projectDir, "hack.env.json"),
+    `${JSON.stringify({ version: 1, vars: [{ key: "TOKEN", source: "keychain" }] })}\n`
+  );
+  await writeFile(keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(keyPath, 0o600);
+  await (
+    await resolveSecretStore({
+      projectName: "app-hostile-key",
+      projectDir: project.projectDir,
+    })
+  ).set({ key: "TOKEN", value: SENTINEL });
+  await chmod(keyPath, 0o644);
+  await writeRegistry([project]);
+  const report = await check(healthyProbes());
+  const finding = report.projects[0]?.findings.find(
+    (f) => f.id === "project-store"
+  );
+  expect(finding?.status).toBe("blocker");
+  const command = (finding?.action ?? "").split("Run: ")[1] ?? "";
+  // Split it the way a shell does: exactly chmod, 600 and that file.
+  const split = Bun.spawnSync([
+    "sh",
+    "-c",
+    `eval "set -- $1"; printf '%s\\0' "$@"`,
+    "sh",
+    command,
+  ]);
+  const out = split.stdout.toString();
+  expect(out).not.toContain("REVIEW_MARKER\0");
+  expect(out.split("\0").slice(0, -1)).toEqual(["chmod", "600", keyPath]);
+});
+
 test("Docker answering but the container listing failing is incomplete", async () => {
   await writeRegistry([await liveProject("app-a")]);
   const report = await check(

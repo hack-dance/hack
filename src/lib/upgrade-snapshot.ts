@@ -9,6 +9,7 @@ import {
   readdir,
   realpath,
   rename,
+  stat,
   unlink,
 } from "node:fs/promises";
 import {
@@ -805,7 +806,9 @@ async function restoreWorkDirs(input: {
   }
   const parent = dirname(input.path);
   await mkdir(parent, { recursive: true, mode: 0o700 });
-  const [work, target] = await Promise.all([lstat(staging), lstat(parent)]);
+  // The directory the restore traverses: a symlinked parent counts by
+  // where it leads (the target's leaf stays no-follow).
+  const [work, target] = await Promise.all([lstat(staging), stat(parent)]);
   if (work.dev !== target.dev) {
     return {
       kind: "refused",

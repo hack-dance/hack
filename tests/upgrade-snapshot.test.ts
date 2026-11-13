@@ -325,6 +325,42 @@ test("no temporary or displaced file ever appears in the checkout", async () => 
   }
 });
 
+test("a parent directory reached through a symlink from another filesystem counts by where it leads", async () => {
+  // Second-family review: lstat compared the symlink's own filesystem.
+  const shm = "/dev/shm";
+  const shmInfo = await lstat(shm).catch(() => null);
+  if (shmInfo === null || shmInfo.dev === (await lstat(work)).dev) {
+    return; // no second filesystem to test with on this host
+  }
+  const shmRoot = await mkdtemp(join(shm, "hack-upgrade-snapshot-"));
+  try {
+    const paths = await fixture();
+    const linkedDir = join(shmRoot, "linked-project");
+    await symlink(join(work, "project"), linkedDir);
+    const viaLink = join(linkedDir, "hack.config.json");
+    const created = await createUpgradeSnapshot({
+      purpose: "symlinked parent",
+      root: snapshots,
+      targets: [{ path: viaLink, label: "config" }],
+    });
+    if (created.status !== "created") {
+      throw new Error("snapshot refused");
+    }
+    const before = await readFile(paths.config);
+    await writeFile(paths.config, '{"step":true}\n');
+    await recordUpgradeSnapshotAfter({
+      manifestPath: created.snapshot.manifestPath,
+    });
+    const result = await restoreUpgradeSnapshot({
+      manifestPath: created.snapshot.manifestPath,
+    });
+    expect(result.status).toBe("restored");
+    expect(await readFile(paths.config)).toEqual(before);
+  } finally {
+    await rm(shmRoot, { recursive: true, force: true });
+  }
+});
+
 test("a target on another filesystem than the snapshot is refused untouched", async () => {
   const shm = "/dev/shm";
   const shmInfo = await lstat(shm).catch(() => null);

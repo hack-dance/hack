@@ -29,6 +29,7 @@ pub(super) fn require_unpublished(candidate: &Candidate, run: &str) -> Result<()
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     Status,
+    Observe,
     Cleanup,
     Logs,
     Exec,
@@ -80,7 +81,7 @@ impl Request {
                 (Action::Logs, Some(logs), None, None) => !logs.valid(),
                 (Action::Exec, None, Some(exec), None) => !exec.valid(),
                 (Action::Run, None, None, Some(one_off)) => !one_off.valid(),
-                (Action::Status | Action::Cleanup, None, None, None) => false,
+                (Action::Status | Action::Observe | Action::Cleanup, None, None, None) => false,
                 _ => true,
             }
         {
@@ -116,6 +117,10 @@ enum Outcome {
         logs: runtime::ServiceLogs,
     },
     Status {
+        #[serde(deserialize_with = "decode_snapshot")]
+        snapshot: Snapshot,
+    },
+    Observed {
         #[serde(deserialize_with = "decode_snapshot")]
         snapshot: Snapshot,
     },
@@ -201,12 +206,15 @@ impl Reply {
                 }
                 &logs.receipt
             }
-            Outcome::Status { snapshot } => {
-                if action != Action::Status
-                    || snapshot
-                        .observations
-                        .keys()
-                        .ne(snapshot.receipt.readiness.keys())
+            Outcome::Status { snapshot } | Outcome::Observed { snapshot } => {
+                if !matches!(
+                    (&self.result, action),
+                    (Outcome::Status { .. }, Action::Status)
+                        | (Outcome::Observed { .. }, Action::Observe)
+                ) || snapshot
+                    .observations
+                    .keys()
+                    .ne(snapshot.receipt.readiness.keys())
                 {
                     return Err(refused());
                 }
@@ -361,6 +369,9 @@ pub fn serve_with_storage_tool(
         publication.verify()?;
         let result = match request.action {
             Action::Status => inspect(candidate, &run).map(|snapshot| Outcome::Status { snapshot }),
+            Action::Observe => {
+                runtime::status(candidate, &run).map(|snapshot| Outcome::Observed { snapshot })
+            }
             Action::Cleanup => clean().map(|receipt| Outcome::Cleaned { receipt }),
             Action::Exec => {
                 let selected = request.exec.as_ref().ok_or_else(refused)?;

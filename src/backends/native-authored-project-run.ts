@@ -46,6 +46,10 @@ import {
 } from "./native-authored-live-stop.ts";
 import type { NativeAuthoredProcessIncarnation } from "./native-authored-process-incarnation.ts";
 import {
+  NativeAuthoredReservedStartError,
+  NativeAuthoredStopUnavailableError,
+} from "./native-authored-stop-errors.ts";
+import {
   NATIVE_GRAPH_UNRESERVED,
   NativeRuntimeRequestError,
 } from "./native-runtime-client.ts";
@@ -425,7 +429,15 @@ async function storage<T>(
       },
       check
     );
-  } catch {
+  } catch (error) {
+    // Preserve only closed, value-free routing hints across the redaction boundary.
+    // Recovery must still acquire its leases and prove the selected state itself.
+    if (
+      error instanceof NativeAuthoredStopUnavailableError ||
+      error instanceof NativeAuthoredReservedStartError
+    ) {
+      throw error;
+    }
     return refused();
   } finally {
     await Promise.all(held.map(({ file }) => file.close()));
@@ -505,6 +517,7 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
     readonly readStart: () => Promise<NativeAuthoredProjectStartSelection>;
     readonly sourcePath: (run: string) => string;
     readonly retireHooks: (run: string) => Promise<void>;
+    readonly assertPreReadyHosts: (run: string) => Promise<void>;
     readonly readSource: (run: string) => Promise<{
       readonly dev: number;
       readonly ino: number;
@@ -538,6 +551,26 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
       readReady: () => read(store),
       readStart: () => readRecord(store, store.startFile, started),
       sourcePath,
+      assertPreReadyHosts: async (run) => {
+        await retireNativeAuthoredHostProcesses({
+          scope: opts,
+          run,
+          assertFresh: store.check,
+          checkOnly: true,
+        });
+        await retireNativeAuthoredRecoveredHooks(
+          {
+            root: store.root,
+            held: store.held,
+            key: digest(JSON.stringify(opts.branch)),
+            projectRoot: store.identity.projectRoot,
+            branch: store.identity.branch,
+            check: store.check,
+          },
+          run,
+          true
+        );
+      },
       retireHooks: async (run) => {
         await retireNativeAuthoredHostProcesses({
           scope: opts,
@@ -749,6 +782,8 @@ export async function withNativeAuthoredProjectStatus<T>(
   action: (selected: {
     readonly ready: NativeAuthoredProjectRunSelection | null;
     readonly pending: boolean;
+    /** Advisory routing only; actual unreserved retirement takes fresh admission. */
+    readonly unreservedCandidate: boolean;
     readonly assertFresh: () => Promise<void>;
   }) => Promise<T>
 ): Promise<T> {
@@ -806,9 +841,30 @@ export async function withNativeAuthoredProjectStatus<T>(
       await assertScope();
     };
     await assertFresh();
+    let unreservedCandidate = !ready && start !== null;
+    if (unreservedCandidate && store) {
+      for (const path of [
+        store.admissionPath,
+        liveStopPath(store),
+        join(
+          store.root.path,
+          `${digest(JSON.stringify(scope.branch))}.hooks.json`
+        ),
+      ]) {
+        try {
+          await lstat(path);
+          unreservedCandidate = false;
+        } catch (error) {
+          if (!hasCode(error, "ENOENT")) {
+            throw error;
+          }
+        }
+      }
+    }
     const result = await action({
       ready,
       pending: !ready && start !== null,
+      unreservedCandidate,
       assertFresh,
     });
     await assertFresh();
@@ -1247,6 +1303,17 @@ async function assertStopFiles(
   }
 }
 
+async function requireStopPath(path: string): Promise<void> {
+  try {
+    await lstat(path);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) {
+      throw new NativeAuthoredStopUnavailableError();
+    }
+    throw error;
+  }
+}
+
 export async function stopNativeAuthoredProject(input: {
   readonly scope: NativeAuthoredProjectRunScope;
   readonly timeoutMs: number;
@@ -1284,6 +1351,9 @@ export async function stopNativeAuthoredProject(input: {
       }
     : undefined;
   await withNativeAuthoredProjectRecoveryStorage(opts.scope, async (store) => {
+    for (const path of [store.ready, store.start]) {
+      await requireStopPath(path);
+    }
     const ready = await store.readReady();
     const start = await store.readStart();
     const run = ready.record.receipt.review.provenance.run;
@@ -1331,6 +1401,7 @@ export async function stopNativeAuthoredProject(input: {
       return;
     }
     const path = join(store.root.path, `${run}.hook-stop.json`);
+    await requireStopPath(path);
     const current = await readPrivate(path, 8192);
     const value: unknown = JSON.parse(current.text);
     if (

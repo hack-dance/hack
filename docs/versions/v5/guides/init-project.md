@@ -11,11 +11,16 @@ cd your-project
 hack init
 ```
 
-`hack init` detects an existing `docker-compose.yml`, asks about services and
-domains, and writes `.hack/`: the Compose file Hack manages, `hack.config.json`,
+`hack init` discovers app packages, asks about services and domains, and writes
+`.hack/`: the Compose file Hack manages, `hack.config.json`,
 the default env YAML and a `.gitignore` for machine-local state. Review the files
 and commit them. To hand setup to an agent instead, run
 `hack init --with claude` or `hack init --with codex`.
+
+It does not automatically adopt an existing Compose file. Use `hack init --manual`
+for a scaffold, then copy the needed service definitions into
+`.hack/docker-compose.yml`. Review relative build and mount paths, env delivery
+and Hack routing labels before starting; keep the old file until the app works.
 
 For an existing project, `hack agent onboard` prints an onboarding prompt that
 describes the services, env and routing a Hack setup should cover. See

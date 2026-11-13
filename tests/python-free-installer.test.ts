@@ -19,7 +19,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { extractArchive } from "../scripts/installer/bundle.ts";
-import { Channel, launcherBytes } from "../scripts/installer/channel.ts";
+import {
+  Channel,
+  launcherBytes,
+  rollbackUninstall,
+} from "../scripts/installer/channel.ts";
 import { download, secureUrl } from "../scripts/installer/download.ts";
 import {
   archiveEntries,
@@ -1051,5 +1055,119 @@ fixtureTest(
         uid
       )
     ).toBe(false);
+  }
+);
+
+fixtureTest(
+  "uninstall previews read-only, retains complete homes on apply and rolls back without replacing an occupied root",
+  async () => {
+    const f = await installed();
+    const home = join(f.channel.root, "versions/5.0.0-next.1/native-home");
+    const sentinel = "synthetic-retained-home-value";
+    writeFileSync(join(home, "user-state"), sentinel);
+    const before = readdirSync(f.root).sort();
+    const preview = f.channel.uninstall();
+    expect(preview.applied).toBe(false);
+    expect(readdirSync(f.root).sort()).toEqual(before);
+    expect(existsSync(preview.manifest)).toBe(false);
+    const result = f.channel.uninstall(true);
+    expect(result.applied).toBe(true);
+    expect(existsSync(f.channel.root)).toBe(false);
+    expect(
+      readFileSync(
+        join(result.to, "versions/5.0.0-next.1/native-home/user-state"),
+        "utf8"
+      )
+    ).toBe(sentinel);
+    expect(readFileSync(result.manifest, "utf8").includes(sentinel)).toBe(
+      false
+    );
+    mkdirSync(f.channel.root, { mode: 0o700 });
+    expect(() =>
+      rollbackUninstall(f.channel.root, result.manifest, f.source)
+    ).toThrow("occupied");
+    rmSync(f.channel.root, { recursive: true });
+    rollbackUninstall(f.channel.root, result.manifest, f.source);
+    f.channel.validate();
+    expect(readFileSync(join(home, "user-state"), "utf8")).toBe(sentinel);
+  }
+);
+fixtureTest(
+  "uninstall refuses a busy candidate without moving it or writing a manifest",
+  async () => {
+    let busy = false;
+    const f = fixture({
+      quiescence: () => {
+        if (busy) {
+          throw new Error("fixture active candidate");
+        }
+      },
+    });
+    const input = fixtureArchive(f.root);
+    await f.channel.install("5.0.0-next.1", input.archive, input.checksum);
+    busy = true;
+    const before = readdirSync(f.root).sort();
+    expect(() => f.channel.uninstall(true)).toThrow("active candidate");
+    expect(readdirSync(f.root).sort()).toEqual(before);
+    f.channel.validate();
+  }
+);
+fixtureTest(
+  "fresh install reclaims only recognized private abandoned stages",
+  async () => {
+    const f = fixture();
+    const stage = join(f.channel.root, `.stage-${"a".repeat(32)}`);
+    mkdirSync(stage, { mode: 0o700 });
+    writeFileSync(join(stage, "partial-download"), "partial bytes");
+    const input = fixtureArchive(f.root);
+    await f.channel.install("5.0.0-next.1", input.archive, input.checksum);
+    expect(existsSync(stage)).toBe(false);
+    f.channel.validate();
+  }
+);
+fixtureTest(
+  "unsafe abandoned stage refuses without deleting its contents",
+  async () => {
+    const f = fixture();
+    const stage = join(f.channel.root, `.stage-${"b".repeat(32)}`);
+    mkdirSync(stage, { mode: 0o700 });
+    chmodSync(stage, 0o755);
+    writeFileSync(join(stage, "keep"), "unrecognized ownership boundary");
+    const input = fixtureArchive(f.root);
+    await expect(
+      f.channel.install("5.0.0-next.1", input.archive, input.checksum)
+    ).rejects.toThrow("mode");
+    expect(readFileSync(join(stage, "keep"), "utf8")).toBe(
+      "unrecognized ownership boundary"
+    );
+  }
+);
+
+fixtureTest(
+  "failed uninstall publication removes only its orphan manifest and preserves the channel",
+  async () => {
+    let outer = "";
+    const f = fixture({
+      checkpoint: (phase) => {
+        if (phase !== "uninstall-manifest") {
+          return;
+        }
+        const manifest = readdirSync(outer).find(
+          (name) => name.endsWith(".json") && name.includes(".uninstalled-")
+        );
+        if (!manifest) {
+          throw new Error("Missing fixture uninstall manifest");
+        }
+        mkdirSync(join(outer, manifest.slice(0, -5)), { mode: 0o700 });
+      },
+    });
+    outer = f.root;
+    expect(() => f.channel.uninstall(true)).toThrow("destination exists");
+    expect(
+      readdirSync(f.root).some(
+        (name) => name.endsWith(".json") && name.includes(".uninstalled-")
+      )
+    ).toBe(false);
+    f.channel.validate();
   }
 );

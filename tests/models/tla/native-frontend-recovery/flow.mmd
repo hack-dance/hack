@@ -1,0 +1,15 @@
+flowchart TD
+    Down["plain down / down --recover"] --> Live{"Live stop reachable?"}
+    Live -->|yes| Stop["Owner-mediated stop"]
+    Live -->|no request sent| Ready{"Saved frontend Ready?"}
+    Ready -->|yes| Proof["Existing Ready recovery proof"]
+    Ready -->|no| Settled{"Exact settled start?"}
+    Settled -->|no| Refuse["Refuse; retain evidence"]
+    Settled -->|yes| Admission["Dead selected or fresh held admission"]
+    Admission --> Intent["Commit v3 intent"]
+    Intent --> Cleanup["Proven native cleanup"]
+    Proof --> Cleanup
+    Cleanup --> Removed["Removed and null observations"]
+    Removed --> Retire["Retire exact frontend files"]
+    Retire --> Release["Record release; retire admission"]
+    Release --> Complete["Confirm absence; complete"]

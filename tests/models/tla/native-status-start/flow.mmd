@@ -1,0 +1,12 @@
+flowchart TD
+    Ps["hack ps"] --> Observer["Read-only Observer"]
+    Observer --> Fence{"Journal unchanged?"}
+    Fence -->|yes| Status["Service state / health"]
+    Fence -->|no| Busy["runtime_busy: retry read"]
+    Up["hack up"] --> Lease["Exclusive provider lease"]
+    Lease --> Effects["Startup effect stages"]
+    Effects --> Ready["Verified readiness"]
+    Effects -->|failure| Down["plain hack down"]
+    Down --> Proof["Existing exact-owner proofs"]
+    Proof -->|proved| Cleanup["Owned cleanup"]
+    Proof -->|uncertain| Refuse["Named refusal"]

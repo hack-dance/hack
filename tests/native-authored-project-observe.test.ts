@@ -128,7 +128,7 @@ async function fixture(
     run: provenance.run,
     review: review.review_id,
     result: {
-      outcome: "status",
+      outcome: "observed",
       snapshot: {
         receipt,
         observations: { web: { state: "running", health: "healthy" } },
@@ -139,7 +139,7 @@ async function fixture(
   const attempts = join(nativeHome, "status-attempts");
   await Bun.write(
     runtime.binary,
-    `#!${process.execPath}\nimport { appendFileSync } from 'node:fs';\nconst expected=${JSON.stringify(["--candidate-root", nativeHome, "graph", "native", "control", "--run-id", provenance.run, "--action", "status", "--json"])};if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(expected))process.exit(97);appendFileSync(${JSON.stringify(attempts)},'status\\n');${nativeCode === undefined ? `console.log(${JSON.stringify(JSON.stringify(reply))});` : `process.stderr.write(${JSON.stringify(JSON.stringify({ code: nativeCode, ...(nativeCode === "native_graph_foreground" ? { cause_code: "runtime_not_running" } : {}) }))});process.exit(1);`}\n`
+    `#!${process.execPath}\nimport { appendFileSync } from 'node:fs';\nconst expected=${JSON.stringify(["--candidate-root", nativeHome, "graph", "native", "control", "--run-id", provenance.run, "--action", "observe", "--json"])};if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(expected))process.exit(97);appendFileSync(${JSON.stringify(attempts)},'status\\n');${nativeCode === undefined ? `console.log(${JSON.stringify(JSON.stringify(reply))});` : `process.stderr.write(${JSON.stringify(JSON.stringify({ code: nativeCode, ...(nativeCode === "native_graph_foreground" ? { cause_code: "runtime_not_running" } : {}) }))});process.exit(1);`}\n`
   );
   await chmod(runtime.binary, 0o700);
   const mapping = join(
@@ -150,6 +150,21 @@ async function fixture(
   );
   return { scope, runtime, receipt, reply, mapping, attempts };
 }
+
+test.each([
+  undefined,
+  "runtime_not_running",
+  "native_graph_foreground",
+])("authored observation crosses the real bounded runtime transport (%s)", (nativeCode) =>
+  owned(async () => {
+    const f = await fixture(true, null, nativeCode);
+    const result = await nativeAuthoredProjectPs(f);
+    expect(result.status).toBe(
+      nativeCode === undefined ? "observed" : "runtime_not_running"
+    );
+    expect(result.items).toHaveLength(nativeCode === undefined ? 1 : 0);
+    expect(await Bun.file(f.attempts).text()).toBe("status\n");
+  }));
 
 test("clean absence and retained start are distinct, readonly and invoke nothing", () =>
   owned(async () => {
@@ -223,7 +238,7 @@ test.each([
           "--run-id",
           f.receipt.review.provenance.run,
           "--action",
-          "status",
+          "observe",
           "--json",
         ]);
         expect(request.boundNativeStatusDrain).toBe(true);
@@ -231,7 +246,7 @@ test.each([
         return {
           ...f.reply,
           result: {
-            outcome: "status",
+            outcome: "observed",
             snapshot: {
               receipt: f.receipt,
               observations: { web: observation },
@@ -266,7 +281,7 @@ test.each([
       owner: {
         ...f.reply,
         result: {
-          outcome: "status",
+          outcome: "observed",
           snapshot: {
             ...snapshot,
             receipt: { ...f.receipt, owner: "4".repeat(32) },
@@ -276,7 +291,7 @@ test.each([
       member: {
         ...f.reply,
         result: {
-          outcome: "status",
+          outcome: "observed",
           snapshot: {
             ...snapshot,
             observations: { foreign: { state: "dead" } },
@@ -286,21 +301,21 @@ test.each([
       source: {
         ...f.reply,
         result: {
-          outcome: "status",
+          outcome: "observed",
           snapshot: { ...snapshot, receipt: { ...f.receipt, source: {} } },
         },
       },
       storage: {
         ...f.reply,
         result: {
-          outcome: "status",
+          outcome: "observed",
           snapshot: { ...snapshot, receipt: { ...f.receipt, data: {} } },
         },
       },
       malformed: {
         ...f.reply,
         result: {
-          outcome: "status",
+          outcome: "observed",
           snapshot: {
             ...snapshot,
             observations: {
@@ -532,6 +547,32 @@ test("a stopped runtime is a status for a ready generation; other refusals still
         },
       })
     ).rejects.toThrow();
+  }));
+
+test.each([
+  "graph_status_changed",
+  "native_graph_foreground",
+])("journal transition is a presentation status (%s)", (nativeCode) =>
+  owned(async () => {
+    const f = await fixture();
+    const status = await nativeAuthoredProjectPs({
+      ...f,
+      invoke: async ({ args }) => {
+        expect(args).toContain("observe");
+        expect(args).not.toContain("status");
+        throw new NativeRuntimeRequestError({
+          message: "changed",
+          nativeCode,
+          nativeCauseCode:
+            nativeCode === "native_graph_foreground"
+              ? "graph_status_changed"
+              : undefined,
+        });
+      },
+    });
+    expect(status.status).toBe("runtime_busy");
+    expect(status.phase).toBeNull();
+    expect(status.items).toEqual([]);
   }));
 
 test.each(

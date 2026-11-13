@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Channel } from "./installer/channel.ts";
+import { Channel, rollbackUninstall } from "./installer/channel.ts";
 import {
   candidateVersion,
   compareCandidateVersions,
@@ -20,13 +20,19 @@ export async function main(inputArgv: string[]) {
   }
   if (argv.length === 1 && ["--help", "-h"].includes(argv[0] ?? "")) {
     console.log(
-      "hack-next --manager install|upgrade --version 5.MINOR.PATCH-next.N [--archive /path --sha256 digest]\nhack-next --manager status|stable|rollback [--version VERSION]|upgrade-manager\nStandalone manager: [--root /canonical/path] <command>; hack-next runs the selected CLI."
+      "hack-next --manager install|upgrade --version 5.MINOR.PATCH-next.N [--archive /path --sha256 digest]\nhack-next --manager status|stable|rollback [--version VERSION]|upgrade-manager\nhack-next --manager uninstall [--apply | --rollback-manifest /path]\nStandalone manager: [--root /canonical/path] <command>; hack-next runs the selected CLI."
     );
     return 0;
   }
   requireThat(
     process.platform === "darwin" && process.arch === "arm64",
     "Native prereleases support Apple Silicon macOS only."
+  );
+  process.umask(0o077);
+  // Also applies to uninstall rollback, whose original root no longer exists.
+  requireThat(
+    import.meta.path.startsWith("/$bunfs/"),
+    "Build the standalone manager before installing; source is not an installable artifact."
   );
   const command = argv[0];
   requireThat(
@@ -39,12 +45,30 @@ export async function main(inputArgv: string[]) {
         "status",
         "upgrade-manager",
         "run",
+        "uninstall",
       ].includes(command),
     "Expected install, upgrade, rollback, stable, status, upgrade-manager or run. Use --help."
   );
   const options: Record<string, string> = Object.create(null);
   const rest = argv.slice(1);
-  if (command !== "run") {
+  if (command === "uninstall") {
+    requireThat(
+      rest.length === 0 ||
+        (rest.length === 1 && rest[0] === "--apply") ||
+        (rest.length === 2 &&
+          rest[0] === "--rollback-manifest" &&
+          Boolean(rest[1])),
+      "Use uninstall, uninstall --apply or uninstall --rollback-manifest /path."
+    );
+    if (rest[0] === "--rollback-manifest") {
+      console.log(
+        JSON.stringify(
+          rollbackUninstall(root, rest[1] as string, process.execPath)
+        )
+      );
+      return 0;
+    }
+  } else if (command !== "run") {
     const allowed =
       command === "install" || command === "upgrade"
         ? ["--version", "--archive", "--sha256"]
@@ -73,12 +97,6 @@ export async function main(inputArgv: string[]) {
       "--archive and --sha256 must be supplied together."
     );
   }
-  process.umask(0o077);
-  // Source invocation is development-only; releases always copy the compiled executable.
-  requireThat(
-    import.meta.path.startsWith("/$bunfs/"),
-    "Build the standalone manager before installing; source is not an installable artifact."
-  );
   const channel = new Channel(root, process.execPath);
   if (command === "install" || command === "upgrade") {
     channel.initialize();
@@ -88,6 +106,10 @@ export async function main(inputArgv: string[]) {
     command === "upgrade-manager"
   );
   try {
+    if (command === "uninstall") {
+      console.log(JSON.stringify(channel.uninstall(rest[0] === "--apply")));
+      return 0;
+    }
     if (command === "install" || command === "upgrade") {
       await channel.install(
         version as string,

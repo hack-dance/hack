@@ -639,8 +639,8 @@ function failedStartupFixture(
     };
   };
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] === "inspect") {
-      events.push("graph inspect");
+    if (request.args[1] === "inspect" || request.args[1] === "status") {
+      events.push(`graph ${request.args[1]}`);
       return {
         journal_incomplete: receipt.journalIncomplete === true,
         receipt: {

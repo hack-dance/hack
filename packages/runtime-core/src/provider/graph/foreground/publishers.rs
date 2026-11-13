@@ -345,6 +345,24 @@ impl Publishers {
         }
         Ok(())
     }
+    /// Status sees an exit without consuming the waitable child or committing
+    /// its exit proof. The owner's child-event path retains responsibility for reaping.
+    pub(super) fn observe_readonly(
+        &self,
+        candidate: &Candidate,
+    ) -> Result<Option<&'static str>, CandidateError> {
+        for owned in &self.children {
+            if owned.exited.is_some() || owned.exit_proof.is_some() {
+                return Ok(Some("publisher_exited"));
+            }
+            if owned.exit_pending || publication::child_exit_pending(&owned.child)? {
+                return Ok(Some("publisher_exit_pending"));
+            }
+            published(candidate, owned)?;
+        }
+        Ok(None)
+    }
+
     pub(super) fn observe_live(&mut self, candidate: &Candidate) -> Result<bool, CandidateError> {
         let exited = self.reap_exited(candidate)?;
         for owned in &mut self.children {
@@ -689,6 +707,45 @@ fn matches_publication(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_distinguishes_waitable_and_reaped_publishers_without_reaping() {
+        let fixture = graph::tests::Fixture::new();
+        let candidate = Candidate::discover(&fixture.0).unwrap();
+        let child = Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap();
+        let mut publishers = Publishers::default();
+        publishers.children.push(Owned {
+            child,
+            run: "a".repeat(32),
+            reservation: "b".repeat(32),
+            service: "web".into(),
+            hostnames: Vec::new(),
+            port: None,
+            target: None,
+            exited: None,
+            exit_proof: None,
+            exit_pending: false,
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !publication::child_exit_pending(&publishers.children[0].child).unwrap() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _lease =
+            crate::provider::state::Lock::acquire(&candidate.state_root.join("run/smolvm"))
+                .unwrap();
+        assert_eq!(
+            publishers.observe_readonly(&candidate).unwrap(),
+            Some("publisher_exit_pending")
+        );
+        assert!(publication::child_exit_pending(&publishers.children[0].child).unwrap());
+        let status = publishers.children[0].child.wait().unwrap();
+        publishers.children[0].exited = Some(status);
+        assert_eq!(
+            publishers.observe_readonly(&candidate).unwrap(),
+            Some("publisher_exited")
+        );
+    }
+
     use super::*;
     #[test]
     fn publication_must_match_every_owned_identity_field() {

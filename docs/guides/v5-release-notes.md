@@ -26,6 +26,8 @@ its original behavior.
 | **Env listings hide values by default, including migrated plaintext.** Ordinary `env` / `env list` text and JSON output are metadata. JSON omits `value` and reports `has_value`. | Use `has_value` for availability checks. For a value a script actually needs, call `hack env get KEY` with the same `--env` and `--service`; that command prints plaintext. Bulk `--show-values` requires interactive stdin and stdout; `--show-secrets` remains an alias. |
 | **Migration cleanup preserves live keys (HACK-2172).** A legacy store's `keyPath` can no longer make the current project/shared key a cleanup target. Current config and YAML inputs are protected too, including filesystem aliases. | Keep key and env backups before migration. On next.16 or an earlier prerelease, do not run `doctor --migrate-env-config` without a private readable copy of `.hack.secret.key`. The fix does not recover a key already removed. |
 | **Doctor fails when an env layer cannot be used by the runtime.** Unreadable, invalid or undecryptable layers no longer get an apparent all-clear. | Run `hack doctor` after upgrading. Fix the reported layer or recover the original key before starting; keep the encrypted file rather than generating a replacement key over it. |
+| **Doctor reports secrets hygiene (#764).** The report covers loose modes, staging leftovers and stale terminal payloads, naming files rather than values. | Review `hack doctor`, then use `hack doctor --fix` to tighten eligible files, add missing project ignore entries and remove stale Hack artifacts. Removal excludes live inputs and retired stores; it rechecks configuration before each removal. |
+| **An old global secret store with a lost key no longer fails Doctor in unrelated projects (HACK-2177).** It is an error where the runtime reads it and a warning elsewhere. | Restore the original key, or deliberately retire the store with `hack secrets retire-store --path <project>`. Retirement preserves the encrypted file and prints how to put it back; see the confirmation requirements below. |
 | **Doctor checks the Compose proxy's loopback ports.** A reachable container address no longer hides a broken published loopback path. | Read the `proxy ports` warning, check competing listeners and DNS/bind settings, then retry. HTTP success on port 80 is not HTTPS success on 443; the check applies no automatic repair. |
 | **Native route readiness can be inferred.** A complete standard Caddy route with no authored healthcheck gets a reviewed HTTP probe and 240 seconds of initial grace. A complete HTTP 200–499 response establishes endpoint readiness, not application correctness. | Review the route port and startup logs. Explicit healthchecks are not replaced, and inferred readiness does not satisfy `depends_on: condition: service_healthy`. The grace does not extend the whole graph's deadline. |
 | **Native start waits for bridge sockets after a stopped pool resumes.** An immediate start no longer fails merely because provider readiness preceded the bridge listener. | Use normal native `up`; startup still requires a successful bridge connection within its deadline. Do not replace readiness checks with a fixed sleep. |
@@ -77,11 +79,25 @@ proof that nothing changed. See [cleanup and reconciliation](../env.md#legacy-re
 [#768](https://github.com/hack-dance/hack/pull/768) and
 [#783](https://github.com/hack-dance/hack/pull/783).
 
-An old global secret store whose key is lost still needs its original key for
-recovery. Keep the encrypted store and key backups; do not delete it or provision
-a new key just to clear Doctor. A separate retire path is being added in
-[#779](https://github.com/hack-dance/hack/pull/779); no retire command is promised
-by these notes until it merges.
+### An old global store whose key is lost
+
+Merged [#779](https://github.com/hack-dance/hack/pull/779), intended for next.17,
+makes a missing or wrong store key a Doctor error only in projects whose runtime
+reads that store. Other projects receive a warning. The finding names registered
+projects that read it; without the key, entries cannot be counted or read.
+
+Choose one: restore the original key, or, if it is gone for good, run
+`hack secrets retire-store --path <project>` for a project that selects the store.
+Retirement moves the encrypted file into a timestamped directory beside it,
+deletes nothing, leaves the key file alone and prints the command to put it back.
+It does not recover the values; a new key cannot decrypt them.
+
+The command refuses a store that an available key opens. It also needs
+`--allow-unchecked`: another shell may set `HACK_SECRETS_FILE_KEY` to the key,
+and Hack cannot inspect that shell. Pass the flag only after confirming that no
+shell for a project selecting the store has that key; it also acknowledges
+registered projects Hack could not check. Without a terminal, add `--yes` for
+the move confirmation. See [store recovery and retirement](../env.md#compatibility-notes).
 
 ## Highlights
 

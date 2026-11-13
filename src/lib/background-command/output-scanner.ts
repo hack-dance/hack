@@ -108,39 +108,24 @@ export function pendingPrefixLength(
   bytes: Uint8Array,
   secrets: readonly Uint8Array[]
 ): number {
-  let longest = 0;
-  for (const secret of secrets) {
-    longest = Math.max(longest, longestSuffixPrefix(bytes, secret));
-  }
-  return longest;
-}
-
-/**
- * Length of the longest proper prefix of `secret` that `bytes` ends with, in
- * linear time (KMP prefix function over the secret, then one pass over at
- * most `secret.length - 1` trailing bytes). A naive suffix-by-suffix
- * comparison is quadratic and, with a long value, could stall a capture poll
- * (and so cancel and timeout handling) for seconds.
- */
-function longestSuffixPrefix(bytes: Uint8Array, secret: Uint8Array): number {
-  if (secret.length < 2 || bytes.length === 0) {
+  const matcher = matcherFor(secrets);
+  if (matcher.longest < 2 || bytes.length === 0) {
     return 0;
   }
-  const failure = prefixFunction(secret);
-  const tail = bytes.subarray(Math.max(0, bytes.length - (secret.length - 1)));
-  let matched = 0;
-  for (const byte of tail) {
-    while (matched > 0 && secret[matched] !== byte) {
-      matched = failure[matched - 1] ?? 0;
-    }
-    if (secret[matched] === byte) {
-      matched += 1;
-    }
-    if (matched === secret.length) {
-      matched = failure[matched - 1] ?? 0;
-    }
+  // A pending prefix is shorter than the longest value, so the state after
+  // the last `longest - 1` bytes (read from the root) already holds it.
+  let state = 0;
+  for (const byte of bytes.subarray(
+    Math.max(0, bytes.length - (matcher.longest - 1))
+  )) {
+    state = step(matcher, state, byte);
   }
-  return matched;
+  // The state is the longest suffix that is a prefix of some value; it is
+  // pending only if some value continues past it.
+  while (state !== 0 && matcher.firstChild[state] === -1) {
+    state = matcher.fail[state] as number;
+  }
+  return matcher.depth[state] as number;
 }
 
 function prefixFunction(secret: Uint8Array): Uint32Array {
@@ -212,22 +197,13 @@ export function scanOutput(input: ScanInput): ScanResult {
     0,
     Math.min(working.length, Math.max(0, input.captureRemaining) + longest)
   );
-  // Each value's (already merged) intervals are merged into one running
-  // sorted list, so memory stays at the number of separate runs in the union
-  // rather than values x runs.
-  let union: { start: number; length: number }[] = [];
-  for (const secret of secrets) {
-    const from = searchStart({
-      scannedPrefix: input.scannedPrefix ?? 0,
-      scannedLength: scanned.length,
-      valueLength: secret.length,
-    });
-    const found = findMatches(scanned.subarray(from), secret).map((match) => ({
-      start: match.start + from,
-      length: match.length,
-    }));
-    union = mergeSortedIntervals(union, found);
-  }
+  // One pass over the bytes finds every value (Aho-Corasick), so the work is
+  // the byte count, not bytes x values.
+  const union = findAllMatches({
+    matcher: matcherFor(secrets),
+    bytes: scanned,
+    scannedPrefix: input.scannedPrefix ?? 0,
+  });
   const redactions = union.map((match) => ({
     offset: input.offset + match.start,
     length: match.length,
@@ -273,60 +249,19 @@ export function searchStart(opts: {
 }
 
 /**
- * Merge two lists of sorted, non-overlapping intervals into one (linear):
- * overlapping or adjacent intervals coalesce.
- */
-function mergeSortedIntervals(
-  left: readonly { readonly start: number; readonly length: number }[],
-  right: readonly { readonly start: number; readonly length: number }[]
-): { start: number; length: number }[] {
-  const merged: { start: number; length: number }[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < left.length || j < right.length) {
-    const a = left[i];
-    const b = right[j];
-    const next =
-      b === undefined || (a !== undefined && a.start <= b.start) ? a : b;
-    if (next === a) {
-      i += 1;
-    } else {
-      j += 1;
-    }
-    if (!next) {
-      break;
-    }
-    const last = merged.at(-1);
-    if (last && next.start <= last.start + last.length) {
-      last.length =
-        Math.max(last.start + last.length, next.start + next.length) -
-        last.start;
-    } else {
-      merged.push({ start: next.start, length: next.length });
-    }
-  }
-  return merged;
-}
-
-/**
- * Most distinct redaction values a full-capture command may have: matching
- * costs bytes x values, so an unbounded count could stall the supervisor.
+ * Most distinct redaction values a full-capture command may have. Matching
+ * is one pass over the output whatever the count; the limit bounds the
+ * matcher's size and build time.
  */
 export const REDACTION_VALUES_LIMIT = 1024;
 
-/** Target byte steps for one scan (slice length x values): about 0.1 s. */
-const SCAN_WORK_STEPS = 16 * 1024 * 1024;
-
 /**
- * Slice length for one scan: smaller as the number of values grows, so one
- * scan's synchronous work (and the delay it adds to cancel and timeout
- * handling) stays bounded. Between 16 KiB and 256 KiB.
+ * Slice length for one scan. Matching is one pass whatever the number of
+ * values, so one slice's work is bounded by its length alone (a few
+ * milliseconds for 256 KiB); the count is accepted for compatibility.
  */
-export function scanSliceBytes(secretCount: number): number {
-  return Math.min(
-    256 * 1024,
-    Math.max(16 * 1024, Math.floor(SCAN_WORK_STEPS / Math.max(1, secretCount)))
-  );
+export function scanSliceBytes(_secretCount: number): number {
+  return 256 * 1024;
 }
 
 /** Encode redaction values; values shorter than `minLength` bytes are skipped. */
@@ -340,4 +275,205 @@ export function encodeSecrets(opts: {
     .map((value) => encoder.encode(value))
     .filter((bytes) => bytes.length >= opts.minLength)
     .sort((left, right) => right.length - left.length);
+}
+
+// --- Multi-value matching (Aho-Corasick) --------------------------------
+
+/**
+ * A trie of the values with failure links, in typed arrays: per node its
+ * byte, first child, next sibling, failure link, depth and the length of the
+ * longest value that ends at it or at a node on its failure chain. The root's
+ * children are also kept in a dense table, since most bytes return there.
+ * Memory is about 22 bytes per byte of value text.
+ */
+type Matcher = {
+  readonly label: Uint8Array;
+  readonly firstChild: Int32Array;
+  readonly nextSibling: Int32Array;
+  readonly fail: Int32Array;
+  readonly depth: Int32Array;
+  readonly best: Int32Array;
+  readonly rootChild: Int32Array;
+  readonly longest: number;
+};
+
+const matchers = new WeakMap<readonly Uint8Array[], Matcher>();
+
+/** The matcher for a set of values, built once per array (the supervisor keeps one). */
+function matcherFor(secrets: readonly Uint8Array[]): Matcher {
+  const cached = matchers.get(secrets);
+  if (cached) {
+    return cached;
+  }
+  const matcher = buildMatcher(secrets.filter((secret) => secret.length > 0));
+  matchers.set(secrets, matcher);
+  return matcher;
+}
+
+function buildMatcher(secrets: readonly Uint8Array[]): Matcher {
+  const capacity = 1 + secrets.reduce((sum, secret) => sum + secret.length, 0);
+  const label = new Uint8Array(capacity);
+  const firstChild = new Int32Array(capacity).fill(-1);
+  const nextSibling = new Int32Array(capacity).fill(-1);
+  const fail = new Int32Array(capacity);
+  const depth = new Int32Array(capacity);
+  const best = new Int32Array(capacity);
+  const rootChild = new Int32Array(256).fill(-1);
+  let nodes = 1;
+  const child = (node: number, byte: number): number => {
+    if (node === 0) {
+      return rootChild[byte] as number;
+    }
+    for (
+      let c = firstChild[node] as number;
+      c !== -1;
+      c = nextSibling[c] as number
+    ) {
+      if (label[c] === byte) {
+        return c;
+      }
+    }
+    return -1;
+  };
+  let longest = 0;
+  for (const secret of secrets) {
+    longest = Math.max(longest, secret.length);
+    let node = 0;
+    for (const byte of secret) {
+      let next = child(node, byte);
+      if (next === -1) {
+        next = nodes;
+        nodes += 1;
+        label[next] = byte;
+        depth[next] = (depth[node] as number) + 1;
+        nextSibling[next] = firstChild[node] as number;
+        firstChild[node] = next;
+        if (node === 0) {
+          rootChild[byte] = next;
+        }
+      }
+      node = next;
+    }
+    best[node] = Math.max(best[node] as number, secret.length);
+  }
+  linkFailures({ label, firstChild, nextSibling, fail, best, nodes, child });
+  return {
+    label,
+    firstChild,
+    nextSibling,
+    fail,
+    depth,
+    best,
+    rootChild,
+    longest,
+  };
+}
+
+/** Breadth-first failure links; `best` inherits along them. */
+function linkFailures(opts: {
+  readonly label: Uint8Array;
+  readonly firstChild: Int32Array;
+  readonly nextSibling: Int32Array;
+  readonly fail: Int32Array;
+  readonly best: Int32Array;
+  readonly nodes: number;
+  readonly child: (node: number, byte: number) => number;
+}): void {
+  const { label, firstChild, nextSibling, fail, best, child } = opts;
+  const queue = new Int32Array(opts.nodes);
+  let head = 0;
+  let tail = 0;
+  for (
+    let c = firstChild[0] as number;
+    c !== -1;
+    c = nextSibling[c] as number
+  ) {
+    fail[c] = 0;
+    queue[tail] = c;
+    tail += 1;
+  }
+  while (head < tail) {
+    const node = queue[head] as number;
+    head += 1;
+    for (
+      let c = firstChild[node] as number;
+      c !== -1;
+      c = nextSibling[c] as number
+    ) {
+      const byte = label[c] as number;
+      let f = fail[node] as number;
+      let target = child(f, byte);
+      while (target === -1 && f !== 0) {
+        f = fail[f] as number;
+        target = child(f, byte);
+      }
+      fail[c] = target === -1 || target === c ? 0 : target;
+      best[c] = Math.max(best[c] as number, best[fail[c] as number] as number);
+      queue[tail] = c;
+      tail += 1;
+    }
+  }
+}
+
+function step(matcher: Matcher, from: number, byte: number): number {
+  let state = from;
+  for (;;) {
+    if (state === 0) {
+      const next = matcher.rootChild[byte] as number;
+      return next === -1 ? 0 : next;
+    }
+    for (
+      let c = matcher.firstChild[state] as number;
+      c !== -1;
+      c = matcher.nextSibling[c] as number
+    ) {
+      if (matcher.label[c] === byte) {
+        return c;
+      }
+    }
+    state = matcher.fail[state] as number;
+  }
+}
+
+/**
+ * Every occurrence of every value in `bytes`, overlapping ones included, as
+ * merged sorted intervals (overlapping or adjacent occurrences coalesce).
+ * Matches wholly inside the first `scannedPrefix` bytes were found by an
+ * earlier scan and are skipped; the search starts where a match could first
+ * reach a new byte.
+ */
+function findAllMatches(opts: {
+  readonly matcher: Matcher;
+  readonly bytes: Uint8Array;
+  readonly scannedPrefix: number;
+}): { start: number; length: number }[] {
+  const { matcher, bytes } = opts;
+  const merged: { start: number; length: number }[] = [];
+  if (matcher.longest === 0) {
+    return merged;
+  }
+  const prefix = Math.min(bytes.length, Math.max(0, opts.scannedPrefix));
+  const from = Math.max(0, prefix - (matcher.longest - 1));
+  let state = 0;
+  for (let index = from; index < bytes.length; index += 1) {
+    state = step(matcher, state, bytes[index] as number);
+    const length = matcher.best[state] as number;
+    if (length === 0 || index < prefix) {
+      continue;
+    }
+    let start = index + 1 - length;
+    const end = index + 1;
+    // Intervals arrive in end order; a longer one can start before the
+    // previous ones, so pop everything it overlaps or touches.
+    for (;;) {
+      const last = merged.at(-1);
+      if (!last || start > last.start + last.length) {
+        break;
+      }
+      start = Math.min(start, last.start);
+      merged.pop();
+    }
+    merged.push({ start, length: end - start });
+  }
+  return merged;
 }

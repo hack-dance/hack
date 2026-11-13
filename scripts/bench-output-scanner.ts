@@ -18,11 +18,14 @@ const valueCount = Number(Bun.argv[2] ?? 1024);
 const megabytes = Number(Bun.argv[3] ?? 8);
 const valueBytes = Number(Bun.argv[4] ?? 32);
 
-// Deterministic pseudo-random bytes, so runs are comparable.
+// Deterministic pseudo-random bytes (xorshift32), so runs are comparable
+// and only the planted values match.
 let seed = 0x21_62;
 const nextByte = (): number => {
-  seed = (seed * 1_103_515_245 + 12_345) & 0x7f_ff_ff_ff;
-  return 97 + (seed % 26);
+  seed ^= seed << 13;
+  seed ^= seed >>> 17;
+  seed ^= seed << 5;
+  return 97 + ((seed >>> 0) % 26);
 };
 const values = Array.from({ length: valueCount }, () =>
   String.fromCharCode(...Array.from({ length: valueBytes }, nextByte))
@@ -43,7 +46,8 @@ const slice = scanSliceBytes(secrets.length);
 const cpuStart = process.cpuUsage();
 const wallStart = performance.now();
 let offset = 0;
-let redacted = 0;
+// Each byte counted once: a rescanned carry finds its matches again.
+const redactedMap = new Uint8Array(total);
 let carry = 0;
 while (offset < total) {
   const end = Math.min(total, offset + slice);
@@ -57,7 +61,9 @@ while (offset < total) {
     scannedPrefix: carry,
     maxRangeBytes: 16 * 1024,
   });
-  redacted += result.redactions.reduce((sum, r) => sum + r.length, 0);
+  for (const r of result.redactions) {
+    redactedMap.fill(1, r.offset, r.offset + r.length);
+  }
   const emitted = result.ranges.reduce((sum, r) => sum + r.length, 0);
   carry = end - (from + emitted);
   offset = end;
@@ -70,7 +76,7 @@ console.log(
     megabytes,
     valueBytes,
     sliceBytes: slice,
-    redactedBytes: redacted,
+    redactedBytes: redactedMap.reduce((sum, byte) => sum + byte, 0),
     cpuMs: Math.round((cpu.user + cpu.system) / 1000),
     wallMs: Math.round(wallMs),
   })

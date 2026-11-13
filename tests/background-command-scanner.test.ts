@@ -6,6 +6,7 @@ import { pumpStream } from "../src/lib/background-command/output-pump.ts";
 import {
   encodeSecrets,
   findMatches,
+  pendingPrefixLength,
   REDACTION_VALUES_LIMIT,
   scanOutput,
   scanSliceBytes,
@@ -272,12 +273,90 @@ describe("scanOutput", () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 
-  test("slices shrink as redaction values grow, so one scan's work stays bounded", () => {
+  test("single-pass matching agrees with a brute-force search, overlaps and held-back prefixes included", () => {
+    let seed = 7;
+    const rand = (n: number) => {
+      seed = (seed * 1_103_515_245 + 12_345) & 0x7f_ff_ff_ff;
+      return seed % n;
+    };
+    const word = (length: number) =>
+      Array.from({ length }, () => "abc"[rand(3)]).join("");
+    const encoder = new TextEncoder();
+    for (let round = 0; round < 300; round += 1) {
+      const values = Array.from({ length: 1 + rand(6) }, () =>
+        word(1 + rand(7))
+      );
+      const secrets = encodeSecrets({ values, minLength: 1 });
+      const text = word(rand(120));
+      const bytes = encoder.encode(text);
+      // Brute force: every occurrence of every value, merged.
+      const covered = new Array<boolean>(text.length).fill(false);
+      for (const value of new Set(values)) {
+        for (
+          let at = text.indexOf(value);
+          at !== -1;
+          at = text.indexOf(value, at + 1)
+        ) {
+          covered.fill(true, at, at + value.length);
+        }
+      }
+      const expected: { offset: number; length: number }[] = [];
+      covered.forEach((on, index) => {
+        const last = expected.at(-1);
+        if (on && last && last.offset + last.length === index) {
+          last.length += 1;
+        } else if (on) {
+          expected.push({ offset: index, length: 1 });
+        }
+      });
+      // Adjacent occurrences coalesce in the scanner too.
+      const result = scanOutput({
+        bytes,
+        offset: 0,
+        final: true,
+        secrets,
+        captureRemaining: 1 << 20,
+        maxRangeBytes: 1 << 20,
+      });
+      expect(result.redactions).toEqual(expected);
+      let pending = 0;
+      for (const value of new Set(values)) {
+        for (let length = value.length - 1; length > pending; length -= 1) {
+          if (text.endsWith(value.slice(0, length))) {
+            pending = length;
+            break;
+          }
+        }
+      }
+      expect(pendingPrefixLength(bytes, secrets)).toBe(pending);
+    }
+  });
+
+  test("one slice's work does not grow with the number of values", () => {
     expect(scanSliceBytes(0)).toBe(256 * 1024);
-    expect(scanSliceBytes(64)).toBe(256 * 1024);
-    expect(scanSliceBytes(256)).toBe(64 * 1024);
-    expect(scanSliceBytes(REDACTION_VALUES_LIMIT)).toBe(16 * 1024);
-    expect(scanSliceBytes(1_000_000)).toBe(16 * 1024);
+    expect(scanSliceBytes(REDACTION_VALUES_LIMIT)).toBe(256 * 1024);
+    const values = Array.from(
+      { length: REDACTION_VALUES_LIMIT },
+      (_, index) => `redaction-value-${index}-${"p".repeat(16)}`
+    );
+    const secrets = encodeSecrets({ values, minLength: 6 });
+    const bytes = new TextEncoder().encode(
+      `${"x".repeat(200_000)}${values[700]}${"y".repeat(60_000)}`
+    );
+    const started = performance.now();
+    const result = scanOutput({
+      bytes,
+      offset: 0,
+      final: true,
+      secrets,
+      captureRemaining: 1 << 23,
+      maxRangeBytes: 16 * 1024,
+    });
+    // Loose bound: the per-value search took about 0.3 s for this slice.
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(result.redactions).toEqual([
+      { offset: 200_000, length: (values[700] as string).length },
+    ]);
   });
 
   test("a carried-over prefix is not searched again for every value", () => {
@@ -462,7 +541,7 @@ describe("pumpStream", () => {
     const dir = await mkdtemp(join(tmpdir(), "hack-bg-pump-"));
     try {
       const path = join(dir, "stdout");
-      const text = "z".repeat(100_000);
+      const text = "z".repeat(600_000);
       await writeFile(path, text, { mode: 0o600 });
       const secrets = encodeSecrets({
         values: Array.from(

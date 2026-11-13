@@ -1,0 +1,27 @@
+---
+title: Upgrade · app view of the flow
+---
+stateDiagram-v2
+  direction TB
+  [*] --> UpToDate
+  UpToDate --> Available : update --check
+  Available --> Checking : Review
+  Checking --> Blocked : blockers
+  Blocked --> Checking : Re-check
+  Checking --> Ready : ready true
+  Ready --> Snapshotting : Upgrade
+  Snapshotting --> Applying : snapshot ok
+  Snapshotting --> Failed : snapshot refused
+  Applying --> RestartingDaemon : apply ok
+  Applying --> Failed : step failed
+  RestartingDaemon --> UpToDate : versions match
+  RestartingDaemon --> Failed : version mismatch
+  Failed --> RollingBack : Roll back
+  RollingBack --> UpToDate : restored
+  RollingBack --> Failed : partial restore
+  classDef live stroke-width:1.6px
+  classDef wait stroke-dasharray:2 2
+  classDef fail stroke-width:2px
+  class Snapshotting,Applying,RestartingDaemon,RollingBack wait
+  class Blocked,Failed fail
+  class UpToDate live

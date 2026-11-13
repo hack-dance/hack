@@ -1,0 +1,26 @@
+---
+title: First run · checks in order
+---
+flowchart TD
+  S([App opens]) --> C1{"hack CLI found,<br/>version supported?"}
+  C1 -->|no| X1["Install CLI card<br/>(brew command)"] --> C1
+  C1 -->|yes| C2{"Engine running?"}
+  C2 -->|no| X2["Engine card:<br/>open Docker / native setup"]
+  C2 -->|yes| C3{"hackd running?"}
+  X2 -. skip .-> C3
+  C3 -->|no| X3["Start hackd<br/>(no admin)"]
+  C3 -->|yes| C4{"Routing + DNS ok?"}
+  X3 -. skip .-> C4
+  C4 -->|no| X4["DNS step<br/>needs admin"]
+  C4 -->|yes| C5{"Certificate trusted?"}
+  X4 -. skip .-> C5
+  C5 -->|no| X5["Trust step<br/>needs admin"]
+  C5 -->|yes| C6{"Login service?"}
+  X5 -. skip .-> C6
+  C6 -->|no| X6["Install login service<br/>(no admin, optional)"]
+  C6 -->|yes| Done([Project list])
+  X6 -. skip .-> Done
+  classDef wait stroke-dasharray:2 2
+  classDef ok stroke-width:1.6px
+  class X4,X5 wait
+  class Done ok

@@ -1,0 +1,15 @@
+---
+title: Desktop app · where data comes from
+---
+flowchart LR
+  App["Hack desktop app"] -->|"hack … --json (as the user)"| CLI["hack CLI"]
+  App -->|"GET /v1/status, /v1/projects"| D["hackd socket"]
+  CLI --> D
+  CLI --> E["Engine (Docker or native VM)"]
+  D -->|"events + 30s inspect"| E
+  App -.->|"opens"| T["Terminal (admin steps)"]
+  App -.->|"opens"| B["Browser (project URL)"]
+  classDef live stroke-width:1.6px
+  classDef idle stroke-dasharray:4 3
+  class D live
+  class T,B idle

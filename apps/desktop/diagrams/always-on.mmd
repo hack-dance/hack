@@ -1,0 +1,23 @@
+---
+title: Always-on · one project
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Off
+  Off --> On : switch on
+  On --> Off : switch off
+  On --> Paused : manual Stop
+  Paused --> On : manual Start
+  On --> NeedsAttention : 3 failed starts
+  NeedsAttention --> On : Retry ok
+  NeedsAttention --> Off : switch off
+  note right of On
+    INV global pause holds every
+    project without changing it
+  end note
+  classDef live stroke-width:1.6px
+  classDef wait stroke-dasharray:2 2
+  classDef fail stroke-width:2px
+  class On live
+  class Paused wait
+  class NeedsAttention fail

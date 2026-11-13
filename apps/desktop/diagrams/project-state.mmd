@@ -1,0 +1,28 @@
+---
+title: Project detail · display states
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Stopped
+  Stopped --> Starting : Start
+  Starting --> Running : all services up
+  Starting --> FailedStart : a service exited
+  Running --> Degraded : a service down
+  Degraded --> Running : service back
+  Running --> Stopping : Stop
+  Degraded --> Stopping : Stop
+  Stopping --> Stopped : down done
+  FailedStart --> Starting : Retry
+  FailedStart --> Stopped : Stop
+  FailedStart --> NeedsAttention : always-on 3x
+  NeedsAttention --> Starting : Retry
+  note right of NeedsAttention
+    INV the app never retries
+    by itself
+  end note
+  classDef live stroke-width:1.6px
+  classDef wait stroke-dasharray:2 2
+  classDef fail stroke-width:2px
+  class Running live
+  class Starting,Stopping wait
+  class FailedStart,NeedsAttention,Degraded fail

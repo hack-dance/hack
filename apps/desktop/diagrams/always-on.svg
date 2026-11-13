@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-state" viewBox="0 0 563 505" width="563" height="505" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_tw:var(--pele-title-weight,bold);--_fm:var(--pele-font-mono,Geist Mono);font:15px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Geist)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="state" data-theme="light"><style><![CDATA[/* Hack Dance house theme for Pele 1.9.x: ink on cream (fleet palette B). Light by default; dark via [data-theme=dark].
+   Colour only for meaning (house classes). Never resize label text: Pele sized label boxes for its own font size. */
+.pele {
+  --pele-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --pele-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --pele-bg: #F3EFE3;
+  --pele-fg: #1D1D1B;
+  --pele-muted: #3D3C37;
+  --pele-line: #3D3C37;
+  --pele-surface: #FBF9F1;
+  --pele-surface-alt: #E8E4D8;
+  --pele-border: #66625A;
+  --pele-accent: #1D1D1B;
+  --pele-critical: #C2461F;
+  --pele-error: #C2461F;
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: #5b3df5; --pele-series-2: #0e9f8a; --pele-series-3: #e08a00; --pele-series-4: #d6345a;
+  --pele-series-5: #2f7de1; --pele-series-6: #8a5cf6; --pele-series-7: #4f9d2d; --pele-series-8: #a0674b;
+  /* semantic state tints (house classes) */
+  --hd-live: #4B4790;  --hd-live-bg: #E6E4F0;
+  --hd-wait: #34506E;  --hd-wait-bg: #D3DBE5;
+  --hd-ok:   #3A7A2E;  --hd-ok-bg:   #E2EBD9;
+  --hd-fail: #C2461F;  --hd-fail-bg: #F5E0D6;
+  --hd-idle: #8A8576;  --hd-idle-bg: #E8E4D8;
+  background: var(--pele-bg);
+}
+.pele[data-theme="dark"], [data-theme="dark"] .pele {
+  --pele-bg: #11100E;
+  --pele-fg: #EDE8D9;
+  --pele-muted: #C9C3B2;
+  --pele-line: #C9C3B2;
+  --pele-surface: #191815;
+  --pele-surface-alt: #1B1A17;
+  --pele-border: #8F897A;
+  --pele-accent: #EDE8D9;
+  --pele-critical: #FF7A52;
+  --pele-error: #FF7A52;
+  --pele-series-1: #9a86ff; --pele-series-2: #3fd1b8; --pele-series-3: #ffb547; --pele-series-4: #ff6b8b;
+  --pele-series-5: #6aa8ff; --pele-series-6: #c4a5ff; --pele-series-7: #8fd16a; --pele-series-8: #d29b7f;
+  --hd-live: #A39CE0;  --hd-live-bg: #24223A;
+  --hd-wait: #9DB4CF;  --hd-wait-bg: #22303D;
+  --hd-ok:   #7CC25E;  --hd-ok-bg:   #1C2A17;
+  --hd-fail: #FF7A52;  --hd-fail-bg: #33190F;
+  --hd-idle: #7A7466;  --hd-idle-bg: #1B1A17;
+}
+/* polish */
+.pele .pele-edge path { stroke-width: 1.4px; stroke-linecap: round; }
+.pele .pele-edge-label rect { fill: var(--pele-bg); }
+.pele .pele-edge-label text { fill: var(--pele-muted); }
+.pele .pele-cluster-label, .pele .pele-title { letter-spacing: .01em; }
+.pele .pele-node > rect, .pele .pele-node > path, .pele .pele-node > polygon, .pele .pele-node > circle, .pele .pele-node > ellipse { stroke-width: 1.2px; }
+/* house semantic classes: in Mermaid write `classDef live stroke-width:1.6px` + `class X live` */
+.pele .live > rect, .pele .live > path, .pele .live > polygon, .pele .live > circle, .pele .live > ellipse { fill: var(--hd-live-bg) !important; stroke: var(--hd-live) !important; }
+.pele .wait > rect, .pele .wait > path, .pele .wait > polygon, .pele .wait > circle, .pele .wait > ellipse { fill: var(--hd-wait-bg) !important; stroke: var(--hd-wait) !important; }
+.pele .ok   > rect, .pele .ok   > path, .pele .ok   > polygon, .pele .ok > circle, .pele .ok > ellipse { fill: var(--hd-ok-bg)   !important; stroke: var(--hd-ok)   !important; }
+.pele .fail > rect, .pele .fail > path, .pele .fail > polygon, .pele .fail > circle, .pele .fail > ellipse { fill: var(--hd-fail-bg) !important; stroke: var(--hd-fail) !important; }
+.pele .idle > rect, .pele .idle > path, .pele .idle > polygon, .pele .idle > circle, .pele .idle > ellipse { fill: var(--hd-idle-bg) !important; stroke: var(--hd-idle) !important; stroke-dasharray: 4 3; }
+.pele .live .pele-label { fill: var(--hd-live); font-weight: 600; }
+.pele .wait .pele-label { fill: var(--hd-wait); font-weight: 600; }
+.pele .ok   .pele-label { fill: var(--hd-ok);   font-weight: 600; }
+.pele .fail .pele-label { fill: var(--hd-fail); font-weight: 600; }
+.pele .idle .pele-label { fill: var(--hd-idle); }
+]]></style><text class="pele-title" font-weight="var(--_tw)" text-anchor="middle" xml:space="preserve"><tspan x="281.5" y="40.75">Always-on · one project</tspan></text><g transform="translate(0,35)"><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge pele-transition" data-id="edge0"><path d="M341.09,38L341.09,75"/><path class="pele-marker" d="M341.09,82L337.73,74L344.45,74Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge1"><path d="M325.09,125L325.09,134.63C325.09,138.52 167.83,143.1 167.83,147L167.83,193L167.83,189.5"/><path class="pele-marker" d="M167.83,196.5L164.47,188.5L171.19,188.5Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge2"><path d="M167.83,196.5L167.83,193C167.83,182 341.09,182 341.09,171L341.09,132"/><path class="pele-marker" d="M341.09,125L344.45,133L337.73,133Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge3"><path d="M167.83,239.5L167.83,243C167.83,260.36 148.58,271 117.16,271C85.75,271 66.49,286.2 66.49,311L66.49,335C66.49,362.5 109.16,362.5 109.16,390L109.16,396"/><path class="pele-marker" d="M109.16,403L105.8,395L112.52,395Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge4"><path d="M125.16,403L125.16,390C125.16,362.5 167.83,362.5 167.83,335L167.83,243L167.83,246.5"/><path class="pele-marker" d="M167.83,239.5L171.19,247.5L164.47,247.5Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge5"><path d="M167.83,239.5L167.83,243C167.83,267.8 187.5,283 219.58,283C251.67,283 271.33,293.64 271.33,311L271.33,335C271.33,359.8 304.89,375 359.64,375C414.39,375 447.94,380.99 447.94,390.75L447.94,396"/><path class="pele-marker" d="M447.94,403L444.58,395L451.3,395Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge6"><path d="M463.94,403L463.94,390C463.94,373.26 444.61,363 413.07,363C381.52,363 362.19,352.36 362.19,335L362.19,311C362.19,286.2 325.26,271 265.01,271C204.76,271 167.83,260.36 167.83,243L167.83,246.5"/><path class="pele-marker" d="M167.83,239.5L171.19,247.5L164.47,247.5Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge7"><path d="M504.18,403L504.18,153C504.18,146.25 357.09,144 357.09,137.25L357.09,132"/><path class="pele-marker" d="M357.09,125L360.45,133L353.73,133Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-note-edge" stroke="var(--_b)" stroke-dasharray="3 4" data-id="On-On----note-8"><path d="M195.83,218L239.83,218"/></g></g><g class="pele-edge-labels" font-size="13"><g class="pele-edge-label" data-id="edge1"><rect x="136.74" y="149" width="62.18" height="20" rx="3" fill="var(--_bg)"/><text x="167.83" y="163.55" text-anchor="middle">switch on</text></g><g class="pele-edge-label" data-id="edge2"><rect x="310" y="149" width="62.18" height="20" rx="3" fill="var(--_bg)"/><text x="341.09" y="163.55" text-anchor="middle">switch off</text></g><g class="pele-edge-label" data-id="edge3"><rect x="26" y="313" width="80.98" height="20" rx="3" fill="var(--_bg)"/><text x="66.49" y="327.55" text-anchor="middle">manual Stop</text></g><g class="pele-edge-label" data-id="edge4"><rect x="126.98" y="313" width="81.7" height="20" rx="3" fill="var(--_bg)"/><text x="167.83" y="327.55" text-anchor="middle">manual Start</text></g><g class="pele-edge-label" data-id="edge5"><rect x="228.68" y="313" width="85.31" height="20" rx="3" fill="var(--_bg)"/><text x="271.33" y="327.55" text-anchor="middle">3 failed starts</text></g><g class="pele-edge-label" data-id="edge6"><rect x="333.99" y="313" width="56.4" height="20" rx="3" fill="var(--_bg)"/><text x="362.19" y="327.55" text-anchor="middle">Retry ok</text></g><g class="pele-edge-label" data-id="edge7"><rect x="473.08" y="208" width="62.18" height="20" rx="3" fill="var(--_bg)"/><text x="504.18" y="222.55" text-anchor="middle">switch off</text></g></g><g class="pele-nodes"><g class="pele-node pele-state-start" data-id="root_start" transform="translate(341.09,31)"><circle r="7" fill="var(--_l)"/></g><g class="pele-node pele-state" data-id="Off" transform="translate(341.09,103.5)"><rect x="-28" y="-21.5" width="56" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Off</text></g><g class="pele-node pele-state wait" data-id="Paused" transform="translate(117.16,424.5)"><rect x="-41.43" y="-21.5" width="82.87" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)" style="stroke-dasharray:2 2;"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Paused</text></g><g class="pele-node pele-state fail" data-id="NeedsAttention" transform="translate(471.22,424.5)"><rect x="-67.28" y="-21.5" width="134.56" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)" style="stroke-width:2px;"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">NeedsAttention</text></g><g class="pele-node pele-state live" data-id="On" transform="translate(167.83,218)"><rect x="-28" y="-21.5" width="56" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)" style="stroke-width:1.6px;"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">On</text></g><g class="pele-note" data-id="On----note-8" transform="translate(336.37,218)"><path d="M-96.54,-25H88.54L96.54,-17V25H-96.54Z" fill="var(--_bg)" stroke="var(--_b)"/><path d="M88.54,-25V-17H96.54" fill="none" stroke="var(--_b)"/><text class="pele-label" font-size="13" fill="var(--_m)" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-3.95">INV global pause holds every</tspan><tspan x="0" y="13.05">project without changing it</tspan></text></g></g></g></svg>

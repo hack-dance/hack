@@ -1633,6 +1633,9 @@ describe("published support list", () => {
       "hack env protect KEY...",
       "HACK-2172",
       "cannot recover",
+      "--show-values",
+      "GET /v1/env",
+      "409 yaml_env_mutation_unsupported",
     ]) {
       expect(notes).toContain(detail);
     }

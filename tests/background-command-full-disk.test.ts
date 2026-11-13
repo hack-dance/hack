@@ -196,6 +196,17 @@ for (const fs of FILESYSTEMS) {
         await writeFile(paths.owner, JSON.stringify(deadOwner), {
           mode: 0o600,
         });
+        // End the events file on a page boundary (readers skip blank lines),
+        // so the final record needs a new page: only the reserve can give it.
+        const size = (await lstat(paths.events)).size;
+        const page = 4096;
+        await writeFile(
+          paths.events,
+          "\n".repeat((page - (size % page)) % page),
+          {
+            flag: "a",
+          }
+        );
         await fill(fs.dir as string);
         const recover = () =>
           recoverLostOwner({

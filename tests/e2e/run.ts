@@ -22,6 +22,7 @@ import { nativeConfigNetworksScenarios } from "./native-config-networks-acceptan
 import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
 import { agentSurfaceFreezeScenario } from "./scenarios/agent-surface-freeze.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
+import { backgroundCommandComposeScenario } from "./scenarios/background-command-compose.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
 import { composeConfigHashDriftScenario } from "./scenarios/compose-config-hash-drift.ts";
 import { composeForegroundSignalScenario } from "./scenarios/compose-foreground-signal.ts";
@@ -128,6 +129,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   composeConfigHashDriftScenario,
   composeForegroundSignalScenario,
   mcpLogsComposeScenario,
+  backgroundCommandComposeScenario,
   nativeConfigComposeScenario,
   nativeConfigBuildScenario,
   nativeConfigDownHooksScenario,

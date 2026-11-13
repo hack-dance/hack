@@ -60,6 +60,15 @@ if (Bun.argv[2] === "--internal-lifecycle-process-client") {
     process.exit(1);
   }
 }
+if (Bun.argv[2] === "--internal-background-command-supervisor") {
+  if (Bun.argv.length !== 4 || !Bun.argv[3]) {
+    process.exit(2);
+  }
+  const { runBackgroundSupervisor } = await import(
+    "./src/lib/background-command/supervisor.ts"
+  );
+  process.exit(await runBackgroundSupervisor({ commandId: Bun.argv[3] }));
+}
 if (Bun.argv[2] === "--internal-native-https-owner") {
   if (Bun.argv.length !== 4 || !Bun.argv[3]) {
     process.exit(2);

@@ -56,6 +56,34 @@ const REPO_ROOT = resolve(import.meta.dir, "..");
 /** Default per-file limit: about twice the slowest measured hosted file. */
 export const DEFAULT_FILE_TIMEOUT_SECONDS = 720;
 
+/** Temporary hosted headroom while this eight-case file is split (HACK-2111). */
+const SLOW_FILE_TIMEOUT_MS: Readonly<Record<string, number>> = {
+  "tests/native-compose-storage-activation-command.test.ts": 20 * 60 * 1000,
+};
+
+export function testFileTimeoutMs(opts: {
+  readonly file: string;
+  readonly defaultTimeoutMs: number;
+  readonly explicit: boolean;
+}): number {
+  return opts.explicit
+    ? opts.defaultTimeoutMs
+    : (SLOW_FILE_TIMEOUT_MS[opts.file] ?? opts.defaultTimeoutMs);
+}
+
+/** Give the exceptional file its budget before other work uses the shard deadline. */
+export function prioritizeSlowFiles(files: readonly string[]): string[] {
+  return [...files].sort(
+    (a, b) =>
+      Number(Object.hasOwn(SLOW_FILE_TIMEOUT_MS, b)) -
+      Number(Object.hasOwn(SLOW_FILE_TIMEOUT_MS, a))
+  );
+}
+
+export function deferredMacosSummary(files: readonly string[]): string {
+  return `### macOS files deferred to the integration run\n\n${files.length} selected platform-sensitive files are deferred to the integration run. Linux results do not qualify these files on macOS.\n\n\`\`\`json\n${JSON.stringify(files, null, 2)}\n\`\`\`\n`;
+}
+
 /** Default shard limit, below the job's `timeout-minutes` so the report prints. */
 export const DEFAULT_DEADLINE_SECONDS = 1800;
 
@@ -231,7 +259,7 @@ export function summaryReport(state: ShardState, now: number): string[] {
 export async function runShardFiles(opts: {
   readonly state: ShardState;
   readonly runFile: RunFile;
-  readonly fileTimeoutMs: number;
+  readonly fileTimeoutMs: number | ((file: string) => number);
   readonly deadlineAt: number;
   readonly heartbeatMs: number;
   readonly interrupt: AbortSignal;
@@ -247,6 +275,10 @@ export async function runShardFiles(opts: {
       return "deadline";
     }
     const startedAt = opts.now();
+    const fileTimeoutMs =
+      typeof opts.fileTimeoutMs === "number"
+        ? opts.fileTimeoutMs
+        : opts.fileTimeoutMs(file);
     state.current = { file, startedAt };
     opts.log(
       `${state.label} (${position + 1}/${state.files.length}) start ${file}`
@@ -261,9 +293,9 @@ export async function runShardFiles(opts: {
     };
     const fileTimer = setTimeout(
       () => stop("timeout"),
-      Math.max(0, Math.min(opts.fileTimeoutMs, opts.deadlineAt - startedAt))
+      Math.max(0, Math.min(fileTimeoutMs, opts.deadlineAt - startedAt))
     );
-    const deadlineFirst = opts.deadlineAt - startedAt < opts.fileTimeoutMs;
+    const deadlineFirst = opts.deadlineAt - startedAt < fileTimeoutMs;
     const onInterrupt = () => stop("interrupted");
     opts.interrupt.addEventListener("abort", onInterrupt);
     const heartbeat = setInterval(() => {
@@ -511,16 +543,7 @@ type ShardTarget = {
   readonly files: readonly string[];
 };
 
-/**
- * Resolve `--shard`, `--layout` and `--focus` to the files this invocation
- * runs. In the pooled layout the host must match the pool, so a workflow that
- * puts a shard on the wrong runner fails instead of silently skipping the
- * platform-gated tests of that pool.
- */
-async function resolveTarget(opts: {
-  readonly args: readonly string[];
-  readonly requireHost: boolean;
-}): Promise<ShardTarget> {
+function selectionInput(): readonly string[] | undefined {
   const selectionJson = process.env.HACK_TEST_SELECTION;
   const selectedFiles: unknown = selectionJson
     ? JSON.parse(selectionJson)
@@ -536,7 +559,30 @@ async function resolveTarget(opts: {
       "test shard: selection must be a JSON string array."
     );
   }
-  const subset = selectedFiles as readonly string[] | undefined;
+  return selectedFiles as readonly string[] | undefined;
+}
+
+function deferralForLayout(layout: string): boolean {
+  const deferred = process.env.HACK_TEST_DEFER_MACOS === "true";
+  if (deferred && layout !== "pooled") {
+    throw new ClosedCliError(
+      "test shard: macOS deferral requires pooled Linux shards."
+    );
+  }
+  return deferred;
+}
+
+/**
+ * Resolve `--shard`, `--layout` and `--focus` to the files this invocation
+ * runs. In the pooled layout the host must match the pool, so a workflow that
+ * puts a shard on the wrong runner fails instead of silently skipping the
+ * platform-gated tests of that pool.
+ */
+async function resolveTarget(opts: {
+  readonly args: readonly string[];
+  readonly requireHost: boolean;
+}): Promise<ShardTarget> {
+  const subset = selectionInput();
   const focusValue = optionValue(opts.args, "focus");
   if (focusValue !== undefined) {
     if (
@@ -562,6 +608,7 @@ async function resolveTarget(opts: {
   }
   const selection = requireSelection(opts.args);
   const layout = parseTestLayout(optionValue(opts.args, "layout"));
+  const deferMacos = deferralForLayout(layout);
   if (layout === "full") {
     const plan = await buildVerifiedPlan({
       repoRoot: REPO_ROOT,
@@ -575,7 +622,12 @@ async function resolveTarget(opts: {
     };
   }
   const pooled = pooledSelection(selection);
-  if (process.env.HACK_TEST_DRAFT === "true") {
+  if (deferMacos && pooled.pool !== "linux") {
+    throw new ClosedCliError(
+      "test shard: macOS deferral requires a Linux shard."
+    );
+  }
+  if (process.env.HACK_TEST_DRAFT === "true" && !deferMacos) {
     if (
       pooled.pool !== "linux" ||
       (opts.requireHost && process.platform !== "linux")
@@ -663,6 +715,21 @@ async function commandVerify(args: readonly string[]): Promise<number> {
   return 0;
 }
 
+async function commandReportDeferred(): Promise<number> {
+  const plan = await buildVerifiedPlan({
+    repoRoot: REPO_ROOT,
+    count: 3,
+    pool: "macos",
+    selectedFiles: selectionInput(),
+  });
+  const summary = deferredMacosSummary(plan.scope);
+  console.log(summary);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
+  }
+  return 0;
+}
+
 async function commandPlan(args: readonly string[]): Promise<number> {
   const target = await resolveTarget({ args, requireHost: false });
   for (const file of target.files) {
@@ -684,10 +751,15 @@ async function commandRun(args: readonly string[]): Promise<number> {
   const startedAt = Date.now();
   runPackageScript("check:bun-version");
   runPackageScript("test:preflight");
-  const { label, plan, files } = await resolveTarget({
+  const {
+    label,
+    plan,
+    files: plannedFiles,
+  } = await resolveTarget({
     args,
     requireHost: true,
   });
+  const files = prioritizeSlowFiles(plannedFiles);
   const state: ShardState = {
     label,
     files,
@@ -723,7 +795,12 @@ async function commandRun(args: readonly string[]): Promise<number> {
   const ended = await runShardFiles({
     state,
     runFile: bunTestFile({ repoRoot: REPO_ROOT }),
-    fileTimeoutMs: fileTimeoutSeconds * 1000,
+    fileTimeoutMs: (file) =>
+      testFileTimeoutMs({
+        file,
+        defaultTimeoutMs: fileTimeoutSeconds * 1000,
+        explicit: optionValue(args, "file-timeout-seconds") !== undefined,
+      }),
     deadlineAt: startedAt + deadlineSeconds * 1000,
     heartbeatMs: HEARTBEAT_SECONDS * 1000,
     interrupt: interrupt.signal,
@@ -812,6 +889,8 @@ export async function main(argv: readonly string[]): Promise<number> {
     switch (command) {
       case "verify":
         return await commandVerify(args);
+      case "report-deferred":
+        return await commandReportDeferred();
       case "plan":
         return await commandPlan(args);
       case "run":

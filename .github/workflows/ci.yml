@@ -9,26 +9,33 @@ on:
       - "v*"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run every test and release compiler host at this ref
+        type: boolean
+        required: true
+        default: true
 
 concurrency:
-  # PR updates supersede earlier runs. Pushes need unique groups: even with
-  # cancellation disabled, a shared group replaces an older pending run.
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Only the newest next push needs evidence. Main pushes and explicit release
+  # qualification keep unique groups; a pending main run must never be replaced.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/next') }}
 
 jobs:
   changes:
-    # Pull-request change scope (scripts/ci-change-scope.ts, HACK-1960). Pushes
-    # to next/main and an unavailable diff are always `full`: every job and every
-    # config compiler host. PRs layer conservative dependency selection and
-    # draft policy over that scope (scripts/ci-pr-plan.ts). Ready PRs retain
-    # platform pools; drafts run selected files on Linux and cannot pass the
+    # PRs and next pushes use trusted base policy over their actual diff.
+    # Main and explicit release qualification stay full; uncertainty widens.
+    # PR tiers layer over selection (scripts/ci-pr-plan.ts). Light PRs defer
+    # platform pools; drafts also cannot pass the
     # required fan-in. The fan-ins report even when a scoped job does not run.
     name: Change scope
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
+      actions: read
     outputs:
       scope: ${{ steps.scope.outputs.scope }}
       compiler_hosts: ${{ steps.scope.outputs.compiler_hosts }}
@@ -42,13 +49,16 @@ jobs:
       test_files: ${{ steps.scope.outputs.test_files }}
       test_shards: ${{ steps.scope.outputs.test_shards }}
       selection_mode: ${{ steps.scope.outputs.selection_mode }}
+      ci_evidence: ${{ steps.scope.outputs.ci_evidence }}
       docker_suite: ${{ steps.scope.outputs.docker_suite }}
+      defer_macos: ${{ steps.scope.outputs.defer_macos }}
+      build_smoke: ${{ steps.scope.outputs.build_smoke }}
     steps:
       # A pull-request checkout is GitHub's merge commit; its first parent is
       # the base tip, so HEAD^1..HEAD is exactly the pull request's change.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name == 'push' && github.ref == 'refs/heads/next' && '0' || '2' }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@v1
         with:
@@ -59,19 +69,39 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
           PR_FULL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          PR_MAC: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:mac') }}
+          PR_E2E: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:e2e') }}
+          CI_REF: ${{ github.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          DISPATCH_FULL: ${{ github.event_name == 'workflow_dispatch' && inputs.full }}
+          CI_READ_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
         shell: bash
         run: |
           set -euo pipefail
+          read_token="${CI_READ_TOKEN:-}"
+          unset CI_READ_TOKEN
           # This guard is independent of the selector and its fallback list.
           full=false
           base=""
-          if [ "$EVENT_NAME" != "pull_request" ] || [ "$PR_FULL" = "true" ]; then
-            full=true
-          else
+          if [ "$EVENT_NAME" = "pull_request" ]; then
             parents=$(git rev-list --parents -n 1 HEAD) || parents=""
             read -r tip base head extra <<< "$parents"
-            if [ -z "$base" ] || [ -z "$head" ] || [ -n "$extra" ] ||
-               ! git diff --name-only --no-renames -z "$base" HEAD > "$RUNNER_TEMP/ci-paths"; then
+            if [ "$PR_FULL" = "true" ] || [ -z "$base" ] || [ -z "$head" ] || [ -n "$extra" ]; then
+              full=true
+            fi
+          elif [ "$EVENT_NAME" = "push" ] && [ "$CI_REF" = "refs/heads/next" ]; then
+            base="$BEFORE_SHA"
+            if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" =~ ^0+$ ]] ||
+               ! git merge-base --is-ancestor "$base" HEAD; then full=true; fi
+          else
+            if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DISPATCH_FULL" != "true" ]; then
+              echo 'Explicit CI dispatch requires full=true for release qualification.' >&2
+              exit 2
+            fi
+            full=true
+          fi
+          if [ "$full" != "true" ]; then
+            if ! git diff --name-only --no-renames -z "$base" HEAD > "$RUNNER_TEMP/ci-paths"; then
               full=true
             else
               while IFS= read -r -d '' path; do
@@ -85,9 +115,24 @@ jobs:
             fi
             # Bootstrap safely when the base predates dependency selection.
             if ! git show "$base:scripts/ci-change-scope.ts" 2>/dev/null | grep -- '--repo-root=' > /dev/null; then full=true; fi
+            if [ "$EVENT_NAME" = "push" ] &&
+               ! git show "$base:scripts/ci-change-scope.ts" 2>/dev/null | grep -- '--base-revision=' > /dev/null; then full=true; fi
+            # A cancelled/failed predecessor leaves untested changes behind.
+            # Only a successful before revision is a valid selection baseline.
+            if [ "$EVENT_NAME" = "push" ] && [ "$full" != "true" ]; then
+              if ! GH_TOKEN="$read_token" gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=next&head_sha=$base&per_page=1" > "$RUNNER_TEMP/ci-before-run.json" ||
+                 ! jq -e --arg base "$base" '.workflow_runs[0] | .head_sha == $base and .head_branch == "next" and .event == "push" and .path == ".github/workflows/ci.yml" and .status == "completed" and .conclusion == "success"' "$RUNNER_TEMP/ci-before-run.json" > /dev/null; then
+                full=true
+              fi
+            fi
           fi
           if [ "$full" = "true" ]; then
-            compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"macos-latest","platform":"darwin","arch":"arm64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"},{"os":"macos-15-intel","platform":"darwin","arch":"x64"}]'
+            evidence=scoped
+            compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"macos-latest","platform":"darwin","arch":"arm64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}]'
+            if { [ "$EVENT_NAME" = "push" ] && [ "$CI_REF" = "refs/heads/main" ]; } || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              evidence=release-full
+              compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"macos-latest","platform":"darwin","arch":"arm64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"},{"os":"macos-15-intel","platform":"darwin","arch":"x64"}]'
+            fi
             native=true
             shards='[1,2,3,4,5,6,7,8]'
             draft=false
@@ -107,9 +152,12 @@ jobs:
           test_files=
           test_shards=$shards
           selection_mode=full
+          ci_evidence=$evidence
           docker_suite=true
+          defer_macos=false
+          build_smoke=true
           EOF
-            echo 'Full suite: push, protected input, unavailable diff, or selector bootstrap.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Full selection: main, explicit dispatch, protected input, unavailable diff, or policy bootstrap. Intel is release-only.' >> "$GITHUB_STEP_SUMMARY"
           else
             # Only base code and base dependencies execute; the merge tree is data.
             policy="$RUNNER_TEMP/ci-policy"
@@ -117,14 +165,35 @@ jobs:
             git archive "$base" | tar -x -C "$policy"
             cd "$policy"
             bun --no-env-file install --cwd "$policy" --frozen-lockfile --ignore-scripts
-            bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE"
+            bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base"
+            echo 'ci_evidence=scoped' >> "$GITHUB_OUTPUT"
+          fi
+          # PR tiers are independent of dependency uncertainty. Even a protected
+          # input or an old base policy cannot silently buy macOS or Docker.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            mac=false; e2e=false; builds=false
+            if [ "$PR_DRAFT" != "true" ]; then
+              if [ "$PR_FULL" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
+              if [ "$PR_FULL" = "true" ] || [ "$PR_E2E" = "true" ]; then e2e=true; fi
+              if [ "$PR_FULL" = "true" ]; then builds=true; fi
+            fi
+            if [ "$mac" != "true" ]; then
+              printf 'compiler_hosts=[]\nruntime_core=false\ntest_shards=[4,5,6,7,8]\ndefer_macos=true\n' >> "$GITHUB_OUTPUT"
+            else
+              echo 'defer_macos=false' >> "$GITHUB_OUTPUT"
+            fi
+            if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
+            printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
+            echo 'PR checks qualify Linux evidence. macOS and Docker are deferred to the integration run unless their tier is labeled.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
           fi
 
   config-compiler:
     name: Config compiler (${{ matrix.os }})
     needs: changes
     # Relevant compiler/toolchain/CI changes check native hosts on ready PRs.
-    # Other code PRs retain Linux checks; full pushes cover every release host.
+    # Intel qualifies explicit release-full dispatches and stable main pushes.
     if: ${{ needs.changes.outputs.compiler_hosts != '[]' }}
     strategy:
       matrix:
@@ -142,6 +211,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
+      - uses: ./.github/actions/ci-dependency-cache
+      - uses: ./.github/actions/ci-dependency-cache
+        with:
+          mode: rust
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -209,7 +282,7 @@ jobs:
 
   state-models:
     name: Runtime state models
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -269,7 +342,7 @@ jobs:
     name: Candidate core (${{ matrix.os }})
     needs: changes
     # Ready PRs follow candidate/guest/launcher/toolchain/CI inputs. Drafts
-    # defer both hosts; full pushes always run both.
+    # defer both hosts; full modes run both, scoped next pushes follow inputs.
     if: ${{ needs.changes.outputs.runtime_core == 'true' }}
     strategy:
       matrix:
@@ -283,6 +356,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
+      - uses: ./.github/actions/ci-dependency-cache
+        with:
+          mode: rust
+          kind: candidate
+          target: .hack-local/target
+      - name: Cache pinned Zig toolchain
+        id: zig-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/candidate-zig
+          key: ci-zig-0.15.2-${{ runner.os }}-${{ runner.arch }}
       - name: Install pinned Zig for guest helpers
         shell: bash
         run: |
@@ -307,7 +391,9 @@ jobs:
           archive="zig-${platform}-0.15.2.tar.xz"
           destination="${RUNNER_TEMP}/candidate-zig"
           mkdir -p "$destination"
-          curl --fail --location --retry 3 "https://ziglang.org/download/0.15.2/${archive}" -o "$destination/$archive"
+          if [ ! -f "$destination/$archive" ]; then
+            curl --fail --location --retry 3 "https://ziglang.org/download/0.15.2/${archive}" -o "$destination/$archive"
+          fi
           (cd "$destination" && echo "$checksum  $archive" | shasum -a 256 --check)
           tar -xf "$destination/$archive" -C "$destination"
           echo "$destination/zig-${platform}-0.15.2" >> "$GITHUB_PATH"
@@ -646,8 +732,8 @@ jobs:
     # `pooled` (pushes and pull requests, HACK-2028): shards 1-3 run the
     # selected platform-sensitive files on macOS and shards 4-8 the rest on Linux
     # (POOLED_MACOS_SHARDS in scripts/test-shard-plan.ts; the runner refuses a
-    # shard on the wrong host). Drafts distribute all selected files over the
-    # five Linux shards. Full push and prerelease job names stay unchanged.
+    # shard on the wrong host). Light PRs defer the macOS pool and report its
+    # selected paths; labels opt into tiers. Integration job names stay unchanged.
     runs-on: ${{ (needs.changes.outputs.draft == 'true' || (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > 3)) && 'ubuntu-latest' || 'macos-15' }}
     # Eight shards keep the slower GitHub-hosted macOS jobs below the existing
     # 30 min file-runner deadline; the 40 min job limit bounds a hung runner.
@@ -659,9 +745,16 @@ jobs:
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.4.4"
+      - name: Cache Bun downloads
+        uses: ./.github/actions/ci-dependency-cache
       - name: Install dependencies
         run: bun install --frozen-lockfile
       # The one-off checks and builds run once, on shard 8 (Linux when pooled).
+      - name: Report selected macOS files deferred to the integration run
+        if: matrix.shard == 8 && needs.changes.outputs.defer_macos == 'true'
+        env:
+          HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
+        run: bun scripts/test-shard.ts report-deferred
       - name: Typecheck (Turbo)
         if: matrix.shard == 8
         run: bun run turbo:typecheck
@@ -672,6 +765,10 @@ jobs:
         if: matrix.shard == 8
         run: bun run turbo:check
       - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Cache matching compiler build
+        uses: ./.github/actions/ci-dependency-cache
+        with:
+          mode: rust
       - name: Prepare matching compiler for private file owner tests
         run: bun run build:config-compiler
       # Runs check:bun-version and test:preflight as `bun run test` does, then
@@ -683,6 +780,7 @@ jobs:
           HACK_TEST_LAYOUT: ${{ needs.changes.outputs.test_layout }}
           HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
           HACK_TEST_DRAFT: ${{ needs.changes.outputs.draft }}
+          HACK_TEST_DEFER_MACOS: ${{ needs.changes.outputs.defer_macos }}
         run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
       - name: Preserve measured file durations
         # Per-file seconds only; refresh scripts/test-shard-durations.json with
@@ -695,10 +793,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Build CLI
-        if: matrix.shard == 8 && needs.changes.outputs.draft != 'true'
+        if: matrix.shard == 8 && needs.changes.outputs.build_smoke == 'true'
         run: bun run build
       - name: Build release smoke (no tests)
-        if: matrix.shard == 8 && needs.changes.outputs.draft != 'true'
+        if: matrix.shard == 8 && needs.changes.outputs.build_smoke == 'true'
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
 
   test-focus:
@@ -797,6 +895,23 @@ jobs:
             echo "test shards did not all succeed (result: $SHARD_RESULT)"
             exit 1
           fi
+      - name: selection_mode=${{ needs.changes.outputs.selection_mode }}
+        env:
+          SELECTION_MODE: ${{ needs.changes.outputs.selection_mode }}
+        run: |
+          case "$SELECTION_MODE" in
+            full|selected) printf 'selection_mode=%s\n' "$SELECTION_MODE" ;;
+            *) echo 'Missing selection evidence' >&2; exit 1 ;;
+          esac
+      - name: ci_evidence=${{ needs.changes.outputs.ci_evidence }}
+        env:
+          CI_EVIDENCE: ${{ needs.changes.outputs.ci_evidence }}
+          SELECTION_MODE: ${{ needs.changes.outputs.selection_mode }}
+        run: |
+          case "$CI_EVIDENCE:$SELECTION_MODE" in
+            release-full:full|scoped:full|scoped:selected) printf 'ci_evidence=%s\n' "$CI_EVIDENCE" ;;
+            *) echo 'Invalid release CI evidence' >&2; exit 1 ;;
+          esac
 
   linux-process-lifetime:
     needs: changes

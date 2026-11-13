@@ -28,7 +28,7 @@ const STUB = [
   'if [ "$1" = "compose" ]; then',
   '  case " $* " in',
   '    *" ps "*)',
-  '      printf "%s\\n" \'{"Service":"web","State":"running","ExitCode":0}\'',
+  '      printf "%s\\n" \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0}\'',
   "      exit 0",
   "      ;;",
   "  esac",

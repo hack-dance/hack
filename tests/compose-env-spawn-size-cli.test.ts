@@ -50,7 +50,7 @@ const STUB = [
   "      exit 0",
   "      ;;",
   '    *" ps "*)',
-  `      for s in ${SERVICES.join(" ")}; do printf '{"Service":"%s","State":"running","ExitCode":0}\\n' "$s"; done`,
+  `      for s in ${SERVICES.join(" ")}; do printf '{"ID":"fixture-%s","Service":"%s","State":"running","ExitCode":0}\\n' "$s" "$s"; done`,
   "      exit 0",
   "      ;;",
   "    *) exit 0 ;;",

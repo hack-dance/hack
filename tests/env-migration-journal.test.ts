@@ -16,6 +16,7 @@ import {
   cleanupEnvMigration,
   type EnvMigrationProject,
   envMigrationJournalPath,
+  previewEnvCleanup,
   previewEnvMigration,
   recordEnvMigrationProjectRun,
   rollbackEnvMigration,
@@ -23,7 +24,11 @@ import {
 import { migrationDigest } from "../src/lib/env-migration-files.ts";
 import { stageMigrationPayloads } from "../src/lib/env-migration-payloads.ts";
 import {
+  LegacyEnvCleanupError,
   resolveProjectEnvConfig,
+  resolveProjectEnvConfigForNativeSelection,
+  resolveProjectEnvMetadata,
+  resolveProjectEnvMetadataForNativeSelection,
   resolveProjectEnvSharedKeyPath,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
@@ -116,6 +121,19 @@ async function projectFiles(): Promise<Map<string, string>> {
   return files;
 }
 
+function expectRestored(
+  actual: Map<string, string>,
+  before: Map<string, string>
+): void {
+  for (const [path, text] of actual) {
+    if (!before.has(path) && path.endsWith("/.hack-staging/.gitignore")) {
+      expect(text).toBe(Buffer.from("*\n").toString("base64"));
+      actual.delete(path);
+    }
+  }
+  expect(actual).toEqual(before);
+}
+
 test("an already modern project without legacy inputs previews complete and applies without creating state", async () => {
   for (const name of ["hack.env.json", ".env", ".env.qa"]) {
     await rm(join(project.projectDir, name));
@@ -152,6 +170,7 @@ test("preview makes no writes and exactly names what apply publishes; completed 
   const preview = await previewEnvMigration(project);
   expect(await projectFiles()).toEqual(before);
   expect(await Bun.file(preview.journalPath).exists()).toBe(false);
+  expect(preview.manifestPath).toBeNull();
   expect(JSON.stringify(preview)).not.toContain(SENTINEL);
   const snapshots = fixtureEnvSnapshots(root);
   const result = await apply({
@@ -163,6 +182,9 @@ test("preview makes no writes and exactly names what apply publishes; completed 
     cleanupEnvMigration({ project, snapshots, acceptTrackedChanges: true })
   ).rejects.toThrow("hack up");
   expect(result.status).toBe("applied");
+  expect((await previewEnvMigration(project)).manifestPath).toBe(
+    result.manifestPath
+  );
   const after = await projectFiles();
   expect(
     [...after]
@@ -280,7 +302,7 @@ test("rollback restores original bytes and refuses a later user edit", async () 
     snapshots,
     manifestPath: result.manifestPath,
   });
-  expect(await projectFiles()).toEqual(before);
+  expectRestored(await projectFiles(), before);
 });
 
 test("a partial publication refuses implicit commands before they can use incomplete layers", async () => {
@@ -298,6 +320,25 @@ test("a partial publication refuses implicit commands before they can use incomp
       },
     })
   ).rejects.toThrow("synthetic interruption");
+  await expect(
+    resolveProjectEnvConfig({ ...project, envName: null })
+  ).rejects.toThrow("unfinished");
+  expect((await previewEnvMigration(project)).manifestPath).toBeString();
+  await expect(
+    resolveProjectEnvMetadata({ ...project, envName: null })
+  ).rejects.toThrow("unfinished");
+  const native = {
+    projectRoot: project.projectRoot,
+    overlay: null,
+    inheritLocal: false,
+    declaredWorkloadNames: ["api"],
+  };
+  await expect(
+    resolveProjectEnvConfigForNativeSelection(native)
+  ).rejects.toThrow("unfinished");
+  await expect(
+    resolveProjectEnvMetadataForNativeSelection(native)
+  ).rejects.toThrow("unfinished");
   for (const args of [
     ["env", "list"],
     ["env", "get", "TOKEN"],
@@ -433,6 +474,45 @@ test("incomplete rollback leaves its journal resumable and skips already restore
       })
     ).status
   ).toBe("restored");
+  expectRestored(await projectFiles(), before);
+});
+
+test("apply rechecks rollback state under the lock after observing a completed journal", async () => {
+  const snapshots = fixtureEnvSnapshots(root);
+  const result = await apply({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+  });
+  const before = await projectFiles();
+  const reached = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const retry = applyEnvMigration({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+    hooks: {
+      beforeLock: async () => {
+        reached.resolve();
+        await release.promise;
+      },
+    },
+  });
+  await reached.promise;
+  try {
+    const interrupted = {
+      ...snapshots,
+      rollback: async () => ({ status: "incomplete" as const, results: [] }),
+    };
+    await rollbackEnvMigration({
+      project,
+      snapshots: interrupted,
+      manifestPath: result.manifestPath,
+    });
+  } finally {
+    release.resolve();
+  }
+  await expect(retry).rejects.toThrow("needs recovery");
   expect(await projectFiles()).toEqual(before);
 });
 
@@ -466,7 +546,7 @@ test("cleanup snapshots must still hold every original; cleanup followed by roll
     snapshots,
     manifestPath: result.manifestPath,
   });
-  expect(await projectFiles()).toEqual(before);
+  expectRestored(await projectFiles(), before);
 });
 
 async function addLegacySecret() {
@@ -496,12 +576,74 @@ async function addLegacySecret() {
   await store.set({ key: "SEC", value: SENTINEL });
 }
 
+test("a failed cleanup receipt preserves confirmed removals and repairs the removed store pointer without exposing the cause", async () => {
+  await addLegacySecret();
+  const snapshots = fixtureEnvSnapshots(root);
+  const result = await apply({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+  });
+  await recordEnvMigrationProjectRun(project);
+  const preview = await previewEnvCleanup(project);
+  const expectedRemoved = preview.files
+    .filter((file) => file.action === "removable")
+    .map((file) => file.path)
+    .sort();
+  let failure: unknown;
+  try {
+    await cleanupEnvMigration({
+      project,
+      snapshots: {
+        ...snapshots,
+        recordAfter: () => Promise.reject(new Error(SENTINEL)),
+      },
+      acceptTrackedChanges: true,
+    });
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(LegacyEnvCleanupError);
+  if (!(failure instanceof LegacyEnvCleanupError)) {
+    throw new Error("Fixture expected a cleanup failure");
+  }
+  expect([...failure.removedPaths].sort()).toEqual(expectedRemoved);
+  expect(failure.message).toContain("--rollback-manifest");
+  expect(failure.message).toContain(result.manifestPath);
+  expect(failure.message).not.toContain(SENTINEL);
+  const journal = await readFile(result.journalPath, "utf8");
+  expect(JSON.parse(journal).state).toBe("cleaning");
+  expect(JSON.parse(journal).removed.sort()).toEqual(expectedRemoved);
+  expect(journal).not.toContain(SENTINEL);
+  for (const path of expectedRemoved) {
+    expect(await Bun.file(path).exists()).toBe(false);
+    expect(failure.message).toContain(JSON.stringify(path));
+  }
+  expect(
+    await readFile(join(project.projectDir, "hack.config.json"), "utf8")
+  ).not.toContain("encryptedFile");
+  await expect(
+    cleanupEnvMigration({ project, snapshots, acceptTrackedChanges: true })
+  ).rejects.toThrow("interrupted");
+  await rollbackEnvMigration({
+    project,
+    snapshots,
+    manifestPath: result.manifestPath,
+  });
+  for (const path of expectedRemoved) {
+    expect(await Bun.file(path).exists()).toBe(true);
+  }
+  expect(
+    await readFile(join(project.projectDir, "hack.config.json"), "utf8")
+  ).toContain("encryptedFile");
+});
+
 test("preview does not provision a new project key; apply encrypts with a private key and rollback retains every legacy value", async () => {
   await addLegacySecret();
   const before = await projectFiles();
   const keyPath = join(project.projectRoot, ".hack.secret.key");
   const preview = await previewEnvMigration(project);
-  expect(await projectFiles()).toEqual(before);
+  expectRestored(await projectFiles(), before);
   expect(preview.files).toContainEqual({
     path: keyPath,
     action: "write",
@@ -520,7 +662,18 @@ test("preview does not provision a new project key; apply encrypts with a privat
       .api?.SEC
   ).toBe(SENTINEL);
   await recordEnvMigrationProjectRun(project);
+  const cleanupBefore = await projectFiles();
+  const cleanupPreview = await previewEnvCleanup(project);
+  expect(await projectFiles()).toEqual(cleanupBefore);
   await cleanupEnvMigration({ project, snapshots, acceptTrackedChanges: true });
+  const cleanupAfter = await projectFiles();
+  const cleanupEffects = [...cleanupBefore]
+    .filter(([path, text]) => cleanupAfter.get(path) !== text)
+    .map(([path]) => path)
+    .sort();
+  expect(cleanupEffects).toEqual(
+    cleanupPreview.files.map((file) => file.path).sort()
+  );
   expect(
     await readFile(join(project.projectDir, "hack.config.json"), "utf8")
   ).not.toContain("encryptedFile");
@@ -534,7 +687,7 @@ test("preview does not provision a new project key; apply encrypts with a privat
   const after = await projectFiles();
   after.delete(keyPath);
   after.delete(join(project.projectRoot, ".gitignore"));
-  expect(after).toEqual(before);
+  expectRestored(after, before);
 });
 
 test("encrypted scoped values and store-only overlays survive; cleanup never removes their live project key", async () => {
@@ -705,7 +858,7 @@ test("SIGKILL at every journal/publication boundary resumes without losing an ov
           selectedProject.projectRoot,
           relative(project.projectRoot, path)
         );
-        await mkdir(dirname(target), { recursive: true });
+        await mkdir(dirname(target), { recursive: true, mode: 0o700 });
         await writeFile(target, Buffer.from(encoded, "base64"), {
           mode: (await lstat(path)).mode & 0o777,
         });

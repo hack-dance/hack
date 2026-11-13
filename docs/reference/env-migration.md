@@ -41,15 +41,21 @@ The preview's `data` has these stable fields:
 | `dryRun` | Always `true` for a preview. |
 | `files` | Ordered array of `{ path, action, keys, tracked }`. |
 | `journalPath` | Absolute path where apply keeps its private journal; preview does not create it. |
+| `manifestPath` | Absolute rollback manifest path once a journal exists, otherwise `null`. Available after interrupted apply even if that apply printed no result. |
 
 Each file `action` is `write` (absent destination), `change` (existing destination)
 or `removable` (a legacy copy eligible for the separate cleanup checks). `keys`
 contains names only; config, key and ignore files have an empty array. `tracked`
 is conservative: unknown Git status in a checkout counts as tracked. A cleanup
-preview includes only `removable` entries. These are candidates, not deletion
+preview includes `removable` entries and any `change` to repair a store pointer.
+These are candidates, not deletion
 authority: apply checks the successful project run, original snapshot and current
 delivery again. Finished publications are omitted on resume, and a completed
 migration previews no further write or change. Confirmed removals are omitted.
+When needed, the plan includes `.hack-staging/.gitignore` beside a destination.
+This self-ignoring private staging guard is published before any value file.
+Rollback retains these guards so interrupted or concurrent staging remains
+invisible to ordinary Git additions; they hold only the fixed `*` ignore rule.
 
 For example, an entry can be:
 
@@ -107,7 +113,10 @@ Migration never includes cleanup. A later explicit cleanup requires:
 
 Legacy stores leave before their keys. Confirmed store removal also repairs its
 config pointer. A partial cleanup preserves confirmed removals in the journal and
-reports the error. If cleanup is interrupted, use its rollback manifest before
+reports every confirmed removal even if pointer repair or snapshot receipt
+recording fails. Pointer repair is attempted before recording removal receipts;
+if repair cannot be confirmed, the error warns about a possible stale pointer.
+If cleanup is interrupted, use its rollback manifest before
 retrying; it does not infer fresh deletion authority from an old receipt.
 
 Rollback restores originals before reversing publications, so legacy values are
@@ -120,3 +129,26 @@ originals and keeps replaced bytes privately in the snapshot instead; it does no
 select or merge values. Rollback can resume an incomplete restoration. Keep the manifest, blobs and journal together
 until the upgrade is accepted. Neither file-level atomic writes nor cooperative
 locks protect against an unrelated process replacing files outside Hack's locks.
+
+### Recovering retained edits
+
+Rollback JSON includes `preserved: [{ path, backupPath }]` for files the snapshot
+provider kept while restoring. `path` identifies the original file and
+`backupPath` identifies its retained bytes. The lower-level per-file `results`
+also retain the provider's `keptAs` and status, including incomplete outcomes.
+These fields contain paths only. The files themselves can hold values and keys.
+
+Use the named backup path to recover a file into a **new private path outside Git
+working trees**. For example, after choosing an existing private recovery
+directory, this copies bytes without printing them or overwriting an existing
+destination:
+
+```sh
+umask 077
+set -C
+cat /private/snapshot/blobs/RECORDED_SHA256 > /private/recovery/recovered.yaml
+```
+
+Replace the source with the returned `backupPath`. Inspect or reconcile the
+recovered file privately; do not paste its contents into reports. Keep the
+snapshot until every retained edit has been recovered or deliberately retired.

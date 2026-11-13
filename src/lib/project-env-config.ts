@@ -18,6 +18,7 @@ import {
   basename,
   dirname,
   isAbsolute,
+  join,
   relative,
   resolve,
   sep,
@@ -47,6 +48,10 @@ import { ClosedCliError, HackCliError } from "./cli-result.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
+import {
+  assertEnvMigrationReadable,
+  EnvMigrationPendingError,
+} from "./env-migration-state.ts";
 import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import {
   AtomicWriteConflictError,
@@ -112,6 +117,7 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { PRIVATE_STAGING_DIRNAME } from "./private-staging.ts";
 import {
   parseEnvConfigSelection,
   readProjectDefaultEnvConfig,
@@ -1441,6 +1447,7 @@ async function readProjectEnvLayers(opts: {
   readonly envName?: string | null;
   readonly strictRead?: boolean;
 }) {
+  await assertEnvMigrationReadable(opts);
   const selection = await resolveProjectEnvSelection({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
@@ -1481,6 +1488,7 @@ async function readProjectEnvLayers(opts: {
   const primaryDir = await resolvePrimaryLocalProjectDir(opts);
   const inheritedReads: ProjectEnvConfigReadResult[] = [];
   if (primaryDir !== null) {
+    await assertEnvMigrationReadable({ projectRoot: dirname(primaryDir) });
     const primaryDefaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
       projectRoot: dirname(primaryDir),
       projectDir: primaryDir,
@@ -1654,6 +1662,9 @@ export async function resolveProjectEnvMetadata(
           .metadata
       : null;
   } catch (error) {
+    if (error instanceof EnvMigrationPendingError) {
+      throw error;
+    }
     if (
       opts.fileDiagnostics &&
       (error instanceof ClosedCliError || error instanceof HackCliError)
@@ -2050,6 +2061,7 @@ async function readNativeProjectEnvSelection(
   onAcquired?: NativeEnvAcquisitionObserver,
   inputOwner: ExplicitManagedEnvInputOwner = nativeManagedEnvInputOwner
 ) {
+  await assertEnvMigrationReadable(opts);
   checkNativeEnvCancellation(opts.signal);
   const overlayName = opts.overlay;
   const inheritLocal = opts.inheritLocal;
@@ -2074,6 +2086,7 @@ async function readNativeProjectEnvSelection(
       signal: opts.signal,
     });
     if (primaryRoot) {
+      await assertEnvMigrationReadable({ projectRoot: primaryRoot });
       await inputOwner.assertRoot({
         projectRoot: primaryRoot,
         signal: opts.signal,
@@ -2181,6 +2194,9 @@ export async function resolveProjectEnvMetadataForNativeSelection(
   try {
     return (await readNativeProjectEnvSelection(opts)).metadata;
   } catch (error: unknown) {
+    if (error instanceof EnvMigrationPendingError) {
+      throw error;
+    }
     if (
       error instanceof NativeConfigCompilerError &&
       error.code === "E_COMPILER_CANCELLED"
@@ -2208,6 +2224,9 @@ export async function resolveProjectEnvConfigForNativeSelection(
       signal: opts.signal,
     });
   } catch (error: unknown) {
+    if (error instanceof EnvMigrationPendingError) {
+      throw error;
+    }
     if (
       error instanceof NativeConfigCompilerError &&
       error.code === "E_COMPILER_CANCELLED"
@@ -6258,6 +6277,7 @@ export type PreparedLegacyEnvMigration = {
   readonly files: readonly {
     readonly path: string;
     readonly kind:
+      | "staging_guard"
       | "ignore"
       | "key"
       | "local_layer"
@@ -6627,6 +6647,87 @@ async function prepareMigrationCompose(
   }
 }
 
+async function prepareMigrationStagingGuards(
+  files: readonly PreparedLegacyEnvMigration["files"][number][],
+  extraSources: Set<string>,
+  add: AddPreparedMigrationFile
+): Promise<void> {
+  const parents = [...new Set(files.map((file) => dirname(file.path)))];
+  for (const parent of parents) {
+    const path = join(parent, PRIVATE_STAGING_DIRNAME, ".gitignore");
+    extraSources.add(path);
+    const info = await lstat(dirname(path)).catch((error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    });
+    if (
+      info &&
+      (!info.isDirectory() ||
+        info.isSymbolicLink() ||
+        info.uid !== process.getuid?.() ||
+        (info.mode & 0o077) !== 0)
+    ) {
+      throw new ClosedCliError(
+        "Cannot prepare env migration: staging directory is unsafe or not private; values omitted."
+      );
+    }
+    const previous = await readReplaceablePrivateFile({
+      path,
+      directories: [],
+      refusal: () =>
+        new ClosedCliError(
+          "Cannot prepare env migration staging guard; values omitted."
+        ),
+    });
+    if (previous && previous.text !== "*\n") {
+      throw new ClosedCliError(
+        "Cannot prepare env migration: staging ignore file differs from the required guard; values omitted."
+      );
+    }
+    if (!previous) {
+      await add({ path, kind: "staging_guard", keys: [], mode: 0o600 }, "*\n");
+    }
+  }
+}
+
+async function prepareMigrationInputs(
+  opts: PreparedMigrationProject,
+  input: {
+    readonly contract: Awaited<ReturnType<typeof readHackEnvContract>>;
+    readonly layersExist: boolean;
+    readonly extraSources: Set<string>;
+    readonly add: AddPreparedMigrationFile;
+    readonly addLayer: AddPreparedMigrationLayer;
+  }
+) {
+  const { contract, layersExist, extraSources, add, addLayer } = input;
+  if (
+    !contract.exists &&
+    layersExist &&
+    !(await canMigrateCheckoutLegacyDotenv(opts))
+  ) {
+    return {
+      overlayNames: [],
+      store: undefined,
+      deliveredValues: new Map<string, ReadonlyMap<string, string | null>>(),
+      configCandidates: [],
+    };
+  }
+  if (contract.exists) {
+    return await prepareContractMigration(
+      opts,
+      contract.contract,
+      layersExist,
+      extraSources,
+      add,
+      addLayer
+    );
+  }
+  return await prepareUndeclaredMigration(opts, addLayer);
+}
+
 async function prepareLegacyProjectEnvMigrationInternal(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -6703,35 +6804,14 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
     );
   };
   const layersExist = await projectEnvConfigExistsForMutation(opts);
-  if (
-    !contract.exists &&
-    layersExist &&
-    !(await canMigrateCheckoutLegacyDotenv(opts))
-  ) {
-    return {
-      files: [],
-      sourcePaths: [],
-      removable: [],
-      overlayNames: [],
-      hasContract: false,
-      retainedEnvFiles: [],
-      blockedCleanupCandidates: [],
-      payload: () => {
-        throw new ClosedCliError("No migration publication is required.");
-      },
-    };
-  }
   const { overlayNames, store, deliveredValues, configCandidates } =
-    contract.exists
-      ? await prepareContractMigration(
-          opts,
-          contract.contract,
-          layersExist,
-          extraSources,
-          add,
-          addLayer
-        )
-      : await prepareUndeclaredMigration(opts, addLayer);
+    await prepareMigrationInputs(opts, {
+      contract,
+      layersExist,
+      extraSources,
+      add,
+      addLayer,
+    });
   if (files.some((file) => file.kind === "local_layer")) {
     const path = resolve(opts.projectDir, ".gitignore");
     const previous = await readReplaceablePrivateFile(
@@ -6788,6 +6868,16 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
       }
     }
   }
+  const stagingTargets = [...files];
+  if (store && removable.includes(store.path)) {
+    stagingTargets.push({
+      path: resolve(opts.projectDir, PROJECT_CONFIG_FILENAME),
+      kind: "config",
+      keys: [],
+      mode: 0o644,
+    });
+  }
+  await prepareMigrationStagingGuards(stagingTargets, extraSources, add);
   const sourcePaths = [
     ...new Set([
       contract.path,
@@ -6804,6 +6894,7 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
   const prepared: PreparedLegacyEnvMigration = {
     files: files.sort((a, b) => {
       const order = {
+        staging_guard: -1,
         ignore: 0,
         key: 1,
         local_layer: 2,

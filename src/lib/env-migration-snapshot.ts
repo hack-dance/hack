@@ -38,6 +38,10 @@ export type EnvMigrationSnapshots = {
   }) => Promise<{
     readonly status: "restored" | "incomplete";
     readonly results: readonly unknown[];
+    readonly preserved?: readonly {
+      readonly path: string;
+      readonly backupPath: string;
+    }[];
   }>;
 };
 
@@ -233,7 +237,18 @@ export function bindEnvMigrationSnapshots(
           break;
         }
       }
-      return { status: incomplete ? "incomplete" : "restored", results };
+      const preserved = results.flatMap((result) =>
+        isRecord(result) &&
+        typeof result.path === "string" &&
+        typeof result.keptAs === "string"
+          ? [{ path: result.path, backupPath: result.keptAs }]
+          : []
+      );
+      return {
+        status: incomplete ? "incomplete" : "restored",
+        results,
+        preserved,
+      };
     },
   };
 }

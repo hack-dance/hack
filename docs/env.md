@@ -1637,7 +1637,7 @@ lists the store's entries read-only before it writes anything, without creating 
 An overlay that exists only in the store, such as a value from
 `hack env set KEY --secret --env staging` with no `.hack/.env.staging`, is migrated like an
 overlay file. A stored overlay whose name can't be an env layer name refuses
-(`E_CONFIG_INVALID`). Doctor offers a configured store inside the project for cleanup only
+(`E_CONFIG_INVALID`). The separate cleanup preview lists a configured store inside the project only
 when the env layers now deliver every entry it holds for this project and it holds none for
 another; otherwise it keeps the store and names the entries that would be lost, never their
 values. A store it can't list (its key isn't available, it can't be read, or the backend is
@@ -1645,15 +1645,18 @@ the keychain) is kept too. A store key file inside the project is offered only w
 that needs it stays behind. Project env keys (including the shared Git key), current
 YAML layers and project config files are never legacy cleanup targets, even when
 an old backend configuration names the same file. Cleanup refuses a request that
-includes one, because migrated values may still depend on it. While a store exists, the migration keeps its pointer in
+includes one, because migrated values may still depend on it. Migration keeps every
+legacy file and its store pointer in
 `hack.config.json` (`controlPlane.secrets.encryptedFile` and `backend: encrypted_file`) on
 every route, including implicit ones such as `hack env add`, so entries it still holds stay
-readable through the secret store without hand edits; Hack reports the kept pointer with the
-key names still in the store, never values. The pointer is dropped only after doctor's
-cleanup has removed the store. If a later removal fails, doctor drops the pointer
-for that confirmed store removal before reporting the cleanup error. If the config
-cannot be updated, doctor warns about the pointer and still reports the original
-cleanup failure and confirmed removals. If the store remains, its pointer stays
+readable through the secret store without hand edits. After a successful full-project
+`hack up`, preview cleanup with `hack env migrate --cleanup --json` and request it
+with `--cleanup --apply`, adding `--accept-tracked-env-changes` for tracked edits.
+The pointer is dropped only after that explicit cleanup removes the store. If a
+later removal or receipt fails, cleanup still attempts pointer repair and reports
+every confirmed removal. If the config cannot be updated, its error also warns
+about the pointer. Restore the snapshot before retrying an incomplete cleanup.
+If the store remains, its pointer stays
 in place. A `cloud`
 backend reads the same pointer, so it always keeps it, and its store and key file are never
 offered for cleanup. The keychain backend can't list its entries, so with it an overlay

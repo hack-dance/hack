@@ -26,6 +26,7 @@ export async function stageMigrationPayloads(input: {
   }));
   await replacePrivateFileAtomic({
     path: join(directory, "receipt.json"),
+    staging: "sibling",
     directories: [directory],
     text: JSON.stringify({
       version: 1,
@@ -41,6 +42,7 @@ export async function stageMigrationPayloads(input: {
     const path = join(directory, `${index}.payload`);
     await replacePrivateFileAtomic({
       path,
+      staging: "sibling",
       directories: [directory],
       text: file.text,
       mode: 0o600,

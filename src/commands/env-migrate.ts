@@ -12,6 +12,7 @@ import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import {
   applyEnvMigration,
   cleanupEnvMigration,
+  previewEnvCleanup,
   previewEnvMigration,
   rollbackEnvMigration,
 } from "../lib/env-migration.ts";
@@ -142,14 +143,14 @@ export async function handleEnvMigrate({
       snapshots: await envMigrationSnapshots(),
     });
   } else {
-    const preview = await previewEnvMigration(project);
+    const preview = await (opts.cleanup
+      ? previewEnvCleanup
+      : previewEnvMigration)(project);
     data = {
       ...preview,
       action,
       dryRun: true,
-      files: opts.cleanup
-        ? preview.files.filter((entry) => entry.action === "removable")
-        : preview.files,
+      files: preview.files,
     };
   }
   if (opts.json) {

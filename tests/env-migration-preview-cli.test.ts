@@ -9,10 +9,23 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fixtureChildren } from "./helpers/fixture-children.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
+const binary = process.env.HACK_TEST_ENV_MIGRATION_BINARY;
+function cliPrefix(): readonly string[] {
+  if (binary && !isAbsolute(binary)) {
+    throw new Error("Compiled test executable must be absolute");
+  }
+  return binary
+    ? [binary]
+    : [
+        process.execPath,
+        "--no-env-file",
+        resolve(import.meta.dir, "..", "index.ts"),
+      ];
+}
 const sentinel = "synthetic-preview-cli-value";
 const children = fixtureChildren("env-migration-preview");
 let root: string | null = null;
@@ -53,7 +66,7 @@ async function fixture() {
   return { root, project, projectDir, env, home: privateCliHome(root) };
 }
 
-test("source CLI preview JSON is versioned and value-free with no runtime, HOME state or project writes", async () => {
+test("CLI preview JSON is versioned and value-free with no runtime, HOME state or project writes", async () => {
   const selected = await fixture();
   const names = (await readdir(selected.projectDir)).sort();
   const before = await Promise.all(
@@ -62,9 +75,7 @@ test("source CLI preview JSON is versioned and value-free with no runtime, HOME 
   for (const flags of [[], ["--cleanup"]]) {
     const result = await children.run({
       cmd: [
-        process.execPath,
-        "--no-env-file",
-        resolve(import.meta.dir, "..", "index.ts"),
+        ...cliPrefix(),
         "env",
         "migrate",
         "--path",
@@ -85,6 +96,7 @@ test("source CLI preview JSON is versioned and value-free with no runtime, HOME 
         status: "ready",
         dryRun: true,
         action: flags.length ? "cleanup" : "preview",
+        manifestPath: null,
         project: {
           projectRoot: selected.project,
           projectDir: selected.projectDir,
@@ -102,6 +114,7 @@ test("source CLI preview JSON is versioned and value-free with no runtime, HOME 
         "project",
         "files",
         "journalPath",
+        "manifestPath",
       ].sort()
     );
     for (const file of output.data.files) {
@@ -131,9 +144,7 @@ test("malformed legacy input cannot print its sentinel in JSON errors", async ()
   );
   const result = await children.run({
     cmd: [
-      process.execPath,
-      "--no-env-file",
-      resolve(import.meta.dir, "..", "index.ts"),
+      ...cliPrefix(),
       "env",
       "migrate",
       "--path",

@@ -221,6 +221,11 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
   "setup cursor": { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "setup claude": { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "setup codex": { kind: "not-a-project-command", reason: NOT_REQUIRED },
+  // Outside a project it retires the global store (HACK-2177).
+  "secrets retire-store": {
+    kind: "not-a-project-command",
+    reason: NOT_REQUIRED,
+  },
   "setup agents": { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "setup sync": { kind: "not-a-project-command", reason: NOT_REQUIRED },
   "setup migrate": { kind: "not-a-project-command", reason: NOT_REQUIRED },

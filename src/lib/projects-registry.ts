@@ -172,6 +172,61 @@ export async function readProjectsRegistry(opts?: {
   return out ?? { version: REGISTRY_VERSION, projects: [] };
 }
 
+/**
+ * Strict read for callers that must not take an unreadable or invalid
+ * registry for an empty one (HACK-2177): `absent` (no file), `valid`, or
+ * `invalid` (not JSON, or not a registry). A file that cannot be read
+ * throws {@link ProjectsRegistryReadError}, as {@link readProjectsRegistry}.
+ */
+export async function readProjectsRegistryStrict(opts?: {
+  readonly registryPath?: string;
+}): Promise<
+  | { readonly kind: "absent" | "invalid" }
+  | {
+      readonly kind: "valid";
+      readonly registry: ProjectsRegistry;
+      /** Project entries the registry holds that are not valid (skipped). */
+      readonly rejected: number;
+    }
+> {
+  const text = await readRegistryText(opts?.registryPath ?? getRegistryPath());
+  if (text === null) {
+    return { kind: "absent" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { kind: "invalid" };
+  }
+  const registry = parseRegistry(parsed);
+  if (registry === null) {
+    return { kind: "invalid" };
+  }
+  // The best-effort parser skips invalid project entries, and invalid
+  // worktree entries inside a valid project; count both, so a caller never
+  // presents a filtered list as complete.
+  const raw = isRecord(parsed) ? parsed.projects : undefined;
+  const items: unknown[] = Array.isArray(raw) ? raw : [];
+  let rejected = 0;
+  for (const item of items) {
+    const project = parseProject(item);
+    if (project === null) {
+      rejected += 1;
+      continue;
+    }
+    const rawWorktrees = isRecord(item) ? item.worktrees : undefined;
+    if (Array.isArray(rawWorktrees)) {
+      rejected += rawWorktrees.length - (project.worktrees?.length ?? 0);
+    } else if (rawWorktrees !== undefined) {
+      // A present worktrees field that is not an array hides any checkouts
+      // it held: unknown, not "no worktrees".
+      rejected += 1;
+    }
+  }
+  return { kind: "valid", registry, rejected };
+}
+
 type RegistrationUpsertOptions = {
   readonly project: ProjectContext;
   readonly nowIso?: string;

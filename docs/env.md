@@ -1677,7 +1677,20 @@ Some older surfaces are still compatibility-oriented:
   before it lands, so a concurrent writer's key is kept, never overwritten. The
   process-wide key cache holds only keychain material, so one store's key file never
   stands in for another store's key. `hack doctor` reports an unreadable or refused
-  store, a missing or refused store key, and a key that does not open the store. Explicit key
+  store, a missing or refused store key, and a key that does not open the store.
+  A store whose key is missing or wrong is an error only in a project that reads
+  it (its legacy env contract declares a store-backed value, or plaintext is kept
+  in the backend), and a warning elsewhere. The finding names the registered
+  projects that read the store, and offers two ways forward: restore the key, or
+  run `hack secrets retire-store`. That command moves the store into a new
+  directory `<store>.retired-<UTC time>/` beside it, deletes and prints nothing, and says
+  how to move it back. It needs `--yes` without a terminal. It refuses a store that
+  another registered project's key still opens, and, unless `--allow-unchecked` is
+  passed, a store some registered projects could not be checked for. Because
+  `HACK_SECRETS_FILE_KEY` overrides key files and may be set in another shell for a
+  project that selects the store, the command cannot rule it out and also needs
+  `--allow-unchecked` as confirmation that none does. Doctor then lists
+  retired files as information. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
   key paths or immediate parent directories. A key generated on first use is
   published only when no key file exists, so concurrent first users adopt the key

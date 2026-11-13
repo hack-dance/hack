@@ -836,7 +836,8 @@ test("the global store's states: no store, an env key, a keychain not asked", as
       cliVersion: "5.0.0-next.17",
       homeDir: home,
       probes: healthyProbes(),
-      env: { ...process.env, ...env },
+      // Only the variables the check reads; never the runner's environment.
+      env: { ...env },
     });
     return {
       report,
@@ -1008,7 +1009,6 @@ test("candidate commands keep a path with spaces, quotes and ' hack ' intact", a
     homeDir: weirdHome,
     probes: healthyProbes(),
     env: {
-      ...process.env,
       HACK_CANDIDATE_ENTRYPOINT: "hack-next",
       HACK_RUNTIME_BACKEND: "compose",
     },

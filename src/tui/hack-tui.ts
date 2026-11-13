@@ -23,6 +23,7 @@ import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
+import { hackReexecEnvironment } from "../lib/child-environment.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir, writeTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -2216,6 +2217,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       }
 
       const proc = Bun.spawn([invocation.bin, ...args], {
+        env: hackReexecEnvironment(),
         cwd: resolve(project.projectRoot),
         stdout: "pipe",
         stderr: "pipe",
@@ -2512,6 +2514,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       }
 
       searchProc = Bun.spawn([invocation.bin, ...args], {
+        env: hackReexecEnvironment(),
         cwd: resolve(project.projectRoot),
         stdout: "pipe",
         stderr: "pipe",
@@ -2612,6 +2615,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         project.projectRoot,
       ];
       logProc = Bun.spawn([invocation.bin, ...args], {
+        env: hackReexecEnvironment(),
         cwd: resolve(project.projectRoot),
         stdout: "pipe",
         stderr: "pipe",
@@ -2732,6 +2736,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         project.projectRoot,
       ];
       const proc = Bun.spawn([invocation.bin, ...cmd], {
+        env: hackReexecEnvironment(),
         cwd: resolve(project.projectRoot),
         stdout: "ignore",
         stderr: "pipe",

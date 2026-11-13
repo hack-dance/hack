@@ -57,7 +57,7 @@ with `hack down --profile docs --branch docs-preview`.
 To move v5 to a newer prerelease:
 
 ```bash
-bun run docs:pin -- --version v5 --ref v5.0.0-next.15 --label "v5 (next.15)" --dir next15
+bun run docs:pin -- --version v5 --ref v5.0.0-next.16 --label "v5 (next.16)" --dir next16
 ```
 
 Then update the release tag in `docs/versions/v5/install.md`, re-read the

@@ -689,6 +689,32 @@ function pinnedUrlAllowed(url: URL, source: URL, pin: PinnedFile): boolean {
   );
 }
 
+function pinRequest(confirmation: boolean, signal: AbortSignal): RequestInit {
+  return {
+    method: confirmation ? "GET" : "HEAD",
+    headers: confirmation
+      ? {
+          "cache-control": "no-cache",
+          range: "bytes=0-0",
+          "accept-encoding": "identity",
+        }
+      : undefined,
+    redirect: "manual",
+    signal,
+  };
+}
+
+function pinFailure(
+  problem: string,
+  kind: "invalid" | "no_longer_served",
+  confirmation: boolean
+): Pick<PinAvailability, "problem" | "kind"> {
+  return {
+    problem: confirmation ? `Length confirmation failed: ${problem}` : problem,
+    kind: confirmation ? "transient" : kind,
+  };
+}
+
 async function pinnedUrlProblem(
   pin: PinnedFile,
   fetcher: typeof fetch,
@@ -698,17 +724,12 @@ async function pinnedUrlProblem(
   const source = new URL(pin.url);
   let url = source;
   // A failed confirmation cannot establish a repeated length mismatch. Only
-  // the successful 200 path below may confirm it and return `invalid`.
+  // a successful one-byte 206 below may confirm it and return `invalid`.
   const failure = (
     problem: string,
     kind: "invalid" | "no_longer_served"
-  ): Pick<PinAvailability, "problem" | "kind"> => ({
-    problem:
-      firstMismatch === undefined
-        ? problem
-        : `Length confirmation failed: ${problem}`,
-    kind: firstMismatch === undefined ? kind : "transient",
-  });
+  ): Pick<PinAvailability, "problem" | "kind"> =>
+    pinFailure(problem, kind, firstMismatch !== undefined);
   try {
     for (let redirects = 0; redirects <= 5; redirects++) {
       if (!pinnedUrlAllowed(url, source, pin)) {
@@ -717,15 +738,13 @@ async function pinnedUrlProblem(
           "invalid"
         );
       }
-      const response = await fetcher(url, {
-        method: "HEAD",
-        headers:
-          firstMismatch === undefined
-            ? undefined
-            : { "cache-control": "no-cache" },
-        redirect: "manual",
-        signal,
-      });
+      const response = await fetcher(
+        url,
+        pinRequest(firstMismatch !== undefined, signal)
+      );
+      if (firstMismatch !== undefined && response.status === 206) {
+        return await pinnedRangeProblem(pin, response, firstMismatch);
+      }
       await response.body?.cancel();
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get("location");
@@ -735,11 +754,15 @@ async function pinnedUrlProblem(
         url = new URL(location, url);
         continue;
       }
+      if (firstMismatch !== undefined) {
+        return failure(
+          `HTTP ${response.status}; one-byte range unavailable, recheck next run`,
+          "invalid"
+        );
+      }
       if (response.status === 404 || response.status === 410) {
         return failure(
-          firstMismatch === undefined
-            ? `HTTP ${response.status}: upstream no longer serves this pinned file`
-            : `HTTP ${response.status}; availability unknown, recheck next run`,
+          `HTTP ${response.status}: upstream no longer serves this pinned file`,
           "no_longer_served"
         );
       }
@@ -753,8 +776,7 @@ async function pinnedUrlProblem(
         pin,
         fetcher,
         signal,
-        response.headers.get("content-length"),
-        firstMismatch
+        response.headers.get("content-length")
       );
     }
   } catch {
@@ -770,8 +792,7 @@ async function pinnedLengthProblem(
   pin: PinnedFile,
   fetcher: typeof fetch,
   signal: AbortSignal,
-  length: string | null,
-  firstMismatch?: string
+  length: string | null
 ): Promise<Pick<PinAvailability, "problem" | "kind">> {
   if (length === null) {
     return {
@@ -780,27 +801,70 @@ async function pinnedLengthProblem(
     };
   }
   if (!/^\d+$/.test(length) || Number(length) !== pin.sizeBytes) {
-    if (firstMismatch === undefined) {
-      // One HEAD can carry stale CDN metadata. Confirm independently from
-      // the original pinned URL, under the same total request deadline.
-      return await pinnedUrlProblem(pin, fetcher, signal, length);
-    }
-    if (length !== firstMismatch) {
-      return {
-        problem:
-          "Content-Length disagreement was not confirmed (transient failure)",
-        kind: "transient",
-      };
-    }
-    return {
-      problem: `Content-Length differs from pinned size_bytes (${pin.sizeBytes}); confirmed by a second HEAD`,
-      kind: "invalid",
-    };
+    // HEAD metadata may be stale. A one-byte GET independently reports the
+    // total from the original pinned URL under the same deadline/policy.
+    // A nonnumeric HEAD can be cleared by the pin's size, but cannot corroborate
+    // a different GET total as a confirmed mismatch.
+    return await pinnedUrlProblem(pin, fetcher, signal, length);
   }
   return { problem: null, kind: "available" };
 }
 
-/** Bounded, unauthenticated HEAD requests. Never download archives or forward the
+async function pinnedRangeProblem(
+  pin: PinnedFile,
+  response: Response,
+  firstLength: string
+): Promise<Pick<PinAvailability, "problem" | "kind">> {
+  const transient = {
+    problem: "One-byte range did not confirm the HEAD length; recheck next run",
+    kind: "transient",
+  } as const;
+  const reader = response.body?.getReader();
+  try {
+    const range = response.headers
+      .get("content-range")
+      ?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+    const total = Number(range?.[3]);
+    if (
+      !(range && Number.isSafeInteger(total)) ||
+      total <= 0 ||
+      Number(range[1]) !== 0 ||
+      Number(range[2]) !== 0 ||
+      response.headers.get("content-length") !== "1" ||
+      ![null, "identity"].includes(response.headers.get("content-encoding")) ||
+      !reader
+    ) {
+      return transient;
+    }
+    // At most one payload byte and EOF. A server ignoring Range is cancelled
+    // before this helper; neither a whole archive nor an endless stream is read.
+    const byte = await reader.read();
+    if (
+      byte.done ||
+      byte.value.byteLength !== 1 ||
+      !(await reader.read()).done
+    ) {
+      return transient;
+    }
+    if (total === pin.sizeBytes) {
+      return { problem: null, kind: "available" };
+    }
+    if (!/^\d+$/.test(firstLength) || total !== Number(firstLength)) {
+      return transient;
+    }
+    return {
+      problem: `Content-Length differs from pinned size_bytes (${pin.sizeBytes}); confirmed by one-byte GET`,
+      kind: "invalid",
+    };
+  } finally {
+    if (reader) {
+      await reader.cancel();
+      reader.releaseLock();
+    }
+  }
+}
+
+/** Bounded, unauthenticated HEAD and optional one-byte GET requests. Never download archives or forward the
  * GitHub API token; only original/pin-listed HTTPS hosts may receive a request. */
 export async function checkPinnedUrls(
   pins: readonly PinnedFile[],

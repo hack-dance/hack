@@ -314,7 +314,7 @@ export function replayAnnotations(opts: {
   };
 }
 
-/** Dedicated jobs keep their own tests even if a unit file is not selected. */
+/** Integration jobs keep their own tests even when PRs defer their tier. */
 export function replayJobAdmitted(opts: {
   readonly name: string;
   readonly changed: readonly string[];
@@ -327,7 +327,9 @@ export function replayJobAdmitted(opts: {
   if (opts.name.startsWith("Config compiler (")) {
     const hosts =
       full || opts.changed.some(touchesCompilerHost)
-        ? JSON.stringify(COMPILER_HOSTS)
+        ? JSON.stringify(
+            COMPILER_HOSTS.filter((host) => host.os !== "macos-15-intel")
+          )
         : coarse.compiler_hosts;
     return hosts.includes(JSON.stringify(opts.name.slice(17, -1)));
   }
@@ -846,6 +848,13 @@ export async function main(args: readonly string[]): Promise<number> {
         macos: pools.macos,
         linux: pools.linux,
         ready: {
+          linuxOnly: true,
+          docker: false,
+          candidate: false,
+          compilerNative: false,
+          deferredMacos: pools.macos,
+        },
+        integration: {
           docker: full || planScope(changed).suite,
           candidate: full || changed.some(touchesCandidate),
           compilerNative: full || changed.some(touchesCompilerHost),

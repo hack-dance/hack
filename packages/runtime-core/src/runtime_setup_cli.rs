@@ -283,7 +283,7 @@ mod output_tests {
         let candidate = Candidate::discover(&std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let result = serde_json::json!({
             "status": "installed",
-            "files": [{"name":"provider.tgz", "outcome":"reused", "size_bytes":5,
+            "files": [{"name":"provider.tgz", "outcome":"offline", "size_bytes":5,
                 "downloaded_bytes":0, "reused_bytes":5}],
             "probe": {"supported":true}
         });
@@ -317,17 +317,18 @@ mod output_tests {
             result
         );
         output.clear();
+        let reused = serde_json::json!({"status":"reused", "files":[], "probe":{"supported":true}});
         execute(
             &candidate,
             &["--json", "--no-interactive"],
-            |_| Ok(Some(result.clone())),
+            |_| Ok(Some(reused.clone())),
             |_, _, _| panic!("reuse prepared"),
             &mut output,
         )
         .unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
-            result
+            reused
         );
     }
 }

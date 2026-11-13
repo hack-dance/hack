@@ -32,13 +32,15 @@ The exact rules for each command are in
 ## Not supported yet
 
 - Verified live log following. `hack logs <service> --follow` is available under
-  verification, with `--tail`, `--since` and `--json`; real-VM acceptance for both
+  verification, with `--tail`, `--since`, `--timestamps` and `--json`; real-VM acceptance for both
   authored and adopted projects remains pending. The following limits apply to
   this candidate command.
 - Querying log history with Loki. Native live logs select one service; services configured with a TTY are currently refused by name.
-- Following through a container restart. Native follows one start generation;
-  a confirmed stop ends the follow, or an already visible restart reports
-  `native_log_container_restarted`. Start a new follower after restart.
+- Unbounded restart following. Project restart re-admission waits at most 30 seconds
+  and retains at most 1000 initial lines from the new container. Failure reports
+  `native_log_restart_unavailable`. Same-container Engine restarts observed by
+  the reader report `native_log_container_restarted`; after an already confirmed
+  stop the follow ends as stopped. Neither case reattaches to that container.
 - Following a service before its graph is ready. Startup refuses with
   `native_log_selection_changed`.
 - Complete oversized lines. Lines over 64 Ki characters retain only that

@@ -64,7 +64,7 @@ const STUB = [
   "      exit 0",
   "      ;;",
   '    *" ps "*)',
-  '      printf "%s\\n" \'{"Service":"web","State":"running","ExitCode":0}\' \'{"Service":"worker","State":"running","ExitCode":0}\'',
+  '      printf "%s\\n" \'{"ID":"fixture-web","Service":"web","State":"running","ExitCode":0}\' \'{"ID":"fixture-worker","Service":"worker","State":"running","ExitCode":0}\'',
   "      exit 0",
   "      ;;",
   "    *) exit 0 ;;",

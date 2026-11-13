@@ -1,3 +1,4 @@
+import { childEnvironment } from "./child-environment.ts";
 import { withoutComposeEnvReferences } from "./compose-managed-env.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -129,7 +130,7 @@ export async function withDependencyStartupProgress<T>(opts: {
   function spawn(args: string[]): Child {
     const child = Bun.spawn(["docker", ...args], {
       cwd: opts.cwd,
-      env,
+      env: childEnvironment(env),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",

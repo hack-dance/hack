@@ -13,8 +13,8 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
-
 import { GLOBAL_HACK_DIR_NAME } from "../constants.ts";
+import { childEnvironment } from "../lib/child-environment.ts";
 import {
   pathExists,
   readTextFile,
@@ -193,7 +193,11 @@ function createDefaultRunner(opts: {
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
-        env: { ...opts.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" },
+        env: childEnvironment({
+          ...opts.env,
+          SYSTEMD_PAGER: "",
+          SYSTEMD_COLORS: "0",
+        }),
       });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

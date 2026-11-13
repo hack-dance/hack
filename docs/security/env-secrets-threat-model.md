@@ -154,8 +154,15 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    check names rollback, `hack up` and adopting again as the way to drop the values.
    A preparation that an earlier version made over a literal override is never
    published now (HACK-1318); until `hack config adopt --recover --rollback` releases
-   its journaled switch, it also keeps the file. Other generated files under `.hack/.internal/` and `.hack/.branch/` are
-   written with the process umask; the scan shows they hold no values today.
+   its journaled switch, it also keeps the file. Lifecycle logs (`.hack/.internal/lifecycle/*.log`) are
+   the exception: they hold hook and lifecycle output verbatim and unredacted, so they are
+   written private (directory 0700, files 0600, owner-checked, never through a symlink;
+   older broad modes are tightened before appending) and persistent output passes through a
+   0600 FIFO in a private `mktemp -d` directory. Staged terminal-multiplexer environments
+   (`$TMPDIR/hack-mux-env-*/env.json`, 0600 in a 0700 directory) are refused after 10 minutes
+   and removed by the next staging if no session ran them. Other generated files under
+   `.hack/.internal/` and `.hack/.branch/` are written with the process umask; the scan shows
+   they hold no values today.
 5. **YAML env layer TOCTOU (narrowed, HACK-1685).** Base and overlay YAML layers,
    including local layers and init scaffold writes, may follow links only when the whole chain resolves inside
    `realpath(projectRoot)`. Component-aware resolution handles relative targets,

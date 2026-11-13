@@ -1,7 +1,11 @@
-import { appendFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ensureDir, pathExists, readTextFile, writeTextFile } from "./fs.ts";
+import { pathExists, readTextFile, writeTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import {
+  appendPrivateFile,
+  ensurePrivateDirectory,
+  openPrivateAppend,
+} from "./private-file.ts";
 
 export type LifecycleBackend = "tmux" | "zellij";
 
@@ -120,9 +124,25 @@ export async function appendLifecycleLogRecord(opts: {
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
-  await ensureDir(root);
-  const line = `${formatLifecycleLogRecord(opts.record)}\n`;
-  await appendFile(logPath, line, "utf8");
+  await ensurePrivateDirectory(root);
+  await appendPrivateFile({
+    path: logPath,
+    data: `${formatLifecycleLogRecord(opts.record)}\n`,
+  });
+}
+
+/**
+ * Lifecycle output is stored verbatim and unredacted, so its directory and
+ * log are private (0700 and 0600, owner-checked, never through a symlink,
+ * older loose modes tightened). Called before the first record and before a
+ * persistent session's shell appends to the log.
+ */
+export async function ensurePrivateLifecycleLog(opts: {
+  readonly root: string;
+  readonly logPath: string;
+}): Promise<void> {
+  await ensurePrivateDirectory(opts.root);
+  await (await openPrivateAppend(opts.logPath)).close();
 }
 
 export async function readLifecycleState(opts: {
@@ -338,7 +358,7 @@ async function writeLifecycleStateFile(opts: {
 }): Promise<void> {
   const root = resolveLifecycleRootDir({ projectDir: opts.projectDir });
   const path = resolveLifecycleStatePath({ projectDir: opts.projectDir });
-  await ensureDir(root);
+  await ensurePrivateDirectory(root);
   await writeTextFile(path, `${JSON.stringify(opts.state, null, 2)}\n`);
 }
 

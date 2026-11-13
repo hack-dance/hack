@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import {
+  chmod,
   type FileHandle,
   lstat,
+  mkdir,
   open,
   realpath,
   rename,
@@ -538,4 +540,102 @@ export function decodeCanonicalBase64(opts: {
     return null;
   }
   return decoded;
+}
+
+/**
+ * A private path was refused: a symlink, a non-regular file or directory,
+ * another owner, or more than one hard link. The message names the path
+ * only; contents are never read.
+ */
+export class PrivatePathRefusedError extends Error {
+  readonly path: string;
+
+  constructor(path: string, reason: string) {
+    super(`Refusing ${reason} at ${path}; remove it and retry.`);
+    this.name = "PrivatePathRefusedError";
+    this.path = path;
+  }
+}
+
+/**
+ * Create (parents included) or adopt a private directory: mode 0700, owned
+ * by this user, not a symlink. An existing directory with group or other
+ * access is tightened to 0700 in place.
+ */
+export async function ensurePrivateDirectory(path: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await mkdir(path, { mode: 0o700 }).catch((error: unknown) => {
+    if (!(isRecord(error) && error.code === "EEXIST")) {
+      throw error;
+    }
+  });
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new PrivatePathRefusedError(path, "a non-directory entry");
+  }
+  if (info.uid !== process.getuid?.()) {
+    throw new PrivatePathRefusedError(
+      path,
+      "a directory owned by another user"
+    );
+  }
+  if ((info.mode & 0o077) !== 0) {
+    await chmod(path, 0o700);
+  }
+}
+
+/**
+ * Open a private file for appending without following a symlink at the
+ * final path: created mode 0600, refused unless it is a regular file owned
+ * by this user with one link; an older file with group or other access is
+ * tightened to 0600 before anything is written. `O_NONBLOCK` makes a planted
+ * FIFO fail instead of blocking.
+ */
+export async function openPrivateAppend(path: string): Promise<FileHandle> {
+  const handle = await open(
+    path,
+    constants.O_WRONLY |
+      constants.O_APPEND |
+      constants.O_CREAT |
+      constants.O_NOFOLLOW |
+      constants.O_NONBLOCK,
+    0o600
+  ).catch((error: unknown) => {
+    if (isRecord(error) && (error.code === "ELOOP" || error.code === "ENXIO")) {
+      throw new PrivatePathRefusedError(path, "a symlink or special file");
+    }
+    throw error;
+  });
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      throw new PrivatePathRefusedError(path, "a non-regular file");
+    }
+    if (info.uid !== process.getuid?.()) {
+      throw new PrivatePathRefusedError(path, "a file owned by another user");
+    }
+    if (info.nlink !== 1) {
+      throw new PrivatePathRefusedError(path, "a file with other hard links");
+    }
+    if ((info.mode & 0o077) !== 0) {
+      await handle.chmod(0o600);
+    }
+    return handle;
+  } catch (error: unknown) {
+    await handle.close();
+    throw error;
+  }
+}
+
+/** Append to a private file (see {@link openPrivateAppend}). */
+export async function appendPrivateFile(opts: {
+  readonly path: string;
+  readonly data: string | Uint8Array;
+}): Promise<void> {
+  const handle = await openPrivateAppend(opts.path);
+  try {
+    await handle.appendFile(opts.data);
+  } finally {
+    await handle.close();
+  }
 }

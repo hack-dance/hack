@@ -3,6 +3,7 @@ import {
   lstat,
   mkdtemp,
   open,
+  readdir,
   realpath,
   rmdir,
   unlink,
@@ -13,6 +14,58 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PREFIX = "hack-mux-env-";
 const MAX_BYTES = 1024 * 1024;
+/**
+ * How long a staged payload may wait for its pane. Past this it is refused by
+ * the consumer and removed by the next staging (or by the staging process,
+ * if it still runs): a session that never runs the command must not leave
+ * the values on disk. Generous, because a busy pane runs sent keys late.
+ */
+export const MUX_ENVIRONMENT_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Remove this user's staged payloads older than the TTL from `parent`
+ * (normally the temp directory). Only `hack-mux-env-*` directories owned by
+ * this user with private modes are touched, and only their `env.json` when
+ * it is a regular single-link file of this user. Failures are skipped: this
+ * is cleanup, never a reason to refuse a new session.
+ */
+export async function sweepStaleMuxEnvironments(opts: {
+  readonly parent?: string;
+  readonly now?: number;
+}): Promise<void> {
+  const parent = opts.parent ?? tmpdir();
+  const now = opts.now ?? Date.now();
+  const uid = process.getuid?.();
+  const names = await readdir(parent).catch(() => [] as string[]);
+  for (const name of names) {
+    if (!name.startsWith(PREFIX)) {
+      continue;
+    }
+    const root = join(parent, name);
+    try {
+      const info = await lstat(root);
+      if (
+        !info.isDirectory() ||
+        info.uid !== uid ||
+        (info.mode & 0o077) !== 0 ||
+        now - info.mtimeMs < MUX_ENVIRONMENT_TTL_MS
+      ) {
+        continue;
+      }
+      const payload = join(root, "env.json");
+      const file = await lstat(payload).catch(() => null);
+      if (file) {
+        if (!file.isFile() || file.uid !== uid || file.nlink !== 1) {
+          continue;
+        }
+        await unlink(payload);
+      }
+      await rmdir(root);
+    } catch {
+      // Another process removed or changed it; leave it.
+    }
+  }
+}
 
 /** The pane consumes and deletes this one-shot, owner-only payload before spawning. */
 export async function stageMuxEnvironment(
@@ -29,6 +82,7 @@ export async function stageMuxEnvironment(
   if (Buffer.byteLength(bytes) > MAX_BYTES) {
     throw new Error("Mux environment exceeds the private input limit");
   }
+  await sweepStaleMuxEnvironments({});
   const root = await realpath(await mkdtemp(join(tmpdir(), PREFIX)));
   const path = join(root, "env.json");
   let identity: { dev: number; ino: number } | undefined;
@@ -69,6 +123,11 @@ export async function stageMuxEnvironment(
     } finally {
       await file.close();
     }
+    // Remove it on timeout if this process is still running then; the
+    // timer never keeps the process alive.
+    setTimeout(() => {
+      cleanup().catch(() => undefined);
+    }, MUX_ENVIRONMENT_TTL_MS).unref();
     return { path, cleanup };
   } catch (error) {
     await cleanup();
@@ -113,6 +172,12 @@ export async function runMuxEnvironment(
       (info.mode & 0o077) !== 0 ||
       info.size > MAX_BYTES
     ) {
+      return 1;
+    }
+    if (Date.now() - info.mtimeMs >= MUX_ENVIRONMENT_TTL_MS) {
+      // Too old: the values are removed, never used.
+      await unlink(path).catch(() => undefined);
+      await rmdir(root).catch(() => undefined);
       return 1;
     }
     const bytes = Buffer.alloc(MAX_BYTES + 1);

@@ -22,10 +22,21 @@ use gpui_kit::{
     Styled, Window, div, prelude::*, px,
 };
 use hack_desktop_core::daemon_state::{DaemonAction, DaemonModel, always_on};
+use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
 use hack_desktop_core::models::LogEntry;
-use hack_desktop_core::source::{ActionOutcome, DaemonRecovery, Source};
+use hack_desktop_core::source::{
+    ActionOutcome, DaemonRecovery, DoctorTarget, Snapshot, Source, SourceError,
+};
+
+use crate::doctor_view::Pane;
+use hack_desktop_core::doctor::DoctorState as DoctorStateView;
+
+use hack_desktop_core::source::target_keys;
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
 use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
+
+#[path = "setup_controller.rs"]
+mod setup_controller;
 
 const TAIL_LINES: u32 = 20;
 
@@ -39,6 +50,15 @@ pub struct HackApp {
     tail: Result<Vec<LogEntry>, String>,
     follow: bool,
     live: bool,
+    pane: Pane,
+    doctor: DoctorPane,
+    pub(crate) setup: hack_desktop_core::setup::Pane,
+    setup_initial: bool,
+    _activation: Option<gpui_kit::Subscription>,
+    /// Is the window visible (not minimised or hidden)? Automatic doctor
+    /// runs wait for it.
+    window_visible: bool,
+    _visibility: Option<gpui_kit::Subscription>,
     /// When each project's running action started, for the slow-action
     /// warning. Display only: the app never terminates a lifecycle command.
     action_started: std::collections::HashMap<String, std::time::Instant>,
@@ -54,13 +74,23 @@ impl HackApp {
             daemon_last_read: None,
             source,
             tab: 0,
+            pane: Pane::Project,
+            doctor: DoctorPane::default(),
+            setup: Default::default(),
+            setup_initial: true,
+            _activation: None,
+            window_visible: true,
+            _visibility: None,
             tail: Ok(Vec::new()),
             follow: true,
             live,
             action_started: std::collections::HashMap::new(),
         };
         if live {
+            this.pane = Pane::Setup;
             this.start_polling(cx);
+            this.start_doctor_refresh(cx);
+            this.load_setup(cx);
         } else {
             this.refresh_now();
         }
@@ -78,7 +108,159 @@ impl HackApp {
         );
     }
 
-    /// Fixtures: select a project by name.
+    /// Fixtures and screenshots: open the Doctor pane with its data loaded.
+    pub fn show_doctor_now(&mut self) {
+        self.pane = Pane::Doctor;
+        let targets = self.doctor_targets();
+        let names = self.doctor_target_keys();
+        let generation = self.doctor.begin(names.as_deref());
+        let runs = self
+            .source
+            .doctor_runs(targets.as_deref().unwrap_or_default());
+        self.doctor.finish(
+            generation,
+            &runs,
+            names.as_deref(),
+            std::time::Instant::now(),
+        );
+    }
+
+    /// `None` when the project list has not been read: doctor then runs
+    /// machine checks only and reports the projects as not checked.
+    fn doctor_targets(&self) -> Option<Vec<DoctorTarget>> {
+        if !self.model.project_list_readable() {
+            return None;
+        }
+        self.model
+            .snapshot()
+            .map(|s| DoctorTarget::from_projects(&s.projects))
+    }
+
+    fn doctor_target_keys(&self) -> Option<Vec<TargetKey>> {
+        self.doctor_targets().map(|t| target_keys(&t))
+    }
+
+    /// Run doctor (machine run plus one per project) off the UI thread.
+    /// A newer run supersedes an older one; a result whose project set no
+    /// longer matches is shown as stale and checked again.
+    pub fn load_doctor(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            self.show_doctor_now();
+            cx.notify();
+            return;
+        }
+        let targets = self.doctor_targets().unwrap_or_default();
+        let generation = self.doctor.begin(self.doctor_target_keys().as_deref());
+        cx.notify();
+        let source = self.source.clone();
+        cx.spawn(async move |this, cx| {
+            let runs = cx
+                .background_executor()
+                .spawn(async move { source.doctor_runs(&targets) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let current = this.doctor_target_keys();
+                let outcome = this.doctor.finish(
+                    generation,
+                    &runs,
+                    current.as_deref(),
+                    std::time::Instant::now(),
+                );
+                if outcome == Finish::AppliedStale {
+                    // Re-run now only if someone can see it; otherwise the
+                    // stale result re-runs when the window is shown again.
+                    this.maybe_auto_refresh(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Open the Doctor pane, optionally filtered to one project, and run
+    /// doctor when it never ran or the result is older than 10 minutes.
+    pub fn open_doctor(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
+        self.pane = Pane::Doctor;
+        self.doctor.filter = filter;
+        if self.doctor.needs_refresh(std::time::Instant::now()) {
+            self.load_doctor(cx);
+        }
+        cx.notify();
+    }
+
+    /// Start a doctor run if the pane is shown in a visible window and the
+    /// result is missing, old or stale. Returns whether it started one.
+    fn maybe_auto_refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        let start = should_auto_refresh(
+            self.pane == Pane::Doctor,
+            self.window_visible,
+            &self.doctor,
+            std::time::Instant::now(),
+        );
+        if start {
+            self.load_doctor(cx);
+        }
+        start
+    }
+
+    /// Track window visibility; when it becomes visible again, refresh a
+    /// missing, old or stale doctor result.
+    pub fn watch_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.window_visible = window.is_visible();
+        self._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && !this.setup.loading && !this.setup.action_busy {
+                this.load_setup(cx);
+            }
+        }));
+        self._visibility = Some(cx.observe_window_visibility(
+            window,
+            |this, visibility, _window, cx| {
+                this.window_visible = visibility.is_visible();
+                this.maybe_auto_refresh(cx);
+            },
+        ));
+    }
+
+    /// While the Doctor pane is visible, refresh every 10 minutes.
+    fn start_doctor_refresh(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.pane == Pane::Setup
+                        && this.window_visible
+                        && !this.setup.loading
+                        && !this.setup.action_busy
+                        && this
+                            .setup
+                            .checked_at
+                            .is_none_or(|t| t.elapsed() >= Duration::from_secs(600))
+                    {
+                        this.load_setup(cx);
+                    }
+                    if !this.maybe_auto_refresh(cx)
+                        && this.pane == Pane::Doctor
+                        && this.window_visible
+                    {
+                        // Keep "Checked N min ago" current.
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Fixtures: show the selected project (after loading doctor).
+    pub fn show_project(&mut self) {
+        self.pane = Pane::Project;
+    }
+
     pub fn select(&mut self, name: &str) {
         self.model.apply(Event::Select(name.to_owned()));
         self.refresh_now();
@@ -133,7 +315,8 @@ impl HackApp {
                     .await;
                 let daemon_epoch = this
                     .update(cx, |this, _| {
-                        (this.daemon.busy.is_none()
+                        (this.window_visible
+                            && this.daemon.busy.is_none()
                             && this
                                 .daemon_last_read
                                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(10)))
@@ -161,11 +344,10 @@ impl HackApp {
                             this.daemon.observed = o;
                             this.daemon_last_read = Some(std::time::Instant::now());
                         }
-                        if !this.model.finish_refresh(token, snap) {
+                        if !this.apply_snapshot(token, snap, cx) {
                             cx.notify();
                             return None;
                         }
-                        cx.notify();
                         this.follow.then(|| this.selected_root()).flatten()
                     })
                     .ok()
@@ -194,7 +376,7 @@ impl HackApp {
     }
 
     fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
-        if self.daemon.busy.is_some() {
+        if self.daemon.busy.is_some() || self.setup.action_busy {
             return;
         }
         let Some(row) = self.model.selected_row() else {
@@ -244,10 +426,14 @@ impl HackApp {
 
     fn run_daemon_action(&mut self, action: DaemonAction, cx: &mut Context<Self>) {
         if !self.live
+            || self.setup.action_busy
             || self.model.cli_missing()
-            || !self
-                .daemon
-                .begin_with_recovery(action, self.model.daemon_recovery())
+            || (!self.setup.report.cards.is_empty() && !self.setup.report.cli_ready())
+            || !self.daemon.begin_machine(
+                action,
+                self.model.daemon_recovery(),
+                Some(&self.setup.report),
+            )
         {
             return;
         }
@@ -288,8 +474,9 @@ impl HackApp {
                 .spawn(async move { source.snapshot() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.model.finish_refresh(token, snap);
+                this.apply_snapshot(token, snap, cx);
                 this.daemon.busy = None;
+                this.load_setup(cx);
                 cx.notify();
             });
         })
@@ -305,7 +492,13 @@ impl HackApp {
                     .label(action.label())
                     .small()
                     .outline()
-                    .disabled(!self.live || self.daemon.busy.is_some() || self.model.cli_missing())
+                    .disabled(
+                        !self.live
+                            || self.setup.action_busy
+                            || self.daemon.busy.is_some()
+                            || self.model.cli_missing()
+                            || (!self.setup.report.cards.is_empty() && !self.setup.report.cli_ready()),
+                    )
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.run_daemon_action(action, cx)),
                     ),
@@ -357,12 +550,28 @@ impl HackApp {
                 .background_executor()
                 .spawn(async move { source.snapshot() })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                this.model.finish_refresh(token, snap);
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.apply_snapshot(token, snap, cx));
         })
         .detach();
+    }
+
+    /// Apply a polled snapshot. A new, removed or moved project (or a
+    /// project list that becomes readable) makes a shown Doctor result
+    /// stale, so a visible Doctor pane checks again.
+    fn apply_snapshot(
+        &mut self,
+        token: hack_desktop_core::viewmodel::RefreshToken,
+        snap: Result<Snapshot, SourceError>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.model.finish_refresh(token, snap) {
+            return false;
+        }
+        let current = self.doctor_target_keys();
+        self.doctor.targets_seen(current.as_deref());
+        self.maybe_auto_refresh(cx);
+        cx.notify();
+        true
     }
 }
 
@@ -477,16 +686,71 @@ impl HackApp {
                 .py_2()
                 // v0 does not read routing status yet: shown as unknown.
                 .child(machine_row("Routing and DNS", None, t.muted_foreground))
-                .child(machine_row(
-                    "Doctor",
-                    (list.doctor_count > 0).then_some(list.doctor_count),
-                    // Unknown until Doctor has actually reported.
-                    match (list.doctor_known, list.doctor_count) {
-                        (false, _) => t.muted_foreground,
-                        (true, 0) => t.success,
-                        (true, _) => t.warning,
-                    },
-                )),
+                .child(self.doctor_row(cx)),
+        )
+    }
+
+    /// The sidebar Doctor row: opens the Doctor pane (and runs doctor the
+    /// first time). Its badge counts the loaded findings when there are any.
+    fn doctor_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme().clone();
+        // Never green unless every run finished clean; grey until it ran.
+        let (count, color) = match &self.doctor.result {
+            DoctorStateView::Loaded(v) => (v.attention_count(), tone_color(self.doctor.tone(), cx)),
+            _ => (0, tone_color(self.doctor.tone(), cx)),
+        };
+        div()
+            .id("doctor-row")
+            .rounded_md()
+            .cursor_pointer()
+            .when(self.pane == Pane::Doctor, |d| {
+                d.bg(t.sidebar_accent)
+                    .text_color(t.sidebar_accent_foreground)
+            })
+            .hover(|d| d.bg(t.sidebar_accent))
+            .mx_2()
+            .px_2()
+            .py_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(dot(color))
+                    .child(div().flex_1().child("Doctor"))
+                    .children((count > 0).then(|| {
+                        Tag::warning()
+                            .xsmall()
+                            .rounded_full()
+                            .child(count.to_string())
+                    })),
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx)))
+            .into_any_element()
+    }
+
+    /// "Doctor: N findings for this project", linking to the Doctor pane
+    /// filtered on the project. A link only: it never changes the state pill.
+    fn doctor_link(&self, project: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let n = self.doctor.findings_for(project);
+        if n == 0 {
+            return None;
+        }
+        let t = cx.theme().clone();
+        let name = project.to_owned();
+        Some(
+            div()
+                .id("doctor-link")
+                .text_sm()
+                .text_color(t.link)
+                .underline()
+                .cursor_pointer()
+                .child(format!(
+                    "Doctor: {n} finding{} for this project",
+                    if n == 1 { "" } else { "s" }
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_doctor(Some(name.clone()), cx);
+                }))
+                .into_any_element(),
         )
     }
 
@@ -500,7 +764,7 @@ impl HackApp {
             .py_1()
             .gap_2()
             .rounded_md()
-            .when(r.selected, |d| {
+            .when(r.selected && self.pane == Pane::Project, |d| {
                 d.bg(t.sidebar_accent)
                     .text_color(t.sidebar_accent_foreground)
             })
@@ -518,6 +782,7 @@ impl HackApp {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.model.apply(Event::Select(name.clone()));
+                this.pane = Pane::Project;
                 this.tail = Ok(Vec::new());
                 if !this.live {
                     this.refresh_now();
@@ -560,6 +825,7 @@ impl HackApp {
                             .disabled(
                                 !self.live
                                     || self.daemon.busy.is_some()
+                                    || self.setup.action_busy
                                     || self.daemon.observed.cli_missing,
                             )
                             .loading(self.daemon.busy.is_some())
@@ -591,10 +857,12 @@ impl HackApp {
             if !d.actions.contains(&a) {
                 continue;
             }
-            let mut b = Button::new(a.label())
-                .label(a.label())
-                .small()
-                .disabled(d.busy || self.daemon.busy.is_some() || self.daemon.observed.cli_missing);
+            let mut b = Button::new(a.label()).label(a.label()).small().disabled(
+                d.busy
+                    || self.setup.action_busy
+                    || self.daemon.busy.is_some()
+                    || self.daemon.observed.cli_missing,
+            );
             b = match a {
                 Action::Start => b.primary(),
                 Action::Stop => b.outline(),
@@ -676,6 +944,7 @@ impl HackApp {
                     .child(format!("Last always-on command failed: {error}"))
             }))
             .children(reason_line(&d.state, d.last_error.as_deref(), cx))
+            .children(self.doctor_link(&d.name, cx))
             .children(
                 self.slow_action_warning(&d.name)
                     .map(|w| div().text_sm().text_color(t.warning).child(w)),
@@ -1007,6 +1276,15 @@ impl Render for HackApp {
         let t = cx.theme().clone();
         let (bg, fg, font) = (t.background, t.foreground, t.font_family.clone());
         let main: AnyElement = match &list.phase {
+            _ if self.pane == Pane::Setup => {
+                crate::setup_view::render(&self.setup, self.daemon.busy.is_some(), cx)
+            }
+            // Machine checks matter most before any project exists, so the
+            // Doctor pane renders for an empty registry too.
+            // Diagnostics are most useful when the project list fails.
+            Phase::Ready | Phase::Empty | Phase::Error { .. } if self.pane == Pane::Doctor => {
+                crate::doctor_view::render(&self.doctor, cx)
+            }
             Phase::CliMissing => self.full_pane(
                 "Hack CLI not found",
                 "The app runs the hack command for everything. Install it, then reopen the app."
@@ -1045,17 +1323,38 @@ impl Render for HackApp {
                     .flex_1()
                     .min_h_0()
                     .items_start()
-                    .child(self.sidebar(&list, cx))
+                    .children(
+                        (self.pane != Pane::Setup || self.setup.report.cli_ready())
+                            .then(|| self.sidebar(&list, cx)),
+                    )
                     .child(
                         v_flex()
                             .flex_1()
                             .h_full()
                             .min_w_0()
-                            .child(self.banners(&list, cx))
-                            .child(self.daemon_panel(cx))
+                            .when(self.pane != Pane::Setup, |el| {
+                                el.child(self.banners(&list, cx))
+                                    .child(self.daemon_panel(cx))
+                            })
                             .child(main),
                     ),
             )
-            .child(self.status_bar(&list, cx))
+            .child(if self.pane == Pane::Setup {
+                div()
+                    .px_3()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(t.border)
+                    .text_xs()
+                    .text_color(t.muted_foreground)
+                    .child(if self.setup.loading {
+                        "Checking setup…"
+                    } else {
+                        "Setup evidence is kept only for this session"
+                    })
+                    .into_any_element()
+            } else {
+                self.status_bar(&list, cx).into_any_element()
+            })
     }
 }

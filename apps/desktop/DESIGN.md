@@ -161,20 +161,21 @@ snapshot, only counts and nothing else.
 
 ## 2. First-run onboarding
 
-Shown on first launch and from the Doctor row ("Run setup again"). One card per
+Shown when fresh launch checks find unresolved setup, and from the Doctor row
+("Run setup again"). No persisted first-run flag. One card per
 check, in order. Every check is read-only; every card offers **Check again**.
 
 ![Onboarding](diagrams/onboarding.svg) ([source](diagrams/onboarding.mmd))
 
 | Step | Read-only check | Fix | Admin | Skipped / unknown shows |
 |---|---|---|---|---|
-| CLI | `hack --version` (text; R1 for JSON) | `brew install hack-dance/tap/hack` (copy) | no | Cannot skip |
+| CLI | `hack --version` (text; R1 for JSON) | v5 install documentation; select the supported executable for the app | no | Cannot skip |
 | Docker (Compose projects) | `runtime_ok` from `/v1/projects` or `hack projects --json` (Docker only) | open Docker Desktop / Docker docs | no | "Docker not reachable" on Compose projects only |
 | Native runtime (native projects) | native `ps` `data.status` per native project (`runtime_not_running` etc.) | native setup doc (HACK-2193) | no | that native project shows Unknown; Compose projects unaffected |
 | hackd | `hack daemon status --json` | `hack daemon start` | no | Status bar "hackd off"; slower refresh |
 | Routing and DNS (Compose) | macOS: doctor `resolver:<tld>`, `dnsmasq.conf:<tld>`, `dnsmasq:53` and `coredns forwarding` (all must pass). Linux: doctor `linux dns route`. Never `hack global status` (can start Docker) | `hack global install` | **yes** | URLs greyed "DNS not set up"; "unknown" when a check is missing |
 | Routing and DNS (native) | `hack doctor --browser-url <project URL>` → `native host dns` (absent without `--browser-url`) | none from the app: `hack global install` refuses native; link to the native setup doc (HACK-2193) | — | "unknown" |
-| Certificate trust (Compose) | **Unknown** today: doctor `caddy local ca` checks the exported CA, not system or browser trust (R16) | `hack global trust` | **yes** | Lock icon on URLs: "browser may warn" |
+| Certificate trust (Compose) | doctor `local ca trust` when available (system and Linux NSS); **Unknown** on older CLIs. `caddy local ca` checks only the exported CA, never trust (R16) | `hack global trust` | **yes** | Lock icon on URLs: "browser may warn" |
 | Certificate trust (native) | doctor `native root trust` | none from the app: `hack global trust` refuses native; doc link | — | "unknown" |
 | Login service | `daemon status` `service.installed` | `hack daemon install` | no | Always-on switch disabled |
 

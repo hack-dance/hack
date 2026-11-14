@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::daemon::DaemonClient;
+use crate::doctor::DoctorRun;
 use crate::fixtures::{self, Fixture};
 use crate::models::{
     DaemonApiStatus, DoctorReport, LifecycleResult, LogEntry, OpenResult, ProjectsPayload,
@@ -163,6 +164,96 @@ pub trait Source: Send + Sync {
     /// Why no tail could be read; shown in place of the tail.
     fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
     -> Result<Vec<LogEntry>, String>;
+
+    /// Fresh setup checks. Fixture implementations stay fully offline.
+    fn setup(&self) -> crate::setup::Report {
+        crate::setup::fixture(self.snapshot(), &self.doctor_runs(&[]))
+    }
+
+    /// Selected executable for an explicit terminal hand-off. Fixtures refuse.
+    fn cli_program(&self) -> Result<String, String> {
+        Err("Fixture: terminal disabled".into())
+    }
+
+    /// Explicit, fixed non-admin setup action; never inferred from Doctor text.
+    fn setup_action(&self, _action: crate::setup::SafeAction) -> String {
+        "Fixture: no action executed".into()
+    }
+
+    /// Doctor runs: one outside any project, then one per project
+    /// (DESIGN.md section 3). Each run fails on its own.
+    fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun>;
+}
+
+/// A project to run doctor for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorTarget {
+    pub missing: bool,
+    pub name: String,
+    pub repo_root: std::path::PathBuf,
+    pub native: bool,
+}
+
+/// Identity of each target (name, checkout, backend) for the stale guard.
+#[must_use]
+pub fn target_keys(targets: &[DoctorTarget]) -> Vec<crate::doctor::TargetKey> {
+    targets
+        .iter()
+        .map(|t| (t.name.clone(), t.repo_root.clone(), t.native, t.missing))
+        .collect()
+}
+
+impl DoctorTarget {
+    fn run(&self, result: Result<crate::models::DoctorReport, String>) -> DoctorRun {
+        DoctorRun {
+            project: Some(self.name.clone()),
+            root: Some(self.repo_root.clone()),
+            native: self.native,
+            result,
+        }
+    }
+
+    /// Retain missing rows for coverage, but never probe them.
+    #[must_use]
+    pub fn from_projects(p: &ProjectsPayload) -> Vec<Self> {
+        p.projects
+            .iter()
+            .map(|r| Self {
+                missing: r.status == "missing" || r.repo_root.is_none(),
+                name: r.name.clone(),
+                repo_root: r.repo_root.clone().unwrap_or_default().into(),
+                native: r.is_native(),
+            })
+            .collect()
+    }
+}
+
+/// Doctor reads take long (they probe DNS, trust and the engine).
+pub const DOCTOR_TIMEOUT: Duration = Duration::from_secs(60);
+/// At most this many doctor runs at once.
+const DOCTOR_PARALLEL: usize = 4;
+/// One refresh never takes longer than this.
+pub const DOCTOR_BUDGET: Duration = Duration::from_secs(90);
+/// The reason shown for projects the budget did not reach.
+pub const NOT_CHECKED_BUDGET: &str = "not checked (time budget)";
+
+/// Read one doctor report. Exit 1 still carries a report; a payload
+/// without a `checks` array is not a report.
+fn read_doctor(
+    runner: &CliRunner,
+    root: Option<&Path>,
+    timeout: Duration,
+) -> Result<crate::models::DoctorReport, String> {
+    let v: serde_json::Value = runner
+        .run_json(&["doctor", "--json"], root, timeout)
+        .map_err(|e| e.to_string())?;
+    if !v
+        .get("checks")
+        .is_some_and(|c| c.as_array().is_some_and(|a| !a.is_empty()))
+    {
+        return Err("doctor printed no checks list".into());
+    }
+    serde_json::from_value(v).map_err(|e| e.to_string())
 }
 
 /// Live data from a matching hackd. CLI listing fallback needs R18:
@@ -172,7 +263,89 @@ pub struct LiveSource {
     pub daemon: Option<DaemonClient>,
 }
 
+/// SIGTERM grace for doctor reads: they only read, so they own no builds
+/// to retire, and a short grace keeps a refresh within its budget.
+pub const DOCTOR_TERM_GRACE: Duration = Duration::from_secs(2);
+
 impl LiveSource {
+    /// Doctor runs under one overall `budget`: each call gets the smaller of
+    /// `per_call` and the time left, and projects not started before the
+    /// budget runs out are reported as not checked.
+    pub fn doctor_runs_within(
+        &self,
+        projects: &[DoctorTarget],
+        budget: Duration,
+        per_call: Duration,
+    ) -> Vec<DoctorRun> {
+        let deadline = std::time::Instant::now() + budget;
+        // Each call's timeout leaves room for its SIGTERM grace, so stopping
+        // a slow check also finishes within the overall budget.
+        let left = || {
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .saturating_sub(DOCTOR_TERM_GRACE)
+        };
+        let read = |runner: &CliRunner, root: Option<&Path>, timeout: Duration| {
+            read_doctor(runner, root, timeout)
+        };
+        // The machine run must happen outside every checkout, or doctor
+        // would report that checkout's project checks as machine checks.
+        // Prefer a user-private directory, then root. A shared temp cwd
+        // would permit another user to plant a project marker after inspection.
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
+            && crate::doctor::is_private_dir(&run)
+        {
+            candidates.push(run);
+        }
+        candidates.push(std::path::PathBuf::from("/"));
+        let machine = match crate::doctor::neutral_dir(&candidates) {
+            Some(dir) if !left().is_zero() => read(
+                &self
+                    .runner
+                    .clone()
+                    .with_cwd(dir)
+                    .with_term_grace(DOCTOR_TERM_GRACE),
+                None,
+                per_call.min(left()),
+            ),
+            Some(_) => Err(NOT_CHECKED_BUDGET.to_owned()),
+            None => Err("machine checks could not run outside a project".into()),
+        };
+        let mut runs = vec![DoctorRun::machine(machine)];
+        for chunk in projects.chunks(DOCTOR_PARALLEL) {
+            let chunk_runs: Vec<DoctorRun> = std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|t| {
+                        let runner = self.runner_for(t.native).with_term_grace(DOCTOR_TERM_GRACE);
+                        let timeout = per_call.min(left());
+                        s.spawn(move || {
+                            let result = if t.missing {
+                                Err("not checked (checkout missing)".into())
+                            } else if timeout.is_zero() {
+                                Err(NOT_CHECKED_BUDGET.to_owned())
+                            } else {
+                                read(&runner, Some(&t.repo_root), timeout)
+                            };
+                            t.run(result)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .zip(chunk)
+                    .map(|(h, t)| {
+                        h.join()
+                            .unwrap_or_else(|_| t.run(Err("doctor read panicked".into())))
+                    })
+                    .collect()
+            });
+            runs.extend(chunk_runs);
+        }
+        runs
+    }
+
     /// The live source exactly as the app builds it: `hack` resolved on
     /// absolute PATH entries, and the hackd socket under `HACK_HOME`
     /// (else `~/.hack`). Used by the window and by `hack-desktop-state`.
@@ -183,7 +356,7 @@ impl LiveSource {
             std::env::var("HOME").ok().as_deref(),
         );
         Self {
-            runner: CliRunner::on_path("hack"),
+            runner: CliRunner::selected(std::env::var_os("HACK_DESKTOP_CLI").as_deref()),
             daemon: socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
         }
     }
@@ -194,7 +367,9 @@ impl LiveSource {
                 .clone()
                 .with_env("HACK_RUNTIME_BACKEND", "native")
         } else {
-            self.runner.clone()
+            self.runner
+                .clone()
+                .with_env("HACK_RUNTIME_BACKEND", "compose")
         }
     }
 
@@ -210,6 +385,22 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn cli_program(&self) -> Result<String, String> {
+        self.runner
+            .resolve_program()
+            .map_err(|e| e.to_string())?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "CLI path is not UTF-8".into())
+    }
+
+    fn setup(&self) -> crate::setup::Report {
+        self.read_setup()
+    }
+    fn setup_action(&self, action: crate::setup::SafeAction) -> String {
+        crate::setup_io::run_safe(&self.runner, action)
+    }
+
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), RunError> {
         crate::daemon_state::act(
             &self.runner,
@@ -293,6 +484,10 @@ impl Source for LiveSource {
             // No app deadline: busy until the CLI exits (see LIFECYCLE_WARN_AFTER).
             _ => ActionOutcome::Lifecycle(runner.run_json_to_completion(args, Some(repo_root))?),
         })
+    }
+
+    fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {
+        self.doctor_runs_within(projects, DOCTOR_BUDGET, DOCTOR_TIMEOUT)
     }
 
     fn log_tail(
@@ -496,6 +691,10 @@ impl Source for FixtureSource {
         fixtures::daemon_observation(self.0)
     }
 
+    fn doctor_runs(&self, _projects: &[DoctorTarget]) -> Vec<DoctorRun> {
+        fixtures::doctor_runs(self.0)
+    }
+
     fn act(
         &self,
         _repo_root: &Path,
@@ -684,6 +883,204 @@ esac
             parse_log_tail(err_ev, "", Some(0)).unwrap_err(),
             "no engine"
         );
+    }
+
+    fn fake_hack(tag: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        std::fs::write(&hack, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        hack
+    }
+
+    fn targets(n: usize) -> Vec<DoctorTarget> {
+        (0..n)
+            .map(|i| DoctorTarget {
+                missing: false,
+                name: format!("p{i}"),
+                repo_root: format!("/work/p{i}").into(),
+                native: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn doctor_probes_only_read_and_select_each_backend() {
+        let hack = fake_hack(
+            "doctor-contract",
+            r#"[ "$HACK_NO_INTERACTIVE" = 1 ] || exit 2
+case "$*" in
+  'doctor --json')
+    detail=machine ;;
+  'doctor --json --path /work/p0')
+    [ "$HACK_RUNTIME_BACKEND" = native ] || exit 3
+    detail=native ;;
+  'doctor --json --path /work/p1')
+    [ "$HACK_RUNTIME_BACKEND" = compose ] || exit 4
+    detail=compose ;;
+  *) exit 5 ;;
+esac
+printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]}}' "$detail"
+"#,
+        );
+        let src = LiveSource {
+            runner: CliRunner::new(&hack).with_env("HACK_RUNTIME_BACKEND", "native"),
+            daemon: None,
+        };
+        let mut projects = targets(2);
+        projects[0].native = true;
+        let runs = src.doctor_runs(&projects);
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        let details: Vec<_> = runs
+            .iter()
+            .map(|run| run.result.as_ref().unwrap().checks[0].detail.as_str())
+            .collect();
+        assert_eq!(details, ["machine", "native", "compose"]);
+    }
+
+    #[test]
+    fn doctor_payload_without_checks_is_not_a_report() {
+        let hack = fake_hack("doctor-empty", r#"echo '{"ok":true,"data":{}}'"#);
+        let src = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let runs = src.doctor_runs(&targets(1));
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert!(runs.iter().all(|r| r.result.is_err()), "{runs:?}");
+        assert!(matches!(
+            crate::doctor::DoctorState::from_runs(&runs),
+            crate::doctor::DoctorState::Error(_)
+        ));
+    }
+
+    #[test]
+    fn missing_registry_targets_are_not_probed_but_remain_unchecked() {
+        let hack = fake_hack(
+            "doctor-missing",
+            r#"[ "$*" = 'doctor --json' ] || exit 9
+echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'"#,
+        );
+        let source = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let payload: ProjectsPayload = serde_json::from_str(r#"{"projects":[{"name":"gone","status":"missing","repo_root":"/work/gone"},{"name":"no-root","status":"missing"}]}"#).unwrap();
+        let runs = source.doctor_runs(&DoctorTarget::from_projects(&payload));
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert_eq!(runs.len(), 3);
+        assert!(
+            runs[1..]
+                .iter()
+                .all(|r| r.result.as_ref().unwrap_err() == "not checked (checkout missing)")
+        );
+        let view = crate::doctor::aggregate(&runs);
+        assert_eq!((view.projects_total, view.projects_checked), (2, 0));
+        assert!(!view.is_clean());
+    }
+
+    #[test]
+    fn doctor_budget_holds_even_when_checks_ignore_sigterm() {
+        // Every call ignores SIGTERM, so each stop costs the full grace.
+        let hack = fake_hack(
+            "doctor-stubborn",
+            "trap '' TERM\nwhile :; do sleep 0.05; done",
+        );
+        let src = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let budget = Duration::from_secs(4);
+        let started = std::time::Instant::now();
+        let runs = src.doctor_runs_within(&targets(6), budget, Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert!(
+            started.elapsed() < budget + Duration::from_millis(800),
+            "took {:?} for a {budget:?} budget",
+            started.elapsed()
+        );
+        assert!(runs.iter().all(|r| r.result.is_err()));
+    }
+
+    #[test]
+    fn doctor_budget_marks_late_projects_not_checked() {
+        let hack = fake_hack("doctor-slow", "sleep 5");
+        let src = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let started = std::time::Instant::now();
+        let runs = src.doctor_runs_within(
+            &targets(6),
+            Duration::from_millis(400),
+            Duration::from_secs(5),
+        );
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "budget not honoured"
+        );
+        assert_eq!(runs.len(), 7);
+        let not_checked = runs
+            .iter()
+            .filter(|r| r.result.as_ref().err().map(String::as_str) == Some(NOT_CHECKED_BUDGET))
+            .count();
+        assert!(not_checked >= 2, "{runs:?}");
+        assert!(runs.iter().all(|r| r.result.is_err()));
+    }
+
+    /// Doctor exits 1 when a check errors but still prints the report.
+    #[test]
+    fn doctor_runs_keep_reports_from_exit_1() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-doctor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        std::fs::write(
+            &hack,
+            r#"#!/bin/sh
+case "$*" in
+  *--path*) echo '{"ok":true,"data":{"checks":[{"id":"env key","status":"error","detail":"key missing"},{"id":"project","status":"ok","detail":"Found .hack/ (or legacy .dev/) at /work/alpha/.hack"}],"summary":[],"counts":{"ok":0,"warn":0,"error":1}}}'; exit 1 ;;
+  *) echo '{"ok":true,"data":{"checks":[{"id":"docker daemon","status":"ok","detail":""}],"summary":[],"counts":{"ok":1,"warn":0,"error":0}}}' ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let src = LiveSource {
+            runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
+            daemon: None,
+        };
+        let runs = src.doctor_runs(&[DoctorTarget {
+            missing: false,
+            name: "alpha".into(),
+            repo_root: "/work/alpha".into(),
+            native: false,
+        }]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(runs.len(), 2);
+        assert!(runs[0].project.is_none());
+        let alpha = runs[1].result.as_ref().expect("exit 1 keeps the report");
+        assert_eq!(alpha.checks[0].id, "env key");
+        let v = crate::doctor::aggregate(&runs);
+        assert_eq!(v.attention_count(), 1);
+        assert_eq!(v.passed, 2);
     }
 
     /// Whether the temp dir's own ancestors are private enough for the

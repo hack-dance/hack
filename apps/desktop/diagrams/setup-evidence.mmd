@@ -1,0 +1,14 @@
+flowchart TD
+    Launch[Launch or check again] --> Read[Bounded background reads]
+    Read --> CLI{Supported CLI?}
+    CLI -->|No or unknown| Required[Required CLI card]
+    Required --> Launch
+    CLI -->|Yes| Cards[Ordered setup cards]
+    Cards -->|Missing or skipped| Unknown[Unresolved evidence]
+    Cards -->|Explicit Run| Safe[Fixed daemon action]
+    Safe --> Read
+    Cards -->|Admin command| Terminal[Copy or terminal handoff]
+    Terminal --> Enter[Show command; wait Enter]
+    Enter --> Fresh[Check again or regain focus]
+    Fresh --> Read
+    Cards -->|Continue| Projects[Project view]

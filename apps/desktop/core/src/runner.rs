@@ -66,8 +66,10 @@ impl std::fmt::Display for RunError {
 pub struct CliRunner {
     program: PathBuf,
     env: Vec<(String, String)>,
-    /// `on_path` found no executable: spawn reports `NotFound`.
+    cwd: Option<PathBuf>,
+    /// An invalid explicit selection: spawn reports `NotFound`.
     missing: bool,
+    path_name: Option<String>,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
     term_grace: Duration,
 }
@@ -84,7 +86,9 @@ impl CliRunner {
         Self {
             program: program.into(),
             env: vec![("HACK_NO_INTERACTIVE".into(), "1".into())],
+            cwd: None,
             missing: false,
+            path_name: None,
             term_grace: TERM_GRACE,
         }
     }
@@ -96,23 +100,62 @@ impl CliRunner {
         self
     }
 
-    /// Find `name` on `PATH` and run it by absolute path.
+    /// Discover `name` on `PATH` for each invocation and run its absolute path.
     ///
     /// Only absolute `PATH` entries are searched: an empty or relative entry
-    /// (such as `.`) would resolve against the working directory, which
-    /// another local user may control. When nothing is found the runner
-    /// reports `NotFound` without spawning anything.
+    /// (such as `.`) would resolve against the working directory, which for
+    /// machine checks is a shared temp directory another local user may
+    /// write. When nothing is found the runner reports `NotFound` without
+    /// spawning anything.
     #[must_use]
     pub fn on_path(name: &str) -> Self {
-        let path = std::env::var_os("PATH");
-        match resolve_on_path(name, path.as_deref()) {
-            Some(p) => Self::new(p),
-            None => {
-                let mut r = Self::new(name);
-                r.missing = true;
-                r
+        let mut runner = Self::new(name);
+        runner.path_name = Some(name.into());
+        runner
+    }
+
+    /// Select an explicit absolute CLI path, or discover `hack` on each call.
+    /// Relative selections fail closed, rather than falling back to another CLI.
+    pub fn selected(value: Option<&std::ffi::OsStr>) -> Self {
+        match value {
+            None => Self::on_path("hack"),
+            Some(path) if Path::new(path).is_absolute() => Self::new(PathBuf::from(path)),
+            Some(_) => {
+                let mut runner = Self::new("hack");
+                runner.missing = true;
+                runner
             }
         }
+    }
+
+    /// Resolve again for every use so Check again and later actions recover
+    /// after installation. Explicit test/selected programs remain pinned.
+    pub fn resolve_program(&self) -> Result<PathBuf, RunError> {
+        if self.missing {
+            return Err(RunError::NotFound);
+        }
+        match &self.path_name {
+            Some(name) => {
+                let inherited = std::env::var_os("PATH");
+                let path = self
+                    .env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == "PATH")
+                    .map(|(_, value)| std::ffi::OsStr::new(value))
+                    .or(inherited.as_deref());
+                resolve_on_path(name, path).ok_or(RunError::NotFound)
+            }
+            None => Ok(self.program.clone()),
+        }
+    }
+
+    /// Run every command from `dir` (for checks that must run outside any
+    /// project, such as the machine-level doctor run).
+    #[must_use]
+    pub fn with_cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
     }
 
     /// Add an environment variable for every command (tests use this for
@@ -123,9 +166,9 @@ impl CliRunner {
         self
     }
 
-    fn command(&self, args: &[&str], path: Option<&Path>) -> Command {
+    fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
         use std::os::unix::process::CommandExt;
-        let mut cmd = Command::new(&self.program);
+        let mut cmd = Command::new(program);
         cmd.args(args);
         if let Some(p) = path {
             cmd.arg("--path").arg(p);
@@ -139,6 +182,9 @@ impl CliRunner {
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
+        }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -147,15 +193,13 @@ impl CliRunner {
     }
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
-        if self.missing {
-            return Err(RunError::NotFound);
-        }
+        let program = self.resolve_program()?;
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match self.command(args, path).spawn() {
+            match self.command(args, path, &program).spawn() {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;
@@ -694,6 +738,7 @@ mod tests {
     fn path_lookup_ignores_relative_entries() {
         let f = FakeHack::new("echo '{}'");
         let dir = f.dir.to_string_lossy().into_owned();
+        // A relative entry that would resolve to the fake via the cwd.
         let rel = std::ffi::OsString::from(format!(".:{dir}"));
         assert_eq!(
             resolve_on_path("hack", Some(&rel)),

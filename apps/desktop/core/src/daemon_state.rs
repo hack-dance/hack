@@ -220,13 +220,42 @@ impl DaemonModel {
         action: DaemonAction,
         recovery: Option<crate::source::DaemonRecovery>,
     ) -> bool {
+        self.begin_machine(action, recovery, None)
+    }
+
+    /// Setup Run, recovery and card clicks share this admission gate.
+    /// Setup may authorize only one of its fixed non-admin remedies.
+    pub fn begin_machine(
+        &mut self,
+        action: DaemonAction,
+        recovery: Option<crate::source::DaemonRecovery>,
+        setup: Option<&crate::setup::Report>,
+    ) -> bool {
+        let setup_allows = setup.is_some_and(|report| {
+            report.cli_ready()
+                && report.cards.iter().any(|card| {
+                    card.status != crate::setup::Status::Passed
+                        && matches!(
+                            (&card.remedy, action),
+                            (
+                                crate::setup::Remedy::Run(crate::setup::SafeAction::StartDaemon),
+                                DaemonAction::Start
+                            ) | (
+                                crate::setup::Remedy::Run(crate::setup::SafeAction::InstallDaemon),
+                                DaemonAction::Install
+                            )
+                        )
+                })
+        });
         let recovery_action = recovery.map(|r| match r {
             crate::source::DaemonRecovery::Start => DaemonAction::Start,
             crate::source::DaemonRecovery::Restart => DaemonAction::Restart,
         });
         if self.busy.is_some()
             || self.observed.cli_missing
-            || (!self.observed.actions().contains(&action) && recovery_action != Some(action))
+            || (!self.observed.actions().contains(&action)
+                && recovery_action != Some(action)
+                && !setup_allows)
         {
             return false;
         }
@@ -334,6 +363,22 @@ pub fn always_on(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn setup_remedies_share_machine_admission_and_require_cli_evidence() {
+        use crate::setup::{Card, Report, Remedy, SafeAction, Status};
+        let mut report = Report {cards:vec![
+            Card {id:"cli".into(), title:"CLI".into(), status:Status::Passed, detail:String::new(), remedy:Remedy::Doc(String::new())},
+            Card {id:"login".into(), title:"Login service".into(), status:Status::NeedsAttention, detail:String::new(), remedy:Remedy::Run(SafeAction::InstallDaemon)},
+        ], ..Default::default()};
+        let mut model = DaemonModel::default();
+        assert!(!model.begin_machine(DaemonAction::Restart, None, Some(&report)));
+        assert!(model.begin_machine(DaemonAction::Install, None, Some(&report)));
+        assert!(!model.begin_with_recovery(DaemonAction::Start, Some(crate::source::DaemonRecovery::Start)));
+        model.refreshed(Observation::default());
+        report.cards[0].status = Status::Unknown;
+        assert!(!model.begin_machine(DaemonAction::Install, None, Some(&report)));
+    }
+
     #[test]
     fn reachable_api_without_tracked_pid_keeps_service_evidence() {
         let status = DaemonStatus::from_value(json!({"status":"running", "running":false, "api_ok":true, "service":{"installed":true}})).unwrap();

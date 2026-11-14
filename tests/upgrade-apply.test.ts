@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -18,6 +18,8 @@ import { join, resolve } from "node:path";
 import { renderCodexSkill } from "../src/agents/codex-skill.ts";
 import { applyPluginMigration } from "../src/agents/plugin-migration.ts";
 import { HACK_PLUGIN_ID } from "../src/agents/plugin-replacement.ts";
+import { renderApply } from "../src/commands/upgrade.ts";
+import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import { runUpgradeApply } from "../src/lib/upgrade-apply.ts";
 import {
@@ -27,7 +29,12 @@ import {
 import type { UpgradeCheckProbes } from "../src/lib/upgrade-check-probes.ts";
 import { renderUpgradeCheck } from "../src/lib/upgrade-check-render.ts";
 import {
+  collectUpgradeReview,
+  renderUpgradeReview,
+} from "../src/lib/upgrade-review.ts";
+import {
   listUpgradeSnapshots,
+  readUpgradeSnapshot,
   readUpgradeSnapshotJournal,
   restoreUpgradeSnapshot,
 } from "../src/lib/upgrade-snapshot.ts";
@@ -280,8 +287,8 @@ test("100 checkouts fit one screen: summary first, worktrees folded, plan groupe
   const legacy = report.plan.find((s) => s.id === "env-format");
   expect(legacy?.blocker).toBe(true);
   expect(report.plan.filter((s) => s.id === "env-format")).toHaveLength(1);
-  expect(legacy?.command).toBeNull();
-  expect(legacy?.action).toContain("checkout");
+  expect(legacy?.command).toBe("hack upgrade review --only env-format");
+  expect(legacy?.action).toContain("resumable env owner");
   expect(
     legacy?.targets.some((target) =>
       target.command?.includes("doctor --migrate-env-config")
@@ -310,12 +317,31 @@ test("100 checkouts fit one screen: summary first, worktrees folded, plan groupe
   expect(text).toContain("stale agent files, 100 checkouts (apply): ");
   expect(text).toContain("Blocked by: app-07 (worktree wt1) env-format");
   expect(text).toContain("Next: hack upgrade snapshot");
+  expect(text).toContain("hygiene only; blocking/unchecked first");
+  expect(projectLines[0]).toContain("app-07");
   expect(text).not.toContain(SENTINEL);
   expect(JSON.stringify(report)).not.toContain(SENTINEL);
 
   // --verbose has every checkout and the dead entries.
   const verbose = renderUpgradeCheck(report, { verbose: true });
   expect(verbose).toContain("old-03");
+  const preview = await runUpgradeApply({
+    report,
+    home,
+    dryRun: true,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  const compact = renderApply({ result: preview, after: null, rollback: null });
+  expect(compact.split("\n")[0]).toMatch(
+    /^Preview: \d+ step\(s\), \d+ checkout\/scope\(s\), \d+ candidate file\(s\)/
+  );
+  expect(compact.trimEnd().split("\n").length).toBeLessThanOrEqual(30);
+  expect(compact).not.toContain(
+    projects[0]?.projectDir ?? "missing-project-path"
+  );
+  expect(
+    renderApply({ result: preview, after: null, rollback: null, verbose: true })
+  ).toContain(projects[0]?.projectDir ?? "missing-project-path");
   expect(verbose).toContain("Checkout app-07 (worktree wt1)");
   expect(verbose).not.toContain(SENTINEL);
 }, 180_000);
@@ -1484,4 +1510,270 @@ test("a failed unchanged agent removal can retry successfully and roll back with
   ).toBe("restored");
   expect(await readFile(agent, "utf8")).toBe(original);
   expect((await stat(agent)).mode & 0o777).toBe(0o640);
+}, 60_000);
+
+test("review walks every affected checkout once without running fixes or exposing values", async () => {
+  const a = await project("app-a", 1);
+  await writeRegistry([a]);
+  for (const dir of a.checkouts) {
+    await writeFile(join(dir, ".hack", ".env"), `TOKEN=${SENTINEL}\n`);
+  }
+  const report = await check();
+  const before = await tree(root);
+  const result = collectUpgradeReview({
+    report,
+    only: ["env-format"],
+    project: "app-a",
+  });
+  expect(result.status).toBe("review");
+  if (result.status !== "review") {
+    throw new Error("Expected review");
+  }
+  expect(result.checkouts).toHaveLength(2);
+  expect(renderUpgradeReview(result)).toContain("2 affected checkout(s)");
+  expect(renderUpgradeReview(result)).not.toContain(
+    "doctor --migrate-env-config"
+  );
+  expect(renderUpgradeReview(result)).not.toContain(SENTINEL);
+  expect(collectUpgradeReview({ report, only: ["bogus"] }).status).toBe(
+    "refused"
+  );
+  expect(
+    collectUpgradeReview({ report, only: [], project: "unknown" }).status
+  ).toBe("refused");
+  expect(await tree(root)).toEqual(before);
+}, 60_000);
+
+test("permission-only env key repairs snapshot exact bytes and mode and resume across chmod boundaries", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const key = join(a.repoRoot, PROJECT_ENV_KEY_FILENAME);
+  const value = randomBytes(32).toString("base64url");
+  await writeFile(key, value, { mode: 0o644 });
+  await writeFile(
+    join(a.repoRoot, ".gitignore"),
+    `${PROJECT_ENV_KEY_FILENAME}\n`
+  );
+  const report = await check();
+  expect(
+    report.plan.find((step) => step.id === "env-key-permissions")?.applies
+  ).toBe(true);
+  const reportPath = join(root, "permission-report.json");
+  await writeFile(reportPath, JSON.stringify(report));
+  const digest = createHash("sha256")
+    .update(await readFile(key))
+    .digest("hex");
+  for (let boundary = 1; boundary <= 4; boundary += 1) {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "fixtures/upgrade-apply-worker.ts"),
+        reportPath,
+        String(boundary),
+        "env-key-permissions",
+      ],
+      {
+        cwd: root,
+        env: privateCliEnv({
+          root,
+          home,
+          env: {
+            HACK_HOME: hackHome,
+            HACK_GLOBAL_CONFIG_PATH: join(hackHome, "hack.config.json"),
+            HACK_HOST_PROBES_DISABLE: "1",
+            HACK_SYSTEMD_DISABLE: "1",
+          },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const reader = child.stdout.getReader();
+    try {
+      const reached = await reader.read();
+      expect(new TextDecoder().decode(reached.value)).toContain("checkpoint");
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+      reader.releaseLock();
+    }
+    const [snapshot] = await listUpgradeSnapshots();
+    if (snapshot === undefined) {
+      throw new Error("Missing snapshot");
+    }
+    const result = await runUpgradeApply({
+      report: await check(),
+      home,
+      dryRun: false,
+      resumeManifest: snapshot.manifestPath,
+      collect: collectUpgradeSnapshotTargets,
+    });
+    expect(result.status).toBe("applied");
+    expect((await stat(key)).mode & 0o777).toBe(0o600);
+    expect(
+      createHash("sha256")
+        .update(await readFile(key))
+        .digest("hex")
+    ).toBe(digest);
+    expect(JSON.stringify(result)).not.toContain(value);
+    expect(await readFile(snapshot.manifestPath, "utf8")).not.toContain(value);
+    expect(
+      (await restoreUpgradeSnapshot({ manifestPath: snapshot.manifestPath }))
+        .status
+    ).toBe("restored");
+    expect((await stat(key)).mode & 0o777).toBe(0o644);
+  }
+}, 60_000);
+
+test("permission repair is never offered for tracked keys and never creates a missing key", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const key = join(a.repoRoot, PROJECT_ENV_KEY_FILENAME);
+  const missing = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    only: ["env-key-permissions"],
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(missing.status).toBe("nothing-to-do");
+  expect(await lstat(key).catch(() => null)).toBeNull();
+  await writeFile(key, randomBytes(32).toString("base64url"), { mode: 0o644 });
+  git(a.repoRoot, ["add", "-f", PROJECT_ENV_KEY_FILENAME]);
+  const report = await check();
+  expect(report.plan.some((step) => step.id === "env-key-permissions")).toBe(
+    false
+  );
+  expect(report.plan.find((step) => step.id === "env-key")?.command).toBe(
+    "hack upgrade review --only env-key"
+  );
+  const before = await tree(root);
+  await runUpgradeApply({
+    report,
+    home,
+    dryRun: false,
+    only: ["env-key-permissions"],
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(await tree(root)).toEqual(before);
+}, 60_000);
+
+test("linked worktrees sharing one primary key repair it once and retain a complete rollback", async () => {
+  const a = await project("app-a");
+  const key = join(a.repoRoot, PROJECT_ENV_KEY_FILENAME);
+  await writeFile(key, randomBytes(32).toString("base64url"), { mode: 0o644 });
+  await writeFile(
+    join(a.repoRoot, ".gitignore"),
+    `${PROJECT_ENV_KEY_FILENAME}\n`
+  );
+  git(a.repoRoot, ["add", ".hack/hack.config.json", ".gitignore"]);
+  git(a.repoRoot, ["commit", "-q", "-m", "fixture"]);
+  const linked = join(root, "linked-checkout");
+  git(a.repoRoot, ["worktree", "add", "-q", "-b", "feature", linked]);
+  await writeRegistry([
+    {
+      ...a,
+      worktrees: [
+        {
+          path: linked,
+          branch: "feature",
+          lastSeenAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    },
+  ]);
+  const report = await check();
+  expect(
+    report.plan.find((step) => step.id === "env-key-permissions")?.count
+  ).toBe(2);
+  const result = await runUpgradeApply({
+    report,
+    home,
+    dryRun: false,
+    only: ["env-key-permissions"],
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(result.status).toBe("applied");
+  if (result.status !== "applied") {
+    throw new Error("Expected shared repair");
+  }
+  expect(result.targets.map((target) => target.status).sort()).toEqual([
+    "applied",
+    "unchanged",
+  ]);
+  expect((await stat(key)).mode & 0o777).toBe(0o600);
+  expect(
+    (
+      await restoreUpgradeSnapshot({
+        manifestPath: result.coverage.manifest_path,
+      })
+    ).status
+  ).toBe("restored");
+  expect((await stat(key)).mode & 0o777).toBe(0o644);
+}, 60_000);
+
+test("permission repair selects only weak candidates and preserves owner bits", async () => {
+  const a = await project("app-a");
+  await writeFile(
+    join(a.repoRoot, ".gitignore"),
+    `${PROJECT_ENV_KEY_FILENAME}\n`
+  );
+  git(a.repoRoot, ["add", ".hack/hack.config.json", ".gitignore"]);
+  git(a.repoRoot, ["commit", "-q", "-m", "fixture"]);
+  const linked = join(root, "linked-checkout");
+  git(a.repoRoot, ["worktree", "add", "-q", "-b", "feature", linked]);
+  // Only this linked checkout is registered: the sibling candidates are outside
+  // the ordinary checkout snapshot set as well as outside the repair write set.
+  await writeRegistry([
+    { ...a, repoRoot: linked, projectDir: join(linked, ".hack") },
+  ]);
+  const primary = join(a.repoRoot, PROJECT_ENV_KEY_FILENAME);
+  const shared = join(a.repoRoot, ".git", PROJECT_ENV_KEY_FILENAME);
+  const local = join(linked, PROJECT_ENV_KEY_FILENAME);
+  for (const [path, mode] of [
+    [primary, 0o400],
+    [shared, 0o700],
+  ] as const) {
+    await writeFile(path, randomBytes(32).toString("base64url"));
+    await chmod(path, mode);
+  }
+  for (const mode of [0o640, 0o604, 0o444, 0o744]) {
+    await chmod(local, 0o600).catch(() => {});
+    await writeFile(local, randomBytes(32).toString("base64url"));
+    await chmod(local, mode);
+    const before = await tree(linked);
+    const result = await runUpgradeApply({
+      report: await check(),
+      home,
+      dryRun: false,
+      only: ["env-key-permissions"],
+      collect: collectUpgradeSnapshotTargets,
+    });
+    expect(result.status).toBe("applied");
+    if (result.status !== "applied") {
+      throw new Error("Expected permission repair");
+    }
+    expect(result.targets[0]?.files).toEqual([local]);
+    const snapshot = await readUpgradeSnapshot({
+      manifestPath: result.coverage.manifest_path,
+    });
+    if (snapshot.status !== "ok") {
+      throw new Error("Expected snapshot");
+    }
+    const paths = snapshot.snapshot.manifest.entries.map((entry) => entry.path);
+    expect(paths).not.toContain(primary);
+    expect(paths).not.toContain(shared);
+    expect((await stat(primary)).mode & 0o777).toBe(0o400);
+    expect((await stat(shared)).mode & 0o777).toBe(0o700);
+    expect((await stat(local)).mode & 0o777).toBe(mode & ~0o077);
+    expect(
+      (
+        await restoreUpgradeSnapshot({
+          manifestPath: result.coverage.manifest_path,
+        })
+      ).status
+    ).toBe("restored");
+    expect(await tree(linked)).toEqual(before);
+  }
 }, 60_000);

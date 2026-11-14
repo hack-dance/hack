@@ -1,4 +1,5 @@
 import pkg from "../../package.json";
+import { activityCommand } from "../commands/activity.ts";
 import { agentCommand } from "../commands/agent.ts";
 import { autostartCommand } from "../commands/autostart.ts";
 import { branchCommand } from "../commands/branch.ts";
@@ -88,6 +89,7 @@ export const CLI_SPEC = defineCli({
     commandsCommand,
     logsCommand,
     openCommand,
+    activityCommand,
     branchCommand,
     logPipeCommand,
     doctorCommand,

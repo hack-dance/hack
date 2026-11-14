@@ -265,6 +265,7 @@ import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
 import {
   beginLifecycleProgress,
   closeLifecycleProgress,
+  isLifecycleProgressRequested,
   prepareLifecycleProgress,
   reportLifecycleProgress,
 } from "../lib/lifecycle-progress.ts";
@@ -5924,6 +5925,10 @@ async function runRemoteLifecycleCommand(opts: {
   });
   if (target.resolvedTarget === "local") {
     return null;
+  }
+  if (isLifecycleProgressRequested()) {
+    // Dispatch output would precede `start`; remote targets are unsupported.
+    throw new CliUsageError("--progress is not supported for remote targets.");
   }
 
   const projectSelector = await resolveDispatchProjectSelector({

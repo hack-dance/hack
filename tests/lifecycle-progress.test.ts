@@ -80,7 +80,8 @@ test("nothing is written before begin or after close", () => {
   stream.begin({ project: "again" });
   expect(stream.close({ result: failure })).toBe(true);
   stream.progress({ service: null, phase: "stopped" });
-  expect(stream.close({ result: failure })).toBe(false);
+  // Closed: later envelopes are swallowed, not printed.
+  expect(stream.close({ result: failure })).toBe(true);
   const parsed = out.lines.map((line) => JSON.parse(line));
   expect(parsed).toEqual([
     expect.objectContaining({ type: "start", action: "down" }),

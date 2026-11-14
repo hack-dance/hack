@@ -89,7 +89,13 @@ Final per-service lines come from the envelope's `data.services` lists on succes
 `error.detail.running`, `completed` and `failed`. Other errors have no final
 per-service lines.
 
-A remote-routed action writes the start line and then its envelope.
+## Interruption
+
+SIGINT or SIGTERM after the start line closes the stream with one compact
+`{"ok":false,"error":{"code":"E_CANCELLED",...}}` line. The existing lifecycle
+cleanup still runs, and the process still ends by that signal. Nothing is
+written to stdout after the closing line. A stream with no closing line was
+killed (for example with SIGKILL).
 
 ## Refusals
 
@@ -101,6 +107,8 @@ These end with the ordinary pretty `--json` envelope (or usage text without
   `Native lifecycle commands do not support --progress yet.` before any work.
 - A native-authored project refuses `--progress` as an unsupported option of its
   native Compose path.
+- A remote target (project lifecycle routed through dispatch): usage error
+  `--progress is not supported for remote targets.` before dispatch.
 - Other usage errors, a missing project, Docker missing from `PATH`, and an
   invalid shared helper configuration.
 

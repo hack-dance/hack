@@ -18,7 +18,7 @@
  */
 
 import { CliUsageError } from "../cli/command.ts";
-import { type CliResult, renderCliResult } from "./cli-result.ts";
+import { type CliResult, errorResult, renderCliResult } from "./cli-result.ts";
 import type { DependencyStartupPhase } from "./dependency-startup-progress.ts";
 import { isRecord } from "./guards.ts";
 
@@ -104,6 +104,11 @@ export class LifecycleProgressStream {
    * caller prints the ordinary pretty envelope.
    */
   close(opts: { readonly result: CliResult<unknown> }): boolean {
+    if (this.state === "closed") {
+      // Already closed (e.g. by a signal): swallow later envelopes so the
+      // compact closing line stays last.
+      return true;
+    }
     if (this.state !== "streaming") {
       return false;
     }
@@ -215,7 +220,47 @@ export function armLifecycleProgress(opts: {
 export function beginLifecycleProgress(opts: {
   readonly project?: string;
 }): void {
-  active?.begin(opts);
+  if (!active) {
+    return;
+  }
+  active.begin(opts);
+  if (signalHandlers.length === 0) {
+    installSignalClose();
+  }
+}
+
+let signalHandlers: Array<readonly [NodeJS.Signals, () => void]> = [];
+
+/**
+ * SIGINT/SIGTERM after `start` closes the stream with an `E_CANCELLED`
+ * envelope. Other handlers (lifecycle cleanup) keep running and own the exit;
+ * when none remain, the signal is raised again so the process still ends by
+ * that signal, as it would without `--progress`.
+ */
+function installSignalClose(): void {
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const handler = (): void => {
+      removeSignalClose();
+      active?.close({
+        result: errorResult({
+          code: "E_CANCELLED",
+          message: `Interrupted by ${signal}.`,
+        }),
+      });
+      if (process.listenerCount(signal) === 0) {
+        process.kill(process.pid, signal);
+      }
+    };
+    signalHandlers.push([signal, handler]);
+    process.on(signal, handler);
+  }
+}
+
+function removeSignalClose(): void {
+  for (const [signal, handler] of signalHandlers) {
+    process.off(signal, handler);
+  }
+  signalHandlers = [];
 }
 
 /** Report one phase; a no-op unless a stream is armed and started. */
@@ -230,10 +275,20 @@ export function reportLifecycleProgress(event: LifecycleProgressEvent): void {
 export function closeLifecycleProgress(opts: {
   readonly result: CliResult<unknown>;
 }): boolean {
-  return active?.close(opts) ?? false;
+  const closed = active?.close(opts) ?? false;
+  if (closed) {
+    removeSignalClose();
+  }
+  return closed;
+}
+
+/** Whether `--progress` was requested for this process (armed or started). */
+export function isLifecycleProgressRequested(): boolean {
+  return active !== null;
 }
 
 /** Test seam: drop the process-wide stream. */
 export function resetLifecycleProgress(): void {
+  removeSignalClose();
   active = null;
 }

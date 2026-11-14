@@ -16,6 +16,7 @@ if [ "$1" != "compose" ]; then exit 0; fi
 case " $* " in
   *" up "*)
     if [ "\${STUB_UP_FAIL:-}" = "1" ]; then exit 3; fi
+    if [ "\${STUB_UP_SLEEP:-}" = "1" ]; then sleep 8; fi
     exit 0 ;;
   *" ps "*)
     case " $* " in
@@ -211,4 +212,54 @@ test("the native backend refuses --progress with a single usage envelope", async
       },
     });
   }
+}, 60_000);
+
+test("SIGTERM after start closes the stream with one E_CANCELLED line", async () => {
+  const child = Bun.spawn(
+    [process.execPath, CLI, "up", "--json", "--progress"],
+    {
+      cwd: project,
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`,
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_NO_INTERACTIVE: "1",
+          NO_COLOR: "1",
+          STUB_UP_SLEEP: "1",
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const reader = child.stdout.getReader();
+  const decoder = new TextDecoder();
+  let stdout = "";
+  while (!stdout.includes('"type":"start"')) {
+    const chunk = await reader.read();
+    if (chunk.done) {
+      break;
+    }
+    stdout += decoder.decode(chunk.value, { stream: true });
+  }
+  child.kill("SIGTERM");
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) {
+      break;
+    }
+    stdout += decoder.decode(chunk.value, { stream: true });
+  }
+  await child.exited;
+
+  const lines = ndjson(stdout);
+  expect(lines[0]).toMatchObject({ type: "start", action: "up" });
+  expect(lines.at(-1)).toMatchObject({
+    ok: false,
+    error: { code: "E_CANCELLED" },
+  });
+  expect(lines.filter((line) => "ok" in line)).toHaveLength(1);
+  expect(child.exitCode === 0).toBe(false);
 }, 60_000);

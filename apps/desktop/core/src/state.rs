@@ -231,7 +231,7 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
             ServiceView {
                 created: first.is_some(),
                 completed: !running
-                    && first.is_some_and(|c| c.state == "exited")
+                    && first.is_some_and(|c| c.state.eq_ignore_ascii_case("exited"))
                     && exit_code == Some(0),
                 route: row
                     .service_hosts

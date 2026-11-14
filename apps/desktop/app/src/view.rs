@@ -22,7 +22,7 @@ use gpui_kit::{
     Styled, Window, div, prelude::*, px,
 };
 use hack_desktop_core::models::LogEntry;
-use hack_desktop_core::source::{ActionOutcome, Source};
+use hack_desktop_core::source::{ActionOutcome, DaemonRecovery, Source};
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
 use hack_desktop_core::viewmodel::{
     AppModel, DetailView, Event, ListView, Phase, RefreshToken, Row,
@@ -38,6 +38,8 @@ pub struct HackApp {
     tail: Result<Vec<LogEntry>, String>,
     follow: bool,
     live: bool,
+    recovery_busy: bool,
+    recovery_error: Option<String>,
     /// When each project's running action started, for the slow-action
     /// warning. Display only: the app never terminates a lifecycle command.
     action_started: std::collections::HashMap<String, std::time::Instant>,
@@ -60,6 +62,8 @@ impl HackApp {
             tail: Ok(Vec::new()),
             follow: true,
             live,
+            recovery_busy: false,
+            recovery_error: None,
             action_started: std::collections::HashMap::new(),
         };
         if live {
@@ -140,6 +144,23 @@ impl HackApp {
                 action,
             });
         }
+    }
+
+    /// Fixture-only unavailable daemon after a previously readable snapshot.
+    pub fn simulate_daemon_unavailable(&mut self, mismatch: bool) {
+        self.model.apply(Event::Refreshed(Err(
+            hack_desktop_core::source::SourceError::DaemonUnavailable {
+                cli: "5.0.0".into(),
+                daemon: mismatch.then(|| "4.3.0".into()),
+                message: if mismatch {
+                    "hackd v4.3.0, CLI v5.0.0: restart hackd"
+                } else {
+                    "hackd is off or unreachable: start hackd"
+                }
+                .into(),
+            },
+        )));
+        self.tail = Err("Project status could not be read".into());
     }
 
     pub(crate) fn selected_root(&self) -> Option<(PathBuf, bool)> {
@@ -254,6 +275,31 @@ impl HackApp {
         })
         .detach();
     }
+
+    fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
+        if self.recovery_busy || !self.live {
+            return;
+        }
+        self.recovery_busy = true;
+        self.recovery_error = None;
+        let source = self.source.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.recover_daemon(action) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.recovery_busy = false;
+                this.recovery_error = result.err();
+                // A command exit is not evidence that a compatible daemon
+                // is ready. Only the next ordered snapshot can restore rows.
+                this.refresh_now_async(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }
 
 fn tone_color(tone: Tone, cx: &gpui_kit::App) -> Hsla {
@@ -341,7 +387,18 @@ impl HackApp {
                     }
                 }
                 if !list.stopped.is_empty() {
-                    body = body.child(header("STOPPED"));
+                    let unknown = list
+                        .stopped
+                        .iter()
+                        .filter(|r| matches!(r.state, ProjectState::Unknown { .. }))
+                        .count();
+                    body = body.child(header(if unknown == list.stopped.len() {
+                        "UNKNOWN"
+                    } else if unknown > 0 {
+                        "STOPPED / UNKNOWN"
+                    } else {
+                        "STOPPED"
+                    }));
                     for r in &list.stopped {
                         body = body.child(self.project_row(r, cx));
                     }
@@ -425,6 +482,29 @@ impl HackApp {
                     .border_b_1()
                     .border_color(t.border)
                     .child(b.text()),
+            );
+        }
+        if let Some(action) = self.model.daemon_recovery() {
+            col = col.child(
+                h_flex()
+                    .px_4()
+                    .py_2()
+                    .gap_3()
+                    .child(
+                        Button::new("recover-hackd")
+                            .label(action.label())
+                            .small()
+                            .disabled(self.recovery_busy)
+                            .loading(self.recovery_busy)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
+                            ),
+                    )
+                    .children(
+                        self.recovery_error
+                            .clone()
+                            .map(|e| div().text_sm().text_color(t.danger).child(e)),
+                    ),
             );
         }
         col
@@ -674,7 +754,13 @@ impl HackApp {
 
     fn status_bar(&self, list: &ListView, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
-        let engine = if list
+        let stale = list
+            .banners
+            .iter()
+            .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::Stale { .. }));
+        let engine = if !self.model.engine_observed() {
+            ("Docker unknown", t.muted_foreground)
+        } else if list
             .banners
             .iter()
             .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::EngineDown { .. }))
@@ -696,6 +782,15 @@ impl HackApp {
             )
         }) {
             ("hackd version mismatch", t.warning)
+        } else if stale
+            || list.banners.iter().any(|b| {
+                matches!(
+                    b,
+                    hack_desktop_core::viewmodel::Banner::DaemonReadFailed { .. }
+                )
+            })
+        {
+            ("hackd unknown", t.muted_foreground)
         } else {
             ("hackd on", t.success)
         };
@@ -829,7 +924,10 @@ impl Render for HackApp {
             Phase::Error { code, message } => self.full_pane(
                 "Could not read projects",
                 format!("{code}: {message}"),
-                Some("hack projects --json"),
+                self.model
+                    .daemon_recovery()
+                    .is_none()
+                    .then_some("hack projects --json"),
                 cx,
             ),
             Phase::Empty => self.full_pane(

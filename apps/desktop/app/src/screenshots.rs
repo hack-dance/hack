@@ -49,6 +49,9 @@ pub fn run(dir: &Path) {
                             let mut app =
                                 HackApp::new(crate::source_for(Some(f)), false, window, cx);
                             app.select(fixtures::selected(f));
+                            if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
+                                app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
+                            }
                             if let Some(a) = fixtures::local(f).in_flight {
                                 app.simulate_in_flight(a);
                             }

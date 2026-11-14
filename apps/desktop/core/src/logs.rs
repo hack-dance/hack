@@ -392,6 +392,18 @@ impl LogsModel {
         }
     }
 
+    /// A finite read was opened while the project was stopped; once it runs,
+    /// the tab should switch to following.
+    #[must_use]
+    pub fn should_follow_now(&self, project_running: bool) -> bool {
+        project_running
+            && !self.follow
+            && !matches!(
+                self.state,
+                StreamState::Unavailable { .. } | StreamState::Idle
+            )
+    }
+
     /// Offer Reconnect after the stream ended or failed.
     #[must_use]
     pub fn can_reconnect(&self) -> bool {
@@ -773,6 +785,21 @@ mod tests {
             "app-closed stream shows nothing"
         );
         assert_eq!(closed.banner(), None);
+    }
+
+    #[test]
+    fn a_stopped_read_switches_to_follow_when_the_project_starts() {
+        let mut m = LogsModel::default();
+        m.start(false);
+        m.apply(&ev("end", Some("eof")));
+        m.exited(Some(0));
+        assert!(!m.should_follow_now(false), "still stopped");
+        assert!(m.should_follow_now(true), "started: follow");
+        m.start(true);
+        assert!(!m.should_follow_now(true), "already following");
+        let mut n = LogsModel::default();
+        n.unavailable("native");
+        assert!(!n.should_follow_now(true), "native stays unavailable");
     }
 
     #[test]

@@ -99,6 +99,13 @@ impl HackApp {
         if self.tab == 1 && before != after {
             self.logs.model.set_service(None);
             self.open_logs(cx);
+        } else if self.tab == 1 {
+            // A stopped project's finite read becomes a followed stream once
+            // the project runs (started here or elsewhere).
+            let running = self.model.detail().is_some_and(|d| d.state.is_active());
+            if self.logs.model.should_follow_now(running) {
+                self.open_logs(cx);
+            }
         }
         cx.notify();
     }

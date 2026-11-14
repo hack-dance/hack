@@ -23,6 +23,7 @@ async function fixture(
     platform?: string;
     fail?: string;
     version?: string;
+    pathVersion?: string;
     repeats?: string;
     required?: boolean;
     report?: boolean;
@@ -54,13 +55,13 @@ async function fixture(
   expect(await versionChild.exited).toBe(0);
   await writeFile(
     join(tools, "cargo"),
-    `#!/bin/sh\nprintf '%s\\n' "$*" >> "$FIXTURE_LOG"\nprintf '%s' "$RUST_TEST_THREADS" > "$FIXTURE_THREADS"\ncase "$1:$2:$FIXTURE_FAIL" in nextest:run:nextest) exit 77;; test:--doc:doc) exit 78;; esac\nif [ "$1:$2" = nextest:run ] && [ -n "$FIXTURE_REPORT" ]; then mkdir -p "$(dirname "$FIXTURE_REPORT")"; printf '<testsuites/>\\n' > "$FIXTURE_REPORT"; fi\n`,
+    `#!/bin/sh\nif [ "$1:$2" = nextest:--version ]; then [ "$FIXTURE_NEXTEST" = present ] || exit 101; printf 'cargo-nextest %s\\n' "$FIXTURE_CARGO_VERSION"; exit 0; fi\nprintf '%s\\n' "$*" >> "$FIXTURE_LOG"\nprintf '%s' "$RUST_TEST_THREADS" > "$FIXTURE_THREADS"\ncase "$1:$2:$FIXTURE_FAIL" in nextest:run:nextest) exit 77;; test:--doc:doc) exit 78;; esac\nif [ "$1:$2" = nextest:run ] && [ -n "$FIXTURE_REPORT" ]; then mkdir -p "$(dirname "$FIXTURE_REPORT")"; printf '<testsuites/>\\n' > "$FIXTURE_REPORT"; fi\n`,
     { mode: 0o700 }
   );
   if (opts.nextest !== false) {
     await writeFile(
       join(tools, "cargo-nextest"),
-      `#!/bin/sh\nprintf '%s\\n' 'cargo-nextest ${opts.version ?? version}'\n`,
+      `#!/bin/sh\nprintf 'direct PATH lookup' > "$FIXTURE_DIRECT_LOOKUP"\nprintf '%s\\n' 'cargo-nextest ${opts.pathVersion ?? opts.version ?? version}'\n`,
       { mode: 0o700 }
     );
   }
@@ -75,6 +76,9 @@ async function fixture(
       PATH: `${tools}:/usr/bin:/bin`,
       FIXTURE_LOG: log,
       FIXTURE_THREADS: join(root, "threads"),
+      FIXTURE_NEXTEST: opts.nextest === false ? "absent" : "present",
+      FIXTURE_CARGO_VERSION: opts.version ?? version,
+      FIXTURE_DIRECT_LOOKUP: join(root, "direct-lookup"),
       FIXTURE_REPORT: opts.report
         ? join(root, "packages/runtime-core/target/nextest/ci/junit.xml")
         : undefined,
@@ -199,8 +203,8 @@ for (const platform of ["Linux", "Darwin"]) {
     expect(r.commands).toHaveLength(1);
     expect(r.commands[0]).toStartWith("test --locked");
     expect(r.commands[0]).toContain("client_relay");
-    expect(r.stderr).toContain(
-      `cargo install --locked --version ${r.version} cargo-nextest`
+    expect(r.stderr.trim()).toBe(
+      `cargo nextest ${r.version} unavailable; using cargo test.`
     );
     expect(r.threads).toBe(platform === "Darwin" ? "1" : "");
   });
@@ -208,13 +212,51 @@ for (const platform of ["Linux", "Darwin"]) {
 test("CI never degrades to libtest when the pinned process runner is missing or mismatched", async () => {
   for (const opts of [
     { nextest: false, required: true },
-    { version: "0.9.150" },
-    { version: "0.9.1512" },
+    { version: "0.9.150", required: true },
+    { version: "0.9.1512", required: true },
+    { version: "0.9.150", repeats: "20" },
+    { version: "0.9.150", report: true },
   ]) {
     const r = await (await fixture(opts)).run();
     expect(r.code).toBe(2);
     expect(r.commands).toEqual([]);
     expect(r.stderr).toContain("cargo install --locked --version");
+  }
+});
+test("another contributor nextest version falls back without replacing it on either host", async () => {
+  for (const platform of ["Linux", "Darwin"]) {
+    const r = await (await fixture({ version: "0.9.150", platform })).run([
+      "--lib",
+      "--all-features",
+    ]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.commands).toHaveLength(1);
+    expect(r.commands[0]).toStartWith("test --locked");
+    expect(r.commands[0]).toEndWith("--lib --all-features");
+    expect(r.stderr.trim()).toBe(
+      `cargo nextest ${r.version} unavailable; using cargo test.`
+    );
+    expect(r.threads).toBe(platform === "Darwin" ? "1" : "");
+  }
+});
+test("the version check follows Cargo subcommand resolution instead of the PATH binary", async () => {
+  const rightCargo = await fixture({
+    pathVersion: "0.9.150",
+    required: true,
+  });
+  const accepted = await rightCargo.run();
+  expect(accepted.code, accepted.stderr).toBe(0);
+  expect(accepted.commands[0]).toStartWith("nextest run");
+  const wrongCargo = await fixture({
+    version: "0.9.150",
+    pathVersion: accepted.version,
+    required: true,
+  });
+  const refused = await wrongCargo.run();
+  expect(refused.code).toBe(2);
+  expect(refused.commands).toEqual([]);
+  for (const f of [wrongCargo, rightCargo]) {
+    expect(await Bun.file(join(f.root, "direct-lookup")).exists()).toBe(false);
   }
 });
 

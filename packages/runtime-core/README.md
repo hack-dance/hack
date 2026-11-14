@@ -570,11 +570,14 @@ The wrapper accepts Cargo build, feature and target options; nextest-specific
 options such as `-E` need a direct `cargo nextest` invocation. Documentation-only
 selection refuses repetition or report settings intended for nextest qualification.
 
-`bun run test:local` uses the same runner when installed. Install its exact pin with
-`cargo install --locked --version 0.9.151 cargo-nextest`. Without nextest the command
-prints that instruction and retains stock `cargo test`; the macOS fallback sets
-one libtest thread to prevent cross-test descriptor inheritance. CI requires the
-pin and never silently falls back. `bun run test:local --all-features` retains the
+`bun run test:local` checks `cargo nextest --version`, matching Cargo's lookup for
+the test run. If that resolves the pin, it uses nextest; a missing or different
+version prints one fallback line and uses stock `cargo test`, leaving the
+contributor's installed version alone. The macOS fallback sets one libtest thread
+to prevent cross-test descriptor inheritance. To opt into the pinned runner,
+install it with `cargo install --locked --version 0.9.151 cargo-nextest`.
+CI and qualification reports/repetitions require the pin and never fall back.
+`bun run test:local --all-features` retains the
 Zig prerequisite above. The toolchain container's existing `rust` task continues
 to use stock Cargo on Linux, where the descriptor creation primitives are atomic.
 

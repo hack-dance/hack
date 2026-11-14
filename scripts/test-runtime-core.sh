@@ -9,20 +9,21 @@ repetitions=${HACK_RUST_TEST_REPETITIONS:-1}
 case "$runner" in auto|nextest) ;; *) echo 'HACK_RUST_TEST_RUNNER must be auto or nextest.' >&2; exit 2 ;; esac
 case "$repetitions" in 1|20) ;; *) echo 'HACK_RUST_TEST_REPETITIONS must be 1 or 20.' >&2; exit 2 ;; esac
 common=(--locked --manifest-path packages/runtime-core/Cargo.toml --target-dir "${HACK_RUST_TEST_TARGET_DIR:-.hack-local/target}")
-if ! command -v cargo-nextest >/dev/null 2>&1; then
-  if [[ "$runner" == nextest || "$repetitions" != 1 ]]; then
-    echo "Pinned cargo-nextest $version is required. Install: $install" >&2
-    exit 2
-  fi
-  echo "cargo-nextest absent; using cargo test. For process isolation install: $install" >&2
-  # A single libtest thread avoids cross-test spawn/close races in the fallback.
-  if [[ "$(uname -s)" == Darwin ]]; then export RUST_TEST_THREADS=1; fi
-  exec cargo test "${common[@]}" --jobs 2 "$@"
-fi
-actual=$(cargo-nextest --version)
+# Cargo's subcommand lookup can differ from a direct PATH lookup. Probe the
+# same command used below, and leave a contributor's other nextest version alone.
+actual=$(cargo nextest --version 2>/dev/null) || actual=""
 case "$actual" in
   "cargo-nextest $version"|"cargo-nextest $version ("*) ;;
-  *) echo "Pinned cargo-nextest $version is required. Install: $install" >&2; exit 2 ;;
+  *)
+    if [[ "$runner" == nextest || "$repetitions" != 1 || -n "${HACK_RUST_TEST_REPORT_DIR:-}" ]]; then
+      echo "Pinned cargo-nextest $version is required. Install: $install" >&2
+      exit 2
+    fi
+    echo "cargo nextest $version unavailable; using cargo test." >&2
+    # A single libtest thread avoids cross-test spawn/close races in the fallback.
+    if [[ "$(uname -s)" == Darwin ]]; then export RUST_TEST_THREADS=1; fi
+    exec cargo test "${common[@]}" --jobs 2 "$@"
+    ;;
 esac
 mode=default
 run_doctests=true

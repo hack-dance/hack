@@ -70,9 +70,11 @@ Cargo; explicit `--doc` uses Cargo alone.
 Pass Cargo build, feature and target options through this wrapper; use
 `cargo nextest` directly for nextest-specific options such as `-E`.
 This prevents another test's spawned child from inheriting a briefly non-CLOEXEC
-macOS descriptor and delaying EOF. `bun run test:local` uses that pin when present;
-otherwise it prints `cargo install --locked --version 0.9.151 cargo-nextest` and
-retains `cargo test` (one libtest thread on macOS). The nextest test group preserves
+macOS descriptor and delaying EOF. `bun run test:local` probes `cargo nextest
+--version`, matching the subcommand it executes. A missing or different version
+prints one fallback line and retains `cargo test` (one libtest thread on macOS),
+leaving the installed nextest alone. CI and qualification reports/repetitions
+require the exact pin. The nextest test group preserves
 the admission-pool tests' serialized host-wide disk probes. A manual CI dispatch
 with `rust_repetitions=20` runs 20 consecutive default and 20 all-feature Mac suites,
 stopping at the first failure, and preserves per-pass JUnit counts/timings.

@@ -198,6 +198,15 @@ export async function startViaLaunchdIfLoaded(
     // not own.
     return await refuseForeignLaunchdProgram({ ...hooks, verb: "start" });
   }
+  if (repair === "home-binding" || repair === "unproven-owner") {
+    // The loaded job is not provably this home's: kickstarting it would
+    // (re)start another home's daemon.
+    logger.error({
+      message:
+        "Not starting hackd through launchd: the loaded launchd job is not proven to serve this Hack home; nothing was changed | Check: hack daemon status; to take the service over for this home, run: hack daemon install",
+    });
+    return 1;
+  }
   trace.action = rewritten ? "reinstalled" : "started";
   // launchd owns the daemon: never spawn a bare process next to it —
   // two process managers for one socket is how machines end up with
@@ -253,6 +262,20 @@ function noteRepair(opts: {
       logger.info({
         message:
           "The launchd service's program cannot be read (Program/ProgramArguments); it is left as it is | To replace it, run: hack daemon install",
+      });
+      return false;
+    case "home-binding":
+      trace.blocked = "home-binding";
+      logger.warn({
+        message:
+          "The launchd plist binds another Hack home (HACK_HOME or HOME in EnvironmentVariables), so it is not rewritten from here | To take the service over for this home, run: hack daemon install",
+      });
+      return false;
+    case "unproven-owner":
+      trace.blocked = "unproven-owner";
+      logger.warn({
+        message:
+          "The loaded launchd job is not proven to be this Hack home's hackd, so it is not rewritten or restarted from here | Check: hack daemon status",
       });
       return false;
     case "unmanaged":

@@ -1,4 +1,29 @@
 import { hackReexecEnvironment } from "../lib/child-environment.ts";
+
+/**
+ * Flags that scope one `hack daemon` invocation and must not reach the
+ * daemon it starts (or anything that daemon starts):
+ * - `HACK_DAEMON_SERVICE_READ_ONLY`: `hack doctor --fix` sets it for that
+ *   one repair;
+ * - `HACK_DAEMON_RECONCILE_ONLY`: `hack update` sets it for the new
+ *   executable's `daemon start --json`, which never starts a stopped
+ *   daemon. A daemon it replaces must start normally (HACK-2216).
+ */
+const INVOCATION_ONLY_ENV_KEYS = [
+  "HACK_DAEMON_SERVICE_READ_ONLY",
+  "HACK_DAEMON_RECONCILE_ONLY",
+] as const;
+
+/** The environment for a detached hackd: the caller's, minus those flags. */
+export function detachedDaemonEnvironment(
+  base: Readonly<Record<string, string | undefined>>
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...base };
+  for (const key of INVOCATION_ONLY_ENV_KEYS) {
+    Reflect.deleteProperty(env, key);
+  }
+  return env;
+}
 /**
  * Spawns a hackd launcher that must outlive its caller.
  *
@@ -18,12 +43,8 @@ import { hackReexecEnvironment } from "../lib/child-environment.ts";
 export function spawnDetachedDaemon(opts: {
   readonly argv: readonly string[];
 }): { readonly pid: number } {
-  // `hack doctor --fix` may run this with the read-only service flag; it is
-  // for that one repair, not for the daemon and everything it starts.
-  const env: Record<string, string | undefined> = { ...process.env };
-  Reflect.deleteProperty(env, "HACK_DAEMON_SERVICE_READ_ONLY");
   const proc = Bun.spawn([...opts.argv], {
-    env: hackReexecEnvironment(env),
+    env: hackReexecEnvironment(detachedDaemonEnvironment(process.env)),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

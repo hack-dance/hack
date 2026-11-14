@@ -23,6 +23,10 @@ type Token =
 type PlistValue =
   | { readonly kind: "string"; readonly text: string }
   | { readonly kind: "array"; readonly first: PlistValue | null }
+  | {
+      readonly kind: "dict";
+      readonly keys: ReadonlyMap<string, PlistValue>;
+    }
   | { readonly kind: "other" };
 
 const PROLOG = /^\s*(<\?xml[^?]*\?>)?\s*(<!DOCTYPE[^>[]*>)?/;
@@ -74,6 +78,47 @@ export function parseLaunchdPlistProgram(opts: {
         kind: "unknown",
         reason: "ProgramArguments is not an array that starts with a string",
       };
+}
+
+/**
+ * The plist's root `EnvironmentVariables` (HACK-2216), for the home
+ * binding check before an automatic rewrite: `env` maps each name to its
+ * string value (null for a non-string value); an absent dict is empty.
+ * `unknown` when the plist cannot be read ({@link parseLaunchdPlistProgram})
+ * or `EnvironmentVariables` is not a dict.
+ */
+export function parseLaunchdPlistEnvironment(opts: {
+  readonly plistText: string;
+}):
+  | {
+      readonly kind: "env";
+      readonly env: ReadonlyMap<string, string | null>;
+    }
+  | { readonly kind: "unknown"; readonly reason: string } {
+  let root: Map<string, PlistValue> | null;
+  try {
+    root = readRootDict(opts.plistText);
+  } catch (error: unknown) {
+    return {
+      kind: "unknown",
+      reason: error instanceof PlistShapeError ? error.message : "unreadable",
+    };
+  }
+  const value = root?.get("EnvironmentVariables");
+  if (value === undefined) {
+    return { kind: "env", env: new Map() };
+  }
+  if (value.kind !== "dict") {
+    return {
+      kind: "unknown",
+      reason: "EnvironmentVariables is not a dict",
+    };
+  }
+  const env = new Map<string, string | null>();
+  for (const [name, entry] of value.keys) {
+    env.set(name, entry.kind === "string" ? entry.text : null);
+  }
+  return { kind: "env", env };
 }
 
 function programPath(raw: string): LaunchdPlistProgram {
@@ -198,8 +243,9 @@ function expectEnd(tokens: readonly Token[], i: number): void {
 }
 
 /**
- * Reads `<key>`/value pairs up to `</dict>`. Only the root dict keeps its
- * keys; a nested dict is read for shape and discarded.
+ * Reads `<key>`/value pairs up to `</dict>`. Keys are only ever looked up
+ * in the dict a caller asks for (Program in the root, HACK_HOME in the
+ * root's EnvironmentVariables), never searched across nesting.
  */
 function readDictBody(
   tokens: readonly Token[],
@@ -224,7 +270,7 @@ function readDictBody(
     // is `Program` to launchd) is not decoded here, so it is unknown.
     const name = key.text;
     if (keep && name.includes("&")) {
-      throw new PlistShapeError("a root key uses an XML escape");
+      throw new PlistShapeError("a key uses an XML escape");
     }
     if (keep && keys.has(name)) {
       throw new PlistShapeError(`the key ${name} appears twice`);
@@ -258,6 +304,9 @@ function emptyValue(name: string): PlistValue {
   if (name === "array") {
     return { kind: "array", first: null };
   }
+  if (name === "dict") {
+    return { kind: "dict", keys: new Map() };
+  }
   return { kind: "other" };
 }
 
@@ -272,9 +321,12 @@ function readValue(tokens: readonly Token[], start: number): ValueRead {
     throw new PlistShapeError("a dict key has no value");
   }
   if (token.name === "dict") {
+    // Nested dicts are kept (EnvironmentVariables binds the service's home)
+    // and held to the same rules: an escaped or repeated key is unknown.
+    const nested = readDictBody(tokens, start + 1, true);
     return {
-      value: { kind: "other" },
-      next: readDictBody(tokens, start + 1, false).next,
+      value: { kind: "dict", keys: nested.keys },
+      next: nested.next,
     };
   }
   if (token.name === "array") {

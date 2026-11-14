@@ -697,6 +697,14 @@ Such a plist is never replaced automatically; `start` reports it and
 - When a needed rewrite does not complete (unloading, writing or loading the
   plist fails), `start` exits 1 with `E_DAEMON_SERVICE` instead of reporting
   hackd as running: the unload may already have stopped it.
+- Before any automatic rewrite (a refresh or a retarget), the loaded job must be
+  this home's. If the plist's `EnvironmentVariables` sets `HACK_HOME`, or a
+  `HOME` other than the one Hack writes for this home, it is left alone
+  (`blocked: "home-binding"`). If the job is running, its pid must be proven to
+  be this home's hackd, holding a socket in this home's `daemon/` directory
+  (the proof `stop` uses). Otherwise it is left alone
+  (`blocked: "unproven-owner"`). A running job without a pid counts as
+  unproven.
 
 ```mermaid
 stateDiagram-v2
@@ -734,7 +742,10 @@ and for this home's hackd. A live pid is not enough: hackd must answer on this
 home's socket. When both are found, it runs the new executable's
 `hack daemon start --json` in reconcile-only mode (`HACK_DAEMON_RECONCILE_ONLY=1`).
 In that mode `start` does nothing (action `none`) when no hackd of this home is
-running, so a daemon that stopped in the meantime is not started. The step never
+running, so a daemon that stopped in the meantime is not started. The flag
+applies to that one invocation only. A daemon it starts to replace an
+incompatible one never inherits it, and a `--foreground` start ignores it, so
+the replacement runs normally. The step never
 fails the update, including when it cannot read the service state. A failure is
 reported in the update result (`daemon.status: "failed"`) with
 `hack daemon install` as the next step. A stopped service picks up the new

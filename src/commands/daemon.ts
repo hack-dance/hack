@@ -282,7 +282,11 @@ async function handleDaemonStart({
         paths,
         foreground: args.options.foreground === true,
         trace,
+        // A foreground start is a daemon being run (by a manager, or as the
+        // replacement a reconcile spawned), never a reconcile: the flag
+        // must not stop it from running.
         reconcileOnly:
+          args.options.foreground !== true &&
           (process.env[DAEMON_RECONCILE_ONLY_ENV] ?? "").trim() === "1",
       }),
   });

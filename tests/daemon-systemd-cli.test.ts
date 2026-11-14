@@ -531,6 +531,62 @@ installFlowTest(
 );
 
 test.skipIf(process.platform !== "linux")(
+  "a replacement daemon started under reconcile-only mode still runs (HACK-2216)",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    const home = join(f.root, "isolated");
+    const env = {
+      ...f.env,
+      HACK_HOME: home,
+      HACK_DAEMON_RECONCILE_ONLY: "1",
+    };
+    // The foreground run is what a replacement spawn executes: even if the
+    // flag leaked into it, it must run the daemon, not exit as a no-op.
+    const daemon = Bun.spawn([f.hackBin, "daemon", "start", "--foreground"], {
+      env,
+      cwd: f.root,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    try {
+      let running = false;
+      for (let i = 0; i < 100 && !running; i++) {
+        const status = await hack({ ...f, env }, [
+          "daemon",
+          "status",
+          "--json",
+        ]);
+        running =
+          (JSON.parse(status.stdout) as { status?: string }).status ===
+          "running";
+        if (!running) {
+          await Bun.sleep(100);
+        }
+      }
+      expect(running).toBe(true);
+      // The reconcile-only start itself sees it running and changes nothing.
+      const reconcile = await hack({ ...f, env }, [
+        "daemon",
+        "start",
+        "--json",
+      ]);
+      expect(JSON.parse(reconcile.stdout)).toMatchObject({
+        ok: true,
+        data: { action: "none", daemon: { running: true, compatible: true } },
+      });
+    } finally {
+      const { HACK_DAEMON_RECONCILE_ONLY: _drop, ...plain } = env;
+      await hack({ ...f, env: plain }, ["daemon", "stop"]);
+      daemon.kill();
+      await daemon.exited;
+    }
+  },
+  90_000
+);
+
+test.skipIf(process.platform !== "linux")(
   "--json with an isolated HACK_HOME: stop reports a no-op, --foreground is a usage error",
   async () => {
     fixture = await createFixture();

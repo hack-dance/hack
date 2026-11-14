@@ -107,6 +107,8 @@ async function makeFixture(): Promise<Fixture> {
       `printf '%s\\n' "$*" >> "${launchctlLog}"`,
       // HACK_TEST_LAUNCHCTL_FAIL=<verb> makes that verb fail (HACK-2216).
       'if [ -n "$HACK_TEST_LAUNCHCTL_FAIL" ] && [ "$1" = "$HACK_TEST_LAUNCHCTL_FAIL" ]; then echo "simulated $1 failure" >&2; exit 5; fi',
+      // HACK_TEST_LAUNCHCTL_JOB=stopped: the job is loaded but runs nothing.
+      `if [ "$1" = "print" ] && [ "$HACK_TEST_LAUNCHCTL_JOB" = "stopped" ]; then printf 'state = not running\\n'; exit 0; fi`,
       `if [ "$1" = "print" ]; then printf 'state = running\\npid = 4242\\n'; fi`,
       `if [ "$1" = "kickstart" ]; then ${touchSocket}; fi`,
       "exit 0",
@@ -338,7 +340,10 @@ test("repairs legacy output paths even when the installed program is still curre
   const run = await runAsDarwin({
     argv: [DRIVER, "repair-output"],
     cwd: fixture.root,
-    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack") }),
+    env: fixture.env({
+      HACK_HOME: join(fixture.home, ".hack"),
+      HACK_TEST_LAUNCHCTL_JOB: "stopped",
+    }),
   });
   expect(run.code).toBe(0);
   expect(JSON.parse(run.stdout)).toEqual({
@@ -349,7 +354,8 @@ test("repairs legacy output paths even when the installed program is still curre
   const verbs = (await launchctlCalls(fixture)).map(
     (line) => line.split(" ")[0]
   );
-  expect(verbs).toEqual(["bootout", "bootstrap"]);
+  // `print`: the job's state is read before a rewrite (HACK-2216).
+  expect(verbs).toEqual(["print", "bootout", "bootstrap"]);
 });
 
 /** Runs the driver's two repairs against `plist`; returns results and calls. */
@@ -366,7 +372,13 @@ async function repairPlist(
   const run = await runAsDarwin({
     argv: [DRIVER, "repair-output"],
     cwd: fixture.root,
-    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack"), ...extraEnv }),
+    // A loaded job that runs nothing unless a test says otherwise: a
+    // running job must first be proven this home's (HACK-2216).
+    env: fixture.env({
+      HACK_HOME: join(fixture.home, ".hack"),
+      HACK_TEST_LAUNCHCTL_JOB: "stopped",
+      ...extraEnv,
+    }),
   });
   expect(run.code).toBe(0);
   return {
@@ -429,7 +441,7 @@ test("an unmarked legacy plist with Hack's label and this hack's program is refr
   expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
   expect(after).toBe(current);
   expect(after).toContain("<!-- Managed by hack");
-  expect(verbs).toEqual(["bootout", "bootstrap"]);
+  expect(verbs).toEqual(["print", "bootout", "bootstrap"]);
 });
 
 test("an unmarked plist with another label is not refreshed (HACK-2216)", async () => {
@@ -460,7 +472,7 @@ test("a managed plist for this hack with an older environment is refreshed (HACK
   });
   expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
   expect(after).toBe(current);
-  expect(verbs).toEqual(["bootout", "bootstrap"]);
+  expect(verbs).toEqual(["print", "bootout", "bootstrap"]);
 });
 
 // Review round 2 (HACK-2216).
@@ -476,7 +488,7 @@ test("a refresh whose unload fails reports failed and leaves the plist", async (
   );
   expect(results).toEqual({ repair: "failed", secondRepair: "failed" });
   expect(after).toBe(legacy);
-  expect(verbs).toEqual(["bootout", "bootout"]);
+  expect(verbs).toEqual(["print", "bootout", "print", "bootout"]);
 });
 
 test("a refresh whose load fails after a successful unload reports failed", async () => {
@@ -485,7 +497,7 @@ test("a refresh whose load fails after a successful unload reports failed", asyn
     { HACK_TEST_LAUNCHCTL_FAIL: "bootstrap" }
   );
   expect((results as { repair: string }).repair).toBe("failed");
-  expect(verbs.slice(0, 2)).toEqual(["bootout", "bootstrap"]);
+  expect(verbs.slice(0, 3)).toEqual(["print", "bootout", "bootstrap"]);
 });
 
 /** A plist whose program is set with `Program` (and optionally args). */
@@ -596,6 +608,67 @@ test("a commented-out Program key does not make a foreign top-level program miss
   });
   expect(after).toBe(written);
   expect(verbs).toEqual([]);
+});
+
+// Codex findings on PR #854: prove the job is this home's before a rewrite.
+
+test("a loaded job whose plist sets another HACK_HOME is not refreshed", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    // This CLI's program and Hack's label, stale content, but the plist
+    // binds another home: a rewrite would drop that binding.
+    written = legacyPlist(fixture).legacy.replace(
+      "    <key>HOME</key>",
+      `    <key>HACK_HOME</key>\n    <string>${join(fixture.root, "other-home", ".hack")}</string>\n    <key>HOME</key>`
+    );
+    return written;
+  });
+  expect(written).toContain("<key>HACK_HOME</key>");
+  expect(results).toEqual({
+    repair: "home-binding",
+    secondRepair: "home-binding",
+  });
+  expect(after).toBe(written);
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+});
+
+test("a loaded job whose HOME is another home is not refreshed", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    const { legacy } = legacyPlist(fixture);
+    written = legacy.replace(
+      `    <key>HOME</key>\n    <string>${fixture.home}</string>`,
+      `    <key>HOME</key>\n    <string>${join(fixture.root, "other-home")}</string>`
+    );
+    return written;
+  });
+  expect(written).toContain("other-home");
+  expect(results).toEqual({
+    repair: "home-binding",
+    secondRepair: "home-binding",
+  });
+  expect(after).toBe(written);
+  expect(verbs).not.toContain("bootout");
+});
+
+test("a running job whose pid is not this home's hackd is not refreshed", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist(
+    (fixture) => {
+      written = legacyPlist(fixture).legacy;
+      return written;
+    },
+    // The stub's job runs pid 4242, which is not this home's hackd.
+    { HACK_TEST_LAUNCHCTL_JOB: "running" }
+  );
+  expect(results).toEqual({
+    repair: "unproven-owner",
+    secondRepair: "unproven-owner",
+  });
+  expect(after).toBe(written);
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
 });
 
 test("an XML-escaped Program key pointing at another hack is never replaced", async () => {

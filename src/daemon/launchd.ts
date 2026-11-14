@@ -15,8 +15,12 @@ import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 import { boundedTimeoutMs } from "../lib/process-deadline.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
-import { parseLaunchdPlistProgram } from "./launchd-plist.ts";
+import {
+  parseLaunchdPlistEnvironment,
+  parseLaunchdPlistProgram,
+} from "./launchd-plist.ts";
 import type { DaemonPaths } from "./paths.ts";
+import { type DaemonProcessProof, proveOwnedDaemonProcess } from "./process.ts";
 
 // biome-ignore lint/performance/noBarrelFile: keeps launchd's public surface in one module
 export {
@@ -491,6 +495,11 @@ export function hasBoundedLaunchdOutput(opts: {
  * but is not Hack's ({@link isHackManagedPlist}: no marker and another
  * `Label`), so it was left as it is;
  * `unknown-program`: its program cannot be read, left as it is;
+ * `home-binding`: a rewrite was needed, but the plist binds another Hack
+ * home (`HACK_HOME`, or a `HOME` the renderer would not write), left as it
+ * is ({@link plistKeepsThisHome});
+ * `unproven-owner`: a rewrite was needed, but the loaded job is not proven
+ * to be this home's ({@link proveLaunchdJobOwnership}), left as it is;
  * `failed`: a rewrite was needed but did not complete (unload, write or
  * load failed, or no installable hack resolves); the service may be
  * stopped.
@@ -501,6 +510,8 @@ export type LaunchdProgramRepairResult =
   | "refreshed"
   | "other-program"
   | "unknown-program"
+  | "home-binding"
+  | "unproven-owner"
   | "unmanaged"
   | "not-installed"
   | "failed";
@@ -593,6 +604,55 @@ export async function readLaunchdProgramState(opts: {
 }
 
 /**
+ * Whether a rewrite would keep the plist's home binding: its
+ * `EnvironmentVariables` sets no `HACK_HOME` (the renderer writes none) and
+ * its `HOME`, if set, is the home the renderer writes. An unreadable
+ * environment is not proof (false).
+ */
+export function plistKeepsThisHome(opts: {
+  readonly plistText: string;
+  readonly home?: string;
+}): boolean {
+  const parsed = parseLaunchdPlistEnvironment({ plistText: opts.plistText });
+  if (parsed.kind !== "env") {
+    return false;
+  }
+  if (parsed.env.has("HACK_HOME")) {
+    return false;
+  }
+  const home = parsed.env.get("HOME");
+  return home === undefined || home === (opts.home ?? resolveUserHomeDir());
+}
+
+/**
+ * Whether the loaded job may be unloaded as this home's: it runs nothing
+ * (not running and no pid), or its pid is proven to be this home's hackd
+ * ({@link proveOwnedDaemonProcess}: a hackd holding a socket in this home's
+ * daemon directory). A running job without a pid, or one that fails the
+ * proof, is not this home's (false).
+ */
+export async function proveLaunchdJobOwnership(opts: {
+  readonly paths: DaemonPaths;
+  readonly status?: LaunchdServiceStatus;
+  readonly prove?: (pid: number) => Promise<DaemonProcessProof>;
+}): Promise<boolean> {
+  const status =
+    opts.status ?? (await getLaunchdServiceStatus({ paths: opts.paths }));
+  if (!status.loaded) {
+    return true;
+  }
+  if (status.pid === null || status.pid <= 1) {
+    return !status.running;
+  }
+  const proof = await (
+    opts.prove ??
+    ((pid: number) =>
+      proveOwnedDaemonProcess({ pid, daemonRoot: opts.paths.root }))
+  )(status.pid);
+  return proof.kind === "owned";
+}
+
+/**
  * Repairs an installed launchd plist (HACK-2216):
  * - a program that is gone or a compiled-binary virtual path (/$bunfs) is
  *   retargeted to this CLI ("repaired"): such a plist leaves launchd
@@ -612,6 +672,8 @@ export async function readLaunchdProgramState(opts: {
  */
 export async function repairLaunchdProgramIfInvalid(opts: {
   readonly paths: DaemonPaths;
+  /** Defaults to {@link proveLaunchdJobOwnership}; tests pin it. */
+  readonly proveJob?: () => Promise<boolean>;
 }): Promise<LaunchdProgramRepairResult> {
   if (!resolveLaunchdAccess().allowed) {
     return "not-installed";
@@ -620,39 +682,22 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   if (plistText === null) {
     return "not-installed";
   }
-  const state = await readLaunchdProgramState({
-    paths: opts.paths,
-    plistText,
-  });
-  if (state.kind === "not-installed") {
-    return "not-installed";
+  const decided = await decideLaunchdRewrite({ paths: opts.paths, plistText });
+  if (decided.kind === "result") {
+    return decided.result;
   }
-  if (state.kind === "other") {
-    return "other-program";
+  const { program } = decided;
+  // A rewrite unloads the loaded job and replaces its plist: it must be
+  // this home's (HACK-2216). The plist must not bind another home, and a
+  // running job must be this home's proven hackd. Unknown refuses.
+  if (!plistKeepsThisHome({ plistText })) {
+    return "home-binding";
   }
-  if (state.kind === "unknown") {
-    return "unknown-program";
-  }
-  if (state.kind === "missing" && state.resolved === null) {
-    return "failed";
-  }
-  const program =
-    state.kind === "ours" && state.program !== null ? state.program : null;
-  if (program !== null) {
-    const current = isLaunchdPlistCurrent({
-      plistText,
-      hackBinPath: program,
-      home: resolveUserHomeDir(),
-    });
-    if (current) {
-      return "ok";
-    }
-    if (
-      hasBoundedLaunchdOutput({ plistText }) &&
-      !isHackManagedPlist({ plistText })
-    ) {
-      return "unmanaged";
-    }
+  const proven = await (
+    opts.proveJob ?? (() => proveLaunchdJobOwnership({ paths: opts.paths }))
+  )();
+  if (!proven) {
+    return "unproven-owner";
   }
   const result = await installLaunchdService({
     paths: opts.paths,
@@ -667,6 +712,61 @@ export async function repairLaunchdProgramIfInvalid(opts: {
     return "failed";
   }
   return program === null ? "repaired" : "refreshed";
+}
+
+/**
+ * Whether the plist needs a rewrite, before any ownership check: a final
+ * `result` (nothing to rewrite, or a reason not to), or `rewrite` with the
+ * program to keep (null: retarget to this CLI).
+ */
+async function decideLaunchdRewrite(opts: {
+  readonly paths: DaemonPaths;
+  readonly plistText: string;
+}): Promise<
+  | { readonly kind: "result"; readonly result: LaunchdProgramRepairResult }
+  | { readonly kind: "rewrite"; readonly program: string | null }
+> {
+  const { plistText } = opts;
+  const state = await readLaunchdProgramState({
+    paths: opts.paths,
+    plistText,
+  });
+  const final = (result: LaunchdProgramRepairResult) =>
+    ({ kind: "result", result }) as const;
+  switch (state.kind) {
+    case "not-installed":
+      return final("not-installed");
+    case "other":
+      return final("other-program");
+    case "unknown":
+      return final("unknown-program");
+    case "missing":
+      return state.resolved === null
+        ? final("failed")
+        : { kind: "rewrite", program: null };
+    default:
+      break;
+  }
+  const program = state.program;
+  if (program === null) {
+    return { kind: "rewrite", program: null };
+  }
+  if (
+    isLaunchdPlistCurrent({
+      plistText,
+      hackBinPath: program,
+      home: resolveUserHomeDir(),
+    })
+  ) {
+    return final("ok");
+  }
+  if (
+    hasBoundedLaunchdOutput({ plistText }) &&
+    !isHackManagedPlist({ plistText })
+  ) {
+    return final("unmanaged");
+  }
+  return { kind: "rewrite", program };
 }
 
 export interface LaunchdUninstallResult {

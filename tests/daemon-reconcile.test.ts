@@ -27,9 +27,12 @@ import {
   isSameExecutableFile,
   LAUNCHD_MANAGED_MARKER,
   parseLaunchdPlistProgram,
+  plistKeepsThisHome,
+  proveLaunchdJobOwnership,
   renderLaunchdPlist,
 } from "../src/daemon/launchd.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
+import type { DaemonProcessProof } from "../src/daemon/process.ts";
 import { hasAncestorProcess } from "../src/daemon/process-ancestry.ts";
 import {
   buildDaemonCommandData,
@@ -38,6 +41,7 @@ import {
   planDaemonReconcile,
   reconcileAction,
 } from "../src/daemon/reconcile.ts";
+import { detachedDaemonEnvironment } from "../src/daemon/spawn.ts";
 import {
   findDroppedHomeBinding,
   isHackManagedUnit,
@@ -956,4 +960,80 @@ test("root keys are read exactly: escapes are unknown, whitespace is another key
       ),
     }).kind
   ).toBe("unknown");
+});
+
+// Codex findings on PR #854 (HACK-2216).
+
+test("a replacement daemon's environment drops the invocation-only flags", () => {
+  const env = detachedDaemonEnvironment({
+    PATH: "/usr/bin",
+    HACK_DAEMON_RECONCILE_ONLY: "1",
+    HACK_DAEMON_SERVICE_READ_ONLY: "1",
+    HACK_HOME: "/srv/u/.hack",
+  });
+  expect(env).toEqual({ PATH: "/usr/bin", HACK_HOME: "/srv/u/.hack" });
+  expect("HACK_DAEMON_RECONCILE_ONLY" in env).toBe(false);
+});
+
+test("a plist keeps this home only without HACK_HOME and with this HOME", () => {
+  const plist = (env: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>EnvironmentVariables</key>\n  <dict>\n${env}\n  </dict>\n</dict>\n</plist>\n`;
+  const home = "/Users/example";
+  const keeps = (text: string) => plistKeepsThisHome({ plistText: text, home });
+  expect(
+    keeps(plist(`    <key>HOME</key>\n    <string>${home}</string>`))
+  ).toBe(true);
+  expect(keeps(plist(""))).toBe(true);
+  expect(
+    keeps(
+      plist(
+        `    <key>HOME</key>\n    <string>${home}</string>\n    <key>HACK_HOME</key>\n    <string>${home}/.hack</string>`
+      )
+    )
+  ).toBe(false);
+  expect(
+    keeps(plist("    <key>HOME</key>\n    <string>/srv/other-home</string>"))
+  ).toBe(false);
+  // An escaped key inside the environment is unreadable: not proof.
+  expect(
+    keeps(plist("    <key>HACK_H&#79;ME</key>\n    <string>/x</string>"))
+  ).toBe(false);
+});
+
+test("a loaded launchd job is this home's only when it runs nothing or its pid is proven", async () => {
+  const paths = resolveDaemonPaths({ home: "/nonexistent-home" });
+  const status = (running: boolean, pid: number | null) => ({
+    installed: true,
+    loaded: true,
+    running,
+    pid,
+    exitStatus: null,
+  });
+  const owned = () =>
+    Promise.resolve({ kind: "owned" } as unknown as DaemonProcessProof);
+  const refused = () =>
+    Promise.resolve({
+      kind: "refused",
+      reason: "foreign-socket",
+    } as DaemonProcessProof);
+  expect(
+    await proveLaunchdJobOwnership({ paths, status: status(false, null) })
+  ).toBe(true);
+  expect(
+    await proveLaunchdJobOwnership({ paths, status: status(true, null) })
+  ).toBe(false);
+  expect(
+    await proveLaunchdJobOwnership({
+      paths,
+      status: status(true, 4242),
+      prove: owned,
+    })
+  ).toBe(true);
+  expect(
+    await proveLaunchdJobOwnership({
+      paths,
+      status: status(true, 4242),
+      prove: refused,
+    })
+  ).toBe(false);
 });

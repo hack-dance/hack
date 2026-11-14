@@ -79,8 +79,20 @@ Use Rust 1.97.1 with the locked dependencies. From the repository root:
 ```sh
 cargo +1.97.1 fmt --manifest-path packages/config-compiler/Cargo.toml --check
 cargo +1.97.1 clippy --locked --manifest-path packages/config-compiler/Cargo.toml --all-targets -- -D warnings
-cargo +1.97.1 test --locked --manifest-path packages/config-compiler/Cargo.toml
+bun run test:config-compiler
 ```
+
+The test command shares the [runtime test runner](../runtime-core/README.md)
+and uses pinned cargo-nextest 0.9.151: each test gets its own process, zero retries,
+then Cargo runs doctests separately. This also isolates the protocol tests that
+spawn children with piped stdin from concurrent tests' descriptor inheritance on
+macOS. CI requires the pin on every compiler host. Locally, missing or other
+nextest versions fall back to Cargo (one libtest thread on macOS), with an optional
+pinned install command in the fallback line; the runner never replaces an install.
+
+An unmatched name filter exits **4** with pinned nextest 0.9.151 ("no tests to run"),
+where stock Cargo exits **0** after running zero tests. Check filter spelling;
+this wrapper keeps nextest's nonzero result, including in CI.
 
 ## Metadata-only environment planning
 

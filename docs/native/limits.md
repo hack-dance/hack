@@ -4,6 +4,9 @@ The native backend supports part of what Compose supports. When a project needs
 something outside that part, Hack refuses and tells you. It does not guess, and it
 does not fall back to Docker without telling you.
 
+The changes labelled next.17 below describe candidate source `5002cf87bb`.
+An installed next.16 bundle keeps its older behavior.
+
 ## Platform
 
 | Platform | Native backend |
@@ -22,7 +25,7 @@ does not fall back to Docker without telling you.
 | Stop the project | `hack down`, and `hack down --recover` after a crash |
 | See what is running | `hack ps` |
 | Read recent logs | `hack logs <service> --no-follow`, a bounded snapshot |
-| Run a command in a running service | `hack exec`, without an interactive terminal |
+| Run a command in a running service | Next.17: foreground terminal `hack exec SERVICE -- /bin/sh` is interactive; redirected input/output and `HACK_NO_INTERACTIVE=1` use finite exec |
 | Run a one-off command | `hack run`, for services without source, data or private env mounts |
 | Preview without starting | `hack config validate`, `hack config plan`, `hack config import --dry-run`, `hack config adopt --dry-run` |
 
@@ -49,7 +52,10 @@ The exact rules for each command are in
 - Proving a complete tail without transport EOF. A stopped service whose stream
   stays open for five idle seconds ends with `native_log_stopped_idle` and exit 1,
   not a clean EOF. The final tail may be incomplete.
-- Interactive `exec` sessions.
+- Interactive exec on an older next.16 bundle. Next.17 supports sized terminals,
+  resize and control bytes; old managed-env launchers require a matching restart
+  or finite exec. Inspect uncertain outcomes with `hack exec-sessions`; see
+  [exec recovery](../guides/native-candidate.md#normal-native-exec).
 - Changing the env overlay, profiles or target of a project that is already
   running. Stop it and start it again.
 - Starting or restarting single services. Native starts and restarts the whole
@@ -64,9 +70,9 @@ refuses with `E_NATIVE_PROJECT_UNSUPPORTED`, names the feature, and starts nothi
 
 | Compose feature | Why it stays on Compose |
 | --- | --- |
-| External networks | Native only uses networks it creates and owns |
+| Foreign external networks | Exact `hack-dev` and `hack-logging` identities map to project-owned bridges in next.17; they do not join Docker's shared networks or provide cross-project DNS |
 | External volumes | Native only uses volumes it creates and owns |
-| Labels Hack or Compose reserve | These labels prove which tool owns a resource |
+| Unsupported routing labels | Generated Hack/Compose metadata is inert in next.17; authored labels never grant resource ownership |
 | Builds beyond a basic `context`, `dockerfile` and `target` | Build arguments, secrets, SSH and cache options are not supported |
 | Platforms other than Linux arm64 | The virtual machine runs Linux arm64. `linux/amd64` works only for services you opt in to emulation. |
 
@@ -82,9 +88,12 @@ Details and the exact checks:
   mount a named volume at that path, for example `redis-data:/data`. Without one
   the project refuses with `graph_image_volume_uncovered`. A bind mount or a
   read-only mount there does not count.
-- **Stopping with Ctrl-C.** In this prerelease, Ctrl-C may not stop a foreground
-  project cleanly when it publishes ports. Use `hack down` from another terminal,
-  and `hack down --recover` if it reports that the owner is gone.
+- **Stopping with Ctrl-C.** The native publisher-shutdown fix (HACK-2087, #719)
+  already shipped in next.16. Next.17 adds lifecycle-command retirement fixes
+  (HACK-2184): transient reads retry, cleanup waits for proved command retirement,
+  and a second Ctrl-C can request the forced command-group stop. Unknown cleanup
+  still retains evidence. Use `hack down` from another terminal, then
+  `hack down --recover` if it reports the owner is gone; do not delete state.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

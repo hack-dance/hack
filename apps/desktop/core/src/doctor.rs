@@ -63,7 +63,12 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
     use Area::*;
     use Scope::*;
     let exact = match id {
-        "docker" | "docker compose" | "docker daemon" | "bun" | "mutagen" => (Engine, Machine),
+        "docker"
+        | "docker compose"
+        | "docker daemon"
+        | "docker plugin discovery"
+        | "bun"
+        | "mutagen" => (Engine, Machine),
         "compose backend features" => (Engine, Project),
         "proxy ports"
         | "proxy network"
@@ -432,6 +437,9 @@ pub struct DoctorRun {
     pub project: Option<String>,
     pub root: Option<PathBuf>,
     pub native: bool,
+    /// Source verified exact CLI root selection and unchanged marker identity
+    /// before/after the native read. Check ids alone never prove a checkout.
+    pub exact_native_root: bool,
     pub result: Result<DoctorReport, String>,
 }
 
@@ -442,6 +450,7 @@ impl DoctorRun {
             project: None,
             root: None,
             native: false,
+            exact_native_root: false,
             result,
         }
     }
@@ -452,6 +461,7 @@ impl DoctorRun {
             project: Some(name.into()),
             root: Some(root.into()),
             native: false,
+            exact_native_root: false,
             result,
         }
     }
@@ -563,17 +573,18 @@ pub(crate) fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
         return true;
     }
     if run.native {
-        return report.checks.iter().any(|c| {
-            matches!(
-                c.id.as_str(),
-                "env key"
-                    | "secret integrity"
-                    | "compose backend features"
-                    | "native settings"
-                    | "native source size"
-                    | "amd64 emulation"
-            )
-        });
+        return run.exact_native_root
+            && report.checks.iter().any(|c| {
+                matches!(
+                    c.id.as_str(),
+                    "env key"
+                        | "secret integrity"
+                        | "compose backend features"
+                        | "native settings"
+                        | "native source size"
+                        | "amd64 emulation"
+                )
+            });
     }
     report.checks.iter().any(|c| {
         c.id == "project"
@@ -681,7 +692,9 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
                 Ok(Some(s)) => (s, detail.clone()),
                 Err(()) => (
                     Severity::CouldNotCheck,
-                    if status.is_empty() {
+                    if !detail.is_empty() {
+                        detail.clone()
+                    } else if status.is_empty() {
                         "The check reported no status".into()
                     } else {
                         format!("The check reported an unknown status {status:?}")
@@ -1431,6 +1444,7 @@ mod tests {
             report(vec![check("native settings", "ok", "valid")]),
         );
         native.native = true;
+        native.exact_native_root = true;
         assert_eq!(aggregate(&[machine.clone(), native]).projects_checked, 1);
         assert!(!aggregate(&[DoctorRun::machine(report(vec![]))]).is_clean());
     }

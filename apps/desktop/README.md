@@ -86,7 +86,8 @@ Checks refresh on opening the pane and every ten minutes while it is visible.
 Stale results cannot show an all-clear message or green Doctor indicator.
 Missing registry rows remain unchecked and are never probed. Compose coverage
 requires a report identifying that exact checkout's Hack directory; native
-coverage requires a known project-only check. A machine-only or ancestor-project
+coverage requires exact root selection and unchanged marker identity before and
+after the read, plus a known project-only check. A machine-only or ancestor-project
 report cannot establish Compose project coverage.
 Machine diagnostics remain visible even when a checkout cannot be verified.
 
@@ -115,7 +116,8 @@ siblings such as Git. Foreign-owned executable targets are excluded too.
 
 Each refresh creates one private temporary PATH of wrappers that exec the checked
 absolute tool paths, preserving normal shim script locations and nested lookup.
-It stores no environment values and removes its own temporary files afterward.
+Wrappers contain checked tool paths only, not credentials or injected context
+values, and their temporary files are removed afterward.
 Scans are bounded to 64 PATH entries and 8,192 directory entries; excess or
 unknown outcomes remain unchecked. This is an ownership/permission boundary,
 not a sandbox or content/signature check: trusted tools, their plugins and
@@ -124,6 +126,23 @@ the combined Mac pass; the layout and nested shims are tested with owned fixture
 Those fixtures use only a temporary Homebrew-style tree and an owned symlink
 alias; expected shim paths come from the fixture's canonical root, never from
 the runner's real Homebrew installation or filesystem modes.
+
+Docker plugin preflight preserves HOME, DOCKER_CONFIG and DOCKER_CONTEXT. It
+checks the selected config/plugin directories, configured `cliPluginsExtraDirs`,
+the four standard Unix system plugin directories and plugin executable/symlink
+targets with the same owner/mode/ancestor rule. It streams only the public extra
+directory list from config JSON; credentials and context contents are ignored,
+never retained, logged, copied or rewritten. Config parsing is bounded to 1 MiB;
+plugin inspection to 64 directories and 8,192 entries. Unsafe or unprovable
+discovery produces CouldNotCheck with a reason before the Doctor CLI/Docker probe.
+
+This supports the documented standard Unix Docker CLI discovery model, not
+opaque/custom discovery. A nonempty `DOCKER_CLI_PLUGIN_EXTRA_DIRS`, relative
+discovery path or unsupported/unreadable config is conservatively refused,
+without switching to another context or home. Custom/bundled discovery and real
+Mac behavior still require reviewer assessment and the combined Mac pass; this
+is not a general Docker sandbox. Native pre/post marker witnesses are read-only
+observations, not locks against concurrent same-user changes.
 
 ## What v0 does not do yet
 

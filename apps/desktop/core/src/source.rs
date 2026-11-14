@@ -178,6 +178,7 @@ impl DoctorTarget {
             project: Some(self.name.clone()),
             root: Some(self.repo_root.clone()),
             native: self.native,
+            exact_native_root: false,
             result,
         }
     }
@@ -236,7 +237,7 @@ fn read_doctor(
 
 /// Owner-write is allowed; group/other-write and foreign ownership are not.
 /// A root-owned sticky ancestor (such as /tmp) may contain a private entry.
-fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
+pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     let real = std::fs::canonicalize(path).ok()?;
     for (index, component) in real.ancestors().enumerate() {
@@ -255,7 +256,7 @@ fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> 
 
 /// A per-read private PATH containing only wrappers for checked executables.
 /// Wrappers exec the original absolute path so shims keep their normal $0.
-/// No environment values are persisted. Drop removes only this owned scratch.
+/// No credential/context values are stored. Drop removes only this owned scratch.
 #[derive(Debug)]
 struct ProbeTools {
     dir: PathBuf,
@@ -375,18 +376,51 @@ impl LiveSource {
         budget: Duration,
         per_call: Duration,
     ) -> Vec<DoctorRun> {
+        self.doctor_runs_with_discovery(
+            projects,
+            budget,
+            per_call,
+            &crate::doctor_plugins::Discovery::from_runner(&self.runner),
+        )
+    }
+
+    fn doctor_runs_with_discovery(
+        &self,
+        projects: &[DoctorTarget],
+        budget: Duration,
+        per_call: Duration,
+        discovery: &crate::doctor_plugins::Discovery,
+    ) -> Vec<DoctorRun> {
         let deadline = std::time::Instant::now() + budget;
+        if let Err(reason) = crate::doctor_plugins::validate(discovery) {
+            let why = format!("Could not check Docker plugin discovery: {reason}");
+            let report = crate::models::DoctorReport {
+                checks: vec![crate::models::DoctorCheck {
+                    id: "docker plugin discovery".into(),
+                    status: "unknown".into(),
+                    detail: why.clone(),
+                }],
+                summary: vec![],
+            };
+            return std::iter::once(DoctorRun::machine(Ok(report)))
+                .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
+                .collect();
+        }
         // Resolve once per refresh, not once per project. The private PATH
         // stays alive until every bounded child has completed.
-        let tools =
-            match trusted_probe_path(std::env::var_os("PATH").unwrap_or_default().as_os_str()) {
-                Ok(tools) => tools,
-                Err(why) => {
-                    return std::iter::once(DoctorRun::machine(Err(why.clone())))
-                        .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
-                        .collect();
-                }
-            };
+        let tools = match trusted_probe_path(
+            self.runner
+                .env_value("PATH")
+                .unwrap_or_default()
+                .as_os_str(),
+        ) {
+            Ok(tools) => tools,
+            Err(why) => {
+                return std::iter::once(DoctorRun::machine(Err(why.clone())))
+                    .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
+                    .collect();
+            }
+        };
         let Some(tool_path) = tools.path().to_str() else {
             let why = "Doctor tool PATH is not UTF-8".to_owned();
             return std::iter::once(DoctorRun::machine(Err(why.clone())))
@@ -440,6 +474,9 @@ impl LiveSource {
                             .with_term_grace(DOCTOR_TERM_GRACE);
                         let timeout = per_call.min(left());
                         s.spawn(move || {
+                            let before = (t.native && !t.missing)
+                                .then(|| exact_doctor_root(&t.repo_root))
+                                .flatten();
                             let result = if t.missing {
                                 Err("not checked (checkout missing)".into())
                             } else if timeout.is_zero() {
@@ -447,7 +484,9 @@ impl LiveSource {
                             } else {
                                 read(&runner, Some(&t.repo_root), timeout)
                             };
-                            let run = t.run(result);
+                            let mut run = t.run(result);
+                            run.exact_native_root =
+                                before.is_some() && before == exact_doctor_root(&t.repo_root);
                             // Adoption is reported as unsupported native input
                             // by legacy project views, but Doctor selects it
                             // through Compose. Accept only exact adopted-root
@@ -777,13 +816,40 @@ pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
     Ok(real)
 }
 
-/// Mirror of the CLI's project discovery from `root` (see
-/// `discoverProjectInputs` in `src/lib/project-input-selection.ts`): `true`
-/// only when discovery starting at `root` selects `root` itself.
-/// - `.hack/hack.project.json` (native) or `.hack/docker-compose.yml` at
-///   `root` selects it;
-/// - `.dev/docker-compose.yml` alone selects it unless an ancestor with
-///   `.hack/docker-compose.yml` is reached before an ancestor native marker.
+#[derive(PartialEq, Eq)]
+struct DoctorRootWitness(PathBuf, PathBuf, u64, u64, i64, i64);
+
+/// Read-only witness of exact discovery, not a lock against same-user edits.
+fn exact_doctor_root(root: &Path) -> Option<DoctorRootWitness> {
+    use std::os::unix::fs::MetadataExt;
+    if !root.is_absolute() {
+        return None;
+    }
+    let real = std::fs::canonicalize(root).ok()?;
+    if !cli_selects_exactly(&real) {
+        return None;
+    }
+    let marker = [
+        ".hack/hack.project.json",
+        ".hack/docker-compose.yml",
+        ".dev/docker-compose.yml",
+    ]
+    .into_iter()
+    .map(|p| real.join(p))
+    .find(|p| p.is_file())?;
+    let meta = std::fs::metadata(&marker).ok()?;
+    Some(DoctorRootWitness(
+        real,
+        marker,
+        meta.dev(),
+        meta.ino(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+    ))
+}
+
+/// Mirror of `discoverProjectInputs`: native or .hack Compose at this root
+/// wins; .dev Compose may lose to an ancestor .hack before a native boundary.
 fn cli_selects_exactly(root: &Path) -> bool {
     let native = |d: &Path| d.join(".hack/hack.project.json").exists();
     let hack_compose = |d: &Path| d.join(".hack/docker-compose.yml").is_file();
@@ -848,6 +914,33 @@ impl Source for FixtureSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl LiveSource {
+        // Fake CLIs must not inspect the runner's actual Docker configuration
+        // or installed plugin directories. The production gate is exercised
+        // with explicit owned inputs in the dedicated discovery tests below.
+        fn fixture_doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {
+            self.fixture_doctor_runs_within(projects, DOCTOR_BUDGET, DOCTOR_TIMEOUT)
+        }
+
+        fn fixture_doctor_runs_within(
+            &self,
+            projects: &[DoctorTarget],
+            budget: Duration,
+            timeout: Duration,
+        ) -> Vec<DoctorRun> {
+            let fake = fake_hack("plugin-inputs", "echo '{}'");
+            let root = fake.parent().unwrap();
+            let discovery = crate::doctor_plugins::Discovery {
+                config_dir: Some(root.join("client")),
+                unsupported_extra_selector: false,
+                system_dirs: vec![root.join("system-plugins")],
+            };
+            let runs = self.doctor_runs_with_discovery(projects, budget, timeout, &discovery);
+            let _ = std::fs::remove_dir_all(root);
+            runs
+        }
+    }
 
     fn fake_daemon(projects: &str) -> (DaemonClient, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
@@ -1077,7 +1170,7 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
         };
         let mut projects = targets(2);
         projects[0].native = true;
-        let runs = src.doctor_runs(&projects);
+        let runs = src.fixture_doctor_runs(&projects);
         let _ = std::fs::remove_dir_all(hack.parent().unwrap());
         let details: Vec<_> = runs
             .iter()
@@ -1102,7 +1195,7 @@ fi"#,
         };
         let mut targets = targets(1);
         targets[0].native = true;
-        let runs = source.doctor_runs(&targets);
+        let runs = source.fixture_doctor_runs(&targets);
         let _ = std::fs::remove_dir_all(hack.parent().unwrap());
         assert!(!runs[1].native);
         let view = crate::doctor::aggregate(&runs);
@@ -1157,7 +1250,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: None,
         };
-        let runs = source.doctor_runs(&[]);
+        let runs = source.fixture_doctor_runs(&[]);
         assert!(runs[0].result.is_ok());
         assert!(!dir.join("executed").exists());
         let _ = std::fs::remove_dir_all(dir);
@@ -1327,13 +1420,197 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             runner: CliRunner::new(&hack),
             daemon: None,
         };
-        let runs = src.doctor_runs(&targets(1));
+        let runs = src.fixture_doctor_runs(&targets(1));
         let _ = std::fs::remove_dir_all(hack.parent().unwrap());
         assert!(runs.iter().all(|r| r.result.is_err()), "{runs:?}");
         assert!(matches!(
             crate::doctor::DoctorState::from_runs(&runs),
             crate::doctor::DoctorState::Error(_)
         ));
+    }
+
+    #[test]
+    fn docker_plugin_preflight_preserves_context_and_blocks_untrusted_or_unknown_discovery() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let hack = fake_hack(
+            "plugin-context",
+            "printf called > \"$HACK_HOME/hack-ran\"\ndocker compose ps >/dev/null || exit 7\necho '{\"ok\":true,\"data\":{\"checks\":[{\"id\":\"docker daemon\",\"status\":\"ok\",\"detail\":\"fixture\"}]}}'",
+        );
+        let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let client = root.join("client");
+        let plugins = client.join("cli-plugins");
+        let bin = root.join("bin");
+        let extra = root.join("plugins extra");
+        let extra_link = root.join("extra-link");
+        let home = root.join("home");
+        for p in [&plugins, &bin, &extra, &home] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        symlink(&extra, &extra_link).unwrap();
+        let target = root.join("owned-compose");
+        let mutable_alias = root.join("mutable-alias");
+        std::fs::create_dir(&mutable_alias).unwrap();
+        std::fs::write(
+            &target,
+            "#!/bin/sh\nprintf called > \"$HACK_HOME/plugin-ran\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&target, plugins.join("docker-compose")).unwrap();
+        symlink(&target, mutable_alias.join("plugin-hop")).unwrap();
+        let docker = bin.join("docker");
+        std::fs::write(&docker, "#!/bin/sh\n[ \"$DOCKER_CONFIG\" = \"$HACK_HOME/client\" ] || exit 91\n[ \"$HOME\" = \"$HACK_HOME/home\" ] || exit 92\n[ \"$DOCKER_CONTEXT\" = fixture-context ] || exit 93\nexec \"$DOCKER_CONFIG/cli-plugins/docker-compose\" \"$@\"\n").unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = serde_json::json!({"currentContext":"fixture-context", "cliPluginsExtraDirs":[extra_link], "auths":{"example.invalid":{"auth":"NOT_A_REAL_CREDENTIAL"}}});
+        std::fs::write(
+            client.join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let source = LiveSource {
+            runner: CliRunner::new(&hack)
+                .with_env("PATH", &bin.to_string_lossy())
+                .with_env("HACK_HOME", &root.to_string_lossy())
+                .with_env("HOME", &home.to_string_lossy())
+                .with_env("DOCKER_CONFIG", &client.to_string_lossy())
+                .with_env("DOCKER_CONTEXT", "fixture-context")
+                .with_env("DOCKER_CLI_PLUGIN_EXTRA_DIRS", ""),
+            daemon: None,
+        };
+        let mut discovery = crate::doctor_plugins::Discovery::from_runner(&source.runner);
+        discovery.system_dirs = vec![root.join("system-plugins")];
+        let runs =
+            source.doctor_runs_with_discovery(&[], DOCTOR_BUDGET, DOCTOR_TIMEOUT, &discovery);
+        assert!(runs[0].result.is_ok(), "{runs:?}");
+        assert!(root.join("hack-ran").exists() && root.join("plugin-ran").exists());
+        assert_eq!(
+            std::fs::read(client.join("config.json")).unwrap(),
+            serde_json::to_vec(&config).unwrap(),
+            "context/config bytes are never rewritten or copied"
+        );
+        for (case, reason) in [
+            ("file", "untrusted"),
+            ("symlink-hop", "untrusted"),
+            ("extra-dir", "owner-controlled"),
+            ("config-dir", "owner-controlled"),
+            ("opaque-extra", "unsupported"),
+            ("relative-extra", "unsupported"),
+            ("invalid-config", "invalid or unsupported"),
+        ] {
+            std::fs::remove_file(root.join("hack-ran")).ok();
+            std::fs::remove_file(root.join("plugin-ran")).ok();
+            for p in [&target, &extra, &client, &mutable_alias] {
+                std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            std::fs::write(
+                client.join("config.json"),
+                serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+            discovery.unsupported_extra_selector = case == "opaque-extra";
+            std::fs::remove_file(plugins.join("docker-compose")).unwrap();
+            symlink(&target, plugins.join("docker-compose")).unwrap();
+            match case {
+                "symlink-hop" => {
+                    std::fs::remove_file(plugins.join("docker-compose")).unwrap();
+                    symlink(
+                        mutable_alias.join("plugin-hop"),
+                        plugins.join("docker-compose"),
+                    )
+                    .unwrap();
+                    std::fs::set_permissions(
+                        &mutable_alias,
+                        std::fs::Permissions::from_mode(0o777),
+                    )
+                    .unwrap();
+                }
+                "file" => std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o777))
+                    .unwrap(),
+                "extra-dir" => {
+                    std::fs::set_permissions(&extra, std::fs::Permissions::from_mode(0o775))
+                        .unwrap()
+                }
+                "config-dir" => {
+                    std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o775))
+                        .unwrap()
+                }
+                "relative-extra" => std::fs::write(
+                    client.join("config.json"),
+                    r#"{"cliPluginsExtraDirs":["relative"]}"#,
+                )
+                .unwrap(),
+                "invalid-config" => {
+                    std::fs::write(client.join("config.json"), "{invalid NOT_A_REAL_CREDENTIAL")
+                        .unwrap()
+                }
+                _ => {}
+            }
+            let runs =
+                source.doctor_runs_with_discovery(&[], DOCTOR_BUDGET, DOCTOR_TIMEOUT, &discovery);
+            let view = crate::doctor::aggregate(&runs);
+            assert!(!view.is_clean());
+            let card = view.cards().next().unwrap();
+            assert_eq!(card.severity, crate::doctor::Severity::CouldNotCheck);
+            assert!(card.detail.contains(reason), "{case}: {}", card.detail);
+            assert!(!card.detail.contains("NOT_A_REAL_CREDENTIAL"));
+            assert!(card.authored_remedy.is_none());
+            assert!(!root.join("hack-ran").exists() && !root.join("plugin-ran").exists());
+        }
+        assert_eq!(
+            source.runner.env_value("DOCKER_CONTEXT").unwrap(),
+            "fixture-context"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_checkout_evidence_does_not_accept_ancestor_checks_when_marker_is_missing_or_changes()
+    {
+        let hack = fake_hack(
+            "native-root",
+            r#"case "$*" in
+*--path*)
+  if [ "$DROP_MARKER" = 1 ] && [ -f "$HACK_HOME/parent/child/.hack/hack.project.json" ]; then /bin/rm "$HACK_HOME/parent/child/.hack/hack.project.json"; fi
+  echo '{"ok":true,"data":{"checks":[{"id":"env key","status":"error","detail":"could be ancestor"},{"id":"native settings","status":"ok","detail":"could be ancestor"},{"id":"native root trust","status":"warn","detail":"machine diagnostic"}]}}' ;;
+*) echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":"fixture"}]}}' ;;
+esac"#,
+        );
+        let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let parent = root.join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(parent.join(".hack")).unwrap();
+        std::fs::create_dir_all(child.join(".hack")).unwrap();
+        std::fs::write(parent.join(".hack/docker-compose.yml"), "services: {}\n").unwrap();
+        let marker = child.join(".hack/hack.project.json");
+        std::fs::write(&marker, "{}").unwrap();
+        let source = LiveSource {
+            runner: CliRunner::new(&hack).with_env("HACK_HOME", &root.to_string_lossy()),
+            daemon: None,
+        };
+        let target = DoctorTarget {
+            name: "child".into(),
+            repo_root: child,
+            native: true,
+            missing: false,
+        };
+        let exact = source.fixture_doctor_runs(std::slice::from_ref(&target));
+        assert!(exact[1].exact_native_root);
+        assert_eq!(crate::doctor::aggregate(&exact).projects_checked, 1);
+        let changed = LiveSource {
+            runner: source.runner.clone().with_env("DROP_MARKER", "1"),
+            daemon: None,
+        }
+        .fixture_doctor_runs(std::slice::from_ref(&target));
+        assert!(!changed[1].exact_native_root);
+        let missing = source.fixture_doctor_runs(&[target]);
+        for runs in [&changed, &missing] {
+            let view = crate::doctor::aggregate(runs);
+            assert_eq!(view.projects_checked, 0);
+            assert!(!view.is_clean());
+            assert!(view.cards().any(|c| c.id == "native root trust"));
+            assert!(!view.cards().any(|c| c.id == "env key"));
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1348,7 +1625,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             daemon: None,
         };
         let payload: ProjectsPayload = serde_json::from_str(r#"{"projects":[{"name":"gone","status":"missing","repo_root":"/work/gone"},{"name":"no-root","status":"missing"}]}"#).unwrap();
-        let runs = source.doctor_runs(&DoctorTarget::from_projects(&payload));
+        let runs = source.fixture_doctor_runs(&DoctorTarget::from_projects(&payload));
         let _ = std::fs::remove_dir_all(hack.parent().unwrap());
         assert_eq!(runs.len(), 3);
         assert!(
@@ -1374,7 +1651,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         };
         let budget = Duration::from_secs(4);
         let started = std::time::Instant::now();
-        let runs = src.doctor_runs_within(&targets(6), budget, Duration::from_secs(60));
+        let runs = src.fixture_doctor_runs_within(&targets(6), budget, Duration::from_secs(60));
         let _ = std::fs::remove_dir_all(hack.parent().unwrap());
         assert!(
             started.elapsed() < budget + Duration::from_millis(800),
@@ -1392,7 +1669,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             daemon: None,
         };
         let started = std::time::Instant::now();
-        let runs = src.doctor_runs_within(
+        let runs = src.fixture_doctor_runs_within(
             &targets(6),
             Duration::from_millis(400),
             Duration::from_secs(5),
@@ -1440,7 +1717,7 @@ esac
             runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: None,
         };
-        let runs = src.doctor_runs(&[DoctorTarget {
+        let runs = src.fixture_doctor_runs(&[DoctorTarget {
             missing: false,
             name: "alpha".into(),
             repo_root: "/work/alpha".into(),

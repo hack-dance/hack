@@ -134,6 +134,16 @@ impl CliRunner {
         self
     }
 
+    /// Effective selector without reading any configuration or secret value.
+    pub(crate) fn env_value(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into())
+            .or_else(|| std::env::var_os(key))
+    }
+
     fn command(&self, args: &[&str], path: Option<&Path>) -> Command {
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(&self.program);

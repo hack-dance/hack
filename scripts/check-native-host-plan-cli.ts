@@ -277,6 +277,10 @@ try {
     "local settings cannot inject host commands"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
+  assert(
+    (await readdir(home)).length === 0,
+    "offline planning leaves HOME empty"
+  );
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -286,9 +290,29 @@ try {
     runtime.exit !== 0 && (runtime.stdout + runtime.stderr).includes("E_USAGE"),
     "native detached service selection refuses before input or runtime work"
   );
+  // A refused lifecycle action still records activity, without registering or
+  // starting the project. No other global state is allowed.
+  const homeEntries = await readdir(home);
+  const hackHomeEntries = await readdir(join(home, ".hack"));
+  const activityLines = (
+    await Bun.file(join(home, ".hack/activity.jsonl")).text()
+  )
+    .trim()
+    .split("\n");
+  assert(activityLines.length === 1, "one activity record for refused up");
+  const activity = record(JSON.parse(activityLines[0] ?? ""));
+  assert(
+    activity.action === "up" &&
+      activity.outcome === "failed" &&
+      activity.project === null,
+    "refused up records unregistered activity"
+  );
   assert(
     !(await Bun.file(marker).exists()) &&
-      (await readdir(home)).length === 0 &&
+      homeEntries.length === 1 &&
+      homeEntries[0] === ".hack" &&
+      hackHomeEntries.length === 1 &&
+      hackHomeEntries[0] === "activity.jsonl" &&
       !(await readdir(join(checkout, ".hack"))).some(
         (name) => name === ".internal" || name === ".branch"
       ),

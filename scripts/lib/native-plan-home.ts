@@ -1,52 +1,68 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
 
-/** Planning stays read-only; subsequent refused lifecycle probes may append only their audit records. */
-export async function nativePlanHomeMatches(opts: {
+/**
+ * Offline planning may read prepared global files, but must not write state.
+ * Failed lifecycle attempts may add only their intentional activity records.
+ */
+export async function assertNativePlanHome(opts: {
   readonly home: string;
-  readonly privateRoot: string;
-  readonly failedActions: number;
-  readonly existing?: readonly string[];
-}): Promise<boolean> {
-  const actual = (await readdir(opts.home, { recursive: true })).sort();
-  const expected = [...(opts.existing ?? [])];
-  if (opts.failedActions > 0) {
-    expected.push(".hack", ".hack/activity.jsonl");
+  readonly privateRoot?: string;
+  readonly failedUps: number;
+  readonly preparedHackFiles?: readonly string[];
+}): Promise<void> {
+  const expectedHackFiles = [...(opts.preparedHackFiles ?? [])];
+  if (opts.failedUps > 0) {
+    expectedHackFiles.push("activity.jsonl");
   }
-  if (
-    JSON.stringify(actual) !== JSON.stringify([...new Set(expected)].sort())
-  ) {
-    return false;
+  const expectedHome = expectedHackFiles.length > 0 ? [".hack"] : [];
+  const homeEntries = await readdir(opts.home);
+  assertNames(homeEntries, expectedHome);
+  assertNames(await readdir(opts.home, { recursive: true }), [
+    ...expectedHome,
+    ...expectedHackFiles.map((name) => `.hack/${name}`),
+  ]);
+  if (expectedHackFiles.length === 0) {
+    return;
   }
-  if (opts.failedActions === 0) {
-    return true;
+  assertNames(await readdir(join(opts.home, ".hack")), expectedHackFiles);
+  if (opts.failedUps === 0) {
+    return;
   }
-  const text = await readFile(join(opts.home, ".hack/activity.jsonl"), "utf8");
-  const entries: unknown[] = text
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  return (
-    entries.length === opts.failedActions &&
-    entries.every(
-      (entry) =>
-        isRecord(entry) &&
-        entry.action === "up" &&
-        entry.outcome === "failed" &&
-        JSON.stringify(Object.keys(entry).sort()) ===
-          JSON.stringify([
-            "action",
-            "branch",
-            "duration_ms",
-            "failed_services",
-            "origin",
-            "outcome",
-            "project",
-            "ts",
-            "v",
-          ]) &&
-        !JSON.stringify(entry).includes(opts.privateRoot)
-    )
-  );
+  const text = await Bun.file(join(opts.home, ".hack/activity.jsonl")).text();
+  const lines = text.trim().split("\n");
+  if (!text.endsWith("\n") || lines.length !== opts.failedUps) {
+    throw new Error("Expected one complete activity record per failed up");
+  }
+  for (const line of lines) {
+    const activity: unknown = JSON.parse(line);
+    if (
+      !isRecord(activity) ||
+      activity.action !== "up" ||
+      activity.outcome !== "failed" ||
+      activity.project !== null ||
+      JSON.stringify(Object.keys(activity).sort()) !==
+        JSON.stringify([
+          "action",
+          "branch",
+          "duration_ms",
+          "failed_services",
+          "origin",
+          "outcome",
+          "project",
+          "ts",
+          "v",
+        ]) ||
+      JSON.stringify(activity).includes(opts.privateRoot ?? opts.home)
+    ) {
+      throw new Error("Expected failed unregistered up activity");
+    }
+  }
+}
+
+function assertNames(actual: string[], expected: string[]): void {
+  if (JSON.stringify(actual.sort()) !== JSON.stringify(expected.sort())) {
+    throw new Error("Unexpected registry or runtime HOME state");
+  }
 }

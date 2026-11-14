@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
-import { nativePlanHomeMatches } from "./lib/native-plan-home.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home.ts";
 
 /** Qualify pure process planning through a relocated bundle and real Git worktree. */
 const root = resolve(import.meta.dir, "..");
@@ -263,14 +263,7 @@ try {
     ],
     checkout
   );
-  assert(
-    await nativePlanHomeMatches({
-      home,
-      privateRoot: directory,
-      failedActions: 0,
-    }),
-    "planning writes no unexpected home state"
-  );
+  await assertNativePlanHome({ home, privateRoot: directory, failedUps: 0 });
   const runtime = await invoke(
     ["up", "web", "--detach"],
     checkout,
@@ -297,14 +290,7 @@ try {
       "planning creates no runtime state"
     );
   }
-  assert(
-    await nativePlanHomeMatches({
-      home,
-      privateRoot: directory,
-      failedActions: 1,
-    }),
-    "planning creates no registry or runtime home state"
-  );
+  await assertNativePlanHome({ home, privateRoot: directory, failedUps: 1 });
   process.stdout.write(
     `Relocated native process planning: ${checks} checks passed; no hooks/DNS/trust/runtime effects\n`
   );

@@ -2,19 +2,19 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nativePlanHomeMatches } from "../scripts/lib/native-plan-home.ts";
+import { assertNativePlanHome } from "../scripts/lib/native-plan-home.ts";
 
-let root: string;
 let home: string;
+
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hack-plan-audit-"));
-  home = join(root, "home");
-  await mkdir(home);
+  home = await mkdtemp(join(tmpdir(), "hack-plan-home-"));
 });
+
 afterEach(async () => {
-  await rm(root, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true });
 });
-const entry = {
+
+const failedUp = {
   v: 1,
   ts: "2026-01-01T00:00:00Z",
   project: null,
@@ -25,36 +25,77 @@ const entry = {
   failed_services: [],
   duration_ms: 1,
 };
-async function write(records: readonly object[]) {
+
+async function writeActivity(records: readonly unknown[]): Promise<void> {
   await mkdir(join(home, ".hack"), { recursive: true });
   await Bun.write(
     join(home, ".hack/activity.jsonl"),
-    `${records.map((value) => JSON.stringify(value)).join("\n")}\n`
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`
   );
 }
-function matches(failedActions: number) {
-  return nativePlanHomeMatches({ home, privateRoot: root, failedActions });
-}
-test("planning must leave home empty; lifecycle probes have an exact audit count", async () => {
-  expect(await matches(0)).toBe(true);
-  expect(await matches(1)).toBe(false);
-  await write([entry]);
-  expect(await matches(0)).toBe(false);
-  expect(await matches(1)).toBe(true);
-  expect(await matches(2)).toBe(false);
-  await write([entry, entry]);
-  expect(await matches(2)).toBe(true);
+
+test("planning leaves HOME empty, failed ups add only activity", async () => {
+  await assertNativePlanHome({ home, failedUps: 0 });
+  await writeActivity([failedUp, failedUp]);
+  await assertNativePlanHome({ home, failedUps: 2 });
 });
-test("audit allowance refuses registry files, unexpected fields, paths and successful actions", async () => {
-  for (const record of [
-    { ...entry, outcome: "ok" },
-    { ...entry, path: "extra" },
-    { ...entry, project: root },
-  ]) {
-    await write([record]);
-    expect(await matches(1)).toBe(false);
-  }
-  await write([entry]);
-  await Bun.write(join(home, ".hack/projects.json"), "{}");
-  expect(await matches(1)).toBe(false);
+
+test("routing may retain only its prepared global config plus activity", async () => {
+  await mkdir(join(home, ".hack"));
+  await Bun.write(join(home, ".hack/hack.config.json"), "{}");
+  const preparedHackFiles = ["hack.config.json"];
+  await assertNativePlanHome({ home, failedUps: 0, preparedHackFiles });
+  await writeActivity([failedUp]);
+  await assertNativePlanHome({ home, failedUps: 1, preparedHackFiles });
+});
+
+for (const extra of [
+  ".hack/projects.json",
+  ".hack/activity.jsonl.lock",
+  ".hack/activity.jsonl.1",
+  "native/state",
+  "other",
+]) {
+  test(`rejects extra HOME state: ${extra}`, async () => {
+    await writeActivity([failedUp]);
+    await Bun.write(join(home, extra), "{}");
+    await expect(assertNativePlanHome({ home, failedUps: 1 })).rejects.toThrow(
+      "Unexpected registry or runtime HOME state"
+    );
+  });
+}
+
+test("planning rejects an activity write before lifecycle attempts", async () => {
+  await writeActivity([failedUp]);
+  await expect(assertNativePlanHome({ home, failedUps: 0 })).rejects.toThrow();
+});
+
+for (const records of [
+  [],
+  [failedUp, failedUp],
+  [{ ...failedUp, outcome: "ok" }],
+  [{ ...failedUp, action: "down" }],
+  [{ ...failedUp, project: "registered" }],
+  [{ ...failedUp, extra: "unexpected" }],
+  [null],
+]) {
+  test(`rejects missing, duplicate or unrelated activity: ${JSON.stringify(records)}`, async () => {
+    await writeActivity(records);
+    await expect(
+      assertNativePlanHome({ home, failedUps: 1 })
+    ).rejects.toThrow();
+  });
+}
+
+test("rejects a torn activity record", async () => {
+  await writeActivity([failedUp]);
+  await Bun.write(join(home, ".hack/activity.jsonl"), JSON.stringify(failedUp));
+  await expect(assertNativePlanHome({ home, failedUps: 1 })).rejects.toThrow(
+    "Expected one complete activity record per failed up"
+  );
+});
+
+test("rejects private paths in known activity fields", async () => {
+  await writeActivity([{ ...failedUp, branch: home }]);
+  await expect(assertNativePlanHome({ home, failedUps: 1 })).rejects.toThrow();
 });

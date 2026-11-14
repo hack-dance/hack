@@ -982,15 +982,17 @@ path to 104 bytes; the retired socket name inside `hkgf` already reaches 88.
 The runtime does not delete either root today, on exit, cancellation or a crash.
 That is deliberate for `hkgf`: its `operation.lock` inode, retirement journal and
 retired socket/owner names are the evidence that restore, `--remove-data` and
-dead-owner recovery require, and they refuse when the root is gone. What a root
-left behind does to the next start:
+dead-owner recovery read, and those paths refuse when the root is gone. Only the
+explicit absent-publication recovery (for a publication lost entirely, for example
+across a host reboot) proceeds without it: it creates a lock-only replacement root.
+What a root left behind does to the next start:
 
 | Left behind | Next start of the same run |
 |---|---|
 | `hkgf` with only the lock and retirement records (clean exit) | Reused: a new publication binds when the lock is free and `control.sock` and `owner.json` are absent. A pending missing-lock intent still refuses. |
 | `hkgf` with `control.sock` and `owner.json` (crash) | New publication refuses; `hack down --recover` retires the dead owner from these files. |
 | `hkgf` with files but no lock | Only the explicit missing-lock retirement recovers it. |
-| `hkgf` absent | A new publication creates it; restoring a retained run refuses. |
+| `hkgf` absent | A new publication creates it; restoring a retained run refuses until explicit absent-publication recovery runs. |
 | `hkro` of an earlier process | Never reused: each owner process derives a new root. Recovery reads it through the receipt's recorded control root. |
 
 So leftovers accumulate: one `hkgf` per run and one `hkro` per owner process.

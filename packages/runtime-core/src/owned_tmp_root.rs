@@ -84,7 +84,7 @@ impl Drop for OwnedTmpRoot {
 }
 
 mod tests {
-    use super::OwnedTmpRoot;
+    use super::{OwnedTmpRoot, is_owner_root};
     use std::path::{Path, PathBuf};
 
     const HEX: &str = "0123456789abcdef01234567";
@@ -92,8 +92,11 @@ mod tests {
     #[test]
     fn accepts_only_exact_owner_root_names() {
         for prefix in ["hkgf", "hkro"] {
-            let path = format!("/private/tmp/{prefix}-{HEX}");
-            assert_eq!(&*OwnedTmpRoot::new(path.as_str()), Path::new(&path));
+            // Checked without a guard: dropping one would remove a directory
+            // this test never created.
+            assert!(is_owner_root(Path::new(&format!(
+                "/private/tmp/{prefix}-{HEX}"
+            ))));
         }
         for refused in [
             "/private/tmp/hkgf-0123456789ABCDEF01234567".to_owned(),

@@ -466,11 +466,15 @@ fn stop(states: &[State]) -> Result<()> {
     struct Target {
         state: State,
         recovery: Option<os::Recovery>,
+        admission: Option<os::Recovery>,
         orphan_term: Option<Instant>,
     }
     impl Target {
         fn recover(&mut self) -> Result<()> {
-            let recovery = os::Recovery::capture(&self.state)?;
+            // Prefer a fresh census, but retain already-proved identities if
+            // TERM ended the command witness before the guard was lost.
+            let recovery = os::Recovery::capture(&self.state)
+                .or_else(|error| self.admission.take().ok_or(error))?;
             recovery.signal(libc::SIGTERM)?;
             self.orphan_term = Some(Instant::now());
             self.recovery = Some(recovery);
@@ -478,7 +482,7 @@ fn stop(states: &[State]) -> Result<()> {
         }
     }
     let mut active = Vec::new();
-    // Validate all receipts and capture orphan members before the first effect.
+    // Capture every target before effects, including live guards that may die mid-stop.
     for state in states {
         if !os::recorded_live(state, false)? {
             continue;
@@ -490,13 +494,16 @@ fn stop(states: &[State]) -> Result<()> {
             }
             _ => false,
         };
+        let captured = os::Recovery::capture(state)?;
+        let (recovery, admission) = if guard_live {
+            (None, Some(captured))
+        } else {
+            (Some(captured), None)
+        };
         active.push(Target {
             state: state.clone(),
-            recovery: if guard_live {
-                None
-            } else {
-                Some(os::Recovery::capture(state)?)
-            },
+            recovery,
+            admission,
             orphan_term: None,
         });
     }
@@ -517,14 +524,13 @@ fn stop(states: &[State]) -> Result<()> {
         let mut live = false;
         for target in &mut active {
             if target.recovery.is_none() {
-                if !os::recorded_live(&target.state, false)? {
-                    continue;
-                }
                 if os::inspect(target.state.guard_pid)?.is_none_or(|p| p.zombie) {
-                    // Guard loss gets its own snapshot and full TERM grace.
+                    // Guard loss gets a fresh census or the admission snapshot.
                     target.recover()?;
                 } else {
-                    live = true;
+                    if os::recorded_live(&target.state, false)? {
+                        live = true;
+                    }
                     continue;
                 }
             }

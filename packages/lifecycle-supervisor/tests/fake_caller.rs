@@ -1038,6 +1038,40 @@ fn dead_guard_with_live_session_recovers_term_then_kill() {
 }
 
 #[test]
+fn guard_lost_mid_stop_keeps_admission_snapshot() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "wrapper-term-child")]);
+    eventually(|| f.root.join("wrapper-child-ready").exists().then_some(()));
+    let state = f.state("worker");
+    let child = eventually(|| {
+        f.log().lines().find_map(|line| {
+            line.split("wrapper-child ")
+                .nth(1)
+                .and_then(|pid| pid.parse::<i32>().ok())
+                .and_then(identity)
+        })
+    });
+    f.owned.borrow_mut().push(child);
+    let mut stop = command(&f.root, "stop").spawn().unwrap();
+    send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    // The guard has acted on this stop once its wrapper is dead. Its five-second
+    // grace leaves time to remove the guard before it can KILL the child.
+    eventually(|| {
+        identity(pid(&state, "commandPid"))
+            .is_none_or(|_| process_is_zombie(pid(&state, "commandPid")))
+            .then_some(())
+    });
+    assert_eq!(
+        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+        0
+    );
+    assert!(wait(&mut caller, TIMEOUT).success());
+    let receipt = receive(stop.stdout.as_mut().unwrap());
+    assert!(wait(&mut stop, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "stopped");
+}
+
+#[test]
 fn orphan_recovery_keeps_observed_child_after_term_ends_witness() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![f.process("worker", "wrapper-term-child")]);

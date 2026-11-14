@@ -13,7 +13,7 @@ standalone Rust binary exercised by a fake caller; the CLI remains unchanged.
 | `ProcessExit`, `Reap` | Session census ignores zombies; reap direct/adopted children; release lock after no live members | Zombie liveness; child changes process group within session |
 | `StopUnknown` | Bounded confirmation can report uncertainty while live members remain | Honest unknown recovery outcome, never successful absence |
 
-Positive TLC exploration: 322 distinct states, queue exhausted, depth 14. Negative
+Positive TLC exploration: 426 distinct states, queue exhausted, depth 14. Negative
 control sets `SkipLiveFence = TRUE`; `Retry` then violates `NoDuplicate` with live,
 durable and duplicate all true in the same state. Both guard-loss and project-loss
 traces can witness this violation; the registry requires the named action and
@@ -87,3 +87,8 @@ an emptied session even during stopping; the old snapshot never authorizes a
 new incarnation. The native wrapper/TERM-ignoring-child regression checks this
 sequence with real processes. New descendants not in the snapshot remain an
 uncovered recovery/unknown boundary; no eventual-exit claim is made.
+
+Stop now captures members while a live guard proves ownership as well. GuardDeath
+retains the stopping phase, and WitnessExit may happen before or after guard loss.
+The native guard_lost_mid_stop_keeps_admission_snapshot regression kills the guard
+after TERM ended its wrapper and checks KILL and confirmed absence for its child.

@@ -46,6 +46,10 @@ A missing leader plus a numeric SID is not ownership: orphan recovery requires
 the exact recorded command PID/birth or a matching guard, including a zombie.
 Only unrecorded members, or legacy receipts without a surviving matching guard, report
 unknown without signals. Descendants alone may require manual recovery when both recorded processes are gone.
+Stop captures verified members before signaling even a live guard. If that guard
+is lost during stop, recovery prefers a fresh capture and falls back to those
+admitted identities, rechecking each before TERM/KILL. Unobserved descendants
+still report unknown.
 
 Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
 `observed`, `stopped`, or `unknown`). A stop whose confirmation times out emits

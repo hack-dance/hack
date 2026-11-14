@@ -38,7 +38,8 @@ SupervisorDeath == /\ supervisor /\ phase = "Running"
                                    identity, unsafeSignal, duplicate, witness, snapshot, orphanKilled>>
 GuardDeath == /\ guard /\ live
               /\ guard' = FALSE /\ locked' = FALSE
-              /\ phase' = "Orphaned" /\ supervisor' = FALSE
+              /\ phase' = IF phase = "Stopping" THEN "Stopping" ELSE "Orphaned"
+              /\ supervisor' = FALSE
               /\ UNCHANGED <<durable, live, attempts, identity,
                               unsafeSignal, duplicate, witness, snapshot, orphanKilled>>
 Retry == /\ ~supervisor /\ live /\ attempts < 2
@@ -52,10 +53,10 @@ ReplaceIdentity == /\ identity = "match" /\ durable
                                    supervisor, attempts, unsafeSignal, duplicate, witness, snapshot, orphanKilled>>
 Stop == /\ phase \in {"Running", "Recoverable"}
         /\ guard /\ durable /\ identity = "match"
-        /\ phase' = "Stopping"
+        /\ phase' = "Stopping" /\ snapshot' = TRUE
         /\ unsafeSignal' = (unsafeSignal \/ identity # "match")
         /\ UNCHANGED <<durable, guard, locked, live, supervisor, attempts,
-                        identity, duplicate, witness, snapshot, orphanKilled>>
+                        identity, duplicate, witness, orphanKilled>>
 Kill == /\ phase = "Stopping" /\ guard /\ identity = "match"
         /\ phase' = "KillPending"
         /\ unsafeSignal' = (unsafeSignal \/ identity # "match")
@@ -87,7 +88,7 @@ RecoverOrphan == /\ phase = "Orphaned" /\ ~guard /\ live /\ durable
                  /\ /\ (witness \/ SkipOrphanFence) /\ snapshot' = TRUE
            /\ UNCHANGED <<durable, guard, locked, live, supervisor,
                                  attempts, identity, duplicate, witness, orphanKilled>>
-WitnessExit == /\ phase = "Stopping" /\ ~guard /\ live /\ witness
+WitnessExit == /\ phase = "Stopping" /\ live /\ witness
                /\ witness' = FALSE
                /\ snapshot' = IF LoseRecoverySnapshot THEN FALSE ELSE snapshot
                /\ UNCHANGED <<phase, durable, guard, locked, live, supervisor,

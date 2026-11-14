@@ -306,7 +306,7 @@ because the unhealthy states live there.
 | Doctor, onboarding | `hack doctor --json` (per project and once outside), `hack daemon status --json` | on open; every 10 min | 60 s |
 | Daemon | `GET /v1/status` | 10 s | 1 s |
 | Upgrades | R14 daily; `hack upgrade check --json` on Review | daily / on demand | 30 s / 60 s |
-| Actions | `hack up -d --json`, `down --json`, `restart --json`, `open --json`, `daemon start\|restart\|install` (exit code), `autostart …` | on click | `up`/`down`/`restart`: none from the app (the CLI owns their timeouts and retires its builds; 6 h safety net), 2 min others |
+| Actions | `hack up -d --json`, `down --json`, `restart --json`, `open --json`, `daemon start\|restart\|install` (exit code), `autostart …` | on click | `up`/`down`/`restart`: none; the app waits for the CLI, which owns their timeouts (after 6 h it only shows a warning), 2 min others |
 
 The 23 numbered requests (R1–R17) this design needs from the CLI and daemon are in
 [Appendix C](#appendix-c-requests-to-the-cli-and-daemon).

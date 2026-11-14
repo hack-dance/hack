@@ -118,12 +118,12 @@ impl LiveSource {
     }
 
     const READ: Duration = Duration::from_secs(15);
-    /// Lifecycle commands (`up`, `down`, `restart`) are not cut short by
-    /// the app: the CLI owns their timeouts and retires the detached build
-    /// subprocesses it starts. Terminating it early can orphan those today
-    /// (its detached build path does not forward SIGTERM; requested of the
-    /// lead). This is only a safety net for a CLI that never returns.
-    pub const LIFECYCLE_SAFETY_NET: Duration = Duration::from_secs(6 * 60 * 60);
+    /// After this long a lifecycle command is only *reported* as slow
+    /// (`LIFECYCLE_WARN_AFTER`); the app never terminates it. The CLI owns
+    /// lifecycle timeouts and retires the detached builds it starts; killing
+    /// it from outside could orphan them (its detached build path does not
+    /// forward SIGTERM today; requested of the lead).
+    pub const LIFECYCLE_WARN_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
     /// `open` starts nothing; a short limit is safe.
     const OPEN: Duration = Duration::from_secs(120);
 }
@@ -179,18 +179,15 @@ impl Source for LiveSource {
         // only on a validated root, by its canonical path.
         let real = trusted_root(repo_root)?;
         let repo_root = real.as_path();
-        let timeout = if action == Action::Open {
-            Self::OPEN
-        } else {
-            Self::LIFECYCLE_SAFETY_NET
-        };
+
         let args = action.cli_args();
         let runner = self.runner_for(native);
         Ok(match action {
             Action::Open => {
-                ActionOutcome::Opened(runner.run_json(args, Some(repo_root), timeout)?)
+                ActionOutcome::Opened(runner.run_json(args, Some(repo_root), Self::OPEN)?)
             }
-            _ => ActionOutcome::Lifecycle(runner.run_json(args, Some(repo_root), timeout)?),
+            // No app deadline: busy until the CLI exits (see LIFECYCLE_WARN_AFTER).
+            _ => ActionOutcome::Lifecycle(runner.run_json_to_completion(args, Some(repo_root))?),
         })
     }
 
@@ -675,10 +672,31 @@ esac
     }
 
     #[test]
-    fn lifecycle_actions_are_not_cut_short_by_the_app() {
-        // The CLI owns lifecycle timeouts; the app only keeps a safety net
-        // far beyond any of them.
-        const { assert!(LiveSource::LIFECYCLE_SAFETY_NET.as_secs() >= 3600) };
+    fn lifecycle_actions_run_to_completion_without_an_app_deadline() {
+        // A Start slower than any read timeout still completes; Open keeps
+        // its bounded limit. (The CLI owns lifecycle timeouts.)
+        use std::os::unix::fs::PermissionsExt;
+        let b = base("lifecycle");
+        let p = b.join("p");
+        make_project(&p, ".hack", "docker-compose.yml");
+        let hack = b.join("hack");
+        std::fs::write(
+            &hack,
+            "#!/bin/sh\nsleep 1\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let src = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        if host_temp_is_trustworthy() {
+            let r = src.act(&p, false, Action::Start);
+            assert!(matches!(r, Ok(ActionOutcome::Lifecycle(_))), "{r:?}");
+        } else {
+            eprintln!("skipped: temp dir ancestors are not private on this host");
+        }
+        let _ = std::fs::remove_dir_all(&b);
     }
 
     #[test]

@@ -36,6 +36,9 @@ pub struct HackApp {
     tail: Result<Vec<LogEntry>, String>,
     follow: bool,
     live: bool,
+    /// When each project's running action started, for the slow-action
+    /// warning. Display only: the app never terminates a lifecycle command.
+    action_started: std::collections::HashMap<String, std::time::Instant>,
 }
 
 impl HackApp {
@@ -48,6 +51,7 @@ impl HackApp {
             tail: Ok(Vec::new()),
             follow: true,
             live,
+            action_started: std::collections::HashMap::new(),
         };
         if live {
             this.start_polling(cx);
@@ -145,6 +149,8 @@ impl HackApp {
             project: project.clone(),
             action,
         });
+        self.action_started
+            .insert(project.clone(), std::time::Instant::now());
         cx.notify();
         if !self.live {
             return;
@@ -159,6 +165,7 @@ impl HackApp {
                 if let Ok(ActionOutcome::Opened(o)) = &result {
                     cx.open_url(&o.url);
                 }
+                this.action_started.remove(&project);
                 if this.model.apply(Event::ActionFinished {
                     project,
                     action,
@@ -421,6 +428,10 @@ impl HackApp {
             )
             .children(reason_line(&d.state, d.last_error.as_deref(), cx))
             .children(
+                self.slow_action_warning(&d.name)
+                    .map(|w| div().text_sm().text_color(t.warning).child(w)),
+            )
+            .children(
                 d.note
                     .clone()
                     .map(|n| div().text_sm().text_color(t.muted_foreground).child(n)),
@@ -454,6 +465,15 @@ impl HackApp {
                     .child(services_table(&d.services, cx))
                     .child(self.log_tail(cx)),
             )
+    }
+
+    /// Shown, never acted on, once an action has run past
+    /// `LiveSource::LIFECYCLE_WARN_AFTER`.
+    fn slow_action_warning(&self, project: &str) -> Option<String> {
+        let started = self.action_started.get(project)?;
+        (started.elapsed() >= hack_desktop_core::source::LiveSource::LIFECYCLE_WARN_AFTER).then(|| {
+            "Still running after 6 hours. Hack owns this command and its timeouts; the app has not stopped it.".to_owned()
+        })
     }
 
     fn log_tail(&self, cx: &mut Context<Self>) -> impl IntoElement {

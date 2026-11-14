@@ -53,6 +53,47 @@ pub struct ProjectRow {
     pub autostart: Option<Autostart>,
     /// Not in the CLI yet (design request R2): `compose` or `native`.
     pub backend: Option<String>,
+    /// Native observation from `hack ps --json` (filled by the source).
+    #[serde(skip)]
+    pub native: Option<NativePs>,
+}
+
+/// Project views refuse canonical native projects with this code.
+pub const NATIVE_PROJECT_CODE: &str = "E_NATIVE_PROJECT_UNSUPPORTED";
+
+impl ProjectRow {
+    /// A native-backend project: reported by `backend`, or recognised by the
+    /// input diagnostic legacy project views return for it.
+    #[must_use]
+    pub fn is_native(&self) -> bool {
+        self.backend.as_deref() == Some("native")
+            || self
+                .input_diagnostic
+                .as_ref()
+                .is_some_and(|d| d.code == NATIVE_PROJECT_CODE)
+    }
+}
+
+/// `HACK_RUNTIME_BACKEND=native hack ps --json` → `data`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct NativePs {
+    /// `not_started | pending | runtime_not_running | runtime_busy |
+    /// provider_pin_changed | observed | owner_unconfirmed | runtime_degraded`.
+    pub status: String,
+    pub items: Vec<NativePsItem>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct NativePsItem {
+    pub service: String,
+    pub state: String,
+    pub health: Option<String>,
+    #[serde(rename = "exitCode")]
+    pub exit_code: Option<i32>,
+    /// `started | healthy | completed` when the native runtime reports it.
+    pub readiness: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

@@ -12,7 +12,7 @@
 //! 5. Some but not all defined services running, or one unhealthy →
 //!    `Degraded`; all running → `Running`; none → `Stopped`.
 
-use crate::models::ProjectRow;
+use crate::models::{NativePs, ProjectRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectState {
@@ -138,7 +138,17 @@ pub struct ServiceView {
     pub running: bool,
     pub status: String,
     pub exit_code: Option<i32>,
+    /// Exited 0 and not running: a finished one-shot service, never "down".
+    pub completed: bool,
     pub route: Option<String>,
+}
+
+impl ServiceView {
+    /// A long-running service that should run but does not.
+    #[must_use]
+    pub fn is_down(&self) -> bool {
+        !self.running && !self.completed
+    }
 }
 
 #[must_use]
@@ -162,20 +172,22 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
                 .unwrap_or_default();
             let running = containers.iter().any(|c| c.is_running());
             let first = containers.first();
+            let exit_code = first.and_then(|c| c.exit_code());
             ServiceView {
+                completed: !running && exit_code == Some(0),
                 route: row
                     .service_hosts
                     .get(&name)
                     .and_then(|h| h.first().cloned()),
                 running,
                 status: first.map_or_else(|| "not created".into(), |c| c.status.clone()),
-                exit_code: first.and_then(|c| c.exit_code()),
+                exit_code,
                 name,
             }
         })
         .collect();
     // Down services first, then by name.
-    out.sort_by(|a, b| a.running.cmp(&b.running).then(a.name.cmp(&b.name)));
+    out.sort_by(|a, b| b.is_down().cmp(&a.is_down()).then(a.name.cmp(&b.name)));
     out
 }
 
@@ -201,6 +213,9 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
             reason: "The project folder is missing".into(),
         };
     }
+    if row.is_native() {
+        return native_state(row.native.as_ref());
+    }
     if let Some(d) = &row.input_diagnostic {
         return ProjectState::NeedsAttention {
             reason: d.message.clone(),
@@ -220,7 +235,7 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         .map(|s| s.name.clone())
         .collect();
 
-    if !local.last_failed.is_empty() && running.len() < svcs.len() {
+    if !local.last_failed.is_empty() && svcs.iter().any(ServiceView::is_down) {
         return ProjectState::FailedStart {
             services: local.last_failed.clone(),
         };
@@ -245,7 +260,7 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         .map(|s| s.service.clone());
     let mut down: Vec<String> = svcs
         .iter()
-        .filter(|s| !s.running)
+        .filter(|s| s.is_down())
         .map(|s| s.name.clone())
         .chain(unhealthy)
         .collect();
@@ -262,6 +277,61 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
     } else {
         ProjectState::Degraded { down }
     }
+}
+
+/// Map native `hack ps --json` `data.status` (and items) to a display state.
+#[must_use]
+pub fn native_state(ps: Option<&NativePs>) -> ProjectState {
+    let Some(ps) = ps else {
+        return ProjectState::Unknown {
+            reason: "Native status was not read".into(),
+        };
+    };
+    let unknown = |why: &str| ProjectState::Unknown {
+        reason: format!("Native runtime: {why}"),
+    };
+    match ps.status.as_str() {
+        "not_started" => ProjectState::Stopped,
+        "pending" => ProjectState::Starting,
+        "runtime_degraded" => ProjectState::Degraded {
+            down: native_down(ps),
+        },
+        "observed" => {
+            let down = native_down(ps);
+            if ps.items.is_empty() {
+                ProjectState::Stopped
+            } else if down.is_empty() {
+                ProjectState::Running { uptime: None }
+            } else if down.len() == ps.items.len() {
+                ProjectState::FailedStart { services: down }
+            } else {
+                ProjectState::Degraded { down }
+            }
+        }
+        "provider_pin_changed" => ProjectState::NeedsAttention {
+            reason: "The native runtime provider changed; run hack doctor".into(),
+        },
+        "runtime_not_running" => unknown("not running"),
+        "runtime_busy" => unknown("busy"),
+        "owner_unconfirmed" => unknown("owner not confirmed"),
+        other => unknown(other),
+    }
+}
+
+fn native_down(ps: &NativePs) -> Vec<String> {
+    let mut down: Vec<String> = ps
+        .items
+        .iter()
+        .filter(|i| {
+            let completed = i.readiness.as_deref() == Some("completed")
+                || (i.exit_code == Some(0) && i.state == "exited");
+            (i.state != "running" && !completed) || i.health.as_deref() == Some("unhealthy")
+        })
+        .map(|i| i.service.clone())
+        .collect();
+    down.sort();
+    down.dedup();
+    down
 }
 
 #[cfg(test)]
@@ -339,6 +409,64 @@ mod tests {
             derive(r, &fixtures::local(Starting)),
             ProjectState::Starting
         );
+    }
+
+    #[test]
+    fn completed_one_shot_is_not_down() {
+        let mut r = row("storefront");
+        let rt = r.runtime.as_mut().unwrap();
+        rt.services[1].containers[0].state = "exited".into();
+        rt.services[1].containers[0].status = "Exited (0) 2 hours ago".into();
+        assert!(matches!(
+            derive(&r, &LocalContext::default()),
+            ProjectState::Running { .. }
+        ));
+    }
+
+    #[test]
+    fn native_status_mapping() {
+        use crate::models::{NativePs, NativePsItem};
+        let ps = |status: &str, items: Vec<(&str, &str)>| NativePs {
+            status: status.into(),
+            items: items
+                .into_iter()
+                .map(|(s, st)| NativePsItem {
+                    service: s.into(),
+                    state: st.into(),
+                    ..NativePsItem::default()
+                })
+                .collect(),
+        };
+        assert_eq!(
+            native_state(Some(&ps("not_started", vec![]))),
+            ProjectState::Stopped
+        );
+        assert_eq!(
+            native_state(Some(&ps("pending", vec![]))),
+            ProjectState::Starting
+        );
+        assert!(matches!(
+            native_state(Some(&ps("observed", vec![("app", "running")]))),
+            ProjectState::Running { .. }
+        ));
+        assert_eq!(
+            native_state(Some(&ps(
+                "observed",
+                vec![("app", "running"), ("job", "exited")]
+            ))),
+            ProjectState::Degraded {
+                down: vec!["job".into()]
+            }
+        );
+        assert!(matches!(
+            native_state(Some(&ps("runtime_busy", vec![]))),
+            ProjectState::Unknown { .. }
+        ));
+        assert!(matches!(native_state(None), ProjectState::Unknown { .. }));
+        assert!(matches!(
+            native_state(Some(&ps("provider_pin_changed", vec![]))),
+            ProjectState::NeedsAttention { .. }
+        ));
     }
 
     #[test]

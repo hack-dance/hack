@@ -63,7 +63,9 @@ impl HackApp {
         self.model.apply(Event::Refreshed(snap));
         self.tail = self
             .selected_root()
-            .map_or_else(Vec::new, |root| self.source.log_tail(&root, TAIL_LINES));
+            .map_or_else(Vec::new, |(root, native)| {
+                self.source.log_tail(&root, native, TAIL_LINES)
+            });
     }
 
     /// Fixtures: select a project by name.
@@ -82,11 +84,9 @@ impl HackApp {
         }
     }
 
-    fn selected_root(&self) -> Option<PathBuf> {
-        self.model
-            .selected_row()
-            .and_then(|r| r.repo_root.as_ref())
-            .map(PathBuf::from)
+    fn selected_root(&self) -> Option<(PathBuf, bool)> {
+        let r = self.model.selected_row()?;
+        Some((PathBuf::from(r.repo_root.as_ref()?), r.is_native()))
     }
 
     fn start_polling(&mut self, cx: &mut Context<Self>) {
@@ -110,10 +110,10 @@ impl HackApp {
                     })
                     .ok()
                     .flatten();
-                if let Some(root) = root {
+                if let Some((root, native)) = root {
                     let tail = cx
                         .background_executor()
-                        .spawn(async move { source.log_tail(&root, TAIL_LINES) })
+                        .spawn(async move { source.log_tail(&root, native, TAIL_LINES) })
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         this.tail = tail;
@@ -131,6 +131,7 @@ impl HackApp {
             return;
         };
         let project = row.name.clone();
+        let native = row.is_native();
         let Some(root) = row.repo_root.clone().map(PathBuf::from) else {
             return;
         };
@@ -149,7 +150,7 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { source.act(&root, action) })
+                .spawn(async move { source.act(&root, native, action) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Ok(ActionOutcome::Opened(o)) = &result {

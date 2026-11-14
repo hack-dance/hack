@@ -261,7 +261,11 @@ impl AppModel {
         let st = state::derive(row, local);
         Some(DetailView {
             name: row.name.clone(),
-            backend: row.backend.clone().unwrap_or_else(|| "compose".into()),
+            backend: if row.is_native() {
+                "native".into()
+            } else {
+                row.backend.clone().unwrap_or_else(|| "compose".into())
+            },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
             actions: st.actions().to_vec(),

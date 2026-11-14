@@ -144,7 +144,25 @@ fn simple(name: &str, status: &str, backend: &str, always_on: bool) -> ProjectRo
                 vec![]
             },
         }),
-        backend: Some(backend.into()),
+        backend: (backend != "native").then(|| backend.into()),
+        // Legacy project views refuse native projects with this diagnostic;
+        // the source then reads native `hack ps`.
+        input_diagnostic: (backend == "native").then(|| InputDiagnostic {
+            code: crate::models::NATIVE_PROJECT_CODE.into(),
+            message: "Native hack.project.json marks this project.".into(),
+        }),
+        native: (backend == "native").then(|| crate::models::NativePs {
+            status: if up { "observed" } else { "not_started" }.into(),
+            items: if up {
+                vec![crate::models::NativePsItem {
+                    service: "app".into(),
+                    state: "running".into(),
+                    ..Default::default()
+                }]
+            } else {
+                vec![]
+            },
+        }),
         autostart: always_on.then(|| Autostart {
             enabled: true,
             state: "on".into(),
@@ -215,6 +233,12 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         for p in &mut projects {
             p.status = "unknown".into();
             p.runtime = None;
+            if p.native.is_some() {
+                p.native = Some(crate::models::NativePs {
+                    status: "runtime_not_running".into(),
+                    items: vec![],
+                });
+            }
         }
     }
     ProjectsPayload {

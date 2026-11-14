@@ -8,6 +8,7 @@ import {
   NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
 } from "../src/backends/native-project-one-off.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import { nativeSetupScriptReply } from "./helpers/native-setup-inspection.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
@@ -34,6 +35,7 @@ async function fixture() {
   await Bun.write(
     native,
     `#!${process.execPath}
+${nativeSetupScriptReply()}
 await Bun.write(${JSON.stringify(join(root, "runtime-called"))}, "unexpected-runtime-call");
 process.exit(2);
 `
@@ -496,6 +498,7 @@ macTest.each([
     await Bun.write(
       selected.native,
       `#!${process.execPath}
+${nativeSetupScriptReply()}
 const args=process.argv.slice(2);
 if(args.length!==8||args[0]!=='--candidate-root'||args[2]!=='graph'||args[3]!=='native'||args[4]!=='plan'||args[5]!=='--source-file'||args[7]!=='--json') {
  await Bun.write(${JSON.stringify(join(selected.root, "runtime-called"))}, 'unexpected-effect'); process.exit(2);
@@ -585,6 +588,7 @@ macTest(
     await Bun.write(
       selected.native,
       `#!${process.execPath}
+${nativeSetupScriptReply()}
 const args=process.argv.slice(2);
 if(args[2]!=='graph'||args[3]!=='native'||args[4]!=='plan'){
  await Bun.write(${JSON.stringify(join(selected.root, "runtime-called"))}, 'unexpected-effect'); process.exit(2);

@@ -20,6 +20,7 @@ import {
 } from "../src/backends/native-project-run.ts";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
 import { installNext13Frontend } from "./helpers/native-next13-state.ts";
+import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -90,6 +91,7 @@ async function fixture(compose = COMPOSE) {
   await writeFile(
     binary,
     `#!/bin/sh
+${nativeSetupShellReply()}
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then
   if [ -f '${stub}/'"$3-$4"'.after-inspect' ]; then cp '${stub}/'"$3-$4"'.after-inspect' '${stub}/graph-inspect.out'; fi

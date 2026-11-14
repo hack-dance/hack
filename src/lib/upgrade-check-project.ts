@@ -502,7 +502,7 @@ function nativeFinding(
     ? {
         id: "native-preflight",
         status: "ok",
-        summary: `Ready for the native backend (${probe.warnings} warning(s)).`,
+        summary: `No native configuration blockers (${probe.warnings} warning(s)); runtime setup and runtime review were not checked. Run hack native setup, then hack doctor --native-preflight.`,
         args: null,
         action: null,
       }
@@ -510,7 +510,7 @@ function nativeFinding(
         // Native is optional: a Compose project upgrades without it.
         id: "native-preflight",
         status: "info",
-        summary: `Not ready for the native backend (${probe.blockers} blocker(s)); Compose is unaffected.`,
+        summary: `Native configuration has ${probe.blockers} blocker(s); runtime setup and runtime review were not checked. Compose is unaffected.`,
         args: null,
         action: null,
       };

@@ -27,33 +27,45 @@ stateDiagram-v2
 
 ## Prepare the runtime
 
-Keep the `hack-next` install from [Install](../install.md). Use the exact version
-shown by `"$HOME/.hack-next/bin/hack-next" --manager status`:
+Keep the `hack-next` install from [Install](../install.md). Its launcher selects
+the installed version and that version's private native home:
 
 ```sh
-V=5.0.0-next.16
-NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
-NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 CANDIDATE="$HOME/.hack-next/bin/hack-next"
-unset HACK_RUNTIME_BACKEND
+unset HACK_RUNTIME_BACKEND HACK_NATIVE_HOME
 ```
 
 Do not use the Compose shell function from page 1 for native commands. The full
 launcher path below selects native and that version's private homes.
 
-Today's setup command is:
+Prepare the runtime with the same frontend, without another binary or a home argument.
+
+These frontend setup steps are intended for next.17; installed next.16 retains
+its [older setup procedure](setup.md#older-setup-only-homes).
 
 ```sh
-"$NATIVE" --candidate-root "$NATIVE_HOME" runtime setup
+"$CANDIDATE" native setup
+# Noninteractive downloads need explicit consent:
+"$CANDIDATE" native setup --accept-downloads --json
 ```
 
-A `hack` command for this step is coming (HACK-2193); only this setup line needs
-to change when it lands. Setup shows file sizes, download hosts, hashes and
-locations, then asks for consent. Read the list. `up` never downloads the runtime
-for you. A matching install is checked and reused. For offline inputs or an
-interrupted download, use [setup and recovery details](setup.md).
+Setup shows file sizes, download hosts, hashes and locations, then asks once for
+consent. Read the list. A matching install is checked and reused. Noninteractive
+`up` refuses until setup is complete; interactive `up` can offer setup with the
+same consent and continue after success. For offline inputs or an interrupted
+download, use [setup and recovery details](setup.md).
+
+Manual bundle users run the adjacent `hack-v5 native setup`. Their default home is
+`$HACK_HOME/native-runtime` or `~/.hack/native-runtime`; an absolute
+`HACK_NATIVE_HOME` selects another home. Managed `hack-next` keeps its version's
+receipt-owned home and refuses a differing override. See
+[home selection and moving homes](setup.md#manual-homes).
 
 ## Check before starting
+
+`hack upgrade check` checks native configuration only. It does not inspect runtime
+setup or runtime admission, so a finding with no configuration blockers is not
+permission to start. Run setup above and the full preflight below.
 
 ```sh
 "$CANDIDATE" doctor --native-preflight --path /absolute/project
@@ -62,7 +74,8 @@ interrupted download, use [setup and recovery details](setup.md).
 Add the project's `--profile` selection if needed. Preflight reads the Compose
 project and lists blockers with fixes. It starts no VM or service. Continue only
 when there are no blockers **and** the report says `Runtime review: completed`.
-In JSON, this means `ready: true` and `runtime_review.status: "completed"`.
+The runtime setup item must also say ready. In JSON, this means `ready: true`
+and `runtime_review.status: "completed"`.
 An exit of 0 alone is not enough: runtime review can be skipped or unavailable.
 
 If blocked, fix the named field and rerun. Do not remove a check or delete state

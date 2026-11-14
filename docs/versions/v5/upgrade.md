@@ -8,6 +8,10 @@ This is today's manual path. **To be replaced by the upgrade assistant**
 and try v5 on one Compose project at a time. Native is a separate trial.
 The published v5 candidate bundle requires an Apple Silicon Mac.
 
+In builds with `hack upgrade check`, its native finding covers configuration
+only; runtime setup and admission are not checked. For a native trial, follow
+[runtime setup and full preflight](native/start.md#prepare-the-runtime).
+
 ```mermaid
 ---
 title: A reversible upgrade trial

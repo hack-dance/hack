@@ -1,0 +1,18 @@
+flowchart TD
+  Up["hack up"] --> Inspect["Inspect installation"]
+  Inspect --> Ready{"Ready?"}
+  Ready -->|Yes| Start["Review project and start"]
+  Ready -->|No| Offer{"Interactive and resumable?"}
+  Offer -->|No| Refuse["Refuse with guidance"]
+  Offer -->|Yes| Consent{"Accept pinned downloads?"}
+  Consent -->|No| Refuse
+  Consent -->|Yes| Setup["Verify and prepare files"]
+  Setup -->|Success| Reinspect["Re-inspect installation"]
+  Reinspect --> Installed{"Ready after setup?"}
+  Installed -->|Yes| Start
+  Installed -->|No| Refuse
+  Setup -->|Failed or interrupted| Refuse
+  class Start ok
+  class Refuse fail
+  class Setup live
+  class Consent wait

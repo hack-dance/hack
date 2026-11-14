@@ -99,9 +99,11 @@ mkdir -m 700 /absolute/private/candidate-home
 ./hack-native --candidate-root /absolute/private/candidate-home --version
 ```
 
-The home must already exist, be owned by the current user, and have mode `0700`.
+The home must already exist, be owned by the current user, and have mode `0700`,
+except that `runtime setup` and its read-only `inspect` accept an absent home.
+Setup creates missing directories privately after consent.
 Use its canonical absolute path without symlink components (on macOS, use
-`/private/tmp` rather than `/tmp`). Every command requires this explicit home,
+`/private/tmp` rather than `/tmp`). Every lower-level `hack-native` command requires this explicit home,
 including help and version. Its `checkout` field is the historical receipt name
 for this stable home; `channel` reports `installed-candidate`. State remains under
 `<home>/.hack-local`. Keep this home fixed across binary upgrades: receipts and
@@ -110,11 +112,12 @@ an active home or adopting another installation's state is not.
 
 For normal project commands, follow the short
 [native start page](https://hack.foo/docs/v5/native/start). Manual bundle users
-use the adjacent `hack-v5` entrypoint with an explicit `HACK_NATIVE_HOME`;
-keep the bundle together. The [candidate installer guide](candidate-install.md#test-both-backends)
+use the adjacent `hack-v5` entrypoint and keep the bundle together. It defaults to
+`$HACK_HOME/native-runtime` or `~/.hack/native-runtime`; an absolute
+`HACK_NATIVE_HOME` overrides that default. The [candidate installer guide](candidate-install.md#test-both-backends)
 defines backend selectors, private versus shared homes, stable-daemon quiescence
-and returning to Compose. Neither entrypoint prepares the provider, migrates a
-project or falls back to Docker for an unsupported native command. An unversioned
+and returning to Compose. Prepare the provider explicitly with `native setup`.
+Neither entrypoint migrates a project or falls back to Docker for an unsupported native command. An unversioned
 local build reports its repository version; only a versioned bundle includes
 candidate version provenance. The entrypoint alone does not identify a release.
 `hack-v5` passes arguments, exit codes and signals through `exec`; it never replaces
@@ -202,7 +205,9 @@ Environment-file findings may name their source path.
 The runtime review half needs a native runtime, so run the preflight from the
 `hack-next` launcher for the full list. Without native selection only the CLI's
 checks run and the review is reported as `skipped`. The review needs no running
-VM.
+VM. A selected runtime also receives a read-only setup inspection. Incomplete or
+unavailable setup is a `native_runtime_setup` blocker; run `hack native setup`
+before retrying. Without native selection, setup is reported as unavailable.
 
 Use a matching updated CLI and runtime. A runtime without start-admission review
 is reported as `unavailable` with an update hint and cannot produce `ready: true`.
@@ -231,6 +236,12 @@ With `--json` the report is the `data` of the standard result envelope:
   "backend": "native",
   "compose_file": ".hack/docker-compose.yml",
   "ready": false,
+  "runtime_setup": {
+    "state": "ready",
+    "installation_state": "ready",
+    "code": "native_setup_ready",
+    "fix": "Native runtime is set up."
+  },
   "runtime_review": { "status": "completed" },
   "blockers": [
     {
@@ -247,8 +258,8 @@ With `--json` the report is the `data` of the standard result envelope:
 }
 ```
 
-- `ready` is true only when there is no blocker and the runtime review
-  completed.
+- `ready` is true only when there is no blocker, setup is ready and the runtime
+  review completed.
 - The exit status follows the blockers: `0` with none, `1` otherwise. A skipped
   or unavailable review is not a blocker, so that run exits `0` with
   `ready: false`. With `--json` the envelope is `ok: true` in both cases; read
@@ -277,7 +288,7 @@ With `--json` the report is the `data` of the standard result envelope:
   `unsupported_build_form`, `emulated_build`, `environment_file_input`, `missing_image`,
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
-  `environment_delivery`, `shared_source_grant_required`,
+  `environment_delivery`, `native_runtime_setup`, `shared_source_grant_required`,
   `route_probe_required` and `too_many_bridges`. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
@@ -915,11 +926,22 @@ For ordinary setup and consent, use the short
 The remainder describes the setup and recovery contract. `--no-interactive` (or
 truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case and
 surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
-`--accept-downloads` explicitly consents. No provider download happens from `up`,
-the installer, the probe or any other implicit path. The optional BuildKit client
+`--accept-downloads` explicitly consents. Interactive `up` can offer setup with
+the same explicit consent; noninteractive `up` refuses until setup is complete.
+The installer and probe never download provider files. The optional BuildKit client
 is still prepared separately below.
 Setup lists the pinned SmolVM, Docker engine and four Alpine guest packages,
 including exact compressed sizes, hosts, hashes, private cache and destinations.
+
+Manual bundle frontends use `$HACK_HOME/native-runtime` or
+`~/.hack/native-runtime` by default, with an absolute `HACK_NATIVE_HOME` override.
+Managed `hack-next` uses the version's receipt-owned home. See
+[native first use and moving homes](candidate-install.md#prepare-the-native-runtime-once).
+The lower-level `hack-native --candidate-root /absolute/private/home runtime setup`
+remains available for explicit runtime administration. Its read-only
+`runtime setup inspect --json` reports installation records without creating a
+home, acquiring a lease or hashing provider trees. Only the manager's
+`--quiescence` inspection takes existing locks; startup verifies full content.
 
 The executable embeds `provider-pins.json` and checks its hashes against the
 manual preparation pins. HTTPS redirects may use only the original host and the
@@ -2530,8 +2552,9 @@ PID, path or depth in the file. Replace the authority fields with exactly one of
 - `"host_lifecycle": "NAME"`: a persistent `up.before` hook (its `name`, or
   `hook-N` when unnamed) or a `lifecycle.processes` entry of this instance. Hack
   reads the pane PID from its lifecycle state and requires the live tmux session
-  to carry the recorded ownership token and that pane to be alive. zellij
-  sessions record no pane PID and refuse.
+  to carry the recorded ownership token and that pane to be alive. Interactive
+  workspaces require tmux; legacy zellij lifecycle records have no pane PID and
+  refuse. See [sessions and migration](../sessions.md).
 - `"host_shared_helper": "NAME"`: an enabled `lifecycle.sharedHelpers` entry
   whose claim is `owned` and `ready`, lists this instance as a holder, and whose
   PID and birth time are live. An adopted helper refuses.

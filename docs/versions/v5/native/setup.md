@@ -1,28 +1,28 @@
-# Prepare the native runtime (under verification)
+# Prepare the native runtime
 
-next.16 includes `runtime setup`. It is **under verification**: publishing the
-command does not establish real-VM acceptance. Use an Apple Silicon Mac, a
+Use the candidate frontend's `native setup` command. Setup success does not
+establish real-VM or application acceptance. Use an Apple Silicon Mac, a
 disposable project and synthetic data. Read [the limits](limits.md) first.
 
-After [installing next.16](../install.md), select that version's native program
-and private home. `hack-next --manager status` shows the selected version.
+After [installing the candidate](../install.md), use the same frontend for setup
+and project commands. Its launcher selects the version's private native home:
 
 ```sh
-V=5.0.0-next.16
-NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
-NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
-"$NATIVE" --candidate-root "$NATIVE_HOME" runtime setup
+CANDIDATE="$HOME/.hack-next/bin/hack-next"
+unset HACK_RUNTIME_BACKEND HACK_NATIVE_HOME
+"$CANDIDATE" native setup
 ```
 
 Setup lists the pinned files, exact compressed sizes, source hosts, hashes and
 destinations before asking once for consent. It downloads and verifies the
 provider, engine and guest network tools, prepares them in staging, and ends
-with the development-profile probe. Ordinary `up` does not download these files.
+with the development-profile probe. Noninteractive `up` refuses until setup is
+complete. Interactive `up` can offer the same consent and continue after success.
 Setup needs no administrator password or keychain access and ignores proxy
-settings; use the [offline form](try-it.md#offline-or-older-builds) on networks
-that require a proxy.
+settings; use the offline form below on networks that require a proxy.
 
-For scripts, add `--no-interactive --accept-downloads`. A noninteractive run
+For scripts, run `"$CANDIDATE" native setup --accept-downloads --json`; JSON
+never prompts and passes the setup result through unchanged. A noninteractive run
 needing preparation refuses with `E_INTERACTIVE_REQUIRED` without that consent.
 A complete matching installation is verified and reused without prompting or
 downloading. An incomplete, changed or differently pinned provider directory is
@@ -33,9 +33,46 @@ Interrupted downloads can be resumed or restarted by rerunning setup. A
 exact offline inputs or a reviewed newer release. Setup does not upgrade a
 home's provider pin in place.
 
-After preparation, continue with [Try it](try-it.md#3-check-the-project).
-Setup success is not proof that the project starts, retains data or switches
-back to Compose correctly. Those results remain under verification.
+## Offline inputs
 
-Sources: [release setup procedure](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/docs/native/try-it.md),
-[setup and recovery contract](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/docs/guides/native-candidate.md#manual-candidate-upgrade-and-rollback).
+Supply all three inputs from the matching pinned release:
+
+```sh
+"$CANDIDATE" native setup \
+  --archive /absolute/smolvm.tar.gz \
+  --engine-archive /absolute/docker.tgz \
+  --network-tools-directory /absolute/network-tools
+```
+
+Do not combine offline inputs with `--accept-downloads`. The network-tools
+directory must contain the four pinned Alpine packages. Setup verifies the same
+sizes and hashes and never falls back to downloading missing offline inputs. See
+the [complete setup contract](full-reference.md#manual-candidate-upgrade-and-rollback)
+for filenames and recovery details.
+
+## Manual homes
+
+Manual bundle users run the adjacent `hack-v5 native setup`. Its default home is
+`$HACK_HOME/native-runtime` or `~/.hack/native-runtime`; an absolute
+`HACK_NATIVE_HOME` overrides that default. Managed `hack-next` instead keeps its
+version's receipt-owned home and refuses a differing override.
+
+To move a manual home, stop its projects and runtime with the old home and
+matching executor, preserve that home for retained data, then select a fresh
+absolute `HACK_NATIVE_HOME` and run `hack-v5 native setup` again. Setup does not
+move receipts, disks or project data. Keep each home with its matching executor.
+
+## Older setup-only homes
+
+If you ran next.16's `runtime setup` and never started a project, finish setup,
+run `up` then `down` with that same next.16 launcher, and confirm its runtime is
+`stopped` before upgrading or uninstalling. Older executors cannot prove
+setup-only quiescence; do not delete receipts to bypass a refusal. See the
+[upgrade and recovery reference](full-reference.md#manual-candidate-upgrade-and-rollback).
+
+The frontend command above is intended for next.17; installed next.16 retains
+the [older setup procedure](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/docs/native/try-it.md).
+
+After preparation, continue with [Check before starting](start.md#check-before-starting).
+Setup success is not proof that the project starts, retains data or switches
+back to Compose correctly.

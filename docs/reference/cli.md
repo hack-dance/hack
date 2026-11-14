@@ -1563,6 +1563,56 @@ hack projects prune [options]
 | `--version, -v` | Show version |
 
 
+## `hack native`
+
+Set up the opt-in native runtime
+
+### Usage
+
+```bash
+hack native <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack native setup` | Download and prepare the pinned native runtime for this home |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack native setup`
+
+Download and prepare the pinned native runtime for this home
+
+### Usage
+
+```bash
+hack native setup [options]
+```
+
+Verifies and resumes pinned downloads without starting a VM. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. --json passes the runtime result through unchanged.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--accept-downloads` | Consent to the displayed pinned downloads |
+| `--archive <path>` | Offline pinned provider archive (requires the complete offline input set) |
+| `--engine-archive <path>` | Offline pinned engine archive |
+| `--network-tools-directory <path>` | Private directory containing all pinned networking packages |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## Diagnostics
 
 ## `hack exec-sessions`

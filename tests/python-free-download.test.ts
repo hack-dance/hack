@@ -608,6 +608,9 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
         expect(calls).toBe(scenario === "stall" ? 2 : 5);
         if (scenario === "cleanup") {
           expect(archiveReadPending).toBe(true);
+          expect(readFileSync(join(root, fixture.name))).toEqual(
+            fixture.archive
+          );
         }
         clock.advance(31);
         await drain();

@@ -293,6 +293,7 @@ for (const delivery of [
       await writeLayer("qa", QA);
     }
     const before = await projectFiles();
+    const composeBefore = await readFile(compose, "base64");
     const path = envMigrationJournalPath(project.projectRoot);
     if (delivery !== "delivered") {
       await expect(previewEnvMigration(project)).rejects.toThrow();
@@ -307,7 +308,7 @@ for (const delivery of [
       expect(await Bun.file(path).exists()).toBe(false);
       // Keeping Compose references is safe even before the layers deliver them.
       await migrateLegacyEnvForCommand({ ...project, materialize: false });
-      expect(await readFile(compose, "base64")).toEqual(before.get(compose));
+      expect(await readFile(compose, "base64")).toBe(composeBefore);
       expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
         `TOKEN=${SENTINEL}\n`
       );

@@ -779,10 +779,11 @@ echo ready > "$HACK_HOME/ready"
 sleep 300 &
 wait $!"#,
         );
+        // A full-grace regression must exceed the generous completion bound.
         let runner = f.runner();
         let r = completes(move || {
             runner
-                .with_term_grace(Duration::from_secs(3))
+                .with_term_grace(Duration::from_secs(300))
                 .run_json::<Value>(&["up"], None, Duration::from_secs(2))
         });
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");

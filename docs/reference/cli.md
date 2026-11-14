@@ -1537,6 +1537,27 @@ hack projects prune [options]
 
 ## Diagnostics
 
+## `hack exec-sessions`
+
+List retained native interactive exec sessions in this native home
+
+### Usage
+
+```bash
+hack exec-sessions [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--reconcile` | Retire only sessions with proven exit, container absence or a stopped boot |
+| `--json` | Print value-free session evidence as JSON |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack log-pipe`
 
 Read log lines from stdin and pretty-print them (best-effort JSON parsing)

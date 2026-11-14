@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -31,12 +31,20 @@ import {
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import {
   awaitPidFile,
   createNativeAuthoredSettlement,
 } from "./helpers/native-authored-settlement.ts";
 
 /** Fixture-owner rule: a case that spawns children passes its own budget. */
+let interactiveEnvironment: string | undefined;
+beforeEach(() => {
+  interactiveEnvironment = process.env.HACK_NO_INTERACTIVE;
+  process.env.HACK_NO_INTERACTIVE = "1";
+});
+afterEach(() => restoreEnv("HACK_NO_INTERACTIVE", interactiveEnvironment));
+
 const DEFAULT_BUDGET_MS = 4000;
 /** The cancelled request child sleeps this long after writing its identity. */
 const REQUEST_SLEEP_MS = 3000;

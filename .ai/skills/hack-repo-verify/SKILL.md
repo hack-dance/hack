@@ -63,14 +63,17 @@ CI also lints those scripts and runs their transport tests; lint changed ones ex
 Rust default gates are `bun run check:local` and `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
-Candidate CI on Linux and macOS runs pinned cargo-nextest 0.9.151, one process per
+Candidate and config-compiler CI on Linux and macOS runs pinned cargo-nextest 0.9.151, one process per
 test and zero retries, then `cargo test --doc` with the same feature selection.
 Explicit target selections (`--lib`, `--test <name>`, etc.) skip doctests, matching
 Cargo; explicit `--doc` uses Cargo alone.
 Pass Cargo build, feature and target options through this wrapper; use
 `cargo nextest` directly for nextest-specific options such as `-E`.
 This prevents another test's spawned child from inheriting a briefly non-CLOEXEC
-macOS descriptor and delaying EOF. `bun run test:local` probes `cargo nextest
+macOS descriptor and delaying EOF. `bun run test:local` and `bun run test:config-compiler` share the isolating runner.
+A name filter matching nothing exits 4 with pinned nextest 0.9.151, whereas
+stock Cargo exits 0 with zero tests. The wrapper preserves that nonzero result.
+`bun run test:local` probes `cargo nextest
 --version`, matching the subcommand it executes. A missing or different version
 prints one fallback line and retains `cargo test` (one libtest thread on macOS),
 leaving the installed nextest alone. CI and qualification reports/repetitions

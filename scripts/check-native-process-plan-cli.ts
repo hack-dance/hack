@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { nativePlanHomeMatches } from "./lib/native-plan-home-state.ts";
 
 /** Qualify pure process planning through a relocated bundle and real Git worktree. */
 const root = resolve(import.meta.dir, "..");
@@ -262,6 +263,14 @@ try {
     ],
     checkout
   );
+  assert(
+    await nativePlanHomeMatches({
+      home,
+      activityCount: 0,
+      privateValues: [canary, directory],
+    }),
+    "offline planning creates no unexpected home state"
+  );
   const runtime = await invoke(
     ["up", "web", "--detach"],
     checkout,
@@ -289,7 +298,11 @@ try {
     );
   }
   assert(
-    (await readdir(join(home, ".hack")).catch(() => [])).length === 0,
+    await nativePlanHomeMatches({
+      home,
+      activityCount: 1,
+      privateValues: [canary, directory],
+    }),
     "planning creates no registry or runtime home state"
   );
   process.stdout.write(

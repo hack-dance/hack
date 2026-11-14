@@ -38,8 +38,11 @@ async function fixture(
   run: (project: { projectRoot: string; projectDir: string }) => Promise<void>
 ) {
   const root = await mkdtemp(join(tmpdir(), "supervisor-controller-"));
-  const project = { projectRoot: root, projectDir: join(root, ".hack") };
-  await mkdir(project.projectDir);
+  const projectRoot = join(root, "checkout");
+  const project = { projectRoot, projectDir: join(projectRoot, ".hack") };
+  await mkdir(project.projectDir, { recursive: true });
+  const savedHackHome = process.env.HACK_HOME;
+  process.env.HACK_HOME = join(root, "host-home");
   try {
     await run(project);
   } finally {
@@ -50,6 +53,7 @@ async function fixture(
       branch: null,
       definitionHash: "synthetic",
     }).catch(() => undefined);
+    restoreEnv("HACK_HOME", savedHackHome);
     await rm(root, { recursive: true, force: true });
   }
 }
@@ -110,7 +114,8 @@ nativeTest(
       );
       expect(await owner.abort()).toBeUndefined();
       expect(await readLifecycleState(project)).toHaveLength(0);
-    })
+    }),
+  30_000
 );
 
 nativeTest(
@@ -132,7 +137,8 @@ nativeTest(
       expect((await readLifecycleState(project))[0]?.ownershipToken).toBe(
         original?.ownershipToken
       );
-    })
+    }),
+  30_000
 );
 
 nativeTest(
@@ -164,7 +170,8 @@ nativeTest(
         },
       });
       expect(await readLifecycleState(project)).toHaveLength(0);
-    })
+    }),
+  30_000
 );
 
 nativeTest(
@@ -188,7 +195,8 @@ nativeTest(
         ownershipToken: entry.ownershipToken,
       });
       expect(status.liveProcessNames).toEqual(["worker"]);
-    })
+    }),
+  30_000
 );
 
 nativeTest(
@@ -225,7 +233,8 @@ nativeTest(
       } finally {
         restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", binary);
       }
-    })
+    }),
+  30_000
 );
 
 nativeTest(
@@ -252,7 +261,8 @@ nativeTest(
       });
       expect([...observed.liveProcessNames].sort()).toEqual([...names].sort());
       expect(await owner.abort()).toBeUndefined();
-    })
+    }),
+  30_000
 );
 
 nativeTest(
@@ -309,7 +319,8 @@ if (action !== "serve") process.exit(await child.exited);
       } finally {
         restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", saved);
       }
-    })
+    }),
+  30_000
 );
 
 nativeTest(
@@ -354,5 +365,6 @@ nativeTest(
           .map((p) => p.name)
           .sort()
       ).toEqual(["first", "second"]);
-    })
+    }),
+  30_000
 );

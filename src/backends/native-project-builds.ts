@@ -499,7 +499,8 @@ export function refuseEmulatedBuilds(opts: {
 
 /**
  * Refuse, before any hook, VM or build effect, a build argument whose value equals a
- * managed secret or value actually delivered privately to this project's services.
+ * nonempty value explicitly marked secret in this project's managed env. Plain
+ * env-file and shell values have no secret metadata and do not widen this guard.
  */
 export function refuseManagedSecretBuildArguments(opts: {
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;
@@ -514,7 +515,7 @@ export function refuseManagedSecretBuildArguments(opts: {
       if (secrets.has(value)) {
         throw new HackCliError({
           code: "E_NATIVE_PROJECT_UNSUPPORTED",
-          message: `Native foreground up cannot build service ${service}: build arg ${name} equals a privately delivered environment value. Build args are not secrets (images record them); pass secrets with BuildKit build secrets instead, which native builds do not support yet. Values were omitted; no hook, VM or build was started.`,
+          message: `Native foreground up cannot build service ${service}: build arg ${name} equals a hack env secret value. Build args are not secrets (images record them); pass secrets with BuildKit build secrets instead, which native builds do not support yet. Values were omitted; no hook, VM or build was started.`,
         });
       }
     }

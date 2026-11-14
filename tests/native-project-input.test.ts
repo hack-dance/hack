@@ -536,7 +536,7 @@ test("shell expressions are private, unresolved bare names unset, and public lit
   expect(services.empty?.environment).toBeNull();
   expect(result.environmentNotices).toHaveLength(5);
   expect(JSON.stringify(result.environmentNotices)).toContain(
-    "NOT_PASSED is unset"
+    "key NOT_PASSED: an unresolved input is unset"
   );
   for (const hidden of [PRIVATE, "other-instance", "unrelated-private"]) {
     expect(result.normalizedComposeJson).not.toContain(hidden);
@@ -544,7 +544,7 @@ test("shell expressions are private, unresolved bare names unset, and public lit
   }
 });
 
-test("Hack key material is refused without reading the caller's value", async () => {
+test("Hack key material stays runtime-owned without files and refuses with files, never reading the caller", async () => {
   for (const key of ["HACK_ENV_SECRET_KEY", "HACK_GATEWAY_TOKEN"]) {
     const opts = await fixture({
       services: {
@@ -557,6 +557,12 @@ test("Hack key material is refused without reading the caller's value", async ()
         throw new Error("private getter must never be invoked");
       },
     });
+    const input = await prepareNativeProjectInput({ ...opts, env: caller });
+    expect(environments(input).api?.environment).toEqual({
+      COPY: reference(key),
+    });
+    expect(input.shellEnvironment).toEqual({});
+    await writeFile(join(opts.projectDir, ".env"), "", { mode: 0o600 });
     await expect(
       prepareNativeProjectInput({ ...opts, env: caller })
     ).rejects.toThrow("protected variable");

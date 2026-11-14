@@ -2,10 +2,13 @@ import { lstat, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { HACK_KEY_MATERIAL_VARIABLES } from "../lib/child-environment.ts";
 import { isRecord } from "../lib/guards.ts";
+import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../lib/native-environment-notices.ts";
 import { nativeAwsCredentialMount } from "./native-aws-environment.ts";
 import {
+  type ComposeEnvEntry,
   composeEnvironmentReferences,
   interpolateComposeEnvironment,
+  NativeEnvSyntaxError,
   parseComposeEnvironmentFile,
 } from "./native-compose-env-syntax.ts";
 import { requireNativeEnvBuildSeparation } from "./native-env-build-context.ts";
@@ -19,13 +22,6 @@ import { nativeServiceActive } from "./native-project-builds.ts";
 import { shellVariableReadable } from "./native-shell-environment.ts";
 
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const CONTROLS = new Set([
-  "COMPOSE_FILE",
-  "COMPOSE_PROFILES",
-  "COMPOSE_PROJECT_NAME",
-  "COMPOSE_ENV_FILES",
-  "COMPOSE_DISABLE_ENV_FILE",
-]);
 const UNSETS = "x-hack-unset-environment";
 type Values = Readonly<Record<string, string>>;
 export type NativeComposeEnvironmentService = {
@@ -50,20 +46,56 @@ type Options = {
   readonly selectedServices?: readonly string[];
 };
 type Sources = {
-  readonly lookup: (name: string) => string | undefined;
+  readonly lookup: (name: string, reportName?: boolean) => string | undefined;
   readonly read: (spec: FileSpec, service?: string) => Promise<Source>;
   readonly dotenv: ReadonlyMap<string, string>;
   readonly shellNames: Set<string>;
   readonly automaticDotenv: string | undefined;
 };
-type Notice = { readonly service: string; readonly line: string };
+type Notice = { readonly service?: string; readonly line: string };
 
 function refused(
   source: string,
   reason: string,
+  service?: string,
+  entry?: ComposeEnvEntry
+): NativeEnvFileRefusal {
+  return new NativeEnvFileRefusal({ source, reason, service, ...entry });
+}
+
+/** Preserve only closed reasons and the destination assignment, never a reference token. */
+function fileLookup(opts: {
+  readonly source: string;
+  readonly service?: string;
+  readonly entry: ComposeEnvEntry;
+  readonly lookup: () => string | undefined;
+}): string | undefined {
+  try {
+    return opts.lookup();
+  } catch (error: unknown) {
+    throw refused(
+      opts.source,
+      error instanceof NativeEnvFileRefusal
+        ? error.reason
+        : "the interpolation source could not be read",
+      opts.service,
+      opts.entry
+    );
+  }
+}
+
+function syntaxRefusal(
+  source: string,
+  error: unknown,
   service?: string
 ): NativeEnvFileRefusal {
-  return new NativeEnvFileRefusal({ source, reason, service });
+  return new NativeEnvFileRefusal({
+    source,
+    service,
+    line: error instanceof NativeEnvSyntaxError ? (error.line ?? 1) : 1,
+    reason:
+      "invalid dotenv syntax, unresolved required reference or source budget",
+  });
 }
 function protectedName(name: string): boolean {
   return name.startsWith("HACK_") || HACK_KEY_MATERIAL_VARIABLES.has(name);
@@ -150,7 +182,8 @@ function checkPublicFields(opts: {
               source: "Compose public field",
               service: opts.service,
               field: opts.field,
-              reason: `variable ${name} may only interpolate inside service environment or env-file values`,
+              reason:
+                "private variables may only interpolate inside service environment or env-file values",
             });
           }
           return undefined;
@@ -166,7 +199,8 @@ function checkPublicFields(opts: {
             source: "Compose public field",
             service: opts.service,
             field: opts.field,
-            reason: `variable ${runtimeName} cannot combine runtime-bound interpolation with a file-backed default`,
+            reason:
+              "runtime-bound interpolation cannot combine with a file-backed default",
           });
         }
         return expanded.replaceAll("$", () => "$$");
@@ -245,6 +279,7 @@ async function readAutomaticDotenv(opts: {
   readonly automatic: string;
   readonly read: Sources["read"];
   readonly lookup: Sources["lookup"];
+  readonly notices: Notice[];
 }): Promise<ReadonlyMap<string, string>> {
   // An absent automatic input grants no file access and adds no new directory
   // admission to projects that use no env files. Explicit optional paths still
@@ -260,12 +295,33 @@ async function readAutomaticDotenv(opts: {
   try {
     dotenv = parseComposeEnvironmentFile({
       text: source.text,
-      lookup: opts.lookup,
-      onUnresolved: (name) => {
+      lookup: (name, entry) =>
+        fileLookup({
+          source: ".env",
+          entry,
+          lookup: () => opts.lookup(name, false),
+        }),
+      onEntry: (entry) => {
+        if (entry.key.startsWith("COMPOSE_") || protectedName(entry.key)) {
+          throw refused(
+            ".env",
+            "control variables are not supported as dotenv inputs",
+            undefined,
+            entry
+          );
+        }
+      },
+      onMissing: (_name, entry) =>
+        opts.notices.push({
+          line: `Environment source ".env" line ${entry.line} key ${entry.key}: an unresolved reference is empty.`,
+        }),
+      onUnresolved: (name, entry) => {
         if (!shellVariableReadable(name)) {
           throw refused(
             ".env",
-            `variable ${name} cannot be read from the caller's shell; use an explicit file value`
+            "a source cannot be read from the caller's shell; use an explicit file value",
+            undefined,
+            entry
           );
         }
       },
@@ -274,36 +330,30 @@ async function readAutomaticDotenv(opts: {
     if (error instanceof NativeEnvFileRefusal) {
       throw error;
     }
-    throw refused(
-      ".env",
-      "invalid dotenv syntax, unresolved required reference or source budget"
-    );
-  }
-  for (const key of dotenv.keys()) {
-    if (CONTROLS.has(key) || protectedName(key)) {
-      throw refused(
-        ".env",
-        `control variable ${key} is not supported as a dotenv input`
-      );
-    }
+    throw syntaxRefusal(".env", error);
   }
   return dotenv;
 }
 
-async function environmentSources(opts: Options): Promise<Sources> {
+async function environmentSources(
+  opts: Options,
+  notices: Notice[]
+): Promise<Sources> {
   const shellNames = new Set<string>();
   const cached = new Map<string, Source>();
   const automatic = join(dirname(opts.composeFile), ".env");
   const env = opts.env ?? {};
   let bytes = 0;
   let references = 0;
-  const shell = (name: string): string | undefined => {
+  const shell = (name: string, reportName: boolean): string | undefined => {
     if (!(shellVariableReadable(name) && Object.hasOwn(env, name))) {
       return undefined;
     }
     const value = env[name];
     if (typeof value === "string") {
-      shellNames.add(name);
+      if (reportName) {
+        shellNames.add(name);
+      }
       return value;
     }
     return undefined;
@@ -360,26 +410,28 @@ async function environmentSources(opts: Options): Promise<Sources> {
     cached.set(path, source);
     return source;
   };
-  const baseLookup = (name: string): string | undefined => {
+  const baseLookup = (name: string, reportName = true): string | undefined => {
     if (protectedName(name)) {
       throw refused(
         "environment",
-        `protected variable ${name} cannot be interpolated`
+        "protected variables cannot be interpolated"
       );
     }
-    return ownValue(opts.global, name) ?? shell(name);
+    return ownValue(opts.global, name) ?? shell(name, reportName);
   };
   const dotenv = await readAutomaticDotenv({
     automatic,
     read,
     lookup: baseLookup,
+    notices,
   });
   return {
     shellNames,
     dotenv,
     automaticDotenv: cached.has(automatic) ? automatic : undefined,
     read,
-    lookup: (name) => baseLookup(name) ?? dotenv.get(name),
+    lookup: (name, reportName) =>
+      baseLookup(name, reportName) ?? dotenv.get(name),
   };
 }
 
@@ -398,16 +450,19 @@ type ServiceContext = {
   readonly global: Values;
   readonly lookup: Sources["lookup"];
   readonly notices: Notice[];
+  readonly filePrivacy: boolean;
+  readonly composeFile: string;
 };
 function missingNotice(opts: {
   readonly context: ServiceContext;
-  readonly name: string;
   readonly key: string;
   readonly unset: boolean;
+  readonly source?: string;
+  readonly line?: number;
 }): void {
   opts.context.notices.push({
     service: opts.context.name,
-    line: `Service ${opts.context.name}: ${opts.key} is ${opts.unset ? "unset" : "empty"} because ${opts.name} is not set in the interpolation context.`,
+    line: `Service ${opts.context.name} source ${JSON.stringify(opts.source ?? opts.context.composeFile)}${opts.line === undefined ? "" : ` line ${opts.line}`} key ${opts.key}: an unresolved input is ${opts.unset ? "unset" : "empty"}.`,
   });
 }
 function expandServiceValue(opts: {
@@ -431,7 +486,7 @@ function expandServiceValue(opts: {
           return;
         }
         privateSource = true;
-        missingNotice({ context, name, key: opts.key, unset: false });
+        missingNotice({ context, key: opts.key, unset: false });
       },
       lookup: (name) => {
         if (name === "COMPOSE_PROJECT_NAME") {
@@ -444,7 +499,7 @@ function expandServiceValue(opts: {
         ) {
           throw refused(
             "environment",
-            `service-scoped variable ${name} is not an interpolation source`,
+            "service-scoped values are not interpolation sources",
             context.name
           );
         }
@@ -469,6 +524,11 @@ function expandServiceValue(opts: {
     }
     return { value, private: privateSource, unbound };
   } catch (error: unknown) {
+    // With no file inputs, preserve next's admission: let the runtime evaluate
+    // declarations the new file parser cannot resolve, without reading private files.
+    if (!context.filePrivacy) {
+      return { value: opts.text, private: false, unbound: true };
+    }
     if (error instanceof NativeEnvFileRefusal) {
       throw error;
     }
@@ -502,6 +562,10 @@ function resolveBareService(opts: {
   readonly unset: string[];
 }): void {
   const { key, context } = opts;
+  if (!(context.filePrivacy || shellVariableReadable(key))) {
+    opts.environment[key] = null;
+    return;
+  }
   const found = context.lookup(key);
   if (found !== undefined) {
     opts.environment[key] = null;
@@ -514,7 +578,7 @@ function resolveBareService(opts: {
     return;
   }
   opts.unset.push(key);
-  missingNotice({ context, name: key, key, unset: true });
+  missingNotice({ context, key, unset: true });
 }
 function resolveService(opts: {
   readonly context: ServiceContext;
@@ -542,7 +606,7 @@ function resolveService(opts: {
       resolved.set(key, managed);
       continue;
     }
-    if (HACK_KEY_MATERIAL_VARIABLES.has(key)) {
+    if (context.filePrivacy && HACK_KEY_MATERIAL_VARIABLES.has(key)) {
       throw refused(
         "environment",
         "Hack key material cannot be copied into services",
@@ -610,36 +674,54 @@ async function serviceFiles(opts: {
         text: source.text,
         raw: spec.raw,
         initial: files,
-        onMissing: (key) =>
+        onMissing: (_name, entry) =>
           missingNotice({
             context: opts.context,
-            name: key,
-            key,
+            key: entry.key,
+            source: spec.path,
+            line: entry.line,
             unset: false,
           }),
-        lookup: (key) => {
-          const project = opts.context.lookup(key);
-          if (project !== undefined) {
-            return project;
-          }
-          if (
-            key === "COMPOSE_PROJECT_NAME" ||
-            opts.resolution.unbound.has(key)
-          ) {
+        onEntry: (entry) => {
+          if (protectedName(entry.key)) {
             throw refused(
               spec.path,
-              `runtime-dependent variable ${key} cannot interpolate private file values`,
-              opts.context.name
+              "protected environment keys cannot be delivered",
+              opts.context.name,
+              entry
             );
           }
-          return opts.resolution.resolved.get(key);
         },
-        onUnresolved: (key) => {
+        lookup: (key, entry) =>
+          fileLookup({
+            source: spec.path,
+            service: opts.context.name,
+            entry,
+            lookup: () => {
+              const project = opts.context.lookup(key, false);
+              if (project !== undefined) {
+                return project;
+              }
+              if (
+                key === "COMPOSE_PROJECT_NAME" ||
+                opts.resolution.unbound.has(key)
+              ) {
+                throw refused(
+                  spec.path,
+                  "runtime-dependent sources cannot interpolate private file values",
+                  opts.context.name
+                );
+              }
+              return opts.resolution.resolved.get(key);
+            },
+          }),
+        onUnresolved: (key, entry) => {
           if (!shellVariableReadable(key)) {
             throw refused(
               spec.path,
-              `variable ${key} cannot be read from the caller's shell; use an explicit file value or credential adapter`,
-              opts.context.name
+              "a source cannot be read from the caller's shell; use an explicit file value or credential adapter",
+              opts.context.name,
+              entry
             );
           }
         },
@@ -648,11 +730,7 @@ async function serviceFiles(opts: {
       if (error instanceof NativeEnvFileRefusal) {
         throw error;
       }
-      throw refused(
-        spec.path,
-        "invalid dotenv syntax, unresolved required reference or source budget",
-        opts.context.name
-      );
+      throw syntaxRefusal(spec.path, error, opts.context.name);
     }
   }
   return files;
@@ -674,6 +752,7 @@ async function normalizeService(opts: {
   }
   for (const [field, value] of Object.entries(document)) {
     if (
+      opts.context.filePrivacy &&
       field !== "environment" &&
       field !== "env_file" &&
       !ignoredExtension(field)
@@ -832,15 +911,26 @@ export async function normalizeNativeComposeEnvironment(
   readonly shellEnvironment: Record<string, Record<string, string>>;
   readonly notices: Notice[];
   readonly forwardedNames: Record<string, readonly string[]>;
-  readonly privateValues: readonly string[];
   readonly fileServices: Readonly<Record<string, boolean>>;
+  readonly ignoredRootDotenv: boolean;
 }> {
   const canonical = await canonicalSourceOptions(opts);
-  const sources = await environmentSources(canonical);
+  const notices: Notice[] = [];
+  const sources = await environmentSources(canonical, notices);
   requireBuildSeparation({ ...canonical, sources });
-  const privateValues = new Set<string>();
+  const filePrivacy =
+    sources.automaticDotenv !== undefined ||
+    Object.values(opts.services).some((service) =>
+      Object.hasOwn(service.document, "env_file")
+    );
+  const ignoredRootDotenv =
+    dirname(canonical.composeFile) !== canonical.projectRoot &&
+    (await present(join(canonical.projectRoot, ".env")));
+  if (ignoredRootDotenv) {
+    notices.push({ line: NATIVE_ROOT_DOTENV_IGNORED_NOTICE });
+  }
   for (const [field, value] of Object.entries(opts.compose)) {
-    if (field !== "services" && !ignoredExtension(field)) {
+    if (filePrivacy && field !== "services" && !ignoredExtension(field)) {
       checkPublicFields({ value, lookup: sources.lookup, field });
     }
   }
@@ -848,7 +938,6 @@ export async function normalizeNativeComposeEnvironment(
     string,
     Record<string, string>
   > = Object.create(null);
-  const notices: Notice[] = [];
   const forwardedNames: Record<string, readonly string[]> = Object.create(null);
   const fileServices: Record<string, boolean> = Object.create(null);
   for (const [name, service] of Object.entries(opts.services)) {
@@ -872,13 +961,12 @@ export async function normalizeNativeComposeEnvironment(
           : {},
         lookup: sources.lookup,
         notices,
+        filePrivacy,
+        composeFile: relative(canonical.projectRoot, canonical.composeFile),
       },
     });
     if (Object.keys(delivered).length > 0) {
       shellEnvironment[name] = delivered;
-    }
-    for (const value of Object.values(delivered)) {
-      privateValues.add(value);
     }
     forwardedNames[name] = [...sources.shellNames].sort();
   }
@@ -886,7 +974,7 @@ export async function normalizeNativeComposeEnvironment(
     shellEnvironment,
     notices,
     forwardedNames,
-    privateValues: [...privateValues].filter((value) => value !== ""),
     fileServices,
+    ignoredRootDotenv,
   };
 }

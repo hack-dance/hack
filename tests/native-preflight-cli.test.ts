@@ -1426,6 +1426,46 @@ test("preflight reports one project-wide managed env metadata error", async () =
   ).toHaveLength(1);
 });
 
+test("preflight stays usable with a missing managed key and reports its recovery hint", async () => {
+  const f = await fixture({ services: { web: { image: IMAGE } } });
+  await writeFile(
+    join(f.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: { TOKEN: { secure: "synthetic-ciphertext-canary" } } },
+    })
+  );
+  await f.review([]);
+  const result = await preflight(f, f.native);
+  expect(result.code).toBe(1);
+  const blockers = result.report.blockers.filter(
+    (entry) => entry.code === "managed_env_unreadable"
+  );
+  expect(blockers).toHaveLength(1);
+  expect(blockers[0]?.message).toContain("project env key is missing");
+  expect(blockers[0]?.message).toContain("Copy .hack.secret.key");
+  expect(result.output).not.toContain("synthetic-ciphertext-canary");
+});
+
+test("preflight reports ignored root dotenv once without its contents", async () => {
+  const f = await fixture({ services: { web: { image: IMAGE } } });
+  await writeFile(join(f.project, ".env"), `ROOT_ONLY=${PRIVATE}\n`, {
+    mode: 0o000,
+  });
+  await f.review([]);
+  const result = await preflight(f, { ...f.native, ...GRANT });
+  expect(result.report.blockers).toEqual([]);
+  expect(
+    result.report.warnings.filter(
+      (entry) => entry.code === "root_dotenv_ignored"
+    )
+  ).toHaveLength(1);
+  expect(result.output.match(/Project-root \.env is ignored/g)).toHaveLength(1);
+  expect(result.output).not.toContain(PRIVATE);
+});
+
 for (const syntax of ["JSON null", "commented YAML"] as const) {
   for (const managed of [false, true]) {
     test(`empty service environments: ${syntax}, managed=${managed}`, async () => {

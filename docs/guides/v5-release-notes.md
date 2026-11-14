@@ -22,6 +22,11 @@ its original behavior.
 
 | Change | What to do |
 | --- | --- |
+| **Native reads `.hack/.env` on every start and preflight, even with managed env.** Symlinks, other-owner or group/other-writable files and project ancestors refuse, as do `COMPOSE_*`/`HACK_*` keys and dotted/dashed identifiers. | Use an owned regular file, deliberately correct permissions, remove control entries and rename unsupported identifiers, or move values into managed env. A sibling `.env.state.json` also refuses possible materialized output; deliberately retire that output after moving to managed env. |
+| **Native service-environment defaults take allowed shell values.** Shell presence can change normalized declarations and plan identity, without storing values in that identity. | Unset the exported name to retain the authored fallback. In projects with `env_file` or adjacent `.env`, public-field references to ambient values now refuse even with a default: unset the source or write a public literal. Without those file sources, public defaults keep their previous behavior. |
+| **Native removes `dotenv_without_managed_env`.** A project-root `.env` outside the Compose directory is now ignored with one names-only notice. | Move required inputs beside Compose (normally `.hack/.env`) or into managed env. Dotenv alone does not inject service variables. |
+| **Native preflight reads the caller's allowed environment and decrypts managed env.** A missing key becomes a structured blocker; the report remains usable. | Run from the intended shell and recover the existing project key when asked. Do not generate a replacement key for existing ciphertext. |
+| **Native env-file paths must stay separate from build inputs.** Contexts, Dockerfiles and Dockerfile-specific ignore inputs may not overlap declared env files or adjacent `.env`, including optional and inactive paths. | Use disjoint build inputs or prebuilt images. The build-argument value guard stays limited to nonempty managed `secret: true` values, with no minimum length; plain file and shell values do not widen it. See [the full rules](../native/environment-files.md). |
 | **Native plain `logs SERVICE --follow` output changes.** It now prints application-text lines, matching a finite snapshot, instead of adding a `SERVICE \| ` prefix. Both service streams go to stdout; Hack notices go to stderr. | Stop parsing the old plain prefix. Use `--json` and the log event's `entry.service`, `entry.stream` and `entry.message` when a script needs those fields. Use `--timestamps` to request Engine timestamps. |
 | **Env listings hide values by default, including migrated plaintext.** Ordinary `env` / `env list` text and JSON output are metadata. JSON omits `value` and reports `has_value`. | Use `has_value` for availability checks. For a value a script actually needs, call `hack env get KEY` with the same `--env` and `--service`; that command prints plaintext. Bulk `--show-values` requires interactive stdin and stdout; `--show-secrets` remains an alias. |
 | **Migration cleanup preserves live keys (HACK-2172).** A legacy store's `keyPath` can no longer make the current project/shared key a cleanup target. Current config and YAML inputs are protected too, including filesystem aliases. | Keep key and env backups before migration. On next.16 or an earlier prerelease, do not run `doctor --migrate-env-config` without a private readable copy of `.hack.secret.key`. The fix does not recover a key already removed. |
@@ -238,6 +243,11 @@ Start with a disposable project. See
 [the native backend overview](../native/README.md),
 [Native config import](../reference/native-config-import.md) and the staged plan in
 [Qualify a project on v5](v5-dogfooding.md).
+
+### Prerelease behavior changes
+
+Plain native `hack logs --follow` output omits the service prefix (such as `web | `)
+and writes both service stdout and stderr to the CLI's stdout, so pipes receive both.
 
 ## Retired and unsupported
 

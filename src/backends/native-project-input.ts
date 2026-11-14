@@ -37,7 +37,7 @@ export type NativeManagedFile = {
 
 /** One value-free note about a service's `environment`: names only. */
 export type NativeEnvironmentNotice = {
-  readonly service: string;
+  readonly service?: string;
   readonly line: string;
 };
 
@@ -53,8 +53,8 @@ export type NativeProjectInput = {
     Record<string, readonly NativeManagedFile[]>
   >;
   /**
-   * Private in-memory disclosure guard: managed secrets plus private file/shell
-   * inputs, so build arguments cannot carry them. Not a stored-env fingerprint.
+   * Private in-memory disclosure guard: nonempty values explicitly marked secret
+   * in managed env. Plain file and shell inputs have no secret metadata here.
    */
   readonly managedSecretValues?: readonly string[];
   /** Private lifecycle environment; not container environment. */
@@ -88,6 +88,7 @@ export type NativeProjectInput = {
    * a referenced variable that is not set. Names only.
    */
   readonly environmentNotices?: readonly NativeEnvironmentNotice[];
+  readonly ignoredRootDotenv?: boolean;
   /**
    * Emulation policy of each service the native adaptation opted in to `linux/amd64`
    * (`amd64Emulation`); absent when none did. See `native-project-platform.ts`.
@@ -257,8 +258,8 @@ function normalizeManagedEnvironment(
  * Adds ephemeral file/shell values to the private delivery. Native
  * start and restart call this once, after the env fingerprints are taken, so a
  * value is delivered to its service and never digested to disk. Commands
- * that prepare input without calling it (exec, stale-env checks) deliver no
- * shell value. Calling it again changes nothing.
+ * Fresh exec also calls this after preparing its selected service. Metadata-only
+ * stale-env checks never acquire or merge these values. Calling it again changes nothing.
  */
 export function mergeNativeShellEnvironment(
   input: NativeProjectInput
@@ -499,8 +500,8 @@ export async function prepareNativeProjectInput(opts: {
           shellEnvironment: {},
           notices: [],
           forwardedNames: {},
-          privateValues: [],
           fileServices: {},
+          ignoredRootDotenv: false,
         }
       : await normalizeNativeComposeEnvironment({
           ...opts,
@@ -533,10 +534,7 @@ export async function prepareNativeProjectInput(opts: {
       originalSha256: createHash("sha256").update(bytes).digest("hex"),
       normalizedComposeJson,
       managedEnvironment,
-      managedSecretValues: [
-        ...managedSecretValues(resolved),
-        ...shell.privateValues,
-      ],
+      managedSecretValues: managedSecretValues(resolved),
       lifecycleHostEnvironment: resolved
         ? selectProjectEnvValuesForExecutionTarget({
             resolved,
@@ -551,6 +549,7 @@ export async function prepareNativeProjectInput(opts: {
       shellEnvironment: shell.shellEnvironment,
       forwardedShellVariables: shell.forwardedNames,
       environmentNotices: shell.notices,
+      ignoredRootDotenv: shell.ignoredRootDotenv,
     };
   } catch (error: unknown) {
     // Only this module's closed refusals carry a cause; anything else stays generic.

@@ -69,6 +69,11 @@ If blocked, fix the named field and rerun. Do not remove a check or delete state
 to force a start. Keep the project on Compose if it needs unsupported behavior.
 See [Troubleshooting](../troubleshooting.md) and [the preflight reference](preflight.md).
 
+Env-file support intended for next.17 changes input checks and shell-default
+selection. Before upgrading, read the [environment-file rules](../../../native/environment-files.md)
+and [migration notes](../../../guides/v5-release-notes.md#next17-what-changed-and-what-to-do).
+They explain which files are read, which declarations refuse and how to fix them.
+
 ## Start, check and stop
 
 ```sh

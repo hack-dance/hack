@@ -16,11 +16,18 @@ import { adaptNativeAwsEnvironment } from "../src/backends/native-aws-environmen
 import { adaptNativeGcloudEnvironment } from "../src/backends/native-gcloud-environment.ts";
 import { nativePrivateEnvironmentPayload } from "../src/backends/native-private-environment-payload.ts";
 import {
+  admitNativeProjectBuilds,
+  buildNativeProjectImages,
+  refuseManagedSecretBuildArguments,
+} from "../src/backends/native-project-builds.ts";
+import {
   mergeNativeShellEnvironment,
   prepareNativeProjectInput,
   requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
+import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 
 const FILE = "synthetic-file-value-canary";
 const DOTENV = "synthetic-dotenv-value-canary";
@@ -320,7 +327,7 @@ test("extra_hosts hostname interpolation refuses project values and runtime-boun
     ...f,
     env: { HOST: SHELL },
   }).catch((caught: unknown) => caught);
-  expect(String(projectError)).toContain("variable HOST");
+  expect(String(projectError)).toContain("private variables");
   expect(String(projectError)).not.toContain(SHELL);
   expect(String(projectError)).not.toContain(FILE);
   await writeFile(
@@ -340,7 +347,7 @@ test("extra_hosts hostname interpolation refuses project values and runtime-boun
   const runtimeError: unknown = await prepareNativeProjectInput(f).catch(
     (caught: unknown) => caught
   );
-  expect(String(runtimeError)).toContain("COMPOSE_PROJECT_NAME");
+  expect(String(runtimeError)).toContain("runtime-bound interpolation");
   expect(String(runtimeError)).toContain("runtime-bound");
   expect(String(runtimeError)).not.toContain(FILE);
 });
@@ -372,7 +379,6 @@ test.each([
   const error: unknown = await prepareNativeProjectInput(f).catch(
     (caught: unknown) => caught
   );
-  expect(String(error)).toContain(name);
   expect(String(error)).toContain("runtime-bound");
   expect(String(error)).not.toContain(FILE);
   expect(String(error)).not.toContain(MANAGED);
@@ -388,7 +394,7 @@ test("public executable defaults still refuse a defined project source beside a 
   const error: unknown = await prepareNativeProjectInput(f).catch(
     (caught: unknown) => caught
   );
-  expect(String(error)).toContain("SOURCE");
+  expect(String(error)).toContain("private variables");
   expect(String(error)).not.toContain(FILE);
   expect(String(error)).not.toContain(DOTENV);
 });
@@ -448,7 +454,9 @@ test("dotenv cloud references use earlier local values and refuse an unavailable
     ...f,
     env: { AWS_REGION: SHELL },
   }).catch((caught: unknown) => caught);
-  expect(String(error)).toContain("AWS_REGION cannot be read");
+  expect(String(error)).toContain('source ".env" line 1 key REGION');
+  expect(String(error)).toContain("cannot be read");
+  expect(String(error)).not.toContain("AWS_REGION");
   expect(String(error)).not.toContain(SHELL);
 });
 
@@ -552,7 +560,7 @@ test.each([
     (caught: unknown) => caught
   );
   expect(error).toBeInstanceOf(Error);
-  expect(String(error)).toContain("SOURCE");
+  expect(String(error)).toContain("private variables");
   expect(String(error)).not.toContain(DOTENV);
 });
 
@@ -647,7 +655,7 @@ test.each([
   expect(input.shellEnvironment).toEqual({});
 });
 
-test("only delivered private values join the build disclosure guard", async () => {
+test("plain file and shell values do not widen the managed-secret build guard", async () => {
   const f = await fixture({
     env_file: "service.env",
     environment: { MODE: "explicit" },
@@ -655,7 +663,238 @@ test("only delivered private values join the build disclosure guard", async () =
   await f.source(".env", "UNUSED=production\n");
   await f.source("service.env", `MODE=production\nTOKEN=${FILE}\n`);
   const input = await prepareNativeProjectInput(f);
-  expect(input.managedSecretValues).toEqual([FILE]);
+  expect(input.managedSecretValues).toEqual([]);
+});
+
+test("ordinary env-file and shell values matching literal build args still build", async () => {
+  const f = await fixture({
+    image: undefined,
+    env_file: "service.env",
+    environment: { PORT: null },
+    build: {
+      context: "../app",
+      args: { NODE_ENV: "production", PORT: "3000" },
+    },
+  });
+  await f.source("service.env", "NODE_ENV=production\n");
+  const input = await prepareNativeProjectInput({
+    ...f,
+    env: { PORT: "3000" },
+  });
+  expect(input.shellEnvironment).toEqual({
+    app: { NODE_ENV: "production", PORT: "3000" },
+  });
+  expect(input.managedSecretValues).toEqual([]);
+  const specs = { app: publicService(input) };
+  const builds = admitNativeProjectBuilds({
+    ...f,
+    services: specs,
+    enabled: true,
+  });
+  refuseManagedSecretBuildArguments({
+    builds,
+    managedSecretValues: input.managedSecretValues ?? [],
+  });
+  let invoked = false;
+  await buildNativeProjectImages({
+    runtime: {
+      binary: "/unused/runtime",
+      home: join(f.projectRoot, "native-home"),
+    },
+    projectRoot: f.projectRoot,
+    branch: null,
+    profiles: [],
+    builds,
+    specs,
+    retainedImages: new Map(),
+    restore: false,
+    rebuild: false,
+    signal: new AbortController().signal,
+    invoke: async ({ requestFile }) => {
+      expect(JSON.parse(await readFile(requestFile, "utf8")).args).toEqual({
+        NODE_ENV: "production",
+        PORT: "3000",
+      });
+      invoked = true;
+      return {
+        imageId: `sha256:${"a".repeat(64)}`,
+        buildKey: "b".repeat(64),
+        reused: false,
+      };
+    },
+  });
+  expect(invoked).toBe(true);
+});
+
+test("only explicit managed secrets enter the build guard, including one-character values", async () => {
+  const f = await fixture({});
+  await managed(f.projectDir, { global: { PLAIN: "production" } });
+  await setProjectEnvValue({
+    projectRoot: f.projectRoot,
+    projectDir: f.projectDir,
+    envName: null,
+    key: "MARKED",
+    value: "x",
+    secret: true,
+    scope: "global",
+  });
+  const input = await prepareNativeProjectInput(f);
+  expect(input.managedSecretValues).toEqual(["x"]);
+  const builds = admitNativeProjectBuilds({
+    ...f,
+    enabled: true,
+    services: { app: { build: { context: "../app", args: { A: "x" } } } },
+  });
+  expect(() =>
+    refuseManagedSecretBuildArguments({
+      builds,
+      managedSecretValues: input.managedSecretValues ?? [],
+    })
+  ).toThrow("hack env secret value");
+});
+
+test.each([
+  "service.env",
+  ".env",
+])("%s notices never expose dollar tokens from private values", async (path) => {
+  const f = await fixture({ env_file: path === ".env" ? undefined : path });
+  await f.source(path, "# header\nDB_PASSWORD=abc$Tail9\n");
+  const input = await prepareNativeProjectInput(f);
+  const notices = JSON.stringify(input.environmentNotices);
+  expect(notices).toContain(path);
+  expect(notices).toContain("line 2 key DB_PASSWORD");
+  expect(notices).not.toContain("Tail9");
+  expect(notices).not.toContain("abc");
+  const withShell = await prepareNativeProjectInput({
+    ...f,
+    env: { Tail9: SHELL },
+  });
+  expect(JSON.stringify(withShell.forwardedShellVariables)).not.toContain(
+    "Tail9"
+  );
+  expect(JSON.stringify(withShell.environmentNotices)).not.toContain("Tail9");
+});
+
+test.each([
+  { token: "HACK_PrivateTail9", reason: "protected variables" },
+  { token: "AWS_PrivateTail9", reason: "cannot be read" },
+  { token: "RuntimeTail9", reason: "runtime-dependent" },
+])("private dollar-reference refusal identifies the assignment, never $token", async ({
+  token,
+  reason,
+}) => {
+  const f = await fixture({
+    env_file: "service.env",
+    environment: { RuntimeTail9: "${COMPOSE_PROJECT_NAME}" },
+  });
+  await f.source("service.env", `# header\nDB_PASSWORD=abc$${token}\n`);
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(Error);
+  const message = String(error);
+  expect(message).toContain('source "service.env" line 2 key DB_PASSWORD');
+  expect(message).toContain(reason);
+  expect(message).not.toContain(token);
+  expect(message).not.toContain("abc");
+});
+
+test.each([
+  "HACK_PrivateTail9",
+  "AWS_PrivateTail9",
+])("dotenv refusal omits the private reference %s", async (token) => {
+  const f = await fixture({});
+  await f.source(".env", `# header\nDB_PASSWORD=abc$${token}\n`);
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain('source ".env" line 2 key DB_PASSWORD');
+  expect(String(error)).not.toContain(token);
+  expect(String(error)).not.toContain("abc");
+});
+
+test.each([
+  "service.env",
+  ".env",
+])("%s syntax refusals identify the physical line without excerpts", async (path) => {
+  const f = await fixture(path === ".env" ? {} : { env_file: path });
+  for (const syntax of [
+    `DOTTED.KEY=${FILE}`,
+    `DASHED-KEY=${FILE}`,
+    `TOKEN="${FILE}`,
+    `TOKEN=\${MissingTail9:?${FILE}}`,
+    `TOKEN=${FILE}\0`,
+  ]) {
+    await f.source(path, `# header\nOK=value\n${syntax}\n`);
+    const error: unknown = await prepareNativeProjectInput(f).catch(
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain(`source "${path}" line 3`);
+    expect(String(error)).not.toContain(FILE);
+    expect(String(error)).not.toContain("MissingTail9");
+    expect(String(error)).not.toContain("DOTTED.KEY");
+  }
+});
+
+test("without file sources public fields keep their authored defaults despite exported shell names", async () => {
+  const declarations = {
+    ports: ["${PORT:-3000}:3000"],
+    image: "example:${TAG:-1}",
+    command: ["echo", "${PUBLIC:-fallback}"],
+    entrypoint: ["${ENTRY:-echo}"],
+  };
+  const f = await fixture(declarations);
+  const env: Record<string, string> = {};
+  for (const name of ["PORT", "TAG", "PUBLIC", "ENTRY"]) {
+    Object.defineProperty(env, name, {
+      enumerable: true,
+      get() {
+        throw new Error("public fields must not read ambient values");
+      },
+    });
+  }
+  const input = await prepareNativeProjectInput({ ...f, env });
+  expect(publicService(input)).toEqual(declarations);
+  await f.source(".env", "");
+  await expect(
+    prepareNativeProjectInput({ ...f, env: { PORT: "4000" } })
+  ).rejects.toThrow("private variables");
+  // Removing the ambient source retains the authored public fallback.
+  expect(publicService(await prepareNativeProjectInput(f))).toEqual(
+    declarations
+  );
+});
+
+test("service defaults use shell presence without placing values in normalized identity", async () => {
+  const f = await fixture({
+    environment: { MODE: "${NODE_ENV:-development}" },
+  });
+  const absent = await prepareNativeProjectInput(f);
+  const present = await prepareNativeProjectInput({
+    ...f,
+    env: { NODE_ENV: SHELL },
+  });
+  expect(publicService(absent).environment.MODE).toBe(
+    "${NODE_ENV:-development}"
+  );
+  expect(publicService(present).environment.MODE).toBeNull();
+  expect(present.shellEnvironment?.app?.MODE).toBe(SHELL);
+  expect(present.normalizedComposeJson).not.toContain(SHELL);
+  expect(present.normalizedComposeJson).not.toBe(absent.normalizedComposeJson);
+});
+
+test("ignored root dotenv gets one fixed notice without opening the file", async () => {
+  const f = await fixture({});
+  const path = join(f.projectRoot, ".env");
+  await writeFile(path, FILE, { mode: 0o000 });
+  const input = await prepareNativeProjectInput(f);
+  expect(input.ignoredRootDotenv).toBe(true);
+  expect(input.environmentNotices).toEqual([
+    { line: NATIVE_ROOT_DOTENV_IGNORED_NOTICE },
+  ]);
+  expect(input.normalizedComposeJson).not.toContain(FILE);
 });
 
 test.each([
@@ -782,6 +1021,7 @@ test("authored public runtime metadata literals survive while file/shell copies 
     "author-owned"
   );
   expect(input.shellEnvironment).toEqual({});
+  await f.source(".env", "");
   await writeFile(
     f.composeFile,
     JSON.stringify({

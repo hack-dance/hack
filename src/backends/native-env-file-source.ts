@@ -15,6 +15,7 @@ const MAX_FILE_BYTES = 256 * 1024;
 const SERVICE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const VARIABLE_PATH = /[$\0\r\n]/;
 const FIELD = /^[A-Za-z0-9_.-]{1,128}$/;
+const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const IGNORE_SOURCES = new Set([".gitignore", ".ignore"]);
 
 /** A closed native-only refusal; source paths and names are allowed, values are not. */
@@ -22,12 +23,17 @@ export class NativeEnvFileRefusal extends HackCliError {
   readonly service?: string;
   readonly source: string;
   readonly field: string;
+  readonly reason: string;
+  readonly line?: number;
+  readonly key?: string;
 
   constructor(opts: {
     readonly source: string;
     readonly reason: string;
     readonly service?: string;
     readonly field?: string;
+    readonly line?: number;
+    readonly key?: string;
   }) {
     const service =
       opts.service !== undefined && SERVICE.test(opts.service)
@@ -39,13 +45,22 @@ export class NativeEnvFileRefusal extends HackCliError {
       opts.field !== undefined && FIELD.test(opts.field)
         ? opts.field
         : fallbackField;
+    const line =
+      Number.isSafeInteger(opts.line) && (opts.line ?? 0) > 0
+        ? opts.line
+        : undefined;
+    const key =
+      opts.key !== undefined && KEY.test(opts.key) ? opts.key : undefined;
     super({
       code: "E_NATIVE_PROJECT_UNSUPPORTED",
-      message: `Native environment input${service === undefined ? "" : ` for service ${service} field ${field}`} source ${JSON.stringify(opts.source)} refused: ${opts.reason}; values omitted.`,
+      message: `Native environment input${service === undefined ? "" : ` for service ${service} field ${field}`} source ${JSON.stringify(opts.source)}${line === undefined ? "" : ` line ${line}`}${key === undefined ? "" : ` key ${key}`} refused: ${opts.reason}; values omitted.`,
     });
     this.source = opts.source;
     this.service = service;
     this.field = field;
+    this.reason = opts.reason;
+    this.line = line;
+    this.key = key;
   }
 }
 

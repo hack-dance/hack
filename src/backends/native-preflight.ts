@@ -8,6 +8,7 @@ import {
   classifyComposeBackendReading,
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
 } from "../lib/native-compose-backend-features.ts";
+import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../lib/native-environment-notices.ts";
 import { NativeEnvFileRefusal } from "./native-env-file-source.ts";
 import { nativeEnvironmentUnsetsReviewed } from "./native-environment-unsets.ts";
 import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
@@ -914,6 +915,28 @@ async function adaptForPreflight(opts: {
       throw new Error("Compose input changed during preflight");
     }
     input = prepared;
+    for (const notice of prepared.environmentNotices ?? []) {
+      findings.push(
+        finding(
+          {
+            severity: "warning",
+            gate: "cli",
+            code:
+              prepared.ignoredRootDotenv &&
+              notice.service === undefined &&
+              notice.line === NATIVE_ROOT_DOTENV_IGNORED_NOTICE
+                ? "root_dotenv_ignored"
+                : "environment_notice",
+            service: notice.service,
+            field: notice.service === undefined ? undefined : "environment",
+          },
+          {
+            message: notice.line,
+            fix: "Review the named environment input; values are omitted.",
+          }
+        )
+      );
+    }
   } catch (error: unknown) {
     findings.push(environmentInputFinding(error));
   }

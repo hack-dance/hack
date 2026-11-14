@@ -54,7 +54,10 @@ export function buildGeneratedFilePathspecs(opts: {
 export async function inspectTrackedGeneratedFiles(opts: {
   readonly projectRoot: string;
   readonly projectDirName: string;
+  /** Bound on each git call (default 10 s); a slower git reads as null. */
+  readonly timeoutMs?: number;
 }): Promise<TrackedGeneratedFilesInspection | null> {
+  const timeoutMs = opts.timeoutMs ?? 10_000;
   const pathspecs = buildGeneratedFilePathspecs({
     projectDirName: opts.projectDirName,
   });
@@ -62,7 +65,7 @@ export async function inspectTrackedGeneratedFiles(opts: {
   try {
     result = await exec(
       ["git", "-C", opts.projectRoot, "ls-files", "-z", "--", ...pathspecs],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs }
     );
   } catch {
     return null;
@@ -95,7 +98,7 @@ export async function inspectTrackedGeneratedFiles(opts: {
         "--",
         `${opts.projectDirName}/.env.*`,
       ],
-      { stdin: "ignore" }
+      { stdin: "ignore", timeoutMs }
     );
   } catch {
     return null;

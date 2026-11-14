@@ -35,7 +35,8 @@ normally `.hack/.env`, matching Hack's Compose project directory. An adjacent
 that `.env`, whether the state is current, stale or unreadable, rather than copy
 another selection's materialized values. The operator can use current Hack env
 layers and remove obsolete materialized output deliberately. A root `.env` outside
-the Compose directory is not read or refused solely for existing. Native does not
+the Compose directory is not read or refused solely for existing; start and
+preflight report once that it is ignored, without reading its contents. Native does not
 search another worktree or overlay dotenv. Every `.env` uses the same guards.
 
 Container precedence, highest first:
@@ -59,6 +60,11 @@ destination but are not ambient interpolation sources. For env-file expansion,
 that project context wins over resolved service `environment`, then current and
 earlier file assignments. A current file assignment replaces the previous file's
 assignment before the next line is read. `.env` alone injects no container variables.
+Service-environment defaults now select an allowed exported shell value before
+their authored fallback. Shell presence can change the normalized declaration
+from a public default expression to a private bare name, changing plan identity;
+the shell value itself never enters that identity. Unset the variable to retain
+the fallback. This also applies to projects without env files.
 Service-environment defaults resolve only against the project context: an env-file
 `HOST` does not replace `${HOST:-localhost}` with its file value. Defaults that
 reference newly file-backed names are frozen before runtime private ownership.
@@ -76,30 +82,40 @@ Support includes export prefixes, `=` and `:` separators in default format,
 comments, single-quoted literals, double-quoted escapes, multiline quoted values,
 `$NAME`, `${NAME}`, defaults (`-`, `:-`), alternatives (`+`, `:+`), required references
 (`?`, `:?`), nesting to four levels, and `$$`. An unset `${NAME}` yields empty with a
-names-only notice; required-reference errors omit the authored error word. Raw
+notice naming the destination key, file and assignment line; neither notices nor
+refusals print reference tokens extracted from a value. Required-reference errors
+omit the authored error word. Syntax refusals name the file and physical line.
+Identifiers must match `[A-Za-z_][A-Za-z0-9_]*`; dotted, dashed, leading-digit and
+Unicode identifiers refuse. Raw
 format follows the separately qualified Compose raw parser. Hack key material and
 `HACK_*` cannot enter containers via files or shell references. Authored public
 runtime-metadata literals keep their existing behavior. Cloud credential
 names are not read from the shell; explicit literal file entries remain available
 unless the selected credential adapter owns that service's name. Compose control
-names (`COMPOSE_FILE`, `COMPOSE_PROFILES`, `COMPOSE_PROJECT_NAME`, `COMPOSE_ENV_FILES`,
-`COMPOSE_DISABLE_ENV_FILE`)
+names (`COMPOSE_*`) and protected `HACK_*` keys
 in `.env` refuse with names only rather than silently change the selected project.
 
 The approved first unit resolves file values only in service `environment` and
-env-file values. If a public field references a name defined by `.env`, managed
+env-file values. In a project that declares `env_file` or has an adjacent `.env`,
+if a public field references a name defined by `.env`, managed
 global env or allowed shell input, it refuses before effects, even if the reference
-has a default. It must never silently select a different fallback. Public fields
+has a default. Unset the ambient source or write the intended public value
+literally. Projects with neither `env_file` nor adjacent `.env` retain their
+previous public-field behavior: `${PORT:-3000}` stays authored even when the
+caller exports `PORT`; the runtime uses its existing public default rules.
+Public fields
 include images, commands, ports, labels, mounts, users, healthchecks and builds.
 The lead approved this privacy boundary: materializing such values would otherwise
 put them in plans, argv or receipts.
 
 Start and `doctor --native-preflight` use the same parser, lookup, permissions and
 normalizer, including the same allow-listed shell environment and managed values.
-Preflight may therefore need the same project decryption key as start. It returns
+Preflight may therefore need the same project decryption key as start. A missing
+key produces a structured `managed_env_unreadable` blocker and recovery guidance;
+the report remains usable and continues other checks. It returns
 only names and paths. Missing required files, malformed input, unsafe reads and
 unsupported public interpolation produce closed diagnostics with service, field
-and source path only. Optional absent files produce no blocker. Parser excerpts,
+and source path, destination key and line where available. Optional absent files produce no blocker. Parser excerpts,
 interpolated error words and raw OS diagnostics never leave the boundary.
 
 The normalized document removes `env_file` and replaces file-derived environment
@@ -133,6 +149,13 @@ non-ASCII components are treated as potentially aliased whenever disjointness
 cannot be proved. Use separate build inputs, a prebuilt image, or Compose for
 overlapping projects. Disjoint contexts and ordinary builds with no env-file or
 dotenv input retain their behavior. Fresh selected-service exec does not build.
+The build-argument value guard keeps its existing policy: exact equality with
+any nonempty managed value explicitly marked `secret: true` refuses, with no
+minimum length. Plain env-file and shell values do not widen that guard because
+they have no secret metadata. `NODE_ENV=production` in an env file may coexist
+with the literal build argument `production`. Build arguments enter image
+history: never put a credential in a build argument merely because it came from
+a plain file. File-path separation still applies.
 Managed-env stale checks remain advisory and do not read ephemeral file inputs;
 file-value-only changes are not detected by their managed fingerprints.
 
@@ -150,3 +173,26 @@ change detection. Tests use sentinel values and recorded Docker Compose v5.6.1 /
 compose-go v2.16.1 results, alongside the documented [environment-file rules](https://compose-spec.github.io/compose-spec/05-services.html#env_file)
 and [interpolation rules](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/).
 Actual guest delivery is qualified separately on a Mac.
+
+## Changes for earlier v5 prereleases
+
+- `.hack/.env` is read on every native start and preflight, including when managed
+  env already exists. A symlink, other-owner file, group/other-writable file or
+  ancestor inside the project root refuses. Replace the symlink with an owned
+  regular file and deliberately correct permissions, or move values to managed
+  env. Remove `COMPOSE_*`/`HACK_*` entries; rename dotted or dashed identifiers
+  and their references to the accepted identifier form.
+- Service defaults take allowed shell values as described above. Public-field
+  interpolation gains the strict boundary only for file-enabled projects; use
+  literal public fields or remove the ambient source.
+- The former `dotenv_without_managed_env` refusal is removed. A project-root
+  `.env` outside the Compose directory is ignored with one notice. Move needed
+  variables beside Compose (normally `.hack/.env`) or into managed env.
+- Preflight now reads the caller's allowed environment and decrypts managed env.
+  Recover the existing project key when reported missing; do not generate a
+  replacement for existing ciphertext.
+
+Foreground notices go to stderr. Detached owners discard stderr rather than
+write it to a log file; only validated forwarded shell names and the fixed
+root-dotenv notice cross IPC to the caller. Tokens referenced only inside file
+values are excluded from the forwarded-names notice as well.

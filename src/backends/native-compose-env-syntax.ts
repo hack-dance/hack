@@ -22,6 +22,8 @@ const ESCAPES: Readonly<Record<string, string>> = {
 };
 
 export type ComposeEnvLookup = (name: string) => string | undefined;
+/** The destination assignment, never a name extracted from its private value. */
+export type ComposeEnvEntry = { readonly key: string; readonly line: number };
 
 /** All syntactic source names, including unselected words, without reading values. */
 export function composeEnvironmentReferences(
@@ -47,8 +49,12 @@ export function composeEnvironmentReferences(
 
 /** Closed failures never include the input, an authored error word or values. */
 export class NativeEnvSyntaxError extends Error {
-  constructor() {
-    super("Invalid or unresolved Compose environment input; values omitted.");
+  readonly line?: number;
+  constructor(line?: number) {
+    super(
+      `Invalid or unresolved Compose environment input${line === undefined ? "" : ` at line ${line}`}; values omitted.`
+    );
+    this.line = line;
   }
 }
 function invalid(): never {
@@ -337,27 +343,29 @@ function inheritBareFileName(opts: {
 export function parseComposeEnvironmentFile(opts: {
   readonly text: string;
   readonly raw?: boolean;
-  readonly lookup: ComposeEnvLookup;
+  readonly lookup: (name: string, entry: ComposeEnvEntry) => string | undefined;
   readonly initial?: ReadonlyMap<string, string>;
-  readonly onMissing?: (name: string) => void;
+  readonly onEntry?: (entry: ComposeEnvEntry) => void;
+  readonly onMissing?: (name: string, entry: ComposeEnvEntry) => void;
   /** Source admission after both project lookup and parsed-file assignments miss. */
-  readonly onUnresolved?: (name: string) => void;
+  readonly onUnresolved?: (name: string, entry: ComposeEnvEntry) => void;
 }): ReadonlyMap<string, string> {
-  if (Buffer.byteLength(opts.text) > MAX_BYTES || opts.text.includes("\0")) {
-    return invalid();
+  if (Buffer.byteLength(opts.text) > MAX_BYTES) {
+    throw new NativeEnvSyntaxError(1);
+  }
+  const nul = opts.text.indexOf("\0");
+  if (nul >= 0) {
+    throw new NativeEnvSyntaxError(opts.text.slice(0, nul).split("\n").length);
   }
   const result = new Map(opts.initial);
   const lines = opts.text.replace(BOM, "").replaceAll("\r\n", "\n").split("\n");
-  if (lines.length > MAX_LINES) {
-    return invalid();
+  // A final newline terminates the last physical line rather than adding one.
+  if (lines.at(-1) === "") {
+    lines.pop();
   }
-  const lookup = (name: string) => {
-    const found = opts.lookup(name) ?? result.get(name);
-    if (found === undefined) {
-      opts.onUnresolved?.(name);
-    }
-    return found;
-  };
+  if (lines.length > MAX_LINES) {
+    throw new NativeEnvSyntaxError(MAX_LINES + 1);
+  }
   for (let index = 0; index < lines.length; index += 1) {
     const line = (lines[index] ?? "").trimStart();
     if (line.trim() === "" || line.startsWith("#")) {
@@ -366,29 +374,48 @@ export function parseComposeEnvironmentFile(opts: {
     const entry = ENTRY.exec(line);
     const key = entry?.[1];
     if (key === undefined) {
-      return invalid();
+      throw new NativeEnvSyntaxError(index + 1);
     }
+    const location = { key, line: index + 1 };
+    opts.onEntry?.(location);
+    const external = (name: string) => opts.lookup(name, location);
+    const unresolved = (name: string) => opts.onUnresolved?.(name, location);
+    const lookup = (name: string) => {
+      const found = external(name) ?? result.get(name);
+      if (found === undefined) {
+        unresolved(name);
+      }
+      return found;
+    };
     if (opts.raw && entry?.[2] !== "=" && entry?.[2] !== undefined) {
-      return invalid();
+      throw new NativeEnvSyntaxError(location.line);
     }
     if (entry?.[2] === undefined) {
       inheritBareFileName({
         key,
-        lookup: opts.lookup,
+        lookup: external,
         values: result,
-        onUnresolved: opts.onUnresolved,
+        onUnresolved: unresolved,
       });
       continue;
     }
-    const decoded = dotenvValue({
-      raw: opts.raw ?? false,
-      line,
-      value: entry?.[3] ?? "",
-      lines,
-      start: index,
-      lookup,
-      onMissing: opts.onMissing,
-    });
+    let decoded: { readonly value: string; readonly end: number };
+    try {
+      decoded = dotenvValue({
+        raw: opts.raw ?? false,
+        line,
+        value: entry?.[3] ?? "",
+        lines,
+        start: index,
+        lookup,
+        onMissing: (name) => opts.onMissing?.(name, location),
+      });
+    } catch (error: unknown) {
+      if (error instanceof NativeEnvSyntaxError) {
+        throw new NativeEnvSyntaxError(location.line);
+      }
+      throw error;
+    }
     index = decoded.end;
     result.set(key, decoded.value);
   }

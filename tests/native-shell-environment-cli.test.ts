@@ -144,6 +144,9 @@ for (const mode of ["foreground", "detached", "json"] as const) {
     `native ${mode} up reports forwarded shell names and prints no value`,
     async () => {
       const f = await fixture();
+      await writeFile(join(f.project, ".env"), `ROOT_ONLY=${PRIVATE}\n`, {
+        mode: 0o600,
+      });
       const child = Bun.spawn(
         [
           process.execPath,
@@ -189,7 +192,7 @@ for (const mode of ["foreground", "detached", "json"] as const) {
       if (!detached) {
         expect(
           output.split(
-            "Service web: REGION is empty because FIXTURE_REGION is not set in the interpolation context.\n"
+            'Service web source ".hack/docker-compose.yml" key REGION: an unresolved input is empty.\n'
           )
         ).toHaveLength(2);
       }
@@ -197,6 +200,7 @@ for (const mode of ["foreground", "detached", "json"] as const) {
         stderr.split("Forwarding shell variables: FIXTURE_API_KEY, PASSED.\n")
       ).toHaveLength(2);
       expect(output).not.toContain("UNREFERENCED_PRIVATE");
+      expect(output.match(/Project-root \.env is ignored/g)).toHaveLength(1);
       // No value reaches the terminal.
       expect(output).not.toContain(PRIVATE);
       // The project passed the CLI's admission: the stub runtime was asked to start.

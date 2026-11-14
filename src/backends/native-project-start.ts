@@ -463,11 +463,13 @@ function reportNativeEnvironmentNotices(
         .flatMap(([, names]) => names)
     ),
   ].sort();
-  if (!nativeDetachedUpShellVariables(names)) {
+  if (
+    !nativeDetachedUpShellVariables(names, input.ignoredRootDotenv === true)
+  ) {
     warn(nativeShellForwardingNotice(names));
   }
   for (const notice of input.environmentNotices ?? []) {
-    if (active.has(notice.service)) {
+    if (notice.service === undefined || active.has(notice.service)) {
       warn(notice.line);
     }
   }

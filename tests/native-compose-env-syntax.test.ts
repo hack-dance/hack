@@ -14,6 +14,16 @@ const variables: Readonly<Record<string, string>> = {
 const lookup = (name: string) =>
   Object.hasOwn(variables, name) ? variables[name] : undefined;
 
+test("line budget counts physical lines including a terminated last assignment", () => {
+  const text = "KEY=value\n".repeat(4096);
+  expect(parseComposeEnvironmentFile({ text, lookup }).get("KEY")).toBe(
+    "value"
+  );
+  expect(() =>
+    parseComposeEnvironmentFile({ text: `${text}KEY=value\n`, lookup })
+  ).toThrow("line 4097");
+});
+
 test("source names include unselected branches while escaped dollars stay literal", () => {
   expect([
     ...composeEnvironmentReferences(

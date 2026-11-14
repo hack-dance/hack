@@ -2726,6 +2726,8 @@ fn finish_absent_locked(
             .sync_all()
             .map_err(io)?;
     }
+    #[cfg(target_os = "macos")]
+    super::interactive_session::after_boot_stopped(candidate, owner);
     phase(candidate, owner, value)
 }
 

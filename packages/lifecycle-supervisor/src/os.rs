@@ -172,7 +172,7 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
         libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,
-            0,
+            1, // XNU requires nonzero arg to search unreaped zombie records.
             info.as_mut_ptr().cast(),
             std::mem::size_of::<libc::proc_bsdinfo>() as i32,
         )
@@ -190,7 +190,15 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
     // SAFETY: the kernel initialized exactly the expected struct size above.
     let info = unsafe { info.assume_init() };
     // SAFETY: getsid only observes the named PID. ESRCH is an exit race.
-    let session = unsafe { libc::getsid(pid) };
+    let mut session = unsafe { libc::getsid(pid) };
+    if session < 0
+        && info.pbi_status == libc::SZOMB
+        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    {
+        // Darwin getsid can reject zombies even when libproc returns birth/UID.
+        // Preserve its immutable PID/birth, but never invent live membership.
+        session = 0;
+    }
     if session < 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
@@ -327,43 +335,72 @@ pub fn absent_error(error: &io::Error) -> bool {
         || matches!(error.raw_os_error(), Some(libc::ESRCH) | Some(libc::ENOENT))
 }
 
-/// Terminal receipts prove the guard finished its census. With no leader, a
-/// matching SID alone is insufficient: that number may belong to a later session.
-/// An observed member born by the recorded command birth anchors the old session.
-/// Missing legacy birth evidence or only newer members is unknown, never authority.
+fn incarnation_matches(expected: &Identity, current: &Identity) -> bool {
+    expected.pid == current.pid
+        && expected.start == current.start
+        && expected.uid == current.uid
+        && expected.session == current.session
+}
+
+/// PID/birth/UID pins the original zombie guard when Darwin getsid rejects it.
+/// Live leaders additionally require the recorded session.
+fn recorded_guard_matches(state: &crate::storage::State, p: &Identity) -> bool {
+    p.pid == state.guard_pid
+        && p.start == state.guard_start_time
+        && p.uid == state.uid
+        && (p.zombie || p.session == state.guard_pid)
+}
+
+/// Return one census with session identity proved across that census. A matching
+/// leader (including zombie) or exact recorded command birth is the witness.
+/// No ordering comparison uses Darwin's adjustable wall-clock start timestamps.
+fn recorded_members(state: &crate::storage::State) -> Result<Vec<Identity>> {
+    for _ in 0..2 {
+        if matches!(state.phase.as_str(), "exited" | "killed" | "failed-start")
+            || state.boot_id != boot()?
+        {
+            return Ok(Vec::new());
+        }
+        let leader = inspect(state.guard_pid)?;
+        if let Some(p) = &leader
+            && !recorded_guard_matches(state, p)
+        {
+            return Ok(Vec::new());
+        }
+        let members: Vec<_> = census()?
+            .into_iter()
+            .filter(|p| p.session == state.guard_pid && !p.zombie)
+            .collect();
+        if members.is_empty() {
+            return Ok(members);
+        }
+        let witness = leader
+            .as_ref()
+            .or_else(|| {
+                members.iter().find(|p| {
+                    Some(p.pid) == state.command_pid
+                        && Some(p.start) == state.command_start_time
+                        && p.uid == state.uid
+                })
+            })
+            .ok_or_else(refused)?;
+        // Recheck after enumeration: the witness held the SID throughout the census.
+        if !inspect(witness.pid)?.as_ref().is_some_and(|p| {
+            if witness.pid == state.guard_pid {
+                recorded_guard_matches(state, p)
+            } else {
+                incarnation_matches(witness, p)
+            }
+        }) {
+            continue;
+        }
+        return Ok(members);
+    }
+    Err(refused())
+}
+
 pub fn recorded_live(state: &crate::storage::State, excluding_guard: bool) -> Result<bool> {
-    if matches!(state.phase.as_str(), "exited" | "killed" | "failed-start")
-        || state.boot_id != boot()?
-    {
-        return Ok(false);
-    }
-    let leader = inspect(state.guard_pid)?;
-    if let Some(identity) = &leader
-        && (identity.start != state.guard_start_time
-            || identity.uid != state.uid
-            || identity.session != state.guard_pid)
-    {
-        return Ok(false);
-    }
-    let members: Vec<_> = census()?
-        .into_iter()
-        .filter(|p| p.session == state.guard_pid && !p.zombie)
-        .collect();
-    if members.is_empty() {
-        return Ok(false);
-    }
-    if leader.is_none_or(|p| p.zombie)
-        && !members.iter().any(|p| {
-            p.uid == state.uid
-                && p.start >= state.guard_start_time
-                && state
-                    .command_start_time
-                    .is_some_and(|birth| p.start <= birth)
-        })
-    {
-        return Err(refused());
-    }
-    Ok(members
+    Ok(recorded_members(state)?
         .iter()
         .any(|p| !excluding_guard || p.pid != state.guard_pid))
 }
@@ -383,9 +420,7 @@ pub fn observe_state(state: &crate::storage::State) -> Observation {
         }
         let leader = inspect(state.guard_pid)?;
         if let Some(identity) = &leader
-            && (identity.start != state.guard_start_time
-                || identity.uid != state.uid
-                || identity.session != state.guard_pid)
+            && !recorded_guard_matches(state, identity)
         {
             return Ok(Observation::Absent);
         }
@@ -446,7 +481,8 @@ fn signal_member(expected: &Identity, signal: i32) -> Result<()> {
         let Some(current) = inspect(expected.pid)? else {
             return Ok(());
         };
-        if current.start != expected.start
+        if current.zombie
+            || current.start != expected.start
             || current.session != expected.session
             || current.uid != expected.uid
         {
@@ -475,7 +511,8 @@ fn signal_member(expected: &Identity, signal: i32) -> Result<()> {
         let Some(current) = inspect(expected.pid)? else {
             return Ok(());
         };
-        if current.start != expected.start
+        if current.zombie
+            || current.start != expected.start
             || current.session != expected.session
             || current.uid != expected.uid
         {
@@ -695,26 +732,49 @@ pub fn wait_activity(fds: &[i32], timeout: std::time::Duration) -> Result<()> {
     Ok(())
 }
 
-/// A dead leader's SID cannot be reused while any old session member remains.
-/// Validate the receipt and each incarnation again before individual delivery.
-/// Never use group delivery here: a group number can outlive its observed members.
-pub fn signal_recorded_session(state: &crate::storage::State, signal: i32) -> Result<()> {
-    if !recorded_live(state, false)? {
-        return Ok(());
-    }
-    for member in census()?
-        .into_iter()
-        .filter(|p| p.session == state.guard_pid && !p.zombie)
-    {
-        if member.uid != state.uid || member.start < state.guard_start_time {
+/// In-memory authority captured while a witness holds the old SID. It survives
+/// witness exit but never grants authority over a later, unobserved incarnation.
+/// A new stop invocation must establish its own witness again.
+pub struct Recovery {
+    session: i32,
+    members: Vec<Identity>,
+}
+
+impl Recovery {
+    pub fn capture(state: &crate::storage::State) -> Result<Self> {
+        let members: Vec<_> = recorded_members(state)?
+            .into_iter()
+            .filter(|p| p.pid != state.guard_pid)
+            .collect();
+        if members.iter().any(|p| p.uid != state.uid) {
             return Err(refused());
         }
-        if !recorded_live(state, false)? {
-            return Ok(());
-        }
-        signal_member(&member, signal)?;
+        Ok(Self {
+            session: state.guard_pid,
+            members,
+        })
     }
-    Ok(())
+
+    pub fn signal(&self, signal: i32) -> Result<()> {
+        for member in &self.members {
+            signal_member(member, signal)?;
+        }
+        Ok(())
+    }
+
+    pub fn live(&self) -> Result<bool> {
+        for member in &self.members {
+            if inspect(member.pid)?.is_some_and(|p| !p.zombie && incarnation_matches(member, &p)) {
+                return Ok(true);
+            }
+        }
+        // Unobserved descendants or an unrelated reused session cannot be
+        // signalled by this snapshot, and must not be claimed as stopped.
+        if live_group(self.session, Some(self.session))? {
+            return Err(refused());
+        }
+        Ok(false)
+    }
 }
 
 /// A successful census must contain our own readable identity. Known restricted
@@ -807,6 +867,46 @@ pub fn timestamp() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zombie_guard_birth_survives_discarded_exit_metadata() {
+        let state = crate::storage::State {
+            version: 1,
+            name: "worker".into(),
+            display_name: None,
+            owner_token: "synthetic".into(),
+            guard_pid: 44,
+            process_group_id: 44,
+            guard_start_time: 100,
+            boot_id: String::new(),
+            uid: 501,
+            command_pid: None,
+            command_start_time: None,
+            phase: "running".into(),
+            exit_code: None,
+            signal: None,
+        };
+        let mut identity = super::Identity {
+            pid: 44,
+            group: 0,
+            session: 0,
+            start: 100,
+            uid: 501,
+            zombie: true,
+        };
+        assert!(super::recorded_guard_matches(&state, &identity));
+        identity.start += 1;
+        assert!(!super::recorded_guard_matches(&state, &identity));
+        identity.start = 100;
+        identity.uid = 0;
+        assert!(!super::recorded_guard_matches(&state, &identity));
+        identity.uid = state.uid;
+        identity.zombie = false;
+        assert!(!super::recorded_guard_matches(&state, &identity));
+        identity.uid = state.uid;
+        identity.session = state.guard_pid;
+        assert!(super::recorded_guard_matches(&state, &identity));
+    }
+
     #[test]
     fn flock_interruption_retries_but_other_errors_do_not() {
         let mut calls = 0;

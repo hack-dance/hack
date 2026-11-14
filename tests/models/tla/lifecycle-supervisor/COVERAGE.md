@@ -13,7 +13,7 @@ standalone Rust binary exercised by a fake caller; the CLI remains unchanged.
 | `ProcessExit`, `Reap` | Session census ignores zombies; reap direct/adopted children; release lock after no live members | Zombie liveness; child changes process group within session |
 | `StopUnknown` | Bounded confirmation can report uncertainty while live members remain | Honest unknown recovery outcome, never successful absence |
 
-Positive TLC exploration: 168 distinct states, queue exhausted, depth 11. Negative
+Positive TLC exploration: 426 distinct states, queue exhausted, depth 14. Negative
 control sets `SkipLiveFence = TRUE`; `Retry` then violates `NoDuplicate` with live,
 durable and duplicate all true in the same state. Both guard-loss and project-loss
 traces can witness this violation; the registry requires the named action and
@@ -25,7 +25,7 @@ validates the negative invariant/action/witness. Apalache is not qualified here.
 
 The guard-owned Stop and Kill checks still assume matching identity. The added
 orphan signal admission is exercised by a separate SID-reuse negative control.
-The orphan path includes an environment SID-reuse action and requires an old-birth
+The orphan path includes an environment SID-reuse action and requires an exact recorded incarnation
 witness, represented by matching identity. The sid-reuse negative control removes
 that witness guard and must violate NoForeignSignal at RecoverOrphan with identity
 sid-reused. Native clock units, enumeration and identity-to-effect races are omitted. `GuardRetainsLock` similarly checks the abstract action
@@ -52,7 +52,8 @@ Native recovery added after this abstraction is deliberately not claimed as mode
 coverage: dead-guard TERM/grace/KILL recovery, supervisor death before guard
 publication, inherited launch-admission lease, stop/exit inspection races, census
 errors and restricted views, high descriptor limits, EINTR retries, and idle
-poll scheduling. RecoverOrphan models signal admission only, not grace, KILL timing or confirmation.
+poll scheduling. RecoverOrphan and OrphanKill model capture, witness loss and KILL admission;
+wall-clock grace timing and native confirmation remain implementation tests.
 ReuseSessionID represents a later survivor after its replacement leader exits. Native regressions include
 `dead_guard_with_live_session_recovers_term_then_kill`,
 `supervisor_and_guard_prepublication_crashes_keep_stop_admission_leased`,
@@ -75,3 +76,31 @@ regression creates a dead session leader and surviving child, then relocates
 a stale receipt SID to reproduce reuse without forcing the host PID allocator
 to wrap. It checks terminal absence, non-terminal unknown without signals, and
 fresh-owner launch after a terminal receipt.
+
+Orphan recovery now models WitnessExit after RecoverOrphan captured the old
+incarnations. OrphanKill remains enabled after witness loss; the implementation
+retains those exact identities through its grace/KILL loop. RecoveryAuthorityRetained
+and OrphanKillEnabled check that availability boundary. The witness-loss negative
+control deliberately clears the captured snapshot on WitnessExit and must violate
+RecoveryAuthorityRetained with live work and no snapshot. SID reuse may follow
+an emptied session even during stopping; the old snapshot never authorizes a
+new incarnation. The native wrapper/TERM-ignoring-child regression checks this
+sequence with real processes. New descendants not in the snapshot remain an
+uncovered recovery/unknown boundary; no eventual-exit claim is made.
+
+Stop now captures members while a live guard proves ownership as well. GuardDeath
+retains the stopping phase, and WitnessExit may happen before or after guard loss.
+The native guard_lost_mid_stop_keeps_admission_snapshot regression kills the guard
+after TERM ended its wrapper and checks KILL and confirmed absence for its child.
+
+Recovery deadlines are not modeled: each recovered target receives a fresh five-second
+TERM grace plus two seconds for confirmation, independently of the original guard
+wait. guard_lost_late_in_stop_gets_full_recovery_deadline kills the guard three
+seconds after wrapper death and checks successful KILL confirmation and child absence; the early-loss variant checks the same boundary without delay.
+Live-guard admission snapshots are best-effort; a denied census does not prevent
+the guard-owned shutdown path. Orphan capture stays strict (unit-tested admission seam).
+
+The census-to-guard-loss handoff and multi-target timeout scheduling are native
+implementation boundaries, not modeled. guarded_live rechecks guard loss after
+a failed census. expired_target_does_not_abandon_other_recovery checks that one
+paused guard timing out does not prevent another target from completing KILL.

@@ -32,9 +32,13 @@ function matches(activityCount: number, existingConfig = false) {
 }
 async function install() {
   await mkdir(hackHome, { mode: 0o700 });
-  await writeFile(activity, '{"action":"up","outcome":"failed"}\n', {
-    mode: 0o600,
-  });
+  await writeFile(
+    activity,
+    '{"action":"up","outcome":"failed","project":null}\n',
+    {
+      mode: 0o600,
+    }
+  );
 }
 
 test("offline planning is empty and lifecycle activity requires the exact count and outcome", async () => {
@@ -47,8 +51,13 @@ test("offline planning is empty and lifecycle activity requires the exact count 
     '{"action":"up","outcome":"ok"}',
     '{"action":"down","outcome":"failed"}',
     "invalid",
-    '{"action":"up","outcome":"failed","detail":"synthetic-private-value"}',
-    JSON.stringify({ action: "up", outcome: "failed", detail: home }),
+    '{"action":"up","outcome":"failed","project":null,"detail":"synthetic-private-value"}',
+    JSON.stringify({
+      action: "up",
+      outcome: "failed",
+      project: null,
+      detail: home,
+    }),
   ]) {
     await writeFile(activity, text);
     expect(await matches(1)).toBe(false);
@@ -77,9 +86,13 @@ test("activity must be a private regular file under a protected directory", asyn
   await chmod(hackHome, 0o700);
   await rm(activity);
   const target = join(hackHome, "hack.config.json");
-  await writeFile(target, '{"action":"up","outcome":"failed"}', {
-    mode: 0o600,
-  });
+  await writeFile(
+    target,
+    '{"action":"up","outcome":"failed","project":null}\n',
+    {
+      mode: 0o600,
+    }
+  );
   await symlink(target, activity);
   expect(await matches(1, true)).toBe(false);
 });
@@ -89,9 +102,13 @@ test("routing fixtures may retain only their explicitly supplied config", async 
   await writeFile(join(hackHome, "hack.config.json"), "{}");
   expect(await matches(0)).toBe(false);
   expect(await matches(0, true)).toBe(true);
-  await writeFile(activity, '{"action":"up","outcome":"failed"}', {
-    mode: 0o600,
-  });
+  await writeFile(
+    activity,
+    '{"action":"up","outcome":"failed","project":null}\n',
+    {
+      mode: 0o600,
+    }
+  );
   expect(await matches(1, true)).toBe(true);
   await writeFile(join(hackHome, "projects.json"), "{}");
   expect(await matches(1, true)).toBe(false);

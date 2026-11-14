@@ -1,9 +1,32 @@
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
+import { assertNativePlanHome } from "./native-plan-home.ts";
 
 /** Exact offline fixture state: planning writes nothing; failed up may add private activity only. */
 export async function nativePlanHomeMatches(opts: {
+  readonly home: string;
+  readonly activityCount: number;
+  readonly existingConfig?: boolean;
+  readonly privateValues: readonly string[];
+}): Promise<boolean> {
+  if (!(await privateNativePlanHomeMatches(opts))) {
+    return false;
+  }
+  try {
+    await assertNativePlanHome({
+      home: opts.home,
+      failedUps: opts.activityCount,
+      preparedHackFiles: opts.existingConfig ? ["hack.config.json"] : [],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Bound and authenticate state before the shared record-level verifier reads it. */
+async function privateNativePlanHomeMatches(opts: {
   readonly home: string;
   readonly activityCount: number;
   readonly existingConfig?: boolean;

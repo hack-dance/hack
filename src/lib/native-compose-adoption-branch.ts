@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { noteActivityBranch } from "./activity-log.ts";
 import { isRecord } from "./guards.ts";
 import { readNativeConfigImportSourceFile } from "./native-config-import-inputs.ts";
 import { parseImportDocument } from "./native-config-import-parser.ts";
@@ -209,6 +210,9 @@ export async function acquireLegacyComposeBranch(opts: {
     signal: opts.signal,
   });
   const branch = selected.branch;
+  // An adopted project's lifecycle commands select their instance here, not
+  // through the ordinary branch resolver: name it in the activity record.
+  noteActivityBranch(branch ?? null);
   if (!branch) {
     if (opts.saved || opts.requestedBranch !== undefined) {
       refuse();

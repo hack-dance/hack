@@ -11,11 +11,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readActivity, recordActivity } from "../src/lib/activity-log.ts";
 import { acquireLegacyComposeBranch } from "../src/lib/native-compose-adoption-branch.ts";
 import { planLegacyComposeAdoption } from "../src/lib/native-compose-adoption-plan.ts";
 import * as importInputs from "../src/lib/native-config-import-inputs.ts";
 import { mapLegacyNativeBranchStorageAdoption } from "../src/lib/native-config-import-plan.ts";
 import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let root: string;
 const configText = JSON.stringify({
@@ -169,5 +171,30 @@ test("a same-inode branch directory permission drift refuses a saved owner", asy
   } finally {
     reader.mockRestore();
     await chmod(directory, original.mode & 0o777);
+  }
+});
+
+test("an adopted project's selected branch is the one its activity record names (HACK-2218)", async () => {
+  const saved = process.env.HACK_HOME;
+  process.env.HACK_HOME = join(root, "hack-home");
+  try {
+    await recordActivity({
+      action: "up",
+      project: async () => "fixture",
+      run: async () => {
+        // The instance is noted as soon as it is selected; a later identity
+        // refusal (a failed action) still names the instance it targeted.
+        await acquireLegacyComposeBranch({
+          root,
+          configText,
+          composeText,
+          requestedBranch: "feature/api",
+        }).catch(() => null);
+        return 0;
+      },
+    });
+    expect((await readActivity({ limit: 1 }))[0]?.branch).toBe("feature-api");
+  } finally {
+    restoreEnv("HACK_HOME", saved);
   }
 });

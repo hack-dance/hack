@@ -176,10 +176,13 @@ impl Container {
         self.status.contains("(unhealthy)")
     }
 
-    /// Exit code from a status like `Exited (1) 3 minutes ago`.
+    /// Exit code from Docker's exited or restarting status text.
     #[must_use]
     pub fn exit_code(&self) -> Option<i32> {
-        let rest = self.status.strip_prefix("Exited (")?;
+        let rest = self
+            .status
+            .strip_prefix("Exited (")
+            .or_else(|| self.status.strip_prefix("Restarting ("))?;
         rest.split(')').next()?.trim().parse().ok()
     }
 

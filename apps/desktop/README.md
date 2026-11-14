@@ -26,7 +26,7 @@ libvulkan-dev`.
 ```sh
 cd apps/desktop
 cargo test -p hack-desktop-core          # no daemon, Docker or Hack home needed
-cargo run -p hack-desktop                # live: hackd, else `hack projects --json`
+cargo run -p hack-desktop                # live: matching hackd; otherwise needs R18
 cargo run -p hack-desktop -- --list-fixtures
 cargo run -p hack-desktop -- --fixtures failed-start --theme dark
 ```
@@ -39,10 +39,19 @@ cargo run -p hack-desktop-core --bin hack-desktop-state -- --project <name>
 ```
 
 `hack-desktop-state` reads exactly what the window reads: hackd when its version
-matches the CLI, otherwise `hack projects --json`, plus native `hack ps` for
-native projects. It applies that to the same view model and prints the list and
+matches the CLI, plus native `hack ps` for native projects. Today's CLI listing
+auto-registers runtime projects and writes the registry, so it is never used as
+a fallback. Without a matching daemon the reader reports Unknown / needs R18
+(observe-only projects), rather than writing or claiming no projects exist.
+It applies that to the same view model and prints the list and
 each project's detail as JSON. It runs no action, opens no window and writes
 nothing.
+
+Live reads refresh every two seconds with a matching daemon and retry every ten
+seconds when unavailable. Every request has an order token: a read started before
+an action finishes cannot clear its failure, and an older result cannot replace a
+newer one. Restarting/dead containers are failures; created/paused containers
+without a running service remain Unknown, even when the CLI summary says stopped.
 
 Every designed state has a fixture (`loading`, `empty`, `daemon-down`, `many-projects`,
 `daemon-mismatch`, `engine-down`, `error`, `cli-missing`, `stopped`, `starting`,
@@ -102,8 +111,9 @@ CoreDNS forwarding. Linux requires `linux dns route`. Missing checks stay Unknow
 Only the explicit `local ca trust` check can prove Compose trust; `caddy local ca`
 only proves export. Older CLIs without R16 leave trust Unknown.
 
-Setup observes with `projects --json --no-daemon`, native `ps`, `daemon status
---json`, socket status and bounded Doctor reads. It never observes through
+Setup observes with a version-matched hackd snapshot, native `ps`, `daemon status
+--json`, socket status and bounded Doctor reads. CLI project listing is refused
+until R18 because it writes the registry; unavailable project coverage stays Unknown. It never observes through
 `global status`. A setup refresh has a 120-second budget (plus the bounded socket
 read); individual commands and Doctor cleanup also have deadlines. Native checks
 not reached within the budget remain Unknown. `running` plus the socket version

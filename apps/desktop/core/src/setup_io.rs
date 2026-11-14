@@ -46,18 +46,14 @@ impl LiveSource {
                 setup::Platform::current(),
             );
         }
-        let mut projects = if left().is_zero() {
-            None
-        } else {
-            runner
-                .run_json::<serde_json::Value>(
-                    &["projects", "--json", "--no-daemon"],
-                    None,
-                    Duration::from_secs(15).min(left()),
-                )
-                .ok()
-                .and_then(|v| crate::models::ProjectsPayload::from_value(v).ok())
-        };
+        // CLI projects writes the registry even with --no-daemon. Until R18,
+        // only a matching daemon snapshot is allowed, including during setup.
+        let socket = self.daemon.as_ref().and_then(|d| d.status().ok());
+        let mut projects = socket
+            .as_ref()
+            .filter(|s| cli.as_ref().is_ok_and(|v| v == &s.version))
+            .and(self.daemon.as_ref())
+            .and_then(|d| d.projects().ok());
         if let Some(p) = &mut projects {
             for row in p.projects.iter_mut().filter(|p| p.is_native()) {
                 if let Some(root) = &row.repo_root
@@ -86,7 +82,6 @@ impl LiveSource {
                 )
                 .ok()
         };
-        let socket = self.daemon.as_ref().and_then(|d| d.status().ok());
         let targets = projects
             .as_ref()
             .map(DoctorTarget::from_projects)

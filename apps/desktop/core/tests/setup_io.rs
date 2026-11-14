@@ -63,6 +63,10 @@ esac
         Status::Unknown
     );
     let read_calls = std::fs::read_to_string(&calls).unwrap();
+    assert!(
+        !read_calls.contains("projects"),
+        "registry-writing listing is refused"
+    );
     assert!(!read_calls.contains("global"));
     assert!(!read_calls.contains("daemon start"));
     let out = source.setup_action(SafeAction::StartDaemon);

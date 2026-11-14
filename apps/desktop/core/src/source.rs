@@ -24,6 +24,20 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Cache-backed reads refresh quickly; unavailable or mismatched
+    /// daemon reads retry slowly, without spawning a registry writer.
+    #[must_use]
+    pub fn poll_interval(snapshot: Option<&Self>) -> Duration {
+        if snapshot.is_some_and(|s| {
+            s.daemon
+                .as_ref()
+                .is_some_and(|d| d.version == s.cli_version)
+        }) {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(10)
+        }
+    }
     /// hackd runs, but at another version than the CLI.
     #[must_use]
     pub fn daemon_mismatch(&self) -> Option<&str> {
@@ -183,7 +197,8 @@ fn read_doctor(
     serde_json::from_value(v).map_err(|e| e.to_string())
 }
 
-/// Live data: hackd when its version matches the CLI, else the CLI.
+/// Live data from a matching hackd. CLI listing fallback needs R18:
+/// today's `projects` command auto-registers projects and writes the registry.
 pub struct LiveSource {
     pub runner: CliRunner,
     pub daemon: Option<DaemonClient>,
@@ -322,21 +337,11 @@ impl Source for LiveSource {
             .filter(|d| d.version == cli_version)
             .and(self.daemon.as_ref())
             .and_then(|d| d.projects().ok());
-        let mut projects: ProjectsPayload = match from_daemon {
-            Some(p) => p,
-            None => {
-                let v: serde_json::Value = self.runner.run_json(
-                    &["projects", "--json", "--no-daemon"],
-                    None,
-                    Self::READ,
-                )?;
-                ProjectsPayload::from_value(v).map_err(|message| SourceError::Cli {
-                    code: "E_APP_BAD_OUTPUT".into(),
-                    message,
-                    failed: vec![],
-                })?
-            }
-        };
+        let mut projects = from_daemon.ok_or_else(|| SourceError::Cli {
+            code: "E_APP_OBSERVE_UNAVAILABLE".into(),
+            message: "Could not read a matching hackd snapshot. CLI fallback needs R18 (observe-only projects); today's listing writes the registry.".into(),
+            failed: vec![],
+        })?;
         // Project views do not read native projects; ask native ps for each.
         let native = self.runner_for(true);
         for row in projects.projects.iter_mut().filter(|r| r.is_native()) {
@@ -608,8 +613,44 @@ impl Source for FixtureSource {
 mod tests {
     use super::*;
 
-    /// Live source against a fake `hack` (no daemon socket): the CLI
-    /// fallback is used, and native rows are read with the native backend.
+    fn fake_daemon(projects: &str) -> (DaemonClient, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::os::unix::{fs::DirBuilderExt, net::UnixListener};
+        let dir = PathBuf::from(format!(
+            "/tmp/hds-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let socket = dir.join("s");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let projects = projects.to_owned();
+        let handle = std::thread::spawn(move || {
+            for body in [r#"{"status":"ok","version":"5.0.0"}"#.to_owned(), projects] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut buf = [0; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET /v1/"));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+        (DaemonClient::new(socket, Duration::from_secs(2)), handle)
+    }
+
+    /// A trusted fake daemon provides rows; only native ps uses the fake CLI.
     #[test]
     fn live_source_reads_native_rows_with_native_backend() {
         use std::os::unix::fs::PermissionsExt;
@@ -635,16 +676,17 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (daemon, server) = fake_daemon(
+            r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","backend":"native"}]}"#,
+        );
         let src = LiveSource {
             runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
-            daemon: Some(DaemonClient::new(
-                dir.join("none.sock"),
-                Duration::from_millis(100),
-            )),
+            daemon: Some(daemon),
         };
         let snap = src.snapshot().unwrap();
+        server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(snap.daemon.is_none());
+        assert!(snap.daemon.is_some());
         let nat = snap
             .projects
             .projects
@@ -684,14 +726,16 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (daemon, server) = fake_daemon("{}");
         let src = LiveSource {
             runner: CliRunner::new(&hack),
-            daemon: None,
+            daemon: Some(daemon),
         };
         let r = src.snapshot();
+        server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
-            matches!(&r, Err(SourceError::Cli { code, .. }) if code == "E_APP_BAD_OUTPUT"),
+            matches!(&r, Err(SourceError::Cli { code, .. }) if code == "E_APP_OBSERVE_UNAVAILABLE"),
             "{r:?}"
         );
     }

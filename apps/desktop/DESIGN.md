@@ -42,8 +42,8 @@ detail pane, status bar. Light and dark follow the system
 | Loading | First read in flight | Three skeleton rows | none |
 | Loaded | `projects[]` non-empty | Groups Running / Stopped; dot per row (green running, amber degraded, grey stopped, red failed or needs attention, grey "?" unknown); "always on" mark | Select row |
 | Empty | Registry has no projects | "No projects yet" + `cd your-repo && hack init` | Copy command, open docs |
-| Daemon not running | `/v1/status` unreachable | List loads through the CLI; banner "hackd is off: status refreshes slowly" | Start hackd |
-| Daemon other version | `/v1/status.version` ≠ CLI version | CLI fallback; banner "hackd vX, CLI vY" | Restart hackd |
+| Daemon not running | `/v1/status` unreachable | Unknown; last good list kept stale. Fallback needs R18: today's CLI listing writes the registry. Retry every 10 s. | Start hackd |
+| Daemon other version | `/v1/status.version` ≠ CLI version | Unknown; fallback needs R18. Last good list kept stale. Retry every 10 s. | Restart hackd |
 | Docker not reachable | `runtime_ok: false` (Docker observation only) | Compose rows keep names, dots "?"; native rows keep their own state from native `ps`; banner with `runtime_error` | Open Docker help |
 | CLI missing or too old | `hack` not on PATH, or outside the supported range | Full-pane card instead of the list; status bar shows no engine/hackd state | Copy install command |
 | Error | CLI exit ≠ 0 or bad JSON | Banner with `code` and `message`; last good list kept, marked stale with its age | Retry, copy error |
@@ -299,7 +299,7 @@ because the unhealthy states live there.
 
 | Screen | Reads | How often | Timeout |
 |---|---|---|---|
-| Sidebar, header | `GET /v1/projects` if `/v1/status.version` matches the CLI, else `hack projects --json --no-daemon`; native rows add `HACK_RUNTIME_BACKEND=native hack ps --json --path` | 2 s with hackd, 10 s without; and after every action | 3 s / 15 s |
+| Sidebar, header | `GET /v1/projects` if `/v1/status.version` matches the CLI; otherwise Unknown until R18 provides observe-only CLI listing. Native rows add `HACK_RUNTIME_BACKEND=native hack ps --json --path` | 2 s with hackd, 10 s without; and after every action | 3 s / 15 s |
 | Services CPU/memory | `hack usage --json --details` (until R3) | 5 s while visible | 10 s |
 | Logs | `hack logs --json --path <root> [<service>] --tail 500` (one long-running child) | stream | killed on tab change |
 | Env | `hack env list --json --path <root>` | on tab open, after env actions | 10 s |
@@ -309,7 +309,7 @@ because the unhealthy states live there.
 | Upgrades | R14 daily; `hack upgrade check --json` on Review | daily / on demand | 30 s / 60 s |
 | Actions | `hack up -d --json`, `down --json`, `restart --json`, `open --json`, `daemon start\|restart\|install` (exit code), `autostart …` | on click | `up`/`down`/`restart`: none; the app waits for the CLI, which owns their timeouts (after 6 h it only shows a warning), 2 min others |
 
-The 23 numbered requests (R1–R17) this design needs from the CLI and daemon are in
+The 24 numbered requests (R1–R18) this design needs from the CLI and daemon are in
 [Appendix C](#appendix-c-requests-to-the-cli-and-daemon).
 
 ## 8. Scope
@@ -391,3 +391,4 @@ Each is small enough for one PR.
 21. **R15** `--json` for `hack daemon start|stop|restart|install`.
 22. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
 23. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.
+24. **R18** Observe-only project listing, including registered native projects: no auto-registration, `lastSeenAt` updates or registry writes. Until it exists, the desktop refuses CLI listing fallback and reports Unknown when a matching hackd snapshot is unavailable.

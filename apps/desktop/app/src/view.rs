@@ -35,7 +35,6 @@ use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase,
 #[path = "setup_controller.rs"]
 mod setup_controller;
 
-const POLL: Duration = Duration::from_secs(2);
 const TAIL_LINES: u32 = 20;
 
 pub struct HackApp {
@@ -272,7 +271,9 @@ impl HackApp {
     fn start_polling(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                let Ok(source) = this.update(cx, |this, _| this.source.clone()) else {
+                let Ok((source, token)) = this.update(cx, |this, _| {
+                    (this.source.clone(), this.model.begin_refresh())
+                }) else {
                     return;
                 };
                 let snap = cx
@@ -284,7 +285,9 @@ impl HackApp {
                     .await;
                 let root = this
                     .update(cx, |this, cx| {
-                        this.apply_snapshot(snap, cx);
+                        if !this.apply_snapshot(token, snap, cx) {
+                            return None;
+                        }
                         this.follow.then(|| this.selected_root()).flatten()
                     })
                     .ok()
@@ -303,7 +306,10 @@ impl HackApp {
                         }
                     });
                 }
-                cx.background_executor().timer(POLL).await;
+                let delay = this
+                    .update(cx, |this, _| this.model.poll_interval())
+                    .unwrap_or(Duration::from_secs(10));
+                cx.background_executor().timer(delay).await;
             }
         })
         .detach();
@@ -357,12 +363,15 @@ impl HackApp {
 
     fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
         let source = self.source.clone();
+        let token = self.model.begin_refresh();
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
                 .spawn(async move { source.snapshot() })
                 .await;
-            let _ = this.update(cx, |this, cx| this.apply_snapshot(snap, cx));
+            let _ = this.update(cx, |this, cx| {
+                this.apply_snapshot(token, snap, cx);
+            });
         })
         .detach();
     }
@@ -370,12 +379,20 @@ impl HackApp {
     /// Apply a polled snapshot. A new, removed or moved project (or a
     /// project list that becomes readable) makes a shown Doctor result
     /// stale, so a visible Doctor pane checks again.
-    fn apply_snapshot(&mut self, snap: Result<Snapshot, SourceError>, cx: &mut Context<Self>) {
-        self.model.apply(Event::Refreshed(snap));
+    fn apply_snapshot(
+        &mut self,
+        token: hack_desktop_core::viewmodel::RefreshToken,
+        snap: Result<Snapshot, SourceError>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.model.finish_refresh(token, snap) {
+            return false;
+        }
         let current = self.doctor_target_keys();
         self.doctor.targets_seen(current.as_deref());
         self.maybe_auto_refresh(cx);
         cx.notify();
+        true
     }
 }
 

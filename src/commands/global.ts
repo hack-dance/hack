@@ -61,6 +61,7 @@ import {
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
+import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import { observeGlobalCaddyIp } from "../lib/caddy-hosts.ts";
 import {
   resolveGlobalConfigPath,
@@ -92,6 +93,8 @@ import {
 } from "../lib/interactivity.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import { createLinuxDnsHost } from "../lib/linux-dns-host.ts";
+import { createLinuxTrustHost } from "../lib/linux-trust-host.ts";
+import { prepareLinuxSystemTrust } from "../lib/linux-trust-setup.ts";
 import {
   buildHackHostTrustEnvironment,
   renderHackHostTrustShellExports,
@@ -99,10 +102,7 @@ import {
   resolveHackHostTrustEnvScriptPath,
   resolveHackLocalCaCertPath,
 } from "../lib/local-ca.ts";
-import {
-  checkMacCaTrust,
-  inspectMacCaEligibility,
-} from "../lib/mac-ca-trust.ts";
+import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
 import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
@@ -146,6 +146,7 @@ import {
   formatDockerConnectionGuidance,
 } from "../lib/runtime-guidance.ts";
 import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts";
+import { createTrustedDockerExec } from "../lib/trusted-docker.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalAlloyConfig,
@@ -167,6 +168,11 @@ import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
 import {
+  type AdminPlan,
+  planGlobalTrust,
+  type TrustPlanDeps,
+} from "./global-admin-plan.ts";
+import {
   bootstrapLinuxGlobalDns,
   inspectLinuxGlobalDns,
   linuxDnsStatusPayload,
@@ -178,6 +184,10 @@ import {
   type LinuxTrustResult,
 } from "./global-linux-trust.ts";
 import { observeMacHostDns } from "./global-mac-dns.ts";
+import {
+  ensureMacTrustCaddyLocalCa,
+  prepareMacTrust,
+} from "./global-mac-trust.ts";
 import {
   inspectProxyNetwork,
   proxyNetworkStatusPayload,
@@ -413,12 +423,20 @@ type GlobalStatusArgs = CommandArgs<
   readonly []
 >;
 
+const optAdminPlan = defineOption({
+  name: "plan",
+  type: "boolean",
+  long: "--plan",
+  description:
+    "Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json)",
+} as const);
+
 const globalTrustSpec = defineCommand({
   name: "trust",
   summary:
     "Trust Caddy Local CA (macOS keychain; Linux trust store and NSS) so https://*.hack is trusted",
   group: "Global",
-  options: [],
+  options: [optJson, optAdminPlan] as const,
   positionals: [],
   subcommands: [],
 } as const);
@@ -453,7 +471,15 @@ export const globalCommand = defineCommand({
     withHandler(globalLogsSpec, handleGlobalLogs),
     withHandler(globalCaSpec, handleGlobalCa),
     withHandler(globalCertSpec, handleGlobalCert),
-    withHandler(globalTrustSpec, async () => await globalTrust()),
+    withHandler(globalTrustSpec, async ({ args }) => {
+      if (args.options.plan === true) {
+        return await printAdminPlan({
+          json: args.options.json === true,
+          build: async () => await planGlobalTrust(trustPlanDeps()),
+        });
+      }
+      return await globalTrust();
+    }),
     withHandler(globalLogsResetSpec, async () => await globalLogsReset()),
     withHandler(globalAuthorizeSpec, async () => await globalAuthorize()),
   ],
@@ -3384,6 +3410,61 @@ function buildGatewayUrl(opts: {
   return `http://${host}:${opts.port}`;
 }
 
+/**
+ * Print an admin plan as JSON. Exit 0 for a complete plan, 1 when the real
+ * command would refuse, 3 when a later phase cannot be known yet.
+ */
+async function printAdminPlan(opts: {
+  readonly json: boolean;
+  readonly build: () => Promise<AdminPlan>;
+}): Promise<number> {
+  if (!opts.json) {
+    logger.error({ message: "--plan prints JSON only: add --json" });
+    return 2;
+  }
+  const result = await opts.build();
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (result.refused !== null) {
+    return 1;
+  }
+  return result.complete ? 0 : 3;
+}
+
+/** The real `hack global trust` sources, used read-only by its plan. */
+function trustPlanDeps(): TrustPlanDeps {
+  const certPath = resolveHackLocalCaCertPath();
+  const native = resolveNativeRuntimeSelection();
+  return {
+    platform: process.platform,
+    refusal: () => {
+      if (native) {
+        return "Native trust needs an exact reviewed HTTPS origin; hack global trust refuses on the native runtime";
+      }
+      return isSlimExecutionMode()
+        ? "hack global trust is unavailable in slim mode"
+        : null;
+    },
+    certPath,
+    inspectIdentity: async () =>
+      await inspectCaddyCaIdentity({
+        certPath,
+        ...(isLinux() ? { exec: createTrustedDockerExec() } : {}),
+      }),
+    readExport: async () => await readTextFile(certPath),
+    ...(isLinux() ? { linuxHost: createLinuxTrustHost() } : {}),
+    prepareLinux: prepareLinuxSystemTrust,
+    dockerAnswers: async () =>
+      (
+        await exec(["docker", "info", "--format", "{{.ServerVersion}}"], {
+          stdin: "ignore",
+          timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+        }).catch(() => ({ exitCode: 127 }))
+      ).exitCode === 0,
+    prepareMac: prepareMacTrust,
+    explicitlyNonInteractive: isExplicitlyNonInteractive,
+  };
+}
+
 async function globalTrust(): Promise<number> {
   const native = resolveNativeRuntimeSelection();
   if (native) {
@@ -4155,98 +4236,6 @@ async function ensureMacMkcert(): Promise<void> {
  * (`sudo -n true`). Used to avoid launching a `sudo` command that would hang
  * waiting on a password prompt when there is no TTY to answer it.
  */
-async function canSudoWithoutPassword(): Promise<boolean> {
-  const check = await exec(["sudo", "-n", "true"], { stdin: "ignore" });
-  return check.exitCode === 0;
-}
-
-async function ensureMacTrustCaddyLocalCa(input: {
-  readonly certPath: string;
-}): Promise<boolean> {
-  const ok = await confirmSafe({
-    message:
-      "Trust Caddy Local CA in macOS System keychain? (enables trusted https://*.hack; requires sudo)",
-    initialValue: true,
-    nonInteractive: "accept-default",
-  });
-  if (!ok) {
-    logger.info({
-      message:
-        "Skipped macOS System keychain trust; leaving host TLS env unchanged.",
-    });
-    return false;
-  }
-
-  const existing = await checkMacCaTrust(input);
-  if (!existing.installable) {
-    logger.warn({
-      message:
-        existing.issue ??
-        "Current Caddy Local CA is not eligible for installation",
-    });
-    return false;
-  }
-  if (existing.trusted) {
-    logger.info({
-      message: "Current Caddy Local CA is trusted in macOS System keychain",
-    });
-    return true;
-  }
-
-  if (isExplicitlyNonInteractive() && !(await canSudoWithoutPassword())) {
-    logger.info({
-      message:
-        "Skipped macOS System keychain trust (non-interactive; sudo would prompt for a password). Run `hack global trust` interactively to finish browser trust.",
-    });
-    return false;
-  }
-
-  logger.step({
-    message: "Installing Caddy Local CA to System keychain (requires sudo)…",
-  });
-  const installExit = await run(
-    [
-      "sudo",
-      "security",
-      "add-trusted-cert",
-      "-d",
-      "-r",
-      "trustRoot",
-      "-k",
-      "/Library/Keychains/System.keychain",
-      input.certPath,
-    ],
-    { stdin: "inherit" }
-  );
-
-  if (installExit !== 0) {
-    logger.warn({
-      message: `Failed to trust Caddy Local CA (exit ${installExit}). You may see HTTPS warnings in the browser.`,
-    });
-    return false;
-  }
-
-  const installed = await checkMacCaTrust(input);
-  if (!installed.trusted) {
-    logger.warn({
-      message:
-        installed.issue ??
-        "macOS TLS trust verification failed after installation",
-    });
-    return false;
-  }
-
-  logger.success({ message: "Trusted Caddy Local CA (macOS System keychain)" });
-  note(
-    [
-      "If your browser still shows a warning, restart the browser.",
-      "To remove later: Keychain Access → System → search 'Caddy Local Authority'.",
-    ].join("\n"),
-    "TLS"
-  );
-  return true;
-}
-
 /** Prepare local trust exports; only permitted homes may update launchd. */
 export async function configureMacHostTlsTrust(input: {
   readonly certPath: string;

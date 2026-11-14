@@ -1,0 +1,93 @@
+# Admin plans: `hack global trust --plan --json`
+
+`--plan` prints the steps a `hack global` command would take, in order, with the
+exact command line of every step that runs with administrator rights, and runs
+none of them. A script or app shows the plan and hands root steps to a terminal.
+
+Status: `hack global trust --plan --json` on macOS and Linux.
+`hack global install --plan` is not available yet.
+
+## Guarantees
+
+- The plan comes from one read-only look at the host and the same decision code
+  the real command uses. The real command then runs the steps that code prepared,
+  so a planned root step is the spawned one (tested at the spawn boundary).
+- `argv` is the spawned argv after privilege wrapping:
+  - Linux: Hack's vetted `sudo` (real path, root-owned, setuid), then
+    `/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C`, then the
+    command.
+  - macOS: `sudo` from `PATH`, then the command.
+- `stdin` gives the size and SHA-256 of what a step reads on stdin (for Linux
+  trust, the verified CA PEM), never the bytes. The step's own arguments carry the
+  same digest, and root refuses other bytes.
+- Planning runs only read-only probes: the runtime CA witness (Docker reads),
+  `docker info`, keychain and trust-store reads, and tool and `sudo` lookups. It
+  never runs a planned step, a `sudo` probe, a write, a prompt, or anything that
+  starts Docker.
+- Nothing is invented. When a step depends on something the run itself creates or
+  reads first, the plan says so (`blocked`, `complete: false`) instead of guessing
+  argv.
+
+## Shape (`hack.global-admin-plan.v1`)
+
+```json
+{
+  "schema": "hack.global-admin-plan.v1",
+  "command": "trust",
+  "platform": "linux",
+  "refused": null,
+  "complete": true,
+  "blocked": [],
+  "steps": [
+    {
+      "order": 1,
+      "privilege": "root",
+      "id": "system-trust-install",
+      "description": "Install the CA (SHA-256 …) into the debian trust anchors; root accepts only these exact bytes",
+      "argv": ["/usr/bin/sudo", "/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "/bin/sh", "-c", "<install script>", "hack-install", "<bytes>", "<sha256>", "/usr/local/share/ca-certificates/hack-caddy-local-ca.crt", "0644"],
+      "shell": "/usr/bin/sudo /usr/bin/env -i … 0644",
+      "stdin": { "bytes": 652, "sha256": "…", "content": "the verified Caddy Local CA (PEM)" },
+      "when": "after you confirm the system-wide trust prompt on an interactive terminal; …"
+    },
+    { "order": 2, "privilege": "root", "id": "system-trust-refresh", "argv": ["/usr/bin/sudo", "/usr/bin/env", "-i", "…", "/usr/sbin/update-ca-certificates"], "…": "…" },
+    { "order": 3, "privilege": "user", "id": "nss-trust", "description": "Add or update Hack's CA in each browser NSS database you own (certutil, as you)", "when": "…" },
+    { "order": 4, "privilege": "user", "id": "host-tls-env", "description": "…", "when": "…" }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `refused` | the real command would refuse (native runtime, slim mode, an invalid CA); no steps |
+| `complete` | false when a phase cannot be known before the run (`blocked[]` says which, why, and what to do first) |
+| `steps[].privilege` | `root` (has `argv`, `shell`, maybe `stdin`) or `user` (what it changes, no argv) |
+| `steps[].when` | when the real command takes the step: after a confirmation, only interactively, only if a check passes |
+| `steps[].gates` | on a probe: the step it can skip (macOS non-interactive runs check `sudo -n true` before the keychain step) |
+
+Exit code: 0 for a complete plan, 1 when `refused`, 3 when incomplete; `--plan`
+without `--json` exits 2.
+
+## What `hack global trust` plans
+
+Linux:
+- If no running Caddy CA can be confirmed: blocked; run `hack global up` first.
+- If the export is stale: a user step rewrites it from the runtime CA first.
+- If the system bundle already holds the CA: no root step. If Hack cannot automate
+  this distribution or its tools: no root step (the real command prints manual
+  steps).
+- Otherwise two root steps: install the exact CA bytes, then rebuild the bundle.
+  They run only after a confirmation on an interactive terminal.
+- Then user steps: NSS databases, and the host trust bundle and env script.
+
+macOS:
+- When Docker answers, a user step copies the running Caddy's CA to the export
+  first. When Docker is down and there is no export, the real command starts
+  Docker first. Then the keychain step depends on the CA it reads, so it is listed
+  as conditional.
+- If the keychain already trusts the CA: no root step. Otherwise
+  `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <export>`,
+  after the prompt, which non-interactive runs accept. With `--no-interactive` (or
+  `HACK_NO_INTERACTIVE`), a `sudo -n true` probe comes first, and the keychain step
+  is skipped when it fails.
+- Then a user step writes the host trust bundle and env script, and sets them for
+  launchd.

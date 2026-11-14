@@ -96,8 +96,10 @@ impl HackApp {
         let before = self.model.selected_row().map(|r| r.name.clone());
         self.model.apply(Event::Refreshed(snap));
         let after = self.model.selected_row().map(|r| r.name.clone());
-        if self.tab == 1 && before != after {
+        if before != after {
             self.logs.model.set_service(None);
+        }
+        if self.tab == 1 && before != after {
             self.open_logs(cx);
         } else if self.tab == 1 {
             // A stopped project's finite read becomes a followed stream once
@@ -372,8 +374,10 @@ impl HackApp {
                 if !this.live {
                     this.refresh_now();
                 }
+                // A service filter belongs to one project: reset it on every
+                // project change, whichever tab is open.
+                this.logs.model.set_service(None);
                 if this.tab == 1 {
-                    this.logs.model.set_service(None);
                     this.open_logs(cx);
                 }
                 cx.notify();

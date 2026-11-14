@@ -991,6 +991,49 @@ test("env-file sources stay private with disjoint native build inputs", async ()
   expect(input.normalizedComposeJson).not.toContain(DOTENV);
 });
 
+test.each([
+  { context: ".." },
+  { context: "../app", dockerfile: "../.env" },
+])("ignored root dotenv stays out of native build inputs %s", async (build) => {
+  const f = await fixture({}, { services: { builder: { build } } });
+  // No env_file or adjacent .env: this is the explicitly approved root-only exception.
+  await writeFile(join(f.projectRoot, ".env"), `TOKEN=${FILE}\n`, {
+    mode: 0o000,
+  });
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain('source "../.env"');
+  expect(String(error)).toContain("service builder field build");
+  expect(String(error)).toContain("overlap an environment source");
+  expect(String(error)).not.toContain(FILE);
+});
+
+test("ignored root dotenv preserves disjoint builds and selected-service exec without reading its values", async () => {
+  const f = await fixture(
+    {},
+    { services: { builder: { build: { context: "../app" } } } }
+  );
+  await writeFile(join(f.projectRoot, ".env"), `TOKEN=${FILE}\n`, {
+    mode: 0o000,
+  });
+  const input = await prepareNativeProjectInput(f);
+  expect(input.ignoredRootDotenv).toBe(true);
+  expect(input.shellEnvironment).toEqual({});
+  expect(JSON.stringify(input.environmentNotices)).not.toContain(FILE);
+  await writeFile(
+    f.composeFile,
+    JSON.stringify({ services: { builder: { build: ".." } } })
+  );
+  const exec = await prepareNativeProjectInput({
+    ...f,
+    selectedServices: ["builder"],
+  });
+  expect(exec.ignoredRootDotenv).toBe(true);
+  expect(exec.shellEnvironment).toEqual({});
+});
+
 test("source-free builds and selected-service exec retain their existing behavior", async () => {
   const plain = await fixture({}, { services: { builder: { build: ".." } } });
   expect((await prepareNativeProjectInput(plain)).shellEnvironment).toEqual({});

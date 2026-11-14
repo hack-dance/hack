@@ -142,7 +142,12 @@ These fresh values may differ from the running container's startup values.
 
 Native builds read raw host contexts. Start and preflight therefore refuse a
 native build whose context, Dockerfile or Dockerfile-specific ignore input
-overlaps any declared env-file path or the selected automatic `.env` path.
+overlaps any declared env-file path, the selected automatic `.env` path or a
+present project-root `.env`. Ignoring root dotenv for interpolation does not
+exclude it from Buildx's raw context: even with no `env_file` or adjacent `.env`,
+a root-context build refuses when root `.env` exists. This is an explicit
+compatibility exception to prevent `COPY .` from embedding ignored dotenv.
+Root dotenv is detected by presence only, without reading its contents.
 Optional absent and inactive-service declarations remain protected; authored
 ignore rules do not lift this refusal. ASCII paths compare without case, and
 non-ASCII components are treated as potentially aliased whenever disjointness
@@ -188,6 +193,8 @@ Actual guest delivery is qualified separately on a Mac.
 - The former `dotenv_without_managed_env` refusal is removed. A project-root
   `.env` outside the Compose directory is ignored with one notice. Move needed
   variables beside Compose (normally `.hack/.env`) or into managed env.
+  Builds overlapping this ignored root file now refuse; use disjoint build
+  inputs or a prebuilt image, even when the project has no other env-file input.
 - Preflight now reads the caller's allowed environment and decrypts managed env.
   Recover the existing project key when reported missing; do not generate a
   replacement for existing ciphertext.

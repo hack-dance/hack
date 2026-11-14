@@ -868,7 +868,10 @@ function resolveFileBindingDefaults(opts: {
 
 /** Fresh exec acquires selected-service values but cannot initiate a build. */
 function requireBuildSeparation(
-  opts: Options & { readonly sources: Sources }
+  opts: Options & {
+    readonly sources: Sources;
+    readonly ignoredRootDotenv: boolean;
+  }
 ): void {
   if (opts.selectedServices === undefined) {
     const privatePaths = Object.entries(opts.services).flatMap(
@@ -886,6 +889,12 @@ function requireBuildSeparation(
       // Retain absent optional declarations and the automatic dotenv location.
       // Nothing is read by this guard; ignore patterns do not grant exclusion.
       privatePaths.push(join(dirname(opts.composeFile), ".env"));
+    }
+    if (opts.ignoredRootDotenv) {
+      // Ignored for interpolation does not make the raw Buildx context safe.
+      privatePaths.push(join(opts.projectRoot, ".env"));
+    }
+    if (privatePaths.length > 0) {
       requireNativeEnvBuildSeparation({
         ...opts,
         services: Object.fromEntries(
@@ -917,15 +926,15 @@ export async function normalizeNativeComposeEnvironment(
   const canonical = await canonicalSourceOptions(opts);
   const notices: Notice[] = [];
   const sources = await environmentSources(canonical, notices);
-  requireBuildSeparation({ ...canonical, sources });
+  const ignoredRootDotenv =
+    dirname(canonical.composeFile) !== canonical.projectRoot &&
+    (await present(join(canonical.projectRoot, ".env")));
+  requireBuildSeparation({ ...canonical, sources, ignoredRootDotenv });
   const filePrivacy =
     sources.automaticDotenv !== undefined ||
     Object.values(opts.services).some((service) =>
       Object.hasOwn(service.document, "env_file")
     );
-  const ignoredRootDotenv =
-    dirname(canonical.composeFile) !== canonical.projectRoot &&
-    (await present(join(canonical.projectRoot, ".env")));
   if (ignoredRootDotenv) {
     notices.push({ line: NATIVE_ROOT_DOTENV_IGNORED_NOTICE });
   }

@@ -1555,6 +1555,9 @@ every native start and preflight, even with managed env. Symlinks, other-owner o
 group/other-writable files and project ancestors refuse, as do `COMPOSE_*` and
 `HACK_*` entries and dotted/dashed identifiers. Use an owned regular file,
 deliberately correct permissions and rename unsupported keys, or use managed env.
+An ignored root `.env` still may not overlap a native build context or
+Dockerfile input: Buildx reads raw host files. Such a build now refuses even
+without `env_file` or adjacent `.env`; use disjoint inputs or a prebuilt image.
 
 | Source | Precedence and delivery |
 | --- | --- |

@@ -344,6 +344,35 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
+test("preflight and start refuse ignored root dotenv in a native build before effects", async () => {
+  const f = await fixture({ services: { builder: { build: ".." } } });
+  await writeFile(join(f.project, ".env"), `TOKEN=${PRIVATE}\n`, {
+    mode: 0o000,
+  });
+  await f.review([]);
+  const env = { ...f.native, ...GRANT, HACK_NATIVE_BUILDS: "1" };
+  const report = await preflight(f, env);
+  expect(report.code).toBe(1);
+  expect(report.report.ready).toBe(false);
+  expect(codes(report.report, "cli")).toContain(
+    "environment_file_input:builder"
+  );
+  expect(
+    report.report.blockers.find(
+      (entry) => entry.code === "environment_file_input"
+    )?.message
+  ).toContain('source "../.env"');
+  expect(report.output).not.toContain(PRIVATE);
+  const before = await f.calls();
+  for (const args of [["up"], ["up", "--json"]]) {
+    const started = await cli(f, args, env);
+    expect(started.code).toBe(1);
+    expect(started.output).toContain("overlap an environment source");
+    expect(started.output).not.toContain(PRIVATE);
+    expect((await f.calls()).slice(before.length)).toEqual([]);
+  }
+});
+
 test("preflight requires the same decryption key as start and closes key errors", async () => {
   const f = await fixture({ services: { web: { image: IMAGE } } });
   await writeFile(

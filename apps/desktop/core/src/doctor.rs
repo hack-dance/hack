@@ -952,7 +952,7 @@ mod tests {
     }
 
     fn proj(name: &str, mut checks: Vec<DoctorCheck>) -> DoctorRun {
-        checks.retain(|c| c.id != "project");
+        checks.retain(|c| c.id != "project" || c.status != "ok");
         checks.push(check(
             "project",
             "ok",

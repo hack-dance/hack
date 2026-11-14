@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home-assertions.ts";
 
 /** Exercise pure endpoint planning through the relocated CLI and real Git linkage. */
 const root = resolve(import.meta.dir, "..");
@@ -367,6 +368,11 @@ try {
     "actual resolution rejects unbound logical reference"
   );
   await authored(checkout, project);
+  await assertNativePlanHome({
+    home,
+    failedUpCount: 0,
+    privateInputs: [canary, directory],
+  });
   const runtime = await invoke(
     ["up", "web", "--detach"],
     checkout,
@@ -393,8 +399,11 @@ try {
       "no generated runtime state"
     );
   }
-  const homeEntries = await readdir(join(home, ".hack")).catch(() => []);
-  assert(homeEntries.length === 0, "no registry or runtime home writes");
+  await assertNativePlanHome({
+    home,
+    failedUpCount: 1,
+    privateInputs: [canary, directory],
+  });
   process.stdout.write(
     `Relocated native endpoint planning: ${checks} checks passed; no hooks/DNS/trust/runtime effects\n`
   );

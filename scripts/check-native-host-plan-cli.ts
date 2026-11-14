@@ -3,6 +3,7 @@ import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home-assertions.ts";
 
 /** Actual relocated CLI and sidecar; no Bun/Rust on PATH and no host effects. */
 const root = resolve(import.meta.dir, "..");
@@ -277,6 +278,11 @@ try {
     "local settings cannot inject host commands"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
+  await assertNativePlanHome({
+    home,
+    failedUpCount: 0,
+    privateInputs: [canary, directory],
+  });
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -287,13 +293,19 @@ try {
     "native detached service selection refuses before input or runtime work"
   );
   assert(
-    !(await Bun.file(marker).exists()) &&
-      (await readdir(home)).length === 0 &&
-      !(await readdir(join(checkout, ".hack"))).some(
+    !(
+      (await Bun.file(marker).exists()) ||
+      (await readdir(join(checkout, ".hack"))).some(
         (name) => name === ".internal" || name === ".branch"
-      ),
+      )
+    ),
     "no hooks, process, registry or runtime effects"
   );
+  await assertNativePlanHome({
+    home,
+    failedUpCount: 1,
+    privateInputs: [canary, directory],
+  });
   process.stdout.write(
     `Relocated native host planning: ${checks} checks passed; no host execution or secret delivery\n`
   );

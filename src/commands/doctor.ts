@@ -152,6 +152,10 @@ import {
   NATIVE_SOURCE_CHECK,
   type NativeSourceReport,
 } from "../lib/doctor-native-source.ts";
+import {
+  DOCTOR_SAFE_FIX_ID,
+  runDoctorSafeFix,
+} from "../lib/doctor-safe-fix.ts";
 import { inspectSecretIntegrity } from "../lib/doctor-secret-integrity.ts";
 import {
   findCrossCheckoutInstances,
@@ -430,6 +434,19 @@ const optBrowserResult = defineOption({
 const doctorOptions = [
   optPath,
   optFix,
+  defineOption({
+    name: "only",
+    type: "string",
+    long: "--only",
+    valueHint: "<id>",
+    description: "With --fix --yes, run exactly one allowlisted safe repair",
+  } as const),
+  defineOption({
+    name: "yes",
+    type: "boolean",
+    long: "--yes",
+    description: "Consent to the one safe repair selected with --fix --only",
+  } as const),
   optMigrateEnvConfig,
   optAcceptTrackedEnvChanges,
   optDomainMigration,
@@ -741,6 +758,15 @@ async function runNativePreflightMode(
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  if (selectedDoctorFixRequested(args.options)) {
+    return await runSelectedDoctorFix(args);
+  }
+  return await runDoctorAudit(args);
+};
+
+async function runDoctorAudit(
+  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
+): Promise<number> {
   if (args.options.nativePreflight) {
     return await runNativePreflightMode(args);
   }
@@ -1140,7 +1166,58 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   }
 
   return 0;
-};
+}
+
+function selectedDoctorFixRequested(opts: {
+  readonly only?: string;
+  readonly yes?: boolean;
+}): boolean {
+  return opts.only !== undefined || opts.yes === true;
+}
+
+/** An allowlist before discovery or side effects: new Doctor flags cannot widen a selected repair. */
+async function runSelectedDoctorFix(
+  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
+): Promise<number> {
+  const allowed = new Set(["path", "fix", "only", "yes", "json"]);
+  if (
+    Object.entries(args.options).some(
+      ([key, value]) =>
+        !allowed.has(key) && value !== undefined && value !== false
+    ) ||
+    !args.options.fix ||
+    !args.options.yes ||
+    args.options.only !== DOCTOR_SAFE_FIX_ID
+  ) {
+    throw new CliUsageError(
+      "Use --fix --only 'hack gitignore' --yes for the supported safe repair; other check IDs and repair modes are refused."
+    );
+  }
+  const started = performance.now();
+  const fixed = await runDoctorSafeFix({
+    startDir: resolveDoctorStartDir(args.options.path),
+  });
+  const results = [
+    { ...fixed.check, durationMs: Math.round(performance.now() - started) },
+  ];
+  if (args.options.json) {
+    emitCliResult({
+      result: okResult({
+        data: {
+          ...buildDoctorJsonData({ results }),
+          fix: {
+            id: DOCTOR_SAFE_FIX_ID,
+            changed: fixed.changed,
+            confirmed: fixed.confirmed,
+          },
+        },
+      }),
+    });
+  } else {
+    await renderDoctorSummary(results);
+  }
+  return fixed.confirmed ? 0 : 1;
+}
 
 /**
  * Compose doctor's browser check concerns the reported origin, else the

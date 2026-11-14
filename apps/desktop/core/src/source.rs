@@ -396,8 +396,10 @@ impl LiveSource {
         discovery: &crate::doctor_plugins::Discovery,
     ) -> Vec<DoctorRun> {
         let deadline = std::time::Instant::now() + budget;
-        if let Err(reason) = crate::doctor_plugins::validate(discovery) {
-            let why = format!("Could not check Docker plugin discovery: {reason}");
+        if let Err(reason) = crate::doctor_plugins::validate_helpers(&self.runner)
+            .and_then(|()| crate::doctor_plugins::validate(discovery))
+        {
+            let why = format!("Could not check Doctor executable discovery: {reason}");
             let report = crate::models::DoctorReport {
                 checks: vec![crate::models::DoctorCheck {
                     id: "docker plugin discovery".into(),
@@ -1388,6 +1390,39 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                     .success()
             );
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn absolute_mutagen_helpers_require_trusted_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack("doctor-mutagen-helper", "echo '{}'");
+        let dir = hack.parent().unwrap();
+        let managed = dir.join("bin/mutagen");
+        std::fs::create_dir(dir.join("bin")).unwrap();
+        std::fs::copy(&hack, &managed).unwrap();
+        let runner = CliRunner::new(&hack)
+            .with_env("HACK_HOME", dir.to_str().unwrap())
+            .with_env("HACK_MUTAGEN_PATH", "");
+        for explicit in [false, true] {
+            let runner = if explicit {
+                runner
+                    .clone()
+                    .with_env("HACK_MUTAGEN_PATH", managed.to_str().unwrap())
+            } else {
+                runner.clone()
+            };
+            std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(crate::doctor_plugins::validate_helpers(&runner).is_ok());
+            std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(crate::doctor_plugins::validate_helpers(&runner).is_err());
+        }
+        assert!(
+            crate::doctor_plugins::validate_helpers(
+                &runner.with_env("HACK_MUTAGEN_PATH", "relative-helper")
+            )
+            .is_err()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

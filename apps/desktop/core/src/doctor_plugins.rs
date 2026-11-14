@@ -165,6 +165,37 @@ fn config_file(path: &Path, uid: u32) -> Result<PluginConfig, &'static str> {
         .map_err(|_| "Docker plugin config is invalid or unsupported")
 }
 
+/// Compose Doctor resolves Mutagen before PATH. Validate that fixed override
+/// or managed candidate without changing its selection or reading its contents.
+pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<(), &'static str> {
+    let selector = |key| -> Result<Option<String>, &'static str> {
+        runner
+            .env_value(key)
+            .map(|v| {
+                v.into_string()
+                    .map(|v| v.trim().to_owned())
+                    .map_err(|_| "Doctor helper selector is not UTF-8")
+            })
+            .transpose()
+            .map(|v| v.filter(|v| !v.is_empty()))
+    };
+    let candidate = if let Some(path) = selector("HACK_MUTAGEN_PATH")? {
+        PathBuf::from(path)
+    } else {
+        let home = if let Some(path) = selector("HACK_HOME")? {
+            PathBuf::from(path)
+        } else {
+            PathBuf::from(selector("HOME")?.ok_or("Doctor helper home is unknown")?).join(".hack")
+        };
+        home.join("bin/mutagen")
+    };
+    let uid = unsafe { libc::getuid() };
+    if present(&candidate, uid)? && trusted_tool_path(&candidate, uid, false).is_none() {
+        return Err("Doctor absolute helper or its ancestors/ACLs are untrusted");
+    }
+    Ok(())
+}
+
 /// Success proves only the documented Unix discovery inputs inspected here.
 /// It neither sandboxes plugin contents nor qualifies custom Docker builds.
 pub(crate) fn validate(discovery: &Discovery) -> Result<(), &'static str> {

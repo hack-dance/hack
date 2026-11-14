@@ -1,4 +1,7 @@
-/** Distinct service logs are required; a replay from one service is insufficient. */
+/**
+ * Compose v2 prefixes logs with `app-1 |` (or plain `app |` without a replica
+ * suffix). Distinct service lines are required; one service's replay is insufficient.
+ */
 export function bothForegroundServicesLogged(output: string): boolean {
   const plain = Bun.stripANSI(output);
   return (

@@ -71,12 +71,15 @@ type StartedLifecycleProcess = {
  * ownership record, for hack down; callers must then keep anything that
  * session depends on (such as shared helper holders).
  */
-export type LifecycleOperationCleanup = () => Promise<unknown>;
+export type LifecycleOperationCleanup = (opts?: {
+  readonly force?: AbortSignal;
+}) => Promise<unknown>;
 
 /** The value an operation cleanup resolves to when it kept the session. */
 export const LIFECYCLE_SESSION_RETAINED = "session-retained";
 const LIFECYCLE_COMMAND_PID_WAIT_ATTEMPTS = 50;
 const LIFECYCLE_COMMAND_PID_WAIT_INTERVAL_MS = 20;
+const PANE_PID_PATTERN = /^\d+$/;
 export function resolveLifecycleSessionName(opts: {
   readonly projectName: string;
   readonly branch: string | null;
@@ -106,6 +109,7 @@ export function installLifecycleSignalCleanup(opts: {
   }
 
   let handlingSignal = false;
+  const force = new AbortController();
   const handlers = new Map<NodeJS.Signals, () => void>();
   const dispose = (): void => {
     for (const [signal, handler] of handlers) {
@@ -116,10 +120,13 @@ export function installLifecycleSignalCleanup(opts: {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const handler = (): void => {
       if (handlingSignal) {
+        if (signal === "SIGINT") {
+          force.abort();
+        }
         return;
       }
       handlingSignal = true;
-      void opts.cleanup?.().finally(() => {
+      void opts.cleanup?.({ force: force.signal }).finally(() => {
         dispose();
         process.kill(process.pid, signal);
       });
@@ -262,6 +269,7 @@ export function createLifecycleProcessController(opts: {
   readonly muxCommandTimeoutMs?: number;
   /** Process retirement boundary; must confirm groups before state removal. */
   readonly retireSession?: ReturnType<typeof createLifecycleSessionRetirement>;
+  readonly readIdentities?: typeof readProcessIdentities;
 }): {
   readonly sessionName: string;
   startFromCommand: (opts: {
@@ -284,7 +292,8 @@ export function createLifecycleProcessController(opts: {
   });
   const startedProcesses: StartedLifecycleProcess[] = [];
   const retireSession =
-    opts.retireSession ?? createLifecycleSessionRetirement();
+    opts.retireSession ??
+    createLifecycleSessionRetirement({ readIdentities: opts.readIdentities });
   let backendName: MuxBackendName | null = null;
   let sessionReady = false;
   let sessionDispositionResolved = false;
@@ -724,6 +733,7 @@ export function createLifecycleProcessController(opts: {
         composeProject: opts.composeProject,
         assertFresh: opts.assertFresh,
         timeoutMs: muxTimeoutMs,
+        readIdentities: opts.readIdentities,
       });
     });
     nextIndex += 1;
@@ -767,9 +777,9 @@ export function createLifecycleProcessController(opts: {
     // holds the instance lock: never acquire it again here.
     getOperationCleanup: () =>
       createdOwnershipToken
-        ? async () => {
+        ? async (cleanupOpts) => {
             await sessionCreationSettled;
-            return await abortOwnedSession();
+            return await abortOwnedSession(cleanupOpts);
           }
         : null,
     getSignalCleanup: () => operationSignalCleanup,
@@ -786,22 +796,22 @@ export function createLifecycleProcessController(opts: {
    * as replacement does. Creation settles first: it holds the lock until its
    * own failure cleanup is done.
    */
-  async function starterAbort(): Promise<
-    undefined | typeof LIFECYCLE_SESSION_RETAINED
-  > {
+  async function starterAbort(cleanupOpts?: {
+    readonly force?: AbortSignal;
+  }): Promise<undefined | typeof LIFECYCLE_SESSION_RETAINED> {
     await sessionCreationSettled;
     if (!(createdOwnershipToken && backendName)) {
       return undefined;
     }
     const ownership = opts.sessionOwnership;
     if (!ownership) {
-      return await abortOwnedSession();
+      return await abortOwnedSession(cleanupOpts);
     }
     let result: undefined | typeof LIFECYCLE_SESSION_RETAINED;
     let outcome: Awaited<ReturnType<typeof ownership.runIfOwned>>;
     try {
       outcome = await ownership.runIfOwned(async () => {
-        result = await abortOwnedSession();
+        result = await abortOwnedSession(cleanupOpts);
       });
     } catch {
       outcome = "undecidable";
@@ -821,9 +831,9 @@ export function createLifecycleProcessController(opts: {
   }
 
   /** Stop this start's created session; the caller holds the instance lock. */
-  async function abortOwnedSession(): Promise<
-    undefined | typeof LIFECYCLE_SESSION_RETAINED
-  > {
+  async function abortOwnedSession(cleanupOpts?: {
+    readonly force?: AbortSignal;
+  }): Promise<undefined | typeof LIFECYCLE_SESSION_RETAINED> {
     if (!(createdOwnershipToken && backendName)) {
       return undefined;
     }
@@ -833,14 +843,33 @@ export function createLifecycleProcessController(opts: {
     if (backend?.available) {
       const ownershipToken = createdOwnershipToken;
       try {
-        stopped = await retireSession({
+        const processes = await refreshMissingLifecyclePaneBirths({
           processes: startedProcesses,
+          readIdentities: opts.readIdentities ?? readProcessIdentities,
+          readPanes: (windowName) =>
+            readTmuxPanePids({ sessionName, windowName, strict: true }),
+          assertOwned: async () => {
+            await opts.assertFresh?.();
+            if (
+              (await backend.readLifecycleOwnerToken?.({
+                name: sessionName,
+              })) !== ownershipToken
+            ) {
+              throw new Error(
+                "Lifecycle ownership changed before identity refresh"
+              );
+            }
+          },
+        });
+        stopped = await retireSession({
+          processes,
           stopSession: () =>
             killLifecycleSessionWithOwnership({
               backend,
               sessionName,
               ownershipToken,
             }),
+          force: cleanupOpts?.force,
         });
       } catch {
         failure = "Lifecycle process-group retirement could not be confirmed.";
@@ -950,6 +979,7 @@ async function startLifecycleProcess(opts: {
   readonly composeProject: string;
   readonly assertFresh?: () => Promise<void>;
   readonly timeoutMs: number;
+  readonly readIdentities?: typeof readProcessIdentities;
 }): Promise<{
   readonly name: string;
   readonly windowName: string;
@@ -1022,7 +1052,7 @@ async function startLifecycleProcess(opts: {
     if (!processGroupId && panePid !== undefined) {
       processGroupId = await readProcessGroupIdForPid({ pid: panePid });
     }
-    const identities = await readProcessIdentities();
+    const identities = await (opts.readIdentities ?? readProcessIdentities)();
     const paneBirth = identities.find((row) => row.pid === panePid)?.birth;
     const processGroupBirth = identities.find(
       (row) => row.pid === processGroupId
@@ -1317,7 +1347,10 @@ async function interruptLifecycleTmuxProcesses(opts: {
       })
     )
   );
-  const identities = await readProcessIdentities();
+  let identities = await readProcessIdentities();
+  if (identities.length === 0) {
+    identities = await readProcessIdentities();
+  }
   const processes = panes.flatMap((pids) =>
     pids.map((panePid) => ({
       panePid,
@@ -1357,27 +1390,88 @@ async function interruptLifecycleTmuxProcesses(opts: {
   }
 }
 
+/**
+ * Recover only missing birth metadata, never replace a recorded incarnation.
+ * Both sides of the live pane query must still prove the operation's ownership.
+ */
+export async function refreshMissingLifecyclePaneBirths(opts: {
+  readonly processes: readonly StartedLifecycleProcess[];
+  readonly readPanes: (windowName: string) => Promise<readonly number[]>;
+  readonly readIdentities: typeof readProcessIdentities;
+  readonly assertOwned: () => Promise<void>;
+}): Promise<readonly StartedLifecycleProcess[]> {
+  const missing = opts.processes.filter(
+    (process) => process.panePid !== undefined && !process.paneBirth
+  );
+  if (missing.length === 0) {
+    return opts.processes;
+  }
+  await opts.assertOwned();
+  const panes = new Map(
+    await Promise.all(
+      missing.map(
+        async (process) =>
+          [
+            process.windowName,
+            await opts.readPanes(process.windowName),
+          ] as const
+      )
+    )
+  );
+  let identities = await opts.readIdentities();
+  if (identities.length === 0) {
+    identities = await opts.readIdentities();
+  }
+  await opts.assertOwned();
+  return opts.processes.map((process) => {
+    if (
+      process.paneBirth ||
+      process.panePid === undefined ||
+      !panes.get(process.windowName)?.includes(process.panePid)
+    ) {
+      return process;
+    }
+    const row = identities.find(
+      (identity) => !identity.zombie && identity.pid === process.panePid
+    );
+    return row ? { ...process, paneBirth: row.birth } : process;
+  });
+}
+
 async function readTmuxPanePids(opts: {
   readonly sessionName: string;
   readonly windowName: string;
+  readonly strict?: boolean;
 }): Promise<number[]> {
   const result = await runMuxCommand(
     [
       "tmux",
       "list-panes",
       "-t",
-      `${opts.sessionName}:${opts.windowName}`,
+      `${opts.strict ? "=" : ""}${opts.sessionName}:${opts.windowName}`,
       "-F",
       "#{pane_pid}",
     ],
     { stdin: "ignore" }
   );
   if (result.exitCode !== 0) {
+    if (opts.strict) {
+      throw new Error("Could not refresh owned lifecycle pane identity");
+    }
     return [];
   }
-  return result.stdout
+  const lines = result.stdout
     .split("\n")
-    .map((line) => Number.parseInt(line.trim(), 10))
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (
+    opts.strict &&
+    lines.some((line) => !PANE_PID_PATTERN.test(line) || Number(line) <= 0)
+  ) {
+    throw new Error("Invalid owned lifecycle pane identity");
+  }
+  return lines
+    .map((line) => Number.parseInt(line, 10))
     .filter((value) => Number.isInteger(value) && value > 0);
 }
 

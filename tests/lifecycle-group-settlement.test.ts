@@ -208,6 +208,122 @@ test("a lost freshness fence prevents escalation", async () => {
   expect(os.signals.filter((event) => event.signal !== 0)).toEqual([]);
 });
 
+for (const failedRead of [1, 2, 52]) {
+  test(`a timed-out census at read ${failedRead} is retried inside the observation deadline`, async () => {
+    const os = runtime({ killExit: 100 });
+    let reads = 0;
+    await terminateLifecycleProcessGroups({
+      processGroupIds: [42],
+      alreadySignalled: true,
+      runtime: {
+        ...os,
+        liveGroups: async (groups) => {
+          reads += 1;
+          if (reads === failedRead) {
+            await os.sleep(2000);
+            throw new Error("ps timeout");
+          }
+          return groups;
+        },
+      },
+    });
+    expect(os.absent()).toBe(true);
+    expect(reads).toBeGreaterThan(failedRead);
+    expect(
+      os.signals.filter((event) => event.signal === "SIGKILL")
+    ).toHaveLength(1);
+  });
+}
+
+test("continuous census failures are bounded and never authorize KILL", async () => {
+  const os = runtime({});
+  await expect(
+    terminateLifecycleProcessGroups({
+      processGroupIds: [42],
+      alreadySignalled: true,
+      runtime: {
+        ...os,
+        liveGroups: async () => {
+          await os.sleep(2000);
+          throw new Error("ps timeout");
+        },
+      },
+    })
+  ).rejects.toThrow("Could not inspect live lifecycle process-group members");
+  expect(os.now()).toBeLessThanOrEqual(7000);
+  expect(os.signals.filter((event) => event.signal !== 0)).toEqual([]);
+});
+
+test("a repeated interrupt skips TERM grace but still confirms one KILL", async () => {
+  const force = new AbortController();
+  const os = runtime({ killExit: 100 });
+  await terminateLifecycleProcessGroups({
+    processGroupIds: [42],
+    alreadySignalled: true,
+    force: force.signal,
+    runtime: {
+      ...os,
+      sleep: async (ms) => {
+        await os.sleep(ms);
+        if (os.now() >= 300) {
+          force.abort();
+        }
+      },
+    },
+  });
+  expect(os.signals.filter((event) => event.signal === "SIGKILL")).toEqual([
+    { group: 42, signal: "SIGKILL", at: 300 },
+  ]);
+  expect(os.now()).toBe(400);
+});
+
+test("a force request cannot bypass the ownership fence", async () => {
+  const force = new AbortController();
+  force.abort();
+  const os = runtime({ killExit: 0 });
+  await expect(
+    terminateLifecycleProcessGroups({
+      processGroupIds: [42],
+      alreadySignalled: true,
+      force: force.signal,
+      runtime: os,
+      assertFresh: async () => {
+        throw new Error("owner replaced");
+      },
+    })
+  ).rejects.toThrow("owner replaced");
+  expect(os.signals.filter((event) => event.signal !== 0)).toEqual([]);
+});
+
+test("unknown confirmation after KILL is not mistaken for retirement", async () => {
+  const os = runtime({});
+  let killed = false;
+  await expect(
+    terminateLifecycleProcessGroups({
+      processGroupIds: [42],
+      runtime: {
+        ...os,
+        signal: (group, signal) => {
+          os.signal(group, signal);
+          if (signal === "SIGKILL") {
+            killed = true;
+          }
+        },
+        liveGroups: async (groups) => {
+          if (killed) {
+            await os.sleep(2000);
+            throw new Error("ps timeout");
+          }
+          return groups;
+        },
+      },
+    })
+  ).rejects.toThrow("Could not inspect live lifecycle process-group members");
+  expect(os.signals.filter((event) => event.signal === "SIGKILL")).toHaveLength(
+    1
+  );
+});
+
 test("one failed foreground snapshot is retried before the owned mux stop", async () => {
   let reads = 0;
   let stopped = false;

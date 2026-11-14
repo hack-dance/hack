@@ -7,12 +7,15 @@ stateDiagram-v2
   attached --> captured : Compose exits
   captured --> signalled : owned mux stop
   signalled --> commandsRetired : no live command members
-  signalled --> retained : observation unknown
+  signalled --> signalled : failed census / retry within budget
+  signalled --> retained : no census succeeds by deadline
   signalled --> escalated : 5 s grace expires
+  signalled --> escalated : second Ctrl-C / identity rechecked
   escalated --> commandsRetired : no live command members
   escalated --> retained : deadline or probe error
   commandsRetired --> wrappersRetired : no live wrapper members
   commandsRetired --> wrapperEscalated : 5 s grace expires
+  commandsRetired --> wrapperEscalated : second Ctrl-C / identity rechecked
   wrapperEscalated --> wrappersRetired : no live wrapper members
   wrapperEscalated --> retained : deadline or probe error
   wrappersRetired --> retired : remove owned record

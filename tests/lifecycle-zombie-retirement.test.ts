@@ -5,13 +5,11 @@ import {
   terminateLifecycleProcessGroups,
 } from "../src/lib/project-lifecycle-processes.ts";
 
-test.skipIf(process.platform !== "linux")(
+const python = process.platform === "linux" ? Bun.which("python3") : null;
+
+test.skipIf(process.platform !== "linux" || python === null)(
   "a real zombie-only process group retires before its parent reaps it",
   async () => {
-    const python = Bun.which("python3");
-    if (!python) {
-      throw new Error("Zombie retirement regression requires working python3");
-    }
     // WNOWAIT deliberately keeps the exited child observable to kill(0). The
     // parent stays alive to reap it in finally, without relying on PID 1.
     const source = `import json, os, sys
@@ -24,7 +22,7 @@ print(json.dumps({"pid": pid}), flush=True)
 sys.stdin.readline()
 os.waitpid(pid, 0)
 `;
-    const parent = Bun.spawn([python, "-c", source], {
+    const parent = Bun.spawn([python ?? "python3", "-c", source], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

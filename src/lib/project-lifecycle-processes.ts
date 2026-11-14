@@ -203,6 +203,9 @@ export async function readProcessSnapshot(
 /** Terminate ownership-proven lifecycle groups with a bounded TERM/KILL sequence. */
 export const LIFECYCLE_TERM_GRACE_MS = 5000;
 
+/** A failed census is unknown, unlike a kernel probe error such as EPERM. */
+class LifecycleCensusUnavailable extends Error {}
+
 /** A zombie holds a PID but runs no code; only live members keep a group active. */
 export function selectLiveLifecycleGroups(opts: {
   readonly groups: readonly number[];
@@ -251,6 +254,8 @@ export async function terminateLifecycleProcessGroups(opts: {
   readonly alreadySignalled?: boolean;
   /** Only these groups received shutdown through the mux/wrapper. */
   readonly alreadySignalledGroups?: readonly number[];
+  /** A repeated interrupt skips grace, never identity checks or confirmation. */
+  readonly force?: AbortSignal;
   readonly beforeSignal?: (
     groups: readonly number[]
   ) => Promise<readonly number[]>;
@@ -305,22 +310,67 @@ export async function terminateLifecycleProcessGroups(opts: {
     if (existing.length === 0) {
       return [];
     }
-    const live = new Set(await runtime.liveGroups(existing));
-    return existing.filter((group) => live.has(group));
-  };
-  const wait = async (
-    pending: readonly number[],
-    timeoutMs: number
-  ): Promise<number[]> => {
-    const deadline = runtime.now() + timeoutMs;
-    let remaining = await living(pending);
-    while (remaining.length > 0 && runtime.now() < deadline) {
-      await runtime.sleep(Math.min(100, deadline - runtime.now()));
-      remaining = await living(remaining);
+    try {
+      const live = new Set(await runtime.liveGroups(existing));
+      return existing.filter((group) => live.has(group));
+    } catch (cause) {
+      throw new LifecycleCensusUnavailable(
+        "Could not inspect live lifecycle process-group members",
+        { cause }
+      );
     }
-    return remaining;
   };
-  const initial = await living(groups);
+  const observe = async (pending: readonly number[]) => {
+    try {
+      return { groups: await living(pending) };
+    } catch (error) {
+      if (!(error instanceof LifecycleCensusUnavailable)) {
+        throw error;
+      }
+      return { unavailable: error };
+    }
+  };
+  const wait = async ({
+    pending,
+    timeoutMs,
+    firstObservation = false,
+    allowForce = false,
+  }: {
+    readonly pending: readonly number[];
+    readonly timeoutMs: number;
+    readonly firstObservation?: boolean;
+    readonly allowForce?: boolean;
+  }): Promise<number[]> => {
+    const deadline = runtime.now() + timeoutMs;
+    let remaining = [...pending];
+    let observed = false;
+    let unavailable: LifecycleCensusUnavailable | undefined;
+    for (;;) {
+      const sample = await observe(remaining);
+      if (sample.groups) {
+        remaining = sample.groups;
+        observed = true;
+        if (firstObservation || remaining.length === 0) {
+          return remaining;
+        }
+      } else {
+        unavailable = sample.unavailable;
+      }
+      const forced = allowForce && opts.force?.aborted === true;
+      if (runtime.now() >= deadline || (observed && forced)) {
+        if (!observed) {
+          throw unavailable;
+        }
+        return remaining;
+      }
+      await runtime.sleep(Math.min(100, Math.max(0, deadline - runtime.now())));
+    }
+  };
+  const initial = await wait({
+    pending: groups,
+    timeoutMs: LIFECYCLE_TERM_GRACE_MS,
+    firstObservation: true,
+  });
   const signalled = new Set(opts.alreadySignalledGroups);
   const needsTerm = opts.alreadySignalled
     ? []
@@ -334,7 +384,11 @@ export async function terminateLifecycleProcessGroups(opts: {
       signal(group, "SIGTERM");
     }
   }
-  const remaining = await wait(initial, LIFECYCLE_TERM_GRACE_MS);
+  const remaining = await wait({
+    pending: initial,
+    timeoutMs: LIFECYCLE_TERM_GRACE_MS,
+    allowForce: true,
+  });
   const targets =
     remaining.length > 0 && opts.beforeSignal
       ? await opts.beforeSignal(remaining)
@@ -343,7 +397,7 @@ export async function terminateLifecycleProcessGroups(opts: {
     await opts.assertFresh?.();
     signal(group, "SIGKILL");
   }
-  const unconfirmed = await wait(remaining, 2000);
+  const unconfirmed = await wait({ pending: remaining, timeoutMs: 2000 });
   if (unconfirmed.length > 0) {
     throw new Error(
       `Could not confirm lifecycle process groups stopped after SIGKILL: ${unconfirmed.join(", ")}`
@@ -359,6 +413,7 @@ type LifecycleSessionRetirementOptions = {
   readonly processes: readonly LifecyclePaneIdentity[];
   readonly stopSession: () => Promise<boolean>;
   readonly assertFresh?: () => Promise<void>;
+  readonly force?: AbortSignal;
 };
 type RetirementBoundary = {
   readonly readSnapshot: () => Promise<ProcessSnapshotRow[]>;
@@ -378,7 +433,7 @@ type CapturedLifecycleGroups = {
  * the captured groups across a retry if the mux exited but retirement failed.
  */
 export function createLifecycleSessionRetirement(boundary?: {
-  readonly readSnapshot: () => Promise<ProcessSnapshotRow[]>;
+  readonly readSnapshot?: () => Promise<ProcessSnapshotRow[]>;
   readonly readIdentities?: () => Promise<ProcessIdentityRow[]>;
 }): (opts: LifecycleSessionRetirementOptions) => Promise<boolean> {
   let captured:
@@ -422,6 +477,7 @@ export function createLifecycleSessionRetirement(boundary?: {
       beforeSignal,
       readIdentities: os.readIdentities,
       assertFresh: opts.assertFresh,
+      force: opts.force,
     });
     await terminateLifecycleProcessGroups({
       processGroupIds: groups.filter((group) => paneGroups.has(group)),
@@ -429,6 +485,7 @@ export function createLifecycleSessionRetirement(boundary?: {
       beforeSignal,
       readIdentities: os.readIdentities,
       assertFresh: opts.assertFresh,
+      force: opts.force,
     });
     return true;
   };
@@ -448,7 +505,7 @@ async function captureRetirementGroups(opts: {
   }
   const [snapshot, identities] = await Promise.all([
     readRetirementSnapshot({ read: opts.os.readSnapshot }),
-    opts.os.readIdentities().catch(() => []),
+    readRetirementIdentities(opts.os.readIdentities),
   ]);
   if (snapshot.length === 0 || identities.length === 0) {
     return "unknown";
@@ -510,7 +567,7 @@ async function verifyRetirementGroups(opts: {
   readonly members: ReadonlyMap<number, readonly ProcessIdentityRow[]>;
   readonly os: RetirementBoundary;
 }): Promise<readonly number[]> {
-  const births = await opts.os.readIdentities();
+  const births = await readRetirementIdentities(opts.os.readIdentities);
   const active = new Set(
     selectLiveLifecycleGroups({ groups: opts.pending, identities: births })
   );
@@ -536,6 +593,19 @@ async function verifyRetirementGroups(opts: {
     }
     return true;
   });
+}
+
+/** Retry one failed bounded identity read; no successful read still means unknown. */
+async function readRetirementIdentities(
+  read: () => Promise<ProcessIdentityRow[]>
+): Promise<ProcessIdentityRow[]> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const identities = await read().catch(() => []);
+    if (identities.length > 0) {
+      return identities;
+    }
+  }
+  return [];
 }
 
 /** Retry one transient foreground observation; neither failure proves absence. */

@@ -4,6 +4,10 @@ import { HACK_PROJECT_DIR_PRIMARY } from "../src/constants.ts";
 import type { ProjectMeta } from "../src/lib/project-meta.ts";
 import type { ProjectView } from "../src/lib/project-views.ts";
 import type { RegisteredProject } from "../src/lib/projects-registry.ts";
+import {
+  type AutostartGlobal,
+  getDefaultAutostartGlobal,
+} from "../src/lib/projects-registry.ts";
 import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
@@ -803,4 +807,105 @@ test("summary payload keeps project identity and omits detailed runtime payloads
   expect(cache.getDiagnostics().lastRefreshPhasesMs).toHaveProperty(
     "auto_register_ms"
   );
+});
+
+test("project polling observes fresh autostart progress without a runtime refresh", async () => {
+  const project: RegisteredProject = {
+    id: "example-id",
+    name: "example",
+    repoRoot: "/example/project",
+    projectDir: "/example/project/.hack",
+    projectDirName: ".hack",
+    createdAt: "2026-01-01T00:00:00Z",
+    autostart: {
+      branch: null,
+      paused: false,
+      lastResult: null,
+      lastAttemptBootId: "private-boot-id",
+    },
+  };
+  let global: AutostartGlobal = {
+    ...getDefaultAutostartGlobal(),
+    loginRun: {
+      runId: "private-run-id",
+      bootId: "private-boot-id",
+      inProgress: true,
+      startedAt: "2026-01-01T00:00:00Z",
+      pending: [project.id],
+      started: [],
+      failed: [],
+    },
+  };
+  let ready = true;
+  const view: ProjectView = {
+    projectId: project.id,
+    name: project.name,
+    devHost: null,
+    repoRoot: project.repoRoot,
+    projectDir: project.projectDir,
+    ownership: null,
+    definedServices: [],
+    extensionsEnabled: null,
+    features: null,
+    serviceHosts: null,
+    runtimeConfigured: true,
+    runtimeStatus: "stopped",
+    runtime: null,
+    branchRuntime: [],
+    sessions: [],
+    lifecycle: null,
+    worktrees: null,
+    kind: "registered",
+    status: "stopped",
+  };
+  const cache = createRuntimeCache({
+    deps: {
+      readProjectsRegistry: async () => ({
+        version: 1,
+        projects: [project],
+        autostartGlobal: global,
+      }),
+      readAutostartServiceReady: async () => ready,
+      buildProjectViews: async () => [view],
+    },
+  });
+  const options = {
+    filter: null,
+    includeGlobal: false,
+    includeUnregistered: false,
+    includeMeta: false,
+  };
+  const first = await cache.getProjectsPayload(options);
+  expect(first.projects[0]?.autostart).toMatchObject({
+    enabled: true,
+    state: "starting",
+  });
+  expect(first.autostart_global).toMatchObject({
+    service_ready: true,
+    login_run: { in_progress: true, pending: [project.id] },
+  });
+  const runtimeReads = runtimeReadCalls.length;
+  global = {
+    paused: true,
+    loginRun: {
+      ...global.loginRun,
+      inProgress: false,
+      pending: [],
+      started: [project.id],
+    },
+  };
+  ready = false;
+  const second = await cache.getProjectsPayload({ ...options, summary: true });
+  expect(runtimeReadCalls.length).toBe(runtimeReads);
+  expect(second.projects[0]?.autostart).toMatchObject({
+    enabled: true,
+    state: "paused",
+    paused_reason: null,
+  });
+  expect(second.autostart_global).toMatchObject({
+    paused: true,
+    service_ready: false,
+    login_run: { in_progress: false, pending: [], started: [project.id] },
+  });
+  expect(JSON.stringify(second)).not.toContain("private-");
 });

@@ -19,6 +19,12 @@ import {
 } from "../cli/project-selector.ts";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
+import {
+  type AutostartGlobalView,
+  projectAutostartFromGlobal,
+  readAutostartServiceReady,
+  serializeAutostartGlobal,
+} from "../lib/autostart-view.ts";
 import { resolveEffectiveBranch } from "../lib/branches.ts";
 import {
   readInternalExtraHostsIp,
@@ -59,6 +65,7 @@ import {
 } from "../lib/project-views.ts";
 import {
   findDeadProjectRegistrations,
+  getDefaultAutostartGlobal,
   type RegisteredProject,
   readProjectsRegistry,
   removeProjectsById,
@@ -499,6 +506,7 @@ async function runNativeStatus(opts: {
   readonly ps?: typeof nativeProjectPs;
   readonly authored?: typeof tryNativeComposeCommand;
   readonly readRegistry?: typeof readProjectsRegistry;
+  readonly serviceReady?: typeof readAutostartServiceReady;
 }): Promise<number> {
   // Once, whichever native observer answers (HACK-2026).
   noteNativeBackendBeta({ json: opts.json });
@@ -529,7 +537,17 @@ async function runNativeStatus(opts: {
               name: parseProjectSelectorOption({ projectOpt: opts.projectOpt })
                 .name,
             });
-      return { autostart: serializeProjectAutostart(registration?.autostart) };
+      const global = serializeAutostartGlobal(
+        registry.autostartGlobal ?? getDefaultAutostartGlobal(),
+        await (opts.serviceReady ?? readAutostartServiceReady)()
+      );
+      return {
+        autostart: projectAutostartFromGlobal({
+          project: registration ?? undefined,
+          global,
+        }),
+        autostart_global: global,
+      };
     },
   });
   if (authored !== null) {
@@ -571,9 +589,20 @@ async function runNativeStatus(opts: {
       entry.projectDir === project.projectDir ||
       entry.worktrees?.some((worktree) => worktree.path === project.projectRoot)
   );
-  const autostart = serializeProjectAutostart(registration?.autostart);
+  const global = serializeAutostartGlobal(
+    registry.autostartGlobal ?? getDefaultAutostartGlobal(),
+    await (opts.serviceReady ?? readAutostartServiceReady)()
+  );
+  const autostart = projectAutostartFromGlobal({
+    project: registration,
+    global,
+  });
   if (opts.json) {
-    emitCliResult({ result: okResult({ data: { ...result, autostart } }) });
+    emitCliResult({
+      result: okResult({
+        data: { ...result, autostart, autostart_global: global },
+      }),
+    });
   } else {
     await displayNativePs(result, false);
     if (registration?.autostart) {
@@ -652,8 +681,13 @@ async function runProjects(opts: {
         buildMetaByProjectName({ views })
       )
     : new Map<string, ProjectMeta>();
+  const global = serializeAutostartGlobal(
+    registry.autostartGlobal ?? getDefaultAutostartGlobal(),
+    await readAutostartServiceReady()
+  );
   if (opts.json) {
     outputProjectsJson({
+      autostartGlobal: global,
       summary: opts.summary === true,
       profiler,
       started,
@@ -684,6 +718,15 @@ async function runProjects(opts: {
     return 0;
   }
 
+  if (global.paused) {
+    await display.panel({
+      title: "Always-on",
+      tone: "warn",
+      lines: [
+        "Always-on is paused for all projects. Resume with: hack autostart resume",
+      ],
+    });
+  }
   await display.section("Projects");
   await display.table({
     columns: [
@@ -703,7 +746,13 @@ async function runProjects(opts: {
         runningCount,
         runtimeOk: runtime.ok,
       });
-      const autostartState = p.autostart?.paused ? "paused" : "always-on";
+      const autostartState = serializeProjectAutostart(p.autostart, {
+        globallyPaused: global.paused,
+        starting:
+          global.login_run.in_progress &&
+          p.projectId !== undefined &&
+          global.login_run.pending.includes(p.projectId),
+      }).state;
       return [
         p.name,
         p.status,
@@ -793,6 +842,10 @@ async function outputDaemonProjects({
     const payload = overlayAutostartPolicy({
       cached,
       projects: registry.projects,
+      global: serializeAutostartGlobal(
+        registry.autostartGlobal ?? getDefaultAutostartGlobal(),
+        await readAutostartServiceReady()
+      ),
     });
     writeProfiledProjects({
       payload,
@@ -811,22 +864,28 @@ async function outputDaemonProjects({
 function overlayAutostartPolicy(opts: {
   readonly cached: Readonly<Record<string, unknown>>;
   readonly projects: readonly RegisteredProject[];
+  readonly global?: AutostartGlobalView;
 }): Record<string, unknown> {
   const markers = new Map(
-    opts.projects.map((project) => [project.id, project.autostart])
+    opts.projects.map((project) => [project.id, project])
   );
+  const global =
+    opts.global ?? serializeAutostartGlobal(getDefaultAutostartGlobal(), false);
   return {
     ...opts.cached,
+    autostart_global: global,
     projects: Array.isArray(opts.cached.projects)
       ? opts.cached.projects.map((project: unknown) =>
           isRecord(project)
             ? {
                 ...project,
-                autostart: serializeProjectAutostart(
-                  typeof project.project_id === "string"
-                    ? markers.get(project.project_id)
-                    : undefined
-                ),
+                autostart: projectAutostartFromGlobal({
+                  project:
+                    typeof project.project_id === "string"
+                      ? markers.get(project.project_id)
+                      : undefined,
+                  global,
+                }),
               }
             : project
         )
@@ -849,6 +908,7 @@ type RuntimeRecoveryNotice = {
 };
 
 function outputProjectsJson(opts: {
+  readonly autostartGlobal: AutostartGlobalView;
   readonly summary: boolean;
   readonly profiler: OperationTimings;
   readonly started: number;
@@ -866,6 +926,7 @@ function outputProjectsJson(opts: {
 }): void {
   const runtimeMeta = formatRuntimeMeta({ runtime: opts.runtime });
   const payload = {
+    autostart_global: opts.autostartGlobal,
     ...(opts.summary ? { detail_level: "summary" } : {}),
     generated_at: new Date().toISOString(),
     filter: opts.filterLabel,
@@ -890,6 +951,13 @@ function outputProjectsJson(opts: {
         ...(opts.summary
           ? serializeProjectSummary(view)
           : serializeProjectView(view)),
+        autostart: serializeProjectAutostart(view.autostart, {
+          globallyPaused: opts.autostartGlobal.paused,
+          starting:
+            opts.autostartGlobal.login_run.in_progress &&
+            view.projectId !== undefined &&
+            opts.autostartGlobal.login_run.pending.includes(view.projectId),
+        }),
         ...(opts.includeMeta
           ? { meta: opts.metaByName.get(view.name) ?? null }
           : {}),

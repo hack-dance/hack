@@ -13,9 +13,13 @@ import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { findProjectContextAtRoot, readProjectConfig } from "../lib/project.ts";
 import {
+  beginAutostartLoginRun,
   claimProjectAutostart,
+  finishAutostartLoginRun,
   type RegisteredProject,
+  readAutostartGlobal,
   readProjectsRegistry,
+  recordAutostartLoginOutcome,
   recordProjectAutostartResult,
 } from "../lib/projects-registry.ts";
 
@@ -66,36 +70,79 @@ export async function runAutostartAtLogin(
   } = {}
 ): Promise<void> {
   const deps = opts.dependencies ?? productionDependencies();
+  const prior = await readAutostartGlobal({ registryPath: opts.registryPath });
+  if (prior.loginRun.inProgress && prior.loginRun.runId) {
+    await finishAutostartLoginRun({
+      runId: prior.loginRun.runId,
+      registryPath: opts.registryPath,
+    });
+  }
   const registry = await readProjectsRegistry({
     registryPath: opts.registryPath,
     requireAutostartTrust: true,
   });
-  const candidates = registry.projects
-    .filter((project) => project.autostart && !project.autostart.paused)
-    .sort(
-      (a, b) =>
-        a.name.localeCompare(b.name, "en") || a.id.localeCompare(b.id, "en")
-    );
-  if (candidates.length === 0) {
+  if (registry.autostartGlobal?.paused) {
     return;
   }
   const machineBootId = await deps.bootId().catch(() => null);
   const bootId = machineBootId ?? "unavailable";
-  const pending = candidates.filter(
-    (project) => project.autostart?.lastAttemptBootId !== bootId
-  );
-  if (pending.length === 0) {
+  const pending = registry.projects
+    .filter(
+      (project) =>
+        project.autostart &&
+        !project.autostart.paused &&
+        !project.autostart.invalid &&
+        project.autostart.lastAttemptBootId !== bootId
+    )
+    .sort(
+      (a, b) =>
+        a.name.localeCompare(b.name, "en") || a.id.localeCompare(b.id, "en")
+    );
+  if (pending.length === 0 || opts.signal?.aborted) {
     return;
   }
-  const refusal = await prepareAutostartRuntime({
-    deps,
-    machineBootId,
-    signal: opts.signal,
+  const loginRun = await beginAutostartLoginRun({
+    bootId,
+    startedAt: new Date(deps.now()).toISOString(),
+    pendingIds: pending.map((project) => project.id),
+    registryPath: opts.registryPath,
   });
-  if (opts.signal?.aborted) {
+  if (!loginRun?.runId) {
     return;
   }
+  try {
+    const refusal = await prepareAutostartRuntime({
+      deps,
+      machineBootId,
+      signal: opts.signal,
+      registryPath: opts.registryPath,
+    });
+    await dispatchAutostartProjects({
+      ...opts,
+      pending,
+      deps,
+      bootId,
+      runId: loginRun.runId,
+      refusal,
+    });
+  } finally {
+    await finishAutostartLoginRun({
+      runId: loginRun.runId,
+      registryPath: opts.registryPath,
+    });
+  }
+}
 
+async function dispatchAutostartProjects(opts: {
+  readonly pending: readonly RegisteredProject[];
+  readonly deps: AutostartDependencies;
+  readonly bootId: string;
+  readonly runId: string;
+  readonly refusal: string | null;
+  readonly registryPath?: string;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  const { deps, bootId, pending } = opts;
   const active = new Set<Promise<void>>();
   const tasks: Promise<void>[] = [];
   let lastStartAt: number | null = null;
@@ -113,7 +160,10 @@ export async function runAutostartAtLogin(
           await deps.sleep(delay, opts.signal);
         }
       }
-      if (opts.signal?.aborted) {
+      if (
+        opts.signal?.aborted ||
+        (await readAutostartGlobal({ registryPath: opts.registryPath })).paused
+      ) {
         break;
       }
       const project = await claimProjectAutostart({
@@ -131,12 +181,9 @@ export async function runAutostartAtLogin(
         dispatched = done;
       });
       const task = startClaimedProject({
-        project,
-        bootId,
-        refusal,
-        deps,
-        onDispatched: dispatched,
         ...opts,
+        project,
+        onDispatched: dispatched,
       });
       const tracked = task.then(
         () => {
@@ -159,6 +206,7 @@ export async function runAutostartAtLogin(
 async function prepareAutostartRuntime(opts: {
   readonly deps: AutostartDependencies;
   readonly machineBootId: string | null;
+  readonly registryPath?: string;
   readonly signal?: AbortSignal;
 }): Promise<string | null> {
   const refusal = opts.deps.startupRefusal?.();
@@ -172,6 +220,11 @@ async function prepareAutostartRuntime(opts: {
   const deadline = deps.now() + ENGINE_WAIT_MS;
   let ready = false;
   while (!signal?.aborted) {
+    if (
+      (await readAutostartGlobal({ registryPath: opts.registryPath })).paused
+    ) {
+      return "global_paused";
+    }
     ready = await deps.engineReady().catch(() => false);
     if (ready || deps.now() >= deadline) {
       break;
@@ -182,10 +235,21 @@ async function prepareAutostartRuntime(opts: {
     return "engine_timeout";
   }
   if (
-    (await deps.routingInstalled()) &&
-    !(await deps.startRouting(signal).catch(() => false))
+    signal?.aborted ||
+    (await readAutostartGlobal({ registryPath: opts.registryPath })).paused
   ) {
-    return "routing_failed";
+    return "global_paused";
+  }
+  if (await deps.routingInstalled()) {
+    if (
+      signal?.aborted ||
+      (await readAutostartGlobal({ registryPath: opts.registryPath })).paused
+    ) {
+      return "global_paused";
+    }
+    if (!(await deps.startRouting(signal).catch(() => false))) {
+      return "routing_failed";
+    }
   }
   return null;
 }
@@ -193,6 +257,7 @@ async function prepareAutostartRuntime(opts: {
 async function startClaimedProject(opts: {
   readonly project: RegisteredProject;
   readonly bootId: string;
+  readonly runId: string;
   readonly refusal: string | null;
   readonly onDispatched: () => void;
   readonly deps: AutostartDependencies;
@@ -211,6 +276,7 @@ async function startClaimedProject(opts: {
     if (
       !current?.autostart ||
       current.autostart.paused ||
+      registry.autostartGlobal?.paused ||
       opts.signal?.aborted
     ) {
       result = {
@@ -238,6 +304,18 @@ async function startClaimedProject(opts: {
     result: { ...result, at: new Date(opts.deps.now()).toISOString() },
     registryPath: opts.registryPath,
   });
+  await recordAutostartLoginOutcome({
+    runId: opts.runId,
+    id: opts.project.id,
+    succeeded:
+      result.status === "started" || result.status === "already_running",
+    cancelled:
+      result.reason !== null &&
+      ["paused", "global_paused", "daemon_stopped", "target_changed"].includes(
+        result.reason
+      ),
+    registryPath: opts.registryPath,
+  });
 }
 
 async function dispatchIfStillWanted(opts: {
@@ -247,12 +325,16 @@ async function dispatchIfStillWanted(opts: {
   readonly signal?: AbortSignal;
   readonly registryPath?: string;
 }): Promise<StartResult> {
-  const latest = (
-    await readProjectsRegistry({
-      registryPath: opts.registryPath,
-      requireAutostartTrust: true,
-    })
-  ).projects.find((project) => project.id === opts.project.id);
+  const registry = await readProjectsRegistry({
+    registryPath: opts.registryPath,
+    requireAutostartTrust: true,
+  });
+  const latest = registry.projects.find(
+    (project) => project.id === opts.project.id
+  );
+  if (registry.autostartGlobal?.paused) {
+    return { status: "skipped", reason: "global_paused" };
+  }
   if (!latest?.autostart || latest.autostart.paused || opts.signal?.aborted) {
     return {
       status: "skipped",
@@ -417,6 +499,18 @@ async function inspectComposeProject(
   if (cfg.parseError) {
     return "unknown";
   }
+  // An uncertain selected graph must run ordinary up rather than adopt a subset.
+  if (
+    project.autostart?.branch ||
+    process.env.COMPOSE_FILE ||
+    process.env.COMPOSE_PROFILES
+  ) {
+    return "stopped";
+  }
+  const model = await readAutostartComposeModel(context.composeFile);
+  if (!model) {
+    return "stopped";
+  }
   const name = await resolveComposeProjectName({ project: context, cfg });
   const composeName = project.autostart?.branch
     ? `${name}--${project.autostart.branch}`
@@ -455,22 +549,25 @@ async function inspectComposeProject(
   if (inspected.exitCode !== 0) {
     return "unknown";
   }
-  const completedServices = await readCompletedDependencyServices(
-    context.composeFile
+  return classifyAutostartContainers(
+    inspected.stdout,
+    model.completedServices,
+    model.requiredServices
   );
-  return classifyAutostartContainers(inspected.stdout, completedServices);
 }
 
 /** Only declared successful-completion dependency targets may be adopted after exit. */
 export function classifyAutostartContainers(
   text: string,
-  completedServices: ReadonlySet<string> = new Set()
+  completedServices: ReadonlySet<string> = new Set(),
+  requiredServices: ReadonlySet<string> = new Set()
 ): "running" | "stopped" | "unknown" {
   const states = text.trim().split("\n").filter(Boolean);
   if (states.length === 0) {
     return "unknown";
   }
   let running = false;
+  const observed = new Set<string>();
   for (const state of states) {
     const [service, status, exitCode, extra] = state.split("|");
     if (extra !== undefined || !service || !status || !exitCode) {
@@ -486,23 +583,112 @@ export function classifyAutostartContainers(
     ) {
       return "stopped";
     }
+    observed.add(service);
     running ||= status === "running";
+  }
+  if ([...requiredServices].some((service) => !observed.has(service))) {
+    return "stopped";
   }
   return running ? "running" : "stopped";
 }
 
-async function readCompletedDependencyServices(
+type AutostartComposeModel = {
+  readonly requiredServices: ReadonlySet<string>;
+  readonly completedServices: ReadonlySet<string>;
+};
+
+async function readAutostartComposeModel(
   composeFile: string
-): Promise<ReadonlySet<string>> {
+): Promise<AutostartComposeModel | null> {
   const text = await readTextFile(composeFile);
   if (text === null) {
-    return new Set();
+    return null;
   }
   try {
-    return completedDependencyServices(YAML.parse(text));
+    return autostartComposeModel(YAML.parse(text));
   } catch {
-    return new Set();
+    return null;
   }
+}
+
+/** Conservative default-profile model; unsupported composition is never adoption evidence. */
+export function autostartComposeModel(
+  compose: unknown
+): AutostartComposeModel | null {
+  if (
+    !(isRecord(compose) && isRecord(compose.services)) ||
+    compose.include !== undefined
+  ) {
+    return null;
+  }
+  const services = compose.services;
+  const requiredServices = new Set<string>();
+  for (const [name, service] of Object.entries(services)) {
+    const defaultService = isDefaultAutostartService(service);
+    if (defaultService === null) {
+      return null;
+    }
+    if (defaultService) {
+      requiredServices.add(name);
+    }
+  }
+  for (const name of requiredServices) {
+    const service = services[name];
+    if (!isRecord(service)) {
+      return null;
+    }
+    const dependencies = requiredComposeDependencies(service.depends_on);
+    if (dependencies === null) {
+      return null;
+    }
+    for (const target of dependencies) {
+      if (!isRecord(services[target])) {
+        return null;
+      }
+      requiredServices.add(target);
+    }
+  }
+  return {
+    requiredServices,
+    completedServices: completedDependencyServices(compose),
+  };
+}
+
+function isDefaultAutostartService(service: unknown): boolean | null {
+  if (!isRecord(service) || service.extends !== undefined) {
+    return null;
+  }
+  if (service.profiles === undefined) {
+    return true;
+  }
+  if (
+    !(
+      Array.isArray(service.profiles) &&
+      service.profiles.every(
+        (profile) => typeof profile === "string" && !profile.includes("$")
+      )
+    )
+  ) {
+    return null;
+  }
+  return service.profiles.length === 0;
+}
+
+function requiredComposeDependencies(value: unknown): readonly string[] | null {
+  if (value === undefined) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.every((item) => typeof item === "string") ? value : null;
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+  return Object.entries(value)
+    .filter(
+      ([, dependency]) => !isRecord(dependency) || dependency.required !== false
+    )
+    .map(([name]) => name);
 }
 
 /** A zero exit or restart policy alone does not establish a one-shot service. */

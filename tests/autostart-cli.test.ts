@@ -1,10 +1,14 @@
 import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
 import { parsePositionalsForCommand } from "../src/cli/command.ts";
+import { runCli } from "../src/cli/run.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import { autostartCommand } from "../src/commands/autostart.ts";
 import { __testOnlyProjectsCommand } from "../src/commands/projects.ts";
+import { serializeAutostartGlobal } from "../src/lib/autostart-view.ts";
+import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { serializeProjectAutostart } from "../src/lib/project-views.ts";
 import type { RegisteredProject } from "../src/lib/projects-registry.ts";
+import { getDefaultAutostartGlobal } from "../src/lib/projects-registry.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const marker = {
@@ -24,6 +28,12 @@ const project: RegisteredProject = {
 };
 const mutations: unknown[] = [];
 let reads = 0;
+let globalState = getDefaultAutostartGlobal();
+const viewMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/autostart-view.ts",
+  overrides: { readAutostartServiceReady: async () => false },
+});
 const linkedRoots = new Set<string>();
 const gitMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -39,7 +49,11 @@ const registryMock = await registerScopedModuleMock({
   overrides: {
     readProjectsRegistry: () => {
       reads += 1;
-      return Promise.resolve({ version: 1, projects: [project] });
+      return Promise.resolve({
+        version: 1,
+        projects: [project],
+        autostartGlobal: globalState,
+      });
     },
     setProjectAutostart: (options: unknown) => {
       mutations.push(options);
@@ -47,7 +61,13 @@ const registryMock = await registerScopedModuleMock({
     },
     removeProjectAutostart: (options: unknown) => {
       mutations.push(options);
-      return Promise.resolve(project);
+      const { autostart: _marker, ...withoutMarker } = project;
+      return Promise.resolve(withoutMarker);
+    },
+    setAutostartGlobalPaused: ({ paused }: { readonly paused: boolean }) => {
+      globalState = { ...globalState, paused };
+      mutations.push({ global: true, paused });
+      return Promise.resolve(globalState);
     },
     setProjectAutostartPaused: (options: unknown) => {
       mutations.push(options);
@@ -56,17 +76,20 @@ const registryMock = await registerScopedModuleMock({
   },
 });
 beforeAll(() => {
+  viewMock.activate();
   registryMock.activate();
   gitMock.activate();
 });
 afterAll(() => {
   gitMock.deactivate();
   registryMock.deactivate();
+  viewMock.deactivate();
 });
 beforeEach(() => {
   mutations.length = 0;
   reads = 0;
   linkedRoots.clear();
+  globalState = getDefaultAutostartGlobal();
 });
 const ctx = { cwd: "/example/project/subdirectory", cli: CLI_SPEC };
 const raw = { argv: [], positionals: [] };
@@ -89,7 +112,7 @@ test("autostart add selects current registered project and passes branch without
     autostartCommand.subcommands[0].handler({
       ctx,
       args: {
-        options: { branch: "preview" },
+        options: { branch: "preview", project: undefined, json: false },
         positionals: parsePositionalsForCommand(
           autostartCommand.subcommands[0].positionals,
           []
@@ -103,12 +126,12 @@ test("autostart add selects current registered project and passes branch without
   expect(result.output).toContain("hack daemon install");
 });
 
-test("pause and resume without a project select every marker", async () => {
+test("pause and resume without a project change global intent independently of project markers", async () => {
   await capture(() =>
     autostartCommand.subcommands[3].handler({
       ctx,
       args: {
-        options: {},
+        options: { project: undefined, json: false },
         positionals: parsePositionalsForCommand(
           autostartCommand.subcommands[0].positionals,
           []
@@ -121,7 +144,7 @@ test("pause and resume without a project select every marker", async () => {
     autostartCommand.subcommands[4].handler({
       ctx,
       args: {
-        options: {},
+        options: { project: undefined, json: false },
         positionals: parsePositionalsForCommand(
           autostartCommand.subcommands[0].positionals,
           []
@@ -131,10 +154,10 @@ test("pause and resume without a project select every marker", async () => {
     })
   );
   expect(mutations).toEqual([
-    { id: undefined, paused: true },
-    { id: undefined, paused: false },
+    { global: true, paused: true },
+    { global: true, paused: false },
   ]);
-  expect(reads).toBe(0);
+  expect(reads).toBe(2);
 });
 
 test("malformed project selector refuses before registry access or mutation", async () => {
@@ -142,7 +165,7 @@ test("malformed project selector refuses before registry access or mutation", as
     autostartCommand.subcommands[1].handler({
       ctx,
       args: {
-        options: {},
+        options: { project: undefined, json: false },
         positionals: parsePositionalsForCommand(
           autostartCommand.subcommands[1].positionals,
           ["KEY=value"]
@@ -163,16 +186,48 @@ test("autostart list JSON exposes stable policy and result fields without admiss
     })
   );
   expect(JSON.parse(result.output)).toEqual({
+    autostart_global: serializeAutostartGlobal(
+      getDefaultAutostartGlobal(),
+      false
+    ),
     projects: [
       {
         project_id: "example-id",
         name: "example",
-        autostart: { branch: null, paused: false, last_result: null },
+        autostart: {
+          enabled: true,
+          state: "on",
+          paused_reason: null,
+          failures: {
+            count: 0,
+            last_at: null,
+            failed_services: [],
+            last_error_code: null,
+          },
+          max_failures: 3,
+          branch: null,
+          paused: false,
+          last_result: null,
+        },
       },
     ],
   });
   expect(result.output).not.toContain("private-admission-id");
-  expect(serializeProjectAutostart(undefined)).toBeNull();
+  expect(serializeProjectAutostart(undefined)).toEqual({
+    enabled: false,
+    state: "off",
+    paused_reason: null,
+    failures: {
+      count: 0,
+      last_at: null,
+      failed_services: [],
+      last_error_code: null,
+    },
+    max_failures: 3,
+    branch: null,
+    paused: false,
+    last_result: null,
+  });
   expect(
     serializeProjectAutostart({
       ...marker,
@@ -184,6 +239,16 @@ test("autostart list JSON exposes stable policy and result fields without admiss
       },
     })
   ).toEqual({
+    enabled: true,
+    state: "paused",
+    paused_reason: "manual_stop",
+    failures: {
+      count: 0,
+      last_at: null,
+      failed_services: [],
+      last_error_code: null,
+    },
+    max_failures: 3,
     branch: null,
     paused: true,
     last_result: {
@@ -212,13 +277,20 @@ test("fresh registry policy overrides cached daemon results and removed markers"
       projects: [{ ...project, autostart: { ...marker, paused: true } }],
     })
   ).toEqual({
+    autostart_global: serializeAutostartGlobal(
+      getDefaultAutostartGlobal(),
+      false
+    ),
     projects: [
       {
         project_id: "example-id",
         name: "example",
-        autostart: { branch: null, paused: true, last_result: null },
+        autostart: serializeProjectAutostart({ ...marker, paused: true }),
       },
-      { project_id: "removed-id", autostart: null },
+      {
+        project_id: "removed-id",
+        autostart: serializeProjectAutostart(undefined),
+      },
     ],
     runtime_ok: true,
   });
@@ -232,7 +304,7 @@ for (const linkedRoot of [ctx.cwd, project.repoRoot]) {
       autostartCommand.subcommands[0].handler({
         ctx,
         args: {
-          options: { branch: "preview" },
+          options: { branch: "preview", project: undefined, json: false },
           positionals: parsePositionalsForCommand(
             autostartCommand.subcommands[0].positionals,
             ["example"]
@@ -244,3 +316,56 @@ for (const linkedRoot of [ctx.cwd, project.repoRoot]) {
     expect(mutations).toEqual([]);
   });
 }
+
+for (const action of ["add", "remove", "pause", "resume"]) {
+  test(`autostart ${action} accepts --project with a single JSON success envelope`, async () => {
+    try {
+      const result = await capture(() =>
+        runCli([
+          "autostart",
+          action,
+          "--project",
+          "example",
+          "--json",
+          "--no-interactive",
+        ])
+      );
+      expect(result.code).toBe(0);
+      expect(result.output.trim().startsWith("{")).toBe(true);
+      expect(result.output.trim().endsWith("}")).toBe(true);
+      expect(JSON.parse(result.output)).toMatchObject({
+        ok: true,
+        data: {
+          action,
+          projects: [
+            {
+              project_id: "example-id",
+              autostart: { enabled: action !== "remove" },
+            },
+          ],
+          autostart_global: { paused: false, service_ready: false },
+        },
+      });
+    } finally {
+      resetNoInteractiveFlagForTests();
+    }
+  });
+}
+
+test("explicit --project and positional name refuse before any registry read", async () => {
+  const result = await capture(() =>
+    runCli([
+      "autostart",
+      "add",
+      "example",
+      "--project",
+      "example",
+      "--json",
+      "--no-interactive",
+    ])
+  );
+  resetNoInteractiveFlagForTests();
+  expect(result.code).toBe(1);
+  expect(reads).toBe(0);
+  expect(mutations).toEqual([]);
+});

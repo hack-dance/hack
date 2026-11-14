@@ -6,20 +6,27 @@ import {
   defineCommand,
   withHandler,
 } from "../cli/command.ts";
-import { optBranch, optJson } from "../cli/options.ts";
+import { optBranch, optJson, optProject } from "../cli/options.ts";
 import {
   parseProjectSelectorOption,
   unknownProjectMessage,
 } from "../cli/project-selector.ts";
+import {
+  projectAutostartFromGlobal,
+  readAutostartServiceReady,
+  serializeAutostartGlobal,
+} from "../lib/autostart-view.ts";
+import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { isLinkedGitWorktree } from "../lib/git-worktree.ts";
 import { sanitizeBranchSlug } from "../lib/project.ts";
 import { PROJECT_SELECTOR_PATTERN } from "../lib/project-name.ts";
-import { serializeProjectAutostart } from "../lib/project-views.ts";
 import {
+  getDefaultAutostartGlobal,
   type RegisteredProject,
   readProjectsRegistry,
   removeProjectAutostart,
   selectRegisteredProjectByName,
+  setAutostartGlobalPaused,
   setProjectAutostart,
   setProjectAutostartPaused,
 } from "../lib/projects-registry.ts";
@@ -30,7 +37,7 @@ const addSpec = defineCommand({
   name: "add",
   summary: "Start this registered project at login on this machine",
   group: "Project",
-  options: [optBranch],
+  options: [optBranch, optProject, optJson],
   positionals: projectPositionals,
   subcommands: [],
 } as const);
@@ -38,7 +45,7 @@ const removeSpec = defineCommand({
   name: "remove",
   summary: "Remove this project's machine autostart marker",
   group: "Project",
-  options: [],
+  options: [optProject, optJson],
   positionals: projectPositionals,
   subcommands: [],
 } as const);
@@ -46,7 +53,7 @@ const pauseSpec = defineCommand({
   name: "pause",
   summary: "Pause one marked project, or all marked projects",
   group: "Project",
-  options: [],
+  options: [optProject, optJson],
   positionals: projectPositionals,
   subcommands: [],
 } as const);
@@ -54,7 +61,7 @@ const resumeSpec = defineCommand({
   name: "resume",
   summary: "Resume one marked project, or all marked projects",
   group: "Project",
-  options: [],
+  options: [optProject, optJson],
   positionals: projectPositionals,
   subcommands: [],
 } as const);
@@ -66,6 +73,47 @@ const listSpec = defineCommand({
   positionals: [],
   subcommands: [],
 } as const);
+
+function selectedProjectName(opts: {
+  readonly positional?: string;
+  readonly option?: string;
+}): string | undefined {
+  if (opts.positional !== undefined && opts.option !== undefined) {
+    throw new CliUsageError(
+      "Use either a project argument or --project, not both."
+    );
+  }
+  return opts.option ?? opts.positional;
+}
+async function writeMutation(opts: {
+  readonly json: boolean;
+  readonly action: string;
+  readonly projects: readonly RegisteredProject[];
+  readonly message: string;
+}): Promise<void> {
+  if (opts.json) {
+    const global = serializeAutostartGlobal(
+      (await readProjectsRegistry()).autostartGlobal ??
+        getDefaultAutostartGlobal(),
+      await readAutostartServiceReady()
+    );
+    emitCliResult({
+      result: okResult({
+        data: {
+          action: opts.action,
+          autostart_global: global,
+          projects: opts.projects.map((project) => ({
+            project_id: project.id,
+            name: project.name,
+            autostart: projectAutostartFromGlobal({ project, global }),
+          })),
+        },
+      }),
+    });
+    return;
+  }
+  process.stdout.write(`${opts.message}\n`);
+}
 
 /** Registry selection changes only the machine marker, without reading project configuration. */
 async function selectProject(opts: {
@@ -117,7 +165,13 @@ async function selectProject(opts: {
 }
 
 const add: CommandHandlerFor<typeof addSpec> = async ({ ctx, args }) => {
-  const project = await selectProject({ ctx, name: args.positionals.project });
+  const project = await selectProject({
+    ctx,
+    name: selectedProjectName({
+      positional: args.positionals.project,
+      option: args.options.project,
+    }),
+  });
   const [cwdLinked, registeredLinked] = await Promise.all([
     isLinkedGitWorktree({ repoRoot: ctx.cwd }),
     isLinkedGitWorktree({ repoRoot: project.repoRoot }),
@@ -139,36 +193,96 @@ const add: CommandHandlerFor<typeof addSpec> = async ({ ctx, args }) => {
       "Invalid --branch value; use a branch alias containing letters or digits."
     );
   }
-  await setProjectAutostart({ id: project.id, branch });
-  process.stdout.write(
-    "Autostart enabled on this machine. Install the login service with: hack daemon install\n"
-  );
+  const updated = await setProjectAutostart({ id: project.id, branch });
+  await writeMutation({
+    json: args.options.json,
+    action: "add",
+    projects: [updated],
+    message:
+      "Autostart enabled on this machine. Install the login service with: hack daemon install",
+  });
   return 0;
 };
 const remove: CommandHandlerFor<typeof removeSpec> = async ({ ctx, args }) => {
-  const project = await selectProject({ ctx, name: args.positionals.project });
-  await removeProjectAutostart({ id: project.id });
-  process.stdout.write("Autostart removed on this machine.\n");
+  const project = await selectProject({
+    ctx,
+    name: selectedProjectName({
+      positional: args.positionals.project,
+      option: args.options.project,
+    }),
+  });
+  const updated = await removeProjectAutostart({ id: project.id });
+  await writeMutation({
+    json: args.options.json,
+    action: "remove",
+    projects: updated ? [updated] : [],
+    message: "Autostart removed on this machine.",
+  });
   return 0;
 };
 const pause: CommandHandlerFor<typeof pauseSpec> = async ({ ctx, args }) => {
   const project =
-    args.positionals.project === undefined
+    selectedProjectName({
+      positional: args.positionals.project,
+      option: args.options.project,
+    }) === undefined
       ? null
-      : await selectProject({ ctx, name: args.positionals.project });
-  await setProjectAutostartPaused({ id: project?.id, paused: true });
-  process.stdout.write("Autostart paused; running projects are unchanged.\n");
+      : await selectProject({
+          ctx,
+          name: selectedProjectName({
+            positional: args.positionals.project,
+            option: args.options.project,
+          }),
+        });
+  let updated: readonly RegisteredProject[];
+  if (project) {
+    updated = await setProjectAutostartPaused({ id: project.id, paused: true });
+  } else {
+    await setAutostartGlobalPaused({ paused: true });
+    updated = (await readProjectsRegistry()).projects.filter(
+      (entry) => entry.autostart
+    );
+  }
+  await writeMutation({
+    json: args.options.json,
+    action: "pause",
+    projects: updated,
+    message: "Autostart paused; running projects are unchanged.",
+  });
   return 0;
 };
 const resume: CommandHandlerFor<typeof resumeSpec> = async ({ ctx, args }) => {
   const project =
-    args.positionals.project === undefined
+    selectedProjectName({
+      positional: args.positionals.project,
+      option: args.options.project,
+    }) === undefined
       ? null
-      : await selectProject({ ctx, name: args.positionals.project });
-  await setProjectAutostartPaused({ id: project?.id, paused: false });
-  process.stdout.write(
-    "Autostart resumed; use 'hack up -d' to start a project now.\n"
-  );
+      : await selectProject({
+          ctx,
+          name: selectedProjectName({
+            positional: args.positionals.project,
+            option: args.options.project,
+          }),
+        });
+  let updated: readonly RegisteredProject[];
+  if (project) {
+    updated = await setProjectAutostartPaused({
+      id: project.id,
+      paused: false,
+    });
+  } else {
+    await setAutostartGlobalPaused({ paused: false });
+    updated = (await readProjectsRegistry()).projects.filter(
+      (entry) => entry.autostart
+    );
+  }
+  await writeMutation({
+    json: args.options.json,
+    action: "resume",
+    projects: updated,
+    message: "Autostart resumed; use 'hack up -d' to start a project now.",
+  });
   return 0;
 };
 const list: CommandHandlerFor<typeof listSpec> = async ({ args }) => {
@@ -176,18 +290,31 @@ const list: CommandHandlerFor<typeof listSpec> = async ({ args }) => {
   const projects = registry.projects
     .filter((project) => project.autostart)
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  const global = serializeAutostartGlobal(
+    registry.autostartGlobal ?? getDefaultAutostartGlobal(),
+    await readAutostartServiceReady()
+  );
   if (args.options.json) {
     process.stdout.write(
-      `${JSON.stringify({ projects: projects.map((project) => ({ project_id: project.id, name: project.name, autostart: serializeProjectAutostart(project.autostart) })) })}\n`
+      `${JSON.stringify({ autostart_global: global, projects: projects.map((project) => ({ project_id: project.id, name: project.name, autostart: projectAutostartFromGlobal({ project, global }) })) })}\n`
     );
     return 0;
+  }
+  if (global.paused) {
+    await display.panel({
+      title: "Always-on",
+      tone: "warn",
+      lines: [
+        "Always-on is paused for all projects. Resume with: hack autostart resume",
+      ],
+    });
   }
   await display.table({
     columns: ["Project", "Branch", "Autostart", "Last result", "Reason"],
     rows: projects.map((project) => [
       project.name,
       project.autostart?.branch ?? "base",
-      project.autostart?.paused ? "paused" : "always-on",
+      projectAutostartFromGlobal({ project, global }).state,
       project.autostart?.lastResult?.status ?? "not attempted",
       project.autostart?.lastResult?.reason ?? "",
     ]),

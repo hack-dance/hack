@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { type FileHandle, open, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -42,6 +42,9 @@ const REGISTRY_VERSION = 1 as const;
 const REGISTRY_LOCK_FILENAME = `${GLOBAL_PROJECTS_REGISTRY_FILENAME}.lock`;
 const REGISTRY_TOUCH_INTERVAL_MS = 60_000;
 const AUTOSTART_REGISTRY_LIMIT_BYTES = 16 * 1024 * 1024;
+/** Progress records are bounded independently of the overall registry byte cap. */
+export const AUTOSTART_LOGIN_PROJECT_LIMIT = 1000;
+const AUTOSTART_PROJECT_ID_LIMIT = 128;
 
 export interface RegisteredProjectWorktree {
   readonly path: string;
@@ -67,6 +70,24 @@ export interface ProjectAutostart {
   readonly invalid?: true;
 }
 
+/** Login progress uses project IDs. Run identity is private admission bookkeeping. */
+export interface AutostartLoginRun {
+  readonly runId: string | null;
+  readonly bootId: string | null;
+  readonly inProgress: boolean;
+  readonly startedAt: string | null;
+  readonly pending: readonly string[];
+  readonly started: readonly string[];
+  readonly failed: readonly string[];
+}
+
+/** Global pause is independent of per-project manual-stop pauses. */
+export interface AutostartGlobal {
+  readonly paused: boolean;
+  readonly loginRun: AutostartLoginRun;
+  readonly invalid?: true;
+}
+
 // Invalid markers remain repairable and survive unrelated registry writes byte-for-JSON-value.
 // The weak key follows the marker through project spreads without exposing raw data in views.
 const invalidAutostartValues = new WeakMap<object, unknown>();
@@ -88,6 +109,7 @@ export interface RegisteredProject {
 export interface ProjectsRegistry {
   readonly version: typeof REGISTRY_VERSION;
   readonly projects: readonly RegisteredProject[];
+  readonly autostartGlobal?: AutostartGlobal;
 }
 
 export class AmbiguousProjectIdError extends Error {
@@ -176,7 +198,7 @@ export class AutostartRegistryTrustError extends HackCliError {
     super({
       code: "E_PERMISSION",
       message:
-        "Autostart cannot trust projects.json. Use a regular file owned by the current user with mode 0600, without a symbolic link; keep it below 16 MiB. Values omitted.",
+        "Autostart cannot trust projects.json. Preserve the old file outside the active registry, then rebuild a fresh current-user-owned regular registry and re-enable only reviewed projects. Do not repair writable files with in-place chmod: existing writer descriptors remain writable. Fresh files must have mode 0600, no symbolic link, and stay below 16 MiB. Values omitted.",
     });
     this.name = "AutostartRegistryTrustError";
   }
@@ -374,7 +396,8 @@ export async function readProjectsRegistryStrict(
  */
 async function readProjectsRegistryForMutation(): Promise<ProjectsRegistry> {
   const observed = await readProjectsRegistry();
-  return observed.projects.some((project) => project.autostart)
+  return observed.autostartGlobal ||
+    observed.projects.some((project) => project.autostart)
     ? await readProjectsRegistry({ requireAutostartTrust: true })
     : observed;
 }
@@ -462,6 +485,7 @@ async function upsertObservedRegistration(input: {
       });
 
       return await commitRegistrationUpdate({
+        registry: current,
         update,
         registryPath,
         signal: opts.signal,
@@ -473,6 +497,7 @@ async function upsertObservedRegistration(input: {
 }
 
 async function commitRegistrationUpdate(opts: {
+  readonly registry: ProjectsRegistry;
   readonly update: Awaited<ReturnType<typeof upsertInMemory>>;
   readonly registryPath: string;
   readonly signal?: AbortSignal;
@@ -486,7 +511,7 @@ async function commitRegistrationUpdate(opts: {
     await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
     await writeRegistryAtomic(
       opts.registryPath,
-      { version: REGISTRY_VERSION, projects: status.projects },
+      { ...opts.registry, projects: status.projects },
       opts.signal
     );
   }
@@ -553,6 +578,7 @@ async function refreshUnchangedPrimary(opts: {
         return { status: "noop", project: primary };
       }
       return await commitRegistrationUpdate({
+        registry: current,
         registryPath,
         projectDir: opts.observation.projectDir,
         update: await updatePrimaryRegistration({
@@ -759,6 +785,203 @@ type AutostartRegistryOptions = {
   readonly signal?: AbortSignal;
 };
 
+/** Legacy registries default to unpaused with no observed login run. */
+export function getDefaultAutostartGlobal(): AutostartGlobal {
+  return {
+    paused: false,
+    loginRun: {
+      runId: null,
+      bootId: null,
+      inProgress: false,
+      startedAt: null,
+      pending: [],
+      started: [],
+      failed: [],
+    },
+  };
+}
+
+/** Automatic-start policy must be read from a trusted machine registry. */
+export async function readAutostartGlobal(
+  opts: AutostartRegistryOptions = {}
+): Promise<AutostartGlobal> {
+  const registry = await readTrustedAutostartRegistry(opts);
+  return registry.autostartGlobal ?? getDefaultAutostartGlobal();
+}
+
+/** Global pause masks every opt-in, including future markers; manual-stop intent is retained. */
+export async function setAutostartGlobalPaused(
+  opts: AutostartRegistryOptions & { readonly paused: boolean }
+): Promise<AutostartGlobal> {
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const old = current.autostartGlobal;
+      const global: AutostartGlobal = {
+        ...(old?.invalid
+          ? getDefaultAutostartGlobal()
+          : (old ?? getDefaultAutostartGlobal())),
+        paused: opts.paused,
+      };
+      return { next: { ...current, autostartGlobal: global }, value: global };
+    },
+  });
+}
+
+/** Begin a new owned progress record. A globally paused machine starts no run. */
+export async function beginAutostartLoginRun(
+  opts: AutostartRegistryOptions & {
+    readonly bootId: string;
+    readonly startedAt: string;
+    readonly pendingIds: readonly string[];
+  }
+): Promise<AutostartLoginRun | null> {
+  if (!(opts.bootId.trim() && Number.isFinite(Date.parse(opts.startedAt)))) {
+    throw new Error(
+      "Autostart login requires a boot identity and valid start time."
+    );
+  }
+  const pending = [...new Set(opts.pendingIds)];
+  if (!isAutostartLoginProjectIds(pending)) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Autostart login progress supports at most 1000 project IDs, each 1 to 128 characters. No projects were started.",
+    });
+  }
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const global = current.autostartGlobal ?? getDefaultAutostartGlobal();
+      if (global.paused) {
+        return { next: current, value: null };
+      }
+      const run: AutostartLoginRun = {
+        runId: randomUUID(),
+        bootId: opts.bootId,
+        inProgress: true,
+        startedAt: opts.startedAt,
+        pending,
+        started: [],
+        failed: [],
+      };
+      return {
+        next: { ...current, autostartGlobal: { ...global, loginRun: run } },
+        value: run,
+      };
+    },
+  });
+}
+
+/** Complete one pending project; duplicate and superseded run receipts do nothing. */
+export async function recordAutostartLoginOutcome(
+  opts: AutostartRegistryOptions & {
+    readonly runId: string;
+    readonly id: string;
+    readonly succeeded: boolean;
+    /** User intent/cancellation is neither success nor a startup failure. */
+    readonly cancelled?: boolean;
+  }
+): Promise<boolean> {
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const global = current.autostartGlobal ?? getDefaultAutostartGlobal();
+      const run = global.loginRun;
+      if (
+        !run.inProgress ||
+        run.runId !== opts.runId ||
+        !run.pending.includes(opts.id)
+      ) {
+        return { next: current, value: false };
+      }
+      const loginRun: AutostartLoginRun = {
+        ...run,
+        pending: run.pending.filter((id) => id !== opts.id),
+        started: opts.succeeded ? [...run.started, opts.id] : run.started,
+        failed:
+          opts.succeeded || opts.cancelled
+            ? run.failed
+            : [...run.failed, opts.id],
+      };
+      return {
+        next: { ...current, autostartGlobal: { ...global, loginRun } },
+        value: true,
+      };
+    },
+  });
+}
+
+/** Close a run; unfinished or cancelled work has no observed failure outcome. */
+export async function finishAutostartLoginRun(
+  opts: AutostartRegistryOptions & { readonly runId: string }
+): Promise<boolean> {
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const global = current.autostartGlobal ?? getDefaultAutostartGlobal();
+      const run = global.loginRun;
+      if (!run.inProgress || run.runId !== opts.runId) {
+        return { next: current, value: false };
+      }
+      const loginRun: AutostartLoginRun = {
+        ...run,
+        inProgress: false,
+        pending: [],
+        failed: run.failed,
+      };
+      return {
+        next: { ...current, autostartGlobal: { ...global, loginRun } },
+        value: true,
+      };
+    },
+  });
+}
+
+async function readTrustedAutostartRegistry(
+  opts: AutostartRegistryOptions
+): Promise<ProjectsRegistry> {
+  const read = await readProjectsRegistryStrict({
+    registryPath: opts.registryPath,
+    requireAutostartTrust: true,
+  });
+  if (read.kind === "invalid" || (read.kind === "valid" && read.rejected > 0)) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Projects registry is invalid; autostart intent was not changed.",
+    });
+  }
+  return read.kind === "valid"
+    ? read.registry
+    : { version: REGISTRY_VERSION, projects: [] };
+}
+
+/** Serialize global policy, progress and project intent with all existing registry writers. */
+async function mutateAutostartRegistry<T>(
+  opts: AutostartRegistryOptions & {
+    readonly update: (current: ProjectsRegistry) => {
+      readonly next: ProjectsRegistry;
+      readonly value: T;
+    };
+  }
+): Promise<T> {
+  const registryPath = opts.registryPath ?? getRegistryPath();
+  await ensureDir(dirname(registryPath));
+  return await withProjectsRegistryLock({
+    lockPath: `${registryPath}.lock`,
+    signal: opts.signal,
+    run: async () => {
+      const current = await readTrustedAutostartRegistry({ registryPath });
+      const { next, value } = opts.update(current);
+      if (next !== current) {
+        await writeRegistryAtomic(registryPath, next, opts.signal);
+      }
+      return value;
+    },
+  });
+}
+
 /** Explicit machine opt-in. Re-adding an unchanged target preserves its boot claim. */
 export async function setProjectAutostart(
   opts: AutostartRegistryOptions & {
@@ -850,6 +1073,7 @@ export async function claimProjectAutostart(
   let claimed: RegisteredProject | null = null;
   await mutateProjectAutostart({
     ...opts,
+    respectGlobalPause: true,
     update: (project) => {
       const marker = project.autostart;
       if (
@@ -902,6 +1126,7 @@ export async function recordProjectAutostartResult(
 async function mutateProjectAutostart(
   opts: AutostartRegistryOptions & {
     readonly id?: string;
+    readonly respectGlobalPause?: boolean;
     readonly update: (project: RegisteredProject) => RegisteredProject;
   }
 ): Promise<readonly RegisteredProject[]> {
@@ -911,24 +1136,10 @@ async function mutateProjectAutostart(
     lockPath: `${registryPath}.lock`,
     signal: opts.signal,
     run: async () => {
-      const read = await readProjectsRegistryStrict({
-        registryPath,
-        requireAutostartTrust: true,
-      });
-      if (
-        read.kind === "invalid" ||
-        (read.kind === "valid" && read.rejected > 0)
-      ) {
-        throw new HackCliError({
-          code: "E_CONFIG_INVALID",
-          message:
-            "Projects registry is invalid; autostart intent was not changed.",
-        });
+      const current = await readTrustedAutostartRegistry({ registryPath });
+      if (opts.respectGlobalPause && current.autostartGlobal?.paused) {
+        return [];
       }
-      const current =
-        read.kind === "valid"
-          ? read.registry
-          : { version: REGISTRY_VERSION, projects: [] };
       if (opts.id !== undefined) {
         selectRegisteredProjectById({
           projects: current.projects,
@@ -991,7 +1202,7 @@ export async function removeProjectsById(opts: {
       await writeRegistryAtomic(
         getRegistryPath(),
         {
-          version: REGISTRY_VERSION,
+          ...current,
           projects: next,
         },
         opts.signal
@@ -1048,7 +1259,77 @@ function parseRegistry(value: unknown): ProjectsRegistry | null {
     }
   }
 
-  return { version: REGISTRY_VERSION, projects };
+  const autostartGlobal = parseAutostartGlobal(value.autostartGlobal);
+  return {
+    version: REGISTRY_VERSION,
+    projects,
+    ...(autostartGlobal ? { autostartGlobal } : {}),
+  };
+}
+
+/** Invalid/future global policy remains visible, preserved and incapable of automatic starts. */
+function parseAutostartGlobal(value: unknown): AutostartGlobal | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    isRecord(value) &&
+    typeof value.paused === "boolean" &&
+    isRecord(value.loginRun)
+  ) {
+    const run = value.loginRun;
+    if (
+      (run.runId === null || typeof run.runId === "string") &&
+      (run.bootId === null || typeof run.bootId === "string") &&
+      typeof run.inProgress === "boolean" &&
+      (run.startedAt === null ||
+        (typeof run.startedAt === "string" &&
+          Number.isFinite(Date.parse(run.startedAt)))) &&
+      isAutostartLoginProjectIds(run.pending) &&
+      isAutostartLoginProjectIds(run.started) &&
+      isAutostartLoginProjectIds(run.failed) &&
+      run.pending.length + run.started.length + run.failed.length <=
+        AUTOSTART_LOGIN_PROJECT_LIMIT &&
+      (!run.inProgress || Boolean(run.runId && run.bootId && run.startedAt))
+    ) {
+      return {
+        ...value,
+        paused: value.paused,
+        loginRun: {
+          ...run,
+          runId: run.runId,
+          bootId: run.bootId,
+          inProgress: run.inProgress,
+          startedAt: run.startedAt,
+          pending: run.pending,
+          started: run.started,
+          failed: run.failed,
+        },
+      };
+    }
+  }
+  const global: AutostartGlobal = {
+    ...getDefaultAutostartGlobal(),
+    paused: true,
+    invalid: true,
+  };
+  invalidAutostartValues.set(global, value);
+  return global;
+}
+
+function isAutostartLoginProjectIds(
+  value: unknown
+): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= AUTOSTART_LOGIN_PROJECT_LIMIT &&
+    value.every(
+      (id: unknown) =>
+        typeof id === "string" &&
+        id.length > 0 &&
+        id.length <= AUTOSTART_PROJECT_ID_LIMIT
+    )
+  );
 }
 
 function parseProject(value: unknown): RegisteredProject | null {
@@ -1200,22 +1481,30 @@ async function writeRegistryAtomic(
   registry: ProjectsRegistry,
   signal?: AbortSignal
 ): Promise<void> {
+  const text = `${JSON.stringify(
+    registry,
+    (_key, value: unknown) => {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        invalidAutostartValues.has(value)
+      ) {
+        return invalidAutostartValues.get(value);
+      }
+      return value;
+    },
+    2
+  )}\n`;
+  if (
+    (registry.autostartGlobal ||
+      registry.projects.some((project) => project.autostart)) &&
+    Buffer.byteLength(text) > AUTOSTART_REGISTRY_LIMIT_BYTES
+  ) {
+    throw new AutostartRegistryTrustError();
+  }
   await writeProjectsRegistryAtomic({
     path,
-    text: `${JSON.stringify(
-      registry,
-      (_key, value: unknown) => {
-        if (
-          typeof value === "object" &&
-          value !== null &&
-          invalidAutostartValues.has(value)
-        ) {
-          return invalidAutostartValues.get(value);
-        }
-        return value;
-      },
-      2
-    )}\n`,
+    text,
     signal,
   });
 }

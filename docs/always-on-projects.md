@@ -5,8 +5,8 @@ Hack's per-user login service, then mark a registered project:
 
 ```sh
 hack daemon install
-hack autostart add sample
-hack autostart add sample --branch preview
+hack autostart add --project sample
+hack autostart add --project sample --branch preview
 hack autostart list --json
 ```
 
@@ -21,12 +21,19 @@ changes the marker; it does not start anything immediately.
 stop it. A later `hack up` clears the pause. Pausing does not stop running services:
 
 ```sh
-hack autostart pause sample
-hack autostart resume sample
-hack autostart pause          # all marked projects
-hack autostart resume         # all marked projects
-hack autostart remove sample # forget the marker; leave running services alone
+hack autostart pause --project sample
+hack autostart resume --project sample
+hack autostart pause                    # globally pause automatic starts
+hack autostart resume                   # resume the global startup policy
+hack autostart remove --project sample  # forget the marker; leave services alone
 ```
+
+The positional project spelling remains accepted. All commands accept
+`--json --no-interactive`; mutations return the usual `{ok,data}` or
+`{ok:false,error}` envelope. `list --json` returns a bare object.
+Global pause also covers projects marked afterwards. Global resume preserves
+projects paused by a manual `down`; start one with `hack up` or explicitly
+`hack autostart resume --project sample` to clear that manual pause.
 
 ## At login
 
@@ -47,7 +54,11 @@ runtime state is skipped rather than taken as proof that the instance is down.
 Adoption requires a running container. An exited-zero container is treated as a
 completed job only when its service is a dependency target explicitly declared
 with `condition: service_completed_successfully`; other stopped services require
-`up`. This slice reads that declaration from the primary Compose file.
+`up`. Adoption also requires every service in the selected default-profile model
+to have a container, including required dependency targets. A missing service
+runs the normal `up` path. This slice reads the primary Compose file; branch
+overrides, explicit Compose file/profile overrides and unsupported composition
+cannot prove adoption, so they run ordinary `up` and may repeat startup hooks.
 
 No terminal or keychain prompt is allowed. Missing keys, required interaction,
 pending env migration, unavailable project paths and startup failures produce a
@@ -56,8 +67,14 @@ not install routing, start Docker, sign in, or migrate configuration at login.
 Before trusting intent, Hack opens `projects.json` without following links and
 requires a regular file owned by the current user, with no group or other write
 access. That check repeats at every autostart read and mutation. Unsafe registry
-permissions refuse startup; inspect ownership and set the registry mode to `0600`
-before retrying. Ordinary project listings remain readable for diagnosis.
+permissions refuse startup. Do not repair a formerly writable registry with
+in-place `chmod`: another user's already-open writer descriptor remains writable.
+Preserve the old file outside the active registry, start with a fresh registry,
+register the projects again, and re-enable only reviewed projects. Do not copy
+untrusted markers into the replacement. Hack publishes fresh registry files with
+mode `0600`. Ordinary project listings remain readable for diagnosis.
+The trust check observes current file ownership and mode; it cannot recover the
+history of arbitrary external permission changes or revoke an existing writer.
 
 A claim is saved before each attempt, once per OS boot. Restarting the daemon in
 the same boot does not repeat starts. A crash after the claim can leave an
@@ -79,28 +96,71 @@ No system service or `sudo` is needed for Hack's login service.
 
 ## JSON contract
 
-`hack projects --json` and `hack status --json` add `autostart` to every project,
-including summary views. It is `null` for unmarked projects. `hack autostart list
---json` returns `{ "projects": [...] }` containing only marked registrations; each
-entry has `project_id`, `name`, and the same `autostart` object:
+`hack projects --json`, `hack status --json`, and `/v1/projects` include an
+`autostart` object for every project, including summary views and unmarked
+projects. `hack autostart list --json` returns marked registrations. All these
+payloads include the same top-level `autostart_global` object:
 
 ```json
 {
-  "project_id": "example-id",
-  "name": "sample",
-  "autostart": {
-    "branch": null,
-    "paused": false,
-    "last_result": {
-      "status": "skipped",
-      "reason": "engine_timeout",
-      "at": "2026-01-01T00:00:00.000Z"
+  "projects": [{
+    "project_id": "example-id",
+    "name": "sample",
+    "autostart": {
+      "enabled": true,
+      "state": "on",
+      "paused_reason": null,
+      "failures": {
+        "count": 0,
+        "last_at": null,
+        "failed_services": [],
+        "last_error_code": null
+      },
+      "max_failures": 3,
+      "branch": null,
+      "paused": false,
+      "last_result": null
     }
+  }],
+  "autostart_global": {
+    "paused": false,
+    "login_run": {
+      "in_progress": false,
+      "started_at": null,
+      "pending": [],
+      "started": [],
+      "failed": []
+    },
+    "service_ready": false
   }
 }
 ```
 
-`branch` is `null` for base or a branch-instance slug. `paused` is a boolean.
+`enabled` is false and `state` is `off` for an unmarked project. State is `on`
+for an enabled project, `paused` after a manual stop or global pause, or `starting` while the
+project is pending in an active login run. Invalid markers use `needs_attention`.
+`paused_reason` is `manual_stop` for an individual pause and otherwise `null`.
+`failures` has the empty values above in this first slice; `max_failures: 3`
+reserves the keep-up retry bound, but no retries run in this slice. Explicit
+project resume clears the pause and failure state. The keep-up slice will use
+the same fields for failure counts and `needs_attention` after exhausting retries.
+
+Global `paused` is an independent machine setting. Login-run arrays contain
+stable project IDs: pending includes queued and active attempts, started includes
+started and already-running projects, and failed includes real startup failures
+and refusals such as an engine timeout or missing key. Manual/global pauses,
+cancellation and target changes leave the queue without being marked failed.
+An interrupted run is closed before the next daemon startup; it does
+not authorize repeating a claimed start. `started_at` is `null` before the first
+run or its ISO 8601 start time. `service_ready` means a login-service file is
+installed for this invocation; it does not prove manager readiness, unit
+freshness, or a real login run. A launcher that disables autostart reports false.
+After a daemon crash, persisted progress can remain `starting` until the daemon
+starts again and closes the interrupted run. Invalid global policy fails closed
+as globally paused; an explicit global resume repairs it.
+
+The additive `branch` field is `null` for base or a branch-instance slug.
+`paused` reflects the individual marker, separate from global pause.
 `last_result` is `null` before any recorded attempt, otherwise its `status` is
 `started`, `already_running`, `skipped`, or `failed`; `reason` is `null` on success
 or a machine-readable code; `at` is an ISO 8601 timestamp. Reasons never contain
@@ -112,10 +172,10 @@ Current skip reasons are `engine_timeout`, `routing_failed`,
 `boot_identity_unavailable`, `native_unsupported`, `runtime_unknown`,
 `interactive_required`, `env_key_missing`, `keychain_unavailable`,
 `pending_env_migration`, `project_unavailable`, `paused`, `target_changed`,
-`daemon_stopped`, and `invalid_marker`. Failure reasons are `start_failed`,
+`daemon_stopped`, `global_paused`, and `invalid_marker`. Failure reasons are `start_failed`,
 `start_timeout`, and `output_limit`.
 
-An invalid or newer marker is shown as paused with `skipped/invalid_marker` and
+An invalid or newer marker is shown as `needs_attention` with `skipped/invalid_marker` and
 the sentinel timestamp `1970-01-01T00:00:00.000Z` (no attempt occurred). Other
 project commands keep working and unrelated registry writes preserve the original
 marker. Remove and re-add it with `hack autostart remove sample` then

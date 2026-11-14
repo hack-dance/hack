@@ -57,6 +57,8 @@ hack autostart add [project] [options]
 | Option | Description |
 | --- | --- |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -81,6 +83,8 @@ hack autostart remove [project] [options]
 
 | Option | Description |
 | --- | --- |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -124,6 +128,8 @@ hack autostart pause [project] [options]
 
 | Option | Description |
 | --- | --- |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -148,6 +154,8 @@ hack autostart resume [project] [options]
 
 | Option | Description |
 | --- | --- |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

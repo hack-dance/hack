@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rename,
   rm,
@@ -14,13 +15,20 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AUTOSTART_LOGIN_PROJECT_LIMIT,
+  beginAutostartLoginRun,
   claimProjectAutostart,
+  finishAutostartLoginRun,
+  getDefaultAutostartGlobal,
   isTrustedAutostartRegistryFile,
+  readAutostartGlobal,
   readProjectsRegistry,
   readProjectsRegistryStrict,
+  recordAutostartLoginOutcome,
   recordProjectAutostartResult,
   removeProjectAutostart,
   removeProjectsById,
+  setAutostartGlobalPaused,
   setProjectAutostart,
   setProjectAutostartPaused,
   touchProjectRegistration,
@@ -415,7 +423,7 @@ test("autostart rejects group and other writable registries while ordinary reads
     ).rejects.toMatchObject({ code: "E_PERMISSION" });
     await expect(
       readProjectsRegistryStrict({ registryPath, requireAutostartTrust: true })
-    ).rejects.toThrow("regular file owned by the current user with mode 0600");
+    ).rejects.toThrow("Do not repair writable files with in-place chmod");
   }
 });
 
@@ -513,6 +521,34 @@ test("trusted mutations publish owner-private registry files", async () => {
   expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
 });
 
+test("fresh registry replacement isolates a writer retained on the preserved unsafe inode", async () => {
+  await chmod(registryPath, 0o660);
+  const writer = await open(registryPath, "r+");
+  try {
+    await rename(registryPath, join(root, "preserved-unsafe-registry.json"));
+    await writeFile(
+      registryPath,
+      JSON.stringify({ version: 1, projects: [entry("alpha")] }),
+      { mode: 0o600, flag: "wx" }
+    );
+    await setProjectAutostart({ id: "alpha", registryPath });
+    await writer.truncate(0);
+    await writer.write(
+      JSON.stringify({ version: 1, projects: [entry("beta")] }),
+      0,
+      "utf8"
+    );
+    const trusted = await readProjectsRegistry({
+      registryPath,
+      requireAutostartTrust: true,
+    });
+    expect(trusted.projects.map((project) => project.id)).toEqual(["alpha"]);
+    expect(trusted.projects[0]?.autostart?.paused).toBe(false);
+  } finally {
+    await writer.close();
+  }
+});
+
 async function createTrustProject() {
   const projectDir = join(root, "alpha", ".hack");
   await mkdir(projectDir, { recursive: true });
@@ -560,4 +596,289 @@ test("ordinary writes retain trusted intent and can upgrade unmarked legacy perm
   });
   expect((await read())?.autostart?.branch).toBe("preview");
   expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+});
+test("legacy registries default to unpaused idle global state without a migration write", async () => {
+  const before = await readFile(registryPath, "utf8");
+  expect(await readAutostartGlobal({ registryPath })).toEqual(
+    getDefaultAutostartGlobal()
+  );
+  expect(await readFile(registryPath, "utf8")).toBe(before);
+  expect(
+    (await readProjectsRegistry({ registryPath })).autostartGlobal
+  ).toBeUndefined();
+});
+
+test("global pause covers future markers and global resume preserves a manual stop", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  await setProjectAutostartPaused({ id: "alpha", paused: true, registryPath });
+  await setAutostartGlobalPaused({ paused: true, registryPath });
+  await setProjectAutostart({ id: "beta", registryPath });
+  expect((await read("beta"))?.autostart?.paused).toBe(false);
+  expect(
+    await claimProjectAutostart({ id: "beta", bootId: "boot-a", registryPath })
+  ).toBeNull();
+  expect(
+    await beginAutostartLoginRun({
+      bootId: "boot-a",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      pendingIds: ["beta"],
+      registryPath,
+    })
+  ).toBeNull();
+  expect((await readAutostartGlobal({ registryPath })).paused).toBe(true);
+  await setAutostartGlobalPaused({ paused: false, registryPath });
+  expect((await read())?.autostart?.paused).toBe(true);
+  expect(
+    await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).toBeNull();
+  expect(
+    await claimProjectAutostart({ id: "beta", bootId: "boot-a", registryPath })
+  ).not.toBeNull();
+});
+
+test("global policy survives ordinary upsert, touch, prune and marker writes", async () => {
+  const project = await createTrustProject();
+  await setAutostartGlobalPaused({ paused: true, registryPath });
+  await upsertProjectRegistration({ project });
+  await touchProjectRegistration({
+    project,
+    nowIso: "2027-01-01T00:00:00.000Z",
+  });
+  await removeProjectsById({ ids: ["beta"] });
+  await setProjectAutostart({ id: "alpha", registryPath });
+  await setProjectAutostartPaused({ id: "alpha", paused: false, registryPath });
+  await removeProjectAutostart({ id: "alpha", registryPath });
+  expect(await readAutostartGlobal({ registryPath })).toEqual({
+    ...getDefaultAutostartGlobal(),
+    paused: true,
+  });
+});
+
+test("login progress persists outcomes and rejects stale run updates in the same boot", async () => {
+  const run = await beginAutostartLoginRun({
+    bootId: "boot-a",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    pendingIds: ["alpha", "beta", "alpha"],
+    registryPath,
+  });
+  if (!run?.runId) {
+    throw new Error("Expected a login run");
+  }
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: true,
+    pending: ["alpha", "beta"],
+    started: [],
+    failed: [],
+  });
+  expect(
+    await recordAutostartLoginOutcome({
+      runId: run.runId,
+      id: "beta",
+      succeeded: true,
+      registryPath,
+    })
+  ).toBe(true);
+  expect(
+    await recordAutostartLoginOutcome({
+      runId: run.runId,
+      id: "beta",
+      succeeded: false,
+      registryPath,
+    })
+  ).toBe(false);
+  expect(
+    await recordAutostartLoginOutcome({
+      runId: run.runId,
+      id: "alpha",
+      succeeded: false,
+      registryPath,
+    })
+  ).toBe(true);
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    pending: [],
+    started: ["beta"],
+    failed: ["alpha"],
+  });
+  const next = await beginAutostartLoginRun({
+    bootId: "boot-a",
+    startedAt: "2026-01-01T00:00:01.000Z",
+    pendingIds: ["alpha"],
+    registryPath,
+  });
+  if (!next) {
+    throw new Error("Expected a replacement login run");
+  }
+  expect(next?.runId).not.toBe(run.runId);
+  expect(
+    await recordAutostartLoginOutcome({
+      runId: run.runId,
+      id: "alpha",
+      succeeded: true,
+      registryPath,
+    })
+  ).toBe(false);
+  expect(
+    await finishAutostartLoginRun({ runId: run.runId, registryPath })
+  ).toBe(false);
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toEqual(next);
+});
+
+test("closing interrupted login progress clears pending without inventing failures or claims", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  const run = await beginAutostartLoginRun({
+    bootId: "boot-a",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    pendingIds: ["alpha", "beta"],
+    registryPath,
+  });
+  if (!run?.runId) {
+    throw new Error("Expected a login run");
+  }
+  expect(
+    await finishAutostartLoginRun({ runId: run.runId, registryPath })
+  ).toBe(true);
+  expect(
+    await finishAutostartLoginRun({ runId: run.runId, registryPath })
+  ).toBe(false);
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: false,
+    pending: [],
+    started: [],
+    failed: [],
+  });
+  expect((await read())?.autostart?.lastAttemptBootId).toBeNull();
+  expect(
+    await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).not.toBeNull();
+});
+
+test("invalid global policy fails closed, survives unrelated writes and explicit resume repairs it", async () => {
+  const raw = { paused: "unknown", futureGlobal: [1, 2] };
+  const registry = await readProjectsRegistry({ registryPath });
+  await writeFile(
+    registryPath,
+    JSON.stringify({ ...registry, autostartGlobal: raw })
+  );
+  expect(await readAutostartGlobal({ registryPath })).toMatchObject({
+    paused: true,
+    invalid: true,
+  });
+  await setProjectAutostart({ id: "alpha", registryPath });
+  expect(
+    await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).toBeNull();
+  await upsertProjectRegistration({ project: await createTrustProject() });
+  expect(
+    JSON.parse(await readFile(registryPath, "utf8")).autostartGlobal
+  ).toEqual(raw);
+  await setAutostartGlobalPaused({ paused: false, registryPath });
+  expect(await readAutostartGlobal({ registryPath })).toEqual(
+    getDefaultAutostartGlobal()
+  );
+});
+
+test("global mutations and reads require trusted files even without project markers", async () => {
+  await setAutostartGlobalPaused({ paused: false, registryPath });
+  await chmod(registryPath, 0o664);
+  const before = await readFile(registryPath, "utf8");
+  await expect(readAutostartGlobal({ registryPath })).rejects.toMatchObject({
+    code: "E_PERMISSION",
+  });
+  await expect(
+    setAutostartGlobalPaused({ paused: true, registryPath })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await expect(
+    beginAutostartLoginRun({
+      bootId: "boot-a",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      pendingIds: [],
+      registryPath,
+    })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await expect(
+    upsertProjectRegistration({ project: await createTrustProject() })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  expect(await readFile(registryPath, "utf8")).toBe(before);
+});
+
+test("progress updates preserve a concurrent global pause and ordinary registry refresh", async () => {
+  const run = await beginAutostartLoginRun({
+    bootId: "boot-a",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    pendingIds: ["alpha", "beta"],
+    registryPath,
+  });
+  if (!run?.runId) {
+    throw new Error("Expected a login run");
+  }
+  const project = await createTrustProject();
+  await Promise.all([
+    recordAutostartLoginOutcome({
+      runId: run.runId,
+      id: "alpha",
+      succeeded: true,
+      registryPath,
+    }),
+    setAutostartGlobalPaused({ paused: true, registryPath }),
+    upsertProjectRegistration({ project }),
+  ]);
+  expect(await readAutostartGlobal({ registryPath })).toMatchObject({
+    paused: true,
+    loginRun: { pending: ["beta"], started: ["alpha"] },
+  });
+  await finishAutostartLoginRun({ runId: run.runId, registryPath });
+  expect(await readAutostartGlobal({ registryPath })).toMatchObject({
+    paused: true,
+    loginRun: { inProgress: false, failed: [] },
+  });
+});
+
+test("login progress rejects oversized ID sets without rewriting state", async () => {
+  const before = await readFile(registryPath, "utf8");
+  await expect(
+    beginAutostartLoginRun({
+      bootId: "boot-a",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      registryPath,
+      pendingIds: Array.from(
+        { length: AUTOSTART_LOGIN_PROJECT_LIMIT + 1 },
+        (_, index) => `project-${index}`
+      ),
+    })
+  ).rejects.toMatchObject({ code: "E_CONFIG_INVALID" });
+  await expect(
+    beginAutostartLoginRun({
+      bootId: "boot-a",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      registryPath,
+      pendingIds: ["x".repeat(129)],
+    })
+  ).rejects.toMatchObject({ code: "E_CONFIG_INVALID" });
+  expect(await readFile(registryPath, "utf8")).toBe(before);
+});
+
+test("stored login arrays exceeding the progress bound globally pause automatic starts", async () => {
+  const global = getDefaultAutostartGlobal();
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      version: 1,
+      projects: [entry("alpha")],
+      autostartGlobal: {
+        ...global,
+        loginRun: {
+          ...global.loginRun,
+          pending: Array.from(
+            { length: AUTOSTART_LOGIN_PROJECT_LIMIT },
+            (_, index) => `project-${index}`
+          ),
+          started: ["extra"],
+        },
+      },
+    })
+  );
+  expect(await readAutostartGlobal({ registryPath })).toMatchObject({
+    paused: true,
+    invalid: true,
+  });
 });

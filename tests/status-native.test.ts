@@ -6,7 +6,12 @@ import type { NativeProjectPsResult } from "../src/backends/native-project-obser
 import { resolveNativeRuntimeSelection } from "../src/backends/native-runtime-client.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { __testOnlyProjectsCommand } from "../src/commands/projects.ts";
+import {
+  serializeAutostartGlobal,
+  serializeProjectAutostart,
+} from "../src/lib/autostart-view.ts";
 import { ProjectInputSelectionError } from "../src/lib/project-input-selection.ts";
+import { getDefaultAutostartGlobal } from "../src/lib/projects-registry.ts";
 
 const { runNativeStatus } = __testOnlyProjectsCommand;
 const roots: string[] = [];
@@ -70,6 +75,7 @@ test("hack status under native selection observes the cwd project like native ps
   const scopes: unknown[] = [];
   const out = await captureStdout(async () => {
     const code = await runNativeStatus({
+      serviceReady: async () => false,
       readRegistry: async () => ({
         version: 1,
         projects: [
@@ -120,12 +126,29 @@ test("hack status under native selection observes the cwd project like native ps
   // The JSON envelope matches native `hack ps --json`; nothing reports "stopped".
   const parsed = JSON.parse(out) as {
     ok: boolean;
-    data: NativeProjectPsResult & { readonly autostart: unknown };
+    data: NativeProjectPsResult & {
+      readonly autostart: unknown;
+      readonly autostart_global: unknown;
+    };
   };
   expect(parsed.ok).toBe(true);
   expect(parsed.data).toEqual({
     ...observed,
+    autostart_global: serializeAutostartGlobal(
+      getDefaultAutostartGlobal(),
+      false
+    ),
     autostart: {
+      enabled: true,
+      state: "paused",
+      paused_reason: "manual_stop",
+      failures: {
+        count: 0,
+        last_at: null,
+        failed_services: [],
+        last_error_code: null,
+      },
+      max_failures: 3,
       branch: null,
       paused: true,
       last_result: {
@@ -146,6 +169,7 @@ test("hack status under native selection refuses outside a project instead of li
   let observations = 0;
   await expect(
     runNativeStatus({
+      serviceReady: async () => false,
       readRegistry: async () => ({ version: 1, projects: [] }),
       cwd: root,
       native: { binary: "/opt/candidate/hack-native", home: root },
@@ -160,6 +184,7 @@ test("hack status under native selection refuses outside a project instead of li
   ).rejects.toBeInstanceOf(CliUsageError);
   await expect(
     runNativeStatus({
+      serviceReady: async () => false,
       readRegistry: async () => ({ version: 1, projects: [] }),
       cwd: root,
       native: { binary: "/opt/candidate/hack-native", home: root },
@@ -191,13 +216,20 @@ test("hack status under native selection dispatches a native-authored project li
   const dispatched: unknown[] = [];
   let observations = 0;
   const code = await runNativeStatus({
+    serviceReady: async () => false,
     readRegistry: async () => ({ version: 1, projects: [] }),
     cwd: root,
     native,
     projectOpt: undefined,
     json: true,
     authored: async (input) => {
-      expect(await input.statusMetadata?.()).toEqual({ autostart: null });
+      expect(await input.statusMetadata?.()).toEqual({
+        autostart: serializeProjectAutostart(undefined),
+        autostart_global: serializeAutostartGlobal(
+          getDefaultAutostartGlobal(),
+          false
+        ),
+      });
       dispatched.push(input);
       return 7;
     },
@@ -221,6 +253,7 @@ test("hack status under native selection dispatches a native-authored project li
   // Control: without the authored dispatch this checkout is refused before any observation.
   await expect(
     runNativeStatus({
+      serviceReady: async () => false,
       readRegistry: async () => ({ version: 1, projects: [] }),
       cwd: root,
       native,

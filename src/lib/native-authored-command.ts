@@ -441,7 +441,7 @@ async function showStatus(options: {
     ]),
   });
   const policy = (await options.statusMetadata?.())?.autostart;
-  if (policy) {
+  if (policy?.enabled) {
     await display.kv({
       entries: [
         ["Autostart", policy.paused ? "paused" : "always-on"],

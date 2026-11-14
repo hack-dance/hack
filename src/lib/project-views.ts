@@ -9,6 +9,11 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
+import { serializeProjectAutostart } from "./autostart-view.ts";
+
+// biome-ignore lint/performance/noBarrelFile: Preserve the existing project policy serializer import contract.
+export { serializeProjectAutostart } from "./autostart-view.ts";
+
 import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -395,31 +400,6 @@ function buildUnregisteredProjectView(opts: {
     kind: "unregistered",
     status: "unregistered",
   };
-}
-
-/** Stable desktop-facing machine policy; per-boot admission bookkeeping remains internal. */
-export function serializeProjectAutostart(
-  marker: RegisteredProject["autostart"]
-): {
-  readonly branch: string | null;
-  readonly paused: boolean;
-  readonly last_result: NonNullable<
-    RegisteredProject["autostart"]
-  >["lastResult"];
-} | null {
-  return marker
-    ? {
-        branch: marker.branch,
-        paused: marker.paused,
-        last_result: marker.lastResult
-          ? {
-              status: marker.lastResult.status,
-              reason: marker.lastResult.reason,
-              at: marker.lastResult.at,
-            }
-          : null,
-      }
-    : null;
 }
 
 /** Summary projection deliberately excludes container labels, mounts and command definitions. */

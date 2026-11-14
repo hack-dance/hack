@@ -4,6 +4,7 @@ import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../backends/native-project-o
 import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
+import type { AutostartGlobalView } from "./autostart-view.ts";
 import {
   emitCliResult,
   errorResult,
@@ -160,6 +161,7 @@ export type NativeComposeCommandOptions = {
   /** Add machine policy only for status callers; ordinary ps keeps its existing shape. */
   readonly statusMetadata?: () => Promise<{
     readonly autostart: ReturnType<typeof serializeProjectAutostart>;
+    readonly autostart_global: AutostartGlobalView;
   }>;
   readonly cwd: string;
   readonly path?: string;

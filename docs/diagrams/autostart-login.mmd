@@ -10,6 +10,10 @@ sequenceDiagram
   participant CLI
   Login->>Daemon: Start user service
   Daemon->>Registry: Read machine markers
+  alt Globally paused
+    Daemon->>Daemon: Skip automatic starts
+  else Automatic starts enabled
+  Daemon->>Registry: Begin login progress
   Daemon->>Engine: Wait up to 60 seconds
   opt Routing already installed
     Daemon->>CLI: global up, no interaction
@@ -23,5 +27,7 @@ sequenceDiagram
     else Running or unknown
       Daemon->>Daemon: Adopt or skip
     end
-    Daemon->>Registry: Save result and reason
+    Daemon->>Registry: Save result and progress
+  end
+  Daemon->>Registry: Finish login progress
   end

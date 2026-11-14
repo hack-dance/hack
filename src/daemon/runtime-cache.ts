@@ -1,5 +1,11 @@
 import { resolve } from "node:path";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
+import {
+  type AutostartGlobalView,
+  projectAutostartFromGlobal,
+  readAutostartServiceReady,
+  serializeAutostartGlobal,
+} from "../lib/autostart-view.ts";
 import { createOperationTimings } from "../lib/operation-timings.ts";
 import { resolveProjectMeta } from "../lib/project-meta.ts";
 import {
@@ -7,7 +13,10 @@ import {
   serializeProjectSummary,
   serializeProjectView,
 } from "../lib/project-views.ts";
-import { readProjectsRegistry } from "../lib/projects-registry.ts";
+import {
+  getDefaultAutostartGlobal,
+  readProjectsRegistry,
+} from "../lib/projects-registry.ts";
 import type { RuntimeProject } from "../lib/runtime-projects.ts";
 import {
   autoRegisterRuntimeHackProjects,
@@ -49,6 +58,7 @@ export type RuntimeSnapshot = {
 };
 
 export type ProjectsPayload = {
+  readonly autostart_global: AutostartGlobalView;
   readonly detail_level?: "summary";
   readonly profiling?: Record<string, unknown>;
   readonly generated_at: string;
@@ -146,12 +156,15 @@ export function createRuntimeCache(opts: {
   readonly onRefresh?: (snapshot: RuntimeSnapshot) => void;
   readonly deps?: {
     readonly readProjectsRegistry?: typeof readProjectsRegistry;
+    readonly readAutostartServiceReady?: typeof readAutostartServiceReady;
     readonly buildProjectViews?: typeof buildProjectViews;
     readonly serializeProjectView?: typeof serializeProjectView;
     readonly resolveProjectMeta?: typeof resolveProjectMeta;
   };
 }): RuntimeCache {
   const deps = {
+    readAutostartServiceReady:
+      opts.deps?.readAutostartServiceReady ?? readAutostartServiceReady,
     readProjectsRegistry:
       opts.deps?.readProjectsRegistry ?? readProjectsRegistry,
     buildProjectViews: opts.deps?.buildProjectViews ?? buildProjectViews,
@@ -359,11 +372,25 @@ export function createRuntimeCache(opts: {
           )
         )
       : [];
+    const global = serializeAutostartGlobal(
+      registry.autostartGlobal ?? getDefaultAutostartGlobal(),
+      await deps.readAutostartServiceReady()
+    );
+    const registeredById = new Map(
+      registry.projects.map((project) => [project.id, project])
+    );
     const projects = profiler.measureSync("projection_ms", () =>
       views.map((view, i) => ({
         ...(summary
           ? serializeProjectSummary(view)
           : deps.serializeProjectView(view)),
+        autostart: projectAutostartFromGlobal({
+          project:
+            view.projectId === undefined
+              ? undefined
+              : registeredById.get(view.projectId),
+          global,
+        }),
         ...(includeMeta ? { meta: metas[i] ?? null } : {}),
       }))
     );
@@ -382,6 +409,7 @@ export function createRuntimeCache(opts: {
           }
         : {}),
       generated_at: new Date().toISOString(),
+      autostart_global: global,
       filter,
       include_global: includeGlobal,
       include_unregistered: includeUnregistered,

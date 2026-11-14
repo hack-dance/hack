@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type AutostartDependencies,
+  autostartComposeModel,
   autostartRuntimeRefusal,
   classifyAutostartContainers,
   classifyAutostartExit,
@@ -12,7 +13,13 @@ import {
   runAutostartSubprocess,
 } from "../src/daemon/autostart.ts";
 import {
+  beginAutostartLoginRun,
+  claimProjectAutostart,
+  readAutostartGlobal,
   readProjectsRegistry,
+  removeProjectAutostart,
+  setAutostartGlobalPaused,
+  setProjectAutostart,
   setProjectAutostartPaused,
 } from "../src/lib/projects-registry.ts";
 
@@ -172,6 +179,9 @@ test("pause while inspecting prevents dispatch", async () => {
   };
   await run();
   expect(starts).toEqual([]);
+  expect((await readAutostartGlobal({ registryPath })).loginRun.failed).toEqual(
+    []
+  );
 });
 
 test("engine wait has a finite bound and records a closed skip reason", async () => {
@@ -273,6 +283,9 @@ test("shutdown cancellation prevents any further launch", async () => {
   };
   await run(abort.signal);
   expect(starts.map((start) => start.id)).toEqual(["alpha"]);
+  expect((await readAutostartGlobal({ registryPath })).loginRun.failed).toEqual(
+    []
+  );
 });
 
 test("only classified safe reasons are persisted; missing keys and prompts are skipped", () => {
@@ -489,4 +502,235 @@ test("keychain preflight and subprocess termination have distinct closed reasons
       { timeoutMs: 1000, signal: abort.signal, env: { HOME: root } }
     )
   ).toEqual({ exitCode: 124, stdout: "", reason: "daemon_stopped" });
+});
+
+test("independent global pause blocks existing and newly marked projects", async () => {
+  await seed(["alpha", "bravo"]);
+  await removeProjectAutostart({ id: "bravo", registryPath });
+  await setAutostartGlobalPaused({ paused: true, registryPath });
+  await setProjectAutostart({ id: "bravo", registryPath });
+  await run();
+  expect(events).toEqual([]);
+  expect(starts).toEqual([]);
+  expect((await readAutostartGlobal({ registryPath })).paused).toBe(true);
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects.every(
+      (project) => project.autostart?.paused === false
+    )
+  ).toBe(true);
+});
+
+test("global pause during inspection blocks dispatch and preserves manual project intent", async () => {
+  await seed(["alpha", "bravo"]);
+  await setProjectAutostartPaused({ id: "bravo", paused: true, registryPath });
+  deps = {
+    ...deps,
+    inspect: async () => {
+      await setAutostartGlobalPaused({ paused: true, registryPath });
+      return "stopped";
+    },
+  };
+  await run();
+  expect(starts).toEqual([]);
+  expect(
+    (await results()).find((project) => project.id === "alpha")?.result?.reason
+  ).toBe("global_paused");
+  await setAutostartGlobalPaused({ paused: false, registryPath });
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects.find(
+      (project) => project.id === "bravo"
+    )?.autostart?.paused
+  ).toBe(true);
+  const progress = (await readAutostartGlobal({ registryPath })).loginRun;
+  expect(progress).toMatchObject({
+    inProgress: false,
+    pending: [],
+    started: [],
+    failed: [],
+  });
+});
+
+test("global pause during engine or routing discovery prevents routing and project starts", async () => {
+  for (const during of ["engine", "routing"]) {
+    await seed(["alpha"]);
+    deps = {
+      ...deps,
+      engineReady: async () => {
+        if (during === "engine") {
+          await setAutostartGlobalPaused({ paused: true, registryPath });
+        }
+        return true;
+      },
+      routingInstalled: async () => {
+        if (during === "routing") {
+          await setAutostartGlobalPaused({ paused: true, registryPath });
+        }
+        return true;
+      },
+    };
+    await run();
+    expect(events).toEqual([]);
+    expect(starts).toEqual([]);
+    expect(
+      (await readAutostartGlobal({ registryPath })).loginRun
+    ).toMatchObject({ inProgress: false, pending: [], failed: [] });
+  }
+});
+
+test("login progress is persisted before engine probing and separates successful and failed outcomes", async () => {
+  await seed(["bravo", "alpha"]);
+  deps = {
+    ...deps,
+    engineReady: async () => {
+      expect(
+        (await readAutostartGlobal({ registryPath })).loginRun
+      ).toMatchObject({
+        inProgress: true,
+        startedAt: "1970-01-01T00:00:00.000Z",
+        pending: ["alpha", "bravo"],
+        started: [],
+        failed: [],
+      });
+      return true;
+    },
+    start: async (project) => {
+      const progress = (await readAutostartGlobal({ registryPath })).loginRun;
+      expect(progress.inProgress).toBe(true);
+      expect(progress.pending).toContain(project.id);
+      return project.id === "alpha"
+        ? { status: "started", reason: null }
+        : { status: "failed", reason: "start_failed" };
+    },
+  };
+  await run();
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: false,
+    pending: [],
+    started: ["alpha"],
+    failed: ["bravo"],
+  });
+});
+
+test("cancelled and interrupted login runs close their pending progress without replaying claims", async () => {
+  await seed(["alpha", "bravo"]);
+  const abort = new AbortController();
+  deps = {
+    ...deps,
+    engineReady: async () => {
+      abort.abort();
+      return true;
+    },
+  };
+  await run(abort.signal);
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: false,
+    pending: [],
+    started: [],
+    failed: [],
+  });
+  const previous = await beginAutostartLoginRun({
+    bootId: "boot-1",
+    startedAt: "1970-01-01T00:00:00.000Z",
+    pendingIds: ["alpha", "bravo"],
+    registryPath,
+  });
+  expect(previous?.inProgress).toBe(true);
+  await claimProjectAutostart({ id: "alpha", bootId: "boot-1", registryPath });
+  await claimProjectAutostart({ id: "bravo", bootId: "boot-1", registryPath });
+  await run();
+  expect(starts).toEqual([]);
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    runId: previous?.runId,
+    inProgress: false,
+    pending: [],
+    failed: [],
+  });
+});
+
+test("a thrown project start records failure and finishes global progress", async () => {
+  await seed(["alpha"]);
+  deps = {
+    ...deps,
+    start: async () => {
+      throw new Error("example sensitive details");
+    },
+  };
+  await run();
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: false,
+    pending: [],
+    failed: ["alpha"],
+  });
+  expect(
+    JSON.stringify(await readAutostartGlobal({ registryPath }))
+  ).not.toContain("example sensitive details");
+});
+
+test("adoption requires every default service rather than a running subset", () => {
+  const model = autostartComposeModel({
+    services: { web: {}, db: {}, debug: { profiles: ["debug"] } },
+  });
+  expect(model).not.toBeNull();
+  expect([...(model?.requiredServices ?? [])]).toEqual(["web", "db"]);
+  expect(
+    classifyAutostartContainers(
+      "db|running|0",
+      model?.completedServices,
+      model?.requiredServices
+    )
+  ).toBe("stopped");
+  expect(
+    classifyAutostartContainers(
+      "web|running|0\ndb|running|0",
+      model?.completedServices,
+      model?.requiredServices
+    )
+  ).toBe("running");
+});
+
+test("required dependency targets include completed initializers but optional disabled profiles stay excluded", () => {
+  const model = autostartComposeModel({
+    services: {
+      web: {
+        depends_on: {
+          init: { condition: "service_completed_successfully" },
+          metrics: { required: false },
+        },
+      },
+      init: { profiles: ["setup"] },
+      metrics: { profiles: ["monitoring"] },
+    },
+  });
+  expect([...(model?.requiredServices ?? [])]).toEqual(["web", "init"]);
+  expect(
+    classifyAutostartContainers(
+      "web|running|0",
+      model?.completedServices,
+      model?.requiredServices
+    )
+  ).toBe("stopped");
+  expect(
+    classifyAutostartContainers(
+      "web|running|0\ninit|exited|0",
+      model?.completedServices,
+      model?.requiredServices
+    )
+  ).toBe("running");
+});
+
+test("ambiguous Compose models cannot prove adoption", () => {
+  expect(
+    autostartComposeModel({ include: ["other.yml"], services: { web: {} } })
+  ).toBeNull();
+  expect(
+    autostartComposeModel({
+      services: { web: { extends: { service: "base", file: "other.yml" } } },
+    })
+  ).toBeNull();
+  expect(
+    autostartComposeModel({ services: { web: { depends_on: ["missing"] } } })
+  ).toBeNull();
+  expect(
+    autostartComposeModel({ services: { web: { profiles: "debug" } } })
+  ).toBeNull();
 });

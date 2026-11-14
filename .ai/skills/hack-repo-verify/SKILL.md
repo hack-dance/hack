@@ -149,7 +149,11 @@ does not mean CI ran.
 Hosted CI runs the `bun run test` file set on eight `test shard i/8` jobs;
 light PRs run only the five Linux shards and report selected macOS paths as
 deferred to the integration run. `ci:mac`/`ci:e2e` opt into selected tiers;
-`ci:full` opts into all ordinary PR tiers. Ready Rust-input PRs retain Linux
+`ci:full` opts into all ordinary PR tiers. Ready CLI-source PRs (`src/`, `index.ts`, `packages/cli/`) retain Linux x64
+Config compiler and relocated acceptance, including refusal HOME/output contracts.
+The required test fan-in rejects selected compiler failures, cancellations and
+unexpected skips. This adds no default Mac minutes; the existing Linux lane also
+builds the release bundle. Ready Rust-input PRs retain Linux
 candidate/compiler checks while deferring macOS. Full tiers run automatically on
 ready PRs changing protected CI inputs or targeting
 `main`; the latter retains Intel. Light PRs skip build smoke, macOS and Docker;
@@ -160,7 +164,9 @@ The required `test` check is their fan-in. Every planned shard and the enabled
 Linux process-lifetime job must succeed; failure, cancellation or an unexpected
 skip fails. A planned out-of-scope lifetime skip passes. Drafts deliberately fail with
 `skipped: draft`. Next pushes can select tests only after a successful predecessor;
-superseded pushes cancel. Main and explicit full dispatches retain release-host
+the active next push finishes while newer pushes replace only the pending run.
+After a batch merges, no further merge proceeds until a next run completes,
+unless the batch verifier ran the same checks on the combined tree. Main and explicit full dispatches retain release-host
 coverage. Prerelease plan/publish require exact-head `release-full` evidence from
 the selected run's latest attempt, including every shard and compiler host.
 [`scripts/test-shard-plan.ts`](../../../scripts/test-shard-plan.ts) splits the files

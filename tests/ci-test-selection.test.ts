@@ -391,7 +391,7 @@ describe("PR matrix policy", () => {
     } as const;
     for (const changed of [
       ["docs/a.md"],
-      ["src/a.ts"],
+      ["tests/a.test.ts"],
       ["packages/runtime-core/README.md"],
     ]) {
       const plan = await planPullRequest({
@@ -476,6 +476,66 @@ describe("PR matrix policy", () => {
       compiler_hosts: "[]",
       defer_macos: true,
     });
+  });
+  test("a PR changing refused lifecycle HOME writes gets relocated acceptance on Linux", async () => {
+    for (const path of [
+      "src/lib/activity-log.ts",
+      "src/commands/project.ts",
+      "src/backends/native-project-start.ts",
+      "src/cli/run.ts",
+      "src/ui/logger.ts",
+      "src/index.ts",
+      "index.ts",
+      "packages/cli/index.ts",
+    ]) {
+      expect(await Bun.file(resolve(repoRoot, path)).exists(), path).toBe(true);
+      const plan = await planPullRequest({
+        repoRoot,
+        changed: [path],
+        draft: false,
+        full: false,
+        selection: { mode: "selected", reason: "fixture", files: [] },
+      });
+      expect(plan.compiler_hosts, path).toBe(
+        JSON.stringify([
+          { os: "ubuntu-latest", platform: "linux", arch: "x64" },
+        ])
+      );
+      expect(plan).toMatchObject({
+        compiler_rust: false,
+        runtime_core: false,
+        defer_macos: true,
+        docker_suite: false,
+        build_smoke: false,
+      });
+      expect(
+        await planPullRequest({
+          repoRoot,
+          changed: [path],
+          draft: true,
+          full: false,
+          selection: { mode: "selected", reason: "fixture", files: [] },
+        })
+      ).toMatchObject({ compiler_hosts: "[]" });
+    }
+  });
+  test("relocated acceptance scripts retain a compiler job on ready PRs", async () => {
+    for (const path of [
+      "scripts/check-native-env-plan-cli.ts",
+      "scripts/check-native-plan-clis.ts",
+    ]) {
+      const plan = await planPullRequest({
+        repoRoot,
+        changed: [path],
+        draft: false,
+        full: false,
+      });
+      expect(JSON.parse(plan.compiler_hosts)).toContainEqual({
+        os: "ubuntu-latest",
+        platform: "linux",
+        arch: "x64",
+      });
+    }
   });
   test("protected inputs and main PRs automatically run full tiers", async () => {
     for (const input of [

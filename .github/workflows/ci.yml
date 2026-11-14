@@ -26,6 +26,8 @@ concurrency:
   # Let the active next run finish, including jobs waiting for macOS capacity.
   # New next pushes replace only the pending run. PRs still cancel stale runs;
   # main pushes and explicit release qualification keep unique groups.
+  # The lead waits for a completed next run between batches unless its batch
+  # verifier ran the same checks: pending revisions may still be replaced.
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -90,6 +92,7 @@ jobs:
           # This guard is independent of the selector and its fallback list.
           full=false
           linux_rust=false
+          relocated_cli=false
           base=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             parents=$(git rev-list --parents -n 1 HEAD) || parents=""
@@ -114,6 +117,10 @@ jobs:
             else
               if [ ! -s "$RUNNER_TEMP/ci-paths" ]; then full=true; fi
               while IFS= read -r -d '' path; do
+                case "$path" in
+                  src/*|index.ts|packages/cli/*|scripts/check-*-cli.ts|scripts/check-native-plan-clis.ts)
+                    relocated_cli=true ;;
+                esac
                 case "$path" in
                   packages/runtime-core/*.md|packages/config-compiler/*.md) ;;
                   packages/runtime-core/*|packages/config-compiler/*|packages/relay-guest/*)
@@ -200,6 +207,8 @@ jobs:
                 compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}]'
                 native=true
                 echo 'compiler_rust=true' >> "$GITHUB_OUTPUT"
+              elif [ "$PR_DRAFT" != "true" ] && [ "$relocated_cli" = "true" ]; then
+                compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]'
               fi
               printf 'compiler_hosts=%s\nruntime_core=%s\ntest_shards=[4,5,6,7,8]\ndefer_macos=true\n' "$compiler" "$native" >> "$GITHUB_OUTPUT"
             else
@@ -208,11 +217,15 @@ jobs:
                 compiler=$(sed -n 's/^compiler_hosts=//p' "$GITHUB_OUTPUT" | tail -n 1)
                 compiler=$(jq -c '. + [{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}] | unique_by(.os) | map(select(.os != "macos-15-intel"))' <<< "${compiler:-[]}")
                 printf 'compiler_hosts=%s\ncompiler_rust=true\nruntime_core=true\n' "$compiler" >> "$GITHUB_OUTPUT"
+              elif [ "$relocated_cli" = "true" ] && [ "$full" != "true" ]; then
+                compiler=$(sed -n 's/^compiler_hosts=//p' "$GITHUB_OUTPUT" | tail -n 1)
+                compiler=$(jq -c '. + [{"os":"ubuntu-latest","platform":"linux","arch":"x64"}] | unique_by(.os)' <<< "${compiler:-[]}")
+                printf 'compiler_hosts=%s\n' "$compiler" >> "$GITHUB_OUTPUT"
               fi
             fi
             if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
-            echo 'Light PRs defer macOS, Docker and build smoke to integration; Rust crate inputs keep Linux candidate/compiler checks. Labels opt in; protected inputs, unavailable policy/diff and ready PRs into main automatically run full tiers.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Light PRs defer macOS, Docker and build smoke to integration; CLI inputs keep Linux relocated acceptance, and Rust crate inputs keep Linux candidate/compiler checks. Labels opt in; protected inputs, unavailable policy/diff and ready PRs into main automatically run full tiers.' >> "$GITHUB_STEP_SUMMARY"
           else
             printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
           fi
@@ -909,7 +922,7 @@ jobs:
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    needs: [changes, test-shard, test-focus, linux-process-lifetime]
+    needs: [changes, test-shard, test-focus, linux-process-lifetime, config-compiler]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -924,6 +937,8 @@ jobs:
           TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
           SHARD_RESULT: ${{ needs.test-shard.result }}
           FOCUS_RESULT: ${{ needs.test-focus.result }}
+          COMPILER_ENABLED: ${{ needs.changes.outputs.compiler_hosts != '[]' }}
+          COMPILER_RESULT: ${{ needs.config-compiler.result }}
           LIFETIME_ENABLED: ${{ needs.changes.outputs.docker_suite }}
           LIFETIME_RESULT: ${{ needs.linux-process-lifetime.result }}
         run: |
@@ -939,6 +954,10 @@ jobs:
             echo "change scope did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
+          case "$COMPILER_ENABLED:$COMPILER_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Compiler acceptance evidence did not match its plan (enabled: $COMPILER_ENABLED, result: $COMPILER_RESULT)" >&2; exit 1 ;;
+          esac
           if [ "$FOCUS_RESULT" != "success" ]; then
             echo "test focus did not succeed (result: $FOCUS_RESULT)"
             exit 1

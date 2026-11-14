@@ -175,7 +175,7 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
     policy: "base",
     data: "topic",
     ci_evidence: "scoped",
-    compiler_hosts: "[]",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     defer_macos: "true",
@@ -311,6 +311,34 @@ for (const path of [
     expect(mac.defer_macos).toBe("false");
   });
 }
+test("the inline boundary keeps relocated acceptance for HOME-writing CLI changes even with old base policy", async () => {
+  for (const path of [
+    "src/lib/activity-log.ts",
+    "src/commands/project.ts",
+    "src/backends/native-project-start.ts",
+    "src/cli/run.ts",
+    "index.ts",
+    "packages/cli/index.ts",
+  ]) {
+    expect(await scope({ path, tamper: true })).toMatchObject({
+      policy: "base",
+      compiler_hosts:
+        '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
+      runtime_core: "false",
+      test_shards: "[4,5,6,7,8]",
+      defer_macos: "true",
+      docker_suite: "false",
+    });
+    expect(await scope({ path, mac: true, tamper: true })).toMatchObject({
+      compiler_hosts:
+        '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
+      defer_macos: "false",
+    });
+    expect(await scope({ path, draft: true })).toMatchObject({
+      compiler_hosts: "[]",
+    });
+  }
+});
 test("retargeting reclassifies through the ordinary pull_request event", () => {
   expect(workflow.on.pull_request.types).toContain("edited");
 });
@@ -399,8 +427,13 @@ test("manual qualification refuses full=false before launching a suite", async (
 
 test("PR labels opt into independent tiers without widening the other tier", async () => {
   const input = { path: "src/value.ts", tierPlan: true };
-  expect(await scope({ ...input, mac: true })).toMatchObject({
-    compiler_hosts: fullPushPlan({ releaseHosts: false }).compiler_hosts,
+  const mac = await scope({ ...input, mac: true });
+  expect(JSON.parse(mac.compiler_hosts ?? "null")).toEqual(
+    JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts).sort(
+      (a: { os: string }, b: { os: string }) => a.os.localeCompare(b.os)
+    )
+  );
+  expect(mac).toMatchObject({
     runtime_core: "true",
     test_shards: "[1,2,3,4,5,6,7,8]",
     docker_suite: "false",
@@ -408,7 +441,7 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     build_smoke: "false",
   });
   expect(await scope({ ...input, e2e: true })).toMatchObject({
-    compiler_hosts: "[]",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     docker_suite: "true",

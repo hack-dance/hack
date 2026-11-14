@@ -384,7 +384,7 @@ function readServiceManagerState(opts: {
   const manager =
     opts.manager ?? (process.platform === "darwin" ? "launchd" : "systemd");
   if (manager === "launchd") {
-    return readLaunchdManagerState({ paths: opts.paths });
+    return readLaunchdManagerState();
   }
   return process.platform === "linux"
     ? readSystemdManagerState({ deps: defaultSystemdDeps() })

@@ -20,6 +20,7 @@ import {
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
+  readLaunchdManagerState,
   repairLaunchdProgramIfInvalid,
   resolveLaunchdAccess,
   stopLaunchdService,
@@ -94,6 +95,13 @@ function recordBunEffects(): {
 }
 
 const paths = resolveDaemonPaths({});
+if (process.argv[2] === "manager-state") {
+  // The replacement fallback's launchd gate, through the stub launchctl.
+  const state = await readLaunchdManagerState();
+  process.stdout.write(`${JSON.stringify({ state })}\n`);
+  process.exit(0);
+}
+
 if (process.argv[2] === "repair-output") {
   const repair = await repairLaunchdProgramIfInvalid({ paths });
   const secondRepair = await repairLaunchdProgramIfInvalid({ paths });

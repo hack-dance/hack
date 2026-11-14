@@ -1330,54 +1330,46 @@ test("systemd counts as idle only when inactive or failed, not restarting, with 
   expect(show("", 1)).toBe("unknown");
 });
 
-test("launchd counts as idle only when absent, or loaded, stopped and not retrying", async () => {
-  const paths = resolveDaemonPaths({ home: "/nonexistent-home" });
-  const status = (
-    over: Partial<{
-      installed: boolean;
-      loaded: boolean;
-      running: boolean;
-      pid: number | null;
-      observation: "reported" | "not-found" | "failed";
-    }>
-  ) => ({
-    installed: true,
-    loaded: true,
-    running: false,
-    pid: null,
-    exitStatus: null,
-    observation: "reported" as const,
-    ...over,
-  });
-  const plist = (keys: string) =>
-    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n${keys}\n</dict>\n</plist>\n`;
-  const state = (
-    s: ReturnType<typeof status>,
-    text: string | null = plist("")
-  ) => readLaunchdManagerState({ paths, status: s, plistText: text });
-  expect(await state(status({ installed: false, loaded: false }))).toBe("idle");
-  expect(await state(status({ loaded: false, observation: "not-found" }))).toBe(
-    "idle"
+// Review round 12 (HACK-2216, owner decision): launchd is idle only on its
+// own confirmed not-found answer for Hack's label.
+
+test("launchd is idle only on launchctl's confirmed not-found answer", async () => {
+  const answer =
+    (exitCode: number, stdout: string, stderr = "") =>
+    () =>
+      Promise.resolve({ exitCode, stdout, stderr });
+  const notFound = answer(
+    113,
+    "",
+    'Bad request.\nCould not find service "dance.hack.hackd" in domain for port\n'
   );
-  expect(await state(status({ loaded: false, observation: "failed" }))).toBe(
-    "unknown"
-  );
-  expect(await state(status({ running: true, pid: 4242 }))).toBe("pending");
-  expect(await state(status({}))).toBe("idle");
+  expect(await readLaunchdManagerState({ query: notFound })).toBe("idle");
+  // Another failure, or the same message with another exit code.
   expect(
-    await state(status({}), plist("  <key>KeepAlive</key>\n  <true/>"))
-  ).toBe("pending");
-  expect(
-    await state(status({}), plist("  <key>RunAtLoad</key>\n  <true/>"))
-  ).toBe("pending");
-  // Hack's own plist: a conditional KeepAlive dict cannot be told.
-  expect(
-    await state(
-      status({}),
-      plist(
-        "  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>"
-      )
-    )
+    await readLaunchdManagerState({ query: answer(5, "", "simulated failure") })
   ).toBe("unknown");
-  expect(await state(status({}), null)).toBe("unknown");
+  expect(
+    await readLaunchdManagerState({
+      query: answer(1, "", "Could not find service"),
+    })
+  ).toBe("unknown");
+});
+
+test("a loaded launchd job is never idle, whatever its plist file says", async () => {
+  const queried: string[] = [];
+  const loaded = (stdout: string) => () => {
+    queried.push("print");
+    return Promise.resolve({ exitCode: 0, stdout, stderr: "" });
+  };
+  // Loaded but not running, its on-disk plist without KeepAlive: still
+  // unknown (the loaded config can differ; StartInterval, WatchPaths...).
+  expect(
+    await readLaunchdManagerState({ query: loaded("state = not running\n") })
+  ).toBe("unknown");
+  expect(
+    await readLaunchdManagerState({
+      query: loaded("state = running\npid = 4242\n"),
+    })
+  ).toBe("unknown");
+  expect(queried).toEqual(["print", "print"]);
 });

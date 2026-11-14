@@ -746,10 +746,13 @@ Such a plist is never replaced automatically; `start` reports it and
   evidence that the manager is idle:
   - systemd: `ActiveState` is `inactive` or `failed`, `SubState` is not
     `auto-restart`, and no `Job` is queued (or the unit is not loaded);
-  - launchd: the job is not loaded (launchd says so), or it is loaded, not
-    running, and its plist asks for no retry (`KeepAlive` and `RunAtLoad` not
-    true). Hack's own plist has a conditional `KeepAlive`, which cannot be
-    told, so a loaded Hack plist counts as unknown.
+  - launchd: only when `launchctl print` for Hack's label answers not-found
+    (exit 113, "Could not find service"). Hack asks launchd even when the plist
+    file is gone, because moving or deleting the file does not unload the job.
+    A loaded job is never idle, whatever its plist file says: the loaded
+    configuration can differ from the file, and `KeepAlive`, `RunAtLoad`,
+    `StartInterval`, `StartCalendarInterval` or `WatchPaths` can start it
+    again. On macOS the fallback therefore runs only once the job is unloaded.
 
   When the manager may still start hackd, or cannot be checked, `start`
   returns the service's error with `blocked: "service-pending"` and says the

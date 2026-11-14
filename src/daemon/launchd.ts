@@ -18,7 +18,6 @@ import { findExecutableInPath } from "../lib/shell.ts";
 import {
   parseLaunchdPlistEnvironment,
   parseLaunchdPlistProgram,
-  parseLaunchdPlistRetry,
 } from "./launchd-plist.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { type DaemonProcessProof, proveOwnedDaemonProcess } from "./process.ts";
@@ -626,45 +625,42 @@ export function plistKeepsThisHome(opts: {
 }
 
 /**
- * Whether launchd will not start hackd on its own any more (HACK-2216):
- * `idle` when no plist is installed (or this process may not use launchd),
- * when launchd positively reports the job absent (`not-found`), or when
- * the loaded job is not running and its plist asks for no retry
- * ({@link parseLaunchdPlistRetry}). `pending` when it runs or will retry;
- * `unknown` when the query failed, the plist is unreadable, or its
- * `KeepAlive` is conditional.
+ * Whether launchd will not start hackd on its own any more (HACK-2216,
+ * owner decision): `idle` only when `launchctl print` for Hack's label,
+ * queried whether or not the plist file exists (moving or deleting it does
+ * not unload the job), positively answers not-found
+ * ({@link isLaunchdServiceNotFound}). Any loaded job is `unknown`, whatever
+ * its plist on disk says: the loaded configuration can differ from the
+ * file, and KeepAlive, RunAtLoad, StartInterval, StartCalendarInterval or
+ * WatchPaths can start it again. Any other result is `unknown` too.
+ *
+ * A process that may not use launchd (an isolated HACK_HOME, or
+ * HACK_LAUNCHD_DISABLE) cannot query it; it never started a launchd job
+ * either, so the job it would ask about is not this replacement's: `idle`.
  */
-export async function readLaunchdManagerState(opts: {
-  readonly paths: DaemonPaths;
-  readonly status?: LaunchdServiceStatus;
-  readonly plistText?: string | null;
-}): Promise<"idle" | "pending" | "unknown"> {
+export async function readLaunchdManagerState(
+  opts: {
+    /** Defaults to `launchctl print gui/<uid>/<label>`; tests pin it. */
+    readonly query?: () => Promise<{
+      readonly exitCode: number;
+      readonly stdout: string;
+      readonly stderr: string;
+    }>;
+  } = {}
+): Promise<"idle" | "unknown"> {
   if (!resolveLaunchdAccess().allowed) {
     return "idle";
   }
-  const status =
-    opts.status ?? (await getLaunchdServiceStatus({ paths: opts.paths }));
-  if (!status.installed) {
-    return "idle";
-  }
-  if (!status.loaded) {
-    return status.observation === "not-found" ? "idle" : "unknown";
-  }
-  if (status.running || status.pid !== null) {
-    return "pending";
-  }
-  const plistText =
-    opts.plistText === undefined
-      ? await readTextFile(opts.paths.launchdPlistPath)
-      : opts.plistText;
-  if (plistText === null) {
-    return "unknown";
-  }
-  const retry = parseLaunchdPlistRetry({ plistText });
-  if (retry === "none") {
-    return "idle";
-  }
-  return retry === "retry" ? "pending" : "unknown";
+  const result = await (
+    opts.query ?? (() => runLaunchctl(["print", launchdServiceTarget()]))
+  )();
+  return result.exitCode !== 0 &&
+    isLaunchdServiceNotFound({
+      exitCode: result.exitCode,
+      output: `${result.stderr}\n${result.stdout}`,
+    })
+    ? "idle"
+    : "unknown";
 }
 
 /**

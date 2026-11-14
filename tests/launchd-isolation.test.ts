@@ -674,6 +674,71 @@ test("a running job whose pid is not this home's hackd is not refreshed", async 
   expect(verbs).not.toContain("bootstrap");
 });
 
+// Review round 12 (HACK-2216): the fallback's launchd gate queries launchd
+// itself, whether or not the plist file exists.
+
+async function managerState(opts: {
+  readonly plist: ((fixture: Fixture) => string) | null;
+  readonly job: "running" | "stopped" | "missing";
+}): Promise<{ readonly state: unknown; readonly verbs: string[] }> {
+  const fixture = await makeFixture();
+  if (opts.plist === null) {
+    await rm(fixture.plistPath, { force: true });
+  } else {
+    await writeFile(fixture.plistPath, opts.plist(fixture));
+  }
+  const run = await runAsDarwin({
+    argv: [DRIVER, "manager-state"],
+    cwd: fixture.root,
+    env: fixture.env({
+      HACK_HOME: join(fixture.home, ".hack"),
+      HACK_TEST_LAUNCHCTL_JOB: opts.job,
+    }),
+  });
+  expect(run.code).toBe(0);
+  return {
+    state: (JSON.parse(run.stdout) as { state: unknown }).state,
+    verbs: (await launchctlCalls(fixture)).map(
+      (line) => line.split(" ")[0] ?? ""
+    ),
+  };
+}
+
+test("a missing plist file while the job is still loaded is not idle", async () => {
+  const result = await managerState({ plist: null, job: "running" });
+  expect(result).toEqual({ state: "unknown", verbs: ["print"] });
+});
+
+test("a loaded, stopped job whose plist on disk has no KeepAlive is not idle", async () => {
+  let written = "";
+  const result = await managerState({
+    plist: (fixture) => {
+      written = legacyPlist(fixture).current.replace(
+        /\n {2}<key>KeepAlive<\/key>\n {2}<dict>\n[\s\S]*?\n {2}<\/dict>\n/,
+        "\n"
+      );
+      return written;
+    },
+    job: "stopped",
+  });
+  expect(written).not.toContain("KeepAlive");
+  expect(written).toContain("<key>RunAtLoad</key>\n  <false/>");
+  expect(result).toEqual({ state: "unknown", verbs: ["print"] });
+});
+
+test("launchd's confirmed not-found answer is idle, plist file or not", async () => {
+  expect(await managerState({ plist: null, job: "missing" })).toEqual({
+    state: "idle",
+    verbs: ["print"],
+  });
+  expect(
+    await managerState({
+      plist: (fixture) => legacyPlist(fixture).current,
+      job: "missing",
+    })
+  ).toEqual({ state: "idle", verbs: ["print"] });
+});
+
 // Review round 6 (HACK-2216): a failed status query is not absence.
 
 test("a failed launchctl print is not 'not loaded': no unload, rewrite or load", async () => {

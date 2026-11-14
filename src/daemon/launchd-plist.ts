@@ -27,7 +27,6 @@ type PlistValue =
       readonly kind: "dict";
       readonly keys: ReadonlyMap<string, PlistValue>;
     }
-  | { readonly kind: "bool"; readonly value: boolean }
   | { readonly kind: "other" };
 
 const PROLOG = /^\s*(<\?xml[^?]*\?>)?\s*(<!DOCTYPE[^>[]*>)?/;
@@ -120,42 +119,6 @@ export function parseLaunchdPlistEnvironment(opts: {
     env.set(name, entry.kind === "string" ? entry.text : null);
   }
   return { kind: "env", env };
-}
-
-/**
- * Whether launchd may start the job again on its own (HACK-2216): `none`
- * when the root has no `KeepAlive` (or `KeepAlive` false) and no
- * `RunAtLoad` true; `retry` when `KeepAlive` is true or `RunAtLoad` is
- * true; `unknown` for a conditional `KeepAlive` dict (whether it fires
- * depends on state this reader does not see), any other value, or an
- * unreadable plist.
- */
-export function parseLaunchdPlistRetry(opts: {
-  readonly plistText: string;
-}): "none" | "retry" | "unknown" {
-  let root: Map<string, PlistValue> | null;
-  try {
-    root = readRootDict(opts.plistText);
-  } catch {
-    return "unknown";
-  }
-  const keepAlive = root?.get("KeepAlive");
-  const runAtLoad = root?.get("RunAtLoad");
-  const flag = (value: PlistValue | undefined) => {
-    if (value === undefined) {
-      return "false" as const;
-    }
-    if (value.kind === "bool") {
-      return value.value ? ("true" as const) : ("false" as const);
-    }
-    return "unknown" as const;
-  };
-  const keep = flag(keepAlive);
-  const load = flag(runAtLoad);
-  if (keep === "unknown" || load === "unknown") {
-    return "unknown";
-  }
-  return keep === "true" || load === "true" ? "retry" : "none";
 }
 
 function programPath(raw: string): LaunchdPlistProgram {
@@ -343,9 +306,6 @@ function emptyValue(name: string): PlistValue {
   }
   if (name === "dict") {
     return { kind: "dict", keys: new Map() };
-  }
-  if (name === "true" || name === "false") {
-    return { kind: "bool", value: name === "true" };
   }
   return { kind: "other" };
 }

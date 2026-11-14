@@ -10,6 +10,7 @@
 
 ## Environment & sessions
 
+- [Version identity](./reference/version.md) — `hack version --json` describes the running CLI without starting services
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
 - [Admin plans](./reference/global-admin-plan.md) — `hack global install|trust --plan --json`: the ordered root and user steps and exact root argv, without running anything

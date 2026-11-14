@@ -11,7 +11,11 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -297,13 +301,18 @@ impl CliRunner {
         let mut child = self.spawn(args, path)?;
         // Diagnostics must not fill the stderr pipe and block ndjson output.
         // Drain concurrently with a bounded tail, as for finite CLI reads.
-        let _stderr = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
+        let stderr = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
         let stdout = child.stdout.take();
-        // Bounded: a reader that outruns the UI blocks, which in turn blocks
-        // the CLI on its pipe, instead of queueing without limit.
+        // Never block on the UI: the CLI ignores stdout backpressure and
+        // would otherwise buffer output in its own process without a bound.
         let (tx, rx) = mpsc::sync_channel(STREAM_QUEUE);
+        let skipped = Arc::new(AtomicU64::new(0));
+        let reader_skipped = skipped.clone();
         let reader = thread::spawn(move || {
-            let Some(stdout) = stdout else { return };
+            let mut diagnostics = String::new();
+            let Some(stdout) = stdout else {
+                return diagnostics;
+            };
             let mut r = BufReader::new(stdout);
             while let Some((line, cut)) = read_bounded_line(&mut r, MAX_RAW_LINE) {
                 if line.trim().is_empty() {
@@ -314,24 +323,52 @@ impl CliRunner {
                 let mut event = if cut {
                     oversized_record_event()
                 } else {
-                    serde_json::from_str::<LogEvent>(&line).unwrap_or_else(|_| LogEvent {
-                        kind: "notice".into(),
-                        message: Some(line),
-                        ..LogEvent::default()
-                    })
+                    match serde_json::from_str::<LogEvent>(&line) {
+                        Ok(event) if !event.kind.is_empty() => event,
+                        _ => {
+                            append_diagnostic(&mut diagnostics, &line);
+                            LogEvent {
+                                kind: "notice".into(),
+                                message: Some(line),
+                                ..LogEvent::default()
+                            }
+                        }
+                    }
                 };
                 // Cap before queueing, so the queue's memory is bounded too.
                 cap_event(&mut event);
-                if tx.send(event).is_err() {
-                    break;
+                match tx.try_send(event) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        reader_skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => break,
                 }
             }
+            diagnostics
         });
         Ok(LogStream {
             child,
             rx: Some(rx),
             reader: Some(reader),
+            skipped,
+            stderr,
+            stdout_diagnostics: String::new(),
+            stderr_diagnostics: None,
         })
+    }
+}
+
+/// Keep only a bounded UTF-8 diagnostic tail, including pretty JSON fragments.
+fn append_diagnostic(text: &mut String, line: &str) {
+    text.push_str(line);
+    text.push('\n');
+    if text.len() > STDERR_KEEP {
+        let mut cut = text.len() - STDERR_KEEP;
+        while !text.is_char_boundary(cut) {
+            cut += 1;
+        }
+        *text = text[cut..].to_owned();
     }
 }
 
@@ -447,11 +484,14 @@ fn oversized_record_event() -> LogEvent {
 }
 
 /// One poll of a stream: up to `max` events, and the exit code once the
-/// process has exited **and** every line it wrote has been delivered.
+/// process has exited **and** retained events have been delivered. Queue
+/// overflow is discarded and reported separately in `skipped`.
 #[derive(Debug, Default)]
 pub struct StreamPoll {
     pub events: Vec<LogEvent>,
     pub exit: Option<Option<i32>>,
+    /// Events discarded while the UI queue was full since the previous poll.
+    pub skipped: u64,
 }
 
 /// A running log stream. Dropping it kills the process group.
@@ -459,7 +499,11 @@ pub struct LogStream {
     child: Child,
     /// `None` only while dropping (see `Drop`).
     rx: Option<mpsc::Receiver<LogEvent>>,
-    reader: Option<thread::JoinHandle<()>>,
+    reader: Option<thread::JoinHandle<String>>,
+    skipped: Arc<AtomicU64>,
+    stderr: mpsc::Receiver<Drained>,
+    stdout_diagnostics: String,
+    stderr_diagnostics: Option<Drained>,
 }
 
 impl LogStream {
@@ -477,8 +521,8 @@ impl LogStream {
     }
 
     /// Up to `max` queued events. `exit` is set only when the reader has
-    /// reached end of output and the queue is empty, so no trailing line is
-    /// lost; its inner value is `None` when a signal ended the process.
+    /// reached end of output and the queue is empty; overflow is reported
+    /// separately. Its inner value is `None` when a signal ended the process.
     pub fn poll(&mut self, max: usize) -> StreamPoll {
         // Checked before draining: once the reader is done, nothing new
         // arrives, so an under-full batch means the queue is exhausted.
@@ -486,30 +530,68 @@ impl LogStream {
             .reader
             .as_ref()
             .is_none_or(thread::JoinHandle::is_finished);
-        let events: Vec<LogEvent> = self
+        let mut events: Vec<LogEvent> = self
             .rx
             .as_ref()
             .map(|rx| rx.try_iter().take(max).collect())
             .unwrap_or_default();
-        let exit = if reader_done && events.len() < max {
+        let mut exit = if reader_done && events.len() < max {
+            if let Some(reader) = self.reader.take() {
+                self.stdout_diagnostics = reader.join().unwrap_or_default();
+            }
             self.child.try_wait().ok().flatten().map(|s| s.code())
         } else {
             None
         };
-        StreamPoll { events, exit }
+        if exit.is_some() && self.stderr_diagnostics.is_none() {
+            match self.stderr.try_recv() {
+                Ok(diagnostics) => self.stderr_diagnostics = Some(diagnostics),
+                Err(mpsc::TryRecvError::Empty) => exit = None,
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        if let Some(code) = exit.filter(|code| *code != Some(0)) {
+            let stderr = self
+                .stderr_diagnostics
+                .as_ref()
+                .map_or("", |d| d.text.as_str());
+            let reason = match parse_result(&self.stdout_diagnostics, stderr, code) {
+                Err(RunError::Cli(error)) => error.message,
+                _ if !stderr.trim().is_empty() => stderr.trim().to_owned(),
+                _ => self.stdout_diagnostics.trim().to_owned(),
+            };
+            if !reason.is_empty() {
+                let mut event = LogEvent {
+                    kind: "error".into(),
+                    message: Some(reason),
+                    ..LogEvent::default()
+                };
+                cap_event(&mut event);
+                events.push(event);
+            }
+        }
+        StreamPoll {
+            events,
+            exit,
+            skipped: self.skipped.swap(0, Ordering::Relaxed),
+        }
     }
 }
 
 impl Drop for LogStream {
     fn drop(&mut self) {
-        // Disconnect first: a reader blocked on a full queue then gets a
-        // send error and exits, so the join below cannot hang.
+        // Disconnect before killing the owned process group and joining.
         drop(self.rx.take());
         kill_group(&mut self.child);
         if let Some(r) = self.reader.take() {
             let _ = r.join();
         }
     }
+}
+
+#[must_use]
+pub fn exit_description(code: Option<i32>) -> String {
+    code.map_or_else(|| "killed by signal".into(), |code| format!("exit {code}"))
 }
 
 /// Which part of a pipe to keep while draining it.
@@ -856,6 +938,92 @@ mod tests {
     }
 
     #[test]
+    fn flood_finishes_without_ui_drain_and_reports_bounded_loss() {
+        let total = STREAM_QUEUE + 10_000;
+        let f = FakeHack::new(&format!(
+            "i=0; while [ $i -lt {total} ]; do echo '{{\"type\":\"log\",\"entry\":{{\"message\":\"flood\"}}}}'; i=$((i+1)); done"
+        ));
+        let mut stream = f.runner().stream_logs(&["logs"], None).unwrap();
+        let deadline = Instant::now() + T;
+        // No receiver calls: both the child and reader must finish even
+        // though the UI has consumed nothing and the queue is full.
+        while !stream.reader.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline, "reader blocked on UI queue");
+            thread::sleep(Duration::from_millis(5));
+        }
+        while stream.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "writer blocked on stdout");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let poll = stream.poll(STREAM_QUEUE + 1);
+        assert_eq!(poll.events.len(), STREAM_QUEUE);
+        assert_eq!(poll.skipped, 10_000);
+        assert!(poll.events.iter().map(event_bytes).sum::<usize>() <= MAX_QUEUED_BYTES);
+        assert_eq!(
+            stream.poll(STREAM_QUEUE + 1).skipped,
+            0,
+            "count delivered once"
+        );
+    }
+
+    fn failed_stream_banner(body: &str) -> String {
+        let f = FakeHack::new(body);
+        let mut stream = f.runner().stream_logs(&["logs"], None).unwrap();
+        let mut model = crate::logs::LogsModel::default();
+        model.start(true);
+        let deadline = Instant::now() + T;
+        loop {
+            let poll = stream.poll(100);
+            for event in poll.events {
+                model.apply(&event);
+            }
+            if let Some(code) = poll.exit {
+                model.exited(code);
+                return model.banner().unwrap();
+            }
+            assert!(Instant::now() < deadline, "stream did not exit");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn pretty_failure_envelope_reaches_the_banner_with_human_status() {
+        let banner = failed_stream_banner(
+            r#"cat <<'JSON'
+{
+  "ok": false,
+  "error": {
+    "code": "E_PROJECT_NOT_FOUND",
+    "message": "No project found at /work/missing"
+  }
+}
+JSON
+exit 1"#,
+        );
+        assert!(
+            banner.contains("No project found at /work/missing (exit 1)"),
+            "{banner}"
+        );
+        assert!(!banner.contains("Some("));
+    }
+
+    #[test]
+    fn stderr_failure_reason_reaches_the_banner_and_diagnostics_are_bounded() {
+        let banner = failed_stream_banner("echo 'docker executable unavailable' >&2; exit 127");
+        assert!(
+            banner.contains("docker executable unavailable (exit 127)"),
+            "{banner}"
+        );
+        let mut diagnostics = String::new();
+        for _ in 0..100 {
+            append_diagnostic(&mut diagnostics, &"é".repeat(STDERR_KEEP));
+            assert!(diagnostics.len() <= STDERR_KEEP);
+            assert!(diagnostics.capacity() <= STDERR_KEEP * 2);
+        }
+        assert_eq!(exit_description(None), "killed by signal");
+    }
+
+    #[test]
     fn log_stream_drains_stderr_without_blocking_stdout() {
         let f = FakeHack::new(
             "head -c 2097152 /dev/zero >&2; echo '{\"type\":\"log\",\"entry\":{\"message\":\"after diagnostics\"}}'",
@@ -890,8 +1058,8 @@ mod tests {
 
     #[test]
     fn dropping_a_stream_with_a_full_queue_does_not_hang() {
-        // Far more lines than STREAM_QUEUE, never polled: the reader blocks
-        // on the full queue. Drop must still return promptly.
+        // Far more lines than STREAM_QUEUE, never polled: overflow is
+        // discarded. Drop must still return promptly while stdout is busy.
         let f = FakeHack::new(
             "i=0; while [ $i -lt 20000 ]; do echo '{\"type\":\"heartbeat\"}'; i=$((i+1)); done; sleep 30",
         );

@@ -25,8 +25,8 @@ use hack_desktop_core::source::LogFeed;
 use crate::view::HackApp;
 
 const DRAIN_EVERY: Duration = Duration::from_millis(150);
-/// Events applied per tick. The reader's queue is bounded too, so a busy
-/// stream slows the CLI down instead of stalling the UI or growing memory.
+/// Events applied per tick. The reader discards overflow without blocking
+/// stdout, because the CLI does not await pipe backpressure.
 const BATCH: usize = 500;
 
 /// Logs tab state owned by the window.
@@ -177,8 +177,13 @@ impl HackApp {
         let Some(feed) = self.logs.feed.as_mut() else {
             return;
         };
-        let hack_desktop_core::runner::StreamPoll { events, exit } = feed.poll(BATCH);
-        if events.is_empty() && exit.is_none() {
+        let hack_desktop_core::runner::StreamPoll {
+            events,
+            exit,
+            skipped,
+        } = feed.poll(BATCH);
+        self.logs.model.skipped = self.logs.model.skipped.saturating_add(skipped);
+        if events.is_empty() && exit.is_none() && skipped == 0 {
             return;
         }
         // While paused, remember which line is at the top so evictions at
@@ -362,8 +367,10 @@ impl HackApp {
                         let (text, shown_hidden) = line.display(false);
                         let hidden = shown_hidden + line.cut;
                         let seq = line.seq;
-                        let color = if line.error_level || line.stderr {
+                        let color = if line.error_level {
                             t.danger
+                        } else if line.stderr {
+                            t.muted_foreground
                         } else {
                             t.foreground
                         };
@@ -488,6 +495,9 @@ impl HackApp {
             .flex_1()
             .min_h_0()
             .when(!unavailable, |d| d.child(toolbar))
+            .when(m.skipped > 0, |d| d.child(div().mx_5().mb_2().text_xs()
+                .text_color(t.muted_foreground)
+                .child(format!("{} events skipped while the log stream outran the display.", m.skipped))))
             .children(banner)
             .child(body)
             .children(detail)

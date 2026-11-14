@@ -90,6 +90,8 @@ pub struct LogsModel {
     bytes: usize,
     next_seq: u64,
     pub dropped: u64,
+    /// Events the pipe reader discarded when the UI queue was full.
+    pub skipped: u64,
     pub state: StreamState,
     /// Following (`true`) or a finite `--no-follow` read.
     pub follow: bool,
@@ -117,6 +119,7 @@ impl LogsModel {
             bytes: 0,
             next_seq: 0,
             dropped: 0,
+            skipped: 0,
             state: StreamState::Idle,
             follow: true,
             paused: false,
@@ -154,6 +157,7 @@ impl LogsModel {
         self.lines.clear();
         self.bytes = 0;
         self.dropped = 0;
+        self.skipped = 0;
         self.unseen = 0;
         self.expanded.clear();
         self.follow = follow;
@@ -278,9 +282,12 @@ impl LogsModel {
                 }
             }
             other => {
-                if !matches!(self.state, StreamState::Failed { .. } | StreamState::Idle) {
+                let status = crate::runner::exit_description(other);
+                if let StreamState::Failed { reason } = &mut self.state {
+                    reason.push_str(&format!(" ({status})"));
+                } else if self.state != StreamState::Idle {
                     self.state = StreamState::Failed {
-                        reason: format!("hack logs exited with {other:?}"),
+                        reason: format!("hack logs: {status}"),
                     };
                 }
             }
@@ -560,6 +567,7 @@ pub mod fixtures {
         }
         match f {
             LogsFixture::PausedSearch => {
+                m.skipped = 128;
                 m.set_paused(true);
                 for e in traffic().iter().skip(1).take(7) {
                     m.apply(e);
@@ -675,7 +683,7 @@ mod tests {
         assert_eq!(
             m.state,
             StreamState::Failed {
-                reason: "Loki query failed: 502".into()
+                reason: "Loki query failed: 502 (exit 1)".into()
             }
         );
     }
@@ -771,6 +779,23 @@ mod tests {
         assert!(m.is_expanded(7));
         m.toggle_expanded(7);
         assert!(!m.is_expanded(7));
+    }
+
+    #[test]
+    fn compose_stderr_log_and_failed_end_are_a_failure() {
+        let mut model = LogsModel::default();
+        model.start(true);
+        let records = [
+            r#"{"type":"log","entry":{"message":"Cannot connect to the Docker daemon","stream":"stderr"}}"#,
+            r#"{"type":"end","reason":"exit:1"}"#,
+        ];
+        for record in records {
+            model.apply(&serde_json::from_str(record).unwrap());
+        }
+        model.exited(Some(1));
+        assert!(model.visible()[0].stderr);
+        assert!(matches!(model.state, StreamState::Failed { .. }));
+        assert!(model.banner().unwrap().contains("exit 1"));
     }
 
     #[test]

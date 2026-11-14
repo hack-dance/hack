@@ -158,7 +158,9 @@ impl HackApp {
                 let root = this
                     .update(cx, |this, cx| {
                         this.apply_refresh(snap, cx);
-                        this.follow.then(|| this.selected_root()).flatten()
+                        (this.follow && this.tab == 0)
+                            .then(|| this.selected_root())
+                            .flatten()
                     })
                     .ok()
                     .flatten();

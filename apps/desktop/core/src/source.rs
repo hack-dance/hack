@@ -96,6 +96,7 @@ impl LogFeed for FixtureFeed {
         crate::runner::StreamPoll {
             events: self.0.drain(..n).collect(),
             exit: None,
+            skipped: 0,
         }
     }
 }

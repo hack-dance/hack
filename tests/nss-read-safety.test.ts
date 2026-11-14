@@ -54,10 +54,17 @@ function moduleText(dbDir: string, updates = true): string {
 }
 
 /** Placeholder files only; no NSS binary, SQL database or module is loaded. */
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "nss-read-"));
+async function fixture(opts: { readonly homeViaAncestorLink?: boolean } = {}) {
+  // Canonical root: on macOS the temp directory is reached through /var ->
+  // private/var, and resolved paths must still count as inside the fixture.
+  const root = await realpath(await mkdtemp(join(tmpdir(), "nss-read-")));
   roots.push(root);
-  const home = join(root, "home");
+  // Optionally name HOME through a symlinked ancestor, as /var is on macOS.
+  const base = opts.homeViaAncestorLink ? join(root, "ancestor-link") : root;
+  if (opts.homeViaAncestorLink) {
+    await symlink(root, base);
+  }
+  const home = join(base, "home");
   const db = join(home, ".pki", "nssdb");
   const config = join(home, ".config");
   const data = join(home, ".local", "share");
@@ -498,6 +505,13 @@ test("a profile alias inside the selected home remains supported", async () => {
   const report = await inspectCaTrust(f.deps);
   expect(report.nss.find((entry) => entry.db === alias)?.state).toBe("trusted");
   expect(f.queries.some((query) => query[2] === `sql:${alias}`)).toBe(true);
+});
+
+test("a home reached through a symlinked ancestor remains supported", async () => {
+  const f = await fixture({ homeViaAncestorLink: true });
+  const report = await inspectCaTrust(f.deps);
+  expect(report.nss.find((entry) => entry.db === f.db)?.state).toBe("trusted");
+  expect(f.queries.some((query) => query[2] === `sql:${f.db}`)).toBe(true);
 });
 
 test("the query environment keeps the selected HOME and removes NSS and loader selectors", () => {

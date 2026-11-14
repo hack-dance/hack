@@ -167,6 +167,10 @@ directories, and regenerate the installed files with `hack global install`
 before another login pass. Unexpected files in the mounted `schemas` or Grafana
 `dashboards` directories must be reviewed and moved outside those directories;
 reinstallation alone does not remove extra files. Ordinary manual routing commands keep their behavior.
+If an upgrade changes the installed templates or schemas, run `hack global install`
+manually before relying on the next login pass. An earlier routing refusal can
+consume this boot's project attempts; use manual `hack up` to recover those
+projects rather than expecting another automatic attempt in the same boot.
 Adoption requires a running container. An exited-zero container is treated as a
 completed job only when its service is a dependency target explicitly declared
 with `condition: service_completed_successfully`; other stopped services require

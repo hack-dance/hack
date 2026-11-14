@@ -78,6 +78,8 @@ Retained projects created by `hack config adopt` also require manual starts.
 Host-file/source-code bind mounts also require manual starts. Verified default
 engine volumes and Hack's authenticated read-only TLS mounts remain supported.
 Interrupting `hack autostart run` cancels the pass and waits for startup cleanup.
+After upgrades that change global templates, run `hack global install` manually
+before relying on login routing.
 
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may

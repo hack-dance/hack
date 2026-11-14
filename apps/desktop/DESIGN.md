@@ -214,6 +214,9 @@ findings link from that project's header. Schema 1 supplies `area`, `scope` and
 appear under "Other" with only Copy and Open doc. No Run button appears without
 a `fix.kind: safe`.
 
+Browser observations and native hostname DNS/HTTPS route checks are project-scoped:
+each describes the selected exact target and must not be de-duplicated across projects.
+
 ## 4. Upgrades
 
 ![Upgrade](diagrams/upgrade.svg) ([source](diagrams/upgrade.mmd))

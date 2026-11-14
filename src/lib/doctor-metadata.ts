@@ -24,6 +24,9 @@ export type DoctorMetadata = {
 const DOC_URL =
   "https://github.com/hack-dance/hack/blob/next/docs/versions/v5/troubleshooting.md";
 const PROJECT_AREAS: Readonly<Record<string, DoctorArea>> = {
+  "browser local network": "routing_dns",
+  "native https route": "native",
+  "native host dns": "routing_dns",
   project: "project_files",
   "sessions mux": "project_files",
   "generated files": "project_files",
@@ -78,12 +81,9 @@ const MACHINE_AREAS: Readonly<Record<string, DoctorArea>> = {
   "local ca trust": "certificates",
   "host tls trust": "certificates",
   "superseded caddy roots": "certificates",
-  "browser local network": "routing_dns",
   "native https owner": "native",
   "native root trust": "certificates",
   "native ca repair": "certificates",
-  "native https route": "native",
-  "native host dns": "routing_dns",
   "native hack.local route": "routing_dns",
   "native hack.local repair": "routing_dns",
 };

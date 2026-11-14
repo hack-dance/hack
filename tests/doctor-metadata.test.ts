@@ -50,6 +50,28 @@ test("unknown checks and inherited object names offer no executable repair", () 
   }
 });
 
+test("different browser and hostname targets retain independent project findings", () => {
+  for (const id of [
+    "browser local network",
+    "native host dns",
+    "native https route",
+  ]) {
+    for (const status of ["ok", "error"] as const) {
+      const data = buildDoctorJsonData({
+        results: [
+          {
+            name: id,
+            status,
+            message: "An exact target was observed",
+            durationMs: 0,
+          },
+        ],
+      });
+      expect(data.checks[0]).toMatchObject({ id, status, scope: "project" });
+    }
+  }
+});
+
 test("versioned doctor audit keeps schema inside data and never parses repair instructions", () => {
   const data = buildDoctorJsonData({
     results: [

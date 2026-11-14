@@ -16,6 +16,7 @@ terminal).
 - `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
 - `hack ps` / `hack status` — project status
 - `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
+- `hack projects --json --observe` — read-only listing: no registration, `lastSeenAt` update, registry creation or write, and no daemon, Docker or VM start. Works with `--summary`, `--project` and `--all`; rejects `--meta`. Ordinary listing retains discovery writes for compatibility.
 - `hack env` — env values and local secrets
 - `hack host exec` / `hack host shell` — host commands/shells with Hack-resolved env injected
 - `hack run <service> [cmd...]` — one-off command in a fresh service container
@@ -125,7 +126,22 @@ does not refresh the global project registry. A held registration lock therefore
 does not block their resolution or require a retry just to update last-seen metadata.
 Use a checkout/path directly, or an existing registry entry with `--project`;
 `hack init`, project lifecycle registration and `hack projects` discovery maintain
-registrations. Optional `hack projects` discovery coalesces unchanged observations
+registrations. `--json --observe` skips registration entirely. Observe reads
+Docker directly and never contacts hackd, including when a daemon is available.
+It returns the normal listing fields plus `observe: true`, and each full or
+summary row adds `backend`, `state`, `state_reason`, `started_at` and `services`.
+Each service has `name`, `state`, `ready`, `completed`, `health`, `exit_code` and
+`started_at`. Missing evidence is null or unknown: Docker activity is not a
+readiness/completion guarantee, and an exited container without an observed
+exit code is unknown. Registered native rows remain visible with
+`backend: native`, `state: unknown`, and `state_reason: native-observer-required`;
+use the native `ps` observer for their current state. R2 will complete the shared
+backend-aware projection. Always-on fields will be supplied when their owner
+exists; absence of `autostart` is not an off-state claim.
+
+![Observe-only listing](reference/projects-observe.svg) ([source](reference/projects-observe.mmd))
+
+Ordinary listing coalesces unchanged observations
 for one minute and defers refresh when the registry lock is busy. Stale optional
 upserts check before Git and configuration discovery, then again before staging
 an owner, so an observed busy lock avoids work that would be discarded. These

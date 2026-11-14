@@ -1,0 +1,13 @@
+---
+title: Observe projects without registration writes
+---
+flowchart TD
+  CLI[projects --json --observe] --> Registry[Read registry]
+  CLI --> Runtime[Read Docker ps and inspect]
+  Registry --> Views[Build registered project views]
+  Runtime --> Views
+  Views --> Native{Native inputs?}
+  Native -->|Yes| Unknown[Keep row, native observer required]
+  Native -->|No| Project[Project activity or unknown]
+  Unknown --> JSON[Full or summary JSON]
+  Project --> JSON

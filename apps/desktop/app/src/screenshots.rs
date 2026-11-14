@@ -23,6 +23,41 @@ pub fn run(dir: &Path) {
     );
     cx.update(gpui_kit::init);
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        for name in hack_desktop_core::upgrade_fixtures::NAMES {
+            cx.update(|cx| Theme::change(mode, None, cx));
+            let opts = WindowOptions {
+                focus: false,
+                show: false,
+                ..crate::window_options()
+            };
+            let (handle, _) = cx
+                .update(|cx| {
+                    gpui_kit::open_window(opts, cx, |_, cx| {
+                        cx.new(|cx| {
+                            let mut app =
+                                HackApp::new(crate::source_for(Some(Fixture::Running)), false, cx);
+                            app.show_upgrade_now(
+                                hack_desktop_core::upgrade_fixtures::load(name)
+                                    .expect("known upgrade fixture"),
+                            );
+                            app
+                        })
+                    })
+                })
+                .expect("offscreen upgrade window");
+            cx.update_window(handle, |_, w, cx| w.render_frame(cx))
+                .expect("render upgrade");
+            let image = cx.capture_screenshot(handle).expect("upgrade renderer");
+            let suffix = if mode == ThemeMode::Dark {
+                "dark"
+            } else {
+                "light"
+            };
+            image
+                .save(dir.join(format!("upgrade-{name}-{suffix}.png")))
+                .expect("save upgrade");
+            cx.update_window(handle, |_, w, _| w.remove_window()).ok();
+        }
         for name in hack_desktop_core::setup_fixtures::NAMES {
             cx.update(|cx| Theme::change(mode, None, cx));
             let mut opts = crate::window_options();

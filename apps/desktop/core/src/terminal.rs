@@ -64,7 +64,18 @@ pub struct Script {
 }
 impl Script {
     pub fn create(temp_root: &Path, spec: &CommandSpec) -> Result<Self, String> {
-        let command = spec.display()?;
+        Self::create_sequence(temp_root, std::slice::from_ref(spec))
+    }
+    /// Fixed authored argv only. Stop the sequence on the first failing command.
+    pub fn create_sequence(temp_root: &Path, specs: &[CommandSpec]) -> Result<Self, String> {
+        if specs.is_empty() {
+            return Err("No terminal commands".into());
+        }
+        let command = specs
+            .iter()
+            .map(CommandSpec::display)
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" && ");
         if !temp_root.is_absolute() || temp_root.to_str().is_none() {
             return Err("Terminal temp root must be an absolute UTF-8 path".into());
         }

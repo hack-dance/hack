@@ -13,6 +13,7 @@ mod doctor_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod setup_view;
+mod upgrade_view;
 mod view;
 
 use std::sync::Arc;
@@ -25,13 +26,14 @@ use hack_desktop_core::source::{FixtureSource, LiveSource, Source};
 pub(crate) struct Args {
     pub fixture: Option<Fixture>,
     pub setup_fixture: Option<String>,
+    pub upgrade_fixture: Option<String>,
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--setup-fixture missing-cli|partial|ready|native-unknown] [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
+        "usage: hack-desktop [--upgrade-fixture <state>] [--setup-fixture missing-cli|partial|ready|native-unknown] [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
     );
     std::process::exit(2)
 }
@@ -40,12 +42,20 @@ fn parse_args() -> Args {
     let mut a = Args {
         fixture: None,
         setup_fixture: None,
+        upgrade_fixture: None,
         theme: None,
         screenshots: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--upgrade-fixture" => {
+                let name = it.next().unwrap_or_else(|| usage());
+                if hack_desktop_core::upgrade_fixtures::load(&name).is_none() {
+                    usage();
+                }
+                a.upgrade_fixture = Some(name);
+            }
             "--setup-fixture" => {
                 let name = it.next().unwrap_or_else(|| usage());
                 if hack_desktop_core::setup_fixtures::load(&name).is_none() {
@@ -114,9 +124,11 @@ fn main() {
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         let setup_fixture = args.setup_fixture;
+        let upgrade_fixture = args.upgrade_fixture;
         let fixture = args
             .fixture
-            .or(setup_fixture.as_ref().map(|_| Fixture::Running));
+            .or(setup_fixture.as_ref().map(|_| Fixture::Running))
+            .or(upgrade_fixture.as_ref().map(|_| Fixture::Running));
         let theme = args.theme;
         let source = source_for(fixture);
         gpui_kit::open_window(window_options(), cx, move |window, cx| {
@@ -144,6 +156,12 @@ fn main() {
                     .and_then(hack_desktop_core::setup_fixtures::load)
                 {
                     app.show_setup_now(report);
+                }
+                if let Some(flow) = upgrade_fixture
+                    .as_deref()
+                    .and_then(hack_desktop_core::upgrade_fixtures::load)
+                {
+                    app.show_upgrade_now(flow);
                 }
                 if let Some(a) = fixture.and_then(|f| fixtures::local(f).in_flight) {
                     app.simulate_in_flight(a);

@@ -21,4 +21,7 @@ pub mod setup_io;
 pub mod source;
 pub mod state;
 pub mod terminal;
+pub mod upgrade;
+pub mod upgrade_fixtures;
+pub mod upgrade_io;
 pub mod viewmodel;

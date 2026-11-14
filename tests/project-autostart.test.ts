@@ -1063,6 +1063,44 @@ test("ordinary legacy republication records review provenance before later named
   expect((await read("beta"))?.autostartRequiresReview).toBe(true);
 });
 
+for (const operation of ["register", "prune"] as const) {
+  test(`ordinary ${operation} tolerates malformed unmarked worktree metadata without granting intent`, async () => {
+    const project = await createTrustProject();
+    await writeFile(
+      registryPath,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          entry("alpha"),
+          {
+            ...entry("beta"),
+            worktrees: [{ path: join(root, "incomplete"), branch: "preview" }],
+          },
+        ],
+      })
+    );
+    const before = await readFile(registryPath, "utf8");
+    await expect(
+      setProjectAutostart({ id: "alpha", registryPath })
+    ).rejects.toMatchObject({ code: "E_CONFIG_INVALID" });
+    expect(await readFile(registryPath, "utf8")).toBe(before);
+    if (operation === "register") {
+      expect((await upsertProjectRegistration({ project })).status).toBe(
+        "updated"
+      );
+      expect((await read("beta"))?.worktrees).toBeUndefined();
+      expect((await read("beta"))?.autostartRequiresReview).toBe(true);
+    } else {
+      expect(
+        (await removeProjectsById({ ids: ["beta"] })).removed
+      ).toHaveLength(1);
+      expect(await read("beta")).toBeUndefined();
+    }
+    expect((await read())?.autostart).toBeUndefined();
+    expect((await read())?.autostartRequiresReview).toBe(true);
+  });
+}
+
 test("ordinary registration replaces an unmarked registry symlink without changing its target", async () => {
   const project = await createTrustProject();
   const target = join(root, "linked-legacy-registry.json");

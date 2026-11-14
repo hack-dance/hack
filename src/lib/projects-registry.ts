@@ -207,6 +207,17 @@ export class AutostartRegistryTrustError extends HackCliError {
   }
 }
 
+/** Strict intent mutations cannot discard malformed registration or worktree records. */
+class AutostartRegistryInvalidError extends HackCliError {
+  constructor() {
+    super({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Projects registry is invalid; autostart intent was not changed.",
+    });
+  }
+}
+
 /**
  * Trust the opened file, never a pre-open path observation. The UID check applies
  * on hosts with a user identity; Unix file modes must deny group/other writes.
@@ -417,7 +428,12 @@ async function readProjectsRegistryForMutation(): Promise<ProjectsRegistry> {
       })
     ).registry;
   } catch (error: unknown) {
-    if (!(error instanceof AutostartRegistryTrustError)) {
+    if (
+      !(
+        error instanceof AutostartRegistryTrustError ||
+        error instanceof AutostartRegistryInvalidError
+      )
+    ) {
       throw error;
     }
     // Preserve ordinary registration/prune behavior for unmarked legacy data.
@@ -1013,11 +1029,7 @@ async function readTrustedAutostartRegistry(
     requireAutostartTrust: true,
   });
   if (read.kind === "invalid" || (read.kind === "valid" && read.rejected > 0)) {
-    throw new HackCliError({
-      code: "E_CONFIG_INVALID",
-      message:
-        "Projects registry is invalid; autostart intent was not changed.",
-    });
+    throw new AutostartRegistryInvalidError();
   }
   return read.kind === "valid"
     ? read.registry

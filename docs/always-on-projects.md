@@ -97,7 +97,8 @@ until they are opted in from their own checkout. Trusted named targets continue
 to work from other directories. The old inode is never reused, so an already-open writer cannot change
 the replacement. This migration refuses symlinks, foreign ownership, malformed
 registries and preexisting intent in an unsafe file. Ordinary registration and
-prune operations keep their prior behavior for an unmarked registry, including
+prune operations keep their lenient handling of malformed unmarked records and
+worktree metadata, including
 replacing a registry symlink itself with a regular file while leaving its target
 unchanged. They retain review requirements on copied paths; this does not
 authorize autostart. That check repeats at every autostart read and mutation. Unsafe registry

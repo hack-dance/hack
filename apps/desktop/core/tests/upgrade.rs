@@ -143,3 +143,15 @@ fn duplicate_scope_and_contradictory_findings_stay_unknown() {
     f.observation.report.as_mut().unwrap().machine[0].status = "blocker".into();
     assert!(!f.done());
 }
+
+#[test]
+fn unreadable_or_relative_cli_never_admits_snapshot_or_upgrade() {
+    let mut flow = fixtures::load("ready").unwrap();
+    flow.observation.cli = None;
+    assert!(!flow.can_snapshot());
+    assert!(!flow.can_upgrade());
+    flow.observation.cli = Some("5.0.0".into());
+    flow.observation.cli_program = "hack".into();
+    assert!(!flow.can_snapshot());
+    assert!(!flow.can_upgrade());
+}

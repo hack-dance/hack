@@ -239,6 +239,7 @@ cargo run -p hack-desktop -- --upgrade-fixture availability-unknown
 Fixture names: `availability-unknown`, `available`, `checking`, `blocked`, `ready`,
 `snapshotting`, `incomplete`, `applying`, `unknown`, `restarting`, `done`, `failed`,
 `rolling-back`, `restored`. `--screenshots` renders all fourteen in both themes
-without a window. Core tests use only fake executables, isolated homes, disabled
+without a window. Evidence: [light](screenshots/upgrade-light.png),
+[dark](screenshots/upgrade-dark.png). Core tests use only fake executables, isolated homes, disabled
 autostart, injected launchers and pure evidence inputs. They do not qualify live
 Homebrew, terminal, platform focus, a published app or a real upgrade.

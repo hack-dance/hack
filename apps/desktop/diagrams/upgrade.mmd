@@ -10,8 +10,10 @@ stateDiagram-v2
   Checking --> Ready : verified target, ready
   Blocked --> Checking : Check again
   Ready --> Snapshotting : Save snapshot click
+  AvailabilityUnknown --> Snapshotting : Save click, readiness checked
   Snapshotting --> Incomplete : refused or gaps
-  Snapshotting --> Ready : complete receipt
+  Snapshotting --> Ready : complete, verified target
+  Snapshotting --> AvailabilityUnknown : complete, no target
   Incomplete --> Checking : Check again
   Ready --> Applying : Upgrade click, complete snapshot
   Applying --> Checking : Check again

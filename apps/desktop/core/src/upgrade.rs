@@ -256,6 +256,8 @@ pub struct Flow {
 impl Flow {
     pub fn can_snapshot(&self) -> bool {
         !self.busy
+            && Path::new(&self.observation.cli_program).is_absolute()
+            && self.observation.cli.as_deref().is_some_and(version)
             && self.observation.report.as_ref().is_some_and(Report::ready)
             && self.previous.is_none()
     }

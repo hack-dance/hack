@@ -26,7 +26,13 @@ const EXECUTOR = `#include <stdio.h>
 #include <unistd.h>
 int main(int argc, char **argv) {
   if (argc > 1 && strcmp(argv[1], "--candidate-root") == 0) {
-    const char *kind = getenv("FIXTURE_STATUS");
+    char kind_buffer[32] = "";
+    char status_path[4096];
+    const char *home = getenv("HOME");
+    if (!home || snprintf(status_path, sizeof(status_path), "%s/fixture-status", home) >= sizeof(status_path)) return 8;
+    FILE *status = fopen(status_path, "r");
+    if (status) { if (!fgets(kind_buffer, sizeof(kind_buffer), status)) { fclose(status); return 8; } fclose(status); }
+    const char *kind = kind_buffer;
     if (kind && strcmp(kind, "error") == 0) return 7;
     if (kind && strcmp(kind, "malformed") == 0) { puts("not json"); return 0; }
     if (kind && strcmp(kind, "active") == 0) { puts("{\\"phase\\":\\"running\\",\\"process_alive\\":true}"); return 0; }
@@ -334,9 +340,16 @@ test.skipIf(!supported)(
       );
       expect(unsignedResult.exitCode).toBe(1);
       expect(readFileSync(join(channel, ".selection.json"))).toEqual(before);
-      for (const status of ["error", "active", "malformed"]) {
-        const rejected = run(
-          [
+      // Quiescence children receive only system variables, including this private HOME.
+      const fixtureStatus = join(home, "fixture-status");
+      for (const [status, message] of [
+        ["error", "Candidate quiescence check failed"],
+        ["active", "Candidate runtime is active or ambiguous"],
+        ["malformed", "JSON Parse error"],
+      ]) {
+        writeFileSync(fixtureStatus, status, { mode: 0o600 });
+        try {
+          const rejected = run([
             "upgrade",
             "--version",
             "5.0.0-next.2",
@@ -344,11 +357,15 @@ test.skipIf(!supported)(
             second.target,
             "--sha256",
             second.checksum,
-          ],
-          { FIXTURE_STATUS: status }
-        );
-        expect(rejected.exitCode).toBe(1);
-        expect(readFileSync(join(channel, ".selection.json"))).toEqual(before);
+          ]);
+          expect(rejected.stderr.toString()).toContain(message);
+          expect(rejected.exitCode).toBe(1);
+          expect(readFileSync(join(channel, ".selection.json"))).toEqual(
+            before
+          );
+        } finally {
+          rmSync(fixtureStatus);
+        }
       }
       const upgraded = manage([
         "upgrade",

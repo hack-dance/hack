@@ -540,6 +540,7 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
     let calls = 0;
     let cancellations = 0;
     const signals: unknown[] = [];
+    const archiveReadBlocked = Promise.withResolvers<void>();
     const mock = spyOn(globalThis, "fetch").mockImplementation(
       fetchMock((url, options) => {
         calls++;
@@ -560,19 +561,27 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
         ) {
           return Promise.resolve(
             new Response(
-              new ReadableStream<Uint8Array>({
-                start(controller) {
-                  if (scenario === "cleanup") {
-                    controller.enqueue(fixture.archive);
-                  }
+              new ReadableStream<Uint8Array>(
+                {
+                  start(controller) {
+                    if (scenario === "cleanup") {
+                      controller.enqueue(fixture.archive);
+                    }
+                  },
+                  pull() {
+                    if (scenario === "cleanup") {
+                      archiveReadBlocked.resolve();
+                    }
+                  },
+                  cancel() {
+                    cancellations++;
+                    if (scenario === "cleanup") {
+                      return new Promise<void>(() => {});
+                    }
+                  },
                 },
-                cancel() {
-                  cancellations++;
-                  if (scenario === "cleanup") {
-                    return new Promise<void>(() => {});
-                  }
-                },
-              })
+                { highWaterMark: 0 }
+              )
             )
           );
         }
@@ -595,6 +604,13 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
           await drain();
         }
         expect(calls).toBe(scenario === "stall" ? 2 : 5);
+        if (scenario === "cleanup") {
+          // With no prefetch, the next read follows the awaited archive write.
+          await archiveReadBlocked.promise;
+          expect(readFileSync(join(root, fixture.name))).toEqual(
+            fixture.archive
+          );
+        }
         clock.advance(31);
         await drain();
         if (scenario === "cleanup") {

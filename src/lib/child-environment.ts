@@ -19,7 +19,11 @@ export function childEnvironment(
 ): Record<string, string> {
   const env: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(base)) {
-    if (typeof value === "string" && !unsetKeys.includes(key)) {
+    if (
+      typeof value === "string" &&
+      !unsetKeys.includes(key) &&
+      key !== "HACK_AUTOSTART_LOGIN"
+    ) {
       env[key] = value;
     }
   }
@@ -41,6 +45,9 @@ export function hackReexecEnvironment(
   base: Readonly<Record<string, string | undefined>> = process.env
 ): Record<string, string> {
   const env = childEnvironment(base);
+  if (base.HACK_AUTOSTART_LOGIN === "1") {
+    env.HACK_AUTOSTART_LOGIN = "1";
+  }
   for (const key of HACK_KEY_MATERIAL_VARIABLES) {
     const value = base[key];
     if (typeof value === "string") {

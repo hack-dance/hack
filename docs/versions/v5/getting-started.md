@@ -63,6 +63,11 @@ hack ps
 hack open
 ```
 
+To start this project at future logins, use `hack up -d --always` and install
+the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
+`hack up` resumes it. See [Always-on projects](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md) for
+the startup bounds, no-prompt behavior and JSON contract.
+
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
 have no URL. Sign in or load a page that reads data to check the app itself.

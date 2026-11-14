@@ -46,6 +46,28 @@ export interface RegisteredProjectWorktree {
   readonly lastSeenAt: string;
 }
 
+/** Value-free result of the daemon's most recent startup attempt. */
+export interface ProjectAutostartResult {
+  readonly status: "started" | "skipped" | "failed" | "already_running";
+  readonly reason: string | null;
+  readonly at: string;
+}
+
+/** Machine-owned intent; repository configuration never creates this marker. */
+export interface ProjectAutostart {
+  readonly branch: string | null;
+  readonly paused: boolean;
+  readonly lastResult: ProjectAutostartResult | null;
+  /** Persisted before starting: daemon replacement in the same boot cannot replay it. */
+  readonly lastAttemptBootId: string | null;
+  /** Invalid/future intent is visible but never eligible for automatic starts. */
+  readonly invalid?: true;
+}
+
+// Invalid markers remain repairable and survive unrelated registry writes byte-for-JSON-value.
+// The weak key follows the marker through project spreads without exposing raw data in views.
+const invalidAutostartValues = new WeakMap<object, unknown>();
+
 export interface RegisteredProject {
   readonly id: string;
   readonly name: string;
@@ -57,6 +79,7 @@ export interface RegisteredProject {
   readonly lastSeenAt?: string;
   /** Linked git worktree checkouts of this project seen by the CLI (additive; absent in older registries). */
   readonly worktrees?: readonly RegisteredProjectWorktree[];
+  readonly autostart?: ProjectAutostart;
 }
 
 export interface ProjectsRegistry {
@@ -187,6 +210,8 @@ export async function readProjectsRegistryStrict(opts?: {
       readonly registry: ProjectsRegistry;
       /** Project entries the registry holds that are not valid (skipped). */
       readonly rejected: number;
+      /** Invalid/future autostart markers retained as disabled diagnostics. */
+      readonly invalidAutostart: number;
     }
 > {
   const text = await readRegistryText(opts?.registryPath ?? getRegistryPath());
@@ -224,7 +249,14 @@ export async function readProjectsRegistryStrict(opts?: {
       rejected += 1;
     }
   }
-  return { kind: "valid", registry, rejected };
+  return {
+    kind: "valid",
+    registry,
+    rejected,
+    invalidAutostart: registry.projects.filter(
+      (project) => project.autostart?.invalid
+    ).length,
+  };
 }
 
 type RegistrationUpsertOptions = {
@@ -602,6 +634,216 @@ export async function resolveRegisteredProjectById(opts: {
   };
 }
 
+type AutostartRegistryOptions = {
+  readonly registryPath?: string;
+  readonly signal?: AbortSignal;
+};
+
+/** Explicit machine opt-in. Re-adding an unchanged target preserves its boot claim. */
+export async function setProjectAutostart(
+  opts: AutostartRegistryOptions & {
+    readonly id: string;
+    readonly branch?: string | null;
+  }
+): Promise<RegisteredProject> {
+  let selected: RegisteredProject | undefined;
+  await mutateProjectAutostart({
+    ...opts,
+    update: (project) => {
+      const branch = opts.branch ?? null;
+      const old = project.autostart;
+      if (old?.invalid) {
+        throw new HackCliError({
+          code: "E_CONFIG_INVALID",
+          message:
+            "Autostart state is invalid or newer than this CLI. Remove the marker with 'hack autostart remove' before adding it again. Values omitted.",
+        });
+      }
+      const autostart: ProjectAutostart = {
+        ...old,
+        branch,
+        paused: false,
+        lastResult: old?.lastResult ?? null,
+        lastAttemptBootId: old?.lastAttemptBootId ?? null,
+      };
+      selected = { ...project, autostart };
+      return selected;
+    },
+  });
+  if (!selected) {
+    throw new HackCliError({
+      code: "E_PROJECT_NOT_FOUND",
+      message:
+        "Project is not registered; register it before enabling autostart.",
+    });
+  }
+  return selected;
+}
+
+/** Remove machine intent without stopping the project's running processes. */
+export async function removeProjectAutostart(
+  opts: AutostartRegistryOptions & { readonly id: string }
+): Promise<RegisteredProject | null> {
+  const changed = await mutateProjectAutostart({
+    ...opts,
+    update: (project) => {
+      const { autostart: _removed, ...rest } = project;
+      return rest;
+    },
+  });
+  return changed[0] ?? null;
+}
+
+/** Pause/resume only existing opt-ins. An omitted id selects all marked projects. */
+export async function setProjectAutostartPaused(
+  opts: AutostartRegistryOptions & {
+    readonly id?: string;
+    readonly paused: boolean;
+  }
+): Promise<readonly RegisteredProject[]> {
+  return await mutateProjectAutostart({
+    ...opts,
+    update: (project) =>
+      project.autostart && !project.autostart.invalid
+        ? {
+            ...project,
+            autostart: { ...project.autostart, paused: opts.paused },
+          }
+        : project,
+  });
+}
+
+/**
+ * Atomically claim an unpaused opt-in once per OS boot, before any child starts.
+ * A crash after publication can skip that boot's attempt; it never duplicates it.
+ * The returned registration is the locked reread, not a stale scheduling snapshot.
+ */
+export async function claimProjectAutostart(
+  opts: AutostartRegistryOptions & {
+    readonly id: string;
+    readonly bootId: string;
+  }
+): Promise<RegisteredProject | null> {
+  if (!opts.bootId.trim()) {
+    throw new Error("Autostart requires a non-empty OS boot identity.");
+  }
+  let claimed: RegisteredProject | null = null;
+  await mutateProjectAutostart({
+    ...opts,
+    update: (project) => {
+      const marker = project.autostart;
+      if (
+        !marker ||
+        marker.invalid ||
+        marker.paused ||
+        marker.lastAttemptBootId === opts.bootId
+      ) {
+        return project;
+      }
+      claimed = {
+        ...project,
+        autostart: { ...marker, lastAttemptBootId: opts.bootId },
+      };
+      return claimed;
+    },
+  });
+  return claimed;
+}
+
+/** A late result cannot recreate removed intent or overwrite a newer boot claim. */
+export async function recordProjectAutostartResult(
+  opts: AutostartRegistryOptions & {
+    readonly id: string;
+    readonly bootId: string;
+    readonly result: ProjectAutostartResult;
+  }
+): Promise<boolean> {
+  let recorded = false;
+  await mutateProjectAutostart({
+    ...opts,
+    update: (project) => {
+      if (
+        project.autostart?.invalid ||
+        project.autostart?.lastAttemptBootId !== opts.bootId
+      ) {
+        return project;
+      }
+      recorded = true;
+      return {
+        ...project,
+        autostart: { ...project.autostart, lastResult: opts.result },
+      };
+    },
+  });
+  return recorded;
+}
+
+/** Every intent mutation rereads and publishes under the same registry lock as upsert. */
+async function mutateProjectAutostart(
+  opts: AutostartRegistryOptions & {
+    readonly id?: string;
+    readonly update: (project: RegisteredProject) => RegisteredProject;
+  }
+): Promise<readonly RegisteredProject[]> {
+  const registryPath = opts.registryPath ?? getRegistryPath();
+  await ensureDir(dirname(registryPath));
+  return await withProjectsRegistryLock({
+    lockPath: `${registryPath}.lock`,
+    signal: opts.signal,
+    run: async () => {
+      const read = await readProjectsRegistryStrict({ registryPath });
+      if (
+        read.kind === "invalid" ||
+        (read.kind === "valid" && read.rejected > 0)
+      ) {
+        throw new HackCliError({
+          code: "E_CONFIG_INVALID",
+          message:
+            "Projects registry is invalid; autostart intent was not changed.",
+        });
+      }
+      const current =
+        read.kind === "valid"
+          ? read.registry
+          : { version: REGISTRY_VERSION, projects: [] };
+      if (opts.id !== undefined) {
+        selectRegisteredProjectById({
+          projects: current.projects,
+          id: opts.id,
+        });
+      } else {
+        for (const project of current.projects) {
+          selectRegisteredProjectById({
+            projects: current.projects,
+            id: project.id,
+          });
+        }
+      }
+      const selected: RegisteredProject[] = [];
+      const projects = current.projects.map((project) => {
+        if (
+          opts.id !== undefined ? project.id !== opts.id : !project.autostart
+        ) {
+          return project;
+        }
+        const updated = opts.update(project);
+        selected.push(updated);
+        return updated;
+      });
+      if (
+        projects.some((project, index) => project !== current.projects[index])
+      ) {
+        await writeRegistryAtomic(
+          registryPath,
+          { ...current, projects },
+          opts.signal
+        );
+      }
+      return selected;
+    },
+  });
+}
+
 /** Validate every requested ID under ownership before removing any entry. */
 export async function removeProjectsById(opts: {
   readonly ids: readonly string[];
@@ -706,6 +948,7 @@ function parseProject(value: unknown): RegisteredProject | null {
   const devHost = getString(value, "devHost") ?? undefined;
   const lastSeenAt = getString(value, "lastSeenAt") ?? undefined;
   const worktrees = parseWorktrees(value.worktrees);
+  const autostart = parseProjectAutostart(value.autostart);
 
   return {
     id,
@@ -718,7 +961,75 @@ function parseProject(value: unknown): RegisteredProject | null {
     createdAt,
     ...(lastSeenAt ? { lastSeenAt } : {}),
     ...(worktrees.length > 0 ? { worktrees } : {}),
+    ...(autostart ? { autostart } : {}),
   };
+}
+
+/** Unknown intent disables only its automatic start; ordinary project operations still work. */
+function parseProjectAutostart(value: unknown): ProjectAutostart | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    !(
+      isRecord(value) &&
+      (value.branch === null || typeof value.branch === "string")
+    ) ||
+    typeof value.paused !== "boolean" ||
+    !(
+      value.lastAttemptBootId === null ||
+      typeof value.lastAttemptBootId === "string"
+    )
+  ) {
+    return invalidProjectAutostart(value);
+  }
+  let lastResult: ProjectAutostartResult | null = null;
+  if (value.lastResult !== null) {
+    const result = value.lastResult;
+    if (
+      !(
+        isRecord(result) &&
+        (result.status === "started" ||
+          result.status === "skipped" ||
+          result.status === "failed" ||
+          result.status === "already_running") &&
+        (result.reason === null || typeof result.reason === "string")
+      ) ||
+      typeof result.at !== "string"
+    ) {
+      return invalidProjectAutostart(value);
+    }
+    lastResult = {
+      ...result,
+      status: result.status,
+      reason: result.reason,
+      at: result.at,
+    };
+  }
+  return {
+    ...value,
+    branch: value.branch,
+    paused: value.paused,
+    lastAttemptBootId: value.lastAttemptBootId,
+    lastResult,
+  };
+}
+
+function invalidProjectAutostart(raw: unknown): ProjectAutostart {
+  const marker: ProjectAutostart = {
+    branch: null,
+    paused: true,
+    lastAttemptBootId: null,
+    lastResult: {
+      status: "skipped",
+      reason: "invalid_marker",
+      // Sentinel: malformed state is observed, not an attempted project start.
+      at: "1970-01-01T00:00:00.000Z",
+    },
+    invalid: true,
+  };
+  invalidAutostartValues.set(marker, raw);
+  return marker;
 }
 
 function parseWorktrees(value: unknown): readonly RegisteredProjectWorktree[] {
@@ -768,7 +1079,20 @@ async function writeRegistryAtomic(
 ): Promise<void> {
   await writeProjectsRegistryAtomic({
     path,
-    text: `${JSON.stringify(registry, null, 2)}\n`,
+    text: `${JSON.stringify(
+      registry,
+      (_key, value: unknown) => {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          invalidAutostartValues.has(value)
+        ) {
+          return invalidAutostartValues.get(value);
+        }
+        return value;
+      },
+      2
+    )}\n`,
     signal,
   });
 }

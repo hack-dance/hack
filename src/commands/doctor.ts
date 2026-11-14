@@ -878,6 +878,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()));
   results.push(await runCheck(s, "daemon", () => checkDaemonStatus()));
+  results.push(
+    await runCheck(s, "autostart login service", () =>
+      checkAutostartLoginService()
+    )
+  );
   if (isLinux() && !isCandidateRun()) {
     // Candidate trials do not manage the stable login service. Otherwise the
     // row is omitted when systemd management is disabled for this process
@@ -1936,6 +1941,35 @@ async function checkGlobalFiles(): Promise<CheckResult> {
     message: ok
       ? root
       : `Missing compose files under ${root} (run: hack global install)`,
+  };
+}
+
+/** File-only observation: never starts the daemon or invokes a service manager. */
+async function checkAutostartLoginService(): Promise<CheckResult> {
+  const registry = await readProjectsRegistry();
+  const marked = registry.projects.filter(
+    (project) => project.autostart
+  ).length;
+  if (marked === 0) {
+    return {
+      name: "autostart login service",
+      status: "ok",
+      message: "No always-on projects marked.",
+    };
+  }
+  let unitPath: string | null = null;
+  if (isMac()) {
+    unitPath = resolveDaemonPaths({}).launchdPlistPath;
+  } else if (isLinux()) {
+    unitPath = resolveSystemdUnitPath();
+  }
+  const installed = unitPath !== null && (await pathExists(unitPath));
+  return {
+    name: "autostart login service",
+    status: installed ? "ok" : "warn",
+    message: installed
+      ? "Always-on projects have an installed login service."
+      : "Always-on projects are marked but the login service is not installed. Run: hack daemon install",
   };
 }
 

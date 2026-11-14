@@ -20,6 +20,7 @@ import { createShellService } from "../control-plane/extensions/supervisor/shell
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { resolveRegisteredProjectById } from "../lib/projects-registry.ts";
+import { runAutostartAtLogin } from "./autostart.ts";
 import {
   evaluateGatewayRouteAccess,
   validateControlPlaneRouteTarget,
@@ -337,8 +338,12 @@ export async function runDaemon({
     }
   }
 
+  const autostartAbort = new AbortController();
+  let autostartWork: Promise<void> = Promise.resolve();
   const shutdown = async ({ reason }: { readonly reason: string }) => {
     logger.warn({ message: `Shutting down hackd (${reason})` });
+    autostartAbort.abort();
+    await autostartWork;
     refreshScheduler.stop();
     watcher.stop();
     await daemonProxy?.close();
@@ -359,6 +364,16 @@ export async function runDaemon({
   logger.info({
     message: `hackd started (pid ${process.pid}, version ${packageJson.version})`,
   });
+  if (process.env.HACK_DAEMON_AUTOSTART_DISABLE !== "1") {
+    autostartWork = runAutostartAtLogin({
+      signal: autostartAbort.signal,
+    }).catch(() => {
+      logger.warn({
+        message:
+          "Autostart could not complete; inspect hack autostart list and run hack up manually. Values omitted.",
+      });
+    });
+  }
 }
 
 async function handleRequest({

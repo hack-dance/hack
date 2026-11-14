@@ -25,6 +25,7 @@ import {
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import { isRecord } from "../lib/guards.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
@@ -52,6 +53,7 @@ import {
 import type { ProjectView } from "../lib/project-views.ts";
 import {
   buildProjectViews,
+  serializeProjectAutostart,
   serializeProjectSummary,
   serializeProjectView,
 } from "../lib/project-views.ts";
@@ -496,6 +498,7 @@ async function runNativeStatus(opts: {
   readonly json: boolean;
   readonly ps?: typeof nativeProjectPs;
   readonly authored?: typeof tryNativeComposeCommand;
+  readonly readRegistry?: typeof readProjectsRegistry;
 }): Promise<number> {
   // Once, whichever native observer answers (HACK-2026).
   noteNativeBackendBeta({ json: opts.json });
@@ -507,6 +510,27 @@ async function runNativeStatus(opts: {
     project: opts.projectOpt,
     operation: "ps",
     json: opts.json,
+    statusMetadata: async () => {
+      const registry = await (opts.readRegistry ?? readProjectsRegistry)();
+      const registration =
+        opts.projectOpt === undefined
+          ? registry.projects
+              .filter((entry) =>
+                [
+                  entry.repoRoot,
+                  ...(entry.worktrees ?? []).map((worktree) => worktree.path),
+                ].some(
+                  (root) => opts.cwd === root || opts.cwd.startsWith(`${root}/`)
+                )
+              )
+              .sort((a, b) => b.repoRoot.length - a.repoRoot.length)[0]
+          : selectRegisteredProjectByName({
+              projects: registry.projects,
+              name: parseProjectSelectorOption({ projectOpt: opts.projectOpt })
+                .name,
+            });
+      return { autostart: serializeProjectAutostart(registration?.autostart) };
+    },
   });
   if (authored !== null) {
     return authored;
@@ -541,7 +565,28 @@ async function runNativeStatus(opts: {
       branch,
     },
   });
-  await displayNativePs(result, opts.json);
+  const registry = await (opts.readRegistry ?? readProjectsRegistry)();
+  const registration = registry.projects.find(
+    (entry) =>
+      entry.projectDir === project.projectDir ||
+      entry.worktrees?.some((worktree) => worktree.path === project.projectRoot)
+  );
+  const autostart = serializeProjectAutostart(registration?.autostart);
+  if (opts.json) {
+    emitCliResult({ result: okResult({ data: { ...result, autostart } }) });
+  } else {
+    await displayNativePs(result, false);
+    if (registration?.autostart) {
+      const policy = registration.autostart;
+      await display.kv({
+        entries: [
+          ["Autostart", policy.paused ? "paused" : "always-on"],
+          ["Last autostart", policy.lastResult?.status ?? "not attempted"],
+          ["Autostart reason", policy.lastResult?.reason ?? ""],
+        ],
+      });
+    }
+  }
   return 0;
 }
 
@@ -641,7 +686,15 @@ async function runProjects(opts: {
 
   await display.section("Projects");
   await display.table({
-    columns: ["Name", "Status", "Services", "Dev Host", "Repo Root"],
+    columns: [
+      "Name",
+      "Status",
+      "Autostart",
+      "Last autostart",
+      "Services",
+      "Dev Host",
+      "Repo Root",
+    ],
     rows: views.map((p) => {
       const definedCount = p.definedServices ? p.definedServices.length : null;
       const runningCount = runtime.ok ? countRunningServices(p.runtime) : null;
@@ -650,9 +703,16 @@ async function runProjects(opts: {
         runningCount,
         runtimeOk: runtime.ok,
       });
+      const autostartState = p.autostart?.paused ? "paused" : "always-on";
       return [
         p.name,
         p.status,
+        p.autostart ? autostartState : "",
+        p.autostart?.lastResult
+          ? [p.autostart.lastResult.status, p.autostart.lastResult.reason]
+              .filter(Boolean)
+              .join(": ")
+          : "",
         servicesCell,
         p.devHost ?? "",
         p.repoRoot ?? "",
@@ -727,7 +787,13 @@ async function outputDaemonProjects({
     daemon.json &&
     (!opts.summary || daemon.json.detail_level === "summary")
   ) {
-    const { profiling, ...payload } = daemon.json;
+    const { profiling, ...cached } = daemon.json;
+    // Policy changes do not wait for Docker's next cache refresh.
+    const registry = await readProjectsRegistry();
+    const payload = overlayAutostartPolicy({
+      cached,
+      projects: registry.projects,
+    });
     writeProfiledProjects({
       payload,
       profiler,
@@ -739,6 +805,33 @@ async function outputDaemonProjects({
     return true;
   }
   return false;
+}
+
+/** Machine intent is fresh even when runtime rows came from an older daemon snapshot. */
+function overlayAutostartPolicy(opts: {
+  readonly cached: Readonly<Record<string, unknown>>;
+  readonly projects: readonly RegisteredProject[];
+}): Record<string, unknown> {
+  const markers = new Map(
+    opts.projects.map((project) => [project.id, project.autostart])
+  );
+  return {
+    ...opts.cached,
+    projects: Array.isArray(opts.cached.projects)
+      ? opts.cached.projects.map((project: unknown) =>
+          isRecord(project)
+            ? {
+                ...project,
+                autostart: serializeProjectAutostart(
+                  typeof project.project_id === "string"
+                    ? markers.get(project.project_id)
+                    : undefined
+                ),
+              }
+            : project
+        )
+      : opts.cached.projects,
+  };
 }
 
 type RuntimeRecoveryMeta = {
@@ -1521,6 +1614,7 @@ function readRepairOutcomeField(opts: {
 }
 
 export const __testOnlyProjectsCommand = {
+  overlayAutostartPolicy,
   buildRuntimeRecoveryNotice,
   runNativeStatus,
   filterPruneRegistryProjects,

@@ -273,7 +273,7 @@ async function observe(opts: {
     }));
     process.stdout.write(
       options.json
-        ? `${JSON.stringify({ owner: "legacy-compose", services: report })}\n`
+        ? `${JSON.stringify({ owner: "legacy-compose", services: report, ...(await options.statusMetadata?.()) })}\n`
         : report.map((entry) => `${entry.service}\t${entry.status}\n`).join("")
     );
     return 0;

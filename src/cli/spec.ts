@@ -1,5 +1,6 @@
 import pkg from "../../package.json";
 import { agentCommand } from "../commands/agent.ts";
+import { autostartCommand } from "../commands/autostart.ts";
 import { branchCommand } from "../commands/branch.ts";
 import { commandsCommand } from "../commands/commands.ts";
 import { configCommand } from "../commands/config.ts";
@@ -70,6 +71,7 @@ export const CLI_SPEC = defineCli({
     statusCommand,
     usageCommand,
     projectsCommand,
+    autostartCommand,
     projectCommand,
     initCommand,
     devCommand,

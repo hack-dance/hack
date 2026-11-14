@@ -417,10 +417,15 @@ const STATUS_NOTES: Readonly<
 async function showStatus(options: {
   readonly result: NativeAuthoredProjectStatus;
   readonly json?: boolean;
+  readonly statusMetadata?: NativeComposeCommandOptions["statusMetadata"];
 }): Promise<void> {
   const { result } = options;
   if (options.json) {
-    emitCliResult({ result: okResult({ data: result }) });
+    emitCliResult({
+      result: okResult({
+        data: { ...result, ...(await options.statusMetadata?.()) },
+      }),
+    });
     return;
   }
   if (result.status !== "observed") {
@@ -435,6 +440,16 @@ async function showStatus(options: {
       item.health ?? "",
     ]),
   });
+  const policy = (await options.statusMetadata?.())?.autostart;
+  if (policy) {
+    await display.kv({
+      entries: [
+        ["Autostart", policy.paused ? "paused" : "always-on"],
+        ["Last autostart", policy.last_result?.status ?? "not attempted"],
+        ["Autostart reason", policy.last_result?.reason ?? ""],
+      ],
+    });
+  }
 }
 
 function commandFailure(options: {
@@ -526,7 +541,11 @@ async function runStatus(input: LifecycleInput): Promise<number> {
   if (input.signal.aborted) {
     return 130;
   }
-  await showStatus({ result, json: input.options.json });
+  await showStatus({
+    result,
+    json: input.options.json,
+    statusMetadata: input.options.statusMetadata,
+  });
   return 0;
 }
 

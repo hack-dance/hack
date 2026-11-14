@@ -8,6 +8,151 @@ Run `hack help <command>` for the same content in the terminal. Global options: 
 
 ## Project
 
+## `hack autostart`
+
+Manage always-on projects on this machine
+
+### Usage
+
+```bash
+hack autostart <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack autostart add [project]` | Start this registered project at login on this machine |
+| `hack autostart remove [project]` | Remove this project's machine autostart marker |
+| `hack autostart list` | List this machine's always-on projects |
+| `hack autostart pause [project]` | Pause one marked project, or all marked projects |
+| `hack autostart resume [project]` | Resume one marked project, or all marked projects |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart add [project]`
+
+Start this registered project at login on this machine
+
+### Usage
+
+```bash
+hack autostart add [project] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `project` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart remove [project]`
+
+Remove this project's machine autostart marker
+
+### Usage
+
+```bash
+hack autostart remove [project] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `project` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart list`
+
+List this machine's always-on projects
+
+### Usage
+
+```bash
+hack autostart list [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart pause [project]`
+
+Pause one marked project, or all marked projects
+
+### Usage
+
+```bash
+hack autostart pause [project] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `project` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart resume [project]`
+
+Resume one marked project, or all marked projects
+
+### Usage
+
+```bash
+hack autostart resume [project] [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `project` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack project`
 
 Inspect or manage project metadata
@@ -187,6 +332,7 @@ hack up [services...] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--always` | Mark this project for machine-local autostart and start it |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

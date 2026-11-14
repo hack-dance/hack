@@ -84,6 +84,7 @@ export type ProjectLifecycleView = {
 
 export type ProjectView = {
   readonly projectId?: string;
+  readonly autostart?: RegisteredProject["autostart"];
   readonly name: string;
   readonly devHost: string | null;
   readonly repoRoot: string | null;
@@ -312,6 +313,7 @@ async function buildRegisteredProjectView(opts: {
 
   return {
     projectId: opts.registration.id,
+    autostart: opts.registration.autostart,
     name: opts.name,
     devHost: opts.registration.devHost ?? null,
     repoRoot: opts.registration.repoRoot,
@@ -340,6 +342,7 @@ function buildUnavailableProjectView(opts: {
 }): ProjectView {
   return {
     projectId: opts.registration.id,
+    autostart: opts.registration.autostart,
     name: opts.name,
     devHost: opts.registration.devHost ?? null,
     repoRoot: opts.registration.repoRoot,
@@ -394,6 +397,31 @@ function buildUnregisteredProjectView(opts: {
   };
 }
 
+/** Stable desktop-facing machine policy; per-boot admission bookkeeping remains internal. */
+export function serializeProjectAutostart(
+  marker: RegisteredProject["autostart"]
+): {
+  readonly branch: string | null;
+  readonly paused: boolean;
+  readonly last_result: NonNullable<
+    RegisteredProject["autostart"]
+  >["lastResult"];
+} | null {
+  return marker
+    ? {
+        branch: marker.branch,
+        paused: marker.paused,
+        last_result: marker.lastResult
+          ? {
+              status: marker.lastResult.status,
+              reason: marker.lastResult.reason,
+              at: marker.lastResult.at,
+            }
+          : null,
+      }
+    : null;
+}
+
 /** Summary projection deliberately excludes container labels, mounts and command definitions. */
 export function serializeProjectSummary(
   view: ProjectView
@@ -407,6 +435,7 @@ export function serializeProjectSummary(
   );
   return {
     project_id: view.projectId ?? null,
+    autostart: serializeProjectAutostart(view.autostart),
     name: view.name,
     repo_root: view.repoRoot,
     dev_host: view.devHost,
@@ -435,6 +464,7 @@ export function serializeProjectView(
 ): Record<string, unknown> {
   return {
     project_id: view.projectId ?? null,
+    autostart: serializeProjectAutostart(view.autostart),
     name: view.name,
     dev_host: view.devHost ?? null,
     repo_root: view.repoRoot ?? null,

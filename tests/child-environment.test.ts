@@ -256,3 +256,12 @@ test.skipIf(!compiledCli)(
     expect(result).toBe(0);
   }
 );
+
+test("login replay context stops at tool boundaries and survives only deliberate Hack reexec", () => {
+  expect(childEnvironment({ HACK_AUTOSTART_LOGIN: "1", KEEP: "yes" })).toEqual({
+    KEEP: "yes",
+  });
+  expect(hackReexecEnvironment({ HACK_AUTOSTART_LOGIN: "1" })).toEqual({
+    HACK_AUTOSTART_LOGIN: "1",
+  });
+});

@@ -152,10 +152,15 @@ import {
 } from "./native-compose-selection.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
+import type { serializeProjectAutostart } from "./project-views.ts";
 import { run } from "./shell.ts";
 
 type Operation = "up" | "restart" | "down" | "ps" | "logs" | "exec" | "run";
 export type NativeComposeCommandOptions = {
+  /** Add machine policy only for status callers; ordinary ps keeps its existing shape. */
+  readonly statusMetadata?: () => Promise<{
+    readonly autostart: ReturnType<typeof serializeProjectAutostart>;
+  }>;
   readonly cwd: string;
   readonly path?: string;
   readonly project?: string;
@@ -736,6 +741,7 @@ async function savedCommand(opts: {
               beforeHooksPending: true,
               hostHookPhase: state.hostHookPhase,
               services: [],
+              ...(await options.statusMetadata?.()),
             },
           }),
         });
@@ -1029,6 +1035,7 @@ async function savedCommand(opts: {
                     oneoff,
                   })
                 ),
+                ...(await options.statusMetadata?.()),
               },
             }),
           });

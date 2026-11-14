@@ -1,0 +1,27 @@
+---
+title: Autostart at login
+---
+sequenceDiagram
+  autonumber
+  participant Login
+  participant Daemon
+  participant Engine
+  participant Registry
+  participant CLI
+  Login->>Daemon: Start user service
+  Daemon->>Registry: Read machine markers
+  Daemon->>Engine: Wait up to 60 seconds
+  opt Routing already installed
+    Daemon->>CLI: global up, no interaction
+  end
+  loop Unpaused projects in stable order
+    Daemon->>Registry: Claim once per boot
+    Daemon->>Engine: Inspect selected instance
+    alt Confirmed stopped
+      Daemon->>CLI: up -d, no interaction
+      CLI-->>Daemon: Result without prompts
+    else Running or unknown
+      Daemon->>Daemon: Adopt or skip
+    end
+    Daemon->>Registry: Save result and reason
+  end

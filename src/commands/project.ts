@@ -21,6 +21,7 @@ export function wrapLifecyclePersistentCommand(
   return wrapSharedLifecyclePersistentCommand(opts);
 }
 
+import { realpath } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import {
   autocompleteMultiselect,
@@ -117,7 +118,10 @@ import {
   optTail,
   optUntil,
 } from "../cli/options.ts";
-import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
+import {
+  parseProjectSelectorOption,
+  resolveRegisteredProjectOption,
+} from "../cli/project-selector.ts";
 import { globalUp } from "../commands/global.ts";
 import {
   DEFAULT_GRAFANA_HOST,
@@ -245,6 +249,7 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
+import { isLinkedGitWorktree } from "../lib/git-worktree.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -322,6 +327,7 @@ import {
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hasUnmigratedLegacyDotenv,
   migrateLegacyProjectEnv,
+  ProjectEnvKeyMissingError,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
@@ -335,6 +341,7 @@ import {
   assertLegacyProjectDiscovery,
   assertLegacyProjectInputFamily,
 } from "../lib/project-input-selection.ts";
+import { normalizeProjectName } from "../lib/project-name.ts";
 import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
@@ -361,6 +368,8 @@ import {
 } from "../lib/project-shared-helpers.ts";
 import {
   readProjectsRegistry,
+  setProjectAutostart,
+  setProjectAutostartPaused,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
 import {
@@ -382,6 +391,7 @@ import {
 import {
   formatSecretStoreDescriptor,
   resolveSecretStore,
+  SecretStoreKeyUnavailableError,
 } from "../lib/secret-store.ts";
 import { exec, findExecutableInPath, run as runShell } from "../lib/shell.ts";
 import { assertComposeSpawnEnvFits } from "../lib/spawn-env-limit.ts";
@@ -567,6 +577,12 @@ const upOptions = [
   optProfile,
   optTarget,
   optJson,
+  defineOption({
+    name: "always",
+    type: "boolean",
+    long: "--always",
+    description: "Mark this project for machine-local autostart and start it",
+  } as const),
 ] as const;
 const downOptions = [
   optPath,
@@ -903,6 +919,10 @@ export async function resolveEffectiveBranchForCommand(opts: {
   if (explicit) {
     return explicit;
   }
+  // A saved null instance means base, even when its checkout is a worktree.
+  if (process.env.HACK_AUTOSTART_LOGIN === "1") {
+    return null;
+  }
 
   const cfg = await readProjectConfig(opts.project);
   const resolved = await resolveEffectiveBranch({
@@ -1141,7 +1161,20 @@ function emitLifecycleResult(opts: {
   return opts.exitCode;
 }
 
-function buildLifecycleJsonErrorResult(opts: { readonly error: unknown }) {
+export function buildLifecycleJsonErrorResult(opts: {
+  readonly error: unknown;
+}) {
+  if (
+    process.env.HACK_AUTOSTART_LOGIN === "1" &&
+    (opts.error instanceof SecretStoreKeyUnavailableError ||
+      opts.error instanceof ProjectEnvKeyMissingError)
+  ) {
+    return errorResult({
+      code: "E_ENV_KEY_MISSING",
+      message:
+        "Autostart skipped: a required secret key is unavailable. Run hack up manually.",
+    });
+  }
   if (opts.error instanceof CliUsageError) {
     return errorResult({ code: "E_USAGE", message: opts.error.message });
   }
@@ -2903,7 +2936,7 @@ export async function mergeLifecycleCommandEnv(
 ): Promise<Record<string, string>> {
   const base: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") {
+    if (typeof value === "string" && key !== "HACK_AUTOSTART_LOGIN") {
       base[key] = value;
     }
   }
@@ -6362,6 +6395,126 @@ async function restartNativeImageProject({
   });
 }
 
+/** Publish explicit user intent before runtime effects so a subsequent login respects down. */
+async function updateAutostartIntent(opts: {
+  readonly ctx: CliContext;
+  readonly action: "up" | "down";
+  readonly args: {
+    readonly options: {
+      readonly path?: string;
+      readonly project?: string;
+      readonly branch?: string;
+      readonly always?: boolean;
+    };
+  };
+}): Promise<void> {
+  const login = process.env.HACK_AUTOSTART_LOGIN === "1";
+  const registry = await readProjectsRegistry();
+  const selector =
+    opts.args.options.project === undefined
+      ? null
+      : parseProjectSelectorOption({ projectOpt: opts.args.options.project });
+  const requestedStartDir = resolveStartDir(opts.ctx, opts.args.options.path);
+  const startDir = await realpath(requestedStartDir).catch(
+    () => requestedStartDir
+  );
+  const marked = registry.projects
+    .filter((entry) => entry.autostart)
+    .find((entry) =>
+      selector
+        ? normalizeProjectName(entry.name) === selector.name
+        : [
+            entry.repoRoot,
+            ...(entry.worktrees?.map((worktree) => worktree.path) ?? []),
+          ].some((path) => startDir === path || startDir.startsWith(`${path}/`))
+    );
+  if (!(login || opts.args.options.always || marked)) {
+    return;
+  }
+  const project = await resolveProjectForArgs({
+    ctx: opts.ctx,
+    pathOpt: opts.args.options.path,
+    projectOpt: opts.args.options.project,
+    touchRegistration: false,
+  });
+  if (login) {
+    // Login must never continue with a legacy environment that needs migration.
+    const contract = await pathExists(
+      resolve(project.projectDir, PROJECT_ENV_CONTRACT_FILENAME)
+    );
+    const modern = await projectEnvConfigExists({
+      projectDir: project.projectDir,
+    });
+    const legacy = await findUnmigratedLegacyDotenv({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      serviceNames: await discoverComposeServiceNames({
+        composeFile: project.composeFile,
+      }),
+    });
+    const dotenv = Bun.file(resolve(project.projectDir, PROJECT_ENV_FILENAME));
+    const legacyDotenv = !modern && (await dotenv.exists()) && dotenv.size > 0;
+    if (
+      (!modern && contract) ||
+      legacyDotenv ||
+      hasUnmigratedLegacyDotenv(legacy)
+    ) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message:
+          "Autostart skipped: pending env migration. Run hack doctor --migrate-env-config.",
+        detail: { reason: "pending_env_migration" },
+      });
+    }
+    return;
+  }
+  // Inspect selection without printing the normal up/down worktree notice twice.
+  const cfg = await readProjectConfig(project);
+  const resolvedBranch = await resolveEffectiveBranch({
+    explicitBranch: resolveBranchSlug(opts.args.options.branch),
+    projectRoot: project.projectRoot,
+    autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
+  });
+  if (resolvedBranch.source === "detached-worktree") {
+    throw new CliUsageError(
+      "Detached linked worktree requires an explicit --branch."
+    );
+  }
+  const branch = resolvedBranch.branch;
+  if (opts.action === "up" && opts.args.options.always) {
+    if (await isLinkedGitWorktree({ repoRoot: project.projectRoot })) {
+      throw new CliUsageError(
+        "Autostart currently requires the primary checkout. Run hack up --always there with --branch <name>."
+      );
+    }
+    const registered = await upsertProjectRegistration({ project });
+    if (registered.status === "conflict") {
+      throw new CliUsageError(
+        "Project registration conflicts; inspect hack projects before enabling autostart."
+      );
+    }
+    await setProjectAutostart({ id: registered.project.id, branch });
+    return;
+  }
+  const projectDir = await realpath(project.projectDir).catch(
+    () => project.projectDir
+  );
+  const projectRoot = await realpath(project.projectRoot).catch(
+    () => project.projectRoot
+  );
+  const registered = registry.projects.find(
+    (entry) =>
+      entry.projectDir === projectDir ||
+      entry.worktrees?.some((worktree) => worktree.path === projectRoot)
+  );
+  if (registered?.autostart && registered.autostart.branch === branch) {
+    await setProjectAutostartPaused({
+      id: registered.id,
+      paused: opts.action === "down",
+    });
+  }
+}
+
 async function handleUp({
   ctx,
   args,
@@ -6371,6 +6524,7 @@ async function handleUp({
 }): Promise<number> {
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
+  await updateAutostartIntent({ ctx, args, action: "up" });
   if (resolveNativeRuntimeSelection()) {
     // Once per `hack up`, whichever native start path follows (HACK-2026).
     noteNativeBackendBeta({ json: args.options.json === true });
@@ -7121,6 +7275,7 @@ async function handleDown({
 }): Promise<number> {
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
+  await updateAutostartIntent({ ctx, args, action: "down" });
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -8392,7 +8547,10 @@ async function handleRestart({
   if (native) {
     return await handleNativeUp({
       ctx,
-      args: { ...args, options: { ...args.options, detach: false } },
+      args: {
+        ...args,
+        options: { ...args.options, detach: false, always: false },
+      },
       native,
       restart: true,
       recovery:

@@ -63,8 +63,11 @@ rather than written.
 
 ## Durability and concurrency
 
-- Each record is one `write(2)` of a whole line, at most 4,096 bytes (plus a
-  leading newline after a torn line), on a file opened with `O_APPEND`.
+![Activity recording and rotation](../diagrams/activity-log.svg)
+
+- Each record is one `write(2)` of a whole line, at most 4,096 bytes including
+  any leading newline after a torn line, on a file opened with `O_APPEND`.
+  Encoding reserves one byte for that recovery separator.
 - Appends and rotation take the same short lock (`activity.jsonl.lock`), so a
   rotation never retires a file between a writer's open and its write. A
   completed record is lost only to retention: after a later rotation has kept

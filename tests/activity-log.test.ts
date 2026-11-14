@@ -119,6 +119,13 @@ test("the file is created 0600; a loose existing file is tightened; a symlink is
   expect(await readFile(target, "utf8")).toBe("untouched\n");
 });
 
+test("an existing owner-executable log is normalized to mode 0600", async () => {
+  await appendActivityRecord({ path, record: record() });
+  await chmod(path, 0o700);
+  await appendActivityRecord({ path, record: record() });
+  expect((await lstat(path)).mode & 0o7777).toBe(0o600);
+});
+
 test("concurrent writers in separate processes never interleave lines", async () => {
   const writers = 8;
   const each = 40;
@@ -194,6 +201,39 @@ test("rotation keeps exactly one generation and reads across it", async () => {
   expect(durations).toEqual([...durations].sort((a, b) => b - a));
   expect(durations.length).toBeGreaterThanOrEqual(5);
   expect(durations.length).toBeLessThanOrEqual(10);
+});
+
+test("torn-line recovery keeps the entire append within the write-size limit", async () => {
+  const base = record({
+    project: "p",
+    branch: "b",
+    failedServices: Array.from({ length: 29 }, (_, index) =>
+      String(index).padEnd(128, "s")
+    ),
+  });
+  const padding =
+    ACTIVITY_LINE_LIMIT - Buffer.byteLength(`${JSON.stringify(base)}\n`);
+  expect(padding).toBeGreaterThanOrEqual(0);
+  expect(padding).toBeLessThanOrEqual(254);
+  const boundary = {
+    ...base,
+    project: "p".repeat(1 + Math.min(padding, 127)),
+    branch: "b".repeat(1 + Math.max(0, padding - 127)),
+  };
+  expect(Buffer.byteLength(`${JSON.stringify(boundary)}\n`)).toBe(
+    ACTIVITY_LINE_LIMIT
+  );
+  await mkdir(join(root, "home"));
+  const torn = '{"torn":';
+  await writeFile(path, torn, { mode: 0o600 });
+  await appendActivityRecord({ path, record: boundary });
+  const bytes = await readFile(path);
+  expect(bytes.byteLength - Buffer.byteLength(torn)).toBeLessThanOrEqual(
+    ACTIVITY_LINE_LIMIT
+  );
+  const entries = await readActivity({ path, limit: 10 });
+  expect(entries).toHaveLength(1);
+  expect(entries[0]?.project).toBe(boundary.project);
 });
 
 test("a torn last line is skipped on read, and the next record stays whole", async () => {

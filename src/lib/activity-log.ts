@@ -38,8 +38,8 @@ import {
 export const ACTIVITY_FILE_NAME = "activity.jsonl";
 export const ACTIVITY_SCHEMA_VERSION = 1;
 /**
- * One record is written with a single write of at most this many bytes (plus
- * a leading newline after a torn line). 4096 is the smallest PIPE_BUF the
+ * One record is written with a single write of at most this many bytes,
+ * including a leading newline after a torn line. 4096 is the smallest PIPE_BUF the
  * supported platforms give.
  */
 export const ACTIVITY_LINE_LIMIT = 4096;
@@ -230,7 +230,8 @@ export function encodeActivityRecord(record: ActivityRecord): Buffer {
     const line = Buffer.from(
       `${JSON.stringify({ ...record, failed_services: services })}\n`
     );
-    if (line.byteLength <= ACTIVITY_LINE_LIMIT || services.length === 0) {
+    // Reserve one byte for recovery after a torn line, within the same write.
+    if (line.byteLength < ACTIVITY_LINE_LIMIT || services.length === 0) {
       return line;
     }
     services = services.slice(0, -1);
@@ -274,7 +275,7 @@ async function openPrivateLog(opts: {
     if (!info.isFile() || (uid !== undefined && info.uid !== uid)) {
       throw new Error("Activity log is not this user's regular file");
     }
-    if ((info.mode & 0o077) !== 0) {
+    if ((info.mode & 0o7777) !== 0o600) {
       await file.chmod(0o600);
     }
     return { file, size: info.size, ino: info.ino, dev: info.dev };
@@ -307,7 +308,7 @@ export async function appendActivityRecord(opts: {
 }): Promise<void> {
   const path = opts.path ?? resolveActivityPath();
   const line = encodeActivityRecord(opts.record);
-  if (line.byteLength > ACTIVITY_LINE_LIMIT) {
+  if (line.byteLength >= ACTIVITY_LINE_LIMIT) {
     throw new Error("Activity record exceeds the line limit");
   }
   await mkdir(resolve(path, ".."), { recursive: true, mode: 0o700 });

@@ -93,7 +93,14 @@ impl Fixture {
         let mut child = command(&self.root, "stop").spawn().unwrap();
         send(child.stdin.as_mut().unwrap(), &self.control(TOKEN));
         drop(child.stdin.take());
-        assert!(wait(&mut child, TIMEOUT).success(), "owned stop failed");
+        let status = wait(&mut child, TIMEOUT);
+        if !status.success() {
+            // Receipts contain only identity/phase metadata, never argv/env.
+            // Read after the same exit deadline so diagnostic collection cannot
+            // change stop admission or hide a resumed-guard timing failure.
+            let receipt = receive(child.stdout.as_mut().unwrap());
+            panic!("owned stop failed: {receipt}");
+        }
     }
 
     fn state(&self, name: &str) -> Value {

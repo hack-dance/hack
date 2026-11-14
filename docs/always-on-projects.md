@@ -404,3 +404,7 @@ The service daemon keeps its existing helper PATH; this feature does not add
 `~/.docker/bin` to daemon cache or watcher lookups. Automatic-start children may
 use that directory only after their separate strict executable audit. Broader
 hardening of existing daemon observation helpers is outside this feature.
+Dotenv template and backup copies (`.env.example`, `.env.sample`, `.env.template`,
+`.env.dist`, `.env.bak`, `.env.backup`, `.env.old`, `.env.orig`) in the checkout
+root or project directory do not block admission. Active `.env` overlays still
+require migration, and Compose `env_file` inputs still require a manual start.

@@ -145,3 +145,5 @@ macOS dnsmasq startup and passwordless DNS recovery; use manual `hack global up`
 when DNS needs starting or recovery.
 The daemon service PATH is unchanged; only automatic-start children use the
 separately audited Docker user-bin path.
+Dotenv template and backup copies do not block always-on admission; active dotenv
+overlays still need migration, and Compose `env_file` inputs require manual starts.

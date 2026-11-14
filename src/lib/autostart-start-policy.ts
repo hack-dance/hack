@@ -24,6 +24,7 @@ import {
   type ProjectDirName,
   parseProjectConfigRecord,
 } from "./project.ts";
+import { isExcludedLegacyDotenvName } from "./project-env-config.ts";
 
 export type AutostartStartPolicyReason =
   | "host_commands_require_manual_start"
@@ -310,7 +311,11 @@ async function envPolicyReason(
 
 function isEnvironmentInput(name: string): boolean {
   return (
-    (name.startsWith(".env") && name !== PROJECT_ENV_STATE_FILENAME) ||
+    (name.startsWith(".env") &&
+      name !== PROJECT_ENV_STATE_FILENAME &&
+      !(
+        name.startsWith(".env.") && isExcludedLegacyDotenvName(name.slice(5))
+      )) ||
     name === PROJECT_ENV_CONTRACT_FILENAME ||
     (name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
       name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX))

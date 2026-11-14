@@ -469,3 +469,42 @@ test("legacy dotenv and contracts preserve the fixed pending migration refusal w
     await rm(path);
   }
 });
+
+test("dotenv templates and backups are not active inputs in either project directory", async () => {
+  for (const directory of [opts.repoRoot, opts.projectDir]) {
+    for (const suffix of [
+      "example",
+      "sample",
+      "template",
+      "dist",
+      "bak",
+      "backup",
+      "old",
+      "orig",
+    ]) {
+      const path = join(directory, `.env.${suffix}`);
+      await writeFile(path, "EXAMPLE_VALUE=nonempty\n", { mode: 0o600 });
+      expect(await autostartStartPolicyRefusal(opts)).toBeNull();
+      expect(await readFile(path, "utf8")).toBe("EXAMPLE_VALUE=nonempty\n");
+    }
+    for (const name of [
+      ".env",
+      ".env.production",
+      ".env.local",
+      ".env.production.local",
+    ]) {
+      const path = join(directory, name);
+      await writeFile(path, "ACTIVE_VALUE=nonempty\n", { mode: 0o600 });
+      expect(await autostartStartPolicyRefusal(opts)).toBe(
+        "pending_env_migration"
+      );
+      await rm(path);
+    }
+  }
+  await compose({
+    services: { web: { image: "example/web:1", env_file: [".env.example"] } },
+  });
+  expect(await autostartStartPolicyRefusal(opts)).toBe(
+    "compose_inputs_require_manual_start"
+  );
+});

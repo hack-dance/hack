@@ -66,6 +66,13 @@ import {
   resolveSystemdUnitPath,
   SYSTEMD_READ_ONLY_ENV,
 } from "../daemon/systemd.ts";
+import {
+  type CaTrustReport,
+  inspectCaTrust,
+  listDirOutcome,
+  pathExistsOutcome,
+  readTextOutcome,
+} from "../lib/ca-trust-status.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
@@ -169,6 +176,7 @@ import {
   requireInteractive,
 } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
+import { createLinuxTrustHost } from "../lib/linux-trust-host.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -280,6 +288,7 @@ import {
   pausableSpinner,
   withTerminalHandoff,
 } from "../lib/terminal-handoff.ts";
+import { vettedHelperEnv } from "../lib/vetted-env.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalCaddyCompose,
@@ -323,6 +332,8 @@ interface CheckResult {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Closed, value-free env key findings; project-relative subjects only. */
   readonly envKey?: EnvKeyInspection;
+  /** Trust-store states for the local CA; paths and fingerprints only. */
+  readonly caTrust?: CaTrustReport;
   /** Closed Compose-backend feature names only; never authored values. */
   readonly composeBackend?: ComposeBackendReport;
   /** Closed native data advisory codes and service names only. */
@@ -1042,6 +1053,12 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       timeoutMs: 16_000,
     })
   );
+  results.push(
+    await runCheck(s, LOCAL_CA_TRUST_CHECK, () => checkLocalCaTrust(), {
+      // A few bounded trust-store queries (5s each), plus one per NSS db.
+      timeoutMs: 30_000,
+    })
+  );
   if (isMac()) {
     results.push(
       await runCheck(s, "host tls trust", () => checkMacHostTlsTrust(), {
@@ -1569,6 +1586,8 @@ export type DoctorJsonCheck = {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
   readonly envKey?: EnvKeyInspection;
+  /** Present only on the local CA trust check (`docs/reference/local-ca-trust.md`). */
+  readonly caTrust?: CaTrustReport;
   /** Present only on the Compose-backend feature check: closed feature names. */
   readonly composeBackend?: ComposeBackendReport;
   /** Present only on the native data-service check: closed codes and service names. */
@@ -1616,6 +1635,7 @@ export function buildDoctorJsonData(opts: {
         ? { hackLocalRoute: result.hackLocalRoute }
         : {}),
       ...(result.envKey ? { envKey: result.envKey } : {}),
+      ...(result.caTrust ? { caTrust: result.caTrust } : {}),
       ...(result.composeBackend
         ? { composeBackend: result.composeBackend }
         : {}),
@@ -2046,6 +2066,55 @@ export async function checkCoreDnsForwarding(): Promise<CheckResult> {
       ? `example.com → ${ip} (via ${server})`
       : "SERVFAIL (run: hack doctor --fix)",
   };
+}
+
+const LOCAL_CA_TRUST_CHECK = "local ca trust";
+
+/**
+ * Whether the system trust store (and, on Linux, NSS) trusts the exported
+ * Caddy Local CA (HACK-2218, R16). Read-only and bounded; `caddy local ca`
+ * checks the export itself. Unknown is a warning that says so.
+ */
+export async function checkLocalCaTrust(): Promise<CheckResult> {
+  const helperEnv = vettedHelperEnv();
+  const report = await inspectCaTrust({
+    platform: process.platform,
+    caPath: getGlobalPaths().caddyCaCert,
+    readText: readTextOutcome,
+    query: async (argv, queryOpts) =>
+      await exec(argv, {
+        stdin: "ignore",
+        timeoutMs: queryOpts.timeoutMs,
+        env: { ...helperEnv.env },
+        unsetEnvKeys: helperEnv.unsetEnvKeys,
+      }).catch(() => ({ exitCode: 127, stdout: "", stderr: "" })),
+    ...(isLinux() ? { linuxHost: createLinuxTrustHost() } : {}),
+    exists: pathExistsOutcome,
+    listDir: listDirOutcome,
+    now: () => Date.now(),
+  });
+  return {
+    name: LOCAL_CA_TRUST_CHECK,
+    status: report.state === "trusted" ? "ok" : "warn",
+    message: describeCaTrust(report),
+    caTrust: report,
+  };
+}
+
+function describeCaTrust(report: CaTrustReport): string {
+  const nss = report.nss
+    .filter((db) => db.state !== "trusted")
+    .map((db) => `${db.db}: ${db.detail}`);
+  if (report.state === "trusted") {
+    const browsers =
+      report.nss.length > 0 ? ` and ${report.nss.length} NSS database(s)` : "";
+    return `Trusted by ${report.system.store ?? "the system"}${browsers}`;
+  }
+  const lead =
+    report.state === "unknown"
+      ? "Could not tell whether the local CA is trusted"
+      : "The local CA is not trusted everywhere";
+  return [`${lead}: ${report.system.detail}`, ...nss].join("; ");
 }
 
 export async function checkCaddyLocalCa(): Promise<CheckResult> {

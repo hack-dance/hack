@@ -572,7 +572,7 @@ impl HackApp {
                             .checked(d.always_on)
                             .small()
                             .disabled(true)
-                            .tooltip("Needs hack autostart (HACK-2213)"),
+                            .tooltip("Always-on controls are not available yet"),
                     ),
             )
             .children(reason_line(&d.state, d.last_error.as_deref(), cx))
@@ -653,20 +653,34 @@ impl HackApp {
                     ));
                 }
                 body = body.child(match report.key_state {
-                    KeyState::Missing | KeyState::Unreadable => "🔒 Names are shown; values cannot be resolved. Needs R10.",
-                    KeyState::Unknown => "Key state unknown · needs R10. Set markers do not prove the key is readable.",
-                    KeyState::Ok => "Env key readable",
+                    KeyState::Missing | KeyState::Unreadable => {
+                        "🔒 Names are shown; stored values cannot be read."
+                    }
+                    KeyState::Unknown => "Key readability is unknown.",
+                    KeyState::Ok => "Key is readable",
                 });
+                body = body.child(
+                    "Set means a value is stored. It does not confirm that the value can be read.",
+                );
                 if matches!(report.key_state, KeyState::Missing | KeyState::Unreadable) {
                     body = body.child(
-                        Button::new("env-doctor")
-                            .label("Copy hack doctor")
-                            .small()
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                    "hack doctor".into(),
-                                ));
-                            })),
+                        h_flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .font_family(t.mono_font_family.clone())
+                                    .child("hack doctor"),
+                            )
+                            .child(
+                                Button::new("env-doctor")
+                                    .label("Copy command")
+                                    .small()
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            "hack doctor".into(),
+                                        ));
+                                    })),
+                            ),
                     );
                 }
                 if report.vars.is_empty() {

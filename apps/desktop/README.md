@@ -1,6 +1,6 @@
 # Hack desktop app (preview)
 
-Unsupported preview of a minimal native window for Hack (HACK-2214): every
+Unsupported preview of a minimal native window for Hack: every
 project, its state and services, and Start / Stop / Restart / Open. It is a view
 over the `hack` CLI and the `hackd` socket; it keeps no state beyond window
 layout, holds no credentials and runs `hack` as you for every action. Not part
@@ -26,7 +26,7 @@ libvulkan-dev`.
 ```sh
 cd apps/desktop
 cargo test -p hack-desktop-core          # no daemon, Docker or Hack home needed
-cargo run -p hack-desktop                # live: matching hackd; otherwise needs R18
+cargo run -p hack-desktop                # live: requires matching hackd
 cargo run -p hack-desktop -- --list-fixtures
 cargo run -p hack-desktop -- --fixtures failed-start --theme dark
 ```
@@ -39,10 +39,9 @@ cargo run -p hack-desktop-core --bin hack-desktop-state -- --project <name>
 ```
 
 `hack-desktop-state` reads exactly what the window reads: hackd when its version
-matches the CLI, plus native `hack ps` for native projects. Today's CLI listing
-auto-registers runtime projects and writes the registry, so it is never used as
-a fallback. Without a matching daemon the reader reports Unknown / needs R18
-(observe-only projects), rather than writing or claiming no projects exist.
+matches the CLI, plus native `hack ps` for native projects. This app does not
+use a CLI project-list fallback. Without a matching daemon the reader reports
+Unknown, rather than writing or claiming no projects exist.
 The window retains stale names with Unknown states and disables project actions.
 It offers **Start hackd** when unreachable or **Restart hackd** for a version
 mismatch. Only a fresh matching snapshot restores observed states.
@@ -98,9 +97,10 @@ Malformed output shows “Could not read environment metadata”.
 The model retains only name, layer/source, scope, storage kind, set and required
 metadata. It discards unknown fields, including values/materialized data, and
 never includes raw output in errors. No editing, value reads, reveal, copy or
-export is offered. The locked state offers only **Copy hack doctor**.
-Missing/unreadable `key_state` shows a lock. Absent key state is unknown:
-**needs R10**, never inferred healthy from `has_value`.
+export is offered. The locked state shows `hack doctor` with **Copy command**.
+Missing/unreadable `key_state` shows a lock. Absent key state means readability
+is unknown, never inferred healthy from `has_value`: Set indicates storage,
+not whether a value can be read.
 
 Fixtures: `env-loading`, `env-error`, `env-normal`, `env-missing`, `env-locked`,
 `env-empty`. Each renders offscreen in both themes through `--screenshots`.

@@ -78,7 +78,10 @@ counts as retired. A live member in the same group still requires shutdown;
 failed process observations never count as absence.
 Native launch cancellation still permits the owned cleanup to retry a missing
 start time: its ownership and artifact checks remain active independently of the
-canceled startup deadline.
+canceled startup deadline. Failed native launches also use a cleanup freshness
+check independent of canceled startup inputs: admission, hook ownership, private
+directory identity, the saved owner record and the mux token are still checked.
+Normal startup and ordinary stop retain their full input freshness checks.
 
 For value-free retirement diagnostics, set `HACK_LIFECYCLE_RETIREMENT_TRACE=1`.
 Stderr records fixed decision labels, PIDs/group IDs, counts and boolean outcomes.

@@ -429,6 +429,8 @@ process.exit(await child.exited);
     );
     let muxStopped = false;
     let stateRemoved = false;
+    let startupInputsCanceled = false;
+    let cleanupChecks = 0;
     const outcome = await withNativeAuthoredProjectAdmission(
       f.scope,
       async (admission) => {
@@ -440,7 +442,16 @@ process.exit(await child.exited);
           lifecycle: f.lifecycle,
           report: () => f.report,
           resolveValues: () => Promise.resolve({ TOKEN: canary }),
-          assertFresh: admission.assertHeld,
+          assertFresh: async () => {
+            if (startupInputsCanceled) {
+              throw new Error("startup input authority was canceled");
+            }
+            await admission.assertHeld();
+          },
+          assertCleanupFresh: async () => {
+            cleanupChecks += 1;
+            await admission.assertHeld();
+          },
           signal: f.abort.signal,
           remaining: f.remaining,
         });
@@ -454,6 +465,7 @@ process.exit(await child.exited);
             await Bun.sleep(10);
           }
           expect(await Bun.file(held).exists()).toBe(true);
+          startupInputsCanceled = true;
           f.abort.abort();
           await Bun.write(release, "released");
           expect(await starting).toBeInstanceOf(Error);
@@ -464,6 +476,8 @@ process.exit(await child.exited);
             (await readLifecycleState({ projectDir: f.projectDir })).length ===
             0;
           if (muxStopped && stateRemoved) {
+            // The frontend refreshes teardown inputs after the launch settles.
+            startupInputsCanceled = false;
             await owner.stop();
             await owner.close();
           }
@@ -479,6 +493,7 @@ process.exit(await child.exited);
       "canceled launch must stop its owned mux despite a missing birth"
     ).toBe(true);
     expect(stateRemoved).toBe(true);
+    expect(cleanupChecks).toBeGreaterThan(0);
     expect(outcome).toBeUndefined();
   }
 );

@@ -553,6 +553,9 @@ export async function createNativeAuthoredHostProcesses(input: {
     name: string
   ) => Promise<Readonly<Record<string, string>>>;
   readonly assertFresh: () => Promise<void>;
+  /** Admission/hook ownership for this live owner's failed-launch cleanup.
+   * Must not depend on the canceled startup input acquisition. */
+  readonly assertCleanupFresh?: () => Promise<void>;
   readonly signal: AbortSignal;
   readonly remaining: () => number;
 }): Promise<NativeAuthoredHostProcesses> {
@@ -609,13 +612,15 @@ export async function createNativeAuthoredHostProcesses(input: {
     await writeExclusive(path, JSON.stringify(owner));
     await synchronizeDirectories(directories);
     const saved = await capture(path);
-    const check = async () => {
+    const check = async (assertCurrent = opts.assertFresh) => {
       traceLifecycleRetirement("native-owner-check", { active });
       if (!active) {
         return refuse();
       }
-      await opts.assertFresh();
-      traceLifecycleRetirement("native-inputs-fresh");
+      await assertCurrent();
+      traceLifecycleRetirement("native-freshness-check-passed", {
+        startupInputsRequired: assertCurrent === opts.assertFresh,
+      });
       await recheckDirectories(directories);
       traceLifecycleRetirement("native-directories-fresh");
       await unchanged(saved);
@@ -644,7 +649,11 @@ export async function createNativeAuthoredHostProcesses(input: {
         traceLifecycleRetirement("native-controller-fresh", {
           abandoningLaunch,
         });
-        await check();
+        await check(
+          abandoningLaunch
+            ? (opts.assertCleanupFresh ?? opts.assertFresh)
+            : opts.assertFresh
+        );
         // Startup cancellation must not veto the missing-birth refresh during
         // abandonment. Owner/artifact freshness still holds for every check.
         if (!abandoningLaunch) {

@@ -1,6 +1,6 @@
 type RetirementTraceEvent =
   | "native-owner-check"
-  | "native-inputs-fresh"
+  | "native-freshness-check-passed"
   | "native-directories-fresh"
   | "native-owner-fresh"
   | "native-controller-fresh"

@@ -277,6 +277,11 @@ try {
     "local settings cannot inject host commands"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
+  assert(
+    (await readdir(home)).length === 0,
+    "validation and planning leave HOME untouched"
+  );
+  // Lifecycle refusals still append activity; planning itself must stay read-only.
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -288,7 +293,8 @@ try {
   );
   assert(
     !(await Bun.file(marker).exists()) &&
-      (await readdir(home)).length === 0 &&
+      JSON.stringify(await readdir(home)) === '[".hack"]' &&
+      (await readdir(join(home, ".hack"))).join() === "activity.jsonl" &&
       !(await readdir(join(checkout, ".hack"))).some(
         (name) => name === ".internal" || name === ".branch"
       ),

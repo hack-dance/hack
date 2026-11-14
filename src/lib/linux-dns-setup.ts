@@ -484,20 +484,34 @@ async function runPlan(opts: {
   readonly plan: LinuxDnsPlan;
 }): Promise<{ readonly failedStep: string; readonly exitCode: number } | null> {
   const { host, plan } = opts;
-  for (const file of plan.files) {
-    const step = stdinInstallStep({ target: file.path, content: file.content });
-    const exitCode = await host.runPrivileged(step.argv, { input: step.input });
+  for (const step of linuxDnsRootSteps(plan)) {
+    const exitCode = await host.runPrivileged(
+      step.argv,
+      step.input === undefined ? undefined : { input: step.input }
+    );
     if (exitCode !== 0) {
-      return { failedStep: `install ${file.path}`, exitCode };
-    }
-  }
-  for (const command of plan.commands) {
-    const exitCode = await host.runPrivileged(command);
-    if (exitCode !== 0) {
-      return { failedStep: renderPrivilegedCommand(command), exitCode };
+      return { failedStep: step.description, exitCode };
     }
   }
   return null;
+}
+
+/** Ordered operations shared by the admin plan and the confirmed executor. */
+export function linuxDnsRootSteps(plan: LinuxDnsPlan): readonly {
+  readonly argv: readonly string[];
+  readonly input?: Uint8Array;
+  readonly description: string;
+}[] {
+  return [
+    ...plan.files.map((file) => ({
+      ...stdinInstallStep({ target: file.path, content: file.content }),
+      description: `install ${file.path}`,
+    })),
+    ...plan.commands.map((argv) => ({
+      argv,
+      description: renderPrivilegedCommand(argv),
+    })),
+  ];
 }
 
 /**

@@ -367,6 +367,11 @@ try {
     "actual resolution rejects unbound logical reference"
   );
   await authored(checkout, project);
+  assert(
+    (await readdir(home)).length === 0,
+    "validation and planning leave HOME untouched"
+  );
+  // Lifecycle refusals still append activity; planning itself must stay read-only.
   const runtime = await invoke(
     ["up", "web", "--detach"],
     checkout,
@@ -393,8 +398,11 @@ try {
       "no generated runtime state"
     );
   }
-  const homeEntries = await readdir(join(home, ".hack")).catch(() => []);
-  assert(homeEntries.length === 0, "no registry or runtime home writes");
+  assert(
+    JSON.stringify(await readdir(home)) === '[".hack"]' &&
+      (await readdir(join(home, ".hack"))).join() === "activity.jsonl",
+    "no registry or runtime home writes beyond lifecycle activity"
+  );
   process.stdout.write(
     `Relocated native endpoint planning: ${checks} checks passed; no hooks/DNS/trust/runtime effects\n`
   );

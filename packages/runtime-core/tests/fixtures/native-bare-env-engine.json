@@ -1,0 +1,61 @@
+{
+  "engineVersion": "29.9.2",
+  "apiVersion": "1.56",
+  "captures": [
+    {
+      "case": "image-default",
+      "removedKey": "PYTHON_VERSION",
+      "imageReference": "python:3.12-alpine",
+      "imageId": "sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89",
+      "imageEnvironment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.16",
+        "PYTHON_SHA256=b5796915dc45ff745cfb4e990a7e7c93d6f546328a102ce31448d69ebc37575c"
+      ],
+      "requestedEnvironment": ["HQ_PLAIN=plain", "PYTHON_VERSION"],
+      "inspectedEnvironment": [
+        "HQ_PLAIN=plain",
+        "PYTHON_VERSION",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_SHA256=b5796915dc45ff745cfb4e990a7e7c93d6f546328a102ce31448d69ebc37575c"
+      ],
+      "processObservation": {
+        "unset_absent": true,
+        "plain_present": true,
+        "other_defaults_present": true
+      }
+    },
+    {
+      "case": "absent-image-key",
+      "removedKey": "HQ_NOT_IN_IMAGE",
+      "imageReference": "python:3.12-alpine",
+      "imageId": "sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89",
+      "imageEnvironment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.16",
+        "PYTHON_SHA256=b5796915dc45ff745cfb4e990a7e7c93d6f546328a102ce31448d69ebc37575c"
+      ],
+      "requestedEnvironment": ["HQ_PLAIN=plain", "HQ_NOT_IN_IMAGE"],
+      "inspectedEnvironment": [
+        "HQ_PLAIN=plain",
+        "HQ_NOT_IN_IMAGE",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.16",
+        "PYTHON_SHA256=b5796915dc45ff745cfb4e990a7e7c93d6f546328a102ce31448d69ebc37575c"
+      ],
+      "processObservation": {
+        "unset_absent": true,
+        "plain_present": true,
+        "other_defaults_present": true
+      }
+    }
+  ]
+}

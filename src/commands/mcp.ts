@@ -230,7 +230,9 @@ function logMcpInstallResults(opts: {
 
     if (result.status === "noop") {
       logger.info({
-        message: `No changes for ${result.target} (${result.path ?? "unknown path"})`,
+        message:
+          result.message ??
+          `No changes for ${result.target} (${result.path ?? "unknown path"})`,
       });
       continue;
     }

@@ -118,13 +118,13 @@ test("resolveRunUpCwd uses the repo root instead of the .hack directory", () => 
   ).toBe("/tmp/alpha");
 });
 
-test("resolveWorkspaceBackendName detects zellij-backed workspaces", () => {
+test("resolveWorkspaceBackendName detects tmux-backed workspaces", () => {
   expect(
     __testOnlySessionCommand.resolveWorkspaceBackendName({
       workspaceName: "alpha--agent-1",
       sessions: [
         {
-          backend: "zellij",
+          backend: "tmux",
           name: "alpha--agent-1",
           attached: null,
           path: null,
@@ -133,16 +133,16 @@ test("resolveWorkspaceBackendName detects zellij-backed workspaces", () => {
         },
       ],
     })
-  ).toBe("zellij");
+  ).toBe("tmux");
 });
 
-test("resolveTmuxOnlyWorkspaceError explains tmux-only pane tooling on zellij", () => {
+test("resolveTmuxOnlyWorkspaceError explains tmux-only pane tooling on tmux", () => {
   expect(
     __testOnlySessionCommand.resolveTmuxOnlyWorkspaceError({
       workspaceName: "alpha--agent-1",
       sessions: [
         {
-          backend: "zellij",
+          backend: "tmux",
           name: "alpha--agent-1",
           attached: null,
           path: null,
@@ -157,8 +157,8 @@ test("resolveTmuxOnlyWorkspaceError explains tmux-only pane tooling on zellij", 
 test("resolveWorkspaceBackendNameForCreate prefers the existing workspace backend over the default", () => {
   expect(
     __testOnlySessionCommand.resolveWorkspaceBackendNameForCreate({
-      preferredBackendName: "zellij",
+      preferredBackendName: "tmux",
       defaultBackendName: "tmux",
     })
-  ).toBe("zellij");
+  ).toBe("tmux");
 });

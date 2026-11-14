@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { noteActivityFailedServices } from "../lib/activity-log.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -2504,6 +2505,7 @@ async function startNativeProjectAttempt(
                 // Names only: a detached owner cannot show output, so the
                 // waiting command names the services and points at foreground up.
                 nativeDetachedUpFailedServices(logs.map((log) => log.service));
+                noteActivityFailedServices(logs.map((log) => log.service));
                 startupLogReport = formatNativeStartupLogReport({
                   logs,
                   managedEnvironment: input.managedEnvironment,

@@ -155,9 +155,17 @@ async function cli(
   return { code, output: stdout + stderr };
 }
 
+/** The activity log every lifecycle command appends to, refused ones too. */
+const ACTIVITY_ENTRIES = new Set([
+  join("user-home", ".hack"),
+  join("user-home", ".hack", "activity.jsonl"),
+]);
+
 /**
- * Every file under the fixture except the stub's own request log and Bun's
- * transpiler cache, which the spawned source CLI writes under its HOME.
+ * Every file under the fixture except the stub's own request log, Bun's
+ * transpiler cache, which the spawned source CLI writes under its HOME, and
+ * the activity log (HACK-2218), which records the refused action by name
+ * only. Any other write to the Hack home still shows.
  */
 async function tree(root: string): Promise<string[]> {
   const entries = await readdir(root, { recursive: true });
@@ -167,7 +175,8 @@ async function tree(root: string): Promise<string[]> {
       (entry) =>
         !(
           entry.startsWith("stub") ||
-          entry.startsWith(join("user-home", "Library"))
+          entry.startsWith(join("user-home", "Library")) ||
+          ACTIVITY_ENTRIES.has(entry)
         )
     )
     .sort();

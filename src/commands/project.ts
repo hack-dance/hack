@@ -166,6 +166,10 @@ import {
   reportInitDiscoveryFindings,
 } from "../init/validation.ts";
 import {
+  noteActivityBranch,
+  noteActivityFailedServices,
+} from "../lib/activity-log.ts";
+import {
   answerExistingRequest,
   parseBackgroundRequest,
 } from "../lib/background-command/launch.ts";
@@ -412,6 +416,7 @@ import {
   startNativeBackgroundCommand,
   withBackgroundSweep,
 } from "./background-command-start.ts";
+import { withActivity } from "./lifecycle-activity.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
@@ -734,7 +739,10 @@ const upSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const upCommand = withHandler(upSpec, withBackgroundSweep(handleUp));
+export const upCommand = withHandler(
+  upSpec,
+  withBackgroundSweep(withActivity("up", handleUp))
+);
 
 const downSpec = defineCommand({
   name: "down",
@@ -747,7 +755,7 @@ const downSpec = defineCommand({
 
 export const downCommand = withHandler(
   downSpec,
-  withBackgroundSweep(handleDown)
+  withBackgroundSweep(withActivity("down", handleDown))
 );
 
 const restartSpec = defineCommand({
@@ -759,7 +767,10 @@ const restartSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const restartCommand = withHandler(restartSpec, handleRestart);
+export const restartCommand = withHandler(
+  restartSpec,
+  withActivity("restart", handleRestart)
+);
 
 const psSpec = defineCommand({
   name: "ps",
@@ -948,6 +959,8 @@ export async function resolveEffectiveBranchForCommand(opts: {
       }
     }
   }
+  // Recorded only when the command runs inside an activity record.
+  noteActivityBranch(resolved.branch);
   return resolved.branch;
 }
 
@@ -1127,6 +1140,17 @@ function composeStartupFailureDetail(opts: {
     budgetMs: opts.failure.budgetMs,
     budgetEnv: opts.failure.budgetEnv,
   };
+}
+
+/**
+ * The Compose "startup incomplete" message; also notes the services that
+ * did not start in the running action's activity record (names only).
+ */
+function composeStartupIncompleteMessage(
+  opts: Parameters<typeof buildStartupIncompleteMessage>[0]
+): string {
+  noteActivityFailedServices(opts.failed);
+  return buildStartupIncompleteMessage(opts);
 }
 
 /**
@@ -6965,7 +6989,7 @@ async function runUpCommand({
         projectDir: project.projectDir,
         composeProject: lifecycleComposeProject,
       });
-      const message = buildStartupIncompleteMessage({
+      const message = composeStartupIncompleteMessage({
         composeProject: composeProjectName ?? baseProjectName,
         failed: startup.failed,
       });
@@ -7394,6 +7418,8 @@ async function runDownCommand({
         writeDownNotice({ json, level, message });
       },
     });
+    // The activity record names the instance this down actually targets.
+    noteActivityBranch(branch);
   }
   await recordBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
@@ -8317,7 +8343,7 @@ async function runTargetedServiceRestart(opts: {
       ok: false,
       code: 1,
       errorCode: "E_STARTUP_INCOMPLETE",
-      message: buildStartupIncompleteMessage({
+      message: composeStartupIncompleteMessage({
         composeProject:
           opts.composeProjectName ??
           defaultProjectSlugFromPath(opts.project.projectRoot),
@@ -8719,7 +8745,7 @@ async function runRestartCommand({
   });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
     await cleanupIncompleteStartup();
-    const message = buildStartupIncompleteMessage({
+    const message = composeStartupIncompleteMessage({
       composeProject: composeProjectName ?? baseProjectName,
       failed: startup.failed,
     });

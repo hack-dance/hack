@@ -2571,8 +2571,11 @@ async function globalStatusObserve(): Promise<number> {
     caddyIp: async () =>
       await observeGlobalCaddyIp({ timeoutMs: DOCKER_READ_TIMEOUT_MS }),
     inspectLinuxDns: async () => {
+      // A config that cannot be read throws here: host DNS is then unknown.
+      const domains = managedLocalDomains(await resolveDefaultDomainStrictly());
       const unreadable: string[] = [];
       const inspection = await inspectLinuxGlobalDns({
+        domains,
         host: createLinuxDnsHost({
           onUnreadable: (what) => unreadable.push(what),
         }),

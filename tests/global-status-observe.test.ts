@@ -1020,7 +1020,11 @@ afterEach(async () => {
 });
 
 /** Fake read-only tools; `docker` answers as a running or stopped engine. */
-async function installFakeTools(base: string, docker: "up" | "down") {
+async function installFakeTools(
+  base: string,
+  docker: "up" | "down",
+  linux: "failing" | "answering" = "failing"
+) {
   const script = (body: string) => `#!/bin/sh\n${body}\n`;
   const tools: Record<string, string> = {
     docker:
@@ -1038,9 +1042,19 @@ async function installFakeTools(base: string, docker: "up" | "down") {
               "exit 0",
             ].join("\n")
           ),
-    systemctl: script("exit 1"),
-    ip: script("exit 1"),
-    resolvectl: script("exit 1"),
+    // "answering": definite Linux answers (resolved active, no Hack
+    // bridge), so the route state is known unless something else is not.
+    systemctl:
+      linux === "answering"
+        ? script(
+            'case "$1" in\n  is-active) echo active ;;\n  --version) echo "systemd 255 (255.4)" ;;\n  show) echo "NeedDaemonReload=no" ;;\nesac\nexit 0'
+          )
+        : script("exit 1"),
+    ip: linux === "answering" ? script('echo "[]"') : script("exit 1"),
+    resolvectl:
+      linux === "answering"
+        ? script('echo "Link 7 ($3): no"')
+        : script("exit 1"),
     brew: script("exit 1"),
     // What a starter would run; present so a regression is recorded rather
     // than skipped (each fails, so nothing could ever start).
@@ -1171,6 +1185,37 @@ test(
         (argv) => argv[1] === "compose" && argv.includes("ps")
       )
     ).toBe(true);
+  },
+  CLI_TEST_TIMEOUT_MS
+);
+
+test(
+  "the CLI reports host DNS as unknown when the global config cannot be read, on either platform",
+  async () => {
+    const base = requireRoot();
+    await installFakeTools(base, "down", "answering");
+    const hackHome = join(base, "home", ".hack");
+    await mkdir(hackHome, { recursive: true });
+    // Malformed: the configured default domain cannot be known.
+    await writeFile(join(hackHome, "hack.config.json"), "{ not json");
+    const result = await runObserve(base);
+    expect(result.spawned.filter((argv) => !allowed(argv))).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout) as {
+      readonly host_dns: { readonly ok: unknown };
+      readonly summary: { readonly host_dns_ok: unknown };
+    };
+    expect(payload.summary.host_dns_ok).toBe("unknown");
+    if (process.platform === "linux") {
+      // Control: with a readable config the same answers give a definite
+      // state.
+      await writeFile(join(hackHome, "hack.config.json"), "{}\n");
+      const control = await runObserve(base);
+      const known = JSON.parse(control.stdout) as {
+        readonly summary: { readonly host_dns_ok: unknown };
+      };
+      expect(known.summary.host_dns_ok).not.toBe("unknown");
+    }
   },
   CLI_TEST_TIMEOUT_MS
 );

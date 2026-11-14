@@ -134,9 +134,18 @@ fn simple(name: &str, status: &str, backend: &str, always_on: bool) -> ProjectRo
         name: name.into(),
         dev_host: Some(format!("{name}.hack")),
         repo_root: Some(format!("/work/{name}")),
-        status: status.into(),
-        defined_services: vec!["app".into()],
-        runtime: Some(ProjectRuntime {
+        status: if backend == "native" {
+            "unavailable".into()
+        } else {
+            status.into()
+        },
+        // Native rows carry no Compose data; services come from native ps.
+        defined_services: if backend == "native" {
+            vec![]
+        } else {
+            vec!["app".into()]
+        },
+        runtime: (backend != "native").then(|| ProjectRuntime {
             project: Some(name.into()),
             services: if up {
                 vec![svc("app", container("running", "Up 3 days"))]

@@ -33,7 +33,7 @@ pub struct HackApp {
     model: AppModel,
     source: Arc<dyn Source>,
     tab: usize,
-    tail: Vec<LogEntry>,
+    tail: Result<Vec<LogEntry>, String>,
     follow: bool,
     live: bool,
 }
@@ -45,7 +45,7 @@ impl HackApp {
             model: AppModel::new(),
             source,
             tab: 0,
-            tail: Vec::new(),
+            tail: Ok(Vec::new()),
             follow: true,
             live,
         };
@@ -61,11 +61,10 @@ impl HackApp {
     pub fn refresh_now(&mut self) {
         let snap = self.source.snapshot();
         self.model.apply(Event::Refreshed(snap));
-        self.tail = self
-            .selected_root()
-            .map_or_else(Vec::new, |(root, native)| {
-                self.source.log_tail(&root, native, TAIL_LINES)
-            });
+        self.tail = self.selected_root().map_or_else(
+            || Ok(Vec::new()),
+            |(root, native)| self.source.log_tail(&root, native, TAIL_LINES),
+        );
     }
 
     /// Fixtures: select a project by name.
@@ -322,7 +321,7 @@ impl HackApp {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.model.apply(Event::Select(name.clone()));
-                this.tail.clear();
+                this.tail = Ok(Vec::new());
                 if !this.live {
                     this.refresh_now();
                 }
@@ -412,7 +411,12 @@ impl HackApp {
                             .tooltip("Needs hack autostart (HACK-2213)"),
                     ),
             )
-            .children(reason_line(&d.state, d.last_error.as_deref(), cx));
+            .children(reason_line(&d.state, d.last_error.as_deref(), cx))
+            .children(
+                d.note
+                    .clone()
+                    .map(|n| div().text_sm().text_color(t.muted_foreground).child(n)),
+            );
         let tabs = TabBar::new("detail-tabs")
             .underline()
             .small()
@@ -438,14 +442,22 @@ impl HackApp {
         let t = cx.theme().clone();
         let mono = t.mono_font_family.clone();
         let mut lines = v_flex().font_family(mono).text_xs().gap_0p5().px_3().py_2();
-        if self.tail.is_empty() {
+        let entries: &[LogEntry] = match &self.tail {
+            Ok(v) => v,
+            Err(why) => {
+                // A failed read is shown as such, never as an empty log.
+                lines = lines.child(div().text_color(t.muted_foreground).child(why.clone()));
+                &[]
+            }
+        };
+        if matches!(&self.tail, Ok(v) if v.is_empty()) {
             lines = lines.child(
                 div()
                     .text_color(t.muted_foreground)
                     .child("No recent log lines"),
             );
         }
-        for e in &self.tail {
+        for e in entries {
             let error = e.level.as_deref() == Some("error");
             lines = lines.child(
                 h_flex()

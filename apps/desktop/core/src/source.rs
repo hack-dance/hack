@@ -70,6 +70,11 @@ pub enum ActionOutcome {
     Opened(OpenResult),
 }
 
+/// Native finite logs are a single-service snapshot (not ndjson), so the
+/// combined tail is not available for native projects in v0.
+pub const NATIVE_LOGS_NOTE: &str =
+    "Native logs are read one service at a time; they arrive with the Logs tab.";
+
 pub trait Source: Send + Sync {
     /// # Errors
     /// A [`SourceError`] when no usable snapshot could be read.
@@ -88,7 +93,11 @@ pub trait Source: Send + Sync {
     ) -> Result<ActionOutcome, SourceError>;
 
     /// Last log lines for a project (no follow).
-    fn log_tail(&self, repo_root: &Path, native: bool, lines: u32) -> Vec<LogEntry>;
+    ///
+    /// # Errors
+    /// Why no tail could be read; shown in place of the tail.
+    fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
+    -> Result<Vec<LogEntry>, String>;
 }
 
 /// Live data: hackd when its version matches the CLI, else the CLI.
@@ -125,8 +134,16 @@ impl Source for LiveSource {
         let mut projects: ProjectsPayload = match from_daemon {
             Some(p) => p,
             None => {
-                self.runner
-                    .run_json(&["projects", "--json", "--no-daemon"], None, Self::READ)?
+                let v: serde_json::Value = self.runner.run_json(
+                    &["projects", "--json", "--no-daemon"],
+                    None,
+                    Self::READ,
+                )?;
+                ProjectsPayload::from_value(v).map_err(|message| SourceError::Cli {
+                    code: "E_APP_BAD_OUTPUT".into(),
+                    message,
+                    failed: vec![],
+                })?
             }
         };
         // Project views do not read native projects; ask native ps for each.
@@ -167,20 +184,39 @@ impl Source for LiveSource {
         })
     }
 
-    fn log_tail(&self, repo_root: &Path, native: bool, lines: u32) -> Vec<LogEntry> {
+    fn log_tail(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        lines: u32,
+    ) -> Result<Vec<LogEntry>, String> {
+        if native {
+            return Err(NATIVE_LOGS_NOTE.into());
+        }
         let tail = lines.to_string();
-        // No --compose / --services: native rejects them (DESIGN.md, Logs).
-        let Ok((out, _, _)) = self.runner_for(native).run_raw(
-            &["logs", "--json", "--no-follow", "--tail", &tail],
-            Some(repo_root),
-            Self::READ,
-        ) else {
-            return vec![];
-        };
-        out.lines()
-            .filter_map(|l| serde_json::from_str::<crate::models::LogEvent>(l).ok())
-            .filter_map(|e| e.entry)
-            .collect()
+        // No --compose / --services: they are backend-specific (DESIGN.md, Logs).
+        let (out, err, code) = self
+            .runner
+            .run_raw(
+                &["logs", "--json", "--no-follow", "--tail", &tail],
+                Some(repo_root),
+                Self::READ,
+            )
+            .map_err(|e| e.to_string())?;
+        let events: Vec<crate::models::LogEvent> = out
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        if let Some(e) = events.iter().find(|e| e.kind == "error") {
+            return Err(e
+                .message
+                .clone()
+                .unwrap_or_else(|| "log read failed".into()));
+        }
+        if code != Some(0) && events.is_empty() {
+            return Err(format!("hack logs exited with {code:?}: {}", err.trim()));
+        }
+        Ok(events.into_iter().filter_map(|e| e.entry).collect())
     }
 }
 
@@ -207,8 +243,16 @@ impl Source for FixtureSource {
         })
     }
 
-    fn log_tail(&self, _repo_root: &Path, _native: bool, _lines: u32) -> Vec<LogEntry> {
-        fixtures::log_tail(self.0)
+    fn log_tail(
+        &self,
+        _repo_root: &Path,
+        native: bool,
+        _lines: u32,
+    ) -> Result<Vec<LogEntry>, String> {
+        if native {
+            return Err(NATIVE_LOGS_NOTE.into());
+        }
+        Ok(fixtures::log_tail(self.0))
     }
 }
 
@@ -271,6 +315,37 @@ esac
             .find(|p| p.name == "svc")
             .unwrap();
         assert!(svc.native.is_none());
+    }
+
+    #[test]
+    fn live_source_rejects_a_payload_without_projects() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-source-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        std::fs::write(
+            &hack,
+            "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0' ;; projects) echo '{}' ;; esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let src = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let r = src.snapshot();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(&r, Err(SourceError::Cli { code, .. }) if code == "E_APP_BAD_OUTPUT"),
+            "{r:?}"
+        );
     }
 
     #[test]

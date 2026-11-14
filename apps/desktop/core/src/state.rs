@@ -172,6 +172,32 @@ impl ServiceView {
 
 #[must_use]
 pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
+    if let Some(ps) = row.native.as_ref().filter(|_| row.is_native()) {
+        let mut out: Vec<ServiceView> = ps
+            .items
+            .iter()
+            .map(|i| {
+                let running = i.state == "running";
+                let status = match &i.health {
+                    Some(h) => format!("{} ({h})", i.state),
+                    None => i.state.clone(),
+                };
+                ServiceView {
+                    name: i.service.clone(),
+                    running,
+                    status,
+                    exit_code: i.exit_code,
+                    completed: !running && i.exit_code == Some(0),
+                    route: row
+                        .service_hosts
+                        .get(&i.service)
+                        .and_then(|h| h.first().cloned()),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| b.is_down().cmp(&a.is_down()).then(a.name.cmp(&b.name)));
+        return out;
+    }
     let mut names: Vec<String> = row.defined_services.clone();
     if let Some(rt) = &row.runtime {
         for s in &rt.services {
@@ -342,9 +368,15 @@ pub fn native_state(ps: Option<&NativePs>) -> ProjectState {
             if ps.items.is_empty() {
                 ProjectState::Stopped
             } else if down.is_empty() {
+                let exited_ok = ps
+                    .items
+                    .iter()
+                    .filter(|i| i.state != "running" && i.exit_code == Some(0))
+                    .map(|i| i.service.clone())
+                    .collect();
                 ProjectState::Running {
                     uptime: None,
-                    exited_ok: vec![],
+                    exited_ok,
                 }
             } else if down.len() == ps.items.len() {
                 ProjectState::FailedStart { services: down }
@@ -526,6 +558,48 @@ mod tests {
             native_state(Some(&ps("provider_pin_changed", vec![]))),
             ProjectState::NeedsAttention { .. }
         ));
+    }
+
+    #[test]
+    fn native_rows_show_native_services_and_exited_ok() {
+        use crate::models::{InputDiagnostic, NativePs, NativePsItem, ProjectRow};
+        let row = ProjectRow {
+            name: "n".into(),
+            status: "unavailable".into(),
+            input_diagnostic: Some(InputDiagnostic {
+                code: crate::models::NATIVE_PROJECT_CODE.into(),
+                message: "m".into(),
+            }),
+            native: Some(NativePs {
+                status: "observed".into(),
+                items: vec![
+                    NativePsItem {
+                        service: "web".into(),
+                        state: "running".into(),
+                        health: Some("healthy".into()),
+                        ..NativePsItem::default()
+                    },
+                    NativePsItem {
+                        service: "migrate".into(),
+                        state: "exited".into(),
+                        exit_code: Some(0),
+                        ..NativePsItem::default()
+                    },
+                ],
+            }),
+            ..ProjectRow::default()
+        };
+        let svcs = services(&row);
+        assert_eq!(svcs.len(), 2);
+        assert_eq!(
+            svcs.iter().find(|s| s.name == "web").unwrap().status,
+            "running (healthy)"
+        );
+        assert!(svcs.iter().find(|s| s.name == "migrate").unwrap().completed);
+        assert_eq!(
+            derive(&row, &LocalContext::default()).label(),
+            "Running · migrate exited (0)"
+        );
     }
 
     #[test]

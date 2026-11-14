@@ -83,7 +83,13 @@ pub struct DetailView {
     pub busy: bool,
     pub services: Vec<ServiceView>,
     pub last_error: Option<String>,
+    /// Why actions are limited (native projects in v0).
+    pub note: Option<String>,
 }
+
+/// Native `up`/`restart` stay in the foreground and refuse `--json` and
+/// `--detach`, so the app cannot run them as request/response commands.
+pub const NATIVE_ACTIONS_NOTE: &str = "Native projects run in the foreground: start or stop them in a terminal with HACK_RUNTIME_BACKEND=native hack up / hack down. The app shows their state.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -121,6 +127,7 @@ impl AppModel {
         match event {
             Event::Refreshed(Ok(s)) => {
                 self.loaded_once = true;
+                self.clear_recovered_failures(&s);
                 self.last_error = None;
                 if self.selected.is_none()
                     || !s
@@ -181,6 +188,29 @@ impl AppModel {
                     }
                 }
                 action != Action::Open
+            }
+        }
+    }
+
+    /// A startup failure is context only until a fresh observation shows it
+    /// is over: every failed service running again, or nothing running at
+    /// all (a real failure then still shows through its exit codes).
+    fn clear_recovered_failures(&mut self, s: &Snapshot) {
+        for p in &s.projects.projects {
+            let Some(ctx) = self.local.get_mut(&p.name) else {
+                continue;
+            };
+            if ctx.last_failed.is_empty() || ctx.in_flight.is_some() {
+                continue;
+            }
+            let svcs = state::services(p);
+            let recovered = ctx
+                .last_failed
+                .iter()
+                .all(|f| svcs.iter().any(|s| &s.name == f && s.running));
+            let nothing_runs = !svcs.iter().any(|s| s.running);
+            if recovered || nothing_runs {
+                ctx.last_failed.clear();
             }
         }
     }
@@ -290,7 +320,12 @@ impl AppModel {
             },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
-            actions: st.actions().to_vec(),
+            actions: if row.is_native() {
+                vec![]
+            } else {
+                st.actions().to_vec()
+            },
+            note: row.is_native().then(|| NATIVE_ACTIONS_NOTE.to_owned()),
             busy: local.in_flight.is_some(),
             services: state::services(row),
             last_error: self.action_errors.get(&row.name).cloned(),
@@ -477,6 +512,48 @@ mod tests {
                 services: vec!["worker".into()]
             }
         );
+    }
+
+    #[test]
+    fn recovered_failure_does_not_stay_latched() {
+        let mut m = model(Fixture::Degraded);
+        m.apply(Event::Select("storefront".into()));
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Start,
+        });
+        m.apply(Event::ActionFinished {
+            project: "storefront".into(),
+            action: Action::Start,
+            result: Err(SourceError::Cli {
+                code: "E_STARTUP_INCOMPLETE".into(),
+                message: "m".into(),
+                failed: vec!["worker".into()],
+            }),
+        });
+        assert!(matches!(
+            m.detail().unwrap().state,
+            ProjectState::FailedStart { .. }
+        ));
+        // Recovered elsewhere: everything runs.
+        m.apply(Event::Refreshed(fixtures::snapshot(Fixture::Running)));
+        assert!(matches!(
+            m.detail().unwrap().state,
+            ProjectState::Running { .. }
+        ));
+        // Then stopped elsewhere: plain Stopped, not "Failed to start".
+        m.apply(Event::Refreshed(fixtures::snapshot(Fixture::Stopped)));
+        assert_eq!(m.detail().unwrap().state, ProjectState::Stopped);
+    }
+
+    #[test]
+    fn native_projects_offer_no_actions_and_say_why() {
+        let mut m = model(Fixture::Running);
+        m.apply(Event::Select("docs-site".into()));
+        let d = m.detail().unwrap();
+        assert!(d.actions.is_empty());
+        assert!(d.note.is_some());
+        assert_eq!(d.backend, "native");
     }
 
     #[test]

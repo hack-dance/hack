@@ -22,10 +22,54 @@ import { privateTmux } from "./helpers/private-tmux.ts";
 import {
   assertPrivateTmuxSocket,
   registerPrivateTmuxRoot,
+  withCompilerFixtureEnvironment,
 } from "./helpers/tmux-socket-guard.ts";
 
 const childEnvironmentScript =
   "process.stdout.write(JSON.stringify({root:process.env.TMUX_TMPDIR,tmux:process.env.TMUX??null}))";
+
+test("exact compiler environment scope preserves only its pure fixture command", () => {
+  const root = mkdtempSync("/tmp/hack-compiler-env-");
+  try {
+    const binary = join(root, "compiler");
+    writeFileSync(
+      binary,
+      `#!${process.execPath}\nprocess.stdout.write(JSON.stringify(Object.keys(process.env).sort()));\n`,
+      { mode: 0o700 }
+    );
+    const run = () =>
+      Bun.spawnSync([binary], {
+        env: { PATH: "/usr/bin:/bin" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    withCompilerFixtureEnvironment({
+      binary,
+      run: () => {
+        const exact = run();
+        expect(exact.exitCode).toBe(0);
+        expect(JSON.parse(exact.stdout.toString())).toEqual(["PATH"]);
+        const peer = Bun.spawnSync(
+          [process.execPath, "-e", childEnvironmentScript],
+          { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" }
+        );
+        expect(peer.exitCode).toBe(0);
+        expect(JSON.parse(peer.stdout.toString())).toEqual({
+          root: process.env.TMUX_TMPDIR,
+          tmux: null,
+        });
+      },
+    });
+    const outside = run();
+    expect(outside.exitCode).toBe(0);
+    expect(JSON.parse(outside.stdout.toString())).toEqual([
+      "PATH",
+      "TMUX_TMPDIR",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("Node spawn overloads keep third-argument options with null or undefined argv", async () => {
   for (const argv of [undefined, null]) {

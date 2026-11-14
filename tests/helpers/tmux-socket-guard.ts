@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import childProcess from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -6,6 +7,53 @@ import { basename, dirname, isAbsolute } from "node:path";
 const privateRoots = new Set<string>();
 let installed = false;
 const nativeSpawnSync = Bun.spawnSync.bind(Bun);
+const compilerFixture = new AsyncLocalStorage<string>();
+
+/**
+ * Only for a freshly-created, pure compiler transport fixture that reports its
+ * received environment and never invokes tmux. Keep the actual PATH-only
+ * compiler contract observable, rather than relaxing its assertions for the
+ * isolation harness. Other commands in the callback still get isolation.
+ */
+export function withCompilerFixtureEnvironment<T>(opts: {
+  binary: string;
+  run: () => T;
+}): T {
+  const parent = lstatSync(dirname(opts.binary));
+  const file = lstatSync(opts.binary);
+  if (
+    !isAbsolute(opts.binary) ||
+    basename(opts.binary) !== "compiler" ||
+    !parent.isDirectory() ||
+    (parent.mode & 0o077) !== 0 ||
+    parent.uid !== process.getuid?.() ||
+    !file.isFile() ||
+    file.uid !== process.getuid?.() ||
+    file.nlink !== 1
+  ) {
+    throw new Error(
+      "Exact compiler environment requires an owned fixture in a private directory."
+    );
+  }
+  return compilerFixture.run(opts.binary, opts.run);
+}
+
+function preserveCompilerEnvironment(command: readonly string[]): boolean {
+  return command[0] !== undefined && command[0] === compilerFixture.getStore();
+}
+
+function childEnvForCommand(
+  command: readonly string[],
+  env?: Record<string, string | undefined>
+): Record<string, string | undefined> {
+  if (!preserveCompilerEnvironment(command)) {
+    return isolatedChildEnv(env);
+  }
+  if (!env) {
+    throw new Error("Compiler fixture must receive an explicit environment.");
+  }
+  return env;
+}
 
 /** Fixed read-only probe: the state guard must still see Bun's native env. */
 export function probeNativeTestEnvironment() {
@@ -114,7 +162,7 @@ export function installTmuxSocketGuard(): void {
         // Without explicit env Bun can use its startup snapshot. Validate
         // exactly what the child will receive, including after a preload
         // replaced inherited TMUX/TMUX_TMPDIR.
-        const env = isolatedChildEnv(record?.env);
+        const env = childEnvForCommand(command, record?.env);
         assertPrivateTmuxSocket(command, env);
         const optionsWithEnv = { ...record, env };
         const forwarded = Array.isArray(first)

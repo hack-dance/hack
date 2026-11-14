@@ -113,6 +113,11 @@ Scripts therefore inherit isolation too; a script that deliberately resets its
 environment or names an explicit socket must maintain that isolation itself.
 `Bun.$` uses the live environment by default, but an explicit `.env(...)` is
 not wrapped: supply the private `TMUX_TMPDIR` in that object too.
+The exact-environment compiler transport tests use
+`withCompilerFixtureEnvironment` only around a freshly-created pure compiler
+fixture that reports its input/env and never invokes tmux. Only that exact
+executable keeps the explicit compiler env; other children in the callback
+and every child outside it remain isolated. Keep the PATH-only assertions.
 The fixed `/usr/bin/env -0` native-state probe remains unwrapped so the global
 state guard can still detect Bun's stale native environment. Tmux cleanup is
 registered last, after the checkout guard has finished spawning Git children.

@@ -24,6 +24,7 @@ import {
   classifyLaunchdProgramPath,
   isHackManagedPlist,
   isLaunchdPlistCurrent,
+  isLaunchdServiceNotFound,
   isSameExecutableFile,
   LAUNCHD_MANAGED_MARKER,
   parseLaunchdPlistProgram,
@@ -1035,5 +1036,45 @@ test("a loaded launchd job is this home's only when it runs nothing or its pid i
       status: status(true, 4242),
       prove: refused,
     })
+  ).toBe(false);
+});
+
+// Review round 6 (HACK-2216).
+
+test("only launchd's exit 113 'Could not find service' is absence", () => {
+  const notFound =
+    'Bad request.\nCould not find service "dance.hack.hackd" in domain for port';
+  expect(isLaunchdServiceNotFound({ exitCode: 113, output: notFound })).toBe(
+    true
+  );
+  expect(isLaunchdServiceNotFound({ exitCode: 113, output: "" })).toBe(false);
+  expect(isLaunchdServiceNotFound({ exitCode: 5, output: notFound })).toBe(
+    false
+  );
+  expect(isLaunchdServiceNotFound({ exitCode: 124, output: "timed out" })).toBe(
+    false
+  );
+});
+
+test("an unloaded job is this home's only when launchd reported it absent", async () => {
+  const paths = resolveDaemonPaths({ home: "/nonexistent-home" });
+  const unloaded = (
+    observation: "reported" | "not-found" | "failed" | undefined
+  ) => ({
+    installed: true,
+    loaded: false,
+    running: false,
+    pid: null,
+    exitStatus: null,
+    ...(observation === undefined ? {} : { observation }),
+  });
+  expect(
+    await proveLaunchdJobOwnership({ paths, status: unloaded("not-found") })
+  ).toBe(true);
+  expect(
+    await proveLaunchdJobOwnership({ paths, status: unloaded("failed") })
+  ).toBe(false);
+  expect(
+    await proveLaunchdJobOwnership({ paths, status: unloaded(undefined) })
   ).toBe(false);
 });

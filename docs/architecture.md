@@ -704,7 +704,10 @@ Such a plist is never replaced automatically; `start` reports it and
   be this home's hackd, holding a socket in this home's `daemon/` directory
   (the proof `stop` uses). Otherwise it is left alone
   (`blocked: "unproven-owner"`). A running job without a pid counts as
-  unproven.
+  unproven. A job counts as not loaded only when `launchctl print` says so
+  itself: exit 113 with "Could not find service". Any other failed query is an
+  observation failure. It is treated as unproven, so nothing is unloaded,
+  rewritten or loaded.
 
 ```mermaid
 stateDiagram-v2

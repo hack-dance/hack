@@ -109,6 +109,9 @@ async function makeFixture(): Promise<Fixture> {
       'if [ -n "$HACK_TEST_LAUNCHCTL_FAIL" ] && [ "$1" = "$HACK_TEST_LAUNCHCTL_FAIL" ]; then echo "simulated $1 failure" >&2; exit 5; fi',
       // HACK_TEST_LAUNCHCTL_JOB=stopped: the job is loaded but runs nothing.
       `if [ "$1" = "print" ] && [ "$HACK_TEST_LAUNCHCTL_JOB" = "stopped" ]; then printf 'state = not running\\n'; exit 0; fi`,
+      // HACK_TEST_LAUNCHCTL_JOB=missing: launchd's own answer for a service
+      // it does not have (exit 113).
+      `if [ "$1" = "print" ] && [ "$HACK_TEST_LAUNCHCTL_JOB" = "missing" ]; then printf 'Bad request.\\nCould not find service "dance.hack.hackd" in domain for port\\n' >&2; exit 113; fi`,
       `if [ "$1" = "print" ]; then printf 'state = running\\npid = 4242\\n'; fi`,
       `if [ "$1" = "kickstart" ]; then ${touchSocket}; fi`,
       "exit 0",
@@ -669,6 +672,41 @@ test("a running job whose pid is not this home's hackd is not refreshed", async 
   expect(after).toBe(written);
   expect(verbs).not.toContain("bootout");
   expect(verbs).not.toContain("bootstrap");
+});
+
+// Review round 6 (HACK-2216): a failed status query is not absence.
+
+test("a failed launchctl print is not 'not loaded': no unload, rewrite or load", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist(
+    (fixture) => {
+      written = legacyPlist(fixture).legacy;
+      return written;
+    },
+    // print fails with an unrecognized error; bootout would succeed.
+    { HACK_TEST_LAUNCHCTL_FAIL: "print" }
+  );
+  expect(results).toEqual({
+    repair: "unproven-owner",
+    secondRepair: "unproven-owner",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual(["print", "print"]);
+});
+
+test("launchd's own service-not-found answer allows the refresh", async () => {
+  let current = "";
+  const { results, after, verbs } = await repairPlist(
+    (fixture) => {
+      const plists = legacyPlist(fixture);
+      current = plists.current;
+      return plists.legacy;
+    },
+    { HACK_TEST_LAUNCHCTL_JOB: "missing" }
+  );
+  expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
+  expect(after).toBe(current);
+  expect(verbs).toEqual(["print", "bootout", "bootstrap"]);
 });
 
 test("an XML-escaped Program key pointing at another hack is never replaced", async () => {

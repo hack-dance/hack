@@ -625,8 +625,10 @@ export function plistKeepsThisHome(opts: {
 }
 
 /**
- * Whether the loaded job may be unloaded as this home's: it runs nothing
- * (not running and no pid), or its pid is proven to be this home's hackd
+ * Whether the loaded job may be unloaded as this home's: launchd positively
+ * reports it absent (`observation: "not-found"`; a failed query proves
+ * nothing and is refused), it runs nothing (loaded, not running, no pid),
+ * or its pid is proven to be this home's hackd
  * ({@link proveOwnedDaemonProcess}: a hackd holding a socket in this home's
  * daemon directory). A running job without a pid, or one that fails the
  * proof, is not this home's (false).
@@ -639,7 +641,9 @@ export async function proveLaunchdJobOwnership(opts: {
   const status =
     opts.status ?? (await getLaunchdServiceStatus({ paths: opts.paths }));
   if (!status.loaded) {
-    return true;
+    // Only a positively identified absence lets the plist be replaced: a
+    // failed query (or none) may hide a running job of another home.
+    return status.observation === "not-found";
   }
   if (status.pid === null || status.pid <= 1) {
     return !status.running;
@@ -876,10 +880,37 @@ async function unloadLaunchdService(): Promise<LaunchctlResult> {
 
 export interface LaunchdServiceStatus {
   readonly installed: boolean;
+  /**
+   * launchd reported the service. False also when the query failed: see
+   * `observation` before treating false as "not loaded" for anything that
+   * changes the service.
+   */
   readonly loaded: boolean;
   readonly running: boolean;
   readonly pid: number | null;
   readonly exitStatus: number | null;
+  /**
+   * How `launchctl print` answered, when it ran (HACK-2216): `reported`
+   * (exit 0), `not-found` (exit 113 with launchd's "Could not find service"
+   * message: absence positively identified), or `failed` (anything else, an
+   * observation failure that proves nothing). Absent when no query ran.
+   */
+  readonly observation?: "reported" | "not-found" | "failed";
+}
+
+/** launchd's answer for a service it does not have loaded. */
+const LAUNCHCTL_SERVICE_NOT_FOUND_EXIT = 113;
+const LAUNCHCTL_SERVICE_NOT_FOUND = /Could not find service/;
+
+/** Whether a failed `launchctl print` positively says the service is absent. */
+export function isLaunchdServiceNotFound(opts: {
+  readonly exitCode: number;
+  readonly output: string;
+}): boolean {
+  return (
+    opts.exitCode === LAUNCHCTL_SERVICE_NOT_FOUND_EXIT &&
+    LAUNCHCTL_SERVICE_NOT_FOUND.test(opts.output)
+  );
 }
 
 /**
@@ -906,17 +937,25 @@ export async function getLaunchdServiceStatus({
     return NOT_INSTALLED_STATUS;
   }
 
-  const { exitCode, stdout } = await runLaunchctl([
+  const { exitCode, stdout, stderr } = await runLaunchctl([
     "print",
     launchdServiceTarget(),
   ]);
   if (exitCode !== 0) {
+    // `loaded: false` either way, as status and doctor display it; the
+    // observation says whether that is known.
     return {
       installed: true,
       loaded: false,
       running: false,
       pid: null,
       exitStatus: null,
+      observation: isLaunchdServiceNotFound({
+        exitCode,
+        output: `${stderr}\n${stdout}`,
+      })
+        ? "not-found"
+        : "failed",
     };
   }
 
@@ -938,6 +977,7 @@ export async function getLaunchdServiceStatus({
     running,
     pid,
     exitStatus,
+    observation: "reported",
   };
 }
 

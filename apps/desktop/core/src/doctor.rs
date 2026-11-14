@@ -75,7 +75,9 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "browser local network" => (RoutingDns, Machine),
         // Each project's internal host mapping (doctor.ts checkCaddyHostMapping).
         "caddy hosts" | "DEV_HOST" => (RoutingDns, Project),
-        "caddy local ca" | "host tls trust" | "superseded caddy roots" => (Certificates, Machine),
+        "caddy local ca" | "host tls trust" | "local ca trust" | "superseded caddy roots" => {
+            (Certificates, Machine)
+        }
         "daemon" | "daemon service" | "gateway config" | "gateway tokens" => (Daemon, Machine),
         "env key"
         | "env mode"
@@ -256,7 +258,9 @@ fn command_for(id: &str, area: Area, detail: &str, affected: &Affected) -> Optio
             remedy_in_detail(detail)
         }
         Affected::Machine => match id {
-            "caddy local ca" | "host tls trust" => Some("hack global trust".into()),
+            "caddy local ca" | "host tls trust" | "local ca trust" => {
+                Some("hack global trust".into())
+            }
             "browser local network" => None,
             _ if area == Area::RoutingDns => Some("hack global install".into()),
             _ => None,
@@ -1399,6 +1403,30 @@ mod tests {
             c.action,
             CardAction::Copy("hack doctor --fix --path '/work/alpha'".into())
         );
+    }
+
+    #[test]
+    fn local_ca_trust_is_one_machine_certificate_card() {
+        assert_eq!(
+            classify("local ca trust"),
+            Some((Area::Certificates, Scope::Machine))
+        );
+        let finding = || {
+            check(
+                "local ca trust",
+                "warn",
+                "The System keychain does not trust it",
+            )
+        };
+        let v = aggregate(&[
+            machine(vec![finding()]),
+            proj("alpha", vec![finding()]),
+            proj("beta", vec![finding()]),
+        ]);
+        assert_eq!(v.attention_count(), 1);
+        let c = v.cards().next().unwrap();
+        assert_eq!(c.affected, Affected::Machine);
+        assert_eq!(c.action, CardAction::Copy("hack global trust".into()));
     }
 
     #[test]

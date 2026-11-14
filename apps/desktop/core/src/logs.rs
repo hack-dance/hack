@@ -593,11 +593,9 @@ pub mod fixtures {
                 m.exited(Some(0));
             }
             LogsFixture::Failed => {
-                m.apply(&ev(
-                    "error",
-                    None,
-                    Some("Cannot connect to the Docker daemon"),
-                ));
+                // A stream failure while Docker itself is up, so the
+                // render agrees with the status bar's "Docker ok".
+                m.apply(&ev("error", None, Some("Loki WebSocket error")));
                 m.exited(Some(1));
             }
             _ => {}

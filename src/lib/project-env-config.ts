@@ -6785,9 +6785,12 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
   await assertLegacyProjectInputFamily(opts);
   const contract = await readHackEnvContract(opts);
   if (contract.parseError !== undefined) {
-    throw new ClosedCliError(
-      "Cannot prepare migration: the env contract is unreadable or malformed; values omitted."
-    );
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason:
+        "hack.env.json can't be read or parsed as an env contract, so the migration can't tell which values to keep. Correct it, or remove it if this project doesn't use a contract, then retry.",
+      closing: "No migration files were changed; values omitted.",
+    });
   }
   const texts = new Map<string, string>();
   const extraSources = new Set<string>([

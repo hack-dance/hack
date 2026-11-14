@@ -393,7 +393,7 @@ test("an implicit env add keeps the pointer of a store with an undeclared entry,
   });
   expect(await store.get({ key: "UNDECL" })).toBe(undeclared);
   expect(run.output).toContain(
-    "Kept the encrypted secret store pointer (controlPlane.secrets) in .hack/hack.config.json for secrets.enc.json, which stays: it still holds SEC, UNDECL (values omitted)"
+    "Legacy env files were kept. After validating the project, preview the separate cleanup step with hack env migrate --cleanup."
   );
   for (const value of [declared, undeclared, added]) {
     expect(run.output).not.toContain(value);

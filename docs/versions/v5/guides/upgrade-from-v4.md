@@ -453,16 +453,27 @@ and separate backend keys still need the documented delivery and consent
 checks before removal. This does not repair an installed next.16 bundle
 or recover a key removed earlier. Keep the backup until recovery is verified.
 
-After those prerequisites, the explicit migration command is:
+Builds containing HACK-2191 (planned after next.17) add a read-only preview and
+resumable migration. Check the chosen executable's help before using them:
 
 ```sh
-HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project --migrate-env-config
+HACK_RUNTIME_BACKEND=compose "$V5" env migrate --path /absolute/project --json
+HACK_RUNTIME_BACKEND=compose "$V5" env migrate --path /absolute/project --apply
 ```
 
-This is a mutation, not a dry run. Review the tracked-file consent list and the
-diff afterward. `--json` cannot be combined with this repair. Without a prompt,
-tracked edits/deletions require explicit `--accept-tracked-env-changes`; do not
-add that flag just to get past an unfamiliar refusal.
+Preview lists paths, file actions and key names, never values, and writes nothing.
+Apply keeps a private rollback snapshot and journal outside working trees.
+Re-running the same apply command resumes interrupted steps; a completed run
+reports a no-op. Snapshot storage and all targets must share a filesystem and
+mount with hard links permitted. Choose a private `HACK_HOME` there if needed.
+Neither command needs Docker, a daemon or the native backend.
+
+Review the tracked-file consent list and the diff afterward. Without a prompt,
+tracked edits require explicit `--accept-tracked-env-changes`; the same flag
+governs later tracked removals. Do not add it just to get past an unfamiliar
+refusal. `doctor --migrate-env-config` uses the same journalled migration, but
+its separate hygiene repairs can run before the migration snapshot. Its repair
+mode still cannot be combined with `--json`.
 
 - The new model uses `hack.env.default.yaml`, named overlay YAML, and private
   `hack.env.local.yaml` / `hack.env.<overlay>.local.yaml` layers. With a legacy
@@ -470,20 +481,44 @@ add that flag just to get past an unfamiliar refusal.
 - Without `hack.env.json`, legacy `.hack/.env` and overlay values go to private
   local layers; tracked layers are empty. Teammates must migrate their own local
   values after the shared change is committed.
-- Doctor can remove old contract/dotenv files and Compose `env_file` references
-  with the documented consent and delivery checks. Undelivered values and files
-  still needed for interpolation are retained. It can also rewrite legacy config
-  keys. Do not delete all `.env*` files by hand.
+- Migration can repair Compose `env_file` references and legacy config keys,
+  but keeps every old contract, dotenv file, store, backend key and store pointer.
+  Cleanup never runs as part of apply or Doctor migration.
 - Env-consuming commands can migrate implicitly. The implicit path keeps the
-  contract and tracked files and does not edit Compose, but can rewrite legacy
-  config keys and remove migrated untracked dotenv files. It is still a write.
+  legacy files and does not edit Compose, but can rewrite legacy config keys.
+  It is still a write. An unfinished apply or rollback blocks env readers until
+  the explicit migration command completes recovery.
 - Migration has refusal paths for collisions, symlinks, unreadable files and
-  changed delivery semantics. Earlier layer or ignore-rule changes can remain
-  after a refusal; inspect before retrying. Secret-backend/keychain discovery has
-  limits. Follow the full audit rather than assuming every overlay was found.
+  changed delivery semantics. A journal can record partial publication after an
+  interruption; resume it rather than editing its files. Secret-backend/keychain
+  discovery has limits. Follow the full audit rather than assuming every overlay
+  was found.
 - Managed values containing `$` now reach containers literally. A previously
   expanded `$VAR` or escaped `$$` can change the application value and cause
   container recreation on the next start.
+
+After checking the application with a successful full-project `hack up`, preview
+and request cleanup as a separate later step:
+
+```sh
+HACK_RUNTIME_BACKEND=compose "$V5" env migrate --path /absolute/project --cleanup --json
+HACK_RUNTIME_BACKEND=compose "$V5" env migrate --path /absolute/project --cleanup --apply
+```
+
+Cleanup rechecks the snapshot, delivery of every migrated value and live inputs
+at that moment. A file current resolution reads, including an alias of a live
+key, cannot be removed. Changed layers require another full-project run.
+Rollback uses `env migrate --rollback-manifest <manifest>` with the path returned
+by apply. It refuses later edits unless `--preserve-changes` is explicit; that
+option retains those bytes privately and reports their recovery paths. An
+incomplete rollback exits nonzero and must be resumed. See the
+[preview and recovery contract](https://github.com/hack-dance/hack/blob/a87b13bf7fdf01811efe33e97dfc27e1b39e87a3/docs/reference/env-migration.md) for the
+versioned JSON and partial-cleanup recovery rules.
+
+Older builds without `env migrate` still use `doctor --migrate-env-config` as a
+mutation without this preview, journal or separate-cleanup guarantee. They can
+remove legacy files during migration; retain the backups and the next.16 key
+warning above. These new recovery guarantees do not apply to those binaries.
 
 Sources: [migration and refusal audit](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/env.md#legacy-repos-and-migration),
 [tracked-consent regression tests](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/tests/env-migration-tracked-consent.test.ts),

@@ -68,6 +68,12 @@ async function fixture(compose: Record<string, unknown>) {
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${stub}/calls'
+if [ "$3" = runtime ] && [ "$4" = setup ]; then
+  if [ "$#" != 6 ] || [ "$5" != inspect ] || [ "$6" != --json ]; then
+    printf '%s' 'fixture refuses setup mutation' >&2
+    exit 1
+  fi
+fi
 reply="$3-$4"
 # The second review names the adapted document: keep a copy and, when the
 # test scripted one, answer it separately from the review of the original.
@@ -143,7 +149,15 @@ exit 1
       (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
         .split("\n")
         .filter(Boolean)
-        .map((line) => line.split(" ").slice(2, 4).join(" ")),
+        .map((line) => {
+          const args = line.split(" ").slice(2);
+          const command = args.slice(0, 2).join(" ");
+          if (command === "runtime setup") {
+            // Assert full argv before shortening the observation for callers.
+            expect(args).toEqual(["runtime", "setup", "inspect", "--json"]);
+          }
+          return command;
+        }),
     native: {
       HACK_RUNTIME_BACKEND: "native",
       HACK_NATIVE_BINARY: binary,

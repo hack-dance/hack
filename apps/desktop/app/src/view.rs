@@ -24,9 +24,10 @@ use gpui_kit::{
 use hack_desktop_core::models::LogEntry;
 use hack_desktop_core::source::{ActionOutcome, Source};
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
-use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
+use hack_desktop_core::viewmodel::{
+    AppModel, DetailView, Event, ListView, Phase, RefreshToken, Row,
+};
 
-const POLL: Duration = Duration::from_secs(2);
 const TAIL_LINES: u32 = 20;
 
 pub struct HackApp {
@@ -99,11 +100,14 @@ impl HackApp {
     /// one disappeared), the Logs tab's stream follows the new selection.
     fn apply_refresh(
         &mut self,
+        token: RefreshToken,
         snap: Result<hack_desktop_core::source::Snapshot, hack_desktop_core::source::SourceError>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let before = self.model.selected_row().map(|r| r.name.clone());
-        self.model.apply(Event::Refreshed(snap));
+        if !self.model.finish_refresh(token, snap) {
+            return false;
+        }
         let after = self.model.selected_row().map(|r| r.name.clone());
         if before != after {
             self.logs.model.set_service(None);
@@ -119,6 +123,7 @@ impl HackApp {
             }
         }
         cx.notify();
+        true
     }
 
     /// Fixtures: select a project by name.
@@ -145,7 +150,9 @@ impl HackApp {
     fn start_polling(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                let Ok(source) = this.update(cx, |this, _| this.source.clone()) else {
+                let Ok((source, token)) = this.update(cx, |this, _| {
+                    (this.source.clone(), this.model.begin_refresh())
+                }) else {
                     return;
                 };
                 let snap = cx
@@ -157,7 +164,9 @@ impl HackApp {
                     .await;
                 let root = this
                     .update(cx, |this, cx| {
-                        this.apply_refresh(snap, cx);
+                        if !this.apply_refresh(token, snap, cx) {
+                            return None;
+                        }
                         (this.follow && this.tab == 0)
                             .then(|| this.selected_root())
                             .flatten()
@@ -178,7 +187,10 @@ impl HackApp {
                         }
                     });
                 }
-                cx.background_executor().timer(POLL).await;
+                let delay = this
+                    .update(cx, |this, _| this.model.poll_interval())
+                    .unwrap_or(Duration::from_secs(10));
+                cx.background_executor().timer(delay).await;
             }
         })
         .detach();
@@ -232,12 +244,13 @@ impl HackApp {
 
     fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
         let source = self.source.clone();
+        let token = self.model.begin_refresh();
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
                 .spawn(async move { source.snapshot() })
                 .await;
-            let _ = this.update(cx, |this, cx| this.apply_refresh(snap, cx));
+            let _ = this.update(cx, |this, cx| this.apply_refresh(token, snap, cx));
         })
         .detach();
     }

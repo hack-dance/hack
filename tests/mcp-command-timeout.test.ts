@@ -118,6 +118,21 @@ test("a command that ends on its own carries no timedOut field", async () => {
   expect(Object.hasOwn(payload, "timedOut")).toBe(false);
 });
 
+test("an independent SIGTERM is an error without being mislabeled as a server timeout", async () => {
+  const client = await startServer("kill -TERM $$");
+  const result = await client.callTool({
+    name: "hack.project.exec",
+    arguments: { service: "api", cmd: ["true"], timeoutMs: 5000 },
+  });
+  const payload = result.structuredContent as Record<string, unknown>;
+  expect(result.isError).toBe(true);
+  expect(payload.exitCode).not.toBe(0);
+  expect(Object.hasOwn(payload, "timedOut")).toBe(false);
+  expect(String(payload.stderr)).not.toContain(
+    "Stopped by the MCP server after timeoutMs"
+  );
+});
+
 test("Codex setup gives Hack's tools a call limit above Hack's own, keeping one the user set", () => {
   const launch = {
     command: "hack",

@@ -168,6 +168,8 @@ starts a container, and the CLI fails when the service is not running.
   signal sent by something else. For anything that may run longer than a few
   minutes, use `hack.project.command.start` instead.
 
+![Foreground command completion, timeout and cancellation](../diagrams/mcp-command-timeout.svg)
+
 ## Background commands
 
 `hack.project.command.start`, `read`, `inspect` and `cancel` start `exec` or

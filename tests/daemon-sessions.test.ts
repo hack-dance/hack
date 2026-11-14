@@ -32,6 +32,7 @@ const hasTmux = tmuxPath !== null;
 let sessionRoot = "";
 let sessionSocket = "";
 let savedPath: string | undefined;
+let pathSaved = false;
 
 /** Never address the default server, even when a route case fails after create. */
 function privateTmux(args: readonly string[]) {
@@ -533,6 +534,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
     await mkdir(join(sessionRoot, "bin"));
     // The route executes real tmux through this shim. Never inherit a caller's
     // socket or config; only the fixture's private server can be created/stopped.
+    // The finite pane command also caps a server's life if the test process dies.
     const quotedTmux = `'${tmuxPath?.replaceAll("'", "'\\''")}'`;
     await writeFile(
       join(sessionRoot, "bin", "tmux"),
@@ -542,6 +544,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
   });
   beforeEach(() => {
     savedPath = process.env.PATH;
+    pathSaved = true;
     process.env.PATH = `${join(sessionRoot, "bin")}:${savedPath ?? "/usr/bin:/bin"}`;
   });
   afterEach(async () => {
@@ -549,7 +552,10 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       await privateTmux(["kill-server"]);
       expect((await privateTmux(["list-sessions"])).exitCode).toBe(1);
     } finally {
-      restoreEnv("PATH", savedPath);
+      if (pathSaved) {
+        restoreEnv("PATH", savedPath);
+        pathSaved = false;
+      }
     }
   });
   afterAll(async () => {
@@ -661,6 +667,9 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
       expect(result?.status).toBe(201);
+      expect(
+        (await privateTmux(["has-session", "-t", "=my-project"])).exitCode
+      ).toBe(0);
     });
 
     test("accepts names with underscores", async () => {
@@ -672,6 +681,9 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
       expect(result?.status).toBe(201);
+      expect(
+        (await privateTmux(["has-session", "-t", "=my_project"])).exitCode
+      ).toBe(0);
     });
 
     test("rejects names with dots", async () => {

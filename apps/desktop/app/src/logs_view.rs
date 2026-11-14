@@ -114,6 +114,12 @@ impl HackApp {
     pub(crate) fn open_logs(&mut self, cx: &mut Context<Self>) {
         self.logs.close();
         let Some((root, native)) = self.selected_root() else {
+            // No folder to read from: never leave another project's lines.
+            self.logs
+                .model
+                .unavailable("This project has no folder to read logs from.");
+            self.logs.refresh_visible();
+            cx.notify();
             return;
         };
         if native {

@@ -835,6 +835,17 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_clears_the_previous_projects_lines() {
+        let mut m = LogsModel::default();
+        m.start(true);
+        m.apply(&line("old project"));
+        m.unavailable("no folder");
+        assert!(m.is_empty());
+        assert!(m.visible().is_empty());
+        assert_eq!(m.banner().as_deref(), Some("no folder"));
+    }
+
+    #[test]
     fn every_logs_fixture_builds_its_state() {
         for f in LogsFixture::ALL {
             assert_eq!(LogsFixture::parse(f.name()), Some(f));

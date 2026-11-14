@@ -365,15 +365,33 @@ mod tests {
     use serde_json::json;
     #[test]
     fn setup_remedies_share_machine_admission_and_require_cli_evidence() {
-        use crate::setup::{Card, Report, Remedy, SafeAction, Status};
-        let mut report = Report {cards:vec![
-            Card {id:"cli".into(), title:"CLI".into(), status:Status::Passed, detail:String::new(), remedy:Remedy::Doc(String::new())},
-            Card {id:"login".into(), title:"Login service".into(), status:Status::NeedsAttention, detail:String::new(), remedy:Remedy::Run(SafeAction::InstallDaemon)},
-        ], ..Default::default()};
+        use crate::setup::{Card, Remedy, Report, SafeAction, Status};
+        let mut report = Report {
+            cards: vec![
+                Card {
+                    id: "cli".into(),
+                    title: "CLI".into(),
+                    status: Status::Passed,
+                    detail: String::new(),
+                    remedy: Remedy::Doc(String::new()),
+                },
+                Card {
+                    id: "login".into(),
+                    title: "Login service".into(),
+                    status: Status::NeedsAttention,
+                    detail: String::new(),
+                    remedy: Remedy::Run(SafeAction::InstallDaemon),
+                },
+            ],
+            ..Default::default()
+        };
         let mut model = DaemonModel::default();
         assert!(!model.begin_machine(DaemonAction::Restart, None, Some(&report)));
         assert!(model.begin_machine(DaemonAction::Install, None, Some(&report)));
-        assert!(!model.begin_with_recovery(DaemonAction::Start, Some(crate::source::DaemonRecovery::Start)));
+        assert!(!model.begin_with_recovery(
+            DaemonAction::Start,
+            Some(crate::source::DaemonRecovery::Start)
+        ));
         model.refreshed(Observation::default());
         report.cards[0].status = Status::Unknown;
         assert!(!model.begin_machine(DaemonAction::Install, None, Some(&report)));

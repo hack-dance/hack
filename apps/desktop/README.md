@@ -117,6 +117,12 @@ unknown until another read. Missing CLI disables actions. Reads have deadlines;
 actions have a two-minute deadline. The app never edits units, signals a daemon,
 or starts one during observation. Only the CLI owns those effects.
 
+Setup Run, the daemon card and recovery share the same machine-action gate and
+fixed CLI adapter. Project actions and terminal launches check that gate; daemon
+actions also check setup's launch gate. Each result refreshes ordered project
+status and setup (queuing a fresh setup check if an older check is in flight).
+The existing setup terminal adapter remains owned by setup.
+
 Always-on consumes proposed project `autostart` and global `autostart_global`
 fields when present, including manual-stop pause, failure count/limit/services,
 global pause and login progress. Missing fields remain unknown. All always-on
@@ -176,7 +182,7 @@ matching the CLI proves hackd; bare status exit zero does not. `service.installe
 proves login installation separately.
 
 Only the fixed `daemon start` and `daemon install` actions offer **Run**, with
-bounded, memory-only output followed by fresh checks. Admin cards offer **Copy
+bounded, memory-only exit/error feedback followed by fresh checks. Admin cards offer **Copy
 command** and **Open Terminal**. The private one-use `.command` script quotes every
 argument, prints the command and waits for Enter. macOS requests a new Terminal
 window through `open -g -a Terminal`; Linux uses `xdg-terminal-exec` when available,

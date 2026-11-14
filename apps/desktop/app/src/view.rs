@@ -450,6 +450,10 @@ impl HackApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon.finished(&result);
+                this.setup.result = Some(match &result {
+                    Ok(()) => "Daemon command exited successfully. Checking fresh status.".into(),
+                    Err(e) => format!("Daemon command failed: {e}. Checking fresh status."),
+                });
                 cx.notify();
             });
             // This read starts only after the action process and output have settled.
@@ -497,7 +501,8 @@ impl HackApp {
                             || self.setup.action_busy
                             || self.daemon.busy.is_some()
                             || self.model.cli_missing()
-                            || (!self.setup.report.cards.is_empty() && !self.setup.report.cli_ready()),
+                            || (!self.setup.report.cards.is_empty()
+                                && !self.setup.report.cli_ready()),
                     )
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.run_daemon_action(action, cx)),

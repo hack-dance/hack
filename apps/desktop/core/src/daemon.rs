@@ -22,6 +22,8 @@ pub enum DaemonError {
     /// No socket, or nothing listening.
     Unreachable(String),
     Timeout,
+    /// The socket or its directory is not provably this user's own.
+    Untrusted(String),
     Http {
         status: u16,
         body: String,
@@ -34,6 +36,7 @@ impl std::fmt::Display for DaemonError {
         match self {
             Self::Unreachable(e) => write!(f, "hackd is not reachable: {e}"),
             Self::Timeout => write!(f, "hackd did not answer in time"),
+            Self::Untrusted(why) => write!(f, "hackd socket not trusted: {why}"),
             Self::Http { status, body } => write!(f, "hackd returned {status}: {body}"),
             Self::BadResponse(e) => write!(f, "unexpected response from hackd: {e}"),
         }
@@ -88,8 +91,23 @@ impl DaemonClient {
     }
 
     fn get(&self, path_and_query: &str) -> Result<Vec<u8>, DaemonError> {
+        // hackd's API has no authentication: trust it only when the socket's
+        // directory is this user's own and nobody else can replace entries
+        // in it, and the peer process runs as this user. Otherwise the app
+        // falls back to the CLI (which applies its own checks).
+        let uid = current_uid();
+        check_private_dir(&self.socket, uid)?;
         let mut s = UnixStream::connect(&self.socket)
             .map_err(|e| DaemonError::Unreachable(e.to_string()))?;
+        match peer_uid(&s) {
+            Some(p) if p == uid => {}
+            Some(p) => {
+                return Err(DaemonError::Untrusted(format!(
+                    "peer runs as uid {p}, not {uid}"
+                )));
+            }
+            None => return Err(DaemonError::Untrusted("peer uid unavailable".into())),
+        }
         s.set_read_timeout(Some(self.timeout))
             .and_then(|()| s.set_write_timeout(Some(self.timeout)))
             .map_err(|e| DaemonError::Unreachable(e.to_string()))?;
@@ -103,6 +121,74 @@ impl DaemonClient {
             .map_err(io_err)?;
         parse_http(&raw)
     }
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+/// The socket and its directory must be owned by `uid`, not symlinks, and
+/// the directory must not be writable by group or others.
+fn check_private_dir(socket: &Path, uid: u32) -> Result<(), DaemonError> {
+    use std::os::unix::fs::MetadataExt;
+    let untrusted = DaemonError::Untrusted;
+    let dir = socket
+        .parent()
+        .ok_or_else(|| untrusted("socket has no parent directory".into()))?;
+    let dm = std::fs::symlink_metadata(dir).map_err(|e| DaemonError::Unreachable(e.to_string()))?;
+    if !dm.is_dir() {
+        return Err(untrusted("daemon directory is not a directory".into()));
+    }
+    if dm.uid() != uid {
+        return Err(untrusted(
+            "daemon directory is owned by another user".into(),
+        ));
+    }
+    if dm.mode() & 0o022 != 0 {
+        return Err(untrusted(
+            "daemon directory is group- or world-writable".into(),
+        ));
+    }
+    let sm =
+        std::fs::symlink_metadata(socket).map_err(|e| DaemonError::Unreachable(e.to_string()))?;
+    if sm.file_type().is_symlink() || sm.uid() != uid {
+        return Err(untrusted(
+            "socket is a link or owned by another user".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(s: &UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).ok()?;
+    // SAFETY: valid fd, out-pointer sized for ucred.
+    let rc = unsafe {
+        libc::getsockopt(
+            s.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    (rc == 0).then_some(cred.uid)
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+fn peer_uid(s: &UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: valid fd and out-pointers.
+    let rc = unsafe { libc::getpeereid(s.as_raw_fd(), &raw mut uid, &raw mut gid) };
+    (rc == 0).then_some(uid)
 }
 
 fn io_err(e: std::io::Error) -> DaemonError {
@@ -202,6 +288,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let sock = dir.join("hackd.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let h = thread::spawn(move || {
@@ -276,6 +366,26 @@ mod tests {
             parse_http(short),
             Err(DaemonError::BadResponse(_))
         ));
+    }
+
+    #[test]
+    fn group_writable_daemon_dir_is_not_trusted() {
+        use std::os::unix::fs::PermissionsExt;
+        let (sock, h) = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec());
+        let dir = sock.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let r = DaemonClient::new(&sock, Duration::from_secs(2)).status();
+        assert!(matches!(r, Err(DaemonError::Untrusted(_))), "{r:?}");
+        // Release the test server so its thread ends.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(UnixStream::connect(&sock));
+        let _ = h.join();
+    }
+
+    #[test]
+    fn own_peer_passes_the_peer_check() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert_eq!(peer_uid(&a), Some(current_uid()));
     }
 
     #[test]

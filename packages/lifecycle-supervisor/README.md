@@ -89,7 +89,11 @@ the recorded command birth. A reused numeric SID alone never authorizes a signal
 Terminal receipts prove the old guard completed cleanup; uncertain legacy or
 newer-member-only sessions remain unknown without effects. See
 [resource and qualification boundaries](../../docs/lifecycle-supervisor.md#resource-and-qualification-boundaries)
-for offline rotation, Darwin different-UID limits and remaining crash-test gaps.
+for offline rotation, Darwin different-UID limits and crash-window qualification.
 The ignored idle measurement has a native Darwin variant using proc_pid_rusage
 over 60 seconds; its kernel idle/interrupt wakeups differ from Linux context switches.
 Descriptor-limit and functional prepublication lease tests run on both platforms.
+
+Deterministic crash checkpoints are available only with the test-hooks feature.
+Run cargo test --features test-hooks guard_killed_after_ to exercise both save/spawn
+windows. Never enable this feature in shipped/default/release artifacts.

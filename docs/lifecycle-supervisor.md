@@ -330,8 +330,11 @@ arbitrarily delayed frames. Retire the entire quiescent root only after all old
 callers and guards have exited. These files have no automatic size/count bound;
 long-running installations must arrange a maintenance window and offline rotation.
 
-Native crash tests currently cover prepublication command-lock blocking, incomplete
-guard launch frames, and blocked ready delivery. Deterministic tests at the two
-smaller instruction windows (starting-state save to spawn, and spawn to running-state
-save) remain unqualified; polling a receipt cannot reliably stop a process in either
-window. They require a dedicated synchronization seam, not a timing-only test.
+Native crash tests cover prepublication command-lock blocking, incomplete launch
+frames, and blocked ready delivery. The opt-in integration also adds deterministic
+SIGKILL tests at both smaller instruction windows: after saving starting but before
+spawn, and after spawn but before saving running. Only a build with the test-hooks
+feature contains these checkpoints; normal and release builds omit them. Before
+spawn the session is absent; after an unrecorded spawn it is unknown and stop sends
+no signal without a birth witness. CI runs the two checkpoint tests separately from
+the default suite and builds the release executable without this feature.

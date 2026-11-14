@@ -84,7 +84,7 @@ liveness/reachability controls have their own documented assumptions.
 
 | Model | Positive distinct states | Configurations |
 | --- | ---: | ---: |
-| [lifecycle-supervisor](../../tests/models/tla/lifecycle-supervisor/LifecycleSupervisor.tla) | 168 | 2 |
+| [lifecycle-supervisor](../../tests/models/tla/lifecycle-supervisor/LifecycleSupervisor.tla) | 168 | 3 |
 | [lifecycle-controller](../../tests/models/tla/lifecycle-controller/LifecycleController.tla) | 21 | 2 |
 | [native-status-start](../../tests/models/tla/native-status-start/StatusStart.tla) | 110 | 2 |
 | [native-publisher-stop](../../tests/models/tla/native-publisher-stop/PublisherStop.tla) | 168 | 7 |

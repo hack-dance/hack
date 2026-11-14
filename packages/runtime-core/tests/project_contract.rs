@@ -2356,6 +2356,83 @@ fn scoped_environment_refuses_cross_service_fallback_and_conflicting_owners() {
 }
 
 #[test]
+fn explicit_environment_unsets_are_public_names_and_cannot_mask_missing_private_values() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    environment: {PUBLIC: literal, PRIVATE: null}\n    x-hack-unset-environment: [REMOVE, UNKNOWN]\n",
+    );
+    let review = fixture.plan();
+    let private = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("PRIVATE".into(), "UNSET_PRIVATE_CANARY".into())]),
+    )]);
+    let compiled = inputs::compile_scoped(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &private,
+    )
+    .unwrap();
+    assert_eq!(
+        compiled.executable.services["web"].environment,
+        ["PUBLIC=literal", "REMOVE", "UNKNOWN"]
+    );
+    assert!(
+        compiled
+            .executable
+            .service_requires_managed_environment("web")
+    );
+    assert!(
+        !serde_json::to_string(&review)
+            .unwrap()
+            .contains("UNSET_PRIVATE_CANARY")
+    );
+    let failure = inputs::compile_scoped(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, "execution_environment_missing");
+    let only_unsets = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    restart: unless-stopped\n    x-hack-unset-environment: [REMOVE]\n",
+    );
+    let review = only_unsets.plan();
+    let compiled = inputs::compile_scoped(
+        &only_unsets.candidate,
+        only_unsets.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(compiled.executable.services["web"].environment, ["REMOVE"]);
+    assert!(!compiled.executable.requires_managed_environment());
+    for metadata in [
+        "[PRIVATE]",
+        "[PUBLIC]",
+        "[REMOVE, REMOVE]",
+        "[bad-key]",
+        "false",
+    ] {
+        let conflict = Fixture::new(&format!(
+            "services:\n  web:\n    image: alpine:3.21\n    environment: {{PUBLIC: value, PRIVATE: null}}\n    x-hack-unset-environment: {metadata}\n"
+        ));
+        assert_eq!(
+            project::plan(&conflict.candidate, conflict.options())
+                .unwrap_err()
+                .code,
+            "invalid_environment_unset"
+        );
+    }
+}
+
+#[test]
 fn scoped_environment_cannot_interpolate_into_any_executable_field() {
     use project::inputs;
     use std::collections::BTreeMap;

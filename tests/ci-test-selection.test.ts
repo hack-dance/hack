@@ -8,6 +8,7 @@ import {
   touchesCompilerHost,
 } from "../scripts/ci-pr-plan.ts";
 import { selectTests } from "../scripts/ci-test-selection.ts";
+import { requiresWorkflowFull } from "../scripts/ci-workflow-guard.ts";
 import {
   buildVerifiedPlan,
   classifyTestPools,
@@ -355,6 +356,31 @@ describe("conservative dependency selection", () => {
 });
 
 describe("PR matrix policy", () => {
+  test.each([
+    "src/commands/project.ts",
+    "src/ui/logger.ts",
+    "src/lib/local-network-hint.ts",
+  ])("light CLI change gates the portable open output contract on Linux: %s", async (path) => {
+    expect(await Bun.file(resolve(repoRoot, path)).exists()).toBe(true);
+    const selection = selectTests({ repoRoot, changed: [path] });
+    expect(selection.mode).toBe("selected");
+    const file = "tests/local-network-hint.test.ts";
+    expect(selection.files).toContain(file);
+    const plan = await planPullRequest({
+      repoRoot,
+      changed: [path],
+      draft: false,
+      full: false,
+      selection,
+    });
+    expect(plan.test_files).toBe(JSON.stringify(selection.files));
+    expect(plan.test_shards).toBe("[4,5,6,7,8]");
+    expect(plan.defer_macos).toBe(true);
+    const pools = await classifyTestPools({ repoRoot, files: selection.files });
+    expect(pools.linux).toContain(file);
+    expect(pools.macos).toContain(file);
+    expect(pools.both).toContain(file);
+  }, 30_000);
   test("ordinary light PRs defer platform and Docker inputs until opt-in or integration", async () => {
     const selection = {
       mode: "selected",
@@ -366,7 +392,7 @@ describe("PR matrix policy", () => {
     } as const;
     for (const changed of [
       ["docs/a.md"],
-      ["src/a.ts"],
+      ["tests/a.test.ts"],
       ["packages/runtime-core/README.md"],
     ]) {
       const plan = await planPullRequest({
@@ -451,6 +477,68 @@ describe("PR matrix policy", () => {
       compiler_hosts: "[]",
       defer_macos: true,
     });
+  });
+  test("a PR changing refused lifecycle HOME writes gets relocated acceptance on Linux", async () => {
+    for (const path of [
+      "src/lib/activity-log.ts",
+      "src/commands/project.ts",
+      "src/backends/native-project-start.ts",
+      "src/cli/run.ts",
+      "src/ui/logger.ts",
+      "src/index.ts",
+      "index.ts",
+      "packages/cli/index.ts",
+    ]) {
+      expect(await Bun.file(resolve(repoRoot, path)).exists(), path).toBe(true);
+      const plan = await planPullRequest({
+        repoRoot,
+        changed: [path],
+        draft: false,
+        full: false,
+        selection: { mode: "selected", reason: "fixture", files: [] },
+      });
+      expect(plan.compiler_hosts, path).toBe(
+        JSON.stringify([
+          { os: "ubuntu-latest", platform: "linux", arch: "x64" },
+        ])
+      );
+      expect(plan).toMatchObject({
+        compiler_rust: false,
+        runtime_core: false,
+        defer_macos: true,
+        docker_suite: false,
+        build_smoke: false,
+      });
+      expect(
+        await planPullRequest({
+          repoRoot,
+          changed: [path],
+          draft: true,
+          full: false,
+          selection: { mode: "selected", reason: "fixture", files: [] },
+        })
+      ).toMatchObject({ compiler_hosts: "[]" });
+    }
+  });
+  test("relocated acceptance scripts retain a compiler job on ready PRs", async () => {
+    for (const path of [
+      "scripts/check-native-env-plan-cli.ts",
+      "scripts/check-native-plan-clis.ts",
+      "scripts/lib/native-plan-home.ts",
+    ]) {
+      expect(requiresWorkflowFull([path]), path).toBe(true);
+      const plan = await planPullRequest({
+        repoRoot,
+        changed: [path],
+        draft: false,
+        full: false,
+      });
+      expect(JSON.parse(plan.compiler_hosts)).toContainEqual({
+        os: "ubuntu-latest",
+        platform: "linux",
+        arch: "x64",
+      });
+    }
   });
   test("protected inputs and main PRs automatically run full tiers", async () => {
     for (const input of [
@@ -675,7 +763,6 @@ test("draft fan-ins fail explicitly even when the light set passes or scope is c
     for (const changes of ["success", "cancelled", "failure"]) {
       const result = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
         env: {
-          ...process.env,
           PR_DRAFT: "true",
           CHANGES_RESULT: changes,
           SUITE: "true",

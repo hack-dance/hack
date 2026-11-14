@@ -2,7 +2,13 @@
 
 A PR uses a light tier by default: typecheck, lint/privacy, secret scan, docs
 checks when relevant, and selected Linux unit files on five Linux shards. It runs
-no macOS jobs, Docker E2E shards, state-model job or CLI/release build smoke.
+no macOS jobs, Docker E2E shards or state-model job. Ready PRs changing CLI
+source (`src/`, `index.ts`, `packages/cli/`) retain the existing Linux x64
+Config compiler job, including its release build and relocated CLI acceptance.
+This deliberately covers activity recording, HOME writes, output envelopes and
+refusals through any shared CLI source, rather than maintaining a fragile list
+of lifecycle helpers. Changes to acceptance scripts retain that job through the
+protected-script full-tier rule. Unrelated test/docs PRs retain the lighter tier.
 Ready Rust-input PRs retain the Linux Candidate core leg and both Linux compiler
 hosts (including Rust checks); macOS stays in the heavy tier. This covers
 non-Markdown inputs under runtime-core/config-compiler (including pins, fixtures
@@ -28,7 +34,11 @@ fallback alone widens files; the independent shell guard also enables full tiers
 Adding/removing labels, pushing, changing readiness or retargeting recomputes
 scope; metadata edits can cancel the active run.
 
-The required `test` fan-in also depends on `linux-process-lifetime`. When that
+The required `test` fan-in also depends on `config-compiler` and
+`linux-process-lifetime`. Every selected compiler host must succeed; its planned
+out-of-scope skip passes. When native tiers are selected, the required check
+also waits for their macOS compiler hosts, including Intel on release/full-main
+runs. When that
 tier is enabled, failure, cancellation, missing results or an unexpected skip
 fails `test`, even when every unit shard passed. Its planned out-of-scope skip
 passes. Branch rules are unchanged.
@@ -93,13 +103,32 @@ nonempty. Full discovery and independent Git enumeration still agree before
 filtering. Duplicate/unknown selections fail. Every selected file runs exactly
 once per active host pool or is explicitly deferred. `BOTH_POOL_FILES` deliberately
 runs the named daemon files on both hosts so Linux-only cases are exercised too.
+It also runs the portable `open --json` subprocess contract in
+`tests/local-network-hint.test.ts` on light PRs' Linux shards, while preserving
+its macOS hint checks in the macOS pool. A change to CLI commands or shared
+output modules therefore checks this contract before integration. This adds no
+macOS minutes per PR; the duration table budgets about four Linux seconds when
+the file is selected. The deferral report separates files already run on Linux
+from files awaiting all execution; both still await macOS qualification.
 Each file retains its suite
 working directory and Bun preload.
 
 The candidate job follows its crate, its config-compiler path dependency, guest, launcher, helper/toolchain and CI
 inputs. The compiler's native host matrix follows its crate/build/toolchain/CI
-inputs. Other compiler checks retain the previous Linux scope. These are job
+inputs. CLI source changes retain Linux x64 compiler acceptance even when
+macOS is deferred. These are job
 input gates, separate from the unit import graph.
+
+Cost: this adds **0 macOS minutes** to an ordinary CLI PR and one Linux x64
+Config compiler job, without adding a second release build. A Linux measurement
+on the 5002cf87 base with Bun 1.4.4 and Rust 1.97.1 took 59.5 seconds for the
+eight relocated CLI scripts, 0.7 seconds for the CLI build, and 41.9 seconds for
+compiler preparation with cached dependencies (102.1 seconds combined). These
+are component timings, not the whole hosted lane: that job also runs schema,
+transport/unit and release-install checks plus setup. Its separate release-install
+check needs host sandbox privileges and is verified in hosted CI. The lead's
+Mac batch reported roughly 80 seconds for all nine acceptance scripts once the
+release build exists; that is Mac evidence, separate from this Linux measurement.
 
 The Intel compiler lane runs on ready PRs into `main`, `main` pushes and explicit
 full dispatches. Native-tier PRs into `next` and ordinary `next` integration runs
@@ -114,6 +143,14 @@ including jobs waiting for macOS capacity. GitHub retains at most one pending ru
 a newer push replaces that pending run, so intermediate revisions may not run.
 As described above, a cancelled or missing predecessor forces full selection,
 so replacing a pending run cannot omit its merged changes from coverage.
+After one batch merges, the lead makes no further merge until a `next` run
+completes, unless the batch verifier ran the same checks on the combined tree.
+A cancelled or merely queued run does not satisfy that rule. The existing
+non-cancelling workflow group protects the active run, but GitHub can replace
+pending runs, so it cannot enforce a completed checkpoint between batches.
+No job-class concurrency split is needed: it would duplicate scheduling and
+could leave acceptance without matching platform evidence.
+
 This preserves all selected macOS coverage without changing runner capacity or
 the PR layout. It does not reserve macOS slots or guarantee a queue wait bound.
 PRs still cancel stale runs for the same PR. `main` pushes retain unique,

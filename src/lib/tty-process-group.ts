@@ -47,10 +47,13 @@ export function openTerminalControl() {
     },
     restoreAttributes: (value: Uint8Array | null) => {
       if (value) {
-        withoutBackgroundStop(() =>
-          libc.symbols.tcsetattr(descriptor, 0, value)
+        return (
+          withoutBackgroundStop(() =>
+            libc.symbols.tcsetattr(descriptor, 0, value)
+          ) === 0
         );
       }
+      return false;
     },
     close: () => {
       if (controllingDescriptor !== null) {

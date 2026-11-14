@@ -1,0 +1,18 @@
+---
+title: First run · one step (repeated per check)
+---
+flowchart TD
+  S([Step card]) --> C{"Observe<br/>(read-only)"}
+  C -->|ok| Next([Next step])
+  C -->|unknown| U["Unknown: show why,<br/>Check again"]
+  C -->|needs action| A{"Admin rights?"}
+  A -->|no| R["Run (app runs hack)"]
+  A -->|yes| T["Copy command /<br/>Open Terminal"]
+  R --> C
+  T -->|Check again| C
+  U -->|Check again| C
+  C -. Skip .-> Next
+  classDef wait stroke-dasharray:2 2
+  classDef ok stroke-width:1.6px
+  class T wait
+  class Next ok

@@ -460,6 +460,7 @@ pub(super) fn environment_files(
     value: Option<&Value>,
     field: &str,
     diagnostics: &mut Vec<Diagnostic>,
+    ownership_only: bool,
 ) -> Result<Vec<String>, CandidateError> {
     let values: Vec<&Value> = match value {
         None => vec![],
@@ -468,13 +469,17 @@ pub(super) fn environment_files(
     };
     let mut result = Vec::new();
     for value in values {
+        let required = !ownership_only
+            && match value {
+                Value::Object(m) => boolean(m.get("required"), true)?,
+                _ => true,
+            };
         let path = if let Value::Object(m) = value {
             keys(m, &["path", "required", "format"], field, diagnostics);
-            if !boolean(m.get("required"), true)?
-                || m.get("format")
-                    .is_some_and(|v| v.as_str() != Some("default"))
+            if m.get("format")
+                .is_some_and(|v| !matches!(v.as_str(), Some("" | "raw")))
             {
-                diagnostics.push(Diagnostic::error("unsupported_env_file_mode",field,"Only required default-format env_file references are modeled. Their contents are never read during planning."));
+                diagnostics.push(Diagnostic::error("unsupported_env_file_mode",field,"Only default and raw env_file formats are modeled. Their contents are never read during planning."));
             }
             string(
                 m.get("path")
@@ -483,32 +488,40 @@ pub(super) fn environment_files(
         } else {
             string(value)?
         };
-        let resolved = source::resolve(project, base, path, true)?;
+        let resolved = if required {
+            source::resolve(project, base, path, true)?
+        } else {
+            source::resolve_optional_env_file(project, base, path)?
+        };
         if resolved
             .file_name()
-            .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                matches!(source::folded_name(name).as_str(), ".gitignore" | ".ignore")
+            })
         {
             return Err(problem(
                 "conflicting_environment_owner",
                 "An environment input cannot also own source ignore rules.",
             ));
         }
-        let metadata = fs::symlink_metadata(&resolved)
-            .map_err(|_| problem("invalid_env_file", "Cannot inspect the env_file reference."))?;
-        if !metadata.is_file() || metadata.nlink() != 1 {
-            return Err(problem(
-                "invalid_env_file",
-                "env_file must refer to a regular file; its contents are not loaded.",
-            ));
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.is_file() && metadata.nlink() == 1 => {}
+            Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(problem(
+                    "invalid_env_file",
+                    "env_file must refer to a regular file; its contents are not loaded.",
+                ));
+            }
         }
         let relative = relative(project, &resolved);
-        if result.contains(&relative) {
-            return Err(problem(
-                "duplicate_env_file",
-                "Duplicate environment file ownership is not accepted.",
-            ));
+        // This is an ownership inventory, not a parser execution order. Repeated
+        // Compose inputs are read in order by the private normalizer, while one
+        // exclusion per path protects snapshot and future live-share contents.
+        if !result.contains(&relative) {
+            result.push(relative);
         }
-        result.push(relative);
     }
     Ok(result)
 }
@@ -775,6 +788,7 @@ fn compile_services(
         identifier(name)?;
         let field = format!("services.{name}");
         let m = object(value)?;
+        let environment_unsets = super::environment_unsets(m)?.into_iter().collect();
         keys(
             m,
             &[
@@ -786,6 +800,7 @@ fn compile_services(
                 "volumes",
                 "depends_on",
                 "environment",
+                "x-hack-unset-environment",
                 "extra_hosts",
                 "env_file",
                 "healthcheck",
@@ -1180,8 +1195,8 @@ fn compile_services(
             profiles:declared_profiles,active,
             dependencies:dependencies(m.get("depends_on"),&format!("{field}.depends_on"),diagnostics)?,
             mounts:declared_mounts,
-            environment:redacted_map(m.get("environment"),true)?,extra_hosts,
-            environment_files:environment_files(project,base,m.get("env_file"),&format!("{field}.env_file"),diagnostics)?,
+            environment:redacted_map(m.get("environment"),true)?,environment_unsets,extra_hosts,
+            environment_files:environment_files(project,base,m.get("env_file"),&format!("{field}.env_file"),diagnostics,false)?,
             environment_precedence:"Compose environment keys override explicitly listed env_file inputs; bare keys and references remain unresolved; no ambient/.env values are loaded".into(),
             healthcheck,
             ports:ports(m.get("ports"),&format!("{field}.ports"),diagnostics)?,exposed_ports,networks,network_aliases,network_mode:if ["project-networks", "none"].contains(&network_mode) {network_mode.into()} else {"[unsupported]".into()},

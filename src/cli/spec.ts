@@ -1,4 +1,5 @@
 import pkg from "../../package.json";
+import { activityCommand } from "../commands/activity.ts";
 import { agentCommand } from "../commands/agent.ts";
 import { branchCommand } from "../commands/branch.ts";
 import { commandsCommand } from "../commands/commands.ts";
@@ -9,6 +10,7 @@ import { devCommand } from "../commands/dev.ts";
 import { dispatchCommand } from "../commands/dispatch.ts";
 import { doctorCommand } from "../commands/doctor.ts";
 import { envCommand, hostCommand } from "../commands/env.ts";
+import { execSessionsCommand } from "../commands/exec-sessions.ts";
 import { gatewayCommand } from "../commands/gateway.ts";
 import { globalCommand } from "../commands/global.ts";
 import { helpCommand } from "../commands/help.ts";
@@ -37,6 +39,7 @@ import { sshCommand } from "../commands/ssh.ts";
 import { theCommand } from "../commands/the.ts";
 import { tuiCommand } from "../commands/tui.ts";
 import { updateCommand } from "../commands/update.ts";
+import { upgradeCommand } from "../commands/upgrade.ts";
 import { usageCommand } from "../commands/usage.ts";
 import { versionCommand } from "../commands/version.ts";
 import { xCommand } from "../commands/x.ts";
@@ -80,9 +83,11 @@ export const CLI_SPEC = defineCli({
     tuiCommand,
     runCommand,
     execCommand,
+    execSessionsCommand,
     commandsCommand,
     logsCommand,
     openCommand,
+    activityCommand,
     branchCommand,
     logPipeCommand,
     doctorCommand,
@@ -105,6 +110,7 @@ export const CLI_SPEC = defineCli({
     internalCommand,
     xCommand,
     updateCommand,
+    upgradeCommand,
     versionCommand,
     helpCommand,
   ],

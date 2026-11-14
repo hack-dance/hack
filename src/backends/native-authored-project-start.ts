@@ -594,6 +594,13 @@ async function prepareHostSelection(opts: {
       await opts.admission.assertHeld();
       await owner.assertFresh();
     },
+    // A failed launch owns its mux token before startup inputs can be canceled.
+    // Abort must retain admission and hook ownership, independently of those
+    // inputs; normal starts and stops still use the full freshness check above.
+    assertCleanupFresh: async () => {
+      await opts.admission.assertHeld();
+      await owner.assertFresh();
+    },
   });
   return { hooks, lifecycle, persistent, owner, processes };
 }

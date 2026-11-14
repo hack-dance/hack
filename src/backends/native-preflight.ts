@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { isRecord } from "../lib/guards.ts";
@@ -8,17 +8,20 @@ import {
   classifyComposeBackendReading,
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
 } from "../lib/native-compose-backend-features.ts";
-import {
-  projectEnvConfigExists,
-  resolveProjectEnvMetadata,
-} from "../lib/project-env-config.ts";
+import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../lib/native-environment-notices.ts";
+import { NativeEnvFileRefusal } from "./native-env-file-source.ts";
+import { nativeEnvironmentUnsetsReviewed } from "./native-environment-unsets.ts";
 import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { admitNativeProjectBuild } from "./native-project-builds.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 import {
-  nativeServiceEnvironment,
+  mergeNativeShellEnvironment,
+  nativeProjectInputRefusalMessage,
+  prepareNativeProjectInput,
   readNativeComposeBytes,
+  requireNativeShellDeliveryFits,
+  selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import {
   applyNativeInternalHostAliases,
@@ -43,7 +46,6 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
-import { shellReference } from "./native-shell-environment.ts";
 import { NATIVE_START_REFUSAL_ENTRIES } from "./native-start-refusal-entries.ts";
 import { readNativeStartRefusals } from "./native-start-refusals.ts";
 
@@ -295,6 +297,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     message: "A mount source is outside the project.",
     fix: "Mount only paths inside the project root.",
   },
+  source_case_collision: {
+    message:
+      "Project source paths collide under Unicode normalization and case folding.",
+    fix: "Rename the conflicting files or directories so their normalized, case-folded paths are distinct, then correct any env_file references.",
+  },
   unresolved_source_path: {
     message: "A mount source cannot be resolved inside the project.",
     fix: "Use a plain path relative to the project.",
@@ -379,7 +386,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   unsupported_env_file_mode: {
     message: "env_file uses an option native does not accept.",
-    fix: "Move the variables into Hack managed env with hack env set --service.",
+    fix: "Use an omitted or empty format for Compose dotenv syntax, or raw.",
   },
   invalid_compose_yaml: {
     message: "The Compose file is not valid YAML.",
@@ -504,6 +511,7 @@ export const REVIEW_STOP_CODES: ReadonlySet<string> = new Set([
   "invalid_duration",
   "invalid_env_file",
   "invalid_environment_key",
+  "invalid_environment_unset",
   "invalid_extra_hosts",
   "invalid_healthcheck",
   "invalid_identifier",
@@ -527,6 +535,7 @@ export const REVIEW_STOP_CODES: ReadonlySet<string> = new Set([
   "registry_template_unsafe",
   "service_budget",
   "source_budget",
+  "source_case_collision",
   "source_escape",
   "source_generated",
   "source_limit_config",
@@ -738,17 +747,6 @@ function cliServiceFindings(opts: {
       builds.add(name);
     }
   }
-  if (isRecord(service) && Object.hasOwn(service, "env_file")) {
-    found.push(
-      finding(
-        { ...base, code: "env_file", field: "env_file" },
-        {
-          message: "The service uses env_file, which native does not read.",
-          fix: "Move its variables into Hack managed env with hack env set --service, or run hack doctor --migrate-env-config.",
-        }
-      )
-    );
-  }
   for (const problem of nativeServicePreparationProblems({
     name,
     service,
@@ -793,13 +791,6 @@ function cliServiceFindings(opts: {
   return found;
 }
 
-async function exists(path: string): Promise<boolean> {
-  return await access(path).then(
-    () => true,
-    () => false
-  );
-}
-
 /**
  * Reads the Compose file with the bounds native start applies
  * (`readCompose` in `native-project-input.ts`): a regular file opened without
@@ -838,51 +829,37 @@ type AdaptedProject = {
     /** False when the adaptation was refused and the document is unadapted. */
     readonly adaptationValid: boolean;
     readonly managedServices: readonly string[];
+    /** In-memory check only. Captured private values never enter report JSON. */
+    readonly checkDelivery: (plan: unknown) => void;
   };
 };
 
-/**
- * Normalize the same managed keys and shell references as start, without a
- * decryption key or access to process.env. Only service names leave this helper.
- * An unset shell reference is still private delivery (of an empty value) at start.
- */
-async function preflightEnvironment(opts: {
-  readonly projectRoot: string;
-  readonly projectDir: string;
-  readonly effectiveEnvName: string | null;
-  readonly services: Record<string, unknown>;
-}): Promise<readonly string[]> {
-  const metadata = await resolveProjectEnvMetadata({
-    projectRoot: opts.projectRoot,
-    projectDir: opts.projectDir,
-    envName: opts.effectiveEnvName,
-    serviceNames: Object.keys(opts.services),
-  });
-  const delivered: string[] = [];
-  for (const [name, service] of Object.entries(opts.services)) {
-    if (!isRecord(service)) {
-      continue;
+function environmentInputFinding(
+  error: unknown,
+  delivery = false
+): NativePreflightFinding {
+  const source = error instanceof NativeEnvFileRefusal ? error : undefined;
+  const inputCode =
+    source === undefined ? "managed_env_unreadable" : "environment_file_input";
+  return finding(
+    {
+      severity: "blocker",
+      gate: "cli",
+      code: delivery ? "environment_delivery" : inputCode,
+      service: source?.service,
+      field: source?.field,
+    },
+    {
+      message:
+        source?.message ??
+        nativeProjectInputRefusalMessage(error) ??
+        "The project's environment declarations or Hack managed env could not be read or decrypted.",
+      fix:
+        source === undefined
+          ? "Check the environment declarations and run hack env list to see the problem."
+          : "Check the named source and environment declaration; use owned regular files that are not writable by others.",
     }
-    const managed = new Set(
-      Object.keys(metadata?.effectiveMetadata[name] ?? {})
-    );
-    const environment = nativeServiceEnvironment(service.environment, name);
-    let hasDelivery = managed.size > 0;
-    for (const key of managed) {
-      environment[key] = null;
-    }
-    for (const [key, value] of Object.entries(environment)) {
-      if (shellReference({ key, value, managed }) !== undefined) {
-        environment[key] = null;
-        hasDelivery = true;
-      }
-    }
-    if (hasDelivery) {
-      service.environment = environment;
-      delivered.push(name);
-    }
-  }
-  return delivered.sort(byCodePoint);
+  );
 }
 
 /**
@@ -901,6 +878,7 @@ async function adaptForPreflight(opts: {
   readonly internalHostSources: Readonly<Record<string, NativeHostAliasSource>>;
   readonly hasDefaultDependencyFile: boolean;
   readonly effectiveEnvName: string | null;
+  readonly profiles: readonly string[];
 }): Promise<AdaptedProject> {
   const blocker = { severity: "blocker", gate: "cli" } as const;
   // One bounded read: the parsed document and the digest come from the same bytes.
@@ -926,26 +904,6 @@ async function adaptForPreflight(opts: {
     ...structuredClone(compose),
     services: structuredClone(compose.services),
   };
-  let managedServices: readonly string[] = [];
-  try {
-    managedServices = await preflightEnvironment({
-      ...opts,
-      services: normalized.services,
-    });
-  } catch {
-    findings.push(
-      finding(
-        { ...blocker, code: "managed_env_unreadable" },
-        {
-          message:
-            "The project's service environment declarations or Hack managed env metadata could not be read.",
-          fix: "Check the service environment declarations and run hack env list to see the problem.",
-        }
-      )
-    );
-  }
-  // Only the public document is adapted; no private value is involved. Every
-  // field is named so a helper that starts reading one fails the type check.
   let input: NativeProjectInput = {
     originalSha256: createHash("sha256").update(bytes).digest("hex"),
     normalizedComposeJson: JSON.stringify(normalized),
@@ -956,6 +914,47 @@ async function adaptForPreflight(opts: {
     environmentFiles: [],
     serviceNames: Object.keys(compose.services),
   };
+  try {
+    const prepared = await prepareNativeProjectInput({
+      ...opts,
+      envName: opts.effectiveEnvName,
+      env: process.env,
+    });
+    if (prepared.originalSha256 !== input.originalSha256) {
+      throw new Error("Compose input changed during preflight");
+    }
+    input = prepared;
+    for (const notice of prepared.environmentNotices ?? []) {
+      findings.push(
+        finding(
+          {
+            severity: "warning",
+            gate: "cli",
+            code:
+              prepared.ignoredRootDotenv &&
+              notice.service === undefined &&
+              notice.line === NATIVE_ROOT_DOTENV_IGNORED_NOTICE
+                ? "root_dotenv_ignored"
+                : "environment_notice",
+            service: notice.service,
+            field: notice.service === undefined ? undefined : "environment",
+          },
+          {
+            message: notice.line,
+            fix: "Review the named environment input; values are omitted.",
+          }
+        )
+      );
+    }
+  } catch (error: unknown) {
+    findings.push(environmentInputFinding(error));
+  }
+  const managedServices = [
+    ...new Set([
+      ...Object.keys(input.managedEnvironment),
+      ...Object.keys(input.shellEnvironment ?? {}),
+    ]),
+  ].sort(byCodePoint);
   let adaptationValid = true;
   try {
     input = await prepareNativeProjectAdaptation({
@@ -1013,6 +1012,13 @@ async function adaptForPreflight(opts: {
       originalSha256: input.originalSha256,
       originalCompose: compose,
       managedServices,
+      checkDelivery: (plan) =>
+        requireNativeShellDeliveryFits(
+          selectActiveNativeProjectInput({
+            input: mergeNativeShellEnvironment(input),
+            reviewedPlan: plan,
+          })
+        ),
       normalizedComposeJson: input.normalizedComposeJson,
       services:
         isRecord(adapted) && isRecord(adapted.services) ? adapted.services : {},
@@ -1095,35 +1101,6 @@ async function collectNativeCliFindings(opts: {
         hasHostDependencies: opts.hasHostDependencies,
         emulated: opts.adapted.emulated,
       })
-    );
-  }
-  const managedEnv = await projectEnvConfigExists({
-    projectDir: opts.projectDir,
-  }).catch(() => null);
-  if (managedEnv === null) {
-    found.push(
-      finding(
-        { ...blocker, code: "managed_env_unreadable" },
-        {
-          message: "The project's Hack managed env files could not be read.",
-          fix: "Run hack env list to see the problem.",
-        }
-      )
-    );
-  } else if (
-    !managedEnv &&
-    ((await exists(join(opts.projectDir, ".env"))) ||
-      (await exists(join(opts.projectRoot, ".env"))))
-  ) {
-    found.push(
-      finding(
-        { ...blocker, code: "dotenv_without_managed_env" },
-        {
-          message:
-            "The project has a .env file and no Hack managed env. Native does not read .env files.",
-          fix: "Migrate it with hack doctor --migrate-env-config, or remove the file.",
-        }
-      )
     );
   }
   if (!opts.sharedSource) {
@@ -1391,6 +1368,33 @@ async function collectNativeRuntimeFindings(opts: {
   if (!(isRecord(reply) && isRecord(reply.plan))) {
     return { review: { status: "unavailable" }, findings: [] };
   }
+  if (
+    !nativeEnvironmentUnsetsReviewed({
+      compose: { services: opts.adapted.services },
+      plan: reply.plan,
+    })
+  ) {
+    return {
+      review: {
+        status: "unavailable",
+        code: "native_environment_unset_unavailable",
+      },
+      findings: [
+        finding(
+          {
+            severity: "blocker",
+            gate: "runtime",
+            code: "native_environment_unset_unavailable",
+          },
+          {
+            message:
+              "The selected native runtime cannot confirm explicit environment removals.",
+            fix: "Update the selected native runtime and retry; no VM was started.",
+          }
+        ),
+      ],
+    };
+  }
   const services = Object.keys(opts.adapted.services).filter((name) =>
     SERVICE.test(name)
   );
@@ -1564,6 +1568,18 @@ export type NativePreflightOptions = {
   readonly invoke?: typeof invokeNativeRuntime;
 };
 
+function deliveryFindings(
+  document: NonNullable<AdaptedProject["document"]>,
+  plan: unknown
+): NativePreflightFinding[] {
+  try {
+    document.checkDelivery(plan);
+    return [];
+  } catch (error: unknown) {
+    return [environmentInputFinding(error, true)];
+  }
+}
+
 /** Runs both gates over one project and merges their findings. */
 export async function collectNativePreflight(
   opts: NativePreflightOptions
@@ -1602,6 +1618,7 @@ export async function collectNativePreflight(
         invoke: opts.invoke,
       });
       if (runtime.plan) {
+        cli.push(...deliveryFindings(adapted.document, runtime.plan));
         cli.push(
           ...routeFindings({
             plan: runtime.plan,

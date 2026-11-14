@@ -111,6 +111,7 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { boundedTimeoutMs } from "./process-deadline.ts";
 import {
   parseEnvConfigSelection,
   readProjectDefaultEnvConfig,
@@ -530,6 +531,10 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
+  /** Private same-filesystem staging for snapshot-owned upgrade writes. */
+  readonly stagingDirectory?: string;
+  /** Last snapshot identity check before atomic publication. */
+  readonly beforePublish?: () => Promise<void>;
   /** Test seam; see {@link HackDirGitignoreWriteAccess}. */
   readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
 }): Promise<HackDirGitignoreEnsureResult> {
@@ -554,8 +559,13 @@ export async function ensureHackDirGitignore(opts: {
   }
   await replacePrivateFileAtomic({
     ...options,
+    staging:
+      opts.stagingDirectory === undefined
+        ? undefined
+        : { directory: opts.stagingDirectory },
     text: next,
     mode: current ? current.mode & 0o777 : 0o644,
+    beforeRename: opts.beforePublish,
   });
   return { changed: true, readOnly: false };
 }
@@ -685,7 +695,7 @@ function hackDirGitignoreFileOptions(opts: {
   };
 }
 
-function mergeHackDirGitignore(opts: {
+export function mergeHackDirGitignore(opts: {
   readonly existing: string | null;
 }): string {
   return mergeManagedGitignoreBlock({
@@ -775,6 +785,17 @@ function toGitProbePath(opts: {
   return relativePath.startsWith("../") ? relativePath : `./${relativePath}`;
 }
 
+/** Bound on a git ignore/tracking probe; a slower git reads as unknown. */
+const GIT_PROBE_TIMEOUT_MS = 10_000;
+
+/** The probe's timeout within any process deadline; at least 1 ms (Bun's 0 means none). */
+function gitProbeTimeoutMs(): number {
+  return Math.max(
+    1,
+    boundedTimeoutMs(GIT_PROBE_TIMEOUT_MS) ?? GIT_PROBE_TIMEOUT_MS
+  );
+}
+
 async function isGitTrackedProjectEnvPath(opts: {
   readonly projectRoot: string;
   readonly path: string;
@@ -797,6 +818,9 @@ async function isGitTrackedProjectEnvPath(opts: {
       stderr: "ignore",
       stdin: "ignore",
       stdout: "ignore",
+      // A hung git is unknown (null), never a wait without end.
+      timeout: gitProbeTimeoutMs(),
+      killSignal: "SIGKILL",
     });
   } catch {
     return null;
@@ -839,6 +863,9 @@ export async function isGitIgnoredProjectEnvPath(opts: {
       stderr: "ignore",
       stdin: "ignore",
       stdout: "ignore",
+      // A hung git is unknown (null), never a wait without end.
+      timeout: gitProbeTimeoutMs(),
+      killSignal: "SIGKILL",
     });
   } catch {
     return null;
@@ -4603,6 +4630,8 @@ async function isGitTrackedProjectEnvPathAnyCase(opts: {
       stderr: "ignore",
       stdin: "ignore",
       stdout: "pipe",
+      timeout: gitProbeTimeoutMs(),
+      killSignal: "SIGKILL",
     });
     const [listed, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
@@ -10408,6 +10437,55 @@ function collectLegacyEncryptedBackendCleanupCandidates(opts: {
   }
 
   return [...candidates].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Read-only preview for `hack upgrade snapshot` (HACK-2189): the legacy
+ * overlays a migration of this project would convert into env layers, from
+ * the migration's own selection (files plus overlays only the secret store
+ * holds). Writes and provisions nothing, and returns names only. When the
+ * contract is absent or the migration would refuse, the file-discovered
+ * overlays (what an undeclared-dotenv migration converts).
+ */
+/**
+ * Read-only (HACK-2189): the overlays a migration of this project finds
+ * without its secret store: `.env.<name>` files and the configured default
+ * overlay, exactly as the migration discovers them. Empty when the
+ * directory cannot be read.
+ */
+export async function discoverLegacyMigrationOverlays(opts: {
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  return await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  }).catch(() => [] as string[]);
+}
+
+export async function previewLegacyMigrationOverlayNames(opts: {
+  readonly projectDir: string;
+  readonly projectName: string;
+}): Promise<readonly string[]> {
+  const discovered = await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  }).catch(() => [] as string[]);
+  const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  if (!contract.exists || contract.parseError !== undefined) {
+    return discovered;
+  }
+  try {
+    return (
+      await selectContractMigrationOverlays({
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
+        contract: contract.contract,
+        composeRepairFollows: true,
+      })
+    ).overlayNames;
+  } catch {
+    return discovered;
+  }
 }
 
 /**

@@ -54,11 +54,11 @@ const SETTINGS_BLOCKER = { severity: "blocker", gate: "cli" } as const;
  * `hack doctor --native-preflight`: list every blocker and note for running
  * this Compose project on the native backend. Read-only for the project.
  *
- * Exit status follows the findings, not the review: 0 when no blocker was
+ * Exit status follows the findings, not the review: 0 when no blocker or outstanding consent was
  * found, 1 otherwise. A skipped or unavailable review is not a blocker, so it
  * exits 0 with `ready: false`. `--json` prints the report in the standard
  * `ok: true` envelope either way: the command worked, and `ready` and
- * `blockers` carry the verdict.
+ * `blockers`/`consent_needed` carry the verdict.
  */
 export async function runNativePreflightCommand(opts: {
   readonly startDir: string;
@@ -66,6 +66,29 @@ export async function runNativePreflightCommand(opts: {
   readonly profiles: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<number> {
+  const report = await collectProjectNativePreflight(opts);
+  if (opts.json) {
+    emitCliResult({ result: okResult({ data: report }) });
+  } else {
+    process.stdout.write(renderNativePreflightReport(report));
+  }
+  return report.blockers.length === 0 && report.consent_needed.length === 0
+    ? 0
+    : 1;
+}
+
+/**
+ * The native preflight report for the project at `startDir`, without
+ * printing it. `runtimeReview: false` skips the native runtime's own review
+ * (it runs the native binary and writes a temporary directory), leaving
+ * only the in-process checks (HACK-2189 upgrade check).
+ */
+export async function collectProjectNativePreflight(opts: {
+  readonly startDir: string;
+  readonly profiles: readonly string[];
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly runtimeReview?: boolean;
+}): Promise<Awaited<ReturnType<typeof collectNativePreflight>>> {
   const env = opts.env ?? process.env;
   const project = await findProjectContext(opts.startDir).catch(
     (error: unknown) => {
@@ -205,14 +228,7 @@ export async function runNativePreflightCommand(opts: {
     hasDefaultDependencyFile,
     effectiveEnvName: effectiveEnv,
     profiles: opts.profiles,
-    runtime: selectedRuntime(env),
+    runtime: opts.runtimeReview === false ? null : selectedRuntime(env),
   });
-  if (opts.json) {
-    emitCliResult({ result: okResult({ data: report }) });
-  } else {
-    process.stdout.write(renderNativePreflightReport(report));
-  }
-  return report.blockers.length === 0 && report.consent_needed.length === 0
-    ? 0
-    : 1;
+  return report;
 }

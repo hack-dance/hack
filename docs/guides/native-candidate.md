@@ -208,8 +208,8 @@ symbolic link. Unreadable, changing or oversized input is reported as
 It changes nothing in the project and starts nothing: no VM, no image pull, no
 lifecycle hook. It accepts only `--path`, `--profile` and `--json`. The report
 never prints authored values. A finding names a closed code, a service and a
-field; environment values, label keys and values, paths and image names are
-left out.
+field; environment values, label keys and values and image names are left out.
+Environment-file findings may name their source path.
 
 The runtime review half needs a native runtime, so run the preflight from the
 `hack-next` launcher for the full list. Without native selection only the CLI's
@@ -225,10 +225,11 @@ Preflight and start use one file-local admission collector. Preflight lists its
 refusals; start returns its first refusal before acquiring runtime inputs. This
 can change which reason start reports first when a file has several problems.
 Review assumes routing is enrolled and cache initializers are admitted. The
-readiness defaults are checked against the CLI over shared fixtures. Managed env
-metadata and eligible shell references contribute service names only, so restart
-policies incompatible with private delivery are blockers even when no decryption
-key is available. Shell values and credentials are never read for this check.
+readiness defaults are checked against the CLI over shared fixtures. Preflight
+uses start's environment preparation, including allowed shell values, guarded
+env-file reads and managed-env decryption. A missing decryption key is a blocker.
+Only names and paths reach the report. Restart policies incompatible with private
+delivery are blockers.
 Credential adapters, image defaults, occupied ports and other inputs only known
 at start remain runtime boundaries.
 AWS/gcloud credentials are added after static review; a restart policy on a
@@ -258,11 +259,11 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
     {
       "severity": "blocker",
       "gate": "cli",
-      "code": "env_file",
+      "code": "environment_file_input",
       "service": "web",
       "field": "env_file",
-      "message": "The service uses env_file, which native does not read.",
-      "fix": "Move its variables into Hack managed env with hack env set --service, or run hack doctor --migrate-env-config."
+      "message": "A required environment file is missing or unsafe; values omitted.",
+      "fix": "Check the named source; use an owned regular file that is not writable by others."
     }
   ],
   "warnings": []
@@ -297,10 +298,10 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
   `internal_hosts_without_dependencies`, `external_network`, `external_volume`,
   `reserved_label`, `unsupported_build`, `foreign_platform`,
   `invalid_service_name`, `invalid_service`, `build_requires_opt_in`,
-  `unsupported_build_form`, `emulated_build`, `env_file`, `missing_image`,
+  `unsupported_build_form`, `emulated_build`, `environment_file_input`, `missing_image`,
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
-  `dotenv_without_managed_env`, `shared_source_grant_required`,
+  `environment_delivery`, `shared_source_grant_required`,
   `route_probe_required` and `too_many_bridges`. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
@@ -327,12 +328,10 @@ The standalone preflight does not cover:
 - `--env`, and a retained run's environment. It uses the project's default
   environment to select the per-env adaptation and dependency files; `hack up`
   uses `--env` when given, or the environment of a run it resumes.
-- Checks that need secret values or a resolved managed environment: a build
-  argument that carries a stored secret, a managed variable whose name is not
-  a valid environment name, and managed env that fails to resolve. `hack up`
-  also replaces the `environment` entries that managed env supplies before its
-  review, so a malformed authored value under such a key is a blocker here and
-  not there.
+- Credential-adapter results and build arguments that only those later results
+  can reveal as private. File and managed-environment admission now uses the same
+  preparation as start, including decryption and permitted shell lookups; a
+  missing project key is a closed preflight blocker.
 - Image pinning. `hack up` reviews images by content ID after it has admitted
   and pulled them; the preflight reviews the references as written.
 - What only a start can find: an image that cannot be pulled or admitted, a
@@ -1555,67 +1554,87 @@ by an older bundle, so clean up such a graph with the bundle that started it.
 - A reference to a Hack-managed value of the same service, for example
   `${TOKEN:-fallback}` when Hack delivers `TOKEN` to that service, refuses with
   `execution_environment_owner`. Managed values are delivered privately and are
-  never interpolated into commands, users, health checks or other values, and a
+  never interpolated into commands, users or health checks, and a
   default is never used in their place. Declare the key bare (`TOKEN:` or `- TOKEN`)
-  to receive the managed value.
+  to receive the managed value. Global managed values can interpolate privately
+  inside service environment and env-file values.
 
-### Shell variables in service environment
+### Environment files and interpolation
 
-Compose reads a variable reference from the shell that runs it. The native runtime
-reads no ambient environment, so two forms of a service `environment` entry could
-never start on native. `hack up` and `hack restart` resolve those forms from the
-caller's environment. Only source variables named by the project's Compose file
-are read; the ambient environment is never forwarded as a whole.
+Native `up` and `restart` accept Compose `env_file` strings, lists and
+long-form `path`/`required`/`format` entries. Optional missing files are skipped;
+unreadable or unsafe files still refuse. `format: raw` preserves quotes and dollar
+signs. Files are read relative to the selected Compose file and must stay inside
+this project root. Reads do not follow symlinks, refuse other-owner or multi-link
+files, and require owner-read access with no group/other write access. Ordinary
+0644 files work; Hack never changes permissions.
 
-Every native start prints one line to stderr naming the forwarded source
-variables, or `(none)`, including detached and JSON starts. Names are deduplicated
-and sorted; values are never printed. Foreground starts also report unset
-references separately. There is no consent prompt in this feature.
+The automatic interpolation file is `.env` beside the Compose file (normally
+`.hack/.env`). A sibling `.env.state.json` causes a refusal: the file may be
+obsolete output of `hack env materialize`. Use current Hack env layers, then
+remove obsolete materialized output deliberately. A root `.env` outside the
+Compose directory is not read; start and preflight report once that it is
+ignored. Dotenv alone does not inject values. The adjacent `.env` is now read on
+every native start and preflight, even with managed env. Symlinks, other-owner or
+group/other-writable files and project ancestors refuse, as do `COMPOSE_*` and
+`HACK_*` entries and dotted/dashed identifiers. Use an owned regular file,
+deliberately correct permissions and rename unsupported keys, or use managed env.
+An ignored root `.env` still may not overlap a native build context or
+Dockerfile input: Buildx reads raw host files. Such a build now refuses even
+without `env_file` or adjacent `.env`; use disjoint inputs or a prebuilt image.
 
-| Entry | Shell has the variable | Shell does not |
-| --- | --- | --- |
-| `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose. |
-| `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The service gets an empty value. Compose would leave it unset instead. |
+| Source | Precedence and delivery |
+| --- | --- |
+| Hack-managed values | Win the final container destination, as Hack's Compose override does. Global values also win interpolation; service-scoped values are not ambient sources. |
+| Service `environment` | Overrides env-file values, including explicit empty values and unresolved bare keys. |
+| `env_file` | Processed in order. Later resolved declarations win. An unresolved bare file key keeps the previous value. |
+| Image defaults | Apply unless replaced or explicitly unset by service environment. |
 
-An entire `environment: null` declaration, including an `environment:` key with
-only comments beneath it, is empty. Preflight and start both accept it; managed
-keys are still added as private references when configured for the service.
+Within service environment, managed globals win over allowed caller-shell values,
+then dotenv. Within env files those sources win over resolved service environment,
+then earlier file assignments. Native supports Compose interpolation operators,
+embedded references, single-quoted file literals and double-quoted file escapes.
+A missing plain reference produces an empty value with a names-only notice. A
+bare service key with no source unsets the key, including an image default; it no
+longer substitutes empty. The selected runtime must confirm these unset names.
+Changing source presence can change reviewed names and plan identity; changing
+only values cannot.
+Service defaults such as `${PORT:-3000}` now take an allowed exported shell
+value. Shell presence can therefore change the normalized declaration and plan
+identity; the value stays private. Unset the variable to retain the fallback.
 
-A value read from the shell is never written to the reviewed Compose document, a
-plan, a receipt, an env fingerprint or a log. The entry stays a reference and the
-value travels in the same private delivery as Hack managed env. Only the variables
-these entries name are read; nothing else of your environment is. The reviewed
-document is the same whether or not the variable is set, so a start from another
-shell resumes the same plan.
+File and shell values stay in memory outside env fingerprints and travel only
+through private stdin and the expiring guest allocation. The normalized document
+contains bare names, never those values. Each start reports forwarded shell names
+on stderr, including JSON starts, without values. Only referenced, allowed shell
+variables are read. Hack key material is refused; `HACK_*` copies from files or
+shell references are refused. Authored public runtime-metadata literals retain
+their existing behavior. Shell
+credential names under `AWS_*`, `GOOGLE_*` and `CLOUDSDK_*` remain excluded.
+Literal cloud entries in an explicit env file are allowed unless a selected
+credential adapter owns that destination.
 
-What stays as it was:
+In projects declaring `env_file` or containing an adjacent `.env`, interpolation
+of private sources in public fields (images, commands, ports,
+labels, builds, mounts, users and healthchecks) refuses before effects, including
+when the expression contains a default. It never silently selects a different
+fallback. Unset the ambient source or write the public value literally. Projects
+with neither file source retain their previous public-field defaults, including
+`${PORT:-3000}` when the caller exports `PORT`.
+Runtime-bound `COMPOSE_PROJECT_NAME` remains public; private expressions
+cannot combine it with other sources. Pure literal/default expressions that read
+no private source retain their existing runtime behavior. File-derived private
+values inherit the launcher's restart-policy limits; an edit to file values needs
+an explicit `hack restart` to reach an existing run.
 
-- **A reference with a default or another operator** (`${PORT:-3000}`, `${X:+alt}`,
-  `${X-d}`, `${X:?err}`). The runtime resolves it without your shell, so
-  `${PORT:-3000}` is `3000` even when your shell sets `PORT`. Compose would use the
-  shell's value. Write `PORT: ${PORT}` to take the value from the shell.
-- **A reference inside a longer string** (`http://${HOST}:3000`), and a reference in
-  any other field (`image`, `ports`, `command`, `volumes`, labels). A reference with
-  no default there still fails the start with `execution_environment_missing`.
-- **A variable Hack manages for the service.** It comes from managed env, never from
-  the shell, and an entry that references a managed variable is still refused by the
-  runtime (`execution_environment_owner`).
-- **`COMPOSE_PROJECT_NAME`.** The runtime supplies it; it is not read from the shell.
-- **Hack's own variables** (`HACK_*`), as the entry's name or as the variable it
-  references. They include the key that decrypts a project's managed secrets, so a
-  Compose file can never copy one into a container.
-- **Cloud names** (`AWS_*`, `GOOGLE_*`, `CLOUDSDK_*`). Long-lived shell credentials
-  are not copied into containers; use the scoped AWS and gcloud delivery described
-  below. The rule goes by prefix, so it also covers non-secret names such as
-  `AWS_REGION` and `GOOGLE_CLOUD_PROJECT`.
-
-  An entry under either rule is left as written. It does not pass through as it
-  would with Compose: the start still fails with `execution_environment_missing`,
-  as it did before.
-- **A project `.env` file.** Hack does not parse it for shell references. A launch
-  runtime such as Bun may preload dotenv into its process environment. Only
-  explicitly referenced, non-excluded names are read from that environment;
-  a missing reference is reported as unset.
+See [the full environment-file contract](../native/environment-files.md) for file
+bounds, materialization, source exclusions and intentionally unsupported forms.
+Syntax errors name the file and line; notices name the destination key rather
+than tokens from values. The build-argument guard compares only nonempty managed
+values explicitly marked `secret: true`, with no minimum length; ordinary file
+and shell values do not join it. Preflight now reads allowed caller variables
+and decrypts managed env; a missing key is a reported blocker with recovery
+guidance, not a failure to produce the report.
 
 Three consequences of the private delivery:
 
@@ -2007,10 +2026,10 @@ under native `hack up -d` above. `hack restart --detach` still refuses with
 `E_USAGE`: run `hack restart` in the foreground in its own terminal and use
 `hack ps` and `hack logs` from another. Routed services and host dependencies require the
 explicit native selections described below. Unsupported Compose or environment input
-(for example a service `env_file`, or a project `.env` without managed env) and
+(for example an unsafe environment file or private interpolation in a public field) and
 unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`. The input
 refusal names its cause and, where known, the service and Compose field (for
-example `service api field env_file`), never values or file contents. Secret
+example `service api field env_file` and its source path), never values or file contents. Secret
 managed env without a project env key refuses with `E_CONFIG_INVALID` and names the
 recovery actions; other unreadable managed env refuses with `E_CONFIG_INVALID`
 without layer excerpts. Invalid branch
@@ -4113,12 +4132,15 @@ are allowed.
 With the same explicit native binary/home selection used for `up`, run
 `hack exec --path /absolute/project SERVICE -- /bin/echo hello`. The command targets
 the current owned project/branch mapping, preserves binary stdout/stderr and the
-command exit code, and never falls back to Compose. It is noninteractive, with a
-30-second observation budget; a timeout may leave the command running and is not
+command exit code, and never falls back to Compose. With piped input/output or
+`HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
+a timeout may leave the command running and is not
 retried. `--env` and `--profile` changes are refused. A command name such as `bun`
-uses the selected container's PATH; no host PATH or implicit shell is used. Normal
-`hack exec` resolves the saved startup overlay and AWS profile again, and delivers
-fresh selected-service values through private stdin.
+uses the selected container's PATH; no host PATH or implicit shell is used. For
+adopted Compose services, `hack exec` resolves the saved startup overlay and AWS profile again, and delivers
+fresh selected-service managed, allowed caller-shell and env-file values through
+private stdin. These values can differ from startup; use `hack restart` when
+the running service must receive changed inputs too.
 Each request binds the reviewed plan, current container and generation, and has
 its own short ingress lifetime. Startup leases and files are not renewed or rewritten.
 The allocation is selected from the current container's exact read-only mounts and
@@ -4127,8 +4149,88 @@ by earlier restores do not compete with this selection; pending, mismatched or
 ambiguous mounted allocations are refused.
 Legacy mappings without explicit selectors and services with older launcher mounts
 refuse before execution; restart with the matching candidate to adopt this path.
-Services without managed values use ordinary exec. The native live qualification
+Services with no private values to deliver use ordinary exec. The native live qualification
 of this fresh-delivery path remains separate from its unit and transport tests.
+
+With terminal stdin and stdout in the foreground, `hack exec SERVICE -- /bin/sh` selects interactive
+exec. It streams both guest output channels through the terminal, forwards resize
+and terminal control bytes, and releases the provider mutation lease after attach.
+`down` and `restart` can proceed while the session is open. Authored projects use
+their foreground owner for admission and inherit startup environment values.
+
+For adopted services with managed values, the pinned guest launcher disables echo
+and enters raw mode before announcing readiness. Hack then sends a bounded base64
+private envelope, waits for the launcher's acknowledgement after terminal
+restoration, and only then forwards user input. The envelope cannot contain Docker
+detach-control bytes. Old launcher mounts refuse before any value is sent; restart
+the service with the matching runtime to enable this mode, or use
+`HACK_NO_INTERACTIVE=1 hack exec SERVICE -- COMMAND` for finite exec. The launcher returns
+125 if admission or exec fails, including an exec failure after acknowledgement.
+This does not isolate values from other processes running as the same container
+user, which already share access to the command's environment.
+
+Interactive managed-env exec refuses if fresh delivery is unavailable; it does
+not reuse mounted startup values. This requirement applies only to the selected
+service: a peer service with no managed values still uses ordinary interactive exec.
+Finite exec retains its existing behavior.
+
+Normal stream closure plus a validated Engine exit returns the exit code and
+restores the terminal before attempting to retire the session receipt. A busy or
+failed receipt store preserves that known exit code silently and leaves the receipt
+for later reconciliation. Surviving background processes are the
+user's responsibility, as with Docker. Lost connections or processes before a
+known outcome, uncertain create/start dispatch and failed inspection retain a
+value-free receipt and `session_cleanup_uncertain` with the attempted session ID.
+No uncertain command is replayed.
+If an authored owner disconnects during handoff or its reply cannot be validated,
+Hack checks only the attempted session ID for retained evidence. A confirmed
+refusal before the intent does not query unrelated sessions.
+
+| stdin | stdout | Foreground group | `HACK_NO_INTERACTIVE` | Selection |
+| --- | --- | --- | --- | --- |
+| TTY | TTY | Yes | unset or not `1` | Interactive |
+| TTY | TTY | No (`&` job) | any | Existing finite exec |
+| TTY | redirected | any | any | Existing finite exec |
+| pipe or file | any | any | any | Existing finite exec |
+| any | any | any | `1` | Existing finite exec |
+
+`hack exec-sessions` lists current service names and run/session IDs without
+taking a mutation lock or writing state. It works after project mappings are
+retired because it selects the native home. `hack exec-sessions --reconcile`
+clears only a validated known exec exit, exact same-boot container absence or
+proven stopped-boot evidence; intents without an exec ID require one of the
+latter two proofs. It reports the exact remaining count and IDs after its bounded
+pass. Use `hack down` for an affected project if uncertainty remains. A new boot
+alone is not proof. Ordinary successful exec does not consume the 1024 retained
+session limit when retirement succeeds. `hack down` names remaining receipts only
+for the selected run; receipts for other runs are reported as a count without
+their service names or run/session IDs.
+
+### Interactive exec acceptance
+
+On the built current-branch runtime and CLI, exercise authored and adopted services:
+
+- A shell with foreground/background jobs; Ctrl-C, Ctrl-Z, `fg` and resize.
+- A 2000-line burst and exit 7, followed by finite exec, second and third terminal
+  sessions, `down` and `up -d`; ordinary exits leave no retained receipts.
+- `hack exec SERVICE -- stty size` reports the host terminal's dimensions on its
+  first output, before any subsequent window resize.
+- Ctrl-P Ctrl-Q disconnect, retaining its UUID and cleanup remedy.
+- A background process that survives shell exit; a validated shell exit is silent
+  and retires its receipt under the Docker-compatible policy.
+- `down` and restart from another terminal while the session is active; the owner
+  stays responsive and the old session never attaches to the new generation.
+- Native child death and frontend death, including an idle terminal; attributes
+  restore, owned children settle, and uncertain sessions remain discoverable.
+- VM loss, followed by exact stopped-boot proof; a new boot alone cannot retire
+  an older receipt.
+- Fresh adopted env with a synthetic canary and detach-control bytes; no private
+  bytes echo, the intended command receives the values, and an old launcher refuses
+  before delivery.
+- In a mixed adopted project, interactive exec also works on a service without
+  managed values while another service has a managed environment.
+
+Linux PTY and fake-Engine tests do not qualify these real Engine/VM effects.
 
 
 Managed HTTPS authority startup uses the same five-second provider-lock admission

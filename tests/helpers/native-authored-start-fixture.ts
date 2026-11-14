@@ -800,10 +800,15 @@ process.exit(await child.exited);
       try {
         process.kill(-group, 0);
       } catch (error) {
-        if ((error as { code?: unknown }).code === "ESRCH") {
+        const code = (error as { code?: unknown }).code;
+        if (code === "ESRCH") {
           return true;
         }
-        throw error;
+        // macOS can deny a probe while a zombie waits to be reaped. Keep
+        // waiting for actual absence; EPERM itself proves no retirement.
+        if (code !== "EPERM") {
+          throw error;
+        }
       }
       await Bun.sleep(50);
     }

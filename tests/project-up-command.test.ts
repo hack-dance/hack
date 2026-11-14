@@ -12,14 +12,20 @@ type CapturedRunResult = {
 
 let tempDir: string | null = null;
 let originalLogger: string | undefined;
+let originalHackHome: string | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-up-missing-project-"));
   originalLogger = process.env.HACK_LOGGER;
   process.env.HACK_LOGGER = "console";
+  // `up` reads the registry and records activity in the Hack home: keep both
+  // in the fixture, never the contributor's.
+  originalHackHome = process.env.HACK_HOME;
+  process.env.HACK_HOME = join(tempDir, "hack-home");
 });
 
 afterEach(async () => {
+  restoreEnv("HACK_HOME", originalHackHome);
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;

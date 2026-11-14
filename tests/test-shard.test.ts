@@ -831,11 +831,17 @@ describe("test shard runner", () => {
 
   test("deferred file summary names the selected macOS evidence gap", () => {
     const macos = "tests/native-authored-project-start.test.ts";
-    const summary = deferredMacosSummary([macos]);
+    const both = "tests/local-network-hint.test.ts";
+    const summary = deferredMacosSummary([macos, both]);
     expect(summary).toContain("deferred to the integration run");
     expect(summary).toContain(macos);
     expect(summary).toContain("1 selected");
     expect(summary).not.toContain("packages/db/tests/smoke.test.ts");
+    const [deferred, onLinux] = summary.split("### Files also run on Linux");
+    expect(deferred).toContain(macos);
+    expect(deferred).not.toContain(both);
+    expect(onLinux).toContain(both);
+    expect(onLinux).toContain("only their macOS coverage is deferred");
   });
 
   test("prints a start and a result line naming each file", async () => {
@@ -1167,9 +1173,10 @@ describe("hosted test CI fan-in", () => {
     owned.push(root);
     const linux = "packages/db/tests/smoke.test.ts";
     const macos = "tests/native-authored-project-start.test.ts";
+    const both = "tests/local-network-hint.test.ts";
     const env = {
       ...process.env,
-      HACK_TEST_SELECTION: JSON.stringify([linux, macos]),
+      HACK_TEST_SELECTION: JSON.stringify([linux, macos, both]),
       HACK_TEST_DRAFT: "true",
       HACK_TEST_DEFER_MACOS: "true",
       GITHUB_STEP_SUMMARY: join(root, "summary"),
@@ -1189,7 +1196,7 @@ describe("hosted test CI fan-in", () => {
       expect(child.exitCode, child.stderr.toString()).toBe(0);
       files.push(...child.stdout.toString().trim().split("\n").filter(Boolean));
     }
-    expect(files).toEqual([linux]);
+    expect(files.sort()).toEqual([linux, both].sort());
     const report = Bun.spawnSync(
       [process.execPath, "scripts/test-shard.ts", "report-deferred"],
       { cwd: repoRoot, env, stdout: "pipe", stderr: "pipe" }
@@ -1199,6 +1206,8 @@ describe("hosted test CI fan-in", () => {
     expect(summary).toContain(macos);
     expect(summary).not.toContain(linux);
     expect(summary).toContain("deferred to the integration run");
+    expect(summary.split("### Files also run on Linux")[0]).not.toContain(both);
+    expect(summary.split("### Files also run on Linux")[1]).toContain(both);
     const wrong = Bun.spawnSync(
       [
         process.execPath,
@@ -1306,6 +1315,7 @@ describe("hosted test CI fan-in", () => {
       "test-shard",
       "test-focus",
       "linux-process-lifetime",
+      "config-compiler",
     ]);
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
@@ -1314,6 +1324,12 @@ describe("hosted test CI fan-in", () => {
     expect(gate?.env?.SHARD_RESULT).toBe("${{ needs.test-shard.result }}");
     expect(gate?.env?.FOCUS_RESULT).toBe("${{ needs.test-focus.result }}");
     expect(gate?.env?.CHANGES_RESULT).toBe("${{ needs.changes.result }}");
+    expect(gate?.env?.COMPILER_RESULT).toBe(
+      "${{ needs.config-compiler.result }}"
+    );
+    expect(gate?.env?.COMPILER_ENABLED).toBe(
+      "${{ needs.changes.outputs.compiler_hosts != '[]' }}"
+    );
     expect(gate?.env?.LIFETIME_RESULT).toBe(
       "${{ needs.linux-process-lifetime.result }}"
     );
@@ -1358,6 +1374,8 @@ describe("hosted test CI fan-in", () => {
           TEST_FOCUS: focus,
           SHARD_RESULT: shards,
           FOCUS_RESULT: focused,
+          COMPILER_ENABLED: "false",
+          COMPILER_RESULT: "skipped",
           LIFETIME_ENABLED: "false",
           LIFETIME_RESULT: "skipped",
         },
@@ -1389,6 +1407,8 @@ describe("hosted test CI fan-in", () => {
           SUITE: "true",
           SHARD_RESULT: "success",
           FOCUS_RESULT: "success",
+          COMPILER_ENABLED: "false",
+          COMPILER_RESULT: "skipped",
           LIFETIME_ENABLED: enabled,
           LIFETIME_RESULT: result,
         },
@@ -1396,6 +1416,38 @@ describe("hosted test CI fan-in", () => {
         timeout: 5000,
       });
       expect(run.exitCode, `lifetime enabled=${enabled} result=${result}`).toBe(
+        exitCode
+      );
+    }
+    for (const [enabled, result, exitCode] of [
+      ["true", "success", 0],
+      ["true", "failure", 1],
+      ["true", "cancelled", 1],
+      ["true", "skipped", 1],
+      ["true", "", 1],
+      ["false", "skipped", 0],
+      ["false", "failure", 1],
+      ["false", "success", 1],
+      ["", "skipped", 1],
+    ] as const) {
+      const run = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
+        env: {
+          ...process.env,
+          PR_DRAFT: "false",
+          CHANGES_RESULT: "success",
+          SCOPE: "fixture",
+          SUITE: "true",
+          SHARD_RESULT: "success",
+          FOCUS_RESULT: "success",
+          LIFETIME_ENABLED: "false",
+          LIFETIME_RESULT: "skipped",
+          COMPILER_ENABLED: enabled,
+          COMPILER_RESULT: result,
+        },
+        stdout: "ignore",
+        timeout: 5000,
+      });
+      expect(run.exitCode, `compiler enabled=${enabled} result=${result}`).toBe(
         exitCode
       );
     }

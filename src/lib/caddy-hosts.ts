@@ -69,6 +69,66 @@ export async function resolveGlobalCaddyIp(): Promise<string | null> {
   return typeof ip === "string" && ip.length > 0 ? ip : null;
 }
 
+/**
+ * The global Caddy container's ingress address for an observe-only read
+ * (`hack global status --observe`): the address; null when Docker confirms
+ * there is no such container or it has no ingress address; "unknown" when a
+ * read fails or does not answer within `timeoutMs`. Only `docker ps` and
+ * `docker inspect`.
+ */
+export async function observeGlobalCaddyIp(opts: {
+  readonly timeoutMs: number;
+}): Promise<string | null | "unknown"> {
+  const read = async (cmd: readonly string[]) =>
+    await exec(cmd, { stdin: "ignore", timeoutMs: opts.timeoutMs }).catch(
+      () => null
+    );
+  const ps = await read([
+    "docker",
+    "ps",
+    "-q",
+    "--filter",
+    `label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT}`,
+    "--filter",
+    "label=com.docker.compose.service=caddy",
+  ]);
+  if (ps === null || ps.exitCode !== 0) {
+    return "unknown";
+  }
+  const id = ps.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!id) {
+    return null;
+  }
+  const inspect = await read([
+    "docker",
+    "inspect",
+    "--format",
+    "{{json .NetworkSettings.Networks}}",
+    id,
+  ]);
+  if (inspect === null || inspect.exitCode !== 0) {
+    return "unknown";
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inspect.stdout);
+  } catch {
+    return "unknown";
+  }
+  if (!isRecord(parsed)) {
+    return "unknown";
+  }
+  const network = parsed[DEFAULT_INGRESS_NETWORK];
+  if (!isRecord(network)) {
+    return null;
+  }
+  const ip = network.IPAddress;
+  return typeof ip === "string" && ip.length > 0 ? ip : null;
+}
+
 export async function readInternalExtraHostsIp(opts: {
   readonly projectDir: string | null;
 }): Promise<string | null> {

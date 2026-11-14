@@ -508,11 +508,16 @@ export const MACOS_POOL_FILES: Readonly<Record<string, string>> = {};
  * Files that need both hosts, with the reason: their macOS run (they match
  * {@link PLATFORM_SENSITIVE_SOURCE} or are listed in {@link MACOS_POOL_FILES})
  * would otherwise be their only one, while tests in them skip off Linux or
- * observe Linux-only behavior. They are planned in the macOS pool, which
+ * observe Linux-only behavior, or include portable CLI contracts needed on light
+ * PRs. They are planned in the macOS pool, which
  * keeps the pools a partition for the exactly-once coverage check, and are
  * added to the Linux pool as well (HACK-2142).
  */
 export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
+  "tests/lifecycle-fifo-retirement.test.ts":
+    "FIFO retirement needs Linux process groups and macOS zombie-probe EPERM coverage",
+  "tests/lifecycle-zombie-retirement.test.ts":
+    "held zombies return probe success on Linux and can return EPERM on macOS",
   "tests/v4-upgrade.test.ts":
     "historical upgrade must preserve keys and values on Linux and macOS",
   "tests/upgrade-installer.test.ts":
@@ -527,6 +532,8 @@ export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
     "detached start differs on Linux (setsid, /proc liveness)",
   "tests/daemon-socket-permissions.test.ts":
     "daemon directory trust walks host paths (macOS /var -> /private/var)",
+  "tests/local-network-hint.test.ts":
+    "portable open --json subprocess contract must gate light PRs; macOS hint behavior still needs macOS",
 };
 
 /** Parse a layout name, refused closed. */

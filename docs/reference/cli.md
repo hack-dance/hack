@@ -914,7 +914,7 @@ Manage persistent project workspaces with tmux-first onboarding
 hack session <subcommand> [options]
 ```
 
-Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work. The guided default is tmux, including `hack setup tmux` for a popup picker. Other mux backends such as zellij still exist through `sessions.mux`, but the interactive session tooling is tmux-first today.
+Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work. The guided default is tmux, including `hack setup tmux` for a popup picker. Interactive workspaces require tmux.
 
 ### Subcommands
 
@@ -1021,7 +1021,7 @@ Attach to an existing workspace
 hack session attach <workspace> [options]
 ```
 
-Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux, while zellij attaches to the named session directly.
+Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux.
 
 ### Arguments
 
@@ -1049,7 +1049,7 @@ hack session exec [options] <workspace> <command>
 
 `<command>` is one argument: quote a command that has its own arguments or flags, as in `"npm --version"`. Put Hack options before it; a leading `--` is optional.
 
-Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.
+Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane. This is useful for long-running agents, background checks, or remote follow-up work.
 
 ### Arguments
 
@@ -1235,6 +1235,8 @@ hack global install [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--plan` | Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1410,6 +1412,8 @@ hack global trust [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--plan` | Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1526,6 +1530,8 @@ hack projects <subcommand> [options]
 | `--summary` | Return compact project counts with --json; load details with --project |
 | `--timings` | Write numeric listing phase timings to stderr (requires --json) |
 | `--no-daemon` | Read runtime directly instead of the daemon cache |
+| `--observe` | Read projects without registry writes or engine contact; --runtime opts in to Docker queries (requires --json) |
+| `--runtime` | With --observe, query Docker for live state; socket contact can start an on-demand engine |
 | `--meta` | Include git/worktree/session/env metadata (implies --details) |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--all` | Include unregistered docker compose projects (best-effort) |
@@ -2069,6 +2075,7 @@ hack version [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

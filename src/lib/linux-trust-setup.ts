@@ -148,25 +148,37 @@ function toolPackage(family: LinuxDistroFamily, tool: string): string {
 }
 
 /**
- * Add the validated CA to the distribution trust store. `show` receives the
- * commands and the certificate's SHA-256 fingerprint before the prompt.
+ * Everything `hack global trust` decides about the system trust store before
+ * any root command, from one read-only look at the host (HACK-2218): either
+ * a final outcome (already trusted, or manual steps), or the exact root
+ * steps to run, with the CA bytes they take on stdin. `--plan` prints these;
+ * {@link applyLinuxSystemTrust} runs these and nothing else.
  */
-export async function applyLinuxSystemTrust(opts: {
+export type PreparedLinuxSystemTrust =
+  | { readonly status: "done"; readonly outcome: LinuxSystemTrustOutcome }
+  | {
+      readonly status: "ready";
+      readonly family: LinuxDistroFamily;
+      readonly bundlePath: string;
+      /** The vetted sudo every root step runs through. */
+      readonly sudoPath: string;
+      /** What is reported when the user does not (or cannot) confirm. */
+      readonly pending: Extract<LinuxSystemTrustOutcome, { status: "pending" }>;
+      /** Inner argv (run as `sudo env -i … <argv>`) and its stdin, in order. */
+      readonly rootSteps: readonly {
+        readonly argv: readonly string[];
+        readonly input: string | undefined;
+      }[];
+    };
+
+export async function prepareLinuxSystemTrust(opts: {
   readonly host: LinuxTrustHost;
   readonly ca: ValidatedCa;
-  /**
-   * Persistent CA path for pending/manual commands. The user's shell opens
-   * it before sudo; root accepts only bytes matching the approved digest.
-   */
   readonly manualCertPath: string;
-  readonly canPrompt: boolean;
-  readonly show: (
-    commands: readonly (readonly string[])[],
-    fingerprint256: string
-  ) => void;
-  readonly confirm: () => Promise<boolean>;
-}): Promise<LinuxSystemTrustOutcome> {
+}): Promise<PreparedLinuxSystemTrust> {
   const { host, ca } = opts;
+  const done = (outcome: LinuxSystemTrustOutcome) =>
+    ({ status: "done", outcome }) as const;
   const family = detectLinuxDistroFamily(
     await host.readFile("/etc/os-release")
   );
@@ -182,9 +194,9 @@ export async function applyLinuxSystemTrust(opts: {
   } as const;
   if (family === null) {
     if (sudoPath === null) {
-      return sudoUnavailable;
+      return done(sudoUnavailable);
     }
-    return {
+    return done({
       status: "manual",
       code: "linux_trust_distro_unknown",
       family: null,
@@ -195,97 +207,144 @@ export async function applyLinuxSystemTrust(opts: {
         sudoPath,
         tools,
       }),
-    };
+    });
   }
   const bundlePath = linuxSystemBundlePath(family);
-  const trusted = async (): Promise<LinuxSystemTrustOutcome | null> => {
-    const bundle = (await host.readFile(bundlePath)) ?? "";
-    return bundleContainsCertificate({ bundle, certPem: ca.pem })
-      ? {
-          status: "trusted",
-          family,
-          otherCaddyRoots: findOtherCaddyRoots({
-            bundle,
-            current: ca.certificate,
-          }),
-        }
-      : null;
-  };
-  const already = await trusted();
+  const already = await systemTrustState({ host, ca, family, bundlePath });
   if (already) {
-    return already;
+    return done(already);
   }
   if (sudoPath === null) {
-    return sudoUnavailable;
+    return done(sudoUnavailable);
   }
   for (const tool of requiredLinuxTrustTools(family)) {
     if (tools[tool] === null) {
-      return {
+      return done({
         status: "manual",
         code: "linux_trust_tool_missing",
         family,
         steps: [
           `${tool} is unavailable as a trusted system executable. Install or repair the ${toolPackage(family, tool)} package and system bin/sbin permissions, then rerun hack global trust.`,
         ],
-      };
+      });
     }
   }
-  const commands = linuxSystemTrustCommands({
+  return {
+    status: "ready",
     family,
-    certPath: opts.manualCertPath,
-    sha256: ca.pemSha256,
-    byteLength: Buffer.byteLength(ca.pem),
+    bundlePath,
     sudoPath,
-    tools,
-  });
-  const pending = {
-    status: "pending",
-    code: "linux_trust_system_pending",
-    family,
-    commands: linuxSystemTrustCommands({
+    pending: {
+      status: "pending",
+      code: "linux_trust_system_pending",
       family,
-      certPath: opts.manualCertPath,
-      sha256: ca.pemSha256,
-      byteLength: Buffer.byteLength(ca.pem),
-      sudoPath,
-      tools,
-    }),
-  } as const;
+      commands: linuxSystemTrustCommands({
+        family,
+        certPath: opts.manualCertPath,
+        sha256: ca.pemSha256,
+        byteLength: Buffer.byteLength(ca.pem),
+        sudoPath,
+        tools,
+      }),
+    },
+    rootSteps: [
+      {
+        argv: linuxSystemTrustInstallArgv({
+          family,
+          sha256: ca.pemSha256,
+          byteLength: Buffer.byteLength(ca.pem),
+          tools,
+        }),
+        input: ca.pem,
+      },
+      {
+        argv: linuxSystemTrustRefreshArgv({ family, tools }),
+        input: undefined,
+      },
+    ],
+  };
+}
+
+/** The trusted outcome when the system bundle already holds the CA. */
+async function systemTrustState(opts: {
+  readonly host: LinuxTrustHost;
+  readonly ca: ValidatedCa;
+  readonly family: LinuxDistroFamily;
+  readonly bundlePath: string;
+}): Promise<LinuxSystemTrustOutcome | null> {
+  const bundle = (await opts.host.readFile(opts.bundlePath)) ?? "";
+  return bundleContainsCertificate({ bundle, certPem: opts.ca.pem })
+    ? {
+        status: "trusted",
+        family: opts.family,
+        otherCaddyRoots: findOtherCaddyRoots({
+          bundle,
+          current: opts.ca.certificate,
+        }),
+      }
+    : null;
+}
+
+export async function applyLinuxSystemTrust(opts: {
+  readonly host: LinuxTrustHost;
+  readonly ca: ValidatedCa;
+  /**
+   * Persistent CA path for pending/manual commands. The user's shell opens
+   * it before sudo; root accepts only bytes matching the approved digest.
+   */
+  readonly manualCertPath: string;
+  readonly canPrompt: boolean;
+  readonly show: (
+    commands: readonly (readonly string[])[],
+    fingerprint256: string
+  ) => void;
+  readonly confirm: () => Promise<boolean>;
+  /** Default: prepared here; a caller that already prepared passes it. */
+  readonly prepared?: PreparedLinuxSystemTrust;
+}): Promise<LinuxSystemTrustOutcome> {
+  const { host, ca } = opts;
+  const prepared =
+    opts.prepared ??
+    (await prepareLinuxSystemTrust({
+      host,
+      ca,
+      manualCertPath: opts.manualCertPath,
+    }));
+  if (prepared.status === "done") {
+    return prepared.outcome;
+  }
   // No root command runs without an interactive yes, and none at all when
   // prompting is unavailable (--no-interactive, HACK_NO_INTERACTIVE, no TTY).
   if (!opts.canPrompt) {
-    return pending;
+    return prepared.pending;
   }
-  opts.show(commands, ca.fingerprint256);
+  opts.show(prepared.pending.commands, ca.fingerprint256);
   if (!(await opts.confirm())) {
-    return pending;
+    return prepared.pending;
   }
-  const rootCommands = [
-    linuxSystemTrustInstallArgv({
-      family,
-      sha256: ca.pemSha256,
-      byteLength: Buffer.byteLength(ca.pem),
-      tools,
-    }),
-    linuxSystemTrustRefreshArgv({ family, tools }),
-  ];
-  for (const [index, command] of rootCommands.entries()) {
-    const exitCode = await host.runPrivileged(
-      command,
-      index === 0 ? ca.pem : undefined
-    );
+  for (const step of prepared.rootSteps) {
+    const exitCode = await host.runPrivileged(step.argv, step.input);
     if (exitCode !== 0) {
       return {
         status: "failed",
         code: "linux_trust_system_failed",
-        family,
-        failedCommand: command,
+        family: prepared.family,
+        failedCommand: step.argv,
         exitCode,
       };
     }
   }
   return (
-    (await trusted()) ?? { status: "applied_unverified", family, bundlePath }
+    (await systemTrustState({
+      host,
+      ca,
+      family: prepared.family,
+      bundlePath: prepared.bundlePath,
+    })) ?? {
+      status: "applied_unverified",
+      family: prepared.family,
+      bundlePath: prepared.bundlePath,
+    }
   );
 }
 

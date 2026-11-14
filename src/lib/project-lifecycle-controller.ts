@@ -1415,7 +1415,9 @@ export async function refreshMissingLifecyclePaneBirths(opts: {
             process.windowName,
             // A failed/missing window is not permission to fill a birth. Keep
             // the original unknown record so the owned mux stop still runs.
-            await opts.readPanes(process.windowName).catch(() => []),
+            await opts
+              .readPanes(process.windowName)
+              .catch((): readonly number[] => []),
           ] as const
       )
     )

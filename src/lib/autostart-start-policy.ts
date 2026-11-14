@@ -389,6 +389,7 @@ async function readProjectPolicyConfig(
   return { raw, path };
 }
 
+/** Current inode checks cannot authenticate permission history; formerly writable inputs require reviewed replacement. */
 async function readPolicyText(
   path: string,
   budget: Budget

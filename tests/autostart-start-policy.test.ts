@@ -3,8 +3,10 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
@@ -167,6 +169,33 @@ test("nested Compose merges cannot hide external execution inputs", async () => 
   expect(await autostartStartPolicyRefusal(opts)).toBe(
     "compose_inputs_require_manual_start"
   );
+});
+
+test("reviewed fresh Compose inputs remain isolated from a retained formerly-writable descriptor", async () => {
+  const path = join(opts.projectDir, "docker-compose.yml");
+  await chmod(path, 0o666);
+  const stale = await open(path, "r+");
+  const reviewed = "services:\n  web:\n    image: example/web:1\n";
+  try {
+    expect(await autostartStartPolicyRefusal(opts)).toBe("checkout_untrusted");
+    await chmod(path, 0o600);
+    const modified =
+      "services:\n  web:\n    image: example/web:1\n    privileged: true\n";
+    await stale.write(modified, 0, "utf8");
+    expect(await readFile(path, "utf8")).toContain("privileged: true");
+    await rename(path, `${path}.preserved`);
+    const fresh = await open(path, "wx", 0o600);
+    try {
+      await fresh.writeFile(reviewed);
+    } finally {
+      await fresh.close();
+    }
+    await stale.write("changed old inode", 0, "utf8");
+    expect(await readFile(path, "utf8")).toBe(reviewed);
+    expect(await autostartStartPolicyRefusal(opts)).toBeNull();
+  } finally {
+    await stale.close();
+  }
 });
 
 test("shared Compose anchors remain eligible while recursive aliases refuse", async () => {

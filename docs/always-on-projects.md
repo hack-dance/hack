@@ -83,11 +83,22 @@ path does not consume a project's attempt for this boot.
 The daemon keeps its installed PATH and continues normal status observation;
 automatic-start refusal does not change ordinary daemon operation.
 The strict policy also applies to Linux user-private groups. Check `hack doctor`
-for the affected trust category. After reviewing ownership and who belongs to the
-group, remove group/other write only on the intended files and directories with
-`chmod go-w <reviewed-path>`; do not recursively change a shared checkout or
-Homebrew installation. Using a private checkout and private tool installation is
-an alternative. Hack never changes those permissions automatically.
+for the affected trust category. After reviewing ownership and group membership,
+`chmod go-w <reviewed-directory>` can restrict future directory writes; do not
+recursively change a shared checkout or Homebrew installation. It does not undo
+entry changes made while that directory was writable.
+Do not repair formerly writable files by changing modes or ACLs in place: an
+already-open writer can still modify that inode. Preserve the old checkout and
+create a private checkout from reviewed source, with freshly generated inputs;
+review local config and env content before recreating it on new private inodes.
+Regenerating inputs in an existing checkout may retain unchanged old inodes and
+does not provide this replacement.
+Reinstall formerly writable helpers/plugins and recreate reviewed Docker config
+on fresh private files too. Merely copying unreviewed old bytes is not a repair.
+These checks observe current ownership, permissions and stable reads; they cannot
+infer permission history, revoke older writer descriptors or freeze every later
+Compose read. Automatic startup requires trusted, reviewed input contents as well
+as trusted paths. Hack never changes those permissions or files automatically.
 Use `umask 022` in shells that run `hack up` so changed generated inputs retain
 safe modes; with umask 002, a later manual start can recreate group-writable
 generated files and require another review before automatic startup.

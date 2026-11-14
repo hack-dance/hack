@@ -69,6 +69,8 @@ the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
 the startup bounds, no-prompt behavior and JSON contract. Automatic startup requires
 trusted, non-writable-by-others tool and project paths; `hack doctor` reports
 permission refusals, including app-bundle and Homebrew paths on macOS.
+Formerly writable files require reviewed replacement on fresh private files;
+changing modes or ACLs in place cannot revoke an older open writer.
 This slice starts only eligible Compose projects with images already available
 locally. Hooks, host helpers, command providers and image builds require manual
 `hack up`; doctor explains those manual-start requirements.

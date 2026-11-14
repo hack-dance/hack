@@ -1991,7 +1991,7 @@ async function checkAutostartLoginService(): Promise<CheckResult> {
     return {
       name: "autostart login service",
       status: "warn",
-      message: `Automatic startup trust prerequisites are not met: ${warnings.join(", ")}. Review ownership and group/other write permissions; see docs/always-on-projects.md. On macOS this can include Homebrew, Docker Desktop or OrbStack links through /Applications. Ordinary daemon operation is unaffected.`,
+      message: `Automatic startup trust prerequisites are not met: ${warnings.join(", ")}. Review ownership and group/other write permissions; formerly writable files need reviewed replacement on fresh private files, since chmod or ACL changes cannot revoke an older open writer. See docs/always-on-projects.md. On macOS this can include Homebrew, Docker Desktop or OrbStack links through /Applications. Ordinary daemon operation is unaffected.`,
     };
   }
   let unitPath: string | null = null;

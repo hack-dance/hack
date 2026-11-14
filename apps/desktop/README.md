@@ -43,6 +43,9 @@ matches the CLI, plus native `hack ps` for native projects. Today's CLI listing
 auto-registers runtime projects and writes the registry, so it is never used as
 a fallback. Without a matching daemon the reader reports Unknown / needs R18
 (observe-only projects), rather than writing or claiming no projects exist.
+The window retains stale names with Unknown states and disables project actions.
+It offers **Start hackd** when unreachable or **Restart hackd** for a version
+mismatch. Only a fresh matching snapshot restores observed states.
 It applies that to the same view model and prints the list and
 each project's detail as JSON. It runs no action, opens no window and writes
 nothing.

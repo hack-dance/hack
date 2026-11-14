@@ -114,6 +114,9 @@ fn main() {
                 let mut app = view::HackApp::new(source, fixture.is_none(), cx);
                 if let Some(f) = fixture {
                     app.select(fixtures::selected(f));
+                    if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
+                        app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
+                    }
                 }
                 if let Some(a) = fixture.and_then(|f| fixtures::local(f).in_flight) {
                     app.simulate_in_flight(a);

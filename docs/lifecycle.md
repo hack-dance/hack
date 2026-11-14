@@ -76,6 +76,9 @@ its per-window mux calls and subsequent shutdown work are additional.
 An unreaped zombie has exited and runs no code: a group containing only zombies
 counts as retired. A live member in the same group still requires shutdown;
 failed process observations never count as absence.
+Native launch cancellation still permits the owned cleanup to retry a missing
+start time: its ownership and artifact checks remain active independently of the
+canceled startup deadline.
 `hack doctor --fix` also captures groups before mux teardown and waits for
 commands before wrappers when repairing an ownership-proven orphan. An
 unconfirmed retirement keeps that entry and is reported while repair continues

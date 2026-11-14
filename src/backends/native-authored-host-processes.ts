@@ -593,6 +593,7 @@ export async function createNativeAuthoredHostProcesses(input: {
     let active = true;
     let began = false;
     let launchIntent = false;
+    let abandoningLaunch = false;
     let abandoned = false;
     let stopped = false;
     let ready: Awaited<ReturnType<typeof capture>> | undefined;
@@ -636,7 +637,11 @@ export async function createNativeAuthoredHostProcesses(input: {
       definitionHash: opts.semanticHash,
       assertFresh: async () => {
         await check();
-        opts.remaining();
+        // Startup cancellation must not veto the missing-birth refresh during
+        // abandonment. Owner/artifact freshness still holds for every check.
+        if (!abandoningLaunch) {
+          opts.remaining();
+        }
       },
       mux: async () => {
         const mux = await resolveMux({});
@@ -707,6 +712,7 @@ export async function createNativeAuthoredHostProcesses(input: {
      * anything unproven stays retained.
      */
     const abandonLaunch = async () => {
+      abandoningLaunch = true;
       try {
         const launched = await currentEntry(opts.scope, composeProject);
         await controller.abort();

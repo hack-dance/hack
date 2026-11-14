@@ -98,6 +98,7 @@ still checks ownership, confirms exit and lets the wrapper finish cleanup.
 Slow process reads can extend shutdown;
 Hack retries transient read failures and reports cleanup it cannot confirm.
 Exited processes waiting to be reaped count as stopped, including on macOS.
+Canceling startup still allows cleanup to retry a missed process start time.
 Ctrl-C does not run `down.before` or `down.after` hooks;
 use explicit `hack down` for those hooks. Attached `up.after` runs only after
 Compose returns successfully, so it does not run while the project stays attached.

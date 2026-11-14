@@ -71,3 +71,9 @@ admission and a `running` phase for adoption. Real regressions are
 `status_waits_for_inflight_stop_before_reporting_adoptable_liveness` and
 `a command already retiring cannot be adopted as healthy`. The finite model's
 atomic lock region does not simulate the phase-publication interval itself.
+
+Generation retirement fences delayed initial dispatch before native admission;
+this is outside the model's atomic native-launch step. The implementation test
+`completed_stop_retires_a_delayed_initial_launch_before_any_authored_effect`
+stops before delivering the launch frame, then proves no command receipt was
+created. New generations require fresh tokens; retired markers are not pruned.

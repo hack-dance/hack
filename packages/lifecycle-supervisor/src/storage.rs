@@ -39,6 +39,28 @@ pub struct Root {
 }
 
 impl Root {
+    fn retirement_key(token: &str) -> String {
+        // Stable non-authentication index. A hash collision only refuses a
+        // launch; it can never permit a retired generation to run again.
+        let hash = token.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+        format!(".retired-{hash:016x}")
+    }
+
+    pub fn retire(&self, token: &str) -> Result<()> {
+        self.file(&Self::retirement_key(token), libc::O_WRONLY | libc::O_CREAT)?
+            .sync_all()?;
+        self.directory.sync_all()
+    }
+
+    pub fn assert_not_retired(&self, token: &str) -> Result<()> {
+        match self.file(&Self::retirement_key(token), libc::O_RDONLY) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(refused()),
+        }
+    }
+
     /// Fresh internal binaries may use a descriptor-relative cwd to keep Unix
     /// socket addresses below Darwin's 104-byte limit. Caller cwd is untouched.
     pub fn enter(&self) -> Result<()> {

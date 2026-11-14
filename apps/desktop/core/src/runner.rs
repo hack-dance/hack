@@ -1013,6 +1013,7 @@ wait $!"#,
         // than exercise cleanup of an already-running process group.
         let f = FakeHack::new(
             r#"sleep 300 &
+echo $! > "$HACK_HOME/holder"
 echo '{"type":"start","backend":"compose"}'
 echo '{"type":"log","entry":{"service":"api","message":"hi"}}'
 echo 'plain text'
@@ -1027,6 +1028,12 @@ wait $!"#,
         assert_eq!(got[1].entry.as_ref().unwrap().message, "hi");
         assert_eq!(got[2].message.as_deref(), Some("plain text"));
         let pid = i32::try_from(s.child.id()).unwrap();
+        let holder: i32 = std::fs::read_to_string(f.dir.join("holder"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!process_gone(holder), "pipe holder is alive");
         assert!(
             !process_gone(pid),
             "positive control: stream child is alive"
@@ -1037,6 +1044,7 @@ wait $!"#,
         );
         completes(move || drop(s));
         assert_retired(pid);
+        assert_retired(holder);
     }
 
     #[test]

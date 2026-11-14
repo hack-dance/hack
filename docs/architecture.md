@@ -589,6 +589,17 @@ of these hold:
   (`# Managed by hack: written by \`hack daemon install\`...`), whose next line
   says local changes are replaced on the next install.
 
+"This CLI's executable" means the binary that is running, not the `hack` first
+on `PATH`. `hack update` runs the new binary by its path while an older `hack`
+may come first on `PATH`, and a service running that older one is not this CLI.
+A source invocation (`bun index.ts`) has no executable a unit or plist could
+name, so it never counts as running the service's program. The `hack` on `PATH`
+is still what `hack daemon install`, and a retarget of a missing program, write
+into the service. When the service runs another program and the daemon is of
+another version, `start` refuses (`blocked: "other-program"`) with
+`hack daemon install` as the next step instead of restarting it into the same
+version. The launchd checks use the same rule.
+
 A unit without that header was written or edited by hand. It keeps the earlier
 behaviour: `start` reports the drift with `hack daemon install` as the next step
 and does not rewrite it. A managed unit whose main file sets the service's Hack

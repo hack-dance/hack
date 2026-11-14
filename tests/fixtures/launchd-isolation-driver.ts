@@ -103,8 +103,14 @@ if (process.argv[2] === "manager-state") {
 }
 
 if (process.argv[2] === "repair-output") {
-  const repair = await repairLaunchdProgramIfInvalid({ paths });
-  const secondRepair = await repairLaunchdProgramIfInvalid({ paths });
+  // This driver runs from source, which has no executable of its own; the
+  // test names the binary that stands for "this CLI" (HACK-2216).
+  const executing = process.env.DRIVER_EXECUTING_CLI ?? null;
+  const repair = await repairLaunchdProgramIfInvalid({ paths, executing });
+  const secondRepair = await repairLaunchdProgramIfInvalid({
+    paths,
+    executing,
+  });
   process.stdout.write(`${JSON.stringify({ repair, secondRepair })}\n`);
   process.exit(0);
 }

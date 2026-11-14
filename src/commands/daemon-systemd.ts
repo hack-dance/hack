@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_DAEMON_DIR_NAME } from "../constants.ts";
 import { DAEMON_CLI_VERSION } from "../daemon/client.ts";
+import { resolveExecutingCliPath } from "../daemon/executing-cli.ts";
 import { isSameExecutableFile } from "../daemon/launchd.ts";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
@@ -130,6 +131,12 @@ export interface SystemdCommandHooks {
    * can tell a refusal (nothing asked) from a failed start.
    */
   readonly onStartRequested?: () => void;
+  /**
+   * The executing CLI's executable ({@link resolveExecutingCliPath}): what
+   * "this CLI" means for automatic restart and rewrite eligibility. Tests
+   * pin it; null is a source invocation (never eligible).
+   */
+  readonly executingProgram?: () => Promise<string | null>;
   /** Defaults to reading `/proc/self/cgroup`; tests pin it. */
   readonly readSelfCgroup?: () => Promise<string | null>;
   /** Records what the command decided, for `--json` (HACK-2216). */
@@ -441,12 +448,15 @@ export async function reconcileRunningSystemdDaemon(
   // but its daemon-reload failed), what is loaded is stale by definition:
   // the restart path reloads first, and the check just before the restart
   // (refuseUnexpectedLoadedProgram) judges the newly loaded program.
-  const fileIsOurs = await unitRunsExpected({ status, expected });
+  // "This CLI" is the executing binary, not the PATH-selected `hack`
+  // (`expected`, the install and retarget target).
+  const executing = await resolveExecutingProgram(hooks);
+  const fileIsOurs = await unitRunsExpected({ status, executing });
   const reloadPending =
     status.needsReload && !isSystemdReadOnly(deps.env) && fileIsOurs;
   const loaded = reloadPending
     ? ("ours" as const)
-    : await loadedProgramIsExpected({ deps, expected });
+    : await loadedProgramIsExpected({ deps, executing });
   const planned = planDaemonReconcile({
     unit: serviceUnitState(status.drift),
     programIsOurs: loaded === "ours" && fileIsOurs,
@@ -935,7 +945,10 @@ async function planStoppedStart(opts: {
   readonly status: SystemdServiceStatus;
   readonly unitPath: string;
   readonly deps: SystemdDeps;
-  readonly hooks: Pick<SystemdCommandHooks, "resolveExpected" | "cliVersion">;
+  readonly hooks: Pick<
+    SystemdCommandHooks,
+    "resolveExpected" | "cliVersion" | "executingProgram"
+  >;
 }): Promise<{
   readonly plan: DaemonReconcilePlan;
   readonly expected: { readonly hackBinPath: string } | null;
@@ -946,7 +959,10 @@ async function planStoppedStart(opts: {
   )();
   const plan = planDaemonReconcile({
     unit: serviceUnitState(status.drift),
-    programIsOurs: await unitRunsExpected({ status, expected }),
+    programIsOurs: await unitRunsExpected({
+      status,
+      executing: await resolveExecutingProgram(hooks),
+    }),
     readOnly: isSystemdReadOnly(deps.env),
     running: null,
     contentBlock: await readContentBlock({ status, unitPath }),
@@ -961,18 +977,33 @@ function serviceUnitState(drift: SystemdUnitDrift): ServiceUnitState {
 }
 
 /**
- * Whether the unit runs this CLI's executable: the same path, or a path
- * that resolves to the same file (for example a stable symlink to it).
+ * Whether the unit runs the executing CLI's executable
+ * ({@link resolveExecutingProgram}, not the PATH-selected install target):
+ * the same path, or a path that resolves to the same file (a stable
+ * symlink to it). False when the executing CLI has no executable a unit
+ * could name (a source invocation).
  */
 async function unitRunsExpected(opts: {
   readonly status: SystemdServiceStatus;
-  readonly expected: { readonly hackBinPath: string } | null;
+  readonly executing: string | null;
 }): Promise<boolean> {
-  const { status, expected } = opts;
-  if (status.program === null || expected === null) {
+  const { status, executing } = opts;
+  if (status.program === null || executing === null) {
     return false;
   }
-  return await isSameExecutableFile(status.program, expected.hackBinPath);
+  return await isSameExecutableFile(status.program, executing);
+}
+
+/**
+ * The executing CLI's executable for eligibility decisions
+ * ({@link resolveExecutingCliPath}); tests pin it with `executingProgram`.
+ */
+async function resolveExecutingProgram(
+  hooks: Pick<SystemdCommandHooks, "executingProgram">
+): Promise<string | null> {
+  return hooks.executingProgram
+    ? await hooks.executingProgram()
+    : resolveExecutingCliPath();
 }
 
 /**
@@ -1014,13 +1045,13 @@ function gateRestartOnLoadedProgram(opts: {
  * restarted) or null to go on.
  */
 async function refuseUnexpectedLoadedProgram(opts: {
-  readonly hooks: Pick<SystemdCommandHooks, "trace" | "resolveExpected">;
+  readonly hooks: Pick<SystemdCommandHooks, "trace" | "executingProgram">;
   readonly deps: SystemdDeps;
 }): Promise<number | null> {
-  const expected = await (
-    opts.hooks.resolveExpected ?? resolveExpectedSystemdUnit
-  )();
-  const loaded = await loadedProgramIsExpected({ deps: opts.deps, expected });
+  const loaded = await loadedProgramIsExpected({
+    deps: opts.deps,
+    executing: await resolveExecutingProgram(opts.hooks),
+  });
   if (loaded === "ours") {
     return null;
   }
@@ -1043,16 +1074,14 @@ async function refuseUnexpectedLoadedProgram(opts: {
  */
 async function loadedProgramIsExpected(opts: {
   readonly deps: SystemdDeps;
-  readonly expected: { readonly hackBinPath: string } | null;
+  /** The executing CLI ({@link resolveExecutingProgram}); null: unknown. */
+  readonly executing: string | null;
 }): Promise<"ours" | "other" | "unknown"> {
   const loaded = await readSystemdLoadedProgram({ deps: opts.deps });
-  if (loaded.kind === "unknown") {
+  if (loaded.kind === "unknown" || opts.executing === null) {
     return "unknown";
   }
-  if (opts.expected === null) {
-    return "other";
-  }
-  return (await isSameExecutableFile(loaded.path, opts.expected.hackBinPath))
+  return (await isSameExecutableFile(loaded.path, opts.executing))
     ? "ours"
     : "other";
 }
@@ -1299,7 +1328,7 @@ async function completePendingReload(opts: {
     expected &&
     status.program &&
     expected.hackBinPath !== status.program &&
-    !(await unitRunsExpected({ status, expected }))
+    !(await isSameExecutableFile(status.program, expected.hackBinPath))
   ) {
     logger.info({
       message: `${SYSTEMD_UNIT_NAME} runs ${status.program}; this CLI is ${expected.hackBinPath}. To switch the service to it, run: hack daemon install`,
@@ -1750,6 +1779,7 @@ export async function describeSystemdIncompatibleOwner(opts: {
   readonly pid: number;
   readonly deps?: SystemdDeps;
   readonly resolveExpected?: typeof resolveExpectedSystemdUnit;
+  readonly executingProgram?: () => Promise<string | null>;
   readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
 }): Promise<string | null> {
   const deps = opts.deps ?? defaultSystemdDeps();
@@ -1773,13 +1803,18 @@ export async function describeSystemdIncompatibleOwner(opts: {
   ) {
     return null;
   }
-  const expected = await (opts.resolveExpected ?? resolveExpectedSystemdUnit)();
-  // The same executable under another path (a stable symlink to it) is
-  // not "another hack": a restart runs this version (HACK-2216).
-  if (!expected || (await unitRunsExpected({ status, expected }))) {
+  // The executing binary, not the PATH-selected `hack`: the same
+  // executable under another path (a stable symlink to it) is not "another
+  // hack", and a unit for an older `hack` first on PATH is (HACK-2216).
+  const executing = await resolveExecutingProgram(opts);
+  if (await unitRunsExpected({ status, executing })) {
     return null;
   }
-  return `hackd (pid ${opts.pid}) is incompatible with this CLI, and ${SYSTEMD_UNIT_NAME} runs ${status.program}, so restarting it would start the same version again | Run: hack daemon install (switches the service to ${expected.hackBinPath})`;
+  const expected = await (opts.resolveExpected ?? resolveExpectedSystemdUnit)();
+  const target = expected
+    ? ` (switches the service to ${expected.hackBinPath})`
+    : "";
+  return `hackd (pid ${opts.pid}) is incompatible with this CLI, and ${SYSTEMD_UNIT_NAME} runs ${status.program}, which is not this CLI, so restarting it would not run this version | Run: hack daemon install${target}`;
 }
 
 /**
@@ -1798,6 +1833,7 @@ export async function withSystemdIncompatibleNextStep<
   readonly report: T;
   readonly deps?: SystemdDeps;
   readonly resolveExpected?: typeof resolveExpectedSystemdUnit;
+  readonly executingProgram?: () => Promise<string | null>;
 }): Promise<T> {
   const { report } = opts;
   if (
@@ -1811,6 +1847,7 @@ export async function withSystemdIncompatibleNextStep<
     pid: report.pid,
     deps: opts.deps,
     resolveExpected: opts.resolveExpected,
+    executingProgram: opts.executingProgram,
   });
   return owner === null
     ? report

@@ -146,6 +146,33 @@ async function writeExecutable(path: string, text: string): Promise<void> {
   await chmod(path, 0o755);
 }
 
+/** Replaces the fixture's source shim with a compiled hack binary. */
+async function compileHack(outfile: string): Promise<void> {
+  const build = Bun.spawn(
+    [
+      process.execPath,
+      "build",
+      join(REPO_ROOT, "index.ts"),
+      "--compile",
+      "--no-compile-autoload-dotenv",
+      "--no-compile-autoload-bunfig",
+      "--no-compile-autoload-tsconfig",
+      "--no-compile-autoload-package-json",
+      "--outfile",
+      outfile,
+    ],
+    { cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "pipe" }
+  );
+  const [code, stderr] = await Promise.all([
+    build.exited,
+    new Response(build.stderr).text(),
+  ]);
+  if (code !== 0) {
+    throw new Error(`compiling hack failed: ${stderr}`);
+  }
+  await chmod(outfile, 0o755);
+}
+
 async function createFixture(): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "hack-systemd-cli-"));
   const home = join(root, "home");
@@ -515,6 +542,10 @@ installFlowTest(
   async () => {
     fixture = await createFixture();
     const f = fixture;
+    // Automatic repairs compare the service with the executing binary
+    // (HACK-2216): a source invocation has none, so this flow runs a
+    // compiled hack, as an installed one is.
+    await compileHack(f.hackBin);
     expect((await hack(f, ["daemon", "install"])).code).toBe(0);
     const before = await readOwnedPid(f);
     expect(before).not.toBeNull();

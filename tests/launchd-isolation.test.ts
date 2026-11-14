@@ -346,6 +346,7 @@ test("repairs legacy output paths even when the installed program is still curre
     env: fixture.env({
       HACK_HOME: join(fixture.home, ".hack"),
       HACK_TEST_LAUNCHCTL_JOB: "stopped",
+      DRIVER_EXECUTING_CLI: join(fixture.root, "tools", "hack"),
     }),
   });
   expect(run.code).toBe(0);
@@ -380,6 +381,8 @@ async function repairPlist(
     env: fixture.env({
       HACK_HOME: join(fixture.home, ".hack"),
       HACK_TEST_LAUNCHCTL_JOB: "stopped",
+      // The stub `hack` on PATH stands for the executing CLI.
+      DRIVER_EXECUTING_CLI: join(fixture.root, "tools", "hack"),
       ...extraEnv,
     }),
   });
@@ -713,8 +716,13 @@ test("macOS restart with a loaded job bound to another HACK_HOME stops nothing",
     expect(envelope.error.detail).toMatchObject({
       schema: "hack.daemon-restart/v1",
       manager: "launchd",
-      blocked: "home-binding",
     });
+    // This CLI runs from source here, so it is not the plist's program
+    // either; whichever check refuses first, nothing may be stopped. The
+    // home-binding refusal itself is covered in daemon-reconcile.test.ts.
+    expect(["home-binding", "other-program"]).toContain(
+      envelope.error.detail.blocked as string
+    );
     // Nothing was stopped: the process lives and its pid file is kept.
     expect(holder.exitCode).toBeNull();
     expect(await readFile(join(daemonDir, "hackd.pid"), "utf8")).toBe(

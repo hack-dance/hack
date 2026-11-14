@@ -958,6 +958,8 @@ function startHooks(fake: Fake, hackBinPath = program) {
       const text = renderSystemdUnit({ hackBinPath });
       return Promise.resolve(text ? { hackBinPath, unitText: text } : null);
     },
+    // The executing CLI is the PATH-selected one unless a test says so.
+    executingProgram: () => Promise.resolve(hackBinPath),
     systemPathDirectories: [sysBin],
   };
 }
@@ -1310,6 +1312,7 @@ linuxTest(
       pid: 4242,
       deps: fake.deps,
       resolveExpected: startHooks(fake).resolveExpected,
+      executingProgram: startHooks(fake).executingProgram,
     });
     expect(message).toContain("hack daemon install");
     expect(
@@ -1317,6 +1320,7 @@ linuxTest(
         pid: 777,
         deps: fake.deps,
         resolveExpected: startHooks(fake).resolveExpected,
+        executingProgram: startHooks(fake).executingProgram,
         isPidInUnit: () => Promise.resolve(false),
       })
     ).toBeNull();
@@ -1673,6 +1677,7 @@ linuxTest(
       report,
       deps: fake.deps,
       resolveExpected: startHooks(fake).resolveExpected,
+      executingProgram: startHooks(fake).executingProgram,
     });
     expect(updated.nextStep).toBe(
       process.platform === "linux"
@@ -4580,6 +4585,7 @@ linuxTest(
         pid: 4242,
         deps: fake.deps,
         resolveExpected: startHooks(fake).resolveExpected,
+        executingProgram: startHooks(fake).executingProgram,
       })
     ).toBeNull();
   }
@@ -5437,5 +5443,57 @@ linuxTest(
     expect(loadedPath).toBe(program);
     expect(second.trace.action).toBe("restarted");
     expect(await Bun.file(restartMarker()).exists()).toBe(false);
+  }
+);
+
+// Codex finding on PR #854: "this CLI" is the executing binary, not the
+// PATH-selected hack.
+
+linuxTest(
+  "a newer CLI run by path does not restart a daemon whose unit runs the older hack on PATH",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    // The unit runs the `hack` first on PATH (the install target)...
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    // ...while the executing CLI is another binary, run by absolute path.
+    const newer = join(root, "new-release", "hack");
+    await mkdir(dirname(newer), { recursive: true });
+    await writeFile(newer, "#!/bin/sh\n");
+    await chmod(newer, 0o755);
+    fake.calls.length = 0;
+
+    const mismatch = {
+      ...runningHooks(fake, "1.0.0"),
+      executingProgram: () => Promise.resolve(newer),
+    };
+    expect(await reconcileRunningSystemdDaemon(mismatch)).toBe(1);
+    expect(mismatch.trace.blocked).toBe("other-program");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+
+    // A pending restart marker does not restart it either.
+    await mkdir(join(root, ".hack", "daemon"), { recursive: true });
+    await writeFile(
+      join(root, ".hack", "daemon", "hackd.service.restart-pending"),
+      "x\n"
+    );
+    const compatible = {
+      ...runningHooks(fake, "2.0.0"),
+      executingProgram: () => Promise.resolve(newer),
+    };
+    expect(await reconcileRunningSystemdDaemon(compatible)).toBeNull();
+    expect(compatible.trace.blocked).toBe("other-program");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+
+    // A source invocation (no executable) is never eligible.
+    const source = {
+      ...runningHooks(fake, "1.0.0"),
+      executingProgram: () => Promise.resolve(null),
+    };
+    expect(await reconcileRunningSystemdDaemon(source)).toBe(1);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
   }
 );

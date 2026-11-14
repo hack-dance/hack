@@ -13,6 +13,7 @@ import { join } from "node:path";
 
 import {
   checkRunningLaunchdDaemon,
+  refuseLaunchdBeforeReplacing,
   startViaLaunchdIfLoaded,
 } from "../src/commands/daemon-launchd.ts";
 import {
@@ -25,6 +26,7 @@ import {
   parseStartEnvelope,
   reconcileDaemonAfterUpdate,
 } from "../src/commands/daemon-upgrade.ts";
+import { resolveExecutingCliPath } from "../src/daemon/executing-cli.ts";
 import {
   classifyLaunchdProgramPath,
   isHackManagedPlist,
@@ -1372,4 +1374,45 @@ test("a loaded launchd job is never idle, whatever its plist file says", async (
     })
   ).toBe("unknown");
   expect(queried).toEqual(["print", "print"]);
+});
+
+// Codex findings on PR #854: restart's launchd check, and "this CLI" is
+// the executing binary.
+
+test("restart's launchd check refuses a job bound to another home before any stop", async () => {
+  const trace = createDaemonCommandTrace();
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>HACK_HOME</key>\n    <string>/srv/other/.hack</string>\n  </dict>\n</dict>\n</plist>\n`;
+  const code = await refuseLaunchdBeforeReplacing({
+    paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+    trace,
+    waitForReady: () => Promise.reject(new Error("must not start")),
+    readStatus: () =>
+      Promise.resolve({
+        installed: true,
+        loaded: true,
+        running: false,
+        pid: null,
+        exitStatus: null,
+        observation: "reported" as const,
+      }),
+    readPlist: () => Promise.resolve(plist),
+    proveJob: () => Promise.resolve(true),
+  });
+  expect(code).toBe(1);
+  expect(trace).toMatchObject({ manager: "launchd", blocked: "home-binding" });
+});
+
+test("the executing CLI is the compiled binary, never a source invocation", () => {
+  expect(
+    resolveExecutingCliPath({
+      main: "/$bunfs/root/hack",
+      execPath: "/opt/hack-new/bin/hack",
+    })
+  ).toBe("/opt/hack-new/bin/hack");
+  expect(
+    resolveExecutingCliPath({
+      main: "/srv/checkout/index.ts",
+      execPath: "/opt/bun/bin/bun",
+    })
+  ).toBeNull();
 });

@@ -15,6 +15,7 @@ import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 import { boundedTimeoutMs } from "../lib/process-deadline.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
+import { resolveExecutingCliPath } from "./executing-cli.ts";
 import {
   parseLaunchdPlistEnvironment,
   parseLaunchdPlistProgram,
@@ -569,6 +570,11 @@ export async function readLaunchdProgramState(opts: {
   readonly plistText?: string | null;
   /** Defaults to `fs.stat`; tests inject errors. */
   readonly stat?: (path: string) => Promise<unknown>;
+  /**
+   * The executing CLI ({@link resolveExecutingCliPath}); null: a source
+   * invocation, never "ours". Test drivers pin it.
+   */
+  readonly executing?: string | null;
 }): Promise<LaunchdProgramState> {
   if (!resolveLaunchdAccess().allowed) {
     return { kind: "not-installed" };
@@ -598,8 +604,13 @@ export async function readLaunchdProgramState(opts: {
   if (presence !== "exists") {
     return { kind: presence, program, resolved };
   }
+  // "This CLI" is the executing binary, not the PATH-selected `hack`
+  // (`resolved`, which stays the retarget target): a newer CLI run by path
+  // must not treat an older `hack` first on PATH as itself.
+  const executing =
+    opts.executing === undefined ? resolveExecutingCliPath() : opts.executing;
   const ours =
-    resolved !== null && (await isSameExecutableFile(program, resolved));
+    executing !== null && (await isSameExecutableFile(program, executing));
   return { kind: ours ? "ours" : "other", program, resolved };
 }
 
@@ -717,6 +728,8 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   readonly paths: DaemonPaths;
   /** Defaults to {@link proveLaunchdJobOwnership}; tests pin it. */
   readonly proveJob?: () => Promise<boolean>;
+  /** See {@link readLaunchdProgramState}; test drivers pin it. */
+  readonly executing?: string | null;
 }): Promise<LaunchdProgramRepairResult> {
   if (!resolveLaunchdAccess().allowed) {
     return "not-installed";
@@ -725,7 +738,11 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   if (plistText === null) {
     return "not-installed";
   }
-  const decided = await decideLaunchdRewrite({ paths: opts.paths, plistText });
+  const decided = await decideLaunchdRewrite({
+    paths: opts.paths,
+    plistText,
+    executing: opts.executing,
+  });
   if (decided.kind === "result") {
     return decided.result;
   }
@@ -765,6 +782,7 @@ export async function repairLaunchdProgramIfInvalid(opts: {
 async function decideLaunchdRewrite(opts: {
   readonly paths: DaemonPaths;
   readonly plistText: string;
+  readonly executing?: string | null;
 }): Promise<
   | { readonly kind: "result"; readonly result: LaunchdProgramRepairResult }
   | { readonly kind: "rewrite"; readonly program: string | null }
@@ -773,6 +791,7 @@ async function decideLaunchdRewrite(opts: {
   const state = await readLaunchdProgramState({
     paths: opts.paths,
     plistText,
+    executing: opts.executing,
   });
   const final = (result: LaunchdProgramRepairResult) =>
     ({ kind: "result", result }) as const;

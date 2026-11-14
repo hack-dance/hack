@@ -59,9 +59,10 @@ Project views read legacy inputs; a canonical native project comes back with
 `input_diagnostic`. The app recognises that code and asks `hack ps` instead
 rather than showing "Needs attention". Every command for a native project runs with
 `HACK_RUNTIME_BACKEND=native`, which is how the CLI selects that backend today.
-Native `up` and `restart` stay in the foreground and refuse `--json` and
-`--detach`, so v0 offers no native actions: the header shows the terminal
-command instead (R2b below). Native finite logs are a one-service snapshot,
+Native `up --json` already starts a detached owner and returns a JSON
+result, but native `restart` (and authored `down`/`restart`) stay in the
+foreground and refuse `--json`. v0 keeps native projects view-only as a scope
+choice: the header shows the terminal commands instead (R2b below). Native finite logs are a one-service snapshot,
 so the combined tail is replaced by a note until the Logs tab reads them per service. Docker's `runtime_ok` never changes a native row. Native `data.status` maps as:
 `not_started` → Stopped, `pending` → Starting, `observed` → Running or Degraded
 from `items[].state` and `items[].health` (`readiness` is not in ordinary `ps` output; until R2 an exited service with exit 0 is "exited (0), role unknown" and any other exit is down), `runtime_degraded` → Degraded, `runtime_not_running` and
@@ -368,7 +369,7 @@ Each is small enough for one PR.
 
 1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
 2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
-3. **R2b** Native lifecycle the app can drive: a detached native `up`/`restart` with a `--json` result (or a hackd-owned start), so the app need not own a foreground process.
+3. **R2b** Native lifecycle the app can drive: a `--json` contract for native `restart` and authored `down`/`restart`, and qualification of the existing detached `up --json` for app use.
 4. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
 5. **R4** Logs: document the `--json` ndjson as stable; `--services a,b` honoured by every backend; `--max-line-bytes <n>` setting `entry.truncated`.
 6. **R5a** Activity writer: append-only `activity.jsonl` in the Hack home, one line per `up`/`down`/`restart`/autostart (`ts, project, branch, action, origin, outcome, failed_services, duration_ms`), `O_APPEND` writes under one line size limit, rotation at a size cap, `origin` from `HACK_ORIGIN` (the app sets `app`).

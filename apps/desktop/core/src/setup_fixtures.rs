@@ -9,6 +9,16 @@ pub fn load(name: &str) -> Option<Report> {
     if !NAMES.contains(&name) {
         return None;
     }
+    if name == "missing-cli" {
+        return Some(setup::derive(
+            Err("CLI unavailable"),
+            None,
+            None,
+            None,
+            &[],
+            Platform::Linux,
+        ));
+    }
     let native = name == "native-unknown";
     let projects = ProjectsPayload {
         runtime_ok: Some(true),

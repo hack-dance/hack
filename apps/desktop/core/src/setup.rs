@@ -198,6 +198,11 @@ pub fn derive(
             Remedy::Doc("https://docs.docker.com/engine/install/".into()),
         ));
     }
+    if projects.is_none()
+        && let Some(docker) = cards.iter_mut().find(|c| c.id == "docker")
+    {
+        docker.detail = "Project and Docker status unknown: needs a matching hackd snapshot. CLI listing writes the registry until R18.".into();
+    }
     for p in &native {
         let state = p
             .native

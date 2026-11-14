@@ -53,11 +53,13 @@ detail pane, status bar. Light and dark follow the system
 | Backend | v0 | Source |
 |---|---|---|
 | Compose | Full detail | `/v1/projects` or `hack projects --json` (`runtime.services[].containers[]`) |
-| Native (beta) | Row and state pill only; Services shows "native: details need R2" | `hack ps --json --path <root>` (`data.status`) |
+| Native (beta) | Row and state pill only; Services shows "native: details need R2" | `HACK_RUNTIME_BACKEND=native hack ps --json --path <root>` (`data.status`) |
 
 Project views read legacy inputs; a canonical native project comes back with
 `input_diagnostic`. The app recognises that code and asks `hack ps` instead
-rather than showing "Needs attention". Native `data.status` maps as:
+rather than showing "Needs attention". Every command for a native project (`ps`, `up`,
+`down`, `restart`, `logs`) runs with `HACK_RUNTIME_BACKEND=native`, which is how the CLI
+selects that backend today. Native `data.status` maps as:
 `not_started` → Stopped, `pending` → Starting, `observed` → Running or Degraded
 from `items[].state`, `runtime_degraded` → Degraded, `runtime_not_running` and
 `runtime_busy` and `owner_unconfirmed` → Unknown (with the status as reason),
@@ -271,7 +273,7 @@ killed with its process group on expiry; a timeout makes the screen Unknown.
 
 | Screen | Reads | How often | Timeout |
 |---|---|---|---|
-| Sidebar, header | `GET /v1/projects` if `/v1/status.version` matches the CLI, else `hack projects --json --no-daemon`; native rows add `hack ps --json --path` | 2 s with hackd, 10 s without; and after every action | 3 s / 15 s |
+| Sidebar, header | `GET /v1/projects` if `/v1/status.version` matches the CLI, else `hack projects --json --no-daemon`; native rows add `HACK_RUNTIME_BACKEND=native hack ps --json --path` | 2 s with hackd, 10 s without; and after every action | 3 s / 15 s |
 | Services CPU/memory | `hack usage --json --details` (until R3) | 5 s while visible | 10 s |
 | Logs | `hack logs --json --path <root> [<service>] --tail 500` (one long-running child) | stream | killed on tab change |
 | Env | `hack env list --json --path <root>` | on tab open, after env actions | 10 s |

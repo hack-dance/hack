@@ -5,14 +5,18 @@ sequenceDiagram
   autonumber
   actor U as User
   participant A as App
-  participant T as Terminal
+  participant T as New terminal window
   participant C as hack CLI
   A->>U: Explain step, show exact command
-  U->>A: Open in Terminal
-  A->>T: New window, command typed, waits for Enter
-  U->>T: Enter
-  T->>C: hack global trust
-  C->>U: sudo asks for password (in Terminal)
-  C-->>T: exit code
-  A->>C: re-run the check (hack doctor --json)
-  A->>U: Step done, failed, or skipped
+  alt Open Terminal (supported adapter)
+    U->>A: Open Terminal
+    A->>T: New window shows command, waits for Enter
+    U->>T: Enter
+    T->>C: hack global trust
+    C->>U: sudo asks for password (in the terminal)
+  else Copy command
+    U->>A: Copy, run it anywhere
+  end
+  U->>A: Check again
+  A->>C: read-only check
+  A->>U: Done, still needed, or unknown

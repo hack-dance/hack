@@ -12,6 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertAutostartExecutablePathTrusted } from "../src/lib/autostart-executable-trust.ts";
+import {
+  DARWIN_ADMIN_GID,
+  isDarwinAdminDirectory,
+} from "../src/lib/path-trust.ts";
 
 let root = "";
 let bin = "";
@@ -201,4 +205,41 @@ test("Darwin ACL probe failures refuse with closed diagnostics", async () => {
       "Automatic startup refused an unsafe executable search path."
     );
   }
+});
+
+test("macOS admin directories such as /Applications are accepted only on darwin, never world-writable", () => {
+  const dir = (fields: { uid: number; gid: number; mode: number }) => ({
+    ...fields,
+    isDirectory: () => true,
+  });
+  // /Applications: root:admin drwxrwxr-x.
+  const applications = dir({ uid: 0, gid: DARWIN_ADMIN_GID, mode: 0o4_0775 });
+  expect(isDarwinAdminDirectory(applications, "darwin")).toBe(true);
+  expect(isDarwinAdminDirectory(applications, "linux")).toBe(false);
+  expect(
+    isDarwinAdminDirectory(
+      dir({ uid: 0, gid: DARWIN_ADMIN_GID, mode: 0o4_0777 }),
+      "darwin"
+    )
+  ).toBe(false);
+  expect(
+    isDarwinAdminDirectory(dir({ uid: 0, gid: 20, mode: 0o4_0775 }), "darwin")
+  ).toBe(false);
+  expect(
+    isDarwinAdminDirectory(
+      dir({ uid: 501, gid: DARWIN_ADMIN_GID, mode: 0o4_0775 }),
+      "darwin"
+    )
+  ).toBe(false);
+  expect(
+    isDarwinAdminDirectory(
+      {
+        uid: 0,
+        gid: DARWIN_ADMIN_GID,
+        mode: 0o10_0775,
+        isDirectory: () => false,
+      },
+      "darwin"
+    )
+  ).toBe(false);
 });

@@ -18,7 +18,10 @@ a branch instance uses the primary checkout's code, not a different Git checkout
 changes the marker; it does not start anything immediately.
 
 `hack down` pauses autostart for the selected marked instance before attempting to
-stop it. For a renamed linked-worktree branch, ownership reconciliation selects
+stop it. If `down` cannot reach the engine while it chooses between the base and
+a branch instance (for example while the login pass is still waiting for Docker),
+it pauses the marked base or current-branch instance before it fails, so the
+waiting pass never starts what that `down` meant to stop. For a renamed linked-worktree branch, ownership reconciliation selects
 the existing instance before its pause is written; the same selected branch is
 used for the start/stop lock and teardown. Start and stop serialize on a machine-local instance lock: `down` waits
 for an in-flight login start, then stops it before returning success. The login
@@ -77,8 +80,14 @@ checks Darwin ACLs on lookup directories, programs and symlink chains, checkout
 and env inputs, Docker config and plugins, registries and locks, routing assets
 and TLS trust files; mutation
 grants, unknown rights or an unsuccessful bounded inspection refuse startup.
-It also applies to group-writable Homebrew directories, including group `admin`: install
-required helpers in a trusted lookup directory before retrying. A refused search
+It also applies to group-writable Homebrew directories owned by a user, including group `admin`: install
+required helpers in a trusted lookup directory before retrying.
+One macOS exception applies to the engine path only (helper lookup, Docker
+plugins and the Docker socket path): a root-owned directory whose only extra
+writer is group `admin`, such as `/Applications` (`root:admin`, mode `0775`),
+is accepted. Administrators can already replace system software, so this adds
+no new writer. A world-writable directory is still refused, and checkout,
+config, registry and TLS inputs never get this exception. A refused search
 path does not consume a project's attempt for this boot.
 The daemon keeps its installed PATH and continues normal status observation;
 automatic-start refusal does not change ordinary daemon operation.
@@ -102,11 +111,10 @@ as trusted paths. Hack never changes those permissions or files automatically.
 Use `umask 022` in shells that run `hack up` so changed generated inputs retain
 safe modes; with umask 002, a later manual start can recreate group-writable
 generated files and require another review before automatic startup.
-This restriction can also affect Docker Desktop and OrbStack: their CLI and
-Compose plugin links can point into app bundles beneath group-writable
-`/Applications`. Such installations are refused by the automatic path even when
-manual Docker works. Do not change `/Applications` permissions as an automatic
-repair; use reviewed private tools or keep starting projects manually.
+Docker Desktop and OrbStack link their CLI and Compose plugin into app bundles
+beneath `/Applications`; that default layout is accepted by the exception above.
+The app bundle itself must still be owned by you or root and not writable by
+others.
 This unit supports Compose-only unattended starts. Projects declaring startup or
 lifecycle hooks, host processes, shared helpers or dependency bootstrap require
 manual `hack up`. The login child never executes those commands, even if the

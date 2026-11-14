@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { assertAutostartPathAclsTrustedSync } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
-import { walkReplaceableChain } from "./path-trust.ts";
+import { isDarwinAdminDirectory, walkReplaceableChain } from "./path-trust.ts";
 
 const LOGIN_DOCKER_TRANSPORT = /^unix:\/\//;
 
@@ -40,13 +40,18 @@ export function assertAutostartDockerConfigTrusted(opts: {
         hackHome: null,
         checked,
         allowMissing: true,
+        acceptDarwinAdminDirectories: true,
       });
       if ("error" in trust) {
         throw new Error("Unsafe selection input");
       }
       // Sticky directories protect existing names, not absent plugin/config names.
       const existing = statSync(trust.existing);
-      if (existing.isDirectory() && (existing.mode & 0o022) !== 0) {
+      if (
+        existing.isDirectory() &&
+        (existing.mode & 0o022) !== 0 &&
+        !isDarwinAdminDirectory(existing)
+      ) {
         throw new Error("Selection directory permits new entries");
       }
       if (!trust.complete) {
@@ -174,6 +179,7 @@ function assertLoginDockerTransport(host: unknown, uid: number): void {
     hackHome: null,
     checked,
     allowMissing: true,
+    acceptDarwinAdminDirectories: true,
   });
   if ("error" in trust) {
     throw new Error("Unsafe socket path");
@@ -183,7 +189,11 @@ function assertLoginDockerTransport(host: unknown, uid: number): void {
       continue;
     }
     const info = lstatSync(entry);
-    if (info.isDirectory() && (info.mode & 0o022) !== 0) {
+    if (
+      info.isDirectory() &&
+      (info.mode & 0o022) !== 0 &&
+      !isDarwinAdminDirectory(info)
+    ) {
       throw new Error("Replaceable socket parent");
     }
   }

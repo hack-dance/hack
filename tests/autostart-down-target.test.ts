@@ -188,6 +188,61 @@ test("unavailable runtime refuses before a final target is published", async () 
   ).rejects.toMatchObject({ code: "E_DOCKER_UNAVAILABLE" });
 });
 
+for (const marked of ["old-branch", "new-branch", null, "other-branch"]) {
+  test(`unavailable runtime still pauses a ${marked ?? "base"} marker that this down could target`, async () => {
+    const paused: { id: string; paused: boolean }[] = [];
+    const registration = {
+      id: "example-id",
+      name: "example",
+      repoRoot: primary,
+      projectDir: join(primary, ".hack"),
+      projectDirName: ".hack" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+      worktrees: [
+        {
+          path: worktree,
+          branch: "new-branch",
+          lastSeenAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      autostart: {
+        branch: marked,
+        paused: false,
+        lastResult: null,
+        lastAttemptBootId: null,
+      },
+    };
+    await expect(
+      resolveFinalAutostartDownTarget(
+        { cwd: worktree },
+        {
+          ...dependencies([]),
+          readProjectsRegistry: async () => ({
+            version: 1 as const,
+            projects: [registration],
+          }),
+          readRuntimeProjects: async () => ({
+            ok: false,
+            runtime: [],
+            error: "fixture unavailable",
+            checkedAtMs: 1,
+          }),
+          setProjectAutostartPaused: async (input) => {
+            paused.push({ id: input.id ?? "", paused: input.paused });
+            return [];
+          },
+        }
+      )
+    ).rejects.toMatchObject({ code: "E_DOCKER_UNAVAILABLE" });
+    // The implicit target is either base or the worktree's current branch.
+    expect(paused).toEqual(
+      marked === null || marked === "new-branch"
+        ? [{ id: "example-id", paused: true }]
+        : []
+    );
+  });
+}
+
 for (const ownedBranch of ["old-branch", null]) {
   test(`source down pauses and locks the owned ${ownedBranch ?? "base"} runtime after a real worktree branch rename`, async () => {
     const ownedComposeProject =

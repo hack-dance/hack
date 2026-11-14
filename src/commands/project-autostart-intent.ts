@@ -68,6 +68,7 @@ export async function resolveFinalAutostartDownTarget(
     readonly readProjectsRegistry?: typeof readProjectsRegistry;
     readonly readRuntimeProjects?: typeof readRuntimeProjects;
     readonly isLocalTarget?: (project: ProjectContext) => Promise<boolean>;
+    readonly setProjectAutostartPaused?: typeof setProjectAutostartPaused;
   }
 ): Promise<AutostartDownTarget | undefined> {
   const registry = await (deps?.readProjectsRegistry ?? readProjectsRegistry)();
@@ -75,7 +76,7 @@ export async function resolveFinalAutostartDownTarget(
   if (!context) {
     return undefined;
   }
-  const { project } = context;
+  const { project, registration } = context;
   const cfg = await readProjectConfig(project);
   const raw = opts.branch?.trim();
   const explicitBranch = raw ? sanitizeBranchSlug(raw) || "branch" : null;
@@ -105,9 +106,17 @@ export async function resolveFinalAutostartDownTarget(
     includeGlobal: false,
   });
   if (!runtime.ok) {
+    // A login pass may be waiting for this same engine. Stop intent cannot
+    // wait for it: pause whichever candidate instance (base or this branch)
+    // is marked, so the pass never starts what this down meant to stop.
+    const paused = await pauseCandidateDownMarker({
+      registration,
+      branch: effective.branch,
+      pause: deps?.setProjectAutostartPaused ?? setProjectAutostartPaused,
+    });
     throw new HackCliError({
       code: "E_DOCKER_UNAVAILABLE",
-      message: `Cannot inspect runtime ownership before down: ${runtime.error}`,
+      message: `Cannot inspect runtime ownership before down: ${runtime.error}${paused ? " Automatic startup for this project is paused; run hack up to resume it." : ""}`,
     });
   }
   return {
@@ -119,6 +128,24 @@ export async function resolveFinalAutostartDownTarget(
       writeNotice: opts.writeNotice ?? (() => undefined),
     }),
   };
+}
+
+/** Pause the marked base or current-branch instance an unresolved down could target. */
+async function pauseCandidateDownMarker(opts: {
+  readonly registration: RegisteredProject | undefined;
+  readonly branch: string | null;
+  readonly pause: typeof setProjectAutostartPaused;
+}): Promise<boolean> {
+  const marker = opts.registration?.autostart;
+  if (
+    !(opts.registration && marker) ||
+    marker.paused ||
+    !(marker.branch === null || marker.branch === opts.branch)
+  ) {
+    return false;
+  }
+  await opts.pause({ id: opts.registration.id, paused: true });
+  return true;
 }
 
 /** Shared legacy discovery never crosses native inputs or guesses a duplicate named registration. */

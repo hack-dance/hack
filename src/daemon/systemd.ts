@@ -2012,8 +2012,11 @@ export async function checkServicePathDirectories(opts: {
   readonly uid?: number;
   /** Optional inventory for additional read-only platform checks; never a trust cache. */
   readonly inspectedPaths?: Set<string>;
+  /** Autostart's engine lookup only; the hackd.service PATH check never sets it. */
+  readonly acceptDarwinAdminDirectories?: boolean;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const admin = opts.acceptDarwinAdminDirectories === true;
   const checked = new Set<string>();
   const scanned = new Set<string>();
   for (const dir of opts.dirs) {
@@ -2028,12 +2031,15 @@ export async function checkServicePathDirectories(opts: {
       hackHome: null,
       allowMissing: true,
       checked: directoryPaths,
+      acceptDarwinAdminDirectories: admin,
     });
     if ("error" in walk) {
       return `the hackd.service PATH directory ${dir} is not safe: ${walk.error}`;
     }
     recordInspectedPaths(directoryPaths, opts.inspectedPaths);
-    const writable = lettingOthersCreate(walk.existing);
+    const writable = lettingOthersCreate(walk.existing, {
+      acceptDarwinAdminDirectories: admin,
+    });
     if (writable !== null) {
       return `other users can ${walk.complete ? "add programs to" : "create"} the hackd.service PATH directory ${dir} (${walk.existing}, ${writable}); run: chmod go-w ${walk.existing}`;
     }
@@ -2045,6 +2051,7 @@ export async function checkServicePathDirectories(opts: {
         uid,
         checked,
         inspectedPaths: opts.inspectedPaths,
+        acceptDarwinAdminDirectories: admin,
       });
       if (program !== null) {
         return `the hackd.service PATH directory ${dir} holds ${program}`;
@@ -2081,6 +2088,7 @@ async function checkPathDirectoryPrograms(opts: {
   readonly uid: number;
   readonly checked: Set<string>;
   readonly inspectedPaths?: Set<string>;
+  readonly acceptDarwinAdminDirectories?: boolean;
 }): Promise<string | null> {
   let entries: string[];
   let systemDir: boolean;
@@ -2105,7 +2113,12 @@ async function checkPathDirectoryPrograms(opts: {
       continue;
     }
     const error = info.isSymbolicLink()
-      ? await checkPathLink({ path, uid: opts.uid, checked: opts.checked })
+      ? await checkPathLink({
+          path,
+          uid: opts.uid,
+          checked: opts.checked,
+          acceptDarwinAdminDirectories: opts.acceptDarwinAdminDirectories,
+        })
       : programFileProblem({ path, info, uid: opts.uid, systemDir });
     if (error !== null) {
       return error;
@@ -2126,6 +2139,7 @@ async function checkPathLink(opts: {
   readonly path: string;
   readonly uid: number;
   readonly checked: Set<string>;
+  readonly acceptDarwinAdminDirectories?: boolean;
 }): Promise<string | null> {
   const walk = await walkReplaceableChain({
     path: opts.path,
@@ -2133,6 +2147,7 @@ async function checkPathLink(opts: {
     hackHome: null,
     allowMissing: true,
     checked: opts.checked,
+    acceptDarwinAdminDirectories: opts.acceptDarwinAdminDirectories,
   });
   if ("error" in walk) {
     return walk.error;
@@ -2140,7 +2155,9 @@ async function checkPathLink(opts: {
   if (walk.complete) {
     return null;
   }
-  const creatable = lettingOthersCreate(walk.existing);
+  const creatable = lettingOthersCreate(walk.existing, {
+    acceptDarwinAdminDirectories: opts.acceptDarwinAdminDirectories,
+  });
   return creatable === null
     ? null
     : `${opts.path}, a link to a missing target that other users could create in ${walk.existing} (${creatable})`;

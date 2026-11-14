@@ -330,8 +330,10 @@ Linux ownership checks read the process's effective UID from `/proc/<pid>/status
 They do not infer UID from proc-file ownership, which changes when a command
 disables dumpability. Such a command remains recoverable after guard loss.
 
-Restart policy and restart backoff belong to the CLI integration in #811, not
-this binary's command ownership loop. This crate does not restart commands.
+This crate does not restart commands, and the CLI opt-in does not add a restart
+policy either: a persistent command that exits stays down under both runners
+until `hack restart` or `hack up`. Automatic restart with crash-loop backoff is
+deferred to a later slice and would belong to the CLI, not this ownership loop.
 
 Logs are append-only and have no automatic rotation. Stop all generations and
 confirm native absence before archiving the private root/log and starting with

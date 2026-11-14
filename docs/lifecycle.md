@@ -699,7 +699,10 @@ noninteractive mode or an interactive workspace.
 
 Supervisor lifecycle processes do not appear as tmux sessions. Watch their output
 with `hack logs -f <name>`. Stop and restart use the recorded owner even after the
-runner setting changes. Unknown shutdown retains the ownership record and any
+runner setting changes. Neither runner restarts a persistent command that exits or
+crashes: it stays down, its exit is recorded, and status reports it as not live.
+Run `hack restart` (or `hack up`) to start it again. Automatic restart with backoff
+is not part of this opt-in. Unknown shutdown retains the ownership record and any
 shared helper holders, and fails so `hack down` can be retried. Shared helper
 commands themselves keep their existing ownership contract in this unit.
 
@@ -710,7 +713,10 @@ unparsable legacy `.hack/.internal/lifecycle/state.json` is moved to a private
 `state.json.legacy-<timestamp>-<id>` sibling, with one explanation, and treated as
 empty. This recovers interrupted non-atomic writes from older mux versions.
 After a project has used the supervisor, the durable `supervisor-state` marker
-disables that fallback: losing ownership may hide running native commands.
+disables that fallback: losing ownership may hide running native commands. With
+that marker present, a missing `state.json` is also refused rather than read as
+"nothing running", so `hack down`, status and runner changes cannot skip native
+retirement. Removing entries rewrites the file; Hack never deletes it.
 Unsafe files (including symlinks, hard links and foreign ownership) and
 semantically invalid records still refuse under both runners. State mutations
 now serialize on `state.lock` and publish atomically with mode 0600.

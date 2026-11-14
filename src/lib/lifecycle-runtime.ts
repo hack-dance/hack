@@ -186,6 +186,12 @@ export async function readLifecycleState(opts: {
     refusal: lifecycleStateRefused,
   });
   if (file === null) {
+    // Removal rewrites an empty entry list and never deletes this file. Once
+    // supervisor ownership was recorded, a missing file is lost state, not
+    // absence: native commands may still run.
+    if (await supervisorStateRecorded(root)) {
+      throw lifecycleStateRefused();
+    }
     return [];
   }
   await verifyLifecycleStateTarget(path);
@@ -194,14 +200,7 @@ export async function readLifecycleState(opts: {
   try {
     parsed = JSON.parse(text);
   } catch {
-    if (
-      await lstat(resolve(root, "supervisor-state")).catch((error: unknown) => {
-        if (isRecord(error) && error.code === "ENOENT") {
-          return null;
-        }
-        throw error;
-      })
-    ) {
+    if (await supervisorStateRecorded(root)) {
       throw lifecycleStateRefused();
     }
     if (!opts.stateLocked) {
@@ -244,12 +243,8 @@ export async function upsertLifecycleStateEntry(opts: {
   readonly entry: LifecycleStateEntry;
 }): Promise<void> {
   return await mutateLifecycleState(opts.projectDir, async () => {
-    if (opts.entry.backend === "supervisor") {
-      await appendPrivateFile({
-        path: resolve(resolveLifecycleRootDir(opts), "supervisor-state"),
-        data: "",
-      });
-    }
+    // Read before marking: the marker turns a missing state file into a
+    // refusal, and a project's first supervisor entry has no file yet.
     const state = await readLifecycleState({
       projectDir: opts.projectDir,
       stateLocked: true,
@@ -266,6 +261,14 @@ export async function upsertLifecycleStateEntry(opts: {
       projectDir: opts.projectDir,
       state: next,
     });
+    // The entry is durable before the marker and before any native launch, so
+    // a crash between them never leaves a marker without a readable file.
+    if (opts.entry.backend === "supervisor") {
+      await appendPrivateFile({
+        path: resolve(resolveLifecycleRootDir(opts), "supervisor-state"),
+        data: "",
+      });
+    }
   });
 }
 
@@ -597,6 +600,19 @@ export async function drainLifecycleOutput(opts: {
       message: line,
     });
   }
+}
+
+/** Durable marker written once a supervisor entry has been published. */
+async function supervisorStateRecorded(root: string): Promise<boolean> {
+  const marker = await lstat(resolve(root, "supervisor-state")).catch(
+    (error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+  );
+  return marker !== null;
 }
 
 function lifecycleStateRefused(): Error {

@@ -1,5 +1,5 @@
-import { lstat } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
 import {
   migrationRefusal,
@@ -7,6 +7,14 @@ import {
   sameMigrationFile,
 } from "./env-migration-files.ts";
 import { isRecord } from "./guards.ts";
+import {
+  createUpgradeSnapshot,
+  readUpgradeSnapshot,
+  recordUpgradeSnapshotAfter,
+  restoreUpgradeSnapshot,
+  type UpgradeRestoreEntry,
+  type UpgradeSnapshotState,
+} from "./upgrade-snapshot.ts";
 
 /** Metadata only. An absent path has a null checksum and mode. */
 export type EnvMigrationFileState = {
@@ -45,61 +53,75 @@ export type EnvMigrationSnapshots = {
   }>;
 };
 
-/** Late binding keeps this unit independent until HACK-2189 lands; replace with a typed static import on integration. */
-export async function envMigrationSnapshots(): Promise<EnvMigrationSnapshots> {
-  const moduleUrl = new URL("./upgrade-snapshot.ts", import.meta.url).href;
-  let library: unknown;
-  try {
-    library = await import(moduleUrl);
-  } catch {
-    throw new ClosedCliError(
-      "Env migration requires the upgrade snapshot library. Preview is available; no migration files were changed."
-    );
+type SnapshotLibrary = {
+  readonly createUpgradeSnapshot: typeof createUpgradeSnapshot;
+  readonly readUpgradeSnapshot: typeof readUpgradeSnapshot;
+  readonly recordUpgradeSnapshotAfter: typeof recordUpgradeSnapshotAfter;
+  readonly restoreUpgradeSnapshot: typeof restoreUpgradeSnapshot;
+};
+
+/** Static imports keep the production provider in both source and compiled CLI routes. */
+export function envMigrationSnapshots(): EnvMigrationSnapshots {
+  return bindEnvMigrationSnapshots({
+    createUpgradeSnapshot,
+    readUpgradeSnapshot,
+    recordUpgradeSnapshotAfter,
+    restoreUpgradeSnapshot,
+  });
+}
+
+/** The provider restores by rename/hard link; refuse before migration if that cannot work. */
+async function assertRestoreFilesystem(
+  snapshotDir: string,
+  files: readonly EnvMigrationFileState[]
+): Promise<void> {
+  const snapshot = await stat(snapshotDir);
+  for (const file of files) {
+    let parent = dirname(file.path);
+    for (;;) {
+      const info = await stat(parent).catch((error: unknown) => {
+        if (isRecord(error) && error.code === "ENOENT") {
+          return null;
+        }
+        throw migrationRefusal();
+      });
+      if (info) {
+        if (!info.isDirectory() || info.dev !== snapshot.dev) {
+          throw new ClosedCliError(
+            "Env migration needs snapshot storage on the same filesystem as every target so rollback can restore it. Choose a private HACK_HOME on that filesystem outside Git working trees; no migration files were changed (values omitted)."
+          );
+        }
+        break;
+      }
+      parent = dirname(parent);
+    }
   }
-  return bindEnvMigrationSnapshots(library);
 }
 
 /** Adapter checks both the snapshot owner's verdict and the journal's exact expectations. */
 export function bindEnvMigrationSnapshots(
-  library: unknown
+  library: SnapshotLibrary
 ): EnvMigrationSnapshots {
-  if (!isRecord(library)) {
-    throw migrationRefusal();
-  }
-  const invoke = async (name: string, input: unknown): Promise<unknown> => {
-    const operation = library[name];
-    if (typeof operation !== "function") {
-      throw migrationRefusal();
-    }
-    return await Reflect.apply(operation, undefined, [input]);
-  };
   const load = async (manifestPath: string) => {
-    const loaded = await invoke("readUpgradeSnapshot", { manifestPath });
-    if (
-      !(
-        isRecord(loaded) &&
-        loaded.status === "ok" &&
-        isRecord(loaded.snapshot) &&
-        isRecord(loaded.snapshot.manifest) &&
-        Array.isArray(loaded.snapshot.manifest.entries) &&
-        typeof loaded.snapshot.dir === "string"
-      )
-    ) {
+    const loaded = await library.readUpgradeSnapshot({ manifestPath });
+    if (loaded.status !== "ok") {
       throw migrationRefusal();
     }
     return {
       dir: loaded.snapshot.dir,
-      entries: loaded.snapshot.manifest.entries as unknown[],
+      entries: loaded.snapshot.manifest.entries,
     };
   };
-  const matches = (state: unknown, expected: EnvMigrationFileState) =>
-    isRecord(state) &&
-    (expected.sha256 === null
+  const matches = (
+    state: UpgradeSnapshotState,
+    expected: EnvMigrationFileState
+  ) =>
+    expected.sha256 === null
       ? state.kind === "absent"
       : state.kind === "file" &&
         state.sha256 === expected.sha256 &&
         state.size === expected.size &&
-        state.mode === expected.mode);
+        state.mode === expected.mode;
   const verifyCurrent = async (files: readonly EnvMigrationFileState[]) => {
     for (const expected of files) {
       if (
@@ -122,9 +144,9 @@ export function bindEnvMigrationSnapshots(
     for (const expected of expectedCurrent) {
       const current = (await readMigrationFile(expected.path)).state;
       const original = snapshot.entries.find(
-        (entry) => isRecord(entry) && entry.path === expected.path
+        (entry) => entry.path === expected.path
       );
-      if (isRecord(original) && matches(original.before, current)) {
+      if (original && matches(original.before, current)) {
         continue;
       }
       if (!(sameMigrationFile(current, expected) || preserveChanges)) {
@@ -138,21 +160,14 @@ export function bindEnvMigrationSnapshots(
   };
   return {
     capture: async ({ projectRoot, files }) => {
-      const result = await invoke("createUpgradeSnapshot", {
+      const result = await library.createUpgradeSnapshot({
         purpose: "env-migration",
         targets: files.map((file) => ({
           path: file.path,
           label: `env migration: ${file.path}`,
         })),
       });
-      if (
-        !(
-          isRecord(result) &&
-          result.status === "created" &&
-          isRecord(result.snapshot) &&
-          typeof result.snapshot.manifestPath === "string"
-        )
-      ) {
+      if (result.status !== "created") {
         throw new ClosedCliError(
           `Snapshot refused for ${projectRoot}; no migration files were changed (values omitted).`
         );
@@ -161,11 +176,12 @@ export function bindEnvMigrationSnapshots(
     },
     assertCoverage: async ({ manifestPath, files }) => {
       const snapshot = await load(manifestPath);
+      await assertRestoreFilesystem(snapshot.dir, files);
       for (const expected of files) {
         const entry = snapshot.entries.find(
-          (candidate) => isRecord(candidate) && candidate.path === expected.path
+          (candidate) => candidate.path === expected.path
         );
-        if (!(isRecord(entry) && matches(entry.before, expected))) {
+        if (!(entry && matches(entry.before, expected))) {
           throw migrationRefusal();
         }
         if (expected.sha256 !== null) {
@@ -184,11 +200,11 @@ export function bindEnvMigrationSnapshots(
     },
     recordAfter: async ({ manifestPath, files }) => {
       await verifyCurrent(files);
-      const result = await invoke("recordUpgradeSnapshotAfter", {
+      const result = await library.recordUpgradeSnapshotAfter({
         manifestPath,
         paths: files.map((file) => file.path),
       });
-      if (!(isRecord(result) && result.status === "recorded")) {
+      if (result.status !== "recorded") {
         throw migrationRefusal();
       }
       await verifyCurrent(files);
@@ -202,17 +218,17 @@ export function bindEnvMigrationSnapshots(
         manifestPath
       );
       // A killed publication may predate the provider's after receipt; only journal-proven bytes may fill that gap.
-      const recorded = await invoke("recordUpgradeSnapshotAfter", {
+      const recorded = await library.recordUpgradeSnapshotAfter({
         manifestPath,
         paths: pending.map((file) => file.path),
       });
-      if (!(isRecord(recorded) && recorded.status === "recorded")) {
+      if (recorded.status !== "recorded") {
         throw migrationRefusal();
       }
-      const results: unknown[] = [];
+      const results: UpgradeRestoreEntry[] = [];
       let incomplete = false;
       for (const target of expectedCurrent) {
-        const result = await invoke("restoreUpgradeSnapshot", {
+        const result = await library.restoreUpgradeSnapshot({
           manifestPath,
           paths: [target.path],
           beforeReplace: async (path: string) => {
@@ -222,13 +238,7 @@ export function bindEnvMigrationSnapshots(
             }
           },
         });
-        if (
-          !(
-            isRecord(result) &&
-            (result.status === "restored" || result.status === "incomplete") &&
-            Array.isArray(result.results)
-          )
-        ) {
+        if (result.status === "invalid-manifest") {
           throw migrationRefusal();
         }
         results.push(...result.results);
@@ -238,9 +248,7 @@ export function bindEnvMigrationSnapshots(
         }
       }
       const preserved = results.flatMap((result) =>
-        isRecord(result) &&
-        typeof result.path === "string" &&
-        typeof result.keptAs === "string"
+        result.keptAs !== undefined
           ? [{ path: result.path, backupPath: result.keptAs }]
           : []
       );

@@ -1346,7 +1346,10 @@ hack env migrate --apply --accept-tracked-env-changes
 Preview is read-only and lists file actions and key names, never values. Apply
 creates a private snapshot outside the working tree and records idempotent steps
 in a journal. Re-run it after interruption; a finished migration is a no-op.
-`doctor --migrate-env-config` remains an applying alias. Both backends use the
+`doctor --migrate-env-config` still applies migration; its existing hygiene
+repairs can run before the migration snapshot and are reported separately.
+Use `hack env migrate --apply` for migration-only preview and rollback.
+Both backends use the
 same file migration; Compose users need no native runtime, and neither preview
 nor apply needs Docker or a daemon.
 

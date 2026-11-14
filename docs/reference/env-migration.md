@@ -86,7 +86,11 @@ rename succeeded before its receipt. An unexpected input or destination change
 refuses instead of guessing. Re-run the same apply command after interruption.
 After completion it returns `already_complete` without rewriting the project or
 journal. `doctor --migrate-env-config` uses the same apply/journal path and keeps
-all legacy files. Implicit migrations from env, session and startup commands also
+all legacy files. Doctor can also perform its existing hygiene repairs before
+migration, such as adding ignore rules or tightening permissions; those separate
+doctor repairs are outside the env migration journal. Use `hack env migrate
+--apply` when the preview and rollback must cover only the migration's writes.
+Implicit migrations from env, session and startup commands also
 keep legacy files and resume an unfinished journal; they preserve existing
 Compose `env_file` references.
 Implicit commands refuse an unfinished apply or rollback journal before using
@@ -97,6 +101,10 @@ staging directories. Unknown or edited entries are retained, reported as
 `payloadCleanup: "kept"` in the apply result. Original snapshot blobs remain for
 rollback. A private data home inside a Git working tree refuses apply; choose a
 private `HACK_HOME` outside repositories, including a home managed as dotfiles.
+Snapshot storage must also share a filesystem with every migration target:
+the snapshot library restores with rename and hard links. Apply refuses before
+project writes if that guarantee is unavailable. Choose a private `HACK_HOME`
+on the target filesystem, outside Git working trees, then retry the preview.
 
 Migration never includes cleanup. A later explicit cleanup requires:
 

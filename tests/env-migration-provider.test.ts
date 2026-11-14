@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -9,9 +10,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { applyEnvMigration } from "../src/lib/env-migration.ts";
+import { bindEnvMigrationSnapshots } from "../src/lib/env-migration-snapshot.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import { resolveProjectEnvConfig } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
+import * as snapshotLibrary from "../src/lib/upgrade-snapshot.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureChildren } from "./helpers/fixture-children.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -242,4 +246,35 @@ test("production rollback maps preserved edits to retrievable private files with
   expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
     `TOKEN=${sentinel}\n`
   );
+});
+
+test("apply refuses cross-filesystem snapshot storage before any project publication", async () => {
+  const sharedMemory = await lstat("/dev/shm").catch(() => null);
+  if (!sharedMemory || sharedMemory.dev === (await lstat(root)).dev) {
+    return; // This host has no second filesystem; Linux CI exercises the boundary.
+  }
+  const snapshotRoot = await mkdtemp(join("/dev/shm", "env-snapshot-"));
+  try {
+    const project = await fixture();
+    const before = await readFile(join(project.projectDir, ".env"));
+    const snapshots = bindEnvMigrationSnapshots({
+      ...snapshotLibrary,
+      createUpgradeSnapshot: (input) =>
+        snapshotLibrary.createUpgradeSnapshot({ ...input, root: snapshotRoot }),
+    });
+    await expect(
+      applyEnvMigration({ project, snapshots, acceptTrackedChanges: true })
+    ).rejects.toThrow("same filesystem");
+    expect(
+      (await readFile(join(project.projectDir, ".env"))).equals(before)
+    ).toBe(true);
+    expect(
+      await Bun.file(join(project.projectDir, "hack.env.default.yaml")).exists()
+    ).toBe(false);
+    expect(
+      await Bun.file(join(project.projectRoot, ".hack.secret.key")).exists()
+    ).toBe(false);
+  } finally {
+    await rm(snapshotRoot, { recursive: true, force: true });
+  }
 });

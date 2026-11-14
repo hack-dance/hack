@@ -123,7 +123,11 @@ file paths before applying. `hack env migrate --apply` snapshots originals outsi
 the working tree and records resumable steps; repeat the same command after an
 interruption. Add `--accept-tracked-env-changes` only when consenting to the
 previewed shared edits. `doctor --migrate-env-config` still applies the migration,
-but now retains all legacy copies, including untracked dotenv files and tracked
+alongside its existing hygiene repairs; the env journal covers migration writes,
+not earlier doctor repairs. Use `hack env migrate --apply` for migration-only
+preview and rollback. Snapshot storage and the target files must share a
+filesystem; apply refuses before writing project files if rollback would cross one.
+Every migrating route now retains all legacy copies, including untracked dotenv files and tracked
 `hack.env.json`. Implicit migrations retain them too.
 
 After checking a successful complete-project `hack up`, preview the separate

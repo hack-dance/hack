@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
-import { assertNativePlanHome } from "./lib/native-plan-home.ts";
+import { nativePlanHomeMatches } from "./lib/native-plan-home-state.ts";
 
 /** Real compiled CLI/sidecar, isolated HOME and Git worktrees, no source or toolchain on PATH. */
 const root = resolve(import.meta.dir, "..");
@@ -250,7 +250,11 @@ try {
   await Bun.write(join(checkout, ".hack/hack.config.json"), "{}");
   await refused([], "E_NATIVE_PROJECT_CONFLICT", checkout);
   await rm(join(checkout, ".hack/hack.config.json"));
-  await assertNativePlanHome({ home, failedUps: 0 });
+  require(await nativePlanHomeMatches({
+    home,
+    activityCount: 0,
+    privateValues: [sentinel, directory],
+  }), "offline planning creates no home state");
   const unsupported = await invoke(
     ["up", "web", "--detach", "--json"],
     checkout,
@@ -278,7 +282,11 @@ try {
     detachedResult.ok === false &&
     record(detachedResult.error).code ===
       "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
-  await assertNativePlanHome({ home, failedUps: 2 });
+  require(await nativePlanHomeMatches({
+    home,
+    activityCount: 2,
+    privateValues: [sentinel, directory],
+  }), "only private failed lifecycle activity is recorded");
   require(!(await readdir(join(checkout, ".hack"))).some(
     (name) => name === ".internal" || name === ".branch"
   ), "no registry or generated runtime state");

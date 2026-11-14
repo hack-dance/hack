@@ -52,6 +52,7 @@ import {
   programFileProblem,
   readSystemdServicePathDirectories,
   readSystemdServiceStatus,
+  renderedServicePathDirectories,
   renderSystemdUnit,
   resolveSystemdAccess,
   resolveSystemdUnitPath,
@@ -496,6 +497,23 @@ linuxTest(
     expect(text).toContain("Restart=on-failure");
     expect(text).toContain("WantedBy=default.target");
     expect(text).toContain("Environment=HACK_NO_INTERACTIVE=1");
+    expect(text).toContain("Environment=HACK_DAEMON_LOGIN_SERVICE=1");
+    expect(text).toContain("KillMode=control-group");
+    expect(text).toContain("%h/.local/bin:%h/.bun/bin:%h/.hack/bin");
+    expect(
+      renderedServicePathDirectories({
+        hackBinPath: "/opt/hack",
+        home: "/example/user",
+        systemDirectories: ["/usr/bin", "/bin"],
+      })
+    ).toEqual([
+      "/opt",
+      "/usr/bin",
+      "/bin",
+      "/example/user/.local/bin",
+      "/example/user/.bun/bin",
+      "/example/user/.hack/bin",
+    ]);
     expect(extractSystemdExecProgram({ unitText: text ?? "" })).toBe(
       "/opt/my tools%/hack"
     );

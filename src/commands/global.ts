@@ -143,10 +143,7 @@ import {
   resolveProxyBindAddress,
 } from "../lib/proxy-bind.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
-import {
-  reconcileRemoteCaddyRoutesStack,
-  stopRemoteCaddyRoutesStack,
-} from "../lib/remote-caddy-routes.ts";
+import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
 import {
   detectDockerBackend,
   formatDockerConnectionGuidance,
@@ -182,6 +179,15 @@ import {
   planGlobalTrust,
   type TrustPlanDeps,
 } from "./global-admin-plan.ts";
+import {
+  assertGlobalBackendStartAllowed,
+  assertGlobalLoginRoutingImages,
+  globalDnsRecoveryAllowed,
+  globalLoggingUpArguments,
+  globalRoutingUpArguments,
+  reconcileGlobalRoutingBridge,
+  secureGlobalLoginRouting,
+} from "./global-autostart.ts";
 import {
   executeMacPrivilegedCommand,
   macAuthorizationArgv,
@@ -864,11 +870,15 @@ function getGlobalPaths() {
   };
 }
 
-async function ensureDockerRunning(): Promise<void> {
+async function ensureDockerRunning(opts?: {
+  readonly login: boolean;
+}): Promise<void> {
   const res = await exec(["docker", "info"], { stdin: "ignore" });
   if (res.exitCode === 0) {
     return;
   }
+
+  assertGlobalBackendStartAllowed({ login: opts?.login === true });
 
   const backend = await detectDockerBackend();
   if (!backend) {
@@ -1840,12 +1850,18 @@ export async function globalUp(): Promise<number> {
     return slimExit;
   }
 
-  await ensureDockerRunning();
-  if (isMac()) {
+  const paths = getGlobalPaths();
+  const login = process.env.HACK_AUTOSTART_LOGIN === "1";
+  await secureGlobalLoginRouting({ root: paths.root, login });
+
+  await ensureDockerRunning({ login });
+  await assertGlobalLoginRoutingImages({
+    composeFile: paths.caddyCompose,
+    login,
+  });
+  if (isMac() && globalDnsRecoveryAllowed({ login })) {
     await ensureMacDnsmasqRunning();
   }
-  const paths = getGlobalPaths();
-
   if (!(await pathExists(paths.caddyCompose))) {
     logger.error({
       message: `Missing ${paths.caddyCompose}. Run: hack global install`,
@@ -1911,15 +1927,7 @@ export async function globalUp(): Promise<number> {
 
   logger.step({ message: "Starting Caddy…" });
   const caddyExit = await run(
-    [
-      "docker",
-      "compose",
-      "-f",
-      paths.caddyCompose,
-      "up",
-      "-d",
-      "--remove-orphans",
-    ],
+    globalRoutingUpArguments({ composeFile: paths.caddyCompose, login }),
     { cwd: dirname(paths.caddyCompose) }
   );
   if (caddyExit !== 0) {
@@ -1946,32 +1954,20 @@ export async function globalUp(): Promise<number> {
     });
     return 1;
   }
-  const remoteRoutes = await reconcileRemoteCaddyRoutesStack();
-  if (remoteRoutes.status === "failed") {
-    logger.warn({
-      message: `Remote route bridge sync failed: ${remoteRoutes.error}`,
-    });
-  } else if (remoteRoutes.status === "applied") {
-    logger.step({
-      message: `Remote route bridge active (${remoteRoutes.routeCount} host${remoteRoutes.routeCount === 1 ? "" : "s"})`,
-    });
-  }
+  await reconcileGlobalRoutingBridge({ enabled: !login });
 
-  logger.step({ message: "Starting logging stack…" });
-  const logExit = await run(
-    [
-      "docker",
-      "compose",
-      "-f",
-      paths.loggingCompose,
-      "up",
-      "-d",
-      "--remove-orphans",
-    ],
-    { cwd: dirname(paths.loggingCompose) }
-  );
-  if (logExit !== 0) {
-    return logExit;
+  const loggingArguments = globalLoggingUpArguments({
+    composeFile: paths.loggingCompose,
+    login,
+  });
+  if (loggingArguments) {
+    logger.step({ message: "Starting logging stack…" });
+    const logExit = await run(loggingArguments, {
+      cwd: dirname(paths.loggingCompose),
+    });
+    if (logExit !== 0) {
+      return logExit;
+    }
   }
 
   logger.success({ message: "Global infra is up" });

@@ -952,6 +952,12 @@ export function renderProjectConfigSchemaJson(): string {
             additionalProperties: true,
             properties: {
               autoStart: { type: "boolean" },
+              autostartEngineWaitMs: {
+                type: "integer",
+                minimum: 1,
+                maximum: 3_600_000,
+                default: 600_000,
+              },
             },
           },
           gateway: {

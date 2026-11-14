@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
@@ -66,6 +67,7 @@ import {
   resolveSystemdUnitPath,
   SYSTEMD_READ_ONLY_ENV,
 } from "../daemon/systemd.ts";
+import { autostartTrustWarnings } from "../lib/autostart-trust-diagnostics.ts";
 import {
   type CaTrustReport,
   inspectCaTrust,
@@ -886,6 +888,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()));
   results.push(await runCheck(s, "daemon", () => checkDaemonStatus()));
+  results.push(
+    await runCheck(s, "autostart login service", () =>
+      checkAutostartLoginService()
+    )
+  );
   if (isLinux() && !isCandidateRun()) {
     // Candidate trials do not manage the stable login service. Otherwise the
     // row is omitted when systemd management is disabled for this process
@@ -1927,6 +1934,46 @@ async function checkGlobalFiles(): Promise<CheckResult> {
     message: ok
       ? root
       : `Missing compose files under ${root} (run: hack global install)`,
+  };
+}
+
+/** File-only observation: never starts the daemon or invokes a service manager. */
+async function checkAutostartLoginService(): Promise<CheckResult> {
+  const registry = await readProjectsRegistry();
+  const marked = registry.projects.filter(
+    (project) => project.autostart
+  ).length;
+  if (marked === 0) {
+    return {
+      name: "autostart login service",
+      status: "ok",
+      message: "No always-on projects marked.",
+    };
+  }
+  const warnings = await autostartTrustWarnings({
+    projects: registry.projects,
+    home: homedir(),
+  });
+  if (warnings.length > 0) {
+    return {
+      name: "autostart login service",
+      status: "warn",
+      message: `Automatic startup trust prerequisites are not met: ${warnings.join(", ")}. Review ownership and group/other write permissions; formerly writable files need reviewed replacement on fresh private files, since chmod or ACL changes cannot revoke an older open writer. See docs/always-on-projects.md. On macOS this can include Homebrew, Docker Desktop or OrbStack links through /Applications. Ordinary daemon operation is unaffected.`,
+    };
+  }
+  let unitPath: string | null = null;
+  if (isMac()) {
+    unitPath = resolveDaemonPaths({}).launchdPlistPath;
+  } else if (isLinux()) {
+    unitPath = resolveSystemdUnitPath();
+  }
+  const installed = unitPath !== null && (await pathExists(unitPath));
+  return {
+    name: "autostart login service",
+    status: installed ? "ok" : "warn",
+    message: installed
+      ? "Always-on projects have an installed login service."
+      : "Always-on projects are marked but the login service is not installed. Run: hack daemon install",
   };
 }
 

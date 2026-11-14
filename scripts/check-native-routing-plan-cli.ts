@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
-import { assertNativePlanHome } from "./lib/native-plan-home.ts";
+import { nativePlanHomeMatches } from "./lib/native-plan-home-state.ts";
 
 /** Exercise the relocated executable/sidecar with isolated policy and real linked Git worktrees. */
 const root = resolve(import.meta.dir, "..");
@@ -379,11 +379,15 @@ try {
     "local route injection refused"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
-  await assertNativePlanHome({
-    home,
-    failedUps: 0,
-    preparedHackFiles: ["hack.config.json"],
-  });
+  assert(
+    await nativePlanHomeMatches({
+      home,
+      activityCount: 0,
+      existingConfig: true,
+      privateValues: [canary, directory],
+    }),
+    "offline planning creates no unexpected home state"
+  );
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -399,14 +403,15 @@ try {
       (await readdir(join(checkout, ".hack"))).some(
         (name) => name === ".internal" || name === ".branch"
       )
-    ),
+    ) &&
+      (await nativePlanHomeMatches({
+        home,
+        activityCount: 1,
+        existingConfig: true,
+        privateValues: [canary, directory],
+      })),
     "no hook, registry, route publication or generated-state effects"
   );
-  await assertNativePlanHome({
-    home,
-    failedUps: 1,
-    preparedHackFiles: ["hack.config.json"],
-  });
   process.stdout.write(
     `Relocated native routing planning: ${checks} checks passed; no DNS/trust/runtime effects\n`
   );

@@ -22,6 +22,7 @@ export function spawnDetachedDaemon(opts: {
   // for that one repair, not for the daemon and everything it starts.
   const env: Record<string, string | undefined> = { ...process.env };
   Reflect.deleteProperty(env, "HACK_DAEMON_SERVICE_READ_ONLY");
+  Reflect.deleteProperty(env, "HACK_DAEMON_LOGIN_SERVICE");
   const proc = Bun.spawn([...opts.argv], {
     env: hackReexecEnvironment(env),
     stdin: "ignore",

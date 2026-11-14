@@ -9,6 +9,11 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
+import { serializeProjectAutostart } from "./autostart-view.ts";
+
+// biome-ignore lint/performance/noBarrelFile: Preserve the existing project policy serializer import contract.
+export { serializeProjectAutostart } from "./autostart-view.ts";
+
 import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -84,6 +89,7 @@ export type ProjectLifecycleView = {
 
 export type ProjectView = {
   readonly projectId?: string;
+  readonly autostart?: RegisteredProject["autostart"];
   readonly name: string;
   readonly devHost: string | null;
   readonly repoRoot: string | null;
@@ -312,6 +318,7 @@ async function buildRegisteredProjectView(opts: {
 
   return {
     projectId: opts.registration.id,
+    autostart: opts.registration.autostart,
     name: opts.name,
     devHost: opts.registration.devHost ?? null,
     repoRoot: opts.registration.repoRoot,
@@ -340,6 +347,7 @@ function buildUnavailableProjectView(opts: {
 }): ProjectView {
   return {
     projectId: opts.registration.id,
+    autostart: opts.registration.autostart,
     name: opts.name,
     devHost: opts.registration.devHost ?? null,
     repoRoot: opts.registration.repoRoot,
@@ -407,6 +415,7 @@ export function serializeProjectSummary(
   );
   return {
     project_id: view.projectId ?? null,
+    autostart: serializeProjectAutostart(view.autostart),
     name: view.name,
     repo_root: view.repoRoot,
     dev_host: view.devHost,
@@ -435,6 +444,7 @@ export function serializeProjectView(
 ): Record<string, unknown> {
   return {
     project_id: view.projectId ?? null,
+    autostart: serializeProjectAutostart(view.autostart),
     name: view.name,
     dev_host: view.devHost ?? null,
     repo_root: view.repoRoot ?? null,

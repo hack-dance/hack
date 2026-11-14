@@ -142,6 +142,21 @@ const restartPolicyStaleUses = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "autostart-start-stop",
+    module: "StartStop",
+    states: 41,
+    invariant: "NoStartAfterSuccessfulDown",
+    action: "ChildStart",
+    fields: [
+      'holder = "none"',
+      "paused = TRUE",
+      'child = "started"',
+      "running = TRUE",
+      'down = "done"',
+      "lateStart = TRUE",
+    ],
+  },
+  {
     name: "interactive-session",
     module: "Session",
     states: 459,

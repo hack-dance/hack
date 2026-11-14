@@ -4,6 +4,7 @@ import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../backends/native-project-o
 import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
+import type { AutostartGlobalView } from "./autostart-view.ts";
 import {
   emitCliResult,
   errorResult,
@@ -152,10 +153,16 @@ import {
 } from "./native-compose-selection.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
+import type { serializeProjectAutostart } from "./project-views.ts";
 import { run } from "./shell.ts";
 
 type Operation = "up" | "restart" | "down" | "ps" | "logs" | "exec" | "run";
 export type NativeComposeCommandOptions = {
+  /** Add machine policy only for status callers; ordinary ps keeps its existing shape. */
+  readonly statusMetadata?: () => Promise<{
+    readonly autostart: ReturnType<typeof serializeProjectAutostart>;
+    readonly autostart_global: AutostartGlobalView;
+  }>;
   readonly cwd: string;
   readonly path?: string;
   readonly project?: string;
@@ -736,6 +743,7 @@ async function savedCommand(opts: {
               beforeHooksPending: true,
               hostHookPhase: state.hostHookPhase,
               services: [],
+              ...(await options.statusMetadata?.()),
             },
           }),
         });
@@ -1029,6 +1037,7 @@ async function savedCommand(opts: {
                     oneoff,
                   })
                 ),
+                ...(await options.statusMetadata?.()),
               },
             }),
           });

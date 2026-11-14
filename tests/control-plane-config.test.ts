@@ -398,3 +398,56 @@ test("readControlPlaneConfig merges secrets backend strategy config", async () =
   expect(projectOverride.config.secrets.cloud.project).toBe("dev-account");
   expect(projectOverride.config.secrets.cloud.secretPrefix).toBe("hack");
 });
+
+test("daemon engine wait defaults to ten minutes and accepts bounded machine configuration", async () => {
+  expect(
+    (await readControlPlaneConfig({})).config.daemon.autostartEngineWaitMs
+  ).toBe(600_000);
+  if (!tempGlobalConfig) {
+    throw new Error("Missing fixture config path");
+  }
+  for (const duration of [1, 900_000, 3_600_000]) {
+    await writeFile(
+      tempGlobalConfig,
+      JSON.stringify({
+        controlPlane: { daemon: { autostartEngineWaitMs: duration } },
+      })
+    );
+    const result = await readControlPlaneConfig({});
+    expect(result.parseError).toBeUndefined();
+    expect(result.config.daemon.autostartEngineWaitMs).toBe(duration);
+  }
+  for (const duration of [0, 3_600_001, 1.5, "900000"]) {
+    await writeFile(
+      tempGlobalConfig,
+      JSON.stringify({
+        controlPlane: { daemon: { autostartEngineWaitMs: duration } },
+      })
+    );
+    expect((await readControlPlaneConfig({})).parseError).toBeDefined();
+  }
+});
+
+test("service configuration uses an explicit machine path instead of a shell override", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-daemon-config-"));
+  const ownedPath = join(tempDir, "machine.json");
+  if (!tempGlobalConfig) {
+    throw new Error("Missing fixture config path");
+  }
+  await writeFile(
+    tempGlobalConfig,
+    JSON.stringify({ controlPlane: { daemon: { autostartEngineWaitMs: 1 } } })
+  );
+  await writeFile(
+    ownedPath,
+    JSON.stringify({
+      controlPlane: { daemon: { autostartEngineWaitMs: 900_000 } },
+    })
+  );
+  const result = await readControlPlaneConfig({
+    globalConfigPath: ownedPath,
+    strict: true,
+  });
+  expect(result.parseError).toBeUndefined();
+  expect(result.config.daemon.autostartEngineWaitMs).toBe(900_000);
+});

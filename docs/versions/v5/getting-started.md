@@ -69,6 +69,24 @@ hack ps
 hack open
 ```
 
+To start this project at future logins, use `hack up -d --always` and install
+the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
+`hack up` resumes it. See [Always-on projects](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md) for
+the startup bounds, no-prompt behavior and JSON contract. Automatic startup requires
+trusted, non-writable-by-others tool and project paths; `hack doctor` reports
+permission refusals, including app-bundle and Homebrew paths on macOS.
+Formerly writable files require reviewed replacement on fresh private files;
+changing modes or ACLs in place cannot revoke an older open writer.
+This slice starts only eligible Compose projects with images already available
+locally. Hooks, host helpers, command providers and image builds require manual
+`hack up`; doctor explains those manual-start requirements.
+Retained projects created by `hack config adopt` also require manual starts.
+Host-file/source-code bind mounts also require manual starts. Verified default
+engine volumes and Hack's authenticated read-only TLS mounts remain supported.
+Interrupting `hack autostart run` cancels the pass and waits for startup cleanup.
+After upgrades that change global templates, run `hack global install` manually
+before relying on login routing.
+
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
 have no URL. Sign in or load a page that reads data to check the app itself.
@@ -117,3 +135,25 @@ This stops the project. It does not delete its named volumes or stop shared
 routing services. See [Run and inspect](guides/run-project.md) for service selection,
 log history and restarts. When this Compose run works, try native only on a
 [disposable project](native/start.md).
+
+Always-on login restores Caddy/CoreDNS routing only. Logging (Grafana, Loki and
+Alloy) starts through manual `hack global up`; login leaves existing logging
+containers running. Change default Grafana credentials before network exposure.
+
+Login requires a non-SSH Docker transport and already-prepared DNS. It skips
+macOS dnsmasq startup and passwordless DNS recovery; use manual `hack global up`
+when DNS needs starting or recovery.
+The daemon service PATH is unchanged; only automatic-start children use the
+separately audited Docker user-bin path.
+Dotenv template and backup copies do not block always-on admission; active dotenv
+overlays still need migration, and Compose `env_file` inputs require manual starts.
+TCP Docker contexts require manual starts too; login accepts local Unix socket
+transports, without claiming TCP peer authentication.
+On Linux/macOS, login also requires a Unix socket under trusted parents; shared
+or sticky socket directories are refused before engine access.
+Writable sticky Docker plugin directories also refuse login startup, including
+empty directories where a plugin could be planted after an audit.
+Direnv files such as `.envrc` are not dotenv overlays and do not block admission.
+Prepare Caddy/CoreDNS images with manual `hack global up`: login routing never
+pulls or builds images and refuses missing local images.
+Machine-wide autostart progress is exposed locally, not through the unsupported gateway.

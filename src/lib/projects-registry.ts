@@ -1,7 +1,11 @@
-import { createHash } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { type FileHandle, open, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_PROJECTS_REGISTRY_FILENAME } from "../constants.ts";
+import { assertAutostartFileAclsTrusted } from "./autostart-path-acl.ts";
+import { isAutostartManualStartReason } from "./autostart-refusal.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, pathExists } from "./fs.ts";
@@ -39,12 +43,57 @@ import {
 const REGISTRY_VERSION = 1 as const;
 const REGISTRY_LOCK_FILENAME = `${GLOBAL_PROJECTS_REGISTRY_FILENAME}.lock`;
 const REGISTRY_TOUCH_INTERVAL_MS = 60_000;
+const AUTOSTART_REGISTRY_LIMIT_BYTES = 16 * 1024 * 1024;
+/** Progress records are bounded independently of the overall registry byte cap. */
+export const AUTOSTART_LOGIN_PROJECT_LIMIT = 1000;
+const AUTOSTART_PROJECT_ID_LIMIT = 128;
 
 export interface RegisteredProjectWorktree {
   readonly path: string;
   readonly branch: string | null;
   readonly lastSeenAt: string;
 }
+
+/** Value-free result of the daemon's most recent startup attempt. */
+export interface ProjectAutostartResult {
+  readonly status: "started" | "skipped" | "failed" | "already_running";
+  readonly reason: string | null;
+  readonly at: string;
+}
+
+/** Machine-owned intent; repository configuration never creates this marker. */
+export interface ProjectAutostart {
+  readonly branch: string | null;
+  readonly paused: boolean;
+  readonly lastResult: ProjectAutostartResult | null;
+  /** Persisted before starting: daemon replacement in the same boot cannot replay it. */
+  readonly lastAttemptBootId: string | null;
+  /** Invalid/future intent is visible but never eligible for automatic starts. */
+  readonly invalid?: true;
+}
+
+/** Login progress uses project IDs. Run identity is private admission bookkeeping. */
+export interface AutostartLoginRun {
+  readonly runId: string | null;
+  readonly bootId: string | null;
+  readonly inProgress: boolean;
+  readonly waitingForEngine: boolean;
+  readonly startedAt: string | null;
+  readonly pending: readonly string[];
+  readonly started: readonly string[];
+  readonly failed: readonly string[];
+}
+
+/** Global pause is independent of per-project manual-stop pauses. */
+export interface AutostartGlobal {
+  readonly paused: boolean;
+  readonly loginRun: AutostartLoginRun;
+  readonly invalid?: true;
+}
+
+// Invalid markers remain repairable and survive unrelated registry writes byte-for-JSON-value.
+// The weak key follows the marker through project spreads without exposing raw data in views.
+const invalidAutostartValues = new WeakMap<object, unknown>();
 
 export interface RegisteredProject {
   readonly id: string;
@@ -57,11 +106,15 @@ export interface RegisteredProject {
   readonly lastSeenAt?: string;
   /** Linked git worktree checkouts of this project seen by the CLI (additive; absent in older registries). */
   readonly worktrees?: readonly RegisteredProjectWorktree[];
+  readonly autostart?: ProjectAutostart;
+  /** Legacy paths copied from writable storage still need independent review before first opt-in. */
+  readonly autostartRequiresReview?: true;
 }
 
 export interface ProjectsRegistry {
   readonly version: typeof REGISTRY_VERSION;
   readonly projects: readonly RegisteredProject[];
+  readonly autostartGlobal?: AutostartGlobal;
 }
 
 export class AmbiguousProjectIdError extends Error {
@@ -144,6 +197,119 @@ async function readRegistryText(path: string): Promise<string | null> {
   }
 }
 
+/** Value-free refusal: an untrusted registry must never authorize login code execution. */
+export class AutostartRegistryTrustError extends HackCliError {
+  constructor() {
+    super({
+      code: "E_PERMISSION",
+      message:
+        "Autostart cannot trust projects.json. Preserve the old file outside the active registry, then rebuild a fresh current-user-owned regular registry and re-enable only reviewed projects. Do not repair writable files with in-place chmod: existing writer descriptors remain writable. Fresh files must have mode 0600, no symbolic link, and stay below 16 MiB. Values omitted.",
+    });
+    this.name = "AutostartRegistryTrustError";
+  }
+}
+
+/** Strict intent mutations cannot discard malformed registration or worktree records. */
+class AutostartRegistryInvalidError extends HackCliError {
+  constructor() {
+    super({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Projects registry is invalid; autostart intent was not changed.",
+    });
+  }
+}
+
+/**
+ * Trust the opened file, never a pre-open path observation. The UID check applies
+ * on hosts with a user identity; Unix file modes must deny group/other writes.
+ * Kept pure so owner rejection can be tested without changing real ownership.
+ */
+export function isTrustedAutostartRegistryFile(opts: {
+  readonly regular: boolean;
+  readonly fileUid: number;
+  readonly currentUid: number | undefined;
+  readonly mode: number;
+  readonly size: number;
+}): boolean {
+  return (
+    opts.regular &&
+    (opts.currentUid === undefined || opts.fileUid === opts.currentUid) &&
+    (opts.mode & 0o022) === 0 &&
+    opts.size >= 0 &&
+    opts.size <= AUTOSTART_REGISTRY_LIMIT_BYTES
+  );
+}
+
+/** No-follow, non-blocking and bounded read from the same descriptor we validate. */
+async function readTrustedAutostartRegistryText(
+  path: string,
+  allowLegacyWritable = false
+): Promise<string | null> {
+  let file: FileHandle;
+  try {
+    file = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    );
+  } catch (error: unknown) {
+    const errno = isRecord(error) ? error.code : undefined;
+    if (errno === "ENOENT" || errno === "ENOTDIR") {
+      return null;
+    }
+    throw new AutostartRegistryTrustError();
+  }
+  try {
+    const info = await file.stat();
+    await assertAutostartFileAclsTrusted({
+      path,
+      uid: process.getuid?.() ?? -1,
+    });
+    if (
+      !isTrustedAutostartRegistryFile({
+        regular: info.isFile(),
+        fileUid: info.uid,
+        currentUid: process.getuid?.(),
+        // Only explicit first opt-in may rebuild unmarked legacy state. The
+        // descriptor's regular-file, owner and byte bounds still apply.
+        mode: allowLegacyWritable ? info.mode & ~0o022 : info.mode,
+        size: info.size,
+      })
+    ) {
+      throw new AutostartRegistryTrustError();
+    }
+    const chunks: Buffer[] = [];
+    const buffer = Buffer.alloc(64 * 1024);
+    let total = 0;
+    while (true) {
+      const { bytesRead } = await file.read(
+        buffer,
+        0,
+        Math.min(buffer.length, AUTOSTART_REGISTRY_LIMIT_BYTES + 1 - total),
+        null
+      );
+      if (bytesRead === 0) {
+        return Buffer.concat(chunks, total).toString("utf8");
+      }
+      total += bytesRead;
+      if (total > AUTOSTART_REGISTRY_LIMIT_BYTES) {
+        throw new AutostartRegistryTrustError();
+      }
+      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+    }
+  } catch {
+    throw new AutostartRegistryTrustError();
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
+
+type RegistryReadOptions = {
+  readonly registryPath?: string;
+  /** Automatic starts require a private, current-user-owned regular registry file. */
+  readonly requireAutostartTrust?: true;
+};
+
 /**
  * Read an explicit session registry without changing process-wide environment.
  *
@@ -151,12 +317,16 @@ async function readRegistryText(path: string): Promise<string | null> {
  * JSON or not a registry. A registry that exists but cannot be read refuses
  * with {@link ProjectsRegistryReadError}; writers reread under the lock, so
  * they refuse too instead of replacing it.
+ * `requireAutostartTrust` additionally refuses unsafe file identity, mode or
+ * size with {@link AutostartRegistryTrustError}, before parsing any intent.
  */
-export async function readProjectsRegistry(opts?: {
-  readonly registryPath?: string;
-}): Promise<ProjectsRegistry> {
+export async function readProjectsRegistry(
+  opts?: RegistryReadOptions
+): Promise<ProjectsRegistry> {
   const path = opts?.registryPath ?? getRegistryPath();
-  const text = await readRegistryText(path);
+  const text = opts?.requireAutostartTrust
+    ? await readTrustedAutostartRegistryText(path)
+    : await readRegistryText(path);
   if (!text) {
     return { version: REGISTRY_VERSION, projects: [] };
   }
@@ -177,19 +347,25 @@ export async function readProjectsRegistry(opts?: {
  * registry for an empty one (HACK-2177): `absent` (no file), `valid`, or
  * `invalid` (not JSON, or not a registry). A file that cannot be read
  * throws {@link ProjectsRegistryReadError}, as {@link readProjectsRegistry}.
+ * Trusted autostart reads also throw {@link AutostartRegistryTrustError}.
  */
-export async function readProjectsRegistryStrict(opts?: {
-  readonly registryPath?: string;
-}): Promise<
+export async function readProjectsRegistryStrict(
+  opts?: RegistryReadOptions
+): Promise<
   | { readonly kind: "absent" | "invalid" }
   | {
       readonly kind: "valid";
       readonly registry: ProjectsRegistry;
       /** Project entries the registry holds that are not valid (skipped). */
       readonly rejected: number;
+      /** Invalid/future autostart markers retained as disabled diagnostics. */
+      readonly invalidAutostart: number;
     }
 > {
-  const text = await readRegistryText(opts?.registryPath ?? getRegistryPath());
+  const path = opts?.registryPath ?? getRegistryPath();
+  const text = opts?.requireAutostartTrust
+    ? await readTrustedAutostartRegistryText(path)
+    : await readRegistryText(path);
   if (text === null) {
     return { kind: "absent" };
   }
@@ -224,7 +400,59 @@ export async function readProjectsRegistryStrict(opts?: {
       rejected += 1;
     }
   }
-  return { kind: "valid", registry, rejected };
+  return {
+    kind: "valid",
+    registry,
+    rejected,
+    invalidAutostart: registry.projects.filter(
+      (project) => project.autostart?.invalid
+    ).length,
+  };
+}
+
+/**
+ * Ordinary registry writers must not launder untrusted login intent into a
+ * current-user-owned atomic replacement. Call only while holding the registry
+ * lock; if the first read carries intent, build the update from a trusted fresh
+ * read instead. If it carries none, a later path replacement cannot inject a
+ * marker into the already-read state that this writer publishes.
+ */
+async function readProjectsRegistryForMutation(): Promise<ProjectsRegistry> {
+  const observed = await readProjectsRegistry();
+  if (
+    observed.autostartGlobal ||
+    observed.projects.some((project) => project.autostart)
+  ) {
+    return await readProjectsRegistry({ requireAutostartTrust: true });
+  }
+  try {
+    return (
+      await readAutostartMutationRegistry({
+        registryPath: getRegistryPath(),
+        allowLegacyPermissionRepair: true,
+        requireObservedLegacyProject: false,
+      })
+    ).registry;
+  } catch (error: unknown) {
+    if (
+      !(
+        error instanceof AutostartRegistryTrustError ||
+        error instanceof AutostartRegistryInvalidError
+      )
+    ) {
+      throw error;
+    }
+    // Preserve ordinary registration/prune behavior for unmarked legacy data.
+    // Replacing a link publishes a fresh file at the registry path and leaves
+    // its target untouched; none of the copied paths gains startup authority.
+    return {
+      ...observed,
+      projects: observed.projects.map((project) => ({
+        ...project,
+        autostartRequiresReview: true,
+      })),
+    };
+  }
 }
 
 type RegistrationUpsertOptions = {
@@ -298,7 +526,7 @@ async function upsertObservedRegistration(input: {
       await assertLegacyProjectDirectory({
         projectDir: opts.project.projectDir,
       });
-      const current = await readProjectsRegistry();
+      const current = await readProjectsRegistryForMutation();
       const update = await upsertInMemory({
         current,
         nowIso,
@@ -310,6 +538,7 @@ async function upsertObservedRegistration(input: {
       });
 
       return await commitRegistrationUpdate({
+        registry: current,
         update,
         registryPath,
         signal: opts.signal,
@@ -321,6 +550,7 @@ async function upsertObservedRegistration(input: {
 }
 
 async function commitRegistrationUpdate(opts: {
+  readonly registry: ProjectsRegistry;
   readonly update: Awaited<ReturnType<typeof upsertInMemory>>;
   readonly registryPath: string;
   readonly signal?: AbortSignal;
@@ -334,7 +564,7 @@ async function commitRegistrationUpdate(opts: {
     await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
     await writeRegistryAtomic(
       opts.registryPath,
-      { version: REGISTRY_VERSION, projects: status.projects },
+      { ...opts.registry, projects: status.projects },
       opts.signal
     );
   }
@@ -387,7 +617,7 @@ async function refreshUnchangedPrimary(opts: {
       await assertLegacyProjectDirectory({
         projectDir: opts.observation.projectDir,
       });
-      const current = await readProjectsRegistry();
+      const current = await readProjectsRegistryForMutation();
       const primary = selectUnchangedPrimary({
         registry: current,
         observation: opts.observation,
@@ -401,6 +631,7 @@ async function refreshUnchangedPrimary(opts: {
         return { status: "noop", project: primary };
       }
       return await commitRegistrationUpdate({
+        registry: current,
         registryPath,
         projectDir: opts.observation.projectDir,
         update: await updatePrimaryRegistration({
@@ -602,6 +833,626 @@ export async function resolveRegisteredProjectById(opts: {
   };
 }
 
+type AutostartRegistryOptions = {
+  readonly registryPath?: string;
+  readonly signal?: AbortSignal;
+};
+
+/** Legacy registries default to unpaused with no observed login run. */
+export function getDefaultAutostartGlobal(): AutostartGlobal {
+  return {
+    paused: false,
+    loginRun: {
+      runId: null,
+      bootId: null,
+      inProgress: false,
+      waitingForEngine: false,
+      startedAt: null,
+      pending: [],
+      started: [],
+      failed: [],
+    },
+  };
+}
+
+/** Automatic-start policy must be read from a trusted machine registry. */
+export async function readAutostartGlobal(
+  opts: AutostartRegistryOptions = {}
+): Promise<AutostartGlobal> {
+  const registry = await readTrustedAutostartRegistry(opts);
+  return registry.autostartGlobal ?? getDefaultAutostartGlobal();
+}
+
+/** Global pause masks every opt-in, including future markers; manual-stop intent is retained. */
+export async function setAutostartGlobalPaused(
+  opts: AutostartRegistryOptions & { readonly paused: boolean }
+): Promise<AutostartGlobal> {
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const old = current.autostartGlobal;
+      const global: AutostartGlobal = {
+        ...(old?.invalid
+          ? getDefaultAutostartGlobal()
+          : (old ?? getDefaultAutostartGlobal())),
+        paused: opts.paused,
+      };
+      return { next: { ...current, autostartGlobal: global }, value: global };
+    },
+  });
+}
+
+/** Begin a new owned progress record. A globally paused machine starts no run. */
+export async function beginAutostartLoginRun(
+  opts: AutostartRegistryOptions & {
+    readonly bootId: string;
+    readonly startedAt: string;
+    readonly pendingIds: readonly string[];
+    readonly waitingForEngine?: boolean;
+  }
+): Promise<AutostartLoginRun | null> {
+  if (!(opts.bootId.trim() && Number.isFinite(Date.parse(opts.startedAt)))) {
+    throw new Error(
+      "Autostart login requires a boot identity and valid start time."
+    );
+  }
+  const pending = [...new Set(opts.pendingIds)];
+  if (!isAutostartLoginProjectIds(pending)) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Autostart login progress supports at most 1000 project IDs, each 1 to 128 characters. No projects were started.",
+    });
+  }
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const global = current.autostartGlobal ?? getDefaultAutostartGlobal();
+      if (global.paused) {
+        return { next: current, value: null };
+      }
+      const run: AutostartLoginRun = {
+        runId: randomUUID(),
+        bootId: opts.bootId,
+        inProgress: true,
+        waitingForEngine: opts.waitingForEngine ?? false,
+        startedAt: opts.startedAt,
+        pending,
+        started: [],
+        failed: [],
+      };
+      return {
+        next: { ...current, autostartGlobal: { ...global, loginRun: run } },
+        value: run,
+      };
+    },
+  });
+}
+
+/** Complete one pending project; duplicate and superseded run receipts do nothing. */
+export async function recordAutostartLoginOutcome(
+  opts: AutostartRegistryOptions & {
+    readonly runId: string;
+    readonly id: string;
+    readonly succeeded: boolean;
+    /** User intent/cancellation is neither success nor a startup failure. */
+    readonly cancelled?: boolean;
+  }
+): Promise<boolean> {
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const global = current.autostartGlobal ?? getDefaultAutostartGlobal();
+      const run = global.loginRun;
+      if (
+        !run.inProgress ||
+        run.runId !== opts.runId ||
+        !run.pending.includes(opts.id)
+      ) {
+        return { next: current, value: false };
+      }
+      const loginRun: AutostartLoginRun = {
+        ...run,
+        pending: run.pending.filter((id) => id !== opts.id),
+        started: opts.succeeded ? [...run.started, opts.id] : run.started,
+        failed:
+          opts.succeeded || opts.cancelled
+            ? run.failed
+            : [...run.failed, opts.id],
+      };
+      return {
+        next: { ...current, autostartGlobal: { ...global, loginRun } },
+        value: true,
+      };
+    },
+  });
+}
+
+/** Publish engine readiness for the active run without touching project claims or outcomes. */
+export async function setAutostartLoginWaitingForEngine(
+  opts: AutostartRegistryOptions & {
+    readonly runId: string;
+    readonly waitingForEngine: boolean;
+  }
+): Promise<boolean> {
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const global = current.autostartGlobal ?? getDefaultAutostartGlobal();
+      const run = global.loginRun;
+      if (!run.inProgress || run.runId !== opts.runId) {
+        return { next: current, value: false };
+      }
+      return {
+        next: {
+          ...current,
+          autostartGlobal: {
+            ...global,
+            loginRun: { ...run, waitingForEngine: opts.waitingForEngine },
+          },
+        },
+        value: true,
+      };
+    },
+  });
+}
+
+/** Close a run; engine deferral retains unclaimed work for a later readiness pass. */
+export async function finishAutostartLoginRun(
+  opts: AutostartRegistryOptions & {
+    readonly runId: string;
+    readonly waitingForEngine?: boolean;
+  }
+): Promise<boolean> {
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const global = current.autostartGlobal ?? getDefaultAutostartGlobal();
+      const run = global.loginRun;
+      if (!run.inProgress || run.runId !== opts.runId) {
+        return { next: current, value: false };
+      }
+      const loginRun: AutostartLoginRun = {
+        ...run,
+        inProgress: false,
+        waitingForEngine: opts.waitingForEngine ?? false,
+        pending: opts.waitingForEngine ? run.pending : [],
+        failed: run.failed,
+      };
+      return {
+        next: { ...current, autostartGlobal: { ...global, loginRun } },
+        value: true,
+      };
+    },
+  });
+}
+
+async function readTrustedAutostartRegistry(
+  opts: AutostartRegistryOptions
+): Promise<ProjectsRegistry> {
+  const read = await readProjectsRegistryStrict({
+    registryPath: opts.registryPath,
+    requireAutostartTrust: true,
+  });
+  if (read.kind === "invalid" || (read.kind === "valid" && read.rejected > 0)) {
+    throw new AutostartRegistryInvalidError();
+  }
+  return read.kind === "valid"
+    ? read.registry
+    : { version: REGISTRY_VERSION, projects: [] };
+}
+
+/** Serialize global policy, progress and project intent with all existing registry writers. */
+async function mutateAutostartRegistry<T>(
+  opts: AutostartRegistryOptions & {
+    readonly update: (current: ProjectsRegistry) => {
+      readonly next: ProjectsRegistry;
+      readonly value: T;
+    };
+  }
+): Promise<T> {
+  const registryPath = opts.registryPath ?? getRegistryPath();
+  await ensureDir(dirname(registryPath));
+  return await withProjectsRegistryLock({
+    lockPath: `${registryPath}.lock`,
+    signal: opts.signal,
+    run: async () => {
+      const current = await readTrustedAutostartRegistry({ registryPath });
+      const { next, value } = opts.update(current);
+      if (next !== current) {
+        await writeRegistryAtomic(registryPath, next, opts.signal);
+      }
+      return value;
+    },
+  });
+}
+
+/** Explicit machine opt-in. Re-adding an unchanged target preserves its boot claim. */
+export async function setProjectAutostart(
+  opts: AutostartRegistryOptions & {
+    readonly id: string;
+    readonly branch?: string | null;
+    /** Independently observed current checkout; unsafe legacy paths cannot establish this proof. */
+    readonly observedProject?: {
+      readonly repoRoot: string;
+      readonly projectDir: string;
+    };
+    /** Fired only after rebuilding an owned, unmarked legacy registry on a new private inode. */
+    readonly onPermissionsRepaired?: () => void;
+  }
+): Promise<RegisteredProject> {
+  let selected: RegisteredProject | undefined;
+  await mutateProjectAutostart({
+    ...opts,
+    allowLegacyPermissionRepair: true,
+    requireObservedProjectReview: true,
+    update: (project) => {
+      const branch = opts.branch ?? null;
+      const old = project.autostart;
+      if (old?.invalid) {
+        throw new HackCliError({
+          code: "E_CONFIG_INVALID",
+          message:
+            "Autostart state is invalid or newer than this CLI. Remove the marker with 'hack autostart remove' before adding it again. Values omitted.",
+        });
+      }
+      const autostart: ProjectAutostart = {
+        ...old,
+        branch,
+        paused: false,
+        lastResult: old?.lastResult ?? null,
+        lastAttemptBootId: old?.lastAttemptBootId ?? null,
+      };
+      const { autostartRequiresReview: _reviewed, ...reviewed } = project;
+      selected = { ...reviewed, autostart };
+      return selected;
+    },
+  });
+  if (!selected) {
+    throw new HackCliError({
+      code: "E_PROJECT_NOT_FOUND",
+      message:
+        "Project is not registered; register it before enabling autostart.",
+    });
+  }
+  return selected;
+}
+
+/** Remove machine intent without stopping the project's running processes. */
+export async function removeProjectAutostart(
+  opts: AutostartRegistryOptions & { readonly id: string }
+): Promise<RegisteredProject | null> {
+  const changed = await mutateProjectAutostart({
+    ...opts,
+    update: (project) => {
+      const { autostart: _removed, ...rest } = project;
+      return rest;
+    },
+  });
+  return changed[0] ?? null;
+}
+
+/** Pause/resume only existing opt-ins. An omitted id selects all marked projects. */
+export async function setProjectAutostartPaused(
+  opts: AutostartRegistryOptions & {
+    readonly id?: string;
+    readonly paused: boolean;
+  }
+): Promise<readonly RegisteredProject[]> {
+  return await mutateProjectAutostart({
+    ...opts,
+    update: (project) =>
+      project.autostart && !project.autostart.invalid
+        ? {
+            ...project,
+            autostart: { ...project.autostart, paused: opts.paused },
+          }
+        : project,
+  });
+}
+
+/**
+ * Atomically claim an unpaused opt-in once per OS boot, before any child starts.
+ * A crash after publication can skip that boot's attempt; it never duplicates it.
+ * The returned registration is the locked reread, not a stale scheduling snapshot.
+ */
+export async function claimProjectAutostart(
+  opts: AutostartRegistryOptions & {
+    readonly id: string;
+    readonly bootId: string;
+  }
+): Promise<RegisteredProject | null> {
+  if (!opts.bootId.trim()) {
+    throw new Error("Autostart requires a non-empty OS boot identity.");
+  }
+  let claimed: RegisteredProject | null = null;
+  await mutateProjectAutostart({
+    ...opts,
+    respectGlobalPause: true,
+    update: (project) => {
+      const marker = project.autostart;
+      if (
+        project.autostartRequiresReview ||
+        !marker ||
+        marker.invalid ||
+        marker.paused ||
+        marker.lastAttemptBootId === opts.bootId
+      ) {
+        return project;
+      }
+      claimed = {
+        ...project,
+        autostart: { ...marker, lastAttemptBootId: opts.bootId },
+      };
+      return claimed;
+    },
+  });
+  return claimed;
+}
+
+/**
+ * A late result cannot recreate removed intent or overwrite a newer boot/branch
+ * claim. Closed manual-only refusals may release an unstarted claim atomically;
+ * failures, unknown reasons and results lacking the expected target never do.
+ */
+export async function recordProjectAutostartResult(
+  opts: AutostartRegistryOptions & {
+    readonly id: string;
+    /** Expected existing claim; null also supports a refusal before any claim. */
+    readonly bootId: string | null;
+    readonly result: ProjectAutostartResult;
+    readonly onlyIfWanted?: boolean;
+    readonly expectedBranch?: string | null;
+    readonly releaseUnstartedClaim?: boolean;
+  }
+): Promise<boolean> {
+  let recorded = false;
+  await mutateProjectAutostart({
+    ...opts,
+    respectGlobalPause: opts.onlyIfWanted,
+    update: (project) => {
+      if (
+        project.autostart?.invalid ||
+        project.autostart?.lastAttemptBootId !== opts.bootId ||
+        (opts.onlyIfWanted && project.autostart?.paused) ||
+        (opts.expectedBranch !== undefined &&
+          project.autostart?.branch !== opts.expectedBranch)
+      ) {
+        return project;
+      }
+      recorded = true;
+      const release =
+        opts.releaseUnstartedClaim === true &&
+        opts.bootId !== null &&
+        opts.expectedBranch !== undefined &&
+        opts.result.status === "skipped" &&
+        isAutostartManualStartReason(opts.result.reason);
+      return {
+        ...project,
+        autostart: {
+          ...project.autostart,
+          lastResult: opts.result,
+          ...(release ? { lastAttemptBootId: null } : {}),
+        },
+      };
+    },
+  });
+  return recorded;
+}
+
+/** Every intent mutation rereads and publishes under the same registry lock as upsert. */
+async function mutateProjectAutostart(
+  opts: AutostartRegistryOptions & {
+    readonly id?: string;
+    readonly respectGlobalPause?: boolean;
+    readonly allowLegacyPermissionRepair?: boolean;
+    readonly requireObservedProjectReview?: boolean;
+    readonly observedProject?: {
+      readonly repoRoot: string;
+      readonly projectDir: string;
+    };
+    readonly onPermissionsRepaired?: () => void;
+    readonly update: (project: RegisteredProject) => RegisteredProject;
+  }
+): Promise<readonly RegisteredProject[]> {
+  const registryPath = opts.registryPath ?? getRegistryPath();
+  await ensureDir(dirname(registryPath));
+  return await withProjectsRegistryLock({
+    lockPath: `${registryPath}.lock`,
+    signal: opts.signal,
+    run: async () => {
+      const { registry: current, permissionsRepaired } =
+        await readAutostartMutationRegistry({
+          registryPath,
+          id: opts.id,
+          observedProject: opts.observedProject,
+          allowLegacyPermissionRepair: opts.allowLegacyPermissionRepair,
+        });
+      if (opts.respectGlobalPause && current.autostartGlobal?.paused) {
+        return [];
+      }
+      if (
+        opts.requireObservedProjectReview &&
+        current.projects.some(
+          (project) => project.id === opts.id && project.autostartRequiresReview
+        )
+      ) {
+        await assertObservedLegacyRepairProject({
+          registry: current,
+          id: opts.id,
+          observedProject: opts.observedProject,
+        });
+      }
+      if (opts.id !== undefined) {
+        selectRegisteredProjectById({
+          projects: current.projects,
+          id: opts.id,
+        });
+      } else {
+        for (const project of current.projects) {
+          selectRegisteredProjectById({
+            projects: current.projects,
+            id: project.id,
+          });
+        }
+      }
+      const selected: RegisteredProject[] = [];
+      const projects = current.projects.map((project) => {
+        if (
+          opts.id !== undefined ? project.id !== opts.id : !project.autostart
+        ) {
+          return project;
+        }
+        const updated = opts.update(project);
+        selected.push(updated);
+        return updated;
+      });
+      if (
+        projects.some((project, index) => project !== current.projects[index])
+      ) {
+        await writeRegistryAtomic(
+          registryPath,
+          { ...current, projects },
+          opts.signal
+        );
+        if (permissionsRepaired) {
+          opts.onPermissionsRepaired?.();
+        }
+      }
+      return selected;
+    },
+  });
+}
+
+/**
+ * An explicit first opt-in may copy current-user-owned unmarked v4 registrations
+ * to a fresh 0600 inode only after independently observed checkout paths match.
+ * Existing automatic-start intent cannot be authenticated
+ * this way: it requires separate preservation and a reviewed rebuild instead.
+ */
+async function readAutostartMutationRegistry(opts: {
+  readonly registryPath: string;
+  readonly allowLegacyPermissionRepair?: boolean;
+  readonly requireObservedLegacyProject?: boolean;
+  readonly id?: string;
+  readonly observedProject?: {
+    readonly repoRoot: string;
+    readonly projectDir: string;
+  };
+}): Promise<{
+  readonly registry: ProjectsRegistry;
+  readonly permissionsRepaired: boolean;
+}> {
+  try {
+    return {
+      registry: await readTrustedAutostartRegistry(opts),
+      permissionsRepaired: false,
+    };
+  } catch (error: unknown) {
+    if (
+      !(
+        opts.allowLegacyPermissionRepair &&
+        error instanceof AutostartRegistryTrustError
+      )
+    ) {
+      throw error;
+    }
+  }
+  const text = await readTrustedAutostartRegistryText(opts.registryPath, true);
+  let value: unknown;
+  try {
+    value =
+      text === null
+        ? { version: REGISTRY_VERSION, projects: [] }
+        : JSON.parse(text);
+  } catch {
+    throw new AutostartRegistryTrustError();
+  }
+  const registry = parseRegistry(value);
+  if (
+    !(registry && isRecord(value) && Array.isArray(value.projects)) ||
+    registry.projects.length !== value.projects.length
+  ) {
+    throw new AutostartRegistryTrustError();
+  }
+  if (
+    value.autostartGlobal !== undefined ||
+    value.projects.some(
+      (project: unknown) => isRecord(project) && project.autostart !== undefined
+    )
+  ) {
+    throw new AutostartRegistryTrustError();
+  }
+  if (
+    value.projects.some((project: unknown, index) => {
+      if (!isRecord(project) || project.worktrees === undefined) {
+        return false;
+      }
+      return (
+        !Array.isArray(project.worktrees) ||
+        project.worktrees.length !==
+          (registry.projects[index]?.worktrees?.length ?? 0)
+      );
+    })
+  ) {
+    throw new AutostartRegistryTrustError();
+  }
+  if (opts.requireObservedLegacyProject !== false) {
+    await assertObservedLegacyRepairProject({
+      registry,
+      id: opts.id,
+      observedProject: opts.observedProject,
+    });
+  }
+  return {
+    registry: {
+      ...registry,
+      projects: registry.projects.map((project) => ({
+        ...project,
+        autostartRequiresReview: true,
+      })),
+    },
+    permissionsRepaired: true,
+  };
+}
+
+async function assertObservedLegacyRepairProject(opts: {
+  readonly registry: ProjectsRegistry;
+  readonly id?: string;
+  readonly observedProject?: {
+    readonly repoRoot: string;
+    readonly projectDir: string;
+  };
+}): Promise<void> {
+  const refusal = () =>
+    new HackCliError({
+      code: "E_PERMISSION",
+      message:
+        "A writable legacy registry cannot authorize a named target by itself. Change into the reviewed project checkout and run 'hack up --always' or 'hack autostart add' there. No intent was changed. Values omitted.",
+    });
+  const matches = opts.registry.projects.filter(
+    (project) => project.id === opts.id
+  );
+  const selected = matches.length === 1 ? matches[0] : undefined;
+  if (!(selected && opts.observedProject)) {
+    throw refusal();
+  }
+  try {
+    const [observedRoot, observedDir, registeredRoot, registeredDir] =
+      await Promise.all([
+        realpath(opts.observedProject.repoRoot),
+        realpath(opts.observedProject.projectDir),
+        realpath(selected.repoRoot),
+        realpath(selected.projectDir),
+      ]);
+    if (observedRoot !== registeredRoot || observedDir !== registeredDir) {
+      throw refusal();
+    }
+  } catch {
+    throw refusal();
+  }
+}
+
 /** Validate every requested ID under ownership before removing any entry. */
 export async function removeProjectsById(opts: {
   readonly ids: readonly string[];
@@ -613,7 +1464,7 @@ export async function removeProjectsById(opts: {
   const removeIds = new Set(opts.ids);
   return await withRegistryLock(
     async () => {
-      const current = await readProjectsRegistry();
+      const current = await readProjectsRegistryForMutation();
       for (const id of removeIds) {
         selectRegisteredProjectById({ projects: current.projects, id });
       }
@@ -626,7 +1477,7 @@ export async function removeProjectsById(opts: {
       await writeRegistryAtomic(
         getRegistryPath(),
         {
-          version: REGISTRY_VERSION,
+          ...current,
           projects: next,
         },
         opts.signal
@@ -683,7 +1534,80 @@ function parseRegistry(value: unknown): ProjectsRegistry | null {
     }
   }
 
-  return { version: REGISTRY_VERSION, projects };
+  const autostartGlobal = parseAutostartGlobal(value.autostartGlobal);
+  return {
+    version: REGISTRY_VERSION,
+    projects,
+    ...(autostartGlobal ? { autostartGlobal } : {}),
+  };
+}
+
+/** Invalid/future global policy remains visible, preserved and incapable of automatic starts. */
+function parseAutostartGlobal(value: unknown): AutostartGlobal | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    isRecord(value) &&
+    typeof value.paused === "boolean" &&
+    isRecord(value.loginRun)
+  ) {
+    const run = value.loginRun;
+    if (
+      (run.runId === null || typeof run.runId === "string") &&
+      (run.bootId === null || typeof run.bootId === "string") &&
+      typeof run.inProgress === "boolean" &&
+      (run.waitingForEngine === undefined ||
+        typeof run.waitingForEngine === "boolean") &&
+      (run.startedAt === null ||
+        (typeof run.startedAt === "string" &&
+          Number.isFinite(Date.parse(run.startedAt)))) &&
+      isAutostartLoginProjectIds(run.pending) &&
+      isAutostartLoginProjectIds(run.started) &&
+      isAutostartLoginProjectIds(run.failed) &&
+      run.pending.length + run.started.length + run.failed.length <=
+        AUTOSTART_LOGIN_PROJECT_LIMIT &&
+      (!run.inProgress || Boolean(run.runId && run.bootId && run.startedAt))
+    ) {
+      return {
+        ...value,
+        paused: value.paused,
+        loginRun: {
+          ...run,
+          runId: run.runId,
+          bootId: run.bootId,
+          inProgress: run.inProgress,
+          waitingForEngine: run.waitingForEngine ?? false,
+          startedAt: run.startedAt,
+          pending: run.pending,
+          started: run.started,
+          failed: run.failed,
+        },
+      };
+    }
+  }
+  const global: AutostartGlobal = {
+    ...getDefaultAutostartGlobal(),
+    paused: true,
+    invalid: true,
+  };
+  invalidAutostartValues.set(global, value);
+  return global;
+}
+
+function isAutostartLoginProjectIds(
+  value: unknown
+): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= AUTOSTART_LOGIN_PROJECT_LIMIT &&
+    value.every(
+      (id: unknown) =>
+        typeof id === "string" &&
+        id.length > 0 &&
+        id.length <= AUTOSTART_PROJECT_ID_LIMIT
+    )
+  );
 }
 
 function parseProject(value: unknown): RegisteredProject | null {
@@ -706,6 +1630,7 @@ function parseProject(value: unknown): RegisteredProject | null {
   const devHost = getString(value, "devHost") ?? undefined;
   const lastSeenAt = getString(value, "lastSeenAt") ?? undefined;
   const worktrees = parseWorktrees(value.worktrees);
+  const autostart = parseProjectAutostart(value.autostart);
 
   return {
     id,
@@ -718,7 +1643,78 @@ function parseProject(value: unknown): RegisteredProject | null {
     createdAt,
     ...(lastSeenAt ? { lastSeenAt } : {}),
     ...(worktrees.length > 0 ? { worktrees } : {}),
+    ...(autostart ? { autostart } : {}),
+    ...(value.autostartRequiresReview === true
+      ? { autostartRequiresReview: true }
+      : {}),
   };
+}
+
+/** Unknown intent disables only its automatic start; ordinary project operations still work. */
+function parseProjectAutostart(value: unknown): ProjectAutostart | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    !(
+      isRecord(value) &&
+      (value.branch === null || typeof value.branch === "string")
+    ) ||
+    typeof value.paused !== "boolean" ||
+    !(
+      value.lastAttemptBootId === null ||
+      typeof value.lastAttemptBootId === "string"
+    )
+  ) {
+    return invalidProjectAutostart(value);
+  }
+  let lastResult: ProjectAutostartResult | null = null;
+  if (value.lastResult !== null) {
+    const result = value.lastResult;
+    if (
+      !(
+        isRecord(result) &&
+        (result.status === "started" ||
+          result.status === "skipped" ||
+          result.status === "failed" ||
+          result.status === "already_running") &&
+        (result.reason === null || typeof result.reason === "string")
+      ) ||
+      typeof result.at !== "string"
+    ) {
+      return invalidProjectAutostart(value);
+    }
+    lastResult = {
+      ...result,
+      status: result.status,
+      reason: result.reason,
+      at: result.at,
+    };
+  }
+  return {
+    ...value,
+    branch: value.branch,
+    paused: value.paused,
+    lastAttemptBootId: value.lastAttemptBootId,
+    lastResult,
+  };
+}
+
+function invalidProjectAutostart(raw: unknown): ProjectAutostart {
+  const marker: ProjectAutostart = {
+    branch: null,
+    paused: true,
+    lastAttemptBootId: null,
+    lastResult: {
+      status: "skipped",
+      reason: "invalid_marker",
+      // Sentinel: malformed state is observed, not an attempted project start.
+      at: "1970-01-01T00:00:00.000Z",
+    },
+    invalid: true,
+  };
+  invalidAutostartValues.set(marker, raw);
+  return marker;
 }
 
 function parseWorktrees(value: unknown): readonly RegisteredProjectWorktree[] {
@@ -771,9 +1767,30 @@ async function writeRegistryAtomic(
   registry: ProjectsRegistry,
   signal?: AbortSignal
 ): Promise<void> {
+  const text = `${JSON.stringify(
+    registry,
+    (_key, value: unknown) => {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        invalidAutostartValues.has(value)
+      ) {
+        return invalidAutostartValues.get(value);
+      }
+      return value;
+    },
+    2
+  )}\n`;
+  if (
+    (registry.autostartGlobal ||
+      registry.projects.some((project) => project.autostart)) &&
+    Buffer.byteLength(text) > AUTOSTART_REGISTRY_LIMIT_BYTES
+  ) {
+    throw new AutostartRegistryTrustError();
+  }
   await writeProjectsRegistryAtomic({
     path,
-    text: `${JSON.stringify(registry, null, 2)}\n`,
+    text,
     signal,
   });
 }

@@ -19,6 +19,7 @@ import {
   resolveLaunchdAccess,
   uninstallLaunchdService,
 } from "../daemon/launchd.ts";
+import { isLoginServiceAutostart } from "../daemon/login-autostart.ts";
 import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessRefusal,
@@ -51,6 +52,7 @@ import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import {
   buildDockerStatusProbe,
   detectDockerBackend,
@@ -297,6 +299,7 @@ async function handleDaemonStart({
   }
 
   if (args.options.foreground) {
+    await reportManualAutostartSkip();
     await runDaemon({ paths, foreground: true });
     return 0;
   }
@@ -306,7 +309,31 @@ async function handleDaemonStart({
     return viaLaunchd;
   }
 
+  await reportManualAutostartSkip();
   return await startDaemonDetached({ paths });
+}
+
+/** A manual cache daemon start does not acquire authority to start projects. */
+export async function reportManualAutostartSkip(opts?: {
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly readRegistry?: typeof readProjectsRegistry;
+  readonly note?: (message: string) => void;
+}): Promise<void> {
+  if (isLoginServiceAutostart({ env: opts?.env ?? process.env })) {
+    return;
+  }
+  const registry = await (opts?.readRegistry ?? readProjectsRegistry)().catch(
+    () => null
+  );
+  if (registry?.projects.some((project) => project.autostart)) {
+    const message =
+      "This manual daemon launch did not run the login autostart pass. Run it intentionally with: hack autostart run --no-interactive";
+    if (opts?.note) {
+      opts.note(message);
+    } else {
+      logger.info({ message });
+    }
+  }
 }
 
 /**

@@ -1,4 +1,5 @@
 import { childEnvironment } from "../lib/child-environment.ts";
+import { HackCliError } from "../lib/cli-result.ts";
 import {
   type ComposeStartupPhase,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
@@ -9,6 +10,12 @@ import { withDependencyStartupProgress } from "../lib/dependency-startup-progres
 import { exec, run } from "../lib/shell.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
+import {
+  inspectUnattendedInputs,
+  inspectUnattendedStorage,
+  type UnattendedNamedVolume,
+  type UnattendedTrustedBind,
+} from "./compose-unattended-preflight.ts";
 
 export type RuntimeBackendName = "compose";
 const DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS = 15_000;
@@ -37,6 +44,12 @@ export interface RuntimeBaseOptions {
 }
 
 export interface RuntimeUpOptions extends RuntimeBaseOptions {
+  /** Unattended startup may only reuse local images, never build, pull or load an implicit .env. */
+  readonly unattended?: boolean;
+  /** Re-authenticated machine-owned TLS files only; authored binds remain ineligible. */
+  readonly unattendedTrustedBinds?: () => Promise<
+    readonly UnattendedTrustedBind[]
+  >;
   readonly dependencyProgress?: {
     readonly project: string;
     readonly services: readonly string[];
@@ -56,6 +69,7 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
    * (`up --no-start`) and before `up -d`, or before an attached `up`. A throw
    * rejects `up` without starting anything, so a caller can refuse to launch
    * services whose prerequisites were withdrawn while images were prepared.
+   * Unattended starts also invoke it before preparation can create containers.
    */
   readonly beforeStart?: () => Promise<void>;
   readonly services?: readonly string[];
@@ -150,10 +164,61 @@ export function buildComposeExecCommand(opts: {
   ];
 }
 
+async function guardStartupStorage(
+  opts: RuntimeUpOptions,
+  volumes: readonly UnattendedNamedVolume[],
+  binds: readonly UnattendedTrustedBind[],
+  timeoutMs: number
+): Promise<number> {
+  await opts.beforeStart?.();
+  if (!opts.unattended || (volumes.length === 0 && binds.length === 0)) {
+    return 0;
+  }
+  const code = await inspectUnattendedStorage(opts, volumes, binds, timeoutMs);
+  if (code === 0) {
+    await opts.beforeStart?.();
+  }
+  return code;
+}
+
+async function prepareUnattendedStartup(
+  opts: RuntimeUpOptions,
+  composeArgs: readonly string[],
+  timeoutMs: number
+) {
+  if (!opts.unattended) {
+    return { exitCode: 0, volumes: [], binds: [] };
+  }
+  await opts.beforeStart?.();
+  const inputs = await inspectUnattendedInputs(opts, composeArgs, timeoutMs);
+  if (inputs.exitCode !== 0) {
+    return inputs;
+  }
+  const storage = await guardStartupStorage(
+    opts,
+    inputs.volumes,
+    inputs.binds,
+    timeoutMs
+  );
+  return { ...inputs, exitCode: storage };
+}
+
 export const composeRuntimeBackend: RuntimeBackend = {
   name: "compose",
   async up(opts) {
+    if (opts.unattended && !opts.detach) {
+      throw new HackCliError({
+        code: "E_PERMISSION",
+        message:
+          "Unattended Compose startup requires detached mode; start this project manually.",
+        detail: { reason: "unattended_requires_detached" },
+      });
+    }
     if (opts.detach) {
+      const composeArgs = [
+        ...buildComposeArgs(opts),
+        ...(opts.unattended ? ["--env-file", "/dev/null"] : []),
+      ];
       const budgetEnv = { ...process.env, ...opts.env };
       const startupTimeoutMs = resolveComposeStartupTimeoutMs({
         startupTimeoutMs: opts.startupTimeoutMs,
@@ -173,18 +238,29 @@ export const composeRuntimeBackend: RuntimeBackend = {
           env: opts.env,
           stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
           timeoutMs,
+          forwardSignals: true,
+          settleProcessGroupOnCancel: true,
         });
       // Image build/pull can take far longer than starting containers, so it
       // runs (with container creation/recreation) under its own budget. The
       // start invocation then only starts the prepared containers and waits on
       // Compose dependency conditions; --no-build keeps it from rebuilding.
       const launch = async () => {
+        const inputs = await prepareUnattendedStartup(
+          opts,
+          composeArgs,
+          imageTimeoutMs
+        );
+        if (inputs.exitCode !== 0) {
+          return inputs.exitCode;
+        }
         opts.onStartupPhase?.("images");
         const prepared = await runPhase(
           [
-            ...buildComposeArgs(opts),
+            ...composeArgs,
             "up",
             "--no-start",
+            ...(opts.unattended ? ["--no-build", "--pull", "never"] : []),
             ...(opts.forceRecreate ? ["--force-recreate"] : []),
             ...scope,
           ],
@@ -194,9 +270,24 @@ export const composeRuntimeBackend: RuntimeBackend = {
           return prepared;
         }
         opts.onStartupPhase?.("start");
-        await opts.beforeStart?.();
+        const storage = await guardStartupStorage(
+          opts,
+          inputs.volumes,
+          inputs.binds,
+          startupTimeoutMs
+        );
+        if (storage !== 0) {
+          return storage;
+        }
         return await runPhase(
-          [...buildComposeArgs(opts), "up", "-d", "--no-build", ...scope],
+          [
+            ...composeArgs,
+            "up",
+            "-d",
+            "--no-build",
+            ...(opts.unattended ? ["--pull", "never"] : []),
+            ...scope,
+          ],
           startupTimeoutMs
         );
       };

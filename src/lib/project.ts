@@ -522,8 +522,12 @@ function parseProjectConfigToml(opts: {
   return parseProjectConfigRecord(parsed, opts.path);
 }
 
+/** Parse an already bounded configuration observation without additional file reads. */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Project config parsing keeps schema migration and legacy compatibility explicit in one parser.
-function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
+export function parseProjectConfigRecord(
+  value: unknown,
+  path: string
+): ProjectConfig {
   if (!isRecord(value)) {
     return {
       configPath: path,

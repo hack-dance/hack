@@ -1,3 +1,4 @@
+import { HackCliError } from "./cli-result.ts";
 import { nativeKeychain } from "./native-keychain.ts";
 
 /** The single boundary for native keychain access, injectable for isolated callers. */
@@ -17,6 +18,13 @@ export function isKeychainDisabled(): boolean {
 
 function assertKeychainEnabled(): void {
   if (isKeychainDisabled()) {
+    if (process.env.HACK_AUTOSTART_LOGIN === "1") {
+      throw new HackCliError({
+        code: "E_ENV_KEY_MISSING",
+        message:
+          "Autostart skipped: required keychain access is unavailable without interaction.",
+      });
+    }
     throw new Error(
       "Keychain access is disabled by HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK."
     );

@@ -10,6 +10,7 @@ import {
 import { runLifecycleCommandChild } from "../src/lib/lifecycle-command-child.ts";
 import { exec, run } from "../src/lib/shell.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv, privateCliRunEnv } from "./helpers/private-cli-env.ts";
 
 const SENTINEL = "synthetic-child-key-sentinel";
@@ -256,3 +257,72 @@ test.skipIf(!compiledCli)(
     expect(result).toBe(0);
   }
 );
+
+test("login replay authority stops at tool boundaries and survives only deliberate Hack reexec", () => {
+  const input = {
+    HACK_AUTOSTART_LOGIN: "1",
+    HACK_AUTOSTART_PROJECT_ID: "fixture-project",
+    HACK_DAEMON_LOGIN_SERVICE: "1",
+    KEEP: "yes",
+  };
+  const child = childEnvironment(input);
+  expect(child).toMatchObject({ KEEP: "yes" });
+  for (const key of [
+    "HACK_AUTOSTART_LOGIN",
+    "HACK_AUTOSTART_PROJECT_ID",
+    "HACK_DAEMON_LOGIN_SERVICE",
+  ]) {
+    expect(child[key]).toBeUndefined();
+  }
+  expect(hackReexecEnvironment(input)).toMatchObject({
+    HACK_AUTOSTART_LOGIN: "1",
+    HACK_AUTOSTART_PROJECT_ID: "fixture-project",
+    KEEP: "yes",
+  });
+  expect(
+    hackReexecEnvironment({
+      HACK_AUTOSTART_PROJECT_ID: "fixture-project",
+      HACK_DAEMON_LOGIN_SERVICE: "1",
+    })
+  ).toEqual({});
+  expect(input.HACK_DAEMON_LOGIN_SERVICE).toBe("1");
+});
+
+test("login Git observations disable monitor hooks despite local config and inherited overrides", async () => {
+  const root = await fixture();
+  const receipt = join(root, "git-monitor-ran");
+  const monitor = join(root, "monitor.sh");
+  await writeFile(monitor, `#!/bin/sh\nprintf ran > '${receipt}'\n`, {
+    mode: 0o700,
+  });
+  const env = privateCliEnv({ root });
+  const git = async (
+    args: readonly string[],
+    childEnv?: Record<string, string>
+  ) => {
+    const child = Bun.spawn(["git", "-C", root, ...args], {
+      env: childEnv ?? fixtureGitEnv({ env }),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return await child.exited;
+  };
+  expect(await git(["init"])).toBe(0);
+  expect(await git(["config", "core.fsmonitor", monitor])).toBe(0);
+  const unattended = childEnvironment(
+    { ...fixtureGitEnv({ env }), HACK_AUTOSTART_LOGIN: "1" },
+    {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.fsmonitor",
+      GIT_CONFIG_VALUE_0: monitor,
+    }
+  );
+  expect(await git(["status", "--porcelain"], unattended)).toBe(0);
+  expect(await Bun.file(receipt).exists()).toBe(false);
+  expect(unattended.GIT_CONFIG_NOSYSTEM).toBe("1");
+  expect(unattended.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+  expect(unattended.GIT_CONFIG_VALUE_1).toBe("/dev/null");
+  expect(await git(["status", "--porcelain"])).toBe(0);
+  expect(await Bun.file(receipt).exists()).toBe(true);
+});

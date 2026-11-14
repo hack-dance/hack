@@ -2,6 +2,7 @@ import {
   composeRuntimeBackend,
   type RuntimeBaseOptions,
 } from "../backends/runtime-backend.ts";
+import { assertAutostartHostCommandsAllowed } from "./autostart-refusal.ts";
 import { COMPOSE_STARTUP_TIMEOUT_ENV } from "./compose-startup-budget.ts";
 
 const BOOTSTRAP_TIMEOUT_MS = 600_000;
@@ -13,6 +14,7 @@ export async function bootstrapDependencyCaches(
     readonly timeoutMs?: number;
   }
 ): Promise<number> {
+  assertAutostartHostCommandsAllowed({ hasCommands: opts.services.length > 0 });
   for (const service of opts.services) {
     process.stderr.write(`Initializing dependency cache with ${service}\n`);
     const code = await composeRuntimeBackend.run({

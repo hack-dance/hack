@@ -1,10 +1,16 @@
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The unsupported experimental gateway server keeps auth and route fan-out inline for traceability.
 import { Buffer } from "node:buffer";
-import { relative, resolve } from "node:path";
+import { userInfo } from "node:os";
+import { dirname, relative, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
 import pkg from "../../package.json";
 
-import { DAEMON_PROCESS_TITLE } from "../constants.ts";
+import {
+  DAEMON_PROCESS_TITLE,
+  GLOBAL_CONFIG_FILENAME,
+  GLOBAL_DAEMON_DIR_NAME,
+  GLOBAL_HACK_DIR_NAME,
+} from "../constants.ts";
 import { loadExtensionManagerForDaemon } from "../control-plane/extensions/daemon.ts";
 import { appendGatewayAuditEntry } from "../control-plane/extensions/gateway/audit.ts";
 import { authenticateGatewayRequest } from "../control-plane/extensions/gateway/auth.ts";
@@ -17,9 +23,13 @@ import type {
   ShellMeta,
 } from "../control-plane/extensions/supervisor/shell-service.ts";
 import { createShellService } from "../control-plane/extensions/supervisor/shell-service.ts";
-import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import {
+  type ControlPlaneConfig,
+  readControlPlaneConfig,
+} from "../control-plane/sdk/config.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { resolveRegisteredProjectById } from "../lib/projects-registry.ts";
+import { runAutostartAtLogin } from "./autostart.ts";
 import {
   evaluateGatewayRouteAccess,
   validateControlPlaneRouteTarget,
@@ -29,7 +39,12 @@ import {
   shouldRefreshForDockerEvent,
   startDockerEventWatcher,
 } from "./docker-events.ts";
+import { gatewayProjectsPayload } from "./gateway-projects-payload.ts";
 import { createDaemonLogger } from "./logger.ts";
+import {
+  createLoginAutostart,
+  isLoginServiceAutostart,
+} from "./login-autostart.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { removeFileIfExists, writeDaemonPid } from "./process.ts";
 import { createRefreshScheduler } from "./refresh-scheduler.ts";
@@ -113,8 +128,48 @@ export async function runDaemon({
     lastProjectsResponseBytes: null,
   };
 
+  const loginAutostart = createLoginAutostart({
+    enabled: isLoginServiceAutostart({ env: process.env }),
+    run: async (signal) => {
+      const home = userInfo().homedir;
+      if (
+        paths.root !==
+        resolve(home, GLOBAL_HACK_DIR_NAME, GLOBAL_DAEMON_DIR_NAME)
+      ) {
+        throw new Error(
+          "Login service daemon state root is not the default machine root."
+        );
+      }
+      const config = await readControlPlaneConfig({
+        globalConfigPath: resolve(dirname(paths.root), GLOBAL_CONFIG_FILENAME),
+        strict: true,
+      });
+      if (config.parseError) {
+        throw new Error(
+          "Autostart service configuration is invalid; no project start ran."
+        );
+      }
+      return await runAutostartAtLogin({
+        signal,
+        runtime: {
+          home,
+          hackHome: dirname(paths.root),
+          serviceOrigin: true,
+          platform: process.platform,
+          engineWaitMs: config.config.daemon.autostartEngineWaitMs,
+        },
+      });
+    },
+    onError: () =>
+      logger.warn({
+        message:
+          "Autostart could not complete; inspect hack autostart list or run hack autostart run --no-interactive. Values omitted.",
+      }),
+  });
+
   const cache = createRuntimeCache({
     onRefresh: (snapshot) => {
+      loginAutostart.observeEngine(snapshot.health.ok);
       metrics.lastRefreshAtMs =
         snapshot.health.checkedAtMs ?? snapshot.updatedAtMs;
       metrics.refreshCount += 1;
@@ -185,7 +240,7 @@ export async function runDaemon({
   }
 
   const refreshIntervalMs = 30_000;
-  setInterval(() => {
+  const refreshInterval = setInterval(() => {
     refreshScheduler.request({ reason: "interval", urgency: "immediate" });
   }, refreshIntervalMs);
 
@@ -339,6 +394,8 @@ export async function runDaemon({
 
   const shutdown = async ({ reason }: { readonly reason: string }) => {
     logger.warn({ message: `Shutting down hackd (${reason})` });
+    clearInterval(refreshInterval);
+    await loginAutostart.stop();
     refreshScheduler.stop();
     watcher.stop();
     await daemonProxy?.close();
@@ -359,6 +416,7 @@ export async function runDaemon({
   logger.info({
     message: `hackd started (pid ${process.pid}, version ${packageJson.version})`,
   });
+  loginAutostart.start();
 }
 
 async function handleRequest({
@@ -692,18 +750,7 @@ async function handleGatewayRequest(opts: {
       includeUnregistered: false,
       includeMeta,
     });
-    const filtered = payload.projects.filter((project) => {
-      if (!project || typeof project !== "object") {
-        return false;
-      }
-      const id = (project as Record<string, unknown>).project_id;
-      return typeof id === "string" && enabledProjectIds.has(id);
-    });
-    return jsonResponse({
-      ...payload,
-      include_unregistered: false,
-      projects: filtered,
-    });
+    return jsonResponse(gatewayProjectsPayload({ payload, enabledProjectIds }));
   }
 
   const response = await handleRequest({

@@ -40,6 +40,7 @@ esac
     let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HACK_HOME", &home)
+        .env("HOME", &home)
         .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
         .output()
         .unwrap();
@@ -73,6 +74,8 @@ fn dump_state_without_hack_reports_the_missing_cli() {
     let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
         .env("PATH", empty.display().to_string())
         .env("HACK_HOME", &empty)
+        .env("HOME", &empty)
+        .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
         .output()
         .unwrap();
     let _ = std::fs::remove_dir_all(&empty);

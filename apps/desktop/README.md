@@ -28,7 +28,7 @@ cargo run -p hack-desktop -- --list-fixtures
 cargo run -p hack-desktop -- --fixtures failed-start --theme dark
 ```
 
-Every designed state has a fixture (`loading`, `empty`, `daemon-down`,
+Every designed state has a fixture (`loading`, `empty`, `daemon-down`, `many-projects`,
 `daemon-mismatch`, `engine-down`, `error`, `cli-missing`, `stopped`, `starting`,
 `running`, `degraded`, `stopping`, `failed-start`, `needs-attention`).
 
@@ -39,7 +39,10 @@ cargo run -p hack-desktop --features screenshots -- --screenshots /tmp/shots
 ```
 
 This renders every fixture in light and dark to PNG with GPUI's offscreen
-renderer (WGPU on Linux, Metal on macOS). It opens no window. Current renders:
+renderer (WGPU on Linux, Metal on macOS). It opens no window. Current renders
+(all 15 fixtures, row by row: loading, empty, daemon-down / daemon-mismatch,
+engine-down, error / cli-missing, many-projects, stopped / starting, running,
+degraded / stopping, failed-start, needs-attention):
 [light](screenshots/fixtures-light.png), [dark](screenshots/fixtures-dark.png).
 
 ## What v0 does not do yet

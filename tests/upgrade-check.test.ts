@@ -1358,6 +1358,55 @@ test("a step with no command is manual: its action is never shown as a command",
 // CLI
 // ---------------------------------------------------------------------------
 
+test("reported kinds distinguish guarded apply, broad Doctor commands and host changes", async () => {
+  const project = await liveProject("action-kinds");
+  const git = Bun.spawnSync(["git", "-C", project.repoRoot, "init", "-q"], {
+    env: fixtureGitEnv(),
+  });
+  expect(git.exitCode).toBe(0);
+  await writeRegistry([project]);
+  const probes = healthyProbes({
+    globalInfra: async () => ({ installed: false, running: false }),
+  });
+  const report = await check(probes);
+  expect(report.report_version).toBe(2);
+  expect(
+    report.machine.find((finding) => finding.id === "global-infra")?.kind
+  ).toBe("admin");
+  expect(report.plan.find((step) => step.id === "global-infra")?.kind).toBe(
+    "admin"
+  );
+  expect(report.plan.find((step) => step.id === "snapshot")?.kind).toBe("safe");
+  expect(
+    report.projects[0]?.findings.find(
+      (finding) => finding.id === "ignore-rules"
+    )?.kind
+  ).toBe("manual");
+  expect(report.plan.find((step) => step.id === "ignore-rules")?.kind).toBe(
+    "safe"
+  );
+  for (const item of [
+    ...report.machine,
+    ...report.projects.flatMap((row) => row.findings),
+    ...report.plan,
+  ]) {
+    expect(["safe", "admin", "manual"]).toContain(item.kind);
+  }
+  // An unsafe checkout keeps the grouped wrapper from being offered as Run.
+  await writeFile(join(project.projectDir, "hack.env.json"), "{}\n");
+  await symlink(
+    join(root, "missing-layer.yaml"),
+    join(project.projectDir, "hack.env.default.yaml")
+  );
+  const blocked = await check(probes);
+  expect(blocked.plan.find((step) => step.id === "ignore-rules")?.kind).toBe(
+    "manual"
+  );
+  expect(blocked.plan.find((step) => step.id === "env-format")?.kind).toBe(
+    "manual"
+  );
+});
+
 async function cli(args: readonly string[]) {
   const child = Bun.spawn([process.execPath, ENTRYPOINT, ...args], {
     cwd: root,

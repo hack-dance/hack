@@ -307,7 +307,7 @@ for (const delivery of [
       expect(await Bun.file(path).exists()).toBe(false);
       // Keeping Compose references is safe even before the layers deliver them.
       await migrateLegacyEnvForCommand({ ...project, materialize: false });
-      expect(await readFile(compose, "base64")).toBe(before.get(compose));
+      expect(await readFile(compose, "base64")).toEqual(before.get(compose));
       expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
         `TOKEN=${SENTINEL}\n`
       );

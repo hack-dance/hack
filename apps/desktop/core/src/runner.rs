@@ -21,6 +21,9 @@ use serde_json::Value;
 use crate::models::{CliError, LogEvent};
 
 const STDERR_KEEP: usize = 8 * 1024;
+/// Most stdout kept from one command; more is an error (`OutputTooLarge`),
+/// never silently parsed half-way. Far above any real `--json` result.
+pub const MAX_STDOUT: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunError {
@@ -206,8 +209,8 @@ impl CliRunner {
         timeout: Option<Duration>,
     ) -> Result<(String, String, Option<i32>), RunError> {
         let mut child = self.spawn(args, path)?;
-        let out = read_all(child.stdout.take());
-        let err = read_all(child.stderr.take());
+        let out = read_all(child.stdout.take(), Keep::Head(MAX_STDOUT));
+        let err = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
         let deadline = timeout.map(|t| (Instant::now() + t, t));
         let status = loop {
             match child.try_wait() {
@@ -225,7 +228,7 @@ impl CliRunner {
         // open after `hack` exits must not hold the caller past the timeout.
         // Without a deadline, wait for the pipes to close.
         let grace = self.term_grace;
-        let drain = |rx: &mpsc::Receiver<String>, child: &mut Child| match deadline {
+        let drain = |rx: &mpsc::Receiver<Drained>, child: &mut Child| match deadline {
             Some((d, t)) => {
                 let left = d.saturating_duration_since(Instant::now());
                 rx.recv_timeout(left).map_err(|_| {
@@ -238,15 +241,14 @@ impl CliRunner {
                 .map_err(|_| RunError::Spawn("output reader stopped".into())),
         };
         let stdout = drain(&out, &mut child)?;
-        let mut stderr = drain(&err, &mut child)?;
-        if stderr.len() > STDERR_KEEP {
-            let cut = stderr.len() - STDERR_KEEP;
-            let cut = (cut..stderr.len())
-                .find(|i| stderr.is_char_boundary(*i))
-                .unwrap_or(cut);
-            stderr = stderr.split_off(cut);
+        let stderr = drain(&err, &mut child)?;
+        if stdout.overflow {
+            return Err(RunError::BadJson {
+                error: format!("output larger than {MAX_STDOUT} bytes"),
+                stdout_head: head(&stdout.text),
+            });
         }
-        Ok((stdout, stderr, status.code()))
+        Ok((stdout.text, stderr.text, status.code()))
     }
 
     /// Run a `--json` command and deserialize its (unwrapped) result.
@@ -343,15 +345,55 @@ impl Drop for LogStream {
     }
 }
 
-/// Read a pipe to EOF on a thread; the result arrives on the channel.
-fn read_all<R: Read + Send + 'static>(r: Option<R>) -> mpsc::Receiver<String> {
+/// Which part of a pipe to keep while draining it.
+#[derive(Clone, Copy)]
+enum Keep {
+    /// The first `n` bytes; anything beyond marks the output as too large.
+    Head(usize),
+    /// Only the last `n` bytes (a rolling window).
+    Tail(usize),
+}
+
+/// What a drained pipe yielded.
+struct Drained {
+    text: String,
+    overflow: bool,
+}
+
+/// Read a pipe to EOF on a thread, keeping memory bounded the whole time
+/// (a lifecycle command can run for hours and print without limit).
+fn read_all<R: Read + Send + 'static>(r: Option<R>, keep: Keep) -> mpsc::Receiver<Drained> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut buf = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut overflow = false;
         if let Some(mut r) = r {
-            let _ = r.read_to_end(&mut buf);
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                let n = match r.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                match keep {
+                    Keep::Head(max) => {
+                        let room = max.saturating_sub(buf.len());
+                        buf.extend_from_slice(&chunk[..n.min(room)]);
+                        overflow |= n > room;
+                    }
+                    Keep::Tail(max) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > max {
+                            let cut = buf.len() - max;
+                            buf.drain(..cut);
+                        }
+                    }
+                }
+            }
         }
-        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+        let _ = tx.send(Drained {
+            text: String::from_utf8_lossy(&buf).into_owned(),
+            overflow,
+        });
     });
     rx
 }
@@ -730,6 +772,24 @@ wait $!"#,
         let r: Value = f.runner().run_json_to_completion(&["up"], None).unwrap();
         assert_eq!(r["action"], "up");
         assert!(started.elapsed() >= Duration::from_millis(900));
+    }
+
+    #[test]
+    fn pipes_are_drained_within_bounded_memory() {
+        // 2 MiB to stderr: only the last STDERR_KEEP bytes are retained.
+        let f = FakeHack::new(
+            "head -c 2097152 /dev/zero | tr '\\0' e >&2\nprintf 'TAIL' >&2\necho '{}'",
+        );
+        let (out, err, code) = f.runner().run_raw(&["x"], None, T).unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(out.trim(), "{}");
+        assert!(err.len() <= STDERR_KEEP, "{}", err.len());
+        assert!(err.ends_with("TAIL"));
+        // Head keeping stops at the cap and flags the overflow.
+        let rx = read_all(Some(&b"abcdef"[..]), Keep::Head(4));
+        let d = rx.recv().unwrap();
+        assert_eq!(d.text, "abcd");
+        assert!(d.overflow);
     }
 
     #[test]

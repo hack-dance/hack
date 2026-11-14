@@ -77,17 +77,32 @@ impl Process {
             || self.argv[0].is_empty()
             || self.argv.iter().any(|v| v.contains('\0'))
             || self.env.iter().any(|(key, value)| {
-                let mut bytes = key.bytes();
-                !bytes
-                    .next()
-                    .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-                    || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    || value.contains('\0')
+                key.is_empty() || key.contains(['\0', '=']) || value.contains('\0')
             })
         {
             return Err(refused());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn inherited_environment_uses_exec_constraints_not_shell_identifiers() {
+        let mut process: super::Process = serde_json::from_value(serde_json::json!({
+            "name": "worker", "argv": ["/usr/bin/true"], "cwd": "/",
+            "env": {"BASH_FUNC_fixture%%": "() { :; }", "1.name": "synthetic"}
+        }))
+        .unwrap();
+        assert!(process.validate().is_ok());
+        for key in ["", "bad=name", "bad\0name"] {
+            process.env.insert(key.into(), "synthetic".into());
+            assert!(process.validate().is_err());
+            process.env.remove(key);
+        }
+        process.env.insert("VALID".into(), "bad\0value".into());
+        assert!(process.validate().is_err());
     }
 }
 

@@ -227,3 +227,10 @@ The offscreen generator writes every `setup-<fixture>-<theme>.png` and also writ
 Unavailable login-manager fixture (no Run offered):
 [light](screenshots/setup-service-unavailable-light.png),
 [dark](screenshots/setup-service-unavailable-dark.png).
+
+Daemon socket discovery uses the selected CLI’s bounded, read-only bare
+`daemon status --json` response. Its absolute `socket_path` is authoritative,
+including candidate launchers with a private default home. Missing or invalid
+paths leave daemon evidence unavailable; the app never falls back to a guessed
+parent-home socket or a registry-writing project listing. Socket version and
+project reads still have to succeed before project state is accepted.

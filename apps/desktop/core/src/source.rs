@@ -335,19 +335,32 @@ impl LiveSource {
         runs
     }
 
-    /// The live source exactly as the app builds it: `hack` resolved on
-    /// absolute PATH entries, and the hackd socket under `HACK_HOME`
-    /// (else `~/.hack`). Used by the window and by `hack-desktop-state`.
+    /// Resolve the selected CLI; its read-only status response owns socket
+    /// discovery, including candidate launchers with a private default home.
     #[must_use]
     pub fn from_env() -> Self {
-        let socket = crate::daemon::default_socket_path(
-            std::env::var("HACK_HOME").ok().as_deref(),
-            std::env::var("HOME").ok().as_deref(),
-        );
         Self {
             runner: CliRunner::selected(std::env::var_os("HACK_DESKTOP_CLI").as_deref()),
-            daemon: socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
+            daemon: None,
         }
+    }
+
+    /// An explicitly injected client is a test seam. Production never guesses
+    /// a socket from parent environment when the selected CLI omits its path.
+    pub(crate) fn effective_daemon(
+        &self,
+        status: Option<&serde_json::Value>,
+    ) -> Option<DaemonClient> {
+        self.daemon.clone().or_else(|| {
+            let path = Path::new(status?.get("socket_path")?.as_str()?);
+            if !path.is_absolute() {
+                return None;
+            }
+            Some(DaemonClient::new(
+                path.to_path_buf(),
+                Duration::from_secs(3),
+            ))
+        })
     }
 
     fn runner_for(&self, native: bool) -> CliRunner {
@@ -418,12 +431,34 @@ impl Source for LiveSource {
         }
     }
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
-        let cli_version = self.runner.version(Duration::from_secs(5))?;
-        let daemon = self.daemon.as_ref().and_then(|d| d.status().ok());
+        let program = self.runner.resolve_program()?;
+        let context =
+            crate::execution::ExecutionContext::capture(&self.runner).map_err(RunError::Spawn)?;
+        let runner = context
+            .runner(
+                program
+                    .to_str()
+                    .ok_or_else(|| RunError::Spawn("CLI path is not UTF-8".into()))?,
+            )
+            .map_err(RunError::Spawn)?;
+        let cli_version = runner.version(Duration::from_secs(5))?;
+        let raw = if self.daemon.is_none() {
+            runner
+                .run_json::<serde_json::Value>(
+                    &["daemon", "status", "--json"],
+                    None,
+                    Duration::from_secs(5),
+                )
+                .ok()
+        } else {
+            None
+        };
+        let client = self.effective_daemon(raw.as_ref());
+        let daemon = client.as_ref().and_then(|d| d.status().ok());
         let from_daemon = daemon
             .as_ref()
             .filter(|d| d.version == cli_version)
-            .and(self.daemon.as_ref())
+            .and(client.as_ref())
             .and_then(|d| d.projects().ok());
         let mut projects = from_daemon.ok_or_else(|| SourceError::DaemonUnavailable {
             cli: cli_version.clone(),
@@ -440,7 +475,7 @@ impl Source for LiveSource {
             },
         })?;
         // Project views do not read native projects; ask native ps for each.
-        let native = self.runner_for(true);
+        let native = runner.with_env("HACK_RUNTIME_BACKEND", "native");
         for row in projects.projects.iter_mut().filter(|r| r.is_native()) {
             if let Some(root) = row.repo_root.clone() {
                 row.native = native
@@ -709,6 +744,29 @@ impl Source for FixtureSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_socket_requires_explicit_absolute_cli_evidence() {
+        let source = LiveSource {
+            runner: CliRunner::new("/missing/hack-next"),
+            daemon: None,
+        };
+        for status in [
+            serde_json::json!({}),
+            serde_json::json!({"socket_path":"relative/hackd.sock"}),
+            serde_json::json!({"socket_path":false}),
+        ] {
+            assert!(source.effective_daemon(Some(&status)).is_none());
+        }
+        assert!(source.effective_daemon(None).is_none());
+        assert!(
+            source
+                .effective_daemon(Some(
+                    &serde_json::json!({"socket_path":"/private/candidate/daemon/hackd.sock"})
+                ))
+                .is_some()
+        );
+    }
 
     fn fake_daemon(projects: &str) -> (DaemonClient, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};

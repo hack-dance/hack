@@ -70,13 +70,25 @@ impl LiveSource {
             report.force_cli_gate = matches!(cli, Err(crate::runner::RunError::NotFound));
             return report;
         }
+        let daemon = if left().is_zero() {
+            None
+        } else {
+            runner
+                .run_json::<serde_json::Value>(
+                    &["daemon", "status", "--json"],
+                    None,
+                    Duration::from_secs(5).min(left()),
+                )
+                .ok()
+        };
         // CLI projects writes the registry even with --no-daemon. Until R18,
         // only a matching daemon snapshot is allowed, including during setup.
-        let socket = self.daemon.as_ref().and_then(|d| d.status().ok());
+        let client = self.effective_daemon(daemon.as_ref());
+        let socket = client.as_ref().and_then(|d| d.status().ok());
         let mut projects = socket
             .as_ref()
             .filter(|s| cli.as_ref().is_ok_and(|v| v == &s.version))
-            .and(self.daemon.as_ref())
+            .and(client.as_ref())
             .and_then(|d| d.projects().ok());
         if let Some(p) = &mut projects {
             for row in p.projects.iter_mut().filter(|p| p.is_native()) {
@@ -96,17 +108,6 @@ impl LiveSource {
                 }
             }
         }
-        let daemon = if left().is_zero() {
-            None
-        } else {
-            runner
-                .run_json::<serde_json::Value>(
-                    &["daemon", "status", "--json"],
-                    None,
-                    Duration::from_secs(5).min(left()),
-                )
-                .ok()
-        };
         let targets = projects
             .as_ref()
             .map(DoctorTarget::from_projects)

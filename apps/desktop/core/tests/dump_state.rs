@@ -68,12 +68,13 @@ fn serve_snapshot(home: &std::path::Path) -> std::thread::JoinHandle<()> {
 fn dump_state_reads_the_cli_like_the_app_and_prints_view_models() {
     let bin = temp_dir("bin");
     let home = temp_dir("home");
-    let hack = bin.join("hack");
+    let hack = bin.join("hack-next");
     std::fs::write(
         &hack,
         r#"#!/bin/sh
 case "$1" in
   --version) echo "hack v5.0.0" ;;
+  daemon) printf '{"socket_path":"%s/private/daemon/hackd.sock"}\n' "$HOME" ;;
   projects) echo called > "$HACK_HOME/unsafe-listing"; exit 2 ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
@@ -86,14 +87,16 @@ esac
     hack_desktop_core::runner::CliRunner::new(&hack)
         .version(std::time::Duration::from_secs(60))
         .unwrap();
-    let server = serve_snapshot(&home);
+    let private = home.join("private");
+    std::fs::create_dir(&private).unwrap();
+    let server = serve_snapshot(&private);
 
     let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HACK_HOME", &home)
         .env("HOME", &home)
         .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-        .env_remove("HACK_DESKTOP_CLI")
+        .env("HACK_DESKTOP_CLI", &hack)
         .output()
         .unwrap();
     server.join().unwrap();
@@ -147,7 +150,7 @@ fn dump_state_without_hack_reports_the_missing_cli() {
 fn missing_daemon_never_runs_the_registry_writing_cli_listing() {
     let home = temp_dir("observe");
     let hack = home.join("hack");
-    std::fs::write(&hack, "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0';; *) echo called > \"$HACK_HOME/unexpected\"; exit 1;; esac\n").unwrap();
+    std::fs::write(&hack, "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0';; daemon) echo '{}';; *) echo called > \"$HACK_HOME/unexpected\"; exit 1;; esac\n").unwrap();
     std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o700)).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
         .env("PATH", &home)

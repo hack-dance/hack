@@ -383,17 +383,56 @@ export function hasBoundedLaunchdOutput(opts: {
   );
 }
 
+/**
+ * `repaired`: the program path was invalid or stale and was replaced;
+ * `refreshed`: the program was current but the rest of the plist (its
+ * environment, output paths or other keys) differed from what this CLI
+ * renders, and the plist was rewritten (HACK-2216).
+ */
 export type LaunchdProgramRepairResult =
   | "ok"
   | "repaired"
+  | "refreshed"
   | "not-installed"
   | "failed";
+
+/** The install options an existing plist was rendered with. */
+export function readLaunchdPlistOptions(opts: {
+  readonly plistText: string;
+}): Pick<LaunchdPlistOptions, "runAtLoad" | "guiSessionOnly"> {
+  return {
+    runAtLoad: opts.plistText.includes("<key>RunAtLoad</key>\n  <true/>"),
+    guiSessionOnly: opts.plistText.includes("LimitLoadToSessionType"),
+  };
+}
+
+/**
+ * Whether an installed plist is exactly what this CLI renders for the same
+ * program, home and install options. Any other difference (an environment
+ * entry added or removed by an upgrade, unbounded output paths) is stale.
+ */
+export function isLaunchdPlistCurrent(opts: {
+  readonly plistText: string;
+  readonly hackBinPath: string;
+  readonly home: string;
+}): boolean {
+  return (
+    opts.plistText ===
+    renderLaunchdPlist({
+      hackBinPath: opts.hackBinPath,
+      home: opts.home,
+      ...readLaunchdPlistOptions({ plistText: opts.plistText }),
+    })
+  );
+}
 
 /**
  * Repairs an installed launchd plist whose program path is invalid — a
  * compiled-binary virtual path (/$bunfs) or a binary that no longer exists
  * (e.g. an upgraded homebrew Cellar path). Broken plists leave launchd
- * flapping with exit status 78 and the daemon unable to stay up.
+ * flapping with exit status 78 and the daemon unable to stay up. A plist
+ * whose program is current but whose other content differs from what this
+ * CLI renders is rewritten too ("refreshed").
  *
  * Reports "not-installed" without reading the plist when
  * {@link resolveLaunchdAccess} denies access: this process does not own the
@@ -421,7 +460,17 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   // the OLD binary forever (incompatible-daemon loop). Normalize to the
   // current stable resolution whenever it differs.
   const valid = exists && (resolved === null || program === resolved);
-  if (valid && hasBoundedLaunchdOutput({ plistText })) {
+  // Without a resolvable hack this CLI cannot render (or install) a new
+  // plist, so only the output paths are checked then.
+  const current =
+    resolved === null
+      ? hasBoundedLaunchdOutput({ plistText })
+      : isLaunchdPlistCurrent({
+          plistText,
+          hackBinPath: resolved,
+          home: resolveUserHomeDir(),
+        });
+  if (valid && current) {
     return "ok";
   }
   if (!exists && resolved === null) {
@@ -432,11 +481,13 @@ export async function repairLaunchdProgramIfInvalid(opts: {
     paths: opts.paths,
     config: {
       installed: true,
-      runAtLoad: plistText.includes("<key>RunAtLoad</key>\n  <true/>"),
-      guiSessionOnly: plistText.includes("LimitLoadToSessionType"),
+      ...readLaunchdPlistOptions({ plistText }),
     },
   });
-  return result.ok ? "repaired" : "failed";
+  if (!result.ok) {
+    return "failed";
+  }
+  return valid ? "refreshed" : "repaired";
 }
 
 export interface LaunchdUninstallResult {

@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import {
   describeSystemdIncompatibleOwner,
   installDaemonSystemdService,
+  reconcileRunningSystemdDaemon,
   startViaSystemdIfInstalled,
   stopViaSystemdIfInstalled,
   uninstallDaemonSystemdService,
@@ -26,6 +27,7 @@ import type {
   DaemonProcessProof,
 } from "../src/daemon/process.ts";
 import type { ProcessImage } from "../src/daemon/process-image.ts";
+import { createDaemonCommandTrace } from "../src/daemon/reconcile.ts";
 import { summarizeSystemdService } from "../src/daemon/service-summary.ts";
 import {
   buildDaemonRepairMessage,
@@ -4379,5 +4381,192 @@ linuxTest(
     expect((await stop(child)).refused).toContain("not proven");
     // No pid file hackd to prove: refused.
     expect((await stop(null)).refused).toContain("not proven");
+  }
+);
+
+// HACK-2216: start brings a stale service up to this CLI.
+
+/** A unit for `program` with one extra line: same program, stale content. */
+async function writeStaleUnit(fake: Fake): Promise<string> {
+  const stale = unitText().replace("RestartSec=2", "RestartSec=9");
+  await installSystemdUnit({ unitPath, unitText: stale, deps: fake.deps });
+  fake.calls.length = 0;
+  return stale;
+}
+
+function runningHooks(fake: Fake, version: string | null) {
+  return {
+    ...startHooks(fake),
+    pid: 4242,
+    version,
+    cliVersion: "2.0.0",
+    trace: createDaemonCommandTrace(),
+  };
+}
+
+linuxTest(
+  "start rewrites a stale unit that runs this hack, keeping it disabled",
+  async () => {
+    const fake = fakeSystemd();
+    await writeStaleUnit(fake);
+    fake.enabled = false;
+    const trace = createDaemonCommandTrace();
+    expect(
+      await startViaSystemdIfInstalled({ ...startHooks(fake), trace })
+    ).toBe(0);
+    expect(await readFile(unitPath, "utf8")).toBe(unitText());
+    expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
+    const reload = fake.calls.indexOf("systemctl --user daemon-reload");
+    expect(reload).toBeGreaterThanOrEqual(0);
+    expect(
+      fake.calls.indexOf("systemctl --user start hackd.service")
+    ).toBeGreaterThan(reload);
+    expect(trace.manager).toBe("systemd");
+    expect(trace.action).toBe("reinstalled");
+    expect([...trace.stale]).toEqual(["content"]);
+  }
+);
+
+linuxTest(
+  "start rewrites a stale unit whose program is a link to this hack, keeping the link",
+  async () => {
+    const fake = fakeSystemd();
+    const link = join(root, "bin", "hack-link");
+    await symlink(program, link);
+    const stale = (renderSystemdUnit({ hackBinPath: link }) ?? "").replace(
+      "RestartSec=2",
+      "RestartSec=9"
+    );
+    await installSystemdUnit({ unitPath, unitText: stale, deps: fake.deps });
+    expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+    expect(await readFile(unitPath, "utf8")).toBe(
+      renderSystemdUnit({ hackBinPath: link }) ?? ""
+    );
+  }
+);
+
+linuxTest("read-only start leaves a stale unit as it is", async () => {
+  const fake = fakeSystemd();
+  fake.deps = {
+    ...fake.deps,
+    env: { ...fake.deps.env, [SYSTEMD_READ_ONLY_ENV]: "1" },
+  };
+  const stale = await writeStaleUnit(fake);
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect(await readFile(unitPath, "utf8")).toBe(stale);
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  expect(fake.calls).toContain("systemctl --user start hackd.service");
+});
+
+linuxTest(
+  "a running hackd of another version under this hack's unit is restarted through systemd",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.calls.length = 0;
+    const hooks = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(0);
+    expect(fake.calls).toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect(hooks.trace.action).toBe("restarted");
+    expect([...hooks.trace.stale]).toEqual(["version-mismatch"]);
+  }
+);
+
+linuxTest(
+  "a running hackd with a stale unit is rewritten and restarted",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await writeStaleUnit(fake);
+    const hooks = runningHooks(fake, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(0);
+    expect(await readFile(unitPath, "utf8")).toBe(unitText());
+    const reload = fake.calls.indexOf("systemctl --user daemon-reload");
+    expect(reload).toBeGreaterThanOrEqual(0);
+    expect(
+      fake.calls.indexOf("systemctl --user restart hackd.service")
+    ).toBeGreaterThan(reload);
+    expect(hooks.trace.action).toBe("reinstalled");
+    // The restart completed, so no restart stays pending.
+    expect(
+      await Bun.file(
+        join(root, ".hack", "daemon", "hackd.service.restart-pending")
+      ).exists()
+    ).toBe(false);
+  }
+);
+
+linuxTest("a current unit running this version is left alone", async () => {
+  const fake = fakeSystemd({ active: true, mainPid: 4242 });
+  await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  fake.calls.length = 0;
+  const hooks = runningHooks(fake, "2.0.0");
+  expect(await reconcileRunningSystemdDaemon(hooks)).toBeNull();
+  expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+  expect(hooks.trace.manager).toBe("systemd");
+  expect(hooks.trace.action).toBe("none");
+});
+
+linuxTest(
+  "a version mismatch under a unit for another existing hack is refused, unchanged",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await writeOldUnit(fake);
+    const before = await readFile(unitPath, "utf8");
+    const hooks = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(await readFile(unitPath, "utf8")).toBe(before);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  }
+);
+
+linuxTest(
+  "a hackd systemd does not run is left to the direct-start path",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.calls.length = 0;
+    expect(
+      await reconcileRunningSystemdDaemon({
+        ...runningHooks(fake, "1.0.0"),
+        pid: 777,
+        isPidInUnit: () => Promise.resolve(false),
+      })
+    ).toBeNull();
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+  }
+);
+
+linuxTest(
+  "an incompatible hackd under a unit that links to this hack is not refused",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    const link = join(root, "bin", "hack-link");
+    await symlink(program, link);
+    await installSystemdUnit({
+      unitPath,
+      unitText: renderSystemdUnit({ hackBinPath: link }) ?? "",
+      deps: fake.deps,
+    });
+    expect(
+      await describeSystemdIncompatibleOwner({
+        pid: 4242,
+        deps: fake.deps,
+        resolveExpected: startHooks(fake).resolveExpected,
+      })
+    ).toBeNull();
   }
 );

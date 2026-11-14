@@ -20,6 +20,8 @@ type PackageJsonType = {
 } & Record<string, unknown>;
 
 const packageJson = pkg as unknown as PackageJsonType;
+/** This CLI's version; a hackd reporting another one is incompatible. */
+export const DAEMON_CLI_VERSION: string = packageJson.version;
 const DAEMON_AUTOSTART_COOLDOWN_MS = 15_000;
 const DAEMON_AUTOSTART_WAIT_MS = 3500;
 const DAEMON_AUTOSTART_POLL_MS = 125;

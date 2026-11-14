@@ -467,3 +467,101 @@ installFlowTest(
   },
   90_000
 );
+
+installFlowTest(
+  "start --json rewrites a stale unit, restarts the service and prints one envelope",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    expect((await hack(f, ["daemon", "install"])).code).toBe(0);
+    const before = await readOwnedPid(f);
+    expect(before).not.toBeNull();
+    const current = await readFile(f.unitPath, "utf8");
+    // What an older hack rendered: same program, other content (HACK-2216).
+    await writeFile(
+      f.unitPath,
+      current.replace("RestartSec=2", "RestartSec=9")
+    );
+
+    const start = await hack(f, ["daemon", "start", "--json"]);
+    expect(start.code).toBe(0);
+    const envelope = JSON.parse(start.stdout) as {
+      ok: boolean;
+      data: Record<string, unknown>;
+    };
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toMatchObject({
+      schema: "hack.daemon-start/v1",
+      manager: "systemd",
+      action: "reinstalled",
+      stale: true,
+      stale_reasons: ["content"],
+      daemon: { running: true, compatible: true },
+    });
+    expect(await readFile(f.unitPath, "utf8")).toBe(current);
+    expect(await calls(f)).toContain("--user restart hackd.service");
+    const after = await readOwnedPid(f);
+    expect(after).not.toBeNull();
+    expect(after).not.toBe(before);
+
+    // Nothing stale now: a second start changes nothing.
+    const again = await hack(f, ["daemon", "start", "--json"]);
+    expect(again.code).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({
+      ok: true,
+      data: { action: "none", stale: false, manager: "systemd" },
+    });
+
+    const stop = await hack(f, ["daemon", "stop", "--json"]);
+    expect(stop.code).toBe(0);
+    expect(JSON.parse(stop.stdout)).toMatchObject({
+      ok: true,
+      data: {
+        schema: "hack.daemon-stop/v1",
+        manager: "systemd",
+        action: "stopped",
+      },
+    });
+    expect((await hack(f, ["daemon", "uninstall"])).code).toBe(0);
+  },
+  90_000
+);
+
+test.skipIf(process.platform !== "linux")(
+  "--json with an isolated HACK_HOME: stop reports a no-op, --foreground is a usage error",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    const isolated = {
+      ...f,
+      env: { ...f.env, HACK_HOME: join(f.root, "isolated") },
+    };
+    const stop = await hack(isolated, ["daemon", "stop", "--json"]);
+    expect(stop.code).toBe(0);
+    expect(JSON.parse(stop.stdout)).toEqual({
+      ok: true,
+      data: {
+        schema: "hack.daemon-stop/v1",
+        manager: "none",
+        action: "none",
+        stale: false,
+        stale_reasons: [],
+        cli_version: expect.any(String),
+        daemon: { running: false, pid: null, version: null, compatible: false },
+      },
+    });
+    const foreground = await hack(isolated, [
+      "daemon",
+      "start",
+      "--foreground",
+      "--json",
+    ]);
+    expect(foreground.code).toBe(1);
+    expect(JSON.parse(foreground.stdout)).toMatchObject({
+      ok: false,
+      error: { code: "E_USAGE" },
+    });
+    expect(await calls(f)).toEqual([]);
+  },
+  90_000
+);

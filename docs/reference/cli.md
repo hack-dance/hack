@@ -1678,7 +1678,7 @@ hack daemon <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
-| `hack daemon start` | Start hackd (local daemon) |
+| `hack daemon start` | Start hackd (local daemon); reinstalls and restarts a stale login service |
 | `hack daemon stop` | Stop hackd |
 | `hack daemon restart` | Restart hackd |
 | `hack daemon status` | Show hackd status |
@@ -1698,7 +1698,7 @@ hack daemon <subcommand> [options]
 
 ## `hack daemon start`
 
-Start hackd (local daemon)
+Start hackd (local daemon); reinstalls and restarts a stale login service
 
 ### Usage
 
@@ -1711,6 +1711,7 @@ hack daemon start [options]
 | Option | Description |
 | --- | --- |
 | `--foreground` | Run hackd in the foreground (debug) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1729,6 +1730,7 @@ hack daemon stop [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1747,6 +1749,7 @@ hack daemon restart [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1843,6 +1846,7 @@ hack daemon install [options]
 | `--no-run-at-load` | Do not start hackd automatically on login (macOS launchd) |
 | `--gui-only` | Only run in GUI sessions (macOS launchd; default) |
 | `--no-gui-only` | Run in all session types, including SSH (macOS launchd) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

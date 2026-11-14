@@ -339,7 +339,7 @@ test("repairs legacy output paths even when the installed program is still curre
   });
   expect(run.code).toBe(0);
   expect(JSON.parse(run.stdout)).toEqual({
-    repair: "repaired",
+    repair: "refreshed",
     secondRepair: "ok",
   });
   expect(await readFile(fixture.plistPath, "utf8")).toBe(plist);

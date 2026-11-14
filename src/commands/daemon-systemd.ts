@@ -1,7 +1,8 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_DAEMON_DIR_NAME } from "../constants.ts";
+import { DAEMON_CLI_VERSION } from "../daemon/client.ts";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessProbe,
@@ -12,6 +13,13 @@ import {
   proveOwnedDaemonProcess,
 } from "../daemon/process.ts";
 import { readLinuxParentPid } from "../daemon/process-image.ts";
+import {
+  type DaemonCommandTrace,
+  type DaemonReconcilePlan,
+  planDaemonReconcile,
+  recordReconcile,
+  type ServiceUnitState,
+} from "../daemon/reconcile.ts";
 import {
   type DaemonServiceSummary,
   summarizeSystemdService,
@@ -38,6 +46,7 @@ import {
   readSystemdServiceStatus,
   readSystemdUnitHackHome,
   renderedServicePathDirectories,
+  renderSystemdUnit,
   resolveExpectedSystemdUnit,
   resolveSystemdAccess,
   resolveSystemdUnitPath,
@@ -45,6 +54,7 @@ import {
   SYSTEMD_UNIT_NAME,
   type SystemdDeps,
   type SystemdServiceStatus,
+  type SystemdUnitDrift,
   systemdDaemonReload,
   systemdServiceAction,
   uninstallSystemdUnit,
@@ -93,6 +103,10 @@ export interface SystemdCommandHooks {
    * directories so they do not depend on the host's.
    */
   readonly systemPathDirectories?: readonly string[];
+  /** Records what the command decided, for `--json` (HACK-2216). */
+  readonly trace?: DaemonCommandTrace;
+  /** Defaults to this CLI's version; tests pin it. */
+  readonly cliVersion?: string;
 }
 
 /** Status for `daemon status` and doctor; null off Linux or when access is denied. */
@@ -229,6 +243,177 @@ export async function startViaSystemdIfInstalled(
 }
 
 /**
+ * `hack daemon start` found this home's hackd running (HACK-2216). When
+ * hackd.service runs it, brings the service up to this CLI with
+ * {@link planDaemonReconcile}: rewrite a stale unit (as
+ * {@link prepareSystemdUnitForStart} does) and `systemctl --user restart` it
+ * when the unit changed or the daemon reports another version. A version
+ * mismatch that a restart cannot fix (the unit runs another existing
+ * `hack`, or an ExecStart hack does not read) is refused with the
+ * `hack daemon install` step.
+ *
+ * Returns null when this does not apply (no usable unit, systemd does not
+ * run `pid`, the unit serves another Hack home) or nothing needs to change;
+ * the caller then goes on as before. Otherwise the exit code.
+ */
+export async function reconcileRunningSystemdDaemon(
+  hooks: Omit<SystemdCommandHooks, "startDetached" | "stopDirect"> & {
+    readonly pid: number;
+    /** What the daemon's API reported; null when it did not answer. */
+    readonly version: string | null;
+  }
+): Promise<number | null> {
+  const deps = hooks.deps ?? defaultSystemdDeps();
+  if (!resolveSystemdAccess({ env: deps.env }).allowed) {
+    return null;
+  }
+  const unitPath = resolveSystemdUnitPath({ env: deps.env });
+  if (!(await pathExists(unitPath))) {
+    return null;
+  }
+  const status = await readSystemdServiceStatus({ unitPath, deps });
+  if (
+    !status?.availability.available ||
+    status.stateError !== null ||
+    !(await systemdRunsPid({
+      status,
+      pid: hooks.pid,
+      isPidInUnit: hooks.isPidInUnit,
+    }))
+  ) {
+    return null;
+  }
+  const unitHome = await checkUnitServesHome({
+    hackHome: dirname(hooks.paths.root),
+    deps,
+    action: "starting",
+  });
+  if (unitHome.kind !== "ours") {
+    return null;
+  }
+  const expected = await (
+    hooks.resolveExpected ?? resolveExpectedSystemdUnit
+  )();
+  const marker = resolve(hooks.paths.root, RESTART_PENDING_FILE);
+  const plan = planDaemonReconcile({
+    unit: serviceUnitState(status.drift),
+    programIsOurs: await unitRunsExpected({ status, expected }),
+    readOnly: isSystemdReadOnly(deps.env),
+    running: { version: hooks.version },
+    restartPending: await pathExists(marker),
+    cliVersion: hooks.cliVersion ?? DAEMON_CLI_VERSION,
+  });
+  if (plan.service === "keep") {
+    if (hooks.trace) {
+      hooks.trace.manager = "systemd";
+    }
+    return null;
+  }
+  recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
+  if (plan.service === "refuse") {
+    logger.warn({
+      message: describeRunningRefusal({
+        plan,
+        status,
+        expected,
+        pid: hooks.pid,
+      }),
+    });
+    return 1;
+  }
+  return await restartReconciledUnit({
+    hooks,
+    plan,
+    status,
+    unitPath,
+    deps,
+    marker,
+  });
+}
+
+/** The refusal for a running hackd whose version a restart cannot fix. */
+function describeRunningRefusal(opts: {
+  readonly plan: DaemonReconcilePlan;
+  readonly status: SystemdServiceStatus;
+  readonly expected: { readonly hackBinPath: string } | null;
+  readonly pid: number;
+}): string {
+  const { plan, status, expected } = opts;
+  if (plan.blocked === "read-only") {
+    return `${describeMissingProgram(status)}; not changing the service here | Run: hack daemon install`;
+  }
+  if (plan.blocked === "unknown-program" || status.program === null) {
+    return `hackd (pid ${opts.pid}) is incompatible with this CLI, and ${SYSTEMD_UNIT_NAME} has an ExecStart hack does not read, so a restart is not known to run this version | Check: systemctl --user cat ${SYSTEMD_UNIT_NAME}; to switch it to this hack, run: hack daemon install`;
+  }
+  const target = expected
+    ? ` (switches the service to ${expected.hackBinPath})`
+    : "";
+  return `hackd (pid ${opts.pid}) is incompatible with this CLI, and ${SYSTEMD_UNIT_NAME} runs ${status.program}, so restarting it would start the same version again | Run: hack daemon install${target}`;
+}
+
+/**
+ * Rewrites the unit when the plan says so, then restarts it through
+ * systemd. A restart runs the unit's stop hooks and stops what hackd
+ * started, so the same checks as `stop` and `start` run first. The
+ * restart-pending marker (shared with install) is written before the unit
+ * changes and removed only after the restart, so a failure in between is
+ * retried as a restart.
+ */
+async function restartReconciledUnit(opts: {
+  readonly hooks: Omit<SystemdCommandHooks, "startDetached" | "stopDirect">;
+  readonly plan: DaemonReconcilePlan;
+  readonly status: SystemdServiceStatus;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  readonly marker: string;
+}): Promise<number> {
+  const { hooks, plan, status, unitPath, deps } = opts;
+  if (plan.rewrite !== "none") {
+    await writeRestartMarker({ paths: hooks.paths });
+    const rewritten = await rewriteUnitForPlan({
+      plan,
+      status,
+      unitPath,
+      deps,
+      hooks,
+      expected: await (hooks.resolveExpected ?? resolveExpectedSystemdUnit)(),
+    });
+    if (rewritten !== null) {
+      return rewritten;
+    }
+  }
+  const blocked =
+    (await checkSystemdUnitTrusted({ unitPath })) ??
+    (await checkSystemdLoadedUnitPaths({ unitPath, deps })) ??
+    (await checkUnitProgramTrusted({ unitPath })) ??
+    (await checkSystemdStopHooks({ unitPath, deps }));
+  if (blocked !== null) {
+    logger.error({ message: blocked });
+    return 1;
+  }
+  const why = plan.reasons.includes("version-mismatch")
+    ? "it runs another hack version"
+    : "its unit changed";
+  logger.info({ message: `Restarting ${SYSTEMD_UNIT_NAME}: ${why}` });
+  const restarted = await systemdServiceAction({ action: "restart", deps });
+  if (!restarted.ok) {
+    logger.error({
+      message: `systemctl --user restart ${SYSTEMD_UNIT_NAME} failed: ${restarted.error} | Check: ${JOURNAL_HINT}`,
+    });
+    return 1;
+  }
+  await rm(opts.marker, { force: true });
+  if (await hooks.waitForReady(READY_TIMEOUT_MS)) {
+    logger.success({ message: "hackd restarted (systemd)" });
+    return 0;
+  }
+  logger.warn({
+    message: `systemd restarted hackd but it did not report ready yet | Check: hack daemon logs --tail 200 and ${JOURNAL_HINT}`,
+  });
+  return 1;
+}
+
+/**
  * The unit is a per-user singleton: starting (or repairing) it from a
  * shell with another Hack home would start someone else's daemon, and this
  * shell's would never become ready (HACK-2052). "ours" to go on; null when
@@ -302,16 +487,21 @@ async function checkUnitServesHome(opts: {
  * installed unit before starting it. Returns an exit code to stop with, or
  * null to go on and start.
  *
- * Owner decision (HACK-2052): start never rewrites a unit whose program
- * still exists, even when this CLI resolves a different `hack`; it reports
- * the difference and `hack daemon install` switches it. That keeps a user's
- * whole-file edits and never points a login service at a temporary binary.
- * Only when the program is gone may start retarget it, and only to a
- * durable location ({@link assessExecutableDurability}), replacing just the
- * ExecStart program so every other line is kept. Under
- * {@link isSystemdReadOnly} (`hack doctor --fix` without a TTY) it neither
- * writes nor reloads. A pending reload (`NeedDaemonReload=yes`, left by a
- * failed reload after a write) is completed first, so a retry recovers.
+ * The decision is {@link planDaemonReconcile} (HACK-2216):
+ * - a unit that runs this CLI's executable (the same path, or one that
+ *   resolves to the same file) but differs from what this CLI renders for
+ *   that program is rewritten whole, as `hack daemon install` would, keeping
+ *   its program path (a stable symlink stays a symlink) and whether it is
+ *   enabled;
+ * - a unit whose program is gone is retargeted to this CLI, only to a
+ *   durable location ({@link assessExecutableDurability}), replacing just
+ *   the ExecStart program so every other line is kept;
+ * - a unit that runs another existing `hack` is never rewritten (HACK-2052:
+ *   the user may have chosen it); start reports the difference and
+ *   `hack daemon install` switches it.
+ * Under {@link isSystemdReadOnly} (`hack doctor --fix` without a TTY) it
+ * neither writes nor reloads. A pending reload (`NeedDaemonReload=yes`, left
+ * by a failed reload after a write) is completed first, so a retry recovers.
  */
 async function prepareSystemdUnitForStart(opts: {
   readonly status: SystemdServiceStatus;
@@ -319,7 +509,11 @@ async function prepareSystemdUnitForStart(opts: {
   readonly deps: SystemdDeps;
   readonly hooks: Pick<
     SystemdCommandHooks,
-    "resolveExpected" | "assessDurability"
+    | "resolveExpected"
+    | "assessDurability"
+    | "trace"
+    | "cliVersion"
+    | "systemPathDirectories"
   >;
 }): Promise<number | null> {
   const { status, unitPath, deps, hooks } = opts;
@@ -334,49 +528,111 @@ async function prepareSystemdUnitForStart(opts: {
       message: `${SYSTEMD_UNIT_NAME} has an ExecStart hack does not read (a prefix, specifier or escape); starting it unchanged`,
     });
   }
-  if (status.drift !== "program-missing") {
-    return await completePendingReload({ status, deps, expected, readOnly });
+  const plan = planDaemonReconcile({
+    unit: serviceUnitState(status.drift),
+    programIsOurs: await unitRunsExpected({ status, expected }),
+    readOnly,
+    running: null,
+    cliVersion: hooks.cliVersion ?? DAEMON_CLI_VERSION,
+  });
+  recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
+  if (plan.service === "refuse") {
+    logger.error({
+      message: `${describeMissingProgram(status)}; not changing the service here | Run: hack daemon install`,
+    });
+    return 1;
   }
+  if (plan.rewrite !== "none") {
+    return await rewriteUnitForPlan({
+      plan,
+      status,
+      unitPath,
+      deps,
+      hooks,
+      expected,
+    });
+  }
+  return await completePendingReload({
+    status,
+    deps,
+    expected,
+    readOnly,
+    plan,
+  });
+}
 
-  const missing = `${SYSTEMD_UNIT_NAME} runs a program that no longer exists (${status.program ?? "unreadable ExecStart"})`;
-  if (readOnly) {
-    logger.error({
-      message: `${missing}; not changing the service here | Run: hack daemon install`,
-    });
-    return 1;
+/** {@link ServiceUnitState} for a unit's {@link SystemdUnitDrift}. */
+function serviceUnitState(drift: SystemdUnitDrift): ServiceUnitState {
+  return drift === "none" ? "current" : drift;
+}
+
+/**
+ * Whether the unit runs this CLI's executable: the same path, or a path
+ * that resolves to the same file (for example a stable symlink to it).
+ */
+async function unitRunsExpected(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly expected: { readonly hackBinPath: string } | null;
+}): Promise<boolean> {
+  const { status, expected } = opts;
+  if (status.program === null || expected === null) {
+    return false;
   }
-  if (!expected) {
-    logger.error({
-      message: `${missing} and no installed hack was found to replace it | Put hack on PATH, then run: hack daemon install`,
-    });
-    return 1;
+  if (status.program === expected.hackBinPath) {
+    return true;
   }
-  const durability = await (
-    hooks.assessDurability ?? assessExecutableDurability
-  )({ path: expected.hackBinPath });
-  if (!durability.durable) {
-    logger.error({
-      message: `${missing}. This CLI (${expected.hackBinPath}) is not a stable location for a login service: ${durability.reason} | Install hack to a stable location, then run: hack daemon install`,
-    });
-    return 1;
-  }
-  const unitText = await readTextFile(unitPath);
-  const retargeted =
-    unitText === null
-      ? null
-      : retargetSystemdUnitProgram({
-          unitText,
-          hackBinPath: expected.hackBinPath,
-        });
-  if (retargeted === null) {
-    logger.error({
-      message: `${missing} and its ExecStart could not be updated | Run: hack daemon install`,
-    });
+  const real = async (path: string): Promise<string | null> => {
+    try {
+      return await realpath(path);
+    } catch {
+      return null;
+    }
+  };
+  const [unitReal, ourReal] = await Promise.all([
+    real(status.program),
+    real(expected.hackBinPath),
+  ]);
+  return unitReal !== null && unitReal === ourReal;
+}
+
+function describeMissingProgram(status: SystemdServiceStatus): string {
+  return `${SYSTEMD_UNIT_NAME} runs a program that no longer exists (${status.program ?? "unreadable ExecStart"})`;
+}
+
+type UnitRewrite =
+  | { readonly unitText: string; readonly done: string }
+  | { readonly error: string };
+
+/**
+ * Carries out a plan's unit rewrite (`content` or `program`) with the
+ * checks `hack daemon install` uses: the program and the PATH it gives
+ * hackd must be safe from other accounts, and {@link installSystemdUnit}
+ * checks the unit directories. An enabled unit stays enabled and a
+ * disabled one stays disabled. Returns 1 (reported) on failure, else null.
+ */
+async function rewriteUnitForPlan(opts: {
+  readonly plan: DaemonReconcilePlan;
+  readonly status: SystemdServiceStatus;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  readonly hooks: Pick<
+    SystemdCommandHooks,
+    "assessDurability" | "systemPathDirectories"
+  >;
+  readonly expected: { readonly hackBinPath: string } | null;
+}): Promise<number | null> {
+  const { plan, status, unitPath, deps, hooks, expected } = opts;
+  const rewritten =
+    plan.rewrite === "program"
+      ? await retargetMissingProgram({ status, unitPath, hooks, expected })
+      : await renderCurrentUnit({ status, deps, hooks });
+  if ("error" in rewritten) {
+    logger.error({ message: rewritten.error });
     return 1;
   }
   const repaired = await installSystemdUnit({
     unitPath,
-    unitText: retargeted,
+    unitText: rewritten.unitText,
     deps,
     // Keep the user's choice: a disabled unit is repaired, not re-enabled.
     enable: status.enabled,
@@ -388,26 +644,120 @@ async function prepareSystemdUnitForStart(opts: {
     });
     return 1;
   }
-  logger.warn({
-    message: `Repaired ${SYSTEMD_UNIT_NAME}: its program no longer existed; it now runs ${expected.hackBinPath} (other lines kept)`,
-  });
+  logger.warn({ message: rewritten.done });
   return null;
 }
 
+/** The unit text for a `program` rewrite: only ExecStart is replaced. */
+async function retargetMissingProgram(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly unitPath: string;
+  readonly hooks: Pick<SystemdCommandHooks, "assessDurability">;
+  readonly expected: { readonly hackBinPath: string } | null;
+}): Promise<UnitRewrite> {
+  const { expected } = opts;
+  const missing = describeMissingProgram(opts.status);
+  if (!expected) {
+    return {
+      error: `${missing} and no installed hack was found to replace it | Put hack on PATH, then run: hack daemon install`,
+    };
+  }
+  const durability = await (
+    opts.hooks.assessDurability ?? assessExecutableDurability
+  )({ path: expected.hackBinPath });
+  if (!durability.durable) {
+    return {
+      error: `${missing}. This CLI (${expected.hackBinPath}) is not a stable location for a login service: ${durability.reason} | Install hack to a stable location, then run: hack daemon install`,
+    };
+  }
+  const unitText = await readTextFile(opts.unitPath);
+  const retargeted =
+    unitText === null
+      ? null
+      : retargetSystemdUnitProgram({
+          unitText,
+          hackBinPath: expected.hackBinPath,
+        });
+  if (retargeted === null) {
+    return {
+      error: `${missing} and its ExecStart could not be updated | Run: hack daemon install`,
+    };
+  }
+  return {
+    unitText: retargeted,
+    done: `Repaired ${SYSTEMD_UNIT_NAME}: its program no longer existed; it now runs ${expected.hackBinPath} (other lines kept)`,
+  };
+}
+
 /**
- * Start with an existing program: never rewrite the unit, only note a
- * different `hack` and finish a reload that an earlier write left pending.
+ * The unit text for a `content` rewrite: what this CLI renders for the
+ * unit's own program, after the program and PATH checks install runs.
+ * Durability is only reported, as install does: the program is unchanged.
+ */
+async function renderCurrentUnit(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly deps: SystemdDeps;
+  readonly hooks: Pick<
+    SystemdCommandHooks,
+    "assessDurability" | "systemPathDirectories"
+  >;
+}): Promise<UnitRewrite> {
+  const program = opts.status.program;
+  const unitText =
+    program === null ? null : renderSystemdUnit({ hackBinPath: program });
+  if (program === null || unitText === null) {
+    return {
+      error: `${SYSTEMD_UNIT_NAME} differs from what this hack writes, but its program cannot be written into a new unit | Run: hack daemon install`,
+    };
+  }
+  const unsafe = await checkInstallPrograms({
+    hackBinPath: program,
+    deps: opts.deps,
+    systemPathDirectories: opts.hooks.systemPathDirectories,
+  });
+  if (unsafe !== null) {
+    return { error: unsafe };
+  }
+  const durability = await (
+    opts.hooks.assessDurability ?? assessExecutableDurability
+  )({ path: program });
+  if (!durability.durable) {
+    logger.warn({
+      message: `The service runs ${program}, which may not last: ${durability.reason}. Install hack to a stable location and run \`hack daemon install\` from there.`,
+    });
+  }
+  return {
+    unitText,
+    done: `Updated ${SYSTEMD_UNIT_NAME}: it differed from what this hack writes for ${program} (local changes belong in a drop-in: systemctl --user edit hackd)`,
+  };
+}
+
+/**
+ * Start without a rewrite: note a unit left stale (it runs another `hack`,
+ * or writes are not allowed here) and finish a reload that an earlier
+ * write left pending.
  */
 async function completePendingReload(opts: {
   readonly status: SystemdServiceStatus;
   readonly deps: SystemdDeps;
   readonly expected: { readonly hackBinPath: string } | null;
   readonly readOnly: boolean;
+  readonly plan: DaemonReconcilePlan;
 }): Promise<number | null> {
-  const { status, expected } = opts;
-  if (expected && status.program && expected.hackBinPath !== status.program) {
+  const { status, expected, plan } = opts;
+  if (
+    expected &&
+    status.program &&
+    expected.hackBinPath !== status.program &&
+    !(await unitRunsExpected({ status, expected }))
+  ) {
     logger.info({
       message: `${SYSTEMD_UNIT_NAME} runs ${status.program}; this CLI is ${expected.hackBinPath}. To switch the service to it, run: hack daemon install`,
+    });
+  }
+  if (plan.blocked === "read-only") {
+    logger.warn({
+      message: `${SYSTEMD_UNIT_NAME} differs from what this hack writes; not changing it here | Run: hack daemon install`,
     });
   }
   if (!status.needsReload) {
@@ -873,7 +1223,9 @@ export async function describeSystemdIncompatibleOwner(opts: {
     return null;
   }
   const expected = await (opts.resolveExpected ?? resolveExpectedSystemdUnit)();
-  if (!expected || expected.hackBinPath === status.program) {
+  // The same executable under another path (a stable symlink to it) is
+  // not "another hack": a restart runs this version (HACK-2216).
+  if (!expected || (await unitRunsExpected({ status, expected }))) {
     return null;
   }
   return `hackd (pid ${opts.pid}) is incompatible with this CLI, and ${SYSTEMD_UNIT_NAME} runs ${status.program}, so restarting it would start the same version again | Run: hack daemon install (switches the service to ${expected.hackBinPath})`;
@@ -1023,6 +1375,7 @@ export async function installDaemonSystemdService(
     });
     return 1;
   }
+  recordInstall({ trace: hooks.trace, before, changed: installed.changed });
   if (installed.changed) {
     logger.success({
       message: before?.installed
@@ -1077,6 +1430,30 @@ export async function installDaemonSystemdService(
     linger: await readLingerStatus(deps),
   });
   return ready ? 0 : 1;
+}
+
+/** Records what install changed, for `--json`. */
+function recordInstall(opts: {
+  readonly trace: DaemonCommandTrace | undefined;
+  readonly before: SystemdServiceStatus | null;
+  readonly changed: boolean;
+}): void {
+  const { trace, before } = opts;
+  if (!trace) {
+    return;
+  }
+  trace.manager = "systemd";
+  if (!opts.changed) {
+    trace.action = "none";
+    return;
+  }
+  trace.action = before?.installed ? "reinstalled" : "installed";
+  if (before?.installed && before.drift === "content") {
+    trace.stale.add("content");
+  }
+  if (before?.installed && before.drift === "program-missing") {
+    trace.stale.add("program-missing");
+  }
 }
 
 /**
@@ -1268,16 +1645,24 @@ async function noteRestartIfActiveUnitChanges(opts: {
   readonly unitPath: string;
   readonly unitText: string;
 }): Promise<string> {
-  const marker = resolve(opts.hooks.paths.root, RESTART_PENDING_FILE);
   if (
     opts.before?.active &&
     (await readTextFile(opts.unitPath)) !== opts.unitText
   ) {
-    // Owner-only whatever the umask: a shared ~/.hack would fail the
-    // service PATH check (and hackd's own state-directory check).
-    await mkdir(opts.hooks.paths.root, { recursive: true, mode: 0o700 });
-    await writeFile(marker, "restart hackd.service to load its new unit\n");
+    return await writeRestartMarker({ paths: opts.hooks.paths });
   }
+  return resolve(opts.hooks.paths.root, RESTART_PENDING_FILE);
+}
+
+/** Writes the restart-pending marker; returns its path. */
+async function writeRestartMarker(opts: {
+  readonly paths: DaemonPaths;
+}): Promise<string> {
+  const marker = resolve(opts.paths.root, RESTART_PENDING_FILE);
+  // Owner-only whatever the umask: a shared ~/.hack would fail the
+  // service PATH check (and hackd's own state-directory check).
+  await mkdir(opts.paths.root, { recursive: true, mode: 0o700 });
+  await writeFile(marker, "restart hackd.service to load its new unit\n");
   return marker;
 }
 

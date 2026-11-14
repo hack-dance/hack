@@ -157,14 +157,14 @@ Source: `src/commands/env.ts:437 (backendUseSpec)`. No command alias is declared
 | `hack log-pipe` | `--format <auto\|docker-compose\|plain>`; `--stream <stdout\|stderr>` | Present |
 | `hack doctor` | `--path, -p <dir>`; `--fix`; `--migrate-env-config`; `--domain-migration preview\|apply\|rollback`; `--json`; `--browser-url https://app.hack`; `--browser-result unknown\|works\|fails\|permission-denied`; `--branch <name>`; `--native-cleanup inspect`; `--native-run-mapping inspect\|repair`; `--expect-selection <64-hex>`; `--accept-legacy-device-rebind` | Present |
 | `hack crash-capture` | `--path, -p <dir>`; `--since <duration>` | Present |
-| `hack daemon start` | `--foreground` | Present |
-| `hack daemon stop` | none | Present |
-| `hack daemon restart` | none | Present |
+| `hack daemon start` | `--foreground`; `--json` | Present |
+| `hack daemon stop` | `--json` | Present |
+| `hack daemon restart` | `--json` | Present |
 | `hack daemon status` | `--json` | Present |
 | `hack daemon metrics` | none | Present |
 | `hack daemon logs` | `--tail <n>` | Present |
 | `hack daemon clear` | none | Present |
-| `hack daemon install` | `--run-at-load`; `--no-run-at-load`; `--gui-only`; `--no-gui-only` | Present |
+| `hack daemon install` | `--run-at-load`; `--no-run-at-load`; `--gui-only`; `--no-gui-only`; `--json` | Present |
 | `hack daemon uninstall` | none | Present |
 | `hack secrets set [name]` | `--service <service>` | Present |
 | `hack secrets get [name]` | `--service <service>` | Present |
@@ -332,6 +332,7 @@ Thrown usage errors with an explicit `--json` token become E_USAGE; other thrown
 | usage | bare projects[], total nullable, host[], host_total nullable, runtime_ok:boolean, runtime_error nullable; details adds containers[] | failures exit 1; optional error string. No samples exits 0 with warning:no_usage_samples. Watch uses the interactive redraw path even with JSON selected; do not treat watch as a JSON report stream. |
 | global status | bare generated_at/caddy/logging/networks/gateway/summary | exits 0 even if summary health false; gateway is retained unsupported data, excluded from public contract |
 | daemon status | bare report below | running returns 0; starting/stale/unavailable may return 1 |
+| daemon start/stop/restart/install | shared envelope; data schema `hack.daemon-<command>/v1`, manager (systemd/launchd/none), action (none/started/restarted/reinstalled/stopped/installed), stale:boolean, stale_reasons (content/program-missing/version-mismatch), cli_version, daemon.{running,pid,version,compatible} | failure is `E_DAEMON_SERVICE` with the same data as detail; access refusals `E_PERMISSION`; `start --foreground --json` is `E_USAGE`; exit codes unchanged |
 | host ps | bare {generatedAt,snapshotAvailable,commands,lifecycle} | timestamp string, availability boolean; nested telemetry remains specialized |
 | session panes/capture/tail | JSON-lines events below | no shared envelope |
 | update | command-owned object with ok:boolean, string error on failure | error is not shared error.{code,message}; success varies by check/install outcome; exit follows ok |

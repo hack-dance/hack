@@ -692,8 +692,10 @@ Source: [current env migration and cleanup guidance](https://github.com/hack-dan
 Installing another CLI does not replace an already running daemon. For an
 unmanaged daemon, `daemon start` replaces a reachable incompatible daemon;
 `daemon restart` is the explicit replacement path. With the newer Linux systemd
-service, a unit pointing at a different existing executable needs explicit
-`daemon install`: restarting that unit would run its old executable again.
+service, `daemon start` rewrites and restarts a stale unit that runs the same
+executable (or a link to it). A unit pointing at a different existing
+executable needs explicit `daemon install`: restarting that unit would run its
+old executable again.
 Keep this separate from a side-by-side candidate
 trial: the launcher disables daemon autostart, and stable `hackd` stays stopped
 while the candidate shares its home. The macOS trials confirmed that the stable

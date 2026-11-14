@@ -47,8 +47,10 @@ import {
  *   first `hack` on PATH), not its symlink target, so a stable symlink such as
  *   `~/.local/bin/hack` keeps working when an upgrade moves the real binary.
  *   When the recorded program no longer exists, `hack daemon start` rewrites
- *   the unit; any other difference is reported as drift and fixed by
- *   `hack daemon install`.
+ *   the unit. When the unit runs this CLI's executable but differs from what
+ *   it renders, or its hackd reports another version, start rewrites and
+ *   restarts it (HACK-2216, `src/daemon/reconcile.ts`). A unit that runs
+ *   another existing `hack` is reported and switched by `hack daemon install`.
  * - `Restart=on-failure`: a crash restarts hackd; `hack daemon stop` (a clean
  *   stop through systemctl) does not. Start limits stop a crash loop.
  * - The default `KillMode=control-group` is kept on purpose: stopping or

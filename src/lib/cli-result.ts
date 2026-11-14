@@ -47,6 +47,7 @@ export const HACK_ERROR_CODES = [
   "E_ADMISSION_LIMIT",
   "E_REQUEST_CONFLICT",
   "E_JOURNAL_VERSION",
+  "E_DAEMON_SERVICE",
   "E_USAGE",
   "E_UNEXPECTED",
 ] as const;

@@ -20,6 +20,10 @@ import {
   resolveUpdateTarget,
   selectCliTarballAsset,
 } from "../lib/self-update.ts";
+import {
+  type PostUpdateDaemonResult,
+  reconcileDaemonAfterUpdate,
+} from "./daemon-upgrade.ts";
 
 const optCheck = defineOption({
   name: "check",
@@ -248,6 +252,9 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
   }
 
   const mutagenProvision = await ensureMutagenAfterUpdate();
+  // An installed login service still runs the old hackd: bring it up to
+  // the new executable (best effort; never fails the update).
+  const daemon = await reconcileDaemonAfterUpdate({ binaryPath: bin.path });
 
   return writeResult({
     json: args.options.json === true,
@@ -262,10 +269,29 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
       assetsDir,
       mutagen: mutagenProvision,
       backupManifest,
+      daemon,
     },
-    human: `Updated to v${latestVersion}. Backup manifest: ${backupManifest}`,
+    human: [
+      `Updated to v${latestVersion}. Backup manifest: ${backupManifest}`,
+      ...describePostUpdateDaemon(daemon),
+    ].join("\n"),
   });
 };
+
+/** The human line for {@link reconcileDaemonAfterUpdate}, if any. */
+function describePostUpdateDaemon(result: PostUpdateDaemonResult): string[] {
+  if (result.status === "skipped") {
+    return [];
+  }
+  if (result.status === "failed") {
+    return [
+      `hackd was not updated: ${result.message} | Run: ${result.next_step}`,
+    ];
+  }
+  return result.action === "none"
+    ? []
+    : [`hackd ${result.action} (${result.manager}) on the new version.`];
+}
 
 async function confirmInstall(opts: {
   readonly yes: boolean;
@@ -439,6 +465,7 @@ type UpdateOutput =
       readonly assetsDir: string;
       readonly mutagen?: MutagenProvisionResult;
       readonly backupManifest?: string;
+      readonly daemon?: PostUpdateDaemonResult;
     }
   | {
       readonly ok: false;

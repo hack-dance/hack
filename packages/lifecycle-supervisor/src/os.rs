@@ -837,14 +837,23 @@ mod tests {
                 libc::_exit(0);
             }
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if inspect(pid).unwrap().is_some_and(|p| p.zombie) {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // Darwin getsid may return ESRCH for zombies, so inspect intentionally
+        // reports absence. Observe exit without reaping through the wait API
+        // instead of requiring a live-process identity for an exited child.
+        let mut event = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: this is our direct child, event is a writable kernel buffer,
+        // and WNOWAIT deliberately retains the child for the assertions below.
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    event.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            },
+            0
+        );
         assert!(!live_group(pid, None).unwrap());
         assert!(
             group_signal_result(pid, io::Error::from_raw_os_error(libc::EPERM), census).is_ok()

@@ -107,6 +107,16 @@ Silicon, the native preflight. It changes nothing and prints no secret value.
 
 To run the apply steps:
 
+JSON findings and plan steps include `kind: safe|admin|manual`, separately from
+severity. `safe` means the supplied action can run without an operator decision:
+the snapshot, daemon status, and grouped snapshot-backed apply steps whose
+targets are eligible. `admin` identifies host routing or login-service changes
+that belong in a terminal for review; it does not mean every command needs sudo.
+`manual` covers decisions, broad Doctor repairs and unknown actions. A grouped
+apply step can be safe while its original per-checkout Doctor command remains
+manual. Any blocked or unchecked target keeps its grouped step manual. This
+metadata does not run a command, grant privileges or bypass apply admission.
+
 ```sh
 hack upgrade apply --dry-run      # what would change; changes nothing
 hack upgrade apply --dry-run --verbose  # include every candidate file path
@@ -969,3 +979,11 @@ Keep the printed resume and rollback commands for a custom `--snapshot-root`:
 ordinary snapshot listings scan only the default root. Resume preserves completed
 outcomes across interruption and refuses a damaged original blob even when its
 agent file has already been removed.
+
+## Breaking change: zellij workspaces removed
+
+v5 supports tmux for interactive workspaces. `sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij` now fail with migration guidance. Install tmux, then remove the setting or set it to `tmux`; `auto` detects tmux only. Existing zellij sessions are not stopped or migrated by Hack.
+
+**Before upgrading a project that used zellij for lifecycle processes:** with zellij installed, use the v4 CLI to run `hack down` for that project and confirm its lifecycle processes have stopped. Then switch to v5 and change the mux setting. Saved zellij lifecycle state blocks v5 start, restart and down because v5 cannot verify or stop that session. If already upgraded, use the retained v4 CLI to stop the affected project first; do not delete or edit managed state files. Removing a workspace setting alone does not clear saved lifecycle state. A stale-state migration path remains part of the lifecycle supervisor work.
+
+A leftover zellij setting also makes `hack global install` fail with the same migration guidance. Fix the setting before retrying.

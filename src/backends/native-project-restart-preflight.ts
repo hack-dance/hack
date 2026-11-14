@@ -451,6 +451,7 @@ export async function preflightNativeRestart(opts: {
       ...opts.scope,
       composeFile: opts.composeFile,
       envName: selected.envName,
+      profiles: selected.profiles,
       // As native start: `environment` references read the caller's shell.
       env: process.env,
     })

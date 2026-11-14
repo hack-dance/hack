@@ -37,9 +37,9 @@ const STACK_FRAME = /^\s+at /m;
 const SPAWN_TIMEOUT_MS = 60_000;
 const IMAGE = `sha256:${"e".repeat(64)}`;
 const ADMITTED_START_REQUESTS = [
+  "project plan",
+  "project plan",
   "runtime check-project-share",
-  "project plan",
-  "project plan",
   "runtime up",
 ];
 const SELECTION =
@@ -425,8 +425,8 @@ test(
         : refusal;
       expectOneClosedLine(result, `E_NATIVE_PROJECT_UNSUPPORTED: ${expected}`);
       expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
-      // The check passed: native up went on to its own source preflight.
-      expect(await f.calls()).toEqual(["runtime check-project-share"]);
+      // Static input admission refuses before the provider share check.
+      expect(await f.calls()).toEqual([]);
     }
   },
   SPAWN_TIMEOUT_MS
@@ -488,7 +488,7 @@ test(
     expect(result.output).not.toContain(secret);
     // The Compose backend would record the value in the image history too.
     expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
-    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+    expect(await f.calls()).toEqual([]);
   },
   SPAWN_TIMEOUT_MS
 );

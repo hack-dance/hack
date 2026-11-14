@@ -29,6 +29,7 @@ import {
   PROXY_BIND_CONFIG_KEY,
   parseProxyBindAddress,
 } from "../lib/proxy-bind.ts";
+import { parseSessionsMuxMode } from "../mux/mux-config.ts";
 import { logger } from "../ui/logger.ts";
 import { configAdoptCommand } from "./config-adopt.ts";
 import { configImportCommand } from "./config-import.ts";
@@ -230,6 +231,13 @@ function parseConfigSetValue(opts: {
   readonly raw: string;
 }): unknown {
   const value = parseValue({ raw: opts.raw });
+  if (opts.path.join(".") === "sessions.mux") {
+    const mode = parseSessionsMuxMode(value);
+    if (!mode) {
+      throw new CliUsageError("sessions.mux must be auto, tmux, or none.");
+    }
+    return mode;
+  }
   if (opts.path.join(".") === PROXY_BIND_CONFIG_KEY) {
     return parseGlobalProxyBind({ target: opts.target, value });
   }

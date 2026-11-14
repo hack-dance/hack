@@ -3,7 +3,6 @@ import type { ProjectContext } from "../lib/project.ts";
 import type { MuxBackend, MuxBackendName } from "./mux-backend.ts";
 import { resolveSessionsMuxMode, type SessionsMuxMode } from "./mux-config.ts";
 import { createTmuxBackend } from "./tmux-backend.ts";
-import { createZellijBackend } from "./zellij-backend.ts";
 
 export type ResolvedMux = {
   readonly mode: SessionsMuxMode;
@@ -12,11 +11,7 @@ export type ResolvedMux = {
 
 export function getMuxBackends(): ReadonlyMap<MuxBackendName, MuxBackend> {
   const tmux = createTmuxBackend();
-  const zellij = createZellijBackend();
-  return new Map([
-    ["tmux", tmux],
-    ["zellij", zellij],
-  ]);
+  return new Map([["tmux", tmux]]);
 }
 
 export async function resolveMux(opts: {
@@ -32,13 +27,14 @@ export function resolveMuxCandidates(opts: {
   if (opts.mode === "none") {
     return [];
   }
-  if (opts.mode === "tmux") {
-    return ["tmux"];
-  }
+  // Legacy lifecycle fixtures may supply a backend directly; configuration rejects zellij.
   if (opts.mode === "zellij") {
     return ["zellij"];
   }
-  return ["tmux", "zellij"];
+  if (opts.mode === "tmux") {
+    return ["tmux"];
+  }
+  return ["tmux"];
 }
 
 export function resolveDefaultBackendName(opts: {

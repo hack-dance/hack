@@ -53,13 +53,16 @@ detail pane, status bar. Light and dark follow the system
 | Backend | v0 | Source |
 |---|---|---|
 | Compose | Full detail | `/v1/projects` or `hack projects --json` (`runtime.services[].containers[]`) |
-| Native (beta) | Row and state pill only; Services shows "native: details need R2" | `HACK_RUNTIME_BACKEND=native hack ps --json --path <root>` (`data.status`) |
+| Native (beta) | State pill and services from native `ps`; no actions and no log tail in the app (see below) | `HACK_RUNTIME_BACKEND=native hack ps --json --path <root>` (`data.status`) |
 
 Project views read legacy inputs; a canonical native project comes back with
 `input_diagnostic`. The app recognises that code and asks `hack ps` instead
-rather than showing "Needs attention". Every command for a native project (`ps`, `up`,
-`down`, `restart`, `logs`) runs with `HACK_RUNTIME_BACKEND=native`, which is how the CLI
-selects that backend today. Docker's `runtime_ok` never changes a native row. Native `data.status` maps as:
+rather than showing "Needs attention". Every command for a native project runs with
+`HACK_RUNTIME_BACKEND=native`, which is how the CLI selects that backend today.
+Native `up` and `restart` stay in the foreground and refuse `--json` and
+`--detach`, so v0 offers no native actions: the header shows the terminal
+command instead (R2b below). Native finite logs are a one-service snapshot,
+so the combined tail is replaced by a note until the Logs tab reads them per service. Docker's `runtime_ok` never changes a native row. Native `data.status` maps as:
 `not_started` → Stopped, `pending` → Starting, `observed` → Running or Degraded
 from `items[].state` and `items[].health` (`readiness` is not in ordinary `ps` output; until R2 an exited service with exit 0 is "exited (0), role unknown" and any other exit is down), `runtime_degraded` → Degraded, `runtime_not_running` and
 `runtime_busy` and `owner_unconfirmed` → Unknown (with the status as reason),
@@ -304,7 +307,7 @@ because the unhealthy states live there.
 | Upgrades | R14 daily; `hack upgrade check --json` on Review | daily / on demand | 30 s / 60 s |
 | Actions | `hack up -d --json`, `down --json`, `restart --json`, `open --json`, `daemon start\|restart\|install` (exit code), `autostart …` | on click | 10 min for `up`, 2 min others |
 
-The 22 numbered requests (R1–R17) this design needs from the CLI and daemon are in
+The 23 numbered requests (R1–R17) this design needs from the CLI and daemon are in
 [Appendix C](#appendix-c-requests-to-the-cli-and-daemon).
 
 ## 8. Scope
@@ -365,23 +368,24 @@ Each is small enough for one PR.
 
 1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
 2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
-3. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
-4. **R4** Logs: document the `--json` ndjson as stable; `--services a,b` honoured by every backend; `--max-line-bytes <n>` setting `entry.truncated`.
-5. **R5a** Activity writer: append-only `activity.jsonl` in the Hack home, one line per `up`/`down`/`restart`/autostart (`ts, project, branch, action, origin, outcome, failed_services, duration_ms`), `O_APPEND` writes under one line size limit, rotation at a size cap, `origin` from `HACK_ORIGIN` (the app sets `app`).
-6. **R5b** Activity reader: `hack activity --json [--project] [--limit]`.
-7. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope.
-8. **R7a** Doctor metadata (a new doctor schema): per check `area`, `scope: machine | project`, `fix: {kind: safe | admin | manual, args[], doc_url}`.
-9. **R7b** One fix without prompts: `hack doctor --fix --only <id> --yes --json`, only for `kind: safe`.
-10. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
-11. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
-12. **R9** (optional) Push updates: `GET /v1/projects?wait=<generated_at>` long-poll.
-13. **R10** Env key state: `key_state: ok | missing | unreadable` in `hack env list --json` (no values).
-14. **R11** Admin argv plan: `hack global install|trust --plan --json` listing the root-only argv lines.
-15. **R12a** Always-on persistence and `hack autostart add|remove|list|pause|resume` ([section 6](#6-always-on-hack-2213-proposed-contract)).
-16. **R12b** Always-on fields in project payloads and `autostart_global`.
-17. **R12c** Login run: hackd starts always-on projects at service start, retries up to `max_failures`, and honours pause.
-18. **R13** Observe-only `hack global status --json --observe` that never starts Docker; reports `host_dns_ok` on both platforms.
-19. **R14** Read-only update check for any install kind: `hack update --check --json --observe` → `{current, latest, available, install_kind, upgrade_command}`.
-20. **R15** `--json` for `hack daemon start|stop|restart|install`.
-21. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
-22. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.
+3. **R2b** Native lifecycle the app can drive: a detached native `up`/`restart` with a `--json` result (or a hackd-owned start), so the app need not own a foreground process.
+4. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
+5. **R4** Logs: document the `--json` ndjson as stable; `--services a,b` honoured by every backend; `--max-line-bytes <n>` setting `entry.truncated`.
+6. **R5a** Activity writer: append-only `activity.jsonl` in the Hack home, one line per `up`/`down`/`restart`/autostart (`ts, project, branch, action, origin, outcome, failed_services, duration_ms`), `O_APPEND` writes under one line size limit, rotation at a size cap, `origin` from `HACK_ORIGIN` (the app sets `app`).
+7. **R5b** Activity reader: `hack activity --json [--project] [--limit]`.
+8. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope.
+9. **R7a** Doctor metadata (a new doctor schema): per check `area`, `scope: machine | project`, `fix: {kind: safe | admin | manual, args[], doc_url}`.
+10. **R7b** One fix without prompts: `hack doctor --fix --only <id> --yes --json`, only for `kind: safe`.
+11. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
+12. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
+13. **R9** (optional) Push updates: `GET /v1/projects?wait=<generated_at>` long-poll.
+14. **R10** Env key state: `key_state: ok | missing | unreadable` in `hack env list --json` (no values).
+15. **R11** Admin argv plan: `hack global install|trust --plan --json` listing the root-only argv lines.
+16. **R12a** Always-on persistence and `hack autostart add|remove|list|pause|resume` ([section 6](#6-always-on-hack-2213-proposed-contract)).
+17. **R12b** Always-on fields in project payloads and `autostart_global`.
+18. **R12c** Login run: hackd starts always-on projects at service start, retries up to `max_failures`, and honours pause.
+19. **R13** Observe-only `hack global status --json --observe` that never starts Docker; reports `host_dns_ok` on both platforms.
+20. **R14** Read-only update check for any install kind: `hack update --check --json --observe` → `{current, latest, available, install_kind, upgrade_command}`.
+21. **R15** `--json` for `hack daemon start|stop|restart|install`.
+22. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
+23. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.

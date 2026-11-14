@@ -574,6 +574,20 @@ mod tests {
         assert_eq!(v["ni"], "1");
     }
 
+    /// Evidence that `pid` has exited: `kill(pid, 0)` fails, or (Linux only)
+    /// `/proc` shows a zombie. An unreadable `/proc` is no evidence.
+    fn process_gone(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks existence.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        if cfg!(target_os = "linux") {
+            return std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|s| s.contains(") Z "));
+        }
+        false
+    }
+
     #[test]
     fn timeout_kills_the_process_group() {
         // The child spawns a grandchild that would outlive a plain kill.
@@ -597,13 +611,12 @@ mod tests {
             .parse()
             .unwrap();
         // Give the kernel a moment to deliver SIGKILL and reparent/reap.
+        // Positive control: a live process must never count as gone, so
+        // the assertion below cannot pass just because a probe is missing.
+        assert!(!process_gone(i32::try_from(std::process::id()).unwrap()));
         let gone = (0..100).any(|_| {
             thread::sleep(Duration::from_millis(20));
-            // SAFETY: signal 0 only checks existence.
-            (unsafe { libc::kill(pid, 0) != 0 })
-                || std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                    .map(|s| s.contains(") Z "))
-                    .unwrap_or(true)
+            process_gone(pid)
         });
         assert!(gone, "grandchild {pid} survived the timeout");
     }

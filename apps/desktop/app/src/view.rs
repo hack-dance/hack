@@ -26,7 +26,6 @@ use hack_desktop_core::source::{ActionOutcome, Source};
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
 use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
 
-const POLL: Duration = Duration::from_secs(2);
 const TAIL_LINES: u32 = 20;
 
 pub struct HackApp {
@@ -133,7 +132,9 @@ impl HackApp {
     fn start_polling(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                let Ok(source) = this.update(cx, |this, _| this.source.clone()) else {
+                let Ok((source, token)) = this.update(cx, |this, _| {
+                    (this.source.clone(), this.model.begin_refresh())
+                }) else {
                     return;
                 };
                 let snap = cx
@@ -146,7 +147,9 @@ impl HackApp {
                 let root = this
                     .update(cx, |this, cx| {
                         let previous = this.selected_root();
-                        this.model.apply(Event::Refreshed(snap));
+                        if !this.model.finish_refresh(token, snap) {
+                            return None;
+                        }
                         if previous != this.selected_root() {
                             this.env.begin();
                             if this.tab == 2 {
@@ -172,7 +175,10 @@ impl HackApp {
                         }
                     });
                 }
-                cx.background_executor().timer(POLL).await;
+                let delay = this
+                    .update(cx, |this, _| this.model.poll_interval())
+                    .unwrap_or(Duration::from_secs(10));
+                cx.background_executor().timer(delay).await;
             }
         })
         .detach();
@@ -226,14 +232,23 @@ impl HackApp {
 
     fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
         let source = self.source.clone();
+        let token = self.model.begin_refresh();
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
                 .spawn(async move { source.snapshot() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.model.apply(Event::Refreshed(snap));
-                cx.notify();
+                let previous = this.selected_root();
+                if this.model.finish_refresh(token, snap) {
+                    if previous != this.selected_root() {
+                        this.env.begin();
+                        if this.tab == 2 {
+                            this.read_env(cx);
+                        }
+                    }
+                    cx.notify();
+                }
             });
         })
         .detach();

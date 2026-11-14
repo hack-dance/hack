@@ -1,11 +1,13 @@
 //! `hack-desktop-state`: a headless check of the desktop app's live data
 //! path. It reads exactly what the window reads (`LiveSource::from_env`
-//! then `Source::snapshot`: hackd when its version matches the CLI, else
-//! `hack projects --json`, plus native `ps` for native projects), applies the
+//! then `Source::snapshot`: hackd when its version matches the CLI,
+//! plus native `ps` for native projects), applies the
 //! result to the same view model, and prints the list and every project's
 //! detail view as JSON.
 //!
 //! Read-only: it runs no action, opens no window and writes nothing.
+//! Without a matching daemon it reports Unknown / needs R18 rather than
+//! invoking today's registry-writing `hack projects` fallback.
 //!
 //! ```text
 //! hack-desktop-state [--project <name>] [--compact]

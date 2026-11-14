@@ -112,6 +112,13 @@ pub enum Event {
     },
 }
 
+/// Identity of a read request, captured before any I/O starts.
+#[derive(Debug, Clone, Copy)]
+pub struct RefreshToken {
+    sequence: u64,
+    action_epoch: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct AppModel {
     snapshot: Option<Snapshot>,
@@ -120,12 +127,48 @@ pub struct AppModel {
     local: HashMap<String, LocalContext>,
     action_errors: HashMap<String, String>,
     loaded_once: bool,
+    refresh_sequence: u64,
+    applied_sequence: u64,
+    action_epoch: u64,
 }
 
 impl AppModel {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Start a read. Results from before an action boundary or a newer
+    /// applied read cannot replace current state or prove failure recovery.
+    pub fn begin_refresh(&mut self) -> RefreshToken {
+        self.refresh_sequence += 1;
+        RefreshToken {
+            sequence: self.refresh_sequence,
+            action_epoch: self.action_epoch,
+        }
+    }
+
+    #[must_use]
+    pub fn poll_interval(&self) -> std::time::Duration {
+        if self.last_error.is_some() {
+            std::time::Duration::from_secs(10)
+        } else {
+            Snapshot::poll_interval(self.snapshot.as_ref())
+        }
+    }
+
+    /// Apply an ordered live read; returns whether it was accepted.
+    pub fn finish_refresh(
+        &mut self,
+        token: RefreshToken,
+        result: Result<Snapshot, SourceError>,
+    ) -> bool {
+        if token.action_epoch != self.action_epoch || token.sequence <= self.applied_sequence {
+            return false;
+        }
+        self.applied_sequence = token.sequence;
+        self.apply(Event::Refreshed(result));
+        true
     }
 
     /// Apply one event. Returns `true` when the app should refresh now.
@@ -163,6 +206,7 @@ impl AppModel {
                     return false;
                 }
                 ctx.in_flight = Some(action);
+                self.action_epoch += 1;
                 self.action_errors.remove(&project);
                 false
             }
@@ -171,6 +215,7 @@ impl AppModel {
                 action,
                 result,
             } => {
+                self.action_epoch += 1;
                 let ctx = self.local.entry(project.clone()).or_default();
                 if ctx.in_flight == Some(action) {
                     ctx.in_flight = None;
@@ -369,6 +414,73 @@ mod tests {
     use super::*;
     use crate::fixtures::{self, Fixture};
     use crate::models::LifecycleResult;
+
+    #[test]
+    fn stale_reads_cannot_erase_startup_failure() {
+        let mut m = model(Fixture::Running);
+        m.apply(Event::Select("storefront".into()));
+        let before_start = m.begin_refresh();
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Restart,
+        });
+        let during_action = m.begin_refresh();
+        m.apply(Event::ActionFinished {
+            project: "storefront".into(),
+            action: Action::Restart,
+            result: Err(SourceError::Cli {
+                code: "E_STARTUP_INCOMPLETE".into(),
+                message: "Could not start api".into(),
+                failed: vec!["api".into()],
+            }),
+        });
+        assert!(!m.finish_refresh(before_start, fixtures::snapshot(Fixture::Running)));
+        assert!(!m.finish_refresh(during_action, fixtures::snapshot(Fixture::Running)));
+        let fresh = m.begin_refresh();
+        let mut snapshot = fixtures::snapshot(Fixture::Running).unwrap();
+        let project = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        project
+            .runtime
+            .as_mut()
+            .unwrap()
+            .services
+            .retain(|s| s.service != "api");
+        assert!(m.finish_refresh(fresh, Ok(snapshot)));
+        assert_eq!(
+            m.detail().unwrap().state,
+            ProjectState::FailedStart {
+                services: vec!["api".into()]
+            }
+        );
+        let recovered = m.begin_refresh();
+        assert!(m.finish_refresh(recovered, fixtures::snapshot(Fixture::Running)));
+        assert!(matches!(
+            m.detail().unwrap().state,
+            ProjectState::Running { .. }
+        ));
+    }
+
+    #[test]
+    fn last_applied_request_wins_and_failed_reads_retry_slowly() {
+        let mut m = model(Fixture::Running);
+        let old = m.begin_refresh();
+        let new = m.begin_refresh();
+        assert!(m.finish_refresh(new, fixtures::snapshot(Fixture::Stopped)));
+        assert!(!m.finish_refresh(old, fixtures::snapshot(Fixture::Running)));
+        assert_eq!(m.poll_interval(), std::time::Duration::from_secs(2));
+        let failed = m.begin_refresh();
+        m.finish_refresh(failed, fixtures::snapshot(Fixture::Error));
+        assert_eq!(m.poll_interval(), std::time::Duration::from_secs(10));
+        assert_eq!(
+            Snapshot::poll_interval(None),
+            std::time::Duration::from_secs(10)
+        );
+    }
 
     fn model(f: Fixture) -> AppModel {
         let mut m = AppModel::new();

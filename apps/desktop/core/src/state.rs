@@ -230,7 +230,9 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
             let exit_code = first.and_then(|c| c.exit_code());
             ServiceView {
                 created: first.is_some(),
-                completed: !running && exit_code == Some(0),
+                completed: !running
+                    && first.is_some_and(|c| c.state == "exited")
+                    && exit_code == Some(0),
                 route: row
                     .service_hosts
                     .get(&name)
@@ -299,11 +301,25 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
 
     let svcs = services(row);
     let running: Vec<&ServiceView> = svcs.iter().filter(|s| s.running).collect();
-    let failed_exit: Vec<String> = svcs
+    let mut failed_exit: Vec<String> = svcs
         .iter()
         .filter(|s| !s.running && s.exit_code.is_some_and(|c| c != 0))
         .map(|s| s.name.clone())
         .collect();
+    // Docker's summary counts only `running`. A crash loop or a dead
+    // container is failure evidence even when the summary says stopped.
+    let mut uncertain = Vec::new();
+    for service in row.runtime.iter().flat_map(|r| &r.services) {
+        for c in &service.containers {
+            match c.state.to_ascii_lowercase().as_str() {
+                "restarting" | "dead" => failed_exit.push(service.service.clone()),
+                "running" | "exited" => {}
+                _ => uncertain.push(service.service.clone()),
+            }
+        }
+    }
+    failed_exit.sort();
+    failed_exit.dedup();
 
     // The CLI named these as failed: trust that, created or not.
     if !local.last_failed.is_empty()
@@ -320,6 +336,11 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         if !failed_exit.is_empty() {
             return ProjectState::FailedStart {
                 services: failed_exit,
+            };
+        }
+        if !uncertain.is_empty() {
+            return ProjectState::Unknown {
+                reason: format!("Containers are not stopped: {}", uncertain.join(", ")),
             };
         }
         // Summary rows carry counts, not services.
@@ -342,6 +363,8 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         .filter(|s| s.is_down())
         .map(|s| s.name.clone())
         .chain(unhealthy)
+        .chain(failed_exit)
+        .chain(uncertain)
         .collect();
     down.sort();
     down.dedup();
@@ -642,5 +665,53 @@ mod tests {
         assert_eq!(s[0].name, "worker");
         assert!(!s[0].running);
         assert_eq!(s[1].route.as_deref(), Some("api.storefront.hack"));
+    }
+    #[test]
+    fn docker_non_running_states_are_not_stopped() {
+        for (state, status, failed) in [
+            ("restarting", "Restarting (1) 5 seconds ago", true),
+            ("dead", "Dead", true),
+            ("created", "Created", false),
+            ("paused", "Up 2 minutes (Paused)", false),
+        ] {
+            let row: ProjectRow = serde_json::from_value(serde_json::json!({
+                    "name": "sample", "status": "stopped", "defined_services": ["api"],
+                    "runtime": {"services": [{"service":"api", "containers":[{"state":state,"status":status}]}]}
+                })).unwrap();
+            let observed = derive(&row, &LocalContext::default());
+            if failed {
+                assert_eq!(
+                    observed,
+                    ProjectState::FailedStart {
+                        services: vec!["api".into()]
+                    },
+                    "{state}"
+                );
+            } else {
+                assert!(
+                    matches!(observed, ProjectState::Unknown { .. }),
+                    "{state}: {observed:?}"
+                );
+            }
+            assert!(!services(&row)[0].completed);
+        }
+    }
+
+    #[test]
+    fn unhealthy_replica_is_degraded_even_when_another_replica_runs() {
+        let row: ProjectRow = serde_json::from_value(serde_json::json!({
+            "name":"sample", "status":"running", "defined_services":["api"],
+            "runtime":{"services":[{"service":"api","containers":[
+                {"state":"running","status":"Up 2 minutes"},
+                {"state":"restarting","status":"Restarting (1) 5 seconds ago"}
+            ]}]}
+        }))
+        .unwrap();
+        assert_eq!(
+            derive(&row, &LocalContext::default()),
+            ProjectState::Degraded {
+                down: vec!["api".into()]
+            }
+        );
     }
 }

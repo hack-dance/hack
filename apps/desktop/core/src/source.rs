@@ -782,6 +782,11 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Complete macOS first-launch scanning before the fake daemon's
+        // bounded accept window starts. --version has no fixture effects.
+        CliRunner::new(&hack)
+            .version(Duration::from_secs(60))
+            .unwrap();
         let (daemon, server) = fake_daemon(
             r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","backend":"native"}]}"#,
         );
@@ -832,6 +837,9 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        CliRunner::new(&hack)
+            .version(Duration::from_secs(60))
+            .unwrap();
         let (daemon, server) = fake_daemon("{}");
         let src = LiveSource {
             runner: CliRunner::new(&hack),

@@ -577,9 +577,21 @@ mod tests {
             ));
             std::fs::create_dir_all(&dir).unwrap();
             let p = dir.join("hack");
-            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::write(
+                &p,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = __warmup ]; then echo '{{}}'; exit 0; fi\n{body}\n"
+                ),
+            )
+            .unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Self { dir }
+            let fake = Self { dir };
+            // macOS may scan a newly written executable on first launch. Keep
+            // that delay outside every test's product-timeout measurement.
+            fake.runner()
+                .run_json::<Value>(&["__warmup"], None, Duration::from_secs(60))
+                .expect("fake CLI warmup");
+            fake
         }
         fn runner(&self) -> CliRunner {
             CliRunner::new(self.dir.join("hack")).with_env("HACK_HOME", &self.dir.to_string_lossy())
@@ -662,9 +674,8 @@ mod tests {
     #[test]
     fn timeout_kills_the_process_group() {
         // The child spawns a grandchild that would outlive a plain kill.
-        // The timeout leaves room for a slow first start of a new script
-        // (macOS scans freshly written executables); `ready` tells a slow
-        // start apart from a runner failure.
+        // FakeHack warms the script before this timed run; `ready` proves
+        // the body ran, rather than timing out before it exercised cleanup.
         let f = FakeHack::new(
             "echo ready > \"$HACK_HOME/ready\"\nsleep 30 &\necho $! > \"$HACK_HOME/grandchild\"\nwait",
         );

@@ -69,6 +69,11 @@ If blocked, fix the named field and rerun. Do not remove a check or delete state
 to force a start. Keep the project on Compose if it needs unsupported behavior.
 See [Troubleshooting](../troubleshooting.md) and [the preflight reference](preflight.md).
 
+Env-file support intended for next.17 changes input checks and shell-default
+selection. Before upgrading, read the [environment-file rules](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/native/environment-files.md)
+and [migration notes](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/guides/v5-release-notes.md#next17-what-changed-and-what-to-do).
+They explain which files are read, which declarations refuse and how to fix them.
+
 ## Start, check and stop
 
 ```sh
@@ -82,6 +87,14 @@ sharing, credentials, ownership and readiness. Preflight does not prove these.
 If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
+
+In a build containing next.17's interactive exec, use
+`"$CANDIDATE" exec api -- /bin/sh` from a foreground terminal for a live shell.
+Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`
+select finite exec. Use the matching runtime, and restart old managed-env
+launchers if requested. After an uncertain outcome, inspect
+`"$CANDIDATE" exec-sessions` and follow the
+[next.17 source recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
 Stop with the **same version and native home**:
 

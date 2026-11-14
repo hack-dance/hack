@@ -499,7 +499,8 @@ export function refuseEmulatedBuilds(opts: {
 
 /**
  * Refuse, before any hook, VM or build effect, a build argument whose value equals a
- * secret value Hack manages for this project and environment (see below).
+ * nonempty value explicitly marked secret in this project's managed env. Plain
+ * env-file and shell values have no secret metadata and do not widen this guard.
  */
 export function refuseManagedSecretBuildArguments(opts: {
   readonly builds: ReadonlyMap<string, NativeBuildRequest>;

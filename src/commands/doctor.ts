@@ -133,6 +133,11 @@ import {
 } from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import {
+  type DoctorMetadata,
+  type DoctorScope,
+  doctorMetadata,
+} from "../lib/doctor-metadata.ts";
+import {
   AMD64_EMULATION_CHECK,
   type Amd64EmulationReport,
   amd64EmulationCheckResult,
@@ -177,6 +182,7 @@ import {
 } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { createLinuxTrustHost } from "../lib/linux-trust-host.ts";
+import { resolveLiveInputScope } from "../lib/live-inputs.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -258,7 +264,6 @@ import {
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
-  resolveProjectEnvSharedKeyPath,
   type TrackedEnvMigrationChange,
 } from "../lib/project-env-config.ts";
 import {
@@ -275,7 +280,6 @@ import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
 import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
-import { resolveFileSecretStorePaths } from "../lib/secret-store.ts";
 import {
   applySecretsHygieneFixes,
   inspectSecretsHygiene,
@@ -326,6 +330,7 @@ interface CheckResult {
   readonly name: string;
   readonly status: CheckStatus;
   readonly message: string;
+  readonly scope?: DoctorScope;
   /** Counts and public fingerprints only; never paths or keychain contents. */
   readonly supersededRoots?: SupersededRootInventory;
   /** Native hack.local route state; lines and paths only, never file contents. */
@@ -511,7 +516,6 @@ const DOCTOR_SUMMARY_GROUPS = [
       "gum (optional)",
       "fzf (optional)",
       "tmux (sessions)",
-      "zellij (sessions)",
       "mutagen",
       "go (optional)",
       "caddy (optional)",
@@ -827,11 +831,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   results.push(
     await runCheck(s, "tmux", () =>
       checkTool({ name: "tmux (sessions)", cmd: "tmux", optional: true })
-    )
-  );
-  results.push(
-    await runCheck(s, "zellij", () =>
-      checkTool({ name: "zellij (sessions)", cmd: "zellij", optional: true })
     )
   );
   results.push(await runCheck(s, "mutagen", () => checkMutagenBinary()));
@@ -1575,7 +1574,7 @@ export async function checkNativeHackLocalRoute(opts: {
   return results;
 }
 
-export type DoctorJsonCheck = {
+export type DoctorJsonCheck = DoctorMetadata & {
   readonly id: string;
   readonly status: CheckStatus;
   readonly detail: string;
@@ -1603,6 +1602,7 @@ export type DoctorJsonCheck = {
 };
 
 export type DoctorJsonData = {
+  readonly schema: 1;
   readonly checks: readonly DoctorJsonCheck[];
   readonly summary: readonly string[];
   readonly counts: {
@@ -1623,8 +1623,10 @@ export function buildDoctorJsonData(opts: {
     counts[result.status] += 1;
   }
   return {
+    schema: 1,
     checks: opts.results.map((result) => ({
       id: result.name,
+      ...doctorMetadata({ id: result.name, scope: result.scope }),
       status: result.status,
       detail: result.message,
       durationMs: result.durationMs,
@@ -1742,9 +1744,7 @@ async function checkTool(opts: {
   return { name: opts.name, status, message };
 }
 
-function muxInstallCommand(opts: {
-  readonly provider: "tmux" | "zellij";
-}): string {
+function muxInstallCommand(opts: { readonly provider: "tmux" }): string {
   if (isMac()) {
     return `brew install ${opts.provider}`;
   }
@@ -1759,7 +1759,6 @@ async function checkSessionsMuxConfig(opts: {
   const project = opts.adopted ? null : await findProjectContext(opts.startDir);
   const mode = await resolveSessionsMuxMode({ project });
   const tmuxPath = findExecutableInPath("tmux");
-  const zellijPath = findExecutableInPath("zellij");
 
   if (mode === "none") {
     return {
@@ -1784,21 +1783,6 @@ async function checkSessionsMuxConfig(opts: {
     };
   }
 
-  if (mode === "zellij") {
-    if (!zellijPath) {
-      return {
-        name: "sessions mux",
-        status: "warn",
-        message: `sessions.mux=zellij, but zellij is missing (run: ${muxInstallCommand({ provider: "zellij" })})`,
-      };
-    }
-    return {
-      name: "sessions mux",
-      status: "ok",
-      message: `sessions.mux=zellij (${zellijPath})`,
-    };
-  }
-
   if (tmuxPath) {
     return {
       name: "sessions mux",
@@ -1807,18 +1791,10 @@ async function checkSessionsMuxConfig(opts: {
     };
   }
 
-  if (zellijPath) {
-    return {
-      name: "sessions mux",
-      status: "ok",
-      message: `sessions.mux=auto (using zellij: ${zellijPath})`,
-    };
-  }
-
   return {
     name: "sessions mux",
     status: "warn",
-    message: `sessions.mux=auto, but neither tmux nor zellij is available (run: ${muxInstallCommand({ provider: "tmux" })})`,
+    message: `sessions.mux=auto, but tmux is unavailable (run: ${muxInstallCommand({ provider: "tmux" })})`,
   };
 }
 
@@ -3276,45 +3252,10 @@ export async function resolveSecretsHygieneScope(opts: {
   readonly startDir: string;
   readonly strict?: boolean;
 }): Promise<SecretsHygieneScope> {
-  const strict = opts.strict === true;
-  const tolerate = <T>(promise: Promise<T>): Promise<T | null> =>
-    strict ? promise : promise.catch(() => null);
-  const project = await tolerate(findDoctorLegacyProjectContext(opts.startDir));
-  const stores = new Map<string, SecretsHygieneScope["stores"][number]>();
-  for (const projectDir of [undefined, project?.projectDir]) {
-    const resolved = await tolerate(
-      resolveFileSecretStorePaths({ projectDir, strict })
-    );
-    const paths = resolved
-      ? { storePath: resolved.storePath, keyPath: resolved.keyPath }
-      : null;
-    const key = paths ? `${paths.storePath}\0${paths.keyPath}` : null;
-    if (!(paths && key) || stores.has(key)) {
-      continue;
-    }
-    // Paths only a project's configuration chose (a cloned repository's
-    // may name any file of the user's) are fixed only inside the checkout
-    // or the Hack home.
-    stores.set(
-      key,
-      projectDir && project
-        ? { ...paths, fixRoots: [project.projectRoot, resolveGlobalHackDir()] }
-        : paths
-    );
-  }
-  return {
-    project: project
-      ? { projectRoot: project.projectRoot, projectDir: project.projectDir }
-      : null,
-    sharedKeyPath: project
-      ? await tolerate(
-          resolveProjectEnvSharedKeyPath({ projectRoot: project.projectRoot })
-        )
-      : null,
-    stores: [...stores.values()],
-    storeKeyFromEnvironment:
-      (process.env.HACK_SECRETS_FILE_KEY ?? "").trim().length > 0,
-  };
+  return await resolveLiveInputScope({
+    ...opts,
+    findProject: findDoctorLegacyProjectContext,
+  });
 }
 
 /**
@@ -3327,10 +3268,13 @@ export async function resolveSecretsHygieneScope(opts: {
 export async function checkSecretsHygiene(opts: {
   readonly startDir: string;
 }): Promise<CheckResult> {
-  const findings = await inspectSecretsHygiene(
-    await resolveSecretsHygieneScope(opts)
-  );
-  return { name: SECRETS_HYGIENE_CHECK, ...describeSecretsHygiene(findings) };
+  const scope = await resolveSecretsHygieneScope(opts);
+  const findings = await inspectSecretsHygiene(scope);
+  return {
+    name: SECRETS_HYGIENE_CHECK,
+    scope: scope.project ? "project" : "machine",
+    ...describeSecretsHygiene(findings),
+  };
 }
 
 function describeSecretsHygiene(findings: readonly SecretsHygieneFinding[]): {

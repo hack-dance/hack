@@ -1,8 +1,10 @@
+import type { UpgradeActionKind } from "./upgrade-action-kind.ts";
 import type {
   UpgradeProjectReport,
   UpgradeReportFinding,
 } from "./upgrade-check.ts";
 import type { UpgradeFindingStatus } from "./upgrade-check-project.ts";
+import { UPGRADE_REVIEW_REASONS } from "./upgrade-review-reasons.ts";
 
 /**
  * The upgrade plan (HACK-2188, HACK-2220): one step per kind of change, not
@@ -23,6 +25,7 @@ import type { UpgradeFindingStatus } from "./upgrade-check-project.ts";
 export const UPGRADE_APPLY_FIXES = [
   "ignore-rules",
   "agent-integrations",
+  "env-key-permissions",
 ] as const;
 
 export type UpgradeApplyFix = (typeof UPGRADE_APPLY_FIXES)[number];
@@ -49,6 +52,8 @@ export type UpgradePlanTarget = {
 };
 
 export type UpgradePlanStep = {
+  /** Classification of this grouped action, not its per-checkout commands. */
+  readonly kind: UpgradeActionKind;
   readonly order: number;
   /** The finding id this step resolves, or `snapshot`. */
   readonly id: string;
@@ -96,6 +101,7 @@ const PROJECT_ORDER = [
   "env-secrets",
   "env-format",
   "env-key",
+  "env-key-permissions",
   "tracked-files",
   "ignore-rules",
   "agent-integrations",
@@ -103,6 +109,8 @@ const PROJECT_ORDER = [
 
 /** What a step covering several checkouts is about (no counts, no values). */
 const GROUP_WHY: Readonly<Record<string, string>> = {
+  "env-key-permissions":
+    "Remove group/other access from verified weak, owner-held, untracked env keys; preserve owner bits and exact bytes and snapshot the original mode.",
   "project-config": "These live checkouts cannot be read.",
   "project-store": "The project's own secret store or its key needs attention.",
   "env-secrets": "Env layer secrets must open under the project env key.",
@@ -145,6 +153,7 @@ export function buildUpgradePlan(opts: {
     .sort((a, b) => rank(MACHINE_ORDER, a.id) - rank(MACHINE_ORDER, b.id))
     .map((finding) => ({
       id: finding.id,
+      kind: finding.kind,
       scope: "machine",
       status: finding.status,
       count: 0,
@@ -169,9 +178,9 @@ export function buildUpgradePlan(opts: {
       if (!actionable(finding)) {
         continue;
       }
-      const key = finding.id;
+      const key = finding.apply_fix ?? finding.id;
       const group = groups.get(key) ?? {
-        id: finding.id,
+        id: key,
         status: finding.status,
         findings: [],
       };
@@ -218,6 +227,7 @@ export function buildUpgradePlan(opts: {
       ? [
           {
             id: "snapshot",
+            kind: "safe",
             scope: "machine",
             status: "step",
             count: 0,
@@ -252,6 +262,7 @@ function groupStep(opts: {
   const targets = findings.map((finding) => finding.target);
   const base = {
     id,
+    kind: "manual" as const,
     status,
     count: targets.length,
     targets,
@@ -261,6 +272,9 @@ function groupStep(opts: {
     const args = ["upgrade", "apply", "--only", id];
     return {
       ...base,
+      kind: targets.every((target) => target.apply_eligible)
+        ? "safe"
+        : "manual",
       scope:
         targets.length === 1 ? (targets[0]?.scope ?? "projects") : "projects",
       command: opts.render(args),
@@ -268,6 +282,19 @@ function groupStep(opts: {
       action: null,
       why: GROUP_WHY[id] ?? findings[0]?.summary ?? id,
       applies: true,
+    };
+  }
+  if (id in UPGRADE_REVIEW_REASONS) {
+    const args = ["upgrade", "review", "--only", id];
+    return {
+      ...base,
+      scope:
+        targets.length === 1 ? (targets[0]?.scope ?? "projects") : "projects",
+      command: opts.render(args),
+      args,
+      action: UPGRADE_REVIEW_REASONS[id] ?? null,
+      why: GROUP_WHY[id] ?? id,
+      applies: false,
     };
   }
   const only = findings.length === 1 ? findings[0] : undefined;

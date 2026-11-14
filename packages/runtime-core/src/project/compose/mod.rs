@@ -13,6 +13,38 @@ mod service;
 use fields::*;
 pub(crate) use project_name::VARIABLE as COMPOSE_PROJECT_NAME;
 
+/// Explicit names-only image-variable removals, disjoint from every environment
+/// declaration. A missing private binding must never be reinterpreted as unset.
+pub(super) fn environment_unsets(
+    value: &Map<String, Value>,
+) -> Result<std::collections::BTreeSet<String>, CandidateError> {
+    let mut result = std::collections::BTreeSet::new();
+    let Some(raw) = value.get("x-hack-unset-environment") else {
+        return Ok(result);
+    };
+    let fail = || {
+        problem(
+            "invalid_environment_unset",
+            "Environment removals must be at most 256 distinct variable names, separate from declared environment bindings; values omitted.",
+        )
+    };
+    let names = raw
+        .as_array()
+        .filter(|names| names.len() <= 256)
+        .ok_or_else(fail)?;
+    let declared = redacted_map(value.get("environment"), true)?;
+    for name in names {
+        let name = name
+            .as_str()
+            .filter(|name| variable_name(name))
+            .ok_or_else(fail)?;
+        if declared.contains_key(name) || !result.insert(name.to_owned()) {
+            return Err(fail());
+        }
+    }
+    Ok(result)
+}
+
 pub(super) fn identifier(value: &str) -> Result<(), CandidateError> {
     fields::identifier(value)
 }
@@ -37,6 +69,7 @@ pub(super) fn original_environment_files(
             object(service)?.get("env_file"),
             "original.env_file",
             &mut Vec::new(),
+            true,
         )?);
     }
     Ok(result)

@@ -42,6 +42,7 @@ const LABEL: Readonly<Record<string, string>> = {
   "env-secrets": "env secrets",
   "env-format": "legacy env format",
   "env-key": "env key",
+  "env-key-permissions": "env key permissions",
   "tracked-files": "tracked machine-local files",
   "ignore-rules": "outdated .hack/.gitignore",
   "agent-integrations": "stale agent files",
@@ -151,11 +152,21 @@ function projectSummaryLines(report: UpgradeCheckReport): string[] {
       )
     )
     .sort((a, b) => worst(a) - worst(b) || a.project.localeCompare(b.project));
+  const hygieneOnly = withFindings.filter((group) =>
+    group.checkouts.every((checkout) =>
+      checkout.findings.every(
+        (finding) =>
+          !NEEDS_WORK.has(finding.status) ||
+          (finding.status === "warn" &&
+            ["ignore-rules", "agent-integrations"].includes(finding.id))
+      )
+    )
+  ).length;
   if (withFindings.length === 0) {
     return lines;
   }
   lines.push(
-    `With findings: ${withFindings.length} of ${groups.length} project(s) (hack upgrade check --verbose shows every checkout):`
+    `With findings: ${withFindings.length} of ${groups.length} project(s), ${hygieneOnly} hygiene only; blocking/unchecked first (--verbose shows every checkout):`
   );
   for (const group of withFindings.slice(0, MAX_PROJECT_LINES)) {
     lines.push(projectLine(group));
@@ -264,7 +275,7 @@ function stepLines(step: UpgradePlanStep): string[] {
   const head =
     step.command === null
       ? `  ${step.order}. ${tag}${what}manual: ${step.action ?? step.why}${scope}`
-      : `  ${step.order}. ${tag}${what}${step.command}${scope}`;
+      : `  ${step.order}. ${tag}${what}${step.command}${scope}${machineStepPurpose(step)}`;
   const skipped = step.applies
     ? step.targets.filter((target) => !target.apply_eligible).length
     : 0;
@@ -272,9 +283,18 @@ function stepLines(step: UpgradePlanStep): string[] {
     skipped === 0
       ? head
       : `${head} (${skipped} blocked/unchecked; apply skips them)`;
-  return step.count <= 1 && step.command !== null && step.action !== null
-    ? [line, `       ${step.action}`]
-    : [line];
+  return [
+    step.command !== null && step.action !== null
+      ? `${line} — ${step.action}`
+      : line,
+  ];
+}
+
+function machineStepPurpose(step: UpgradePlanStep): string {
+  if (step.id === "snapshot") {
+    return " — save recovery files";
+  }
+  return step.count === 0 ? ` — ${step.why}` : "";
 }
 
 /** Blockers or unchecked items: a few named (with why for unchecked), the rest counted. */

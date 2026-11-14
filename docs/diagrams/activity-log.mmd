@@ -1,0 +1,11 @@
+flowchart TD
+    C[Lifecycle command] --> H[Run handler]
+    H --> N[Build names-only record]
+    N --> L{Lock acquired?}
+    L -->|yes| R[Rotate if needed]
+    L -->|deadline| A[Append without rotation]
+    R --> W[One bounded append]
+    A --> W
+    W --> E[Return handler result]
+    N -. recording failure .-> E
+    W -. write failure .-> E

@@ -9,6 +9,7 @@ import type {
   UpgradeApplyJournal,
   UpgradeApplyTarget,
 } from "./upgrade-apply.ts";
+import { verifyKeyPermissionFiles } from "./upgrade-key-permissions.ts";
 import { UPGRADE_APPLY_FIXES } from "./upgrade-plan.ts";
 import {
   MAX_SNAPSHOT_FILE_BYTES,
@@ -61,6 +62,9 @@ const applyJournalSchema = z.object({
         .enum(["other-filesystem", "filesystem-unknown"])
         .nullable()
         .optional(),
+      files: z
+        .array(z.string().refine((path) => resolve(path) === path))
+        .optional(),
     })
   ),
 });
@@ -104,6 +108,22 @@ export async function verifyApplyInput(opts: {
   if (opts.target.fix === "agent-integrations") {
     return await verifyAgentInput(opts);
   }
+  if (opts.target.fix === "env-key-permissions") {
+    return (await verifyKeyPermissionFiles({
+      snapshot: opts.snapshot,
+      files: opts.target.files ?? [],
+      output: false,
+      interrupted: opts.previous !== undefined,
+    }))
+      ? "safe"
+      : "conflict";
+  }
+  return await verifyIgnoreInput(opts);
+}
+
+async function verifyIgnoreInput(
+  opts: Parameters<typeof verifyApplyInput>[0]
+): Promise<"safe" | "conflict"> {
   if (opts.target.projectDir === null) {
     return "conflict";
   }

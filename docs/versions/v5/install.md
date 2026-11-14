@@ -57,6 +57,13 @@ cover the release installer too. Check it with `command hack --version`.
 
 ## Select v5 on Compose
 
+Before machine-wide Compose setup, inspect administrator operations without
+running them with `hack global install --plan --json`. For certificate trust
+alone, use `hack global trust --plan --json`. Both distinguish root and user
+steps and include exact root argv and shell forms. Exit 3 means a phase depends
+on state bootstrap has not created yet; review the reported prerequisite rather
+than treating it as a complete plan.
+
 Have a running Docker-compatible engine and Docker Compose. Check with
 `docker info` and `docker compose version`.
 

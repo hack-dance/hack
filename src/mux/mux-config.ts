@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { readGlobalConfig } from "../lib/config.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import { readProjectConfig } from "../lib/project.ts";
@@ -16,7 +17,9 @@ export function parseSessionsMuxMode(value: unknown): SessionsMuxMode | null {
     return "tmux";
   }
   if (v === "zellij") {
-    return "zellij";
+    throw new ClosedCliError(
+      "sessions.mux=zellij was removed in v5. Install tmux, then unset sessions.mux (and HACK_SESSIONS_MUX) or set it to tmux."
+    );
   }
   if (v === "none") {
     return "none";

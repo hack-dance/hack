@@ -16,6 +16,10 @@ import {
   listSecretStoreReaders,
   secretStoreSelectionProblem,
 } from "./secret-store-retire.ts";
+import {
+  type UpgradeActionKind,
+  upgradeActionKind,
+} from "./upgrade-action-kind.ts";
 import type { UpgradeCheckProbes } from "./upgrade-check-probes.ts";
 import {
   classifyRegistryEntry,
@@ -60,6 +64,7 @@ export type { UpgradePlanStep, UpgradePlanTarget } from "./upgrade-plan.ts";
  * 2 (HACK-2220): the plan has one step per kind of change (`count`,
  * `targets`, `applies`), project reports name their registered `project`
  * and `project_dir`, and `cli.build` says whether a source build ran.
+ * R17 adds `kind` on report findings and plan steps without removing detail.
  */
 export const UPGRADE_CHECK_REPORT_VERSION = 2;
 
@@ -113,6 +118,8 @@ export function renderUpgradeCommand(
 
 /** A finding as reported: its command rendered for the running CLI. */
 export type UpgradeReportFinding = UpgradeFinding & {
+  /** Classifies the supplied command/action, independently of severity. */
+  readonly kind: UpgradeActionKind;
   /** The command line for `args`; null when only `action` applies. */
   readonly command: string | null;
 };
@@ -213,6 +220,7 @@ export async function runUpgradeCheck(opts: {
   const prefix = upgradeCommandPrefix({ env, homeDir: opts.homeDir });
   const render = (finding: UpgradeFinding): UpgradeReportFinding => ({
     ...finding,
+    kind: upgradeActionKind(finding),
     command:
       finding.args === null ? null : renderUpgradeCommand(prefix, finding.args),
   });

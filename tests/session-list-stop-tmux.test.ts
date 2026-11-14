@@ -20,6 +20,7 @@ let root = "";
 function isolatedEnv(): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "",
+    HACK_DAEMON_AUTOSTART_DISABLE: "1",
     HOME: join(root, "home"),
     TMUX_TMPDIR: join(root, "tmux"),
     LC_ALL: "C",

@@ -25,6 +25,13 @@ import {
 import { gitignoreLinePattern, writeTextFileAtomicIfChanged } from "./fs.ts";
 import { isKeychainDisabled } from "./keychain.ts";
 import {
+  isLive,
+  livePaths,
+  muxRemovalTargets,
+  realpathOrMissing,
+  removalAllowed,
+} from "./live-inputs.ts";
+import {
   findStagingLeftovers,
   legacyStagingTargetName,
   removeStagingLeftover,
@@ -34,9 +41,7 @@ import {
   isGitIgnoredProjectEnvPath,
   isGitTrackedOrUnknownProjectPath,
   isInsideGitCheckoutMarker,
-  projectEnvLiveInputPaths,
 } from "./project-env-config.ts";
-import { RETIRED_STORE_INFIX } from "./secret-store.ts";
 
 /**
  * `hack doctor`'s "secrets hygiene" section (HACK-2165): files at rest that
@@ -136,6 +141,8 @@ export type SecretsHygieneFinding = {
 
 /** One file or directory the inspection covers, labelled for messages. */
 export type SecretsHygieneScope = {
+  /** Global configuration file read while resolving the current inputs. */
+  readonly globalConfigPath?: string;
   /** The project's root and its `.hack` directory, or null for none. */
   readonly project: {
     readonly projectRoot: string;
@@ -639,25 +646,6 @@ async function containingWorkTree(
 }
 
 /**
- * `path` resolved, null when it (or a directory on the way) does not exist,
- * or "unknown" for any other failure: only confirmed absence lets a caller
- * look at the parent instead (HACK-2165).
- */
-async function realpathOrMissing(
-  path: string
-): Promise<string | null | "unknown"> {
-  try {
-    return await realpath(path);
-  } catch (error: unknown) {
-    const code =
-      typeof error === "object" && error !== null && "code" in error
-        ? (error as { readonly code?: unknown }).code
-        : undefined;
-    return code === "ENOENT" || code === "ENOTDIR" ? null : "unknown";
-  }
-}
-
-/**
  * The resolved nearest directory of `path` that exists (git runs there); null
  * when a directory on the way cannot be inspected.
  */
@@ -1023,87 +1011,12 @@ export async function inspectSecretsHygiene(
     const fix = finding.fix;
     if (fix?.kind !== "remove_leftover" && fix?.kind !== "remove_mux") {
       kept.push(finding);
-    } else if (!(await isLive({ path: removalTarget(fix), live }))) {
+    } else if (!(await anyLive({ paths: removalTargets(fix), live }))) {
       kept.push({ ...finding, fix: { ...fix, scope } });
     }
   }
   findings.splice(0, findings.length, ...kept);
   return await Promise.all(findings.map(withGuard));
-}
-
-/**
- * Files the configuration uses (stores, keys, the project and shared keys),
- * as given and resolved.
- */
-/**
- * Every path current resolution reads (HACK-2165): configured stores and
- * keys, the shared key, and the project's env inputs (its key, the primary
- * worktree's key, `hack.config.json` and every YAML layer; see
- * `projectEnvLiveInputPaths`), each as given and resolved. "unknown" when the
- * project's inputs cannot be inspected: then nothing counts as removable.
- */
-async function livePaths(
-  scope: SecretsHygieneScope
-): Promise<ReadonlySet<string> | "unknown"> {
-  const paths = [
-    ...scope.stores.flatMap((store) => [store.storePath, store.keyPath]),
-    ...(scope.sharedKeyPath ? [scope.sharedKeyPath] : []),
-  ];
-  if (scope.project) {
-    paths.push(join(scope.project.projectRoot, PROJECT_ENV_KEY_FILENAME));
-    try {
-      paths.push(...(await projectEnvLiveInputPaths(scope.project)));
-    } catch {
-      return "unknown";
-    }
-  }
-  const live = new Set<string>();
-  for (const path of paths) {
-    live.add(resolve(path));
-    // A missing input has no resolved spelling; one that cannot be resolved
-    // for another reason leaves the set unknown, never smaller.
-    const real = await realpathOrMissing(path);
-    if (real === "unknown") {
-      return "unknown";
-    }
-    if (real !== null) {
-      live.add(real);
-    }
-  }
-  return live;
-}
-
-/**
- * Whether resolution reads `path`, by its own spelling or resolved. A path,
- * not an inode: removing another link to a live file never removes the name
- * resolution reads.
- */
-async function isLive(opts: {
-  readonly path: string;
-  readonly live: ReadonlySet<string> | "unknown";
-}): Promise<boolean> {
-  if (opts.live === "unknown" || opts.live.has(resolve(opts.path))) {
-    return true;
-  }
-  // Only a missing target has no resolved spelling; one that cannot be
-  // resolved for another reason might be live (or retired), so it is.
-  const real = await realpathOrMissing(opts.path);
-  if (real === "unknown") {
-    return true;
-  }
-  if (real !== null && opts.live.has(real)) {
-    return true;
-  }
-  // A retired store (HACK-2177) is kept on purpose: it may hold the only
-  // copy of values its key still opens. Nothing in or under one is removed.
-  return [resolve(opts.path), real].some(
-    (spelling) => spelling !== null && inRetiredStore(spelling)
-  );
-}
-
-/** Whether a path component is a retired-store name (`<store>.retired-…`). */
-function inRetiredStore(path: string): boolean {
-  return path.split(sep).some((part) => part.includes(RETIRED_STORE_INFIX));
 }
 
 /** The directory a fix changes. */
@@ -1285,20 +1198,33 @@ export async function applySecretsHygieneFixes(opts: {
   return { applied, skipped };
 }
 
-/** The file a removal unlinks. */
-function removalTarget(
+/** What a removal can remove (see `muxRemovalTargets`). */
+function removalTargets(
   fix: Extract<SecretsHygieneFix, { kind: "remove_leftover" | "remove_mux" }>
-): string {
+): readonly string[] {
   return fix.kind === "remove_leftover"
-    ? fix.leftover.path
-    : join(fix.stale.root, "env.json");
+    ? [fix.leftover.path]
+    : muxRemovalTargets(fix.stale.root);
+}
+
+async function anyLive(opts: {
+  readonly paths: readonly string[];
+  readonly live: ReadonlySet<string> | "unknown";
+}): Promise<boolean> {
+  for (const path of opts.paths) {
+    if (await isLive({ path, live: opts.live })) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
- * Whether a removal may still go ahead: its target is live in neither the
+ * Whether a removal may still go ahead: its targets are live in neither the
  * inspection's scope nor the current one (resolved again here, so a
  * configuration edit since inspection counts). Any failure to resolve
- * refuses the removal.
+ * refuses the removal. The automatic payload sweep makes the same decision
+ * through the same function (`removalAllowed`, HACK-2181).
  */
 async function removalStillSafe(opts: {
   readonly fix: Extract<
@@ -1307,34 +1233,14 @@ async function removalStillSafe(opts: {
   >;
   readonly currentScope?: () => Promise<SecretsHygieneScope>;
 }): Promise<boolean> {
-  const scopes: SecretsHygieneScope[] = [];
-  if (opts.fix.scope) {
-    scopes.push(opts.fix.scope);
-  }
-  if (opts.currentScope) {
-    const current = await opts.currentScope().catch(() => null);
-    if (current === null) {
-      return false;
-    }
-    scopes.push(current);
-  }
-  const path = removalTarget(opts.fix);
-  // Whatever the scopes say, a retired store is never removed, and neither
-  // is a target whose resolved path (so its membership) is unknown.
-  const real = await realpathOrMissing(path);
-  if (
-    real === "unknown" ||
-    inRetiredStore(resolve(path)) ||
-    (real !== null && inRetiredStore(real))
-  ) {
-    return false;
-  }
-  for (const scope of scopes) {
-    if (await isLive({ path, live: await livePaths(scope) })) {
-      return false;
-    }
-  }
-  return true;
+  const inspected = opts.fix.scope;
+  return await removalAllowed({
+    targets: removalTargets(opts.fix),
+    scopes: [
+      ...(inspected ? [() => Promise.resolve(inspected)] : []),
+      ...(opts.currentScope ? [opts.currentScope] : []),
+    ],
+  });
 }
 
 /** Applies one fix; false when it no longer applies. */

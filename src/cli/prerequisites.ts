@@ -91,11 +91,10 @@ export const PREREQUISITE_CHECKS = [
     id: "mux_backend",
     domain: "mux",
     summary:
-      "The configured `sessions.mux` backend resolves to an installed tmux or zellij binary",
+      "The configured `sessions.mux` backend resolves to an installed tmux binary",
     detection:
-      "Read `sessions.mux`, then verify the selected backend in PATH; in `auto`, accept either tmux or zellij.",
-    primaryGuidance:
-      "Install tmux or zellij, or change `sessions.mux` to a valid value.",
+      "Read `sessions.mux`, then verify the selected backend in PATH; in `auto`, require tmux.",
+    primaryGuidance: "Install tmux, or change `sessions.mux` to a valid value.",
   },
   {
     id: "tmux_binary",

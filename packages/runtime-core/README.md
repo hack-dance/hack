@@ -555,6 +555,49 @@ turn on no features and do not need Zig. Root `mise.toml` and `.tool-versions` p
 Zig 0.15.2. The toolchain image installs the `mise.toml` pins and runs its tasks
 under `mise exec`. CI downloads a checksum-verified 0.15.2 archive.
 
+### Rust test processes
+
+Both Candidate core CI hosts use **cargo-nextest 0.9.151**, downloaded from its
+pinned release and SHA-256 verified, for default and all-feature tests. Each test
+runs in its own process: on macOS the two-call close-on-exec setup briefly permits
+another test's spawned child to inherit a socket and delay EOF. Retries are zero.
+The admission-pool test group retains the old mutex's serialization of whole-host
+`lsof` scans. Ignored helpers remain ignored and their owning tests still invoke
+them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+Focused target selections such as `bun run test:local --lib` or `--test <name>`
+skip doctests, matching Cargo; explicit `--doc` selection runs through Cargo alone.
+The wrapper accepts Cargo build, feature and target options; nextest-specific
+options such as `-E` need a direct `cargo nextest` invocation. Documentation-only
+selection refuses repetition or report settings intended for nextest qualification.
+
+An unmatched name filter exits **4** with pinned nextest 0.9.151 ("no tests to run"),
+where stock Cargo exits **0** after running zero tests. Check filter spelling;
+this wrapper keeps nextest's nonzero result, including in CI.
+
+
+`bun run test:local` checks `cargo nextest --version`, matching Cargo's lookup for
+the test run. If that resolves the pin, it uses nextest; a missing or different
+version prints one fallback line and uses stock `cargo test`, leaving the
+contributor's installed version alone. The macOS fallback sets one libtest thread
+to prevent cross-test descriptor inheritance. To opt into the pinned runner,
+install it with `cargo install --locked --version 0.9.151 cargo-nextest`.
+CI and qualification reports/repetitions require the pin and never fall back.
+`bun run test:local --all-features` retains the
+Zig prerequisite above. The toolchain container's existing `rust` task continues
+to use stock Cargo on Linux, where the descriptor creation primitives are atomic.
+
+For bounded hosted qualification, dispatch `ci.yml` at the exact branch/commit
+with `full=true` and `rust_repetitions=20`. Only macOS repeats: 20 default suites
+and 20 all-feature suites, each followed by doctests. A failed iteration stops
+the job immediately; this is a consecutive-pass experiment, not retry policy.
+The `candidate-rust-results-*` artifacts retain each pass's counts and duration.
+Discovery JSON and stock libtest lists retain ignored-test counts separately:
+nextest's JUnit report contains executed tests, not ignored fixtures. The CI profile
+terminates a hung test after ten 60-second intervals, above the existing 500-second
+fixture budgets, so a hang fails with evidence. Qualification dispatches allow up
+to 300 minutes; ordinary Candidate jobs keep their 45-minute limit. Record measured
+test-step times as well as the pass count before treating the loop as qualified.
+
 Source binaries embed their build checkout. If a copied Cargo target directory
 retains a different checkout identity, use a fresh `--target-dir` for checks and
 tests; Cargo reporting a cached binary as fresh does not qualify that identity.

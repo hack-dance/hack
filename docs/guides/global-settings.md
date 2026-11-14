@@ -15,7 +15,7 @@ before retrying; a failed update preserves its contents.
 
 Common settings:
 
-- `sessions.mux` (default `auto`; `auto|tmux|zellij|none`) — multiplexer for `hack session`.
+- `sessions.mux` (default `auto`; `auto|tmux|none`) — multiplexer for `hack session`.
 - `controlPlane.tui.logs.maxEntries` (default `2000`) — log buffer cap in `hack tui`.
 - `controlPlane.tui.logs.maxLines` (default `400`) — rendered log lines cap.
 - `controlPlane.tui.logs.historyTailStep` (default `200`) — history page size.

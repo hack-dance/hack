@@ -199,7 +199,7 @@ is removed after use. The app never types into an existing terminal or pane.
 
 Source: `hack doctor --json --path <root>` per registered project, plus one run
 outside any project for machine checks (until R7c), on open and every 10
-minutes while visible. Today it gives `checks[{id,status,detail}]`.
+minutes while visible. The versioned audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a).
 
 | Card part | Content |
 |---|---|
@@ -209,9 +209,13 @@ minutes while visible. Today it gives `checks[{id,status,detail}]`.
 | One action | Run safe fix (R7b) · Open Terminal (admin) · Copy command · Open doc |
 
 Machine findings are de-duplicated by check `id` and shown once; project
-findings link from that project's header. Until R7a adds `area`, `scope` and
-`fix`, `core` maps known `id`s to areas and shows unknown ones under "Other"
-with only Copy and Open doc. No Run button appears without a `fix.kind: safe`.
+findings link from that project's header. Schema 1 supplies `area`, `scope` and
+`fix`; older CLI versions still need `core`'s known-ID mapping. Unknown checks
+appear under "Other" with only Copy and Open doc. No Run button appears without
+a `fix.kind: safe`.
+
+Browser observations and native hostname DNS/HTTPS route checks are project-scoped:
+each describes the selected exact target and must not be de-duplicated across projects.
 
 ## 4. Upgrades
 
@@ -367,7 +371,7 @@ A macOS system prompt could come later for single root-only lines from R11, neve
 
 Each is small enough for one PR.
 
-1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
+1. **R1** Exists: `hack version --json`: `{version, channel, install_kind, binary_path}`; see [Version identity](../../docs/reference/version.md).
 2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
 3. **R2b** Native lifecycle the app can drive: a `--json` contract for native `restart` and authored `down`/`restart`, and qualification of the existing detached `up --json` for app use.
 4. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
@@ -375,7 +379,7 @@ Each is small enough for one PR.
 6. **R5a** Activity writer: append-only `activity.jsonl` in the Hack home, one line per `up`/`down`/`restart`/autostart (`ts, project, branch, action, origin, outcome, failed_services, duration_ms`), `O_APPEND` writes under one line size limit, rotation at a size cap, `origin` from `HACK_ORIGIN` (the app sets `app`).
 7. **R5b** Activity reader: `hack activity --json [--project] [--limit]`.
 8. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope.
-9. **R7a** Doctor metadata (a new doctor schema): per check `area`, `scope: machine | project`, `fix: {kind: safe | admin | manual, args[], doc_url}`.
+9. **R7a — exists.** Doctor audit schema 1 adds per-check `area`, `scope: machine | project` and `fix: {kind: safe | admin | manual, args[], doc_url}` inside the existing `{ok,data}` envelope. Unknown checks default to Other/manual with no executable args. A category is guidance, not permission to run it.
 10. **R7b** One fix without prompts: `hack doctor --fix --only <id> --yes --json`, only for `kind: safe`.
 11. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
 12. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
@@ -389,5 +393,5 @@ Each is small enough for one PR.
 20. **R14** Read-only update check for any install kind: `hack update --check --json --observe` → `{current, latest, available, install_kind, upgrade_command}`.
 21. **R15** `--json` for `hack daemon start|stop|restart|install`.
 22. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
-23. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.
-24. **R18** Observe-only project listing, including registered native projects: no auto-registration, `lastSeenAt` updates or registry writes. Until it exists, the desktop refuses CLI listing fallback and reports Unknown when a matching hackd snapshot is unavailable. The daemon-off screen names `hack daemon start` and offers Start hackd as its first recovery action.
+23. **R17 — exists** `kind: safe | admin | manual` on upgrade report findings and plan steps (additive version-2 fields), independent of severity. Only explicitly allowed diagnostic/snapshot commands and fully eligible guarded apply groups are safe; host routing/login-service changes are admin; decisions and unknown actions are manual. The supplied per-checkout command can remain manual while its guarded grouped apply step is safe. Consumers must treat absent or unrecognized kinds as manual and still require an executable command before offering Run. App adoption is separate.
+24. **R18 — exists** `hack projects --json --observe` (also `--summary`, `--project`, `--all`): no auto-registration, `lastSeenAt` update, registry write, daemon contact or engine contact. Includes registered native rows. Compose state defaults to unknown; `--runtime` explicitly opts in to Docker reads that can start a socket-activated engine. Rows add the R2 field vocabulary with null/unknown for unavailable evidence; native state still comes from native `ps` until R2 integrates that observer. Always-on fields follow their persistence owner. Desktop fallback can use the default non-contact command when a matching hackd snapshot is unavailable; adopting it in the app is separate work. The daemon-off screen still offers Start hackd.

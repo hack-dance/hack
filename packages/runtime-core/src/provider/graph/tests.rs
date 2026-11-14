@@ -1,4 +1,6 @@
 use super::*;
+#[path = "cold_environment_tests.rs"]
+mod cold_environment;
 use std::{io::Read, path::Path, process::Command};
 pub(super) struct Fixture(pub(super) PathBuf);
 impl Fixture {

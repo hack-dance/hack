@@ -1,0 +1,15 @@
+---
+title: Native environment input boundaries
+---
+flowchart TD
+  Sources["Files and allowed sources"] --> Guard["Guarded source reads"]
+  Guard --> Normalize["Shared environment preparation"]
+  Normalize -->|"names and public declarations"| Review["Read-only runtime admission"]
+  Normalize -->|"values in memory"| Private["Bounded private delivery"]
+  Normalize -->|"private reference in public field"| Refuse["Closed refusal"]
+  Review -->|"admitted active services"| Private
+  Private --> Stdin["Private stdin envelope"]
+  Stdin --> Guest["Expiring guest allocation"]
+  Guest --> Launch["Service launcher"]
+  class Refuse fail
+  class Review,Launch ok

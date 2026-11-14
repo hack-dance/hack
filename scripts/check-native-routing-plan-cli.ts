@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home.ts";
 
 /** Exercise the relocated executable/sidecar with isolated policy and real linked Git worktrees. */
 const root = resolve(import.meta.dir, "..");
@@ -378,6 +379,11 @@ try {
     "local route injection refused"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
+  await assertNativePlanHome({
+    home,
+    failedUps: 0,
+    preparedHackFiles: ["hack.config.json"],
+  });
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -393,9 +399,14 @@ try {
       (await readdir(join(checkout, ".hack"))).some(
         (name) => name === ".internal" || name === ".branch"
       )
-    ) && (await readdir(join(home, ".hack"))).join() === "hack.config.json",
+    ),
     "no hook, registry, route publication or generated-state effects"
   );
+  await assertNativePlanHome({
+    home,
+    failedUps: 1,
+    preparedHackFiles: ["hack.config.json"],
+  });
   process.stdout.write(
     `Relocated native routing planning: ${checks} checks passed; no DNS/trust/runtime effects\n`
   );

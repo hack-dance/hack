@@ -16,6 +16,10 @@ import {
 } from "./upgrade-apply-filesystems.ts";
 import type { UpgradeCheckReport } from "./upgrade-check.ts";
 import {
+  applyKeyPermissions,
+  keyPermissionFiles,
+} from "./upgrade-key-permissions.ts";
+import {
   isUpgradeApplyFix,
   UPGRADE_APPLY_FIXES,
   type UpgradeApplyFix,
@@ -23,6 +27,7 @@ import {
 import {
   createUpgradeSnapshot,
   defaultUpgradeSnapshotRoot,
+  readUpgradeSnapshot,
   recordUpgradeSnapshotAfter,
   type UpgradeSnapshot,
   type UpgradeSnapshotTarget,
@@ -179,6 +184,7 @@ export type Planned = {
   /** The checkout's Hack directory; null for machine-wide agent files. */
   readonly projectDir: string | null;
   readonly skip: string | null;
+  readonly files?: readonly string[];
   readonly skipReason?: "other-filesystem" | "filesystem-unknown";
 };
 
@@ -241,7 +247,7 @@ export async function runUpgradeApply(
     };
   }
   const only = recovery?.journal.filters.only ?? input.only ?? [];
-  const refusal = selectionRefusal({
+  const refusal = validateUpgradeSelection({
     report: input.report,
     only,
     project: recovery?.journal.filters.project ?? input.project,
@@ -270,7 +276,10 @@ export async function runUpgradeApply(
   const planned = await planUpgradeFilesystems({
     targets: selected,
     snapshotRoot: selectedSnapshotRoot(input, recovery),
-    files: (target) => previewTargetFiles(target, input.home),
+    files: (target) =>
+      target.files === undefined
+        ? previewTargetFiles(target, input.home)
+        : Promise.resolve([...target.files]),
     device: input.filesystemDevice,
   });
   if (input.snapshotRoot !== undefined && hasOtherFilesystem(planned)) {
@@ -455,8 +464,12 @@ async function executeApplyRun(opts: {
       ),
     });
     await input.checkpoint?.("target-started");
-    const safe = await verifyApplyInput({ snapshot, target, previous });
-    if (safe === "conflict") {
+    const currentSnapshot = await currentApplySnapshot({
+      snapshot,
+      target,
+      previous,
+    });
+    if (currentSnapshot === null) {
       results.push(
         outcome(
           target,
@@ -473,7 +486,7 @@ async function executeApplyRun(opts: {
       results.push(
         await applyTarget({
           target,
-          snapshot,
+          snapshot: currentSnapshot,
           inSnapshot,
           home: input.home,
           backupDir,
@@ -513,6 +526,22 @@ async function executeApplyRun(opts: {
   };
 }
 
+/** Earlier targets may share a key; use the latest durable after-state under the run lock. */
+async function currentApplySnapshot(
+  opts: Parameters<typeof verifyApplyInput>[0]
+): Promise<UpgradeSnapshot | null> {
+  const loaded = await readUpgradeSnapshot({
+    manifestPath: opts.snapshot.manifestPath,
+  });
+  if (loaded.status !== "ok") {
+    return null;
+  }
+  return (await verifyApplyInput({ ...opts, snapshot: loaded.snapshot })) ===
+    "safe"
+    ? loaded.snapshot
+    : null;
+}
+
 /** The dry-run, nothing-to-do and all-blocked results; null when there is work to run. */
 function resultBeforeSnapshot(opts: {
   readonly dryRun: boolean;
@@ -546,7 +575,7 @@ function resultBeforeSnapshot(opts: {
 }
 
 /** An unknown `--only`, or an unknown or ambiguous `--project`; null when the selection is valid. */
-function selectionRefusal(opts: {
+export function validateUpgradeSelection(opts: {
   readonly report: UpgradeCheckReport;
   readonly only: readonly string[];
   readonly project: string | undefined;
@@ -681,6 +710,9 @@ async function applyTarget(opts: {
   const { target } = opts;
   if (target.fix === "ignore-rules") {
     return await applyIgnoreRules(opts);
+  }
+  if (target.fix === "env-key-permissions") {
+    return await applyPermissionTarget(opts);
   }
   const backup = opts.backup as { readonly id: string; readonly path: string };
   let migrated: PluginMigrationApplyResult;
@@ -896,6 +928,7 @@ function outcome(
     status,
     message,
     backup_manifest: null,
+    files: target.files,
     reason: target.skipReason ?? null,
   };
 }
@@ -907,46 +940,63 @@ function outcome(
  * its checkout is refused alone (not in the snapshot) instead.
  */
 async function snapshotTargets(opts: {
-  readonly runnable: readonly Planned[];
-  readonly collected: UpgradeApplySnapshotSet;
-  readonly home: string;
+  runnable: readonly Planned[];
+  collected: UpgradeApplySnapshotSet;
+  home: string;
 }): Promise<UpgradeSnapshotTarget[]> {
-  const collectedPaths = new Set(
-    opts.collected.targets.map((t) => normalize(t.path))
+  const paths = new Set(
+    opts.collected.targets.map((target) => normalize(target.path))
   );
   const extra: UpgradeSnapshotTarget[] = [];
   for (const target of opts.runnable) {
-    if (target.fix === "agent-integrations") {
-      const plan = await planPluginMigration({
-        scopes: [
-          target.projectDir === null
-            ? { scope: "global", root: opts.home }
-            : { scope: "project", root: target.root },
-        ],
-        home: opts.home,
-        clients: MIGRATION_CLIENTS,
-        skipPluginCheck: [],
-      });
-      for (const entry of plan.entries) {
-        if (entry.action === "remove" && !collectedPaths.has(entry.path)) {
-          collectedPaths.add(entry.path);
-          extra.push({
-            path: entry.path,
-            label: `agent ${target.root}: ${entry.target}`,
-          });
-        }
+    for (const candidate of await additionalSnapshotTargets(
+      target,
+      opts.home
+    )) {
+      if (!paths.has(candidate.path)) {
+        paths.add(candidate.path);
+        extra.push(candidate);
       }
-    }
-    if (target.fix !== "ignore-rules" || target.projectDir === null) {
-      continue;
-    }
-    const path = gitignorePath(target.projectDir);
-    if (!collectedPaths.has(path) && (await snapshotable(path))) {
-      collectedPaths.add(path);
-      extra.push({ path, label: `project ${target.scope}: .hack/.gitignore` });
     }
   }
   return [...opts.collected.targets, ...extra];
+}
+
+async function additionalSnapshotTargets(
+  target: Planned,
+  home: string
+): Promise<UpgradeSnapshotTarget[]> {
+  if (target.fix === "env-key-permissions") {
+    return (target.files ?? []).map((path) => ({
+      path,
+      label: `project ${target.scope}: env key permissions`,
+    }));
+  }
+  if (target.fix === "agent-integrations") {
+    const plan = await planPluginMigration({
+      scopes: [
+        target.projectDir === null
+          ? { scope: "global", root: home }
+          : { scope: "project", root: target.root },
+      ],
+      home,
+      clients: MIGRATION_CLIENTS,
+      skipPluginCheck: [],
+    });
+    return plan.entries
+      .filter((entry) => entry.action === "remove")
+      .map((entry) => ({
+        path: entry.path,
+        label: `agent ${target.root}: ${entry.target}`,
+      }));
+  }
+  if (target.projectDir === null) {
+    return [];
+  }
+  const path = gitignorePath(target.projectDir);
+  return (await snapshotable(path))
+    ? [{ path, label: `project ${target.scope}: .hack/.gitignore` }]
+    : [];
 }
 
 /** A regular file or an absent path (not a link or other entry). */
@@ -1007,6 +1057,7 @@ function recoverPlannedTarget(opts: {
     root: target.root,
     project: target.project,
     projectDir: checkout?.project_dir ?? null,
+    files: target.files,
     skip,
   };
 }
@@ -1017,6 +1068,9 @@ async function previewTargetFiles(
 ): Promise<string[]> {
   if (target.fix === "ignore-rules") {
     return target.projectDir === null ? [] : [gitignorePath(target.projectDir)];
+  }
+  if (target.fix === "env-key-permissions") {
+    return await keyPermissionFiles(target.root);
   }
   const plan = await planPluginMigration({
     scopes: [
@@ -1052,9 +1106,29 @@ async function previewEarlyResult(opts: {
       const files =
         planned === undefined
           ? []
-          : await previewTargetFiles(planned, opts.home);
+          : (planned.files ?? (await previewTargetFiles(planned, opts.home)));
       return { ...target, files };
     })
   );
   return { ...opts.result, targets };
+}
+
+async function applyPermissionTarget(opts: {
+  snapshot: UpgradeSnapshot;
+  target: Planned;
+  checkpoint?: (boundary: string) => Promise<void>;
+}): Promise<UpgradeApplyTarget> {
+  const { target } = opts;
+  const status = await applyKeyPermissions({
+    snapshot: opts.snapshot,
+    files: target.files ?? [],
+    checkpoint: opts.checkpoint,
+  });
+  return outcome(
+    target,
+    status,
+    status === "failed"
+      ? "Permission repair could not be verified; no key was created, rotated, moved or untracked. Review this checkout before retrying."
+      : null
+  );
 }

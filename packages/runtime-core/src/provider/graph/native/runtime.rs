@@ -530,7 +530,7 @@ fn verify_config(
     receipt: &Receipt,
     service: &str,
     expected: &Value,
-    environment: &BTreeMap<String, String>,
+    environment: &image_environment::Expected,
     actual: &Value,
 ) -> Result<(), CandidateError> {
     image_environment::verify(environment, &actual["Config"]["Env"])?;
@@ -768,7 +768,7 @@ struct Session<'a, B> {
     root: PathBuf,
     receipt: Receipt,
     configs: BTreeMap<String, Value>,
-    expected_environment: BTreeMap<String, BTreeMap<String, String>>,
+    expected_environment: BTreeMap<String, image_environment::Expected>,
     environments: BTreeMap<String, PendingEnvironment>,
 }
 impl<B: Backend> Session<'_, B> {
@@ -1784,7 +1784,7 @@ fn verify_native_images(
     resources: &BTreeMap<String, Resource>,
     configs: &mut BTreeMap<String, Value>,
     private: &BTreeSet<String>,
-) -> Result<BTreeMap<String, BTreeMap<String, String>>, CandidateError> {
+) -> Result<BTreeMap<String, image_environment::Expected>, CandidateError> {
     let mut expected = BTreeMap::new();
     for resource in resources
         .values()

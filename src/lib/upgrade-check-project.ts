@@ -33,6 +33,7 @@ import {
   resolveFileSecretStorePaths,
 } from "./secret-store.ts";
 import { projectUsesSecretStore } from "./secret-store-retire.ts";
+import { upgradeCheckFailureClass } from "./upgrade-check-failure.ts";
 import type { NativePreflightProbe } from "./upgrade-check-probes.ts";
 
 /**
@@ -692,8 +693,10 @@ async function guarded(
           `Not checked: it took longer than ${Math.max(1, Math.round(timeoutMs / 1000))} s.`
         )
       : result;
-  } catch {
-    return notChecked("Not checked: the check failed.");
+  } catch (error) {
+    return notChecked(
+      `Not checked: the check failed (${upgradeCheckFailureClass(error)}).`
+    );
   } finally {
     clearTimeout(timer);
   }

@@ -1951,6 +1951,7 @@ to keep recovery bytes in an explicit private directory outside every Git workin
 | `--dry-run` | List what would change and change nothing |
 | `--resume <manifest>` | Resume the apply journal beside this explicit snapshot manifest |
 | `--snapshot-root <directory>` | Keep recovery bytes in this private directory outside Git, on the selected targets' filesystem |
+| `--verbose` | Also list every checkout's findings and the dead registry entries (--json always has everything) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

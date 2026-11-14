@@ -109,6 +109,7 @@ To run the apply steps:
 
 ```sh
 hack upgrade apply --dry-run      # what would change; changes nothing
+hack upgrade apply --dry-run --verbose  # include every candidate file path
 hack upgrade apply                # every apply step, every checkout
 hack upgrade apply --only ignore-rules --project my-app
 hack upgrade apply --only ignore-rules --project my-app --snapshot-root /path/on/project-volume/private-snapshots
@@ -123,6 +124,13 @@ removal is covered by the same upgrade snapshot. File bytes live only in private
 snapshot blobs; the manifest and journal contain metadata. Apply prints the
 rollback command and then rechecks. Ignore-rule writes stage inside the snapshot,
 so they leave no staging files in the checkout.
+
+Dry-run text begins with step, checkout/scope and candidate-file counts, including
+counts for each fix. It keeps the per-file list behind `--verbose`; JSON retains
+all file paths. Check summaries list blocking or unchecked projects first and
+count projects with only ignore-rule or agent-file hygiene findings. Failed
+checks include a closed error class, such as `permission-denied` or `parse-error`,
+without exposing exception messages or process output.
 
 After an interruption, choose the run explicitly:
 

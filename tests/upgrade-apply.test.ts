@@ -18,6 +18,7 @@ import { join, resolve } from "node:path";
 import { renderCodexSkill } from "../src/agents/codex-skill.ts";
 import { applyPluginMigration } from "../src/agents/plugin-migration.ts";
 import { HACK_PLUGIN_ID } from "../src/agents/plugin-replacement.ts";
+import { renderApply } from "../src/commands/upgrade.ts";
 import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import { runUpgradeApply } from "../src/lib/upgrade-apply.ts";
 import {
@@ -310,12 +311,31 @@ test("100 checkouts fit one screen: summary first, worktrees folded, plan groupe
   expect(text).toContain("stale agent files, 100 checkouts (apply): ");
   expect(text).toContain("Blocked by: app-07 (worktree wt1) env-format");
   expect(text).toContain("Next: hack upgrade snapshot");
+  expect(text).toContain("hygiene only; blocking/unchecked first");
+  expect(projectLines[0]).toContain("app-07");
   expect(text).not.toContain(SENTINEL);
   expect(JSON.stringify(report)).not.toContain(SENTINEL);
 
   // --verbose has every checkout and the dead entries.
   const verbose = renderUpgradeCheck(report, { verbose: true });
   expect(verbose).toContain("old-03");
+  const preview = await runUpgradeApply({
+    report,
+    home,
+    dryRun: true,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  const compact = renderApply({ result: preview, after: null, rollback: null });
+  expect(compact.split("\n")[0]).toMatch(
+    /^Preview: \d+ step\(s\), \d+ checkout\/scope\(s\), \d+ candidate file\(s\)/
+  );
+  expect(compact.trimEnd().split("\n").length).toBeLessThanOrEqual(30);
+  expect(compact).not.toContain(
+    projects[0]?.projectDir ?? "missing-project-path"
+  );
+  expect(
+    renderApply({ result: preview, after: null, rollback: null, verbose: true })
+  ).toContain(projects[0]?.projectDir ?? "missing-project-path");
   expect(verbose).toContain("Checkout app-07 (worktree wt1)");
   expect(verbose).not.toContain(SENTINEL);
 }, 180_000);

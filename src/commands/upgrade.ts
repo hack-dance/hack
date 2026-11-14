@@ -165,6 +165,7 @@ const applyOptions = [
   optDryRun,
   optResume,
   optSnapshotRoot,
+  optVerbose,
   optJson,
 ] as const;
 
@@ -527,7 +528,14 @@ async function handleUpgradeApply({
       result: okResult({ data: applyJson({ result, after, rollback }) }),
     });
   } else {
-    process.stdout.write(renderApply({ result, after, rollback }));
+    process.stdout.write(
+      renderApply({
+        result,
+        after,
+        rollback,
+        verbose: args.options.verbose === true,
+      })
+    );
   }
   // Exit 1 when selected work did not all get done: refused, blocked
   // (every selected checkout skipped) or partial.
@@ -586,13 +594,14 @@ export function renderApply(opts: {
   readonly result: UpgradeApplyResult;
   readonly after: UpgradeCheckReport | null;
   readonly rollback: string | null;
+  readonly verbose?: boolean;
 }): string {
   const { result } = opts;
   const lines =
     result.status === "refused"
       ? [result.message]
       : [
-          ...outcomeLines(result),
+          ...outcomeLines(result, opts.verbose === true),
           ...recoveryLines({ result, rollback: opts.rollback }),
           ...afterLines(opts.after),
         ];
@@ -600,7 +609,8 @@ export function renderApply(opts: {
 }
 
 function outcomeLines(
-  result: Exclude<UpgradeApplyResult, { status: "refused" }>
+  result: Exclude<UpgradeApplyResult, { status: "refused" }>,
+  verbose: boolean
 ): string[] {
   const notes = result.notes.map((note) => `Note: ${note}`);
   if (result.targets.length === 0) {
@@ -612,7 +622,8 @@ function outcomeLines(
     groups.set(key, [...(groups.get(key) ?? []), target]);
   }
   const verb = result.status === "dry-run" ? "would change" : "changed";
-  const lines: string[] = [];
+  const lines: string[] =
+    result.status === "dry-run" ? dryRunSummary(result.targets) : [];
   for (const targets of groups.values()) {
     const first = targets[0] as (typeof targets)[number];
     const names = targets.slice(0, 3).map((t) => t.scope);
@@ -625,7 +636,7 @@ function outcomeLines(
       lines.push(`  ${first.message}`);
     }
   }
-  if (result.status === "dry-run") {
+  if (result.status === "dry-run" && verbose) {
     lines.push(
       ...result.targets.flatMap((target) =>
         (target.files ?? []).map((path) => `  ${path}`)
@@ -638,6 +649,28 @@ function outcomeLines(
     );
   }
   return [...lines, ...notes];
+}
+
+function dryRunSummary(
+  targets: readonly Exclude<
+    UpgradeApplyResult,
+    { status: "refused" }
+  >["targets"][number][]
+): string[] {
+  const fixes = new Map<string, typeof targets>();
+  for (const target of targets) {
+    fixes.set(target.fix, [...(fixes.get(target.fix) ?? []), target]);
+  }
+  const files = new Set(targets.flatMap((target) => target.files ?? []));
+  return [
+    `Preview: ${fixes.size} step(s), ${new Set(targets.map((target) => target.root)).size} checkout/scope(s), ${files.size} candidate file(s). Nothing changed.`,
+    ...[...fixes].map(
+      ([fix, items]) =>
+        `  ${APPLY_LABEL[fix] ?? fix}: ${items.length} checkout/scope(s), ${new Set(items.flatMap((target) => target.files ?? [])).size} candidate file(s).`
+    ),
+    "File paths: add --verbose (or --json for full detail).",
+    "",
+  ];
 }
 
 function recoveryLines(opts: {

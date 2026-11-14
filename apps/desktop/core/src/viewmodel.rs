@@ -193,9 +193,10 @@ impl AppModel {
         }
     }
 
-    /// A startup failure is context only until a fresh observation shows it
-    /// is over: every failed service running again, or nothing running at
-    /// all (a real failure then still shows through its exit codes).
+    /// A startup failure is cleared only on evidence that it is over: every
+    /// failed service is observed running again. (A successful Stop from
+    /// this app clears it too, in `ActionFinished`.) "Nothing runs" is not
+    /// evidence: a failed start can leave containers never created.
     fn clear_recovered_failures(&mut self, s: &Snapshot) {
         for p in &s.projects.projects {
             let Some(ctx) = self.local.get_mut(&p.name) else {
@@ -209,8 +210,7 @@ impl AppModel {
                 .last_failed
                 .iter()
                 .all(|f| svcs.iter().any(|s| &s.name == f && s.running));
-            let nothing_runs = !svcs.iter().any(|s| s.running);
-            if recovered || nothing_runs {
+            if recovered {
                 ctx.last_failed.clear();
             }
         }
@@ -544,6 +544,43 @@ mod tests {
         ));
         // Then stopped elsewhere: plain Stopped, not "Failed to start".
         m.apply(Event::Refreshed(fixtures::snapshot(Fixture::Stopped)));
+        assert_eq!(m.detail().unwrap().state, ProjectState::Stopped);
+    }
+
+    #[test]
+    fn failed_start_with_nothing_created_stays_failed() {
+        let mut m = model(Fixture::Stopped);
+        m.apply(Event::Select("storefront".into()));
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Start,
+        });
+        m.apply(Event::ActionFinished {
+            project: "storefront".into(),
+            action: Action::Start,
+            result: Err(SourceError::Cli {
+                code: "E_STARTUP_INCOMPLETE".into(),
+                message: "m".into(),
+                failed: vec!["api".into()],
+            }),
+        });
+        let failed = ProjectState::FailedStart {
+            services: vec!["api".into()],
+        };
+        assert_eq!(m.detail().unwrap().state, failed);
+        // The same stopped observation is no evidence of recovery.
+        m.apply(Event::Refreshed(fixtures::snapshot(Fixture::Stopped)));
+        assert_eq!(m.detail().unwrap().state, failed);
+        // An explicit successful Stop clears it.
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Stop,
+        });
+        m.apply(Event::ActionFinished {
+            project: "storefront".into(),
+            action: Action::Stop,
+            result: Ok(ActionOutcome::Lifecycle(LifecycleResult::default())),
+        });
         assert_eq!(m.detail().unwrap().state, ProjectState::Stopped);
     }
 

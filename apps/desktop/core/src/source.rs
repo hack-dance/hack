@@ -203,21 +203,43 @@ impl Source for LiveSource {
                 Self::READ,
             )
             .map_err(|e| e.to_string())?;
-        let events: Vec<crate::models::LogEvent> = out
-            .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        if let Some(e) = events.iter().find(|e| e.kind == "error") {
-            return Err(e
-                .message
-                .clone()
-                .unwrap_or_else(|| "log read failed".into()));
-        }
-        if code != Some(0) && events.is_empty() {
-            return Err(format!("hack logs exited with {code:?}: {}", err.trim()));
-        }
-        Ok(events.into_iter().filter_map(|e| e.entry).collect())
+        parse_log_tail(&out, &err, code)
     }
+}
+
+/// Parse a finite `hack logs --json` run. Any non-zero exit, `error` event or
+/// unsuccessful `end` reason (for example `exit:1`) is a failed read, even
+/// when some entries arrived: a partial tail is never shown as complete.
+///
+/// # Errors
+/// The reason the read failed.
+pub fn parse_log_tail(out: &str, err: &str, code: Option<i32>) -> Result<Vec<LogEntry>, String> {
+    let events: Vec<crate::models::LogEvent> = out
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    if let Some(e) = events.iter().find(|e| e.kind == "error") {
+        return Err(e
+            .message
+            .clone()
+            .unwrap_or_else(|| "log read failed".into()));
+    }
+    let bad_end = events.iter().find(|e| {
+        e.kind == "end"
+            && e.reason
+                .as_deref()
+                .is_some_and(|r| r == "error" || (r.starts_with("exit:") && r != "exit:0"))
+    });
+    if let Some(e) = bad_end {
+        return Err(format!(
+            "log read ended with {}",
+            e.reason.as_deref().unwrap_or("an error")
+        ));
+    }
+    if code != Some(0) {
+        return Err(format!("hack logs exited with {code:?}: {}", err.trim()));
+    }
+    Ok(events.into_iter().filter_map(|e| e.entry).collect())
 }
 
 /// Canned data for one designed state.
@@ -345,6 +367,24 @@ esac
         assert!(
             matches!(&r, Err(SourceError::Cli { code, .. }) if code == "E_APP_BAD_OUTPUT"),
             "{r:?}"
+        );
+    }
+
+    #[test]
+    fn failed_log_reads_are_failures_even_with_entries() {
+        let entry = r#"{"type":"log","entry":{"service":"api","message":"hi"}}"#;
+        let ok =
+            format!("{{\"type\":\"start\"}}\n{entry}\n{{\"type\":\"end\",\"reason\":\"eof\"}}\n");
+        assert_eq!(parse_log_tail(&ok, "", Some(0)).unwrap().len(), 1);
+        let bad_end = format!(
+            "{{\"type\":\"start\"}}\n{entry}\n{{\"type\":\"end\",\"reason\":\"exit:1\"}}\n"
+        );
+        assert!(parse_log_tail(&bad_end, "", Some(0)).is_err());
+        assert!(parse_log_tail(&ok, "boom", Some(1)).is_err());
+        let err_ev = "{\"type\":\"error\",\"message\":\"no engine\"}\n";
+        assert_eq!(
+            parse_log_tail(err_ev, "", Some(0)).unwrap_err(),
+            "no engine"
         );
     }
 

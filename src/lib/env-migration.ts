@@ -36,7 +36,7 @@ import {
   acquireLegacyEnvCleanupContext,
   assertLegacyEnvMigrationDelivery,
   assertMachineLocalFileGitPrivate,
-  assertProjectEnvKeyUntracked,
+  assertMigrationProjectEnvKeyPrivate,
   assertProjectEnvLayerPaths,
   inspectLegacyComposeEnvFileReferences,
   isGitTrackedOrUnknownProjectPath,
@@ -800,7 +800,10 @@ async function publishEntry(
 ): Promise<void> {
   const run = async () => {
     if (entry.kind === "key") {
-      await assertProjectEnvKeyUntracked({ keyPath: entry.path });
+      await assertMigrationProjectEnvKeyPrivate({
+        ...project,
+        keyPath: entry.path,
+      });
     }
     await checkPrivateDirectory(dirname(entry.payload));
     const current = await readState(entry.path);
@@ -842,7 +845,10 @@ async function publishEntry(
       refusal: refuse,
       beforeRename: async () => {
         if (entry.kind === "key") {
-          await assertProjectEnvKeyUntracked({ keyPath: entry.path });
+          await assertMigrationProjectEnvKeyPrivate({
+            ...project,
+            keyPath: entry.path,
+          });
         }
         if (!same((await readState(entry.path)).state, entry.before)) {
           throw refuse();

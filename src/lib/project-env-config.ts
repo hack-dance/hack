@@ -48,6 +48,7 @@ import { ClosedCliError, HackCliError } from "./cli-result.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
+import { readMigrationFile } from "./env-migration-files.ts";
 import {
   assertEnvMigrationReadable,
   EnvMigrationPendingError,
@@ -5334,6 +5335,32 @@ export async function assertProjectEnvKeyUntracked(opts: {
   }
 }
 
+/** Migration key publishers recheck effective Git protection under their key owner lock. */
+export async function assertMigrationProjectEnvKeyPrivate(opts: {
+  readonly projectRoot: string;
+  readonly keyPath: string;
+}): Promise<void> {
+  await assertProjectEnvKeyUntracked(opts);
+  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  // Only the verified Git common-directory key is outside worktree ignore rules.
+  if (opts.keyPath === shared?.path) {
+    return;
+  }
+  const projectRoot = dirname(opts.keyPath);
+  // Git ignores symlinked .gitignore files, even if their target lists the key.
+  await readMigrationFile(resolve(projectRoot, ".gitignore"));
+  if (
+    (await machineLocalLayerGitProblem({
+      projectRoot,
+      path: opts.keyPath,
+    })) !== null
+  ) {
+    throw new ClosedCliError(
+      "Refusing env migration: the project key is not verifiably untracked and ignored by Git. Repair the root .gitignore and make git status work before retrying; no key was published (values omitted)."
+    );
+  }
+}
+
 export type EnsureProjectEnvSecretKeyResult = {
   readonly keyPath: string;
   readonly keyText: string;
@@ -6464,7 +6491,7 @@ async function prepareMigrationKeyIgnore(
   add: AddPreparedMigrationFile
 ): Promise<void> {
   const path = resolve(opts.projectRoot, ".gitignore");
-  const existing = await readTextFile(path);
+  const existing = (await readMigrationFile(path)).text;
   // Appending after possible negations ensures a freshly written private key
   // is ignored. Existing effective final entries require no change.
   if (existing?.split("\n").at(-2) === PROJECT_ENV_KEY_FILENAME) {

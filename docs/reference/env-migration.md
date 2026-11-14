@@ -136,8 +136,12 @@ remains an explicit recovery option, not a prerequisite to inspect the plan.
 Migration refuses a Git-tracked project key path even when its file is absent
 from the worktree, including case-folded aliases such as `.Hack.Secret.Key`.
 Tracked-change consent does not allow publishing key bytes at that path.
-Git tracking is checked again under the key lock before publication;
-keep the key out of the index before resuming a refused migration.
+Git tracking is checked again under the key lock before publication. Keep the
+key out of the index before resuming a refused migration. Checkout-local keys
+also require an effective Git ignore result at that point
+and immediately before publication. Symlinked root `.gitignore` files refuse;
+Git does not use them as ignore rules. An unknown Git result inside a checkout
+refuses without publishing the key.
 
 Completed publication payloads are removed; retries also sweep receipted orphan
 staging directories. Unknown or edited entries are retained, reported as

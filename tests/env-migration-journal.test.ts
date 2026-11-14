@@ -1125,6 +1125,116 @@ async function migrationFixtureGit(args: readonly string[]): Promise<void> {
   expect(result.exitCode, result.stderr).toBe(0);
 }
 
+test("secret migration refuses a symlinked root ignore file even when its target lists the key", async () => {
+  await addLegacySecret();
+  await migrationFixtureGit(["init", "--quiet"]);
+  const ignore = join(project.projectRoot, ".gitignore");
+  const target = join(root, "ignore-target");
+  await writeFile(target, ".hack.secret.key\n");
+  await symlink(target, ignore);
+  const before = await projectFiles();
+  await expect(previewEnvMigration(project)).rejects.toThrow();
+  await expect(
+    applyEnvMigration({
+      project,
+      snapshots: fixtureEnvSnapshots(root),
+      acceptTrackedChanges: true,
+    })
+  ).rejects.toThrow();
+  expect(await projectFiles()).toEqual(before);
+  expect((await lstat(ignore)).isSymbolicLink()).toBe(true);
+  expect(await readFile(target, "utf8")).toBe(".hack.secret.key\n");
+  expect(
+    await Bun.file(join(project.projectRoot, ".hack.secret.key")).exists()
+  ).toBe(false);
+  expect(
+    await Bun.file(envMigrationJournalPath(project.projectRoot)).exists()
+  ).toBe(false);
+});
+
+test("key publication rechecks effective ignores after waiting for its lock and resumes after repair", async () => {
+  await addLegacySecret();
+  await migrationFixtureGit(["init", "--quiet"]);
+  const ignore = join(project.projectRoot, ".gitignore");
+  await writeFile(ignore, ".hack.secret.key\n");
+  const keyPath = join(project.projectRoot, ".hack.secret.key");
+  const preview = await previewEnvMigration(project);
+  const keyIndex = preview.files.findIndex((file) => file.path === keyPath);
+  const location = await resolveProjectEnvSharedKeyLocation(project);
+  if (!location || keyIndex < 0) {
+    throw new Error("Fixture expected key publication");
+  }
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const reached = Promise.withResolvers<void>();
+  const holder = withProjectsRegistryLock({
+    lockPath: `${location.path}.lock`,
+    run: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  await entered.promise;
+  const snapshots = fixtureEnvSnapshots(root);
+  const applying = applyEnvMigration({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+    hooks: {
+      boundary: async ({ phase, index }) => {
+        if (phase === "before_publish" && index === keyIndex) {
+          reached.resolve();
+        }
+      },
+    },
+  }).then(
+    () => null,
+    (error: unknown) => error
+  );
+  try {
+    await Promise.race([
+      reached.promise,
+      applying.then(() => {
+        throw new Error("Migration settled before key publication");
+      }),
+    ]);
+    await writeFile(ignore, ".hack.secret.key\n!.hack.secret.key\n");
+  } finally {
+    release.resolve();
+    await holder;
+  }
+  const error = await applying;
+  expect(error).toBeInstanceOf(Error);
+  if (error instanceof Error) {
+    expect(error.message).toContain("ignored");
+    expect(error.message).not.toContain(SENTINEL);
+  }
+  expect(await Bun.file(keyPath).exists()).toBe(false);
+  expect(
+    await Bun.file(join(project.projectDir, "hack.env.default.yaml")).exists()
+  ).toBe(false);
+  await writeFile(ignore, ".hack.secret.key\n");
+  expect(
+    (await apply({ project, snapshots, acceptTrackedChanges: true })).status
+  ).toBe("applied");
+  await migrationFixtureGit([
+    "check-ignore",
+    "--no-index",
+    "--",
+    ".hack.secret.key",
+  ]);
+  await migrationFixtureGit(["add", "--all"]);
+  const tracked = await runFixtureGit({
+    cwd: project.projectRoot,
+    args: ["ls-files", "--", ".hack.secret.key"],
+  });
+  expect(tracked.stdout).toBe("");
+  expect(
+    (await resolveProjectEnvConfig({ ...project, envName: null }))?.serviceEnv
+      .api?.SEC
+  ).toBe(SENTINEL);
+}, 20_000);
+
 for (const trackedName of [".hack.secret.key", ".Hack.Secret.Key"]) {
   test(`secret migration refuses an absent key tracked as ${trackedName} before planning or writes`, async () => {
     await addLegacySecret();

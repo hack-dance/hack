@@ -500,7 +500,12 @@ export function hasBoundedLaunchdOutput(opts: {
  * home (`HACK_HOME`, or a `HOME` the renderer would not write), left as it
  * is ({@link plistKeepsThisHome});
  * `unproven-owner`: a rewrite was needed, but the loaded job is not proven
- * to be this home's ({@link proveLaunchdJobOwnership}), left as it is;
+ * to be this home's ({@link proveLaunchdJobOwnership}), or hackd runs and
+ * the executing CLI cannot be shown to be what the plist will run (a source
+ * invocation), left as it is;
+ * `retarget-refused`: the program is gone, but the `hack` it would be
+ * retargeted to is not fit for a login service
+ * ({@link checkLaunchdRetargetTarget}), left as it is;
  * `failed`: a rewrite was needed but did not complete (unload, write or
  * load failed, or no installable hack resolves); the service may be
  * stopped.
@@ -513,6 +518,7 @@ export type LaunchdProgramRepairResult =
   | "unknown-program"
   | "home-binding"
   | "unproven-owner"
+  | "retarget-refused"
   | "unmanaged"
   | "not-installed"
   | "failed";
@@ -730,6 +736,16 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   readonly proveJob?: () => Promise<boolean>;
   /** See {@link readLaunchdProgramState}; test drivers pin it. */
   readonly executing?: string | null;
+  /**
+   * The caller knows this home's hackd runs (start found it compatible and
+   * running). A rewrite unloads and restarts it, so it needs an eligible
+   * executing CLI ({@link refuseRunningRewrite}). A running job counts too.
+   */
+  readonly daemonRunning?: boolean;
+  /** Defaults to {@link checkLaunchdRetargetTarget}; tests pin it. */
+  readonly validateRetarget?: (path: string) => Promise<string | null>;
+  /** Defaults to the real launchd status; tests pin it. */
+  readonly readStatus?: () => Promise<LaunchdServiceStatus>;
 }): Promise<LaunchdProgramRepairResult> {
   if (!resolveLaunchdAccess().allowed) {
     return "not-installed";
@@ -746,15 +762,43 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   if (decided.kind === "result") {
     return decided.result;
   }
-  const { program } = decided;
+  const { program, target } = decided;
+  // A retarget writes a new program into the login service: the same
+  // checks a systemd retarget makes (HACK-2216).
+  if (program === null) {
+    const refused = await (opts.validateRetarget ?? checkLaunchdRetargetTarget)(
+      target
+    );
+    if (refused !== null) {
+      return "retarget-refused";
+    }
+  }
   // A rewrite unloads the loaded job and replaces its plist: it must be
   // this home's (HACK-2216). The plist must not bind another home, and a
   // running job must be this home's proven hackd. Unknown refuses.
   if (!plistKeepsThisHome({ plistText })) {
     return "home-binding";
   }
+  const status = await (
+    opts.readStatus ?? (() => getLaunchdServiceStatus({ paths: opts.paths }))
+  )();
+  const running =
+    opts.daemonRunning === true || status.running || status.pid !== null;
+  if (running) {
+    const refused = await refuseRunningRewrite({
+      target,
+      executing:
+        opts.executing === undefined
+          ? resolveExecutingCliPath()
+          : opts.executing,
+    });
+    if (refused !== null) {
+      return refused;
+    }
+  }
   const proven = await (
-    opts.proveJob ?? (() => proveLaunchdJobOwnership({ paths: opts.paths }))
+    opts.proveJob ??
+    (() => proveLaunchdJobOwnership({ paths: opts.paths, status }))
   )();
   if (!proven) {
     return "unproven-owner";
@@ -765,13 +809,89 @@ export async function repairLaunchdProgramIfInvalid(opts: {
       installed: true,
       ...readLaunchdPlistOptions({ plistText }),
     },
-    // A refresh keeps the plist's own program path; a repair uses ours.
-    ...(program === null ? {} : { hackBinPath: program }),
+    // A refresh keeps the plist's own program path; a retarget writes the
+    // validated target.
+    hackBinPath: target,
   });
   if (!result.ok) {
     return "failed";
   }
   return program === null ? "repaired" : "refreshed";
+}
+
+/**
+ * A rewrite of a loaded plist unloads and restarts a running hackd
+ * (HACK-2216). Only an eligible executing CLI may do that: a compiled
+ * binary ({@link resolveExecutingCliPath}; a source invocation is unknown)
+ * that is the same file as the program the plist will run. Otherwise the
+ * job is not touched: `unproven-owner` for an unknown executing CLI,
+ * `other-program` for another one. A stopped job may still be repaired
+ * from any CLI.
+ */
+async function refuseRunningRewrite(opts: {
+  readonly target: string;
+  readonly executing: string | null;
+}): Promise<"other-program" | "unproven-owner" | null> {
+  if (opts.executing === null) {
+    return "unproven-owner";
+  }
+  return (await isSameExecutableFile(opts.target, opts.executing))
+    ? null
+    : "other-program";
+}
+
+const SCRIPT_EXTENSION = /\.(?:[cm]?[jt]s|tsx|jsx)$/i;
+const BUN_SHEBANG = /^#!.*\bbun\b/;
+
+/**
+ * Why `path` may not become the program of a login service by an automatic
+ * retarget, or null when it may (HACK-2216): not a source file (`.ts`,
+ * `.js`...), not a `#!` script run by bun, durable
+ * (`assessExecutableDurability`, as for a systemd retarget) and safe from
+ * other accounts (`checkServiceExecutableTrusted`). `hack daemon install`
+ * still writes what it is asked to, with its own checks.
+ */
+export async function checkLaunchdRetargetTarget(
+  path: string,
+  opts: {
+    readonly readHead?: (path: string) => Promise<string | null>;
+    readonly assessDurability?: (opts: {
+      readonly path: string;
+    }) => Promise<{ readonly durable: boolean; readonly reason?: string }>;
+    readonly checkTrusted?: (opts: {
+      readonly path: string;
+    }) => Promise<string | null>;
+  } = {}
+): Promise<string | null> {
+  if (SCRIPT_EXTENSION.test(path)) {
+    return `${path} is a source file, not an installed hack`;
+  }
+  const head = await (opts.readHead ?? readFileHead)(path);
+  if (head === null) {
+    return `${path} could not be read`;
+  }
+  if (BUN_SHEBANG.test(head.split("\n", 1)[0] ?? "")) {
+    return `${path} is a script run by bun, not an installed hack`;
+  }
+  // Loaded lazily: systemd.ts imports this module.
+  const systemd = await import("./systemd.ts");
+  const durability = await (
+    opts.assessDurability ?? systemd.assessExecutableDurability
+  )({ path });
+  if (!durability.durable) {
+    return `${path} is not a stable location for a login service: ${durability.reason ?? "unknown reason"}`;
+  }
+  return await (opts.checkTrusted ?? systemd.checkServiceExecutableTrusted)({
+    path,
+  });
+}
+
+async function readFileHead(path: string): Promise<string | null> {
+  try {
+    return await Bun.file(path).slice(0, 256).text();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -785,7 +905,13 @@ async function decideLaunchdRewrite(opts: {
   readonly executing?: string | null;
 }): Promise<
   | { readonly kind: "result"; readonly result: LaunchdProgramRepairResult }
-  | { readonly kind: "rewrite"; readonly program: string | null }
+  | {
+      readonly kind: "rewrite";
+      /** The plist's own program to keep; null: retarget to `target`. */
+      readonly program: string | null;
+      /** The program the rewritten plist runs. */
+      readonly target: string;
+    }
 > {
   const { plistText } = opts;
   const state = await readLaunchdProgramState({
@@ -805,13 +931,15 @@ async function decideLaunchdRewrite(opts: {
     case "missing":
       return state.resolved === null
         ? final("failed")
-        : { kind: "rewrite", program: null };
+        : { kind: "rewrite", program: null, target: state.resolved };
     default:
       break;
   }
   const program = state.program;
   if (program === null) {
-    return { kind: "rewrite", program: null };
+    return state.resolved === null
+      ? final("failed")
+      : { kind: "rewrite", program: null, target: state.resolved };
   }
   if (
     isLaunchdPlistCurrent({
@@ -828,7 +956,7 @@ async function decideLaunchdRewrite(opts: {
   ) {
     return final("unmanaged");
   }
-  return { kind: "rewrite", program };
+  return { kind: "rewrite", program, target: program };
 }
 
 export interface LaunchdUninstallResult {

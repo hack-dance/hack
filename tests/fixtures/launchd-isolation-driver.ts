@@ -17,6 +17,7 @@
  */
 import { requestDaemonJson } from "../../src/daemon/client.ts";
 import {
+  checkLaunchdRetargetTarget,
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
@@ -105,12 +106,28 @@ if (process.argv[2] === "manager-state") {
 if (process.argv[2] === "repair-output") {
   // This driver runs from source, which has no executable of its own; the
   // test names the binary that stands for "this CLI" (HACK-2216).
-  const executing = process.env.DRIVER_EXECUTING_CLI ?? null;
-  const repair = await repairLaunchdProgramIfInvalid({ paths, executing });
-  const secondRepair = await repairLaunchdProgramIfInvalid({
-    paths,
-    executing,
-  });
+  // Empty: a source invocation (no executable of its own).
+  const executing = process.env.DRIVER_EXECUTING_CLI || null;
+  // DRIVER_DAEMON_RUNNING=1: start found this home's hackd running.
+  const daemonRunning = process.env.DRIVER_DAEMON_RUNNING === "1";
+  // DRIVER_DURABLE_TARGET=1: the fixture's temp-dir `hack` counts as a
+  // durable install for the retarget check (everything else still runs).
+  const validateRetarget =
+    process.env.DRIVER_DURABLE_TARGET === "1"
+      ? (path: string) =>
+          checkLaunchdRetargetTarget(path, {
+            assessDurability: () => Promise.resolve({ durable: true }),
+          })
+      : undefined;
+  const repairOnce = () =>
+    repairLaunchdProgramIfInvalid({
+      paths,
+      executing,
+      daemonRunning,
+      validateRetarget,
+    });
+  const repair = await repairOnce();
+  const secondRepair = await repairOnce();
   process.stdout.write(`${JSON.stringify({ repair, secondRepair })}\n`);
   process.exit(0);
 }

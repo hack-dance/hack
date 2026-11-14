@@ -257,8 +257,16 @@ export async function startViaLaunchdIfLoaded(
   // A repair may reload (bootstrap) the job, which can start it: from here
   // on launchd may have been asked to start hackd.
   hooks.onStartRequested?.();
+  // With onlyIfStale, start found this home's hackd running and compatible:
+  // a rewrite would unload and restart it, so the repair requires an
+  // eligible executing CLI (HACK-2216).
   const repair = await (
-    hooks.repair ?? (() => repairLaunchdProgramIfInvalid({ paths }))
+    hooks.repair ??
+    (() =>
+      repairLaunchdProgramIfInvalid({
+        paths,
+        daemonRunning: hooks.onlyIfStale === true,
+      }))
   )();
   if (repair === "failed") {
     logger.error({
@@ -275,7 +283,25 @@ export async function startViaLaunchdIfLoaded(
     // Before HACK-2216 start retargeted such a plist to this CLI; it no
     // longer does, and kickstarting it would run a program this CLI does
     // not own.
-    return await refuseForeignLaunchdProgram({ ...hooks, verb: "start" });
+    const refused = await refuseForeignLaunchdProgram({
+      ...hooks,
+      verb: "start",
+    });
+    if (refused !== null) {
+      return refused;
+    }
+    logger.error({
+      message:
+        "Not starting hackd through launchd: the program it would run is not this CLI; nothing was changed | Run: hack daemon install",
+    });
+    return 1;
+  }
+  if (repair === "retarget-refused") {
+    logger.error({
+      message:
+        "Not starting hackd through launchd: its program is gone and the hack it would be retargeted to is not fit for a login service; nothing was changed | Install hack to a stable location, then run: hack daemon install",
+    });
+    return 1;
   }
   if (repair === "home-binding" || repair === "unproven-owner") {
     // The loaded job is not provably this home's: kickstarting it would
@@ -354,7 +380,15 @@ function noteRepair(opts: {
       trace.blocked = "unproven-owner";
       logger.warn({
         message:
-          "The loaded launchd job is not proven to be this Hack home's hackd, so it is not rewritten or restarted from here | Check: hack daemon status",
+          "The launchd job is not rewritten or restarted from here: it is not proven to be this Hack home's, or hackd runs and this CLI cannot be shown to be what it would run (a source checkout) | Check: hack daemon status; then run: hack daemon install",
+      });
+      return false;
+    case "retarget-refused":
+      trace.stale.add("program-missing");
+      trace.blocked = "rewrite-refused";
+      logger.warn({
+        message:
+          "The launchd service's program is gone, and the hack it would be retargeted to is not fit for a login service (a source file, a bun script, a temporary location or one others can change) | Install hack to a stable location, then run: hack daemon install",
       });
       return false;
     case "unmanaged":

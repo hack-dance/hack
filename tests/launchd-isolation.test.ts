@@ -805,6 +805,74 @@ test("launchd's confirmed not-found answer is idle, plist file or not", async ()
   ).toEqual({ state: "idle", verbs: ["print"] });
 });
 
+// Review round 17 (HACK-2216): a running daemon is only unloaded or
+// restarted by an eligible CLI; a retarget target must be fit for a login
+// service.
+
+/** Hack's plist naming a program that no longer exists. */
+function missingProgramPlist(fixture: Fixture): string {
+  return renderLaunchdPlist({
+    hackBinPath: join(fixture.root, "gone", "hack"),
+    home: fixture.home,
+    runAtLoad: false,
+    guiSessionOnly: false,
+  });
+}
+
+test("from source, a running daemon's missing-program plist is not booted out or replaced", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist(
+    (fixture) => {
+      written = missingProgramPlist(fixture);
+      return written;
+    },
+    {
+      DRIVER_EXECUTING_CLI: "",
+      DRIVER_DAEMON_RUNNING: "1",
+      DRIVER_DURABLE_TARGET: "1",
+    }
+  );
+  expect(results).toEqual({
+    repair: "unproven-owner",
+    secondRepair: "unproven-owner",
+  });
+  expect(after).toBe(written);
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+  expect(verbs).not.toContain("kickstart");
+});
+
+test("a compiled CLI that is the retarget target repairs a running daemon's plist", async () => {
+  let target = "";
+  const { results, after, verbs } = await repairPlist(
+    (fixture) => {
+      // repairPlist pins the executing CLI to this stub `hack` on PATH,
+      // which is also what the plist is retargeted to.
+      target = join(fixture.root, "tools", "hack");
+      return missingProgramPlist(fixture);
+    },
+    { DRIVER_DAEMON_RUNNING: "1", DRIVER_DURABLE_TARGET: "1" }
+  );
+  expect(results).toEqual({ repair: "repaired", secondRepair: "ok" });
+  expect(after).toContain(`<string>${target}</string>`);
+  expect(verbs).toContain("bootout");
+  expect(verbs).toContain("bootstrap");
+});
+
+test("a retarget to a hack in a temporary location is refused, nothing changed", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    written = missingProgramPlist(fixture);
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "retarget-refused",
+    secondRepair: "retarget-refused",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
 // Review round 6 (HACK-2216): a failed status query is not absence.
 
 test("a failed launchctl print is not 'not loaded': no unload, rewrite or load", async () => {

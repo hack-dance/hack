@@ -28,6 +28,7 @@ import {
 } from "../src/commands/daemon-upgrade.ts";
 import { resolveExecutingCliPath } from "../src/daemon/executing-cli.ts";
 import {
+  checkLaunchdRetargetTarget,
   classifyLaunchdProgramPath,
   isHackManagedPlist,
   isLaunchdPlistCurrent,
@@ -1415,4 +1416,89 @@ test("the executing CLI is the compiled binary, never a source invocation", () =
       execPath: "/opt/bun/bin/bun",
     })
   ).toBeNull();
+});
+
+// Review round 17 (HACK-2216): launchd retarget targets and running-daemon
+// eligibility.
+
+test("a launchd retarget target must be an installed, durable, trusted hack", async () => {
+  const durable = () => Promise.resolve({ durable: true });
+  const trusted = () => Promise.resolve(null);
+  const head = (text: string) => () => Promise.resolve(text);
+  // A source file selected from the invocation's arguments.
+  expect(
+    await checkLaunchdRetargetTarget("/srv/checkout/bin/hack-dev.ts", {
+      readHead: head("console.log(1)\n"),
+      assessDurability: durable,
+      checkTrusted: trusted,
+    })
+  ).toContain("source file");
+  // A `#!` script run by bun.
+  expect(
+    await checkLaunchdRetargetTarget("/opt/hack/bin/hack", {
+      readHead: head("#!/usr/bin/env bun\nimport './index.ts'\n"),
+      assessDurability: durable,
+      checkTrusted: trusted,
+    })
+  ).toContain("run by bun");
+  // Not durable.
+  expect(
+    await checkLaunchdRetargetTarget("/tmp/x/hack", {
+      readHead: head("\u007fELF"),
+      assessDurability: () =>
+        Promise.resolve({
+          durable: false,
+          reason: "it is in a temporary directory",
+        }),
+      checkTrusted: trusted,
+    })
+  ).toContain("not a stable location");
+  // An installed, durable, trusted binary.
+  expect(
+    await checkLaunchdRetargetTarget("/opt/hack/bin/hack", {
+      readHead: head("\u007fELF"),
+      assessDurability: durable,
+      checkTrusted: trusted,
+    })
+  ).toBeNull();
+});
+
+test("a compatible running daemon is restarted after a repair only when the repair ran", async () => {
+  const run = async (
+    repair: "repaired" | "unproven-owner" | "other-program"
+  ) => {
+    const kicked: string[] = [];
+    const trace = createDaemonCommandTrace();
+    const code = await startViaLaunchdIfLoaded({
+      paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+      trace,
+      onlyIfStale: true,
+      waitForReady: () => Promise.resolve(true),
+      readStatus: () =>
+        Promise.resolve({
+          installed: true,
+          loaded: true,
+          running: true,
+          pid: 4242,
+          exitStatus: null,
+          observation: "reported" as const,
+        }),
+      repair: () => Promise.resolve(repair),
+      kickstart: () => {
+        kicked.push("kickstart");
+        return Promise.resolve({ ok: true });
+      },
+    });
+    return { code, kicked, trace };
+  };
+  const repaired = await run("repaired");
+  expect(repaired.code).toBe(0);
+  expect(repaired.kicked).toEqual(["kickstart"]);
+  expect(repaired.trace.action).toBe("reinstalled");
+  for (const refused of ["unproven-owner", "other-program"] as const) {
+    const kept = await run(refused);
+    expect(kept.code).toBeNull();
+    expect(kept.kicked).toEqual([]);
+    expect(kept.trace.blocked).toBe(refused);
+  }
 });

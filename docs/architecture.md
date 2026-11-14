@@ -713,7 +713,18 @@ Such a plist is never replaced automatically; `start` reports it and
 - A plist whose program is gone is retargeted to this CLI. Gone means no program
   at all, a compiled-binary virtual path, or a path that `stat` reports as
   `ENOENT` or `ENOTDIR`. Any other `stat` error (for example `EACCES` or `EIO`)
-  means the program cannot be checked, and the plist is left alone.
+  means the program cannot be checked, and the plist is left alone. The
+  retarget target (the `hack` on `PATH`) must pass the same checks as a systemd
+  retarget. It may not be a source file (`.ts`, `.js`...) or a `#!` script run
+  by bun. It must be durable, outside temporary directories, package caches
+  and checkouts, and safe from other accounts. Otherwise start refuses
+  (`blocked: "rewrite-refused"`) with `hack daemon install` as the next step.
+- While hackd runs (start found it running, or launchd reports the job
+  running), a rewrite would unload and restart it. Only an eligible CLI may do
+  that: a compiled binary that is the same file as the program the plist will
+  run. Otherwise the job is not touched and the daemon keeps running
+  (`unproven-owner` from a source checkout, `other-program` for another
+  binary). A stopped job may still be repaired from any CLI.
 - A plist that runs this CLI's executable (same file) is rewritten with the
   marker when it differs from what this CLI writes, if it is Hack's or its
   output paths are not `/dev/null` (the earlier output repair). launchd then

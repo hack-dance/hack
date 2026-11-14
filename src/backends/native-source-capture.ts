@@ -71,8 +71,17 @@ const CACHE_BOOTSTRAP_LABEL = "hack.dependencies.bootstrap";
 /** A Compose mount the runtime plans as a project bind; unclear forms count as binds. */
 function composeMountBindsSource(mount: unknown): boolean {
   if (typeof mount === "string") {
-    // Short syntax: a named volume is a bare identifier; a path (`.`/`/`) is a bind.
-    const source = mount.split(":", 1)[0] ?? "";
+    // Short syntax: a named volume is a bare identifier; a path (`.`/`/`) is a
+    // bind, unless it is an absolute path with no second path after it. That
+    // is an anonymous volume (`/data`, `/data:ro`), which shares no source.
+    const [source = "", second, ...rest] = mount.split(":");
+    if (
+      source.startsWith("/") &&
+      rest.length === 0 &&
+      !second?.startsWith("/")
+    ) {
+      return false;
+    }
     return !(mount.includes(":") && NAMED_VOLUME.test(source));
   }
   if (isRecord(mount)) {

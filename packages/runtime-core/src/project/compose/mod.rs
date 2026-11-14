@@ -240,7 +240,7 @@ pub(super) fn compile(
             problem("missing_services", "Compose services mapping is required.")
         })?)?,
         profiles,
-        &volumes,
+        &mut volumes,
         &mut diagnostics,
     )?;
     // Quarantining a directory that is, or contains, a mounted volume subpath

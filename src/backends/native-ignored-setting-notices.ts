@@ -1,7 +1,8 @@
 import { isRecord } from "../lib/guards.ts";
 
 /**
- * Review warnings for Compose settings that native accepts and does not apply.
+ * Review warnings for Compose settings that native accepts and either does not
+ * apply or applies differently from Compose.
  * Each maps the diagnostic's field suffix to the fixed sentence shown for it.
  */
 const IGNORED_SETTINGS: Readonly<
@@ -15,6 +16,11 @@ const IGNORED_SETTINGS: Readonly<
     suffix: "logging",
     notice:
       "logging configuration is not applied; read container logs with hack logs.",
+  },
+  anonymous_volume_named: {
+    suffix: "volumes",
+    notice:
+      "anonymous volumes are stored as named volumes this project owns. They are kept across hack down and are not refilled from a rebuilt image; hack down --remove-data deletes them.",
   },
   mount_host_hint_ignored: {
     suffix: "volumes",

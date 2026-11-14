@@ -256,7 +256,7 @@ With `--json` the report is the `data` of the standard result envelope:
 - `runtime_review.status` is one of:
   - `completed`: the review ran.
   - `stopped`: the review met a project problem it cannot continue past, such as
-    an anonymous volume (`invalid_mount`) or a mount outside the project
+    a malformed mount (`invalid_mount`) or a mount outside the project
     (`source_escape`). `code` names it, it is listed as a blocker, and more
     findings can appear once it is fixed.
   - `skipped`: the review did not run. Without `code`, no native runtime is
@@ -1417,7 +1417,8 @@ containers, as Docker does; owned cleanup or recovery stops and removes them.
 
 An image that declares `VOLUME` (for example a database image) runs natively only
 when the service mounts a named volume at each declared path, as in
-`db-data:/var/lib/postgresql/data`. Hack never creates an anonymous volume: a declared
+`db-data:/var/lib/postgresql/data`, or an anonymous volume at that path (see below).
+The engine is never left to allocate storage on its own: a declared
 path without exactly one whole named volume of the project refuses with
 `graph_image_volume_uncovered`, and a read-only (`:ro`) mount, a bind mount, a
 `volume.subpath` mount or a dependency-cache volume at that path does not count. On first use the engine copies
@@ -1814,6 +1815,21 @@ and the SELinux flags `z` or `Z`. Native accepts them, ignores them and reports 
 warning `mount_host_hint_ignored`; they tune host file sharing and change nothing
 inside the container. Other mount options, such as `nocopy` or a propagation mode,
 still refuse with `unsupported_mount_option`.
+
+An anonymous volume, such as `- /app/node_modules`, `- /app/.cache:ro` or a long-form
+`type: volume` entry with no `source`, is accepted. Native stores each one as a named
+volume the project owns, called `hack-anonymous-` plus 16 hexadecimal characters
+derived from the service name and the container path, and reports the warning
+`anonymous_volume_named`. This differs from Compose in two ways:
+
+- The volume is kept across `hack down` and reused by the next `hack up`. Compose
+  starts a new, empty anonymous volume after `down`. A rebuilt image therefore does
+  not refill it; run `hack down --remove-data` to start it empty again.
+- It counts toward the limit of 16 volumes per project.
+
+Two services that name the same path get separate volumes, as on Compose. Volume
+names that start with `hack-anonymous-` are reserved. A bind mount still needs a
+source, and a `volume.subpath` still needs a named volume.
 Because virtiofs preserves host ownership, those services keep `DAC_OVERRIDE`
 (part of the default capability set) even when `cap_drop` removes it. This allows
 root processes to access the explicitly shared tree; it does not bypass a read-only

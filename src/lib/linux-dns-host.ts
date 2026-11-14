@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { readTextFile } from "./fs.ts";
 import {
+  isResolvectlLinkAnswer,
   type LinuxLinkRoute,
   parseLinkForAddress,
   parseResolvectlLinkValues,
@@ -177,7 +178,11 @@ async function readResolvectlLinkRoute(link: string): Promise<{
     if (res === undefined || res.exitCode !== 0) {
       return true;
     }
-    // dns and domain may legitimately be empty; the others always answer.
+    // Every answer must be recognizable; dns and domain may then be empty,
+    // the single-value settings always carry a value.
+    if (!isResolvectlLinkAnswer(res.stdout)) {
+      return true;
+    }
     return index >= 2 && single(res) === null;
   });
   if (!(dns && domain) || dns.exitCode !== 0 || domain.exitCode !== 0) {

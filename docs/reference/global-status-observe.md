@@ -26,9 +26,11 @@ stopped (its process group gets a short termination grace) and its part reports
 
 Docker's JSON output is read strictly: empty output is "no rows"; a line that does
 not parse, a row without its required fields (`Service` and `Status`, `Name`, `ID`),
-or an `inspect` answer that is not one object per container makes that part
+an `inspect` answer that is not one object per container, or a proxy record
+without its service label, `State` flags or network map makes that part
 `"unknown"`, never a smaller list. On Linux, each per-link `resolvectl` query that
-fails or (for a single-value setting) answers nothing is listed in
+fails, answers with no recognizable `Link N (name):` line, or (for a single-value
+setting) answers nothing is listed in
 `host_dns.unreadable[]`.
 
 When `docker info` does not answer, Docker is asked nothing else and every

@@ -578,6 +578,99 @@ test("compose, networks and proxy adapters never take malformed or partial outpu
   }
 });
 
+test("proxy inspect records must carry what the assessment reads", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hack-observe-inspect-"));
+  try {
+    const file = join(dir, "docker-compose.yml");
+    await writeFile(file, "services: {}\n");
+    const caddy = (overrides: Record<string, unknown> = {}) => ({
+      Name: "/hack-dev-proxy-caddy-1",
+      Config: { Labels: { "com.docker.compose.service": "caddy" } },
+      State: { Running: true, Restarting: false, Paused: false },
+      NetworkSettings: {
+        Networks: { "hack-dev": { IPAddress: "172.30.0.2" } },
+      },
+      ...overrides,
+    });
+    const inspect = async (records: readonly unknown[]) => {
+      const ids = records.map((_r, i) => `abc12${i}`);
+      const answers = [
+        { exitCode: 0, stdout: ids.map((id) => `{"ID":"${id}"}`).join("\n") },
+        { exitCode: 0, stdout: JSON.stringify(records) },
+      ];
+      let index = 0;
+      const spy = fakeExec(
+        () => answers[index++] ?? { exitCode: 1, stdout: "" }
+      );
+      try {
+        return (await observeProxyNetwork({ composeFile: file })).ok;
+      } finally {
+        spy.mockRestore();
+      }
+    };
+    // Controls: a healthy proxy, a proxy off the ingress network, and a
+    // record of another service (complete with its label alone).
+    expect(await inspect([caddy()])).toBe(true);
+    expect(await inspect([caddy({ NetworkSettings: { Networks: {} } })])).toBe(
+      false
+    );
+    expect(
+      await inspect([
+        caddy(),
+        { Config: { Labels: { "com.docker.compose.service": "other" } } },
+      ])
+    ).toBe(true);
+    // Incomplete: nothing to classify by, a proxy without State, with a
+    // partial State, without networks, and a valid record beside one of
+    // these.
+    for (const records of [
+      [{}],
+      [{ Config: { Labels: { "com.docker.compose.service": "caddy" } } }],
+      [caddy({ State: undefined })],
+      [caddy({ State: { Running: true } })],
+      [caddy({ NetworkSettings: {} })],
+      [caddy(), {}],
+    ]) {
+      expect({ records, ok: await inspect(records) }).toEqual({
+        records,
+        ok: "unknown",
+      });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("Linux host adapter: a list query that answers nothing recognizable is unreadable; a valid empty list is not", async () => {
+  for (const verb of ["dns", "domain"]) {
+    for (const [stdout, flagged] of [
+      ["not a resolvectl answer\n", true],
+      ["", true],
+      ["Link 7 (br-fixture):\n", false],
+    ] as const) {
+      const unreadable: string[] = [];
+      const host = createLinuxDnsHost({
+        onUnreadable: (what) => unreadable.push(what),
+      });
+      const spy = fakeExec((cmd) =>
+        cmd[1] === verb
+          ? { exitCode: 0, stdout }
+          : { exitCode: 0, stdout: "Link 7 (br-fixture): no\n" }
+      );
+      try {
+        await host.readLinkRoute("br-fixture");
+      } finally {
+        spy.mockRestore();
+      }
+      expect({ verb, stdout, unreadable }).toEqual({
+        verb,
+        stdout,
+        unreadable: flagged ? [`resolvectl ${verb} -- br-fixture`] : [],
+      });
+    }
+  }
+});
+
 test("macOS DNS adapter: missing files are missing; unreadable files, no Homebrew prefix or no Caddy answer are unknown", async () => {
   const files = new Map<string, string | NodeJS.ErrnoException>();
   const errno = (code: string) => Object.assign(new Error(code), { code });

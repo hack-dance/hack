@@ -299,9 +299,44 @@ async function readProxyContainersStrictly(
   if (
     !Array.isArray(parsed) ||
     parsed.length !== ids.length ||
-    !parsed.every(isRecord)
+    !parsed.every(isCompleteContainerRecord)
   ) {
     return "unknown";
   }
   return parseProxyContainerInspect(inspect.stdout);
+}
+
+const PROXY_SERVICES = new Set(["caddy", "coredns"]);
+
+/**
+ * Whether an inspect record carries what the proxy assessment reads: its
+ * Compose service label and, for a proxy service, its State flags and its
+ * network map. A record of another service is complete with its label; one
+ * that cannot be classified or assessed is not.
+ */
+function isCompleteContainerRecord(record: unknown): boolean {
+  if (!isRecord(record)) {
+    return false;
+  }
+  const config = record.Config;
+  const labels = isRecord(config) ? config.Labels : undefined;
+  const service = isRecord(labels)
+    ? labels["com.docker.compose.service"]
+    : undefined;
+  if (typeof service !== "string") {
+    return false;
+  }
+  if (!PROXY_SERVICES.has(service)) {
+    return true;
+  }
+  const state = record.State;
+  const settings = record.NetworkSettings;
+  return (
+    isRecord(state) &&
+    typeof state.Running === "boolean" &&
+    typeof state.Restarting === "boolean" &&
+    typeof state.Paused === "boolean" &&
+    isRecord(settings) &&
+    isRecord(settings.Networks)
+  );
 }

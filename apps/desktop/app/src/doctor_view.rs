@@ -27,6 +27,7 @@ pub enum Pane {
     #[default]
     Project,
     Doctor,
+    Setup,
 }
 
 pub fn render(pane: &DoctorPane, cx: &mut Context<HackApp>) -> AnyElement {
@@ -46,6 +47,13 @@ pub fn render(pane: &DoctorPane, cx: &mut Context<HackApp>) -> AnyElement {
                 .child("Doctor"),
         )
         .child(div().flex_1())
+        .child(
+            Button::new("run-setup-again")
+                .label("Run setup again")
+                .small()
+                .outline()
+                .on_click(cx.listener(|this, _, _, cx| this.open_setup(cx))),
+        )
         .children(
             pane.age_label(Instant::now())
                 .map(|a| div().text_sm().text_color(t.muted_foreground).child(a)),

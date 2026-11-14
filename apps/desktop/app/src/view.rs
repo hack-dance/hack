@@ -32,6 +32,9 @@ use hack_desktop_core::source::target_keys;
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
 use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
 
+#[path = "setup_controller.rs"]
+mod setup_controller;
+
 const POLL: Duration = Duration::from_secs(2);
 const TAIL_LINES: u32 = 20;
 
@@ -44,6 +47,9 @@ pub struct HackApp {
     live: bool,
     pane: Pane,
     doctor: DoctorPane,
+    pub(crate) setup: hack_desktop_core::setup::Pane,
+    setup_initial: bool,
+    _activation: Option<gpui_kit::Subscription>,
     /// Is the window visible (not minimised or hidden)? Automatic doctor
     /// runs wait for it.
     window_visible: bool,
@@ -62,6 +68,9 @@ impl HackApp {
             tab: 0,
             pane: Pane::Project,
             doctor: DoctorPane::default(),
+            setup: Default::default(),
+            setup_initial: true,
+            _activation: None,
             window_visible: true,
             _visibility: None,
             tail: Ok(Vec::new()),
@@ -70,8 +79,10 @@ impl HackApp {
             action_started: std::collections::HashMap::new(),
         };
         if live {
+            this.pane = Pane::Setup;
             this.start_polling(cx);
             this.start_doctor_refresh(cx);
+            this.load_setup(cx);
         } else {
             this.refresh_now();
         }
@@ -184,6 +195,11 @@ impl HackApp {
     /// missing, old or stale doctor result.
     pub fn watch_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.window_visible = window.is_visible();
+        self._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && !this.setup.loading && !this.setup.action_busy {
+                this.load_setup(cx);
+            }
+        }));
         self._visibility = Some(cx.observe_window_visibility(
             window,
             |this, visibility, _window, cx| {
@@ -201,6 +217,17 @@ impl HackApp {
                     .timer(std::time::Duration::from_secs(60))
                     .await;
                 let alive = this.update(cx, |this, cx| {
+                    if this.pane == Pane::Setup
+                        && this.window_visible
+                        && !this.setup.loading
+                        && !this.setup.action_busy
+                        && this
+                            .setup
+                            .checked_at
+                            .is_none_or(|t| t.elapsed() >= Duration::from_secs(600))
+                    {
+                        this.load_setup(cx);
+                    }
                     if !this.maybe_auto_refresh(cx)
                         && this.pane == Pane::Doctor
                         && this.window_visible
@@ -952,6 +979,7 @@ impl Render for HackApp {
         let t = cx.theme().clone();
         let (bg, fg, font) = (t.background, t.foreground, t.font_family.clone());
         let main: AnyElement = match &list.phase {
+            _ if self.pane == Pane::Setup => crate::setup_view::render(&self.setup, cx),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.
@@ -993,16 +1021,37 @@ impl Render for HackApp {
                     .flex_1()
                     .min_h_0()
                     .items_start()
-                    .child(self.sidebar(&list, cx))
+                    .children(
+                        (self.pane != Pane::Setup || self.setup.report.cli_ready())
+                            .then(|| self.sidebar(&list, cx)),
+                    )
                     .child(
                         v_flex()
                             .flex_1()
                             .h_full()
                             .min_w_0()
-                            .child(self.banners(&list, cx))
+                            .when(self.pane != Pane::Setup, |el| {
+                                el.child(self.banners(&list, cx))
+                            })
                             .child(main),
                     ),
             )
-            .child(self.status_bar(&list, cx))
+            .child(if self.pane == Pane::Setup {
+                div()
+                    .px_3()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(t.border)
+                    .text_xs()
+                    .text_color(t.muted_foreground)
+                    .child(if self.setup.loading {
+                        "Checking setup…"
+                    } else {
+                        "Setup evidence is kept only for this session"
+                    })
+                    .into_any_element()
+            } else {
+                self.status_bar(&list, cx).into_any_element()
+            })
     }
 }

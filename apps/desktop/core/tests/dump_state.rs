@@ -84,3 +84,26 @@ fn dump_state_without_hack_reports_the_missing_cli() {
     assert_eq!(v["source"]["ok"], false);
     assert_eq!(v["list"]["phase"]["phase"], "cli_missing");
 }
+
+#[test]
+fn setup_fixture_cli_never_resolves_hack() {
+    let home = temp_dir("setup-offline");
+    let output = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
+        .args(["--setup-fixture", "native-unknown"])
+        .env("PATH", &home)
+        .env("HOME", &home)
+        .env("HACK_HOME", &home)
+        .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "native:sample" && c["status"] == "Unknown")
+    );
+}

@@ -100,6 +100,16 @@ pub trait Source: Send + Sync {
     fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
     -> Result<Vec<LogEntry>, String>;
 
+    /// Fresh setup checks. Fixture implementations stay fully offline.
+    fn setup(&self) -> crate::setup::Report {
+        crate::setup::fixture(self.snapshot(), &self.doctor_runs(&[]))
+    }
+
+    /// Explicit, fixed non-admin setup action; never inferred from Doctor text.
+    fn setup_action(&self, _action: crate::setup::SafeAction) -> String {
+        "Fixture: no action executed".into()
+    }
+
     /// Doctor runs: one outside any project, then one per project
     /// (DESIGN.md section 3). Each run fails on its own.
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun>;
@@ -297,6 +307,13 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn setup(&self) -> crate::setup::Report {
+        self.read_setup()
+    }
+    fn setup_action(&self, action: crate::setup::SafeAction) -> String {
+        crate::setup_io::run_safe(&self.runner, action)
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         let cli_version = self.runner.version(Duration::from_secs(5))?;
         let daemon = self.daemon.as_ref().and_then(|d| d.status().ok());

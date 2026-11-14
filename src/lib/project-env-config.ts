@@ -5151,9 +5151,10 @@ async function resolveProjectEnvKey(opts: {
  * `HACK_ENV_SECRET_KEY`).
  *
  * - `ok`: a key is present and readable.
- * - `missing`: no key file and no `HACK_ENV_SECRET_KEY`.
+ * - `missing`: no key file and no `HACK_ENV_SECRET_KEY`. An empty or
+ *   whitespace-only file counts as absent, as it does for the runtime.
  * - `unreadable`: a key file exists but is refused (symlink, not a regular
- *   file, unreadable, empty or oversized), so the runtime cannot use it.
+ *   file, unreadable or oversized), so the runtime cannot use it.
  *
  * Read-only: never creates, repairs or rotates a key. The key text stays in
  * this function; callers receive only the state. It does not check that the

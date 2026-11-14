@@ -187,6 +187,21 @@ test(
 );
 
 test(
+  "env list --json treats an empty key file as absent, like the runtime",
+  async () => {
+    const project = await createSecretProject();
+    await writeFile(keyPath(project), "  \n");
+    expect((await listJson({ project })).json.key_state).toBe("missing");
+    const withFallback = await listJson({
+      project,
+      env: { HACK_ENV_SECRET_KEY: "synthetic-fallback-key-text-for-the-probe" },
+    });
+    expect(withFallback.json.key_state).toBe("ok");
+  },
+  CLI_TEST_TIMEOUT_MS
+);
+
+test(
   "env list --json reports a refused key file as unreadable and still lists names",
   async () => {
     const project = await createSecretProject();

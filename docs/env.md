@@ -645,8 +645,8 @@ JSON also reports `key_state`, whether the project env key can be read, without 
 | `key_state` | Meaning |
 | --- | --- |
 | `ok` | A key is present and readable. It is not checked against existing values; `hack doctor` reports a layer the key cannot decrypt. |
-| `missing` | No key file and no `HACK_ENV_SECRET_KEY`. Names are still listed. Copy the original key from a checkout that has it; a new key cannot decrypt existing values. |
-| `unreadable` | A key file exists but is refused (a symlink, not a regular file, unreadable, empty or larger than 1 MiB). Names are still listed. Run `hack doctor`. |
+| `missing` | No key file and no `HACK_ENV_SECRET_KEY`. An empty or whitespace-only key file counts as absent, as it does for the runtime, so the next location is used. Names are still listed. Copy the original key from a checkout that has it; a new key cannot decrypt existing values. |
+| `unreadable` | A key file exists but is refused (a symlink, not a regular file, unreadable, not UTF-8 or larger than 1 MiB). Names are still listed. Run `hack doctor`. |
 | `not_checked` | The project uses the legacy `hack.env.json` contract, which does not use this key. |
 
 `--show-values` reveals resolved values only when both stdin and stdout are terminals and interaction is enabled. The older `--show-secrets` spelling is an alias. Redirecting or piping the output refuses the reveal, including with `--json`; ordinary `--json` is metadata only. Use `env get KEY` for an explicit single-value read in a script.

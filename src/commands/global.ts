@@ -137,10 +137,7 @@ import {
   resolveProxyBindAddress,
 } from "../lib/proxy-bind.ts";
 import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
-import {
-  reconcileRemoteCaddyRoutesStack,
-  stopRemoteCaddyRoutesStack,
-} from "../lib/remote-caddy-routes.ts";
+import { stopRemoteCaddyRoutesStack } from "../lib/remote-caddy-routes.ts";
 import {
   detectDockerBackend,
   formatDockerConnectionGuidance,
@@ -166,6 +163,11 @@ import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
 import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
+import {
+  globalRoutingUpArguments,
+  reconcileGlobalRoutingBridge,
+  secureGlobalLoginRouting,
+} from "./global-autostart.ts";
 import {
   bootstrapLinuxGlobalDns,
   inspectLinuxGlobalDns,
@@ -1820,12 +1822,14 @@ export async function globalUp(): Promise<number> {
     return slimExit;
   }
 
+  const paths = getGlobalPaths();
+  const login = process.env.HACK_AUTOSTART_LOGIN === "1";
+  await secureGlobalLoginRouting({ root: paths.root, login });
+
   await ensureDockerRunning();
   if (isMac()) {
     await ensureMacDnsmasqRunning();
   }
-  const paths = getGlobalPaths();
-
   if (!(await pathExists(paths.caddyCompose))) {
     logger.error({
       message: `Missing ${paths.caddyCompose}. Run: hack global install`,
@@ -1891,15 +1895,7 @@ export async function globalUp(): Promise<number> {
 
   logger.step({ message: "Starting Caddy…" });
   const caddyExit = await run(
-    [
-      "docker",
-      "compose",
-      "-f",
-      paths.caddyCompose,
-      "up",
-      "-d",
-      "--remove-orphans",
-    ],
+    globalRoutingUpArguments({ composeFile: paths.caddyCompose, login }),
     { cwd: dirname(paths.caddyCompose) }
   );
   if (caddyExit !== 0) {
@@ -1926,28 +1922,11 @@ export async function globalUp(): Promise<number> {
     });
     return 1;
   }
-  const remoteRoutes = await reconcileRemoteCaddyRoutesStack();
-  if (remoteRoutes.status === "failed") {
-    logger.warn({
-      message: `Remote route bridge sync failed: ${remoteRoutes.error}`,
-    });
-  } else if (remoteRoutes.status === "applied") {
-    logger.step({
-      message: `Remote route bridge active (${remoteRoutes.routeCount} host${remoteRoutes.routeCount === 1 ? "" : "s"})`,
-    });
-  }
+  await reconcileGlobalRoutingBridge({ enabled: !login });
 
   logger.step({ message: "Starting logging stack…" });
   const logExit = await run(
-    [
-      "docker",
-      "compose",
-      "-f",
-      paths.loggingCompose,
-      "up",
-      "-d",
-      "--remove-orphans",
-    ],
+    globalRoutingUpArguments({ composeFile: paths.loggingCompose, login }),
     { cwd: dirname(paths.loggingCompose) }
   );
   if (logExit !== 0) {

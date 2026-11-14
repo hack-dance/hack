@@ -71,6 +71,20 @@ under the owned home (plus Linux `.local/bin`); launching-shell `DOCKER_*`, `COM
 Hack adds only its explicit internal noninteractive and identity settings.
 Already-running instances are adopted without repeating startup hooks. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
+
+Automatic routing accepts only the already-installed files produced by this
+CLI's current Caddy, CoreDNS, logging, Grafana and schema templates. It checks
+ownership, file type and every directory component, refuses symlinks and unsafe
+parent directories, and compares bounded reads with those templates. All files
+must pass before matching bytes are republished on fresh `0600` inodes. Routing
+and logging containers are recreated to bind those new files; an old open writer
+or old file mount cannot modify the new assets. Compose `.env` imports and the
+unsupported remote-route bridge are disabled for this automatic path.
+Customized, outdated, missing or unsafe assets cause `routing_failed` and no
+project starts. This path does not install or migrate assets. Review the paths,
+preserve suspect files outside the active installation, secure their parent
+directories, and regenerate the installed files with `hack global install`
+before another login pass. Ordinary manual routing commands keep their behavior.
 Adoption requires a running container. An exited-zero container is treated as a
 completed job only when its service is a dependency target explicitly declared
 with `condition: service_completed_successfully`; other stopped services require

@@ -549,6 +549,7 @@ function productionDependencies(
             timeoutMs: 60_000,
             signal,
             env,
+            routing: true,
           }
         )
       ).exitCode === 0,
@@ -943,6 +944,8 @@ export async function runAutostartSubprocess(
     readonly signal?: AbortSignal;
     readonly env?: Readonly<Record<string, string | undefined>>;
     readonly projectId?: string;
+    /** Routing helpers must not load a working-directory Compose .env. */
+    readonly routing?: boolean;
     readonly terminationGraceMs?: number;
   }
 ): Promise<{
@@ -961,6 +964,7 @@ export async function runAutostartSubprocess(
       HACK_DAEMON_AUTOSTART_DISABLE: "1",
       HACK_AUTOSTART_LOGIN: "1",
       ...(opts.projectId ? { HACK_AUTOSTART_PROJECT_ID: opts.projectId } : {}),
+      ...(opts.routing ? { COMPOSE_ENV_FILES: "/dev/null" } : {}),
     },
     stdin: "ignore",
     stdout: "pipe",

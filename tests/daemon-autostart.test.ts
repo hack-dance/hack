@@ -368,6 +368,23 @@ test("only classified safe reasons are persisted; missing keys and prompts are s
   });
 });
 
+test("routing children suppress Compose env files without inheriting shell overrides", async () => {
+  const invocation = [
+    process.execPath,
+    "--eval",
+    "process.stdout.write(process.env.COMPOSE_ENV_FILES ?? 'absent')",
+  ];
+  for (const routing of [false, true]) {
+    const result = await runAutostartSubprocess(invocation, {
+      timeoutMs: 5000,
+      routing,
+      env: { COMPOSE_ENV_FILES: "/untrusted.env" },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(routing ? "/dev/null" : "absent");
+  }
+});
+
 test("production runner has no input terminal or keychain and does not retain stderr", async () => {
   const result = await runAutostartSubprocess(
     [

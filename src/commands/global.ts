@@ -482,6 +482,12 @@ export const globalCommand = defineCommand({
   ...globalSpec,
   subcommands: [
     withHandler(globalInstallSpec, async ({ args }) => {
+      if (args.options.json === true && args.options.plan !== true) {
+        logger.error({
+          message: "Use --json with --plan: hack global install --plan --json",
+        });
+        return 2;
+      }
       if (args.options.plan === true) {
         return await printAdminPlan({
           json: args.options.json === true,
@@ -498,6 +504,12 @@ export const globalCommand = defineCommand({
     withHandler(globalCaSpec, handleGlobalCa),
     withHandler(globalCertSpec, handleGlobalCert),
     withHandler(globalTrustSpec, async ({ args }) => {
+      if (args.options.json === true && args.options.plan !== true) {
+        logger.error({
+          message: "Use --json with --plan: hack global trust --plan --json",
+        });
+        return 2;
+      }
       if (args.options.plan === true) {
         return await printAdminPlan({
           json: args.options.json === true,
@@ -3487,7 +3499,6 @@ async function readMacInstallSnapshot(
     services: services?.exitCode === 0 ? services.stdout : null,
     helperPath: MAC_DNS_RECOVERY_HELPER_PATH,
     helperInstalled: await pathExists(MAC_DNS_RECOVERY_HELPER_PATH),
-    interactive: isInteractiveTerminal(),
     resolverDomains,
     ...recovery,
   };

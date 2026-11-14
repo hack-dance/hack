@@ -427,10 +427,18 @@ test("global install plan root argv equals the command's fake-root execution, in
   });
   const { runCli } = await import("../src/cli/run.ts");
   let planCode: number;
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: false,
+  });
   try {
     planCode = await runCli(["global", "install", "--plan", "--json"]);
   } finally {
     stdout.mockRestore();
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: true,
+    });
   }
   const planned = JSON.parse(chunks.join("")) as AdminPlan;
   expect(planCode).toBe(0);

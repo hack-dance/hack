@@ -25,6 +25,7 @@ import {
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../src/constants.ts";
 import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
+import * as interactivity from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -181,6 +182,25 @@ async function writeExecutable(path: string): Promise<void> {
   await writeFile(path, "#!/usr/bin/env sh\nexit 0\n");
   await chmod(path, 0o755);
 }
+
+test.each([
+  "install",
+  "trust",
+])("global %s --json without --plan refuses before any effect", async (command) => {
+  const confirm = spyOn(interactivity, "confirmSafe").mockImplementation(() => {
+    throw new Error("No confirmation expected");
+  });
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", command, "--json"])).toBe(2);
+    expect(execCalls).toEqual([]);
+    expect(runCalls).toEqual([]);
+    expect(linuxDnsPrivileged).toEqual([]);
+    expect(confirm).not.toHaveBeenCalled();
+  } finally {
+    confirm.mockRestore();
+  }
+});
 
 test.skipIf(process.platform !== "linux")(
   "global install --plan --json uses read-only probes and --plan requires JSON",

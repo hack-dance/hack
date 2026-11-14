@@ -78,7 +78,6 @@ function macSnapshot(
     services: "dnsmasq stopped root\n",
     helperPath: HELPER,
     helperInstalled: false,
-    interactive: true,
     resolverDomains: DOMAINS,
     authorization: null,
     authorizationRefusal: null,
@@ -227,65 +226,94 @@ test("install refuses before probing, and unknown network, bridge, resolver or s
   expect(skipped.steps.some((step) => step.id === "skip-dns")).toBe(true);
 });
 
-test("macOS install lists startup and bootstrap retry argv exactly as the real fake runner receives them", async () => {
-  for (const interactive of [false, true]) {
-    const plan = await planGlobalInstall(
-      deps({
-        platform: "darwin",
-        macSnapshot: () => Promise.resolve(macSnapshot({ interactive })),
-      })
-    );
-    const recorded: string[][] = [];
-    const exit = await executeMacPrivilegedCommand({
-      command: [BREW, "services", "restart", "dnsmasq"],
-      interactive,
-      runner: (argv, opts) => {
-        recorded.push([...argv]);
-        expect(opts?.stdin).toBe(recorded.length === 1 ? "ignore" : "inherit");
-        return Promise.resolve(recorded.length === 1 ? 1 : 0);
-      },
-    });
-    expect(exit).toBe(interactive ? 0 : 1);
-    expect(
-      rootSteps(plan)
-        .filter((step) => step.id.startsWith("global-up-restart"))
-        .map((step) => step.argv)
-    ).toEqual(recorded);
-    expect(
-      rootSteps(plan)
-        .filter((step) => step.id.startsWith("dns-bootstrap-restart"))
-        .map((step) => step.argv)
-    ).toEqual(recorded);
-    expect(rootSteps(plan)[0]?.shell).toContain(
-      "'/opt/Example Tools/bin/brew'"
-    );
-    expect(
-      plan.steps.findIndex((step) => step.id.startsWith("global-up-restart"))
-    ).toBeLessThan(plan.steps.findIndex((step) => step.id === "global-stack"));
-    expect(
-      rootSteps(plan)
-        .filter((step) => step.id.startsWith("resolver"))
-        .map((step) => step.argv)
-    ).toEqual(
-      DOMAINS.map((domain) => [
-        "sudo",
-        "sh",
-        "-c",
-        `mkdir -p /etc/resolver && printf '%s\\n' 'nameserver 127.0.0.1' > /etc/resolver/${domain}`,
-      ])
-    );
-    expect(
-      rootSteps(plan)
-        .filter((step) => step.id.startsWith("dns-flush"))
-        .map((step) => step.argv)
-    ).toEqual([
-      ["sudo", "-n", "/usr/bin/dscacheutil", "-flushcache"],
-      ...(interactive ? [["sudo", "/usr/bin/dscacheutil", "-flushcache"]] : []),
-      ["sudo", "-n", "/usr/bin/killall", "-HUP", "mDNSResponder"],
-      ...(interactive
-        ? [["sudo", "/usr/bin/killall", "-HUP", "mDNSResponder"]]
-        : []),
-    ]);
+test("macOS install plans terminal retry alternatives even with non-TTY planning stdin", async () => {
+  const originalTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: false,
+  });
+  try {
+    for (const interactive of [false, true]) {
+      const plan = await planGlobalInstall(
+        deps({
+          platform: "darwin",
+          macSnapshot: () => Promise.resolve(macSnapshot()),
+        })
+      );
+      const recorded: string[][] = [];
+      Object.defineProperty(process.stdin, "isTTY", {
+        configurable: true,
+        value: interactive,
+      });
+      const exit = await executeMacPrivilegedCommand({
+        command: [BREW, "services", "restart", "dnsmasq"],
+        interactive,
+        runner: (argv, opts) => {
+          recorded.push([...argv]);
+          expect(opts?.stdin).toBe(
+            recorded.length === 1 ? "ignore" : "inherit"
+          );
+          return Promise.resolve(recorded.length === 1 ? 1 : 0);
+        },
+      });
+      expect(exit).toBe(interactive ? 0 : 1);
+      expect(
+        rootSteps(plan)
+          .filter((step) => step.id.startsWith("global-up-restart"))
+          .filter((_, index) => interactive || index === 0)
+          .map((step) => step.argv)
+      ).toEqual(recorded);
+      expect(
+        rootSteps(plan)
+          .filter((step) => step.id.startsWith("dns-bootstrap-restart"))
+          .filter((_, index) => interactive || index === 0)
+          .map((step) => step.argv)
+      ).toEqual(recorded);
+      expect(rootSteps(plan)[0]?.shell).toContain(
+        "'/opt/Example Tools/bin/brew'"
+      );
+      expect(
+        plan.steps.findIndex((step) => step.id.startsWith("global-up-restart"))
+      ).toBeLessThan(
+        plan.steps.findIndex((step) => step.id === "global-stack")
+      );
+      expect(
+        rootSteps(plan)
+          .filter((step) => step.id.startsWith("resolver"))
+          .map((step) => step.argv)
+      ).toEqual(
+        DOMAINS.map((domain) => [
+          "sudo",
+          "sh",
+          "-c",
+          `mkdir -p /etc/resolver && printf '%s\\n' 'nameserver 127.0.0.1' > /etc/resolver/${domain}`,
+        ])
+      );
+      expect(
+        rootSteps(plan)
+          .filter((step) => step.id.startsWith("dns-flush"))
+          .map((step) => step.argv)
+      ).toEqual([
+        ["sudo", "-n", "/usr/bin/dscacheutil", "-flushcache"],
+        ["sudo", "/usr/bin/dscacheutil", "-flushcache"],
+        ["sudo", "-n", "/usr/bin/killall", "-HUP", "mDNSResponder"],
+        ["sudo", "/usr/bin/killall", "-HUP", "mDNSResponder"],
+      ]);
+      expect(
+        rootSteps(plan).find((step) => step.id === "global-up-restart-1-2")
+          ?.when
+      ).toContain("only on an interactive terminal");
+      Object.defineProperty(process.stdin, "isTTY", {
+        configurable: true,
+        value: false,
+      });
+    }
+  } finally {
+    if (originalTty) {
+      Object.defineProperty(process.stdin, "isTTY", originalTty);
+    } else {
+      Reflect.deleteProperty(process.stdin, "isTTY");
+    }
   }
 });
 

@@ -70,7 +70,7 @@ to run the listed commands.
 | `steps[].gates` | on a probe: the step it can skip (macOS non-interactive runs check `sudo -n true` before the keychain step) |
 
 Exit code: 0 for a complete plan, 1 when `refused`, 3 when incomplete; `--plan`
-without `--json` exits 2.
+without `--json` exits 2. `--json` without `--plan` also exits 2 before any effect.
 
 ## What `hack global trust` plans
 
@@ -142,8 +142,9 @@ On macOS, the plan includes these phases in execution order:
    user-level validation and the root-controlled-path checks. The per-user daemon
    login-service offer is a user step.
 
-Each macOS service/cache command shows its `sudo -n` attempt. An interactive
-password attempt follows only when that attempt fails; helper fallbacks are also
+Each macOS service/cache command shows its `sudo -n` attempt and the interactive
+password alternative, even when a script plans without a TTY. That alternative
+runs only on an interactive terminal when the passwordless attempt fails; helper fallbacks are also
 conditional. A plan lists possible operations with their guards, not a promise
 that every listed operation will execute. Completion still requires the real
 command's checks and prompts against the current host state.

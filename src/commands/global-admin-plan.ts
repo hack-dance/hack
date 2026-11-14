@@ -166,7 +166,6 @@ export type MacInstallSnapshot = {
   readonly services: string | null;
   readonly helperPath: string;
   readonly helperInstalled: boolean;
-  readonly interactive: boolean;
   /** Existing custom resolver files are retained; built-in ones are offered again. */
   readonly resolverDomains: readonly string[];
   readonly authorization: null | Parameters<typeof macAuthorizationArgv>[0];
@@ -420,14 +419,15 @@ async function finishLinuxInstallPlan(
 
 function appendMacAttempts(
   steps: StepInput[],
-  mac: MacInstallSnapshot,
   command: readonly string[],
   id: string,
   when: string
 ): void {
+  // A script can generate a plan for a later terminal run. Keep both attempts
+  // and describe the terminal guard instead of sampling the planning stdin.
   for (const [index, argv] of macPrivilegedAttempts({
     command,
-    interactive: mac.interactive,
+    interactive: true,
   }).entries()) {
     steps.push(
       rootStep({
@@ -437,7 +437,7 @@ function appendMacAttempts(
         when:
           index === 0
             ? when
-            : `${when}; only if the passwordless attempt fails`,
+            : `${when}; only on an interactive terminal and only if the passwordless attempt fails`,
       })
     );
   }
@@ -452,7 +452,6 @@ function appendMacRestart(
   for (const [index, command] of macRestartCommands(mac).entries()) {
     appendMacAttempts(
       steps,
-      mac,
       command,
       `${prefix}-restart-${index + 1}`,
       index === 0
@@ -521,7 +520,6 @@ function appendMacInstall(opts: {
   for (const [index, command] of macFlushCommands(mac).entries()) {
     appendMacAttempts(
       steps,
-      mac,
       command,
       `dns-flush-${index + 1}`,
       "after dnsmasq restart succeeds; each later cache command requires previous success"

@@ -421,3 +421,68 @@ for (const failure of ["http-500", "malformed-json"] as const) {
     expect(await composeLogsCalls()).toEqual([]);
   }, 60_000);
 }
+
+test("an HTTP error whose body breaks mid-read still ends the --json stream last", async () => {
+  // Raw TCP: /ready answers, query_range sends 500 headers promising more body
+  // than it writes, then closes, so reading the error body rejects.
+  const broken = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, chunk) {
+        const request = Buffer.from(chunk).toString("latin1");
+        if (request.startsWith("GET /ready")) {
+          socket.end(
+            "HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nready"
+          );
+          return;
+        }
+        socket.end(
+          "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 1000\r\nconnection: close\r\n\r\npartial"
+        );
+      },
+    },
+  });
+  try {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        CLI,
+        "logs",
+        "--loki",
+        "--json",
+        "--no-follow",
+        "migrate",
+      ],
+      {
+        cwd: projectRoot,
+        env: privateCliEnv({
+          root,
+          env: {
+            PATH: `${join(root, "bin")}:/usr/bin:/bin`,
+            STUB_CAPTURE: capture,
+            HACK_NO_INTERACTIVE: "1",
+            HACK_LOKI_URL: `http://127.0.0.1:${broken.port}`,
+          },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    liveChildren.push(child);
+    const [exitCode, stdout] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+    ]);
+
+    expect(exitCode).toBe(1);
+    const lines = stdout
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines.map((line) => line.type)).toEqual(["start", "error", "end"]);
+  } finally {
+    broken.stop(true);
+  }
+}, 60_000);

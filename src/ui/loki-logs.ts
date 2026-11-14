@@ -273,9 +273,9 @@ async function lokiQueryRange(
   }
   if (!res.ok) {
     failJson(`Loki HTTP ${res.status}`);
-    process.stderr.write(
-      `Failed to query Loki (${res.status}): ${await res.text()}\n`
-    );
+    // The body is diagnostic only; a broken read must not add output after `end`.
+    const body = await res.text().catch(() => "(response body unreadable)");
+    process.stderr.write(`Failed to query Loki (${res.status}): ${body}\n`);
     return failed;
   }
 

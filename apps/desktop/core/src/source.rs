@@ -725,6 +725,40 @@ esac
     }
 
     #[test]
+    fn doctor_probes_only_read_and_select_each_backend() {
+        let hack = fake_hack(
+            "doctor-contract",
+            r#"[ "$HACK_NO_INTERACTIVE" = 1 ] || exit 2
+case "$*" in
+  'doctor --json')
+    detail=machine ;;
+  'doctor --json --path /work/p0')
+    [ "$HACK_RUNTIME_BACKEND" = native ] || exit 3
+    detail=native ;;
+  'doctor --json --path /work/p1')
+    [ "$HACK_RUNTIME_BACKEND" = compose ] || exit 4
+    detail=compose ;;
+  *) exit 5 ;;
+esac
+printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]}}' "$detail"
+"#,
+        );
+        let src = LiveSource {
+            runner: CliRunner::new(&hack).with_env("HACK_RUNTIME_BACKEND", "compose"),
+            daemon: None,
+        };
+        let mut projects = targets(2);
+        projects[0].native = true;
+        let runs = src.doctor_runs(&projects);
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        let details: Vec<_> = runs
+            .iter()
+            .map(|run| run.result.as_ref().unwrap().checks[0].detail.as_str())
+            .collect();
+        assert_eq!(details, ["machine", "native", "compose"]);
+    }
+
+    #[test]
     fn doctor_payload_without_checks_is_not_a_report() {
         let hack = fake_hack("doctor-empty", r#"echo '{"ok":true,"data":{}}'"#);
         let src = LiveSource {

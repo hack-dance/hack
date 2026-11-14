@@ -61,8 +61,23 @@ engine-down, error / cli-missing, many-projects, stopped / starting, running,
 degraded / stopping, failed-start, needs-attention):
 [light](screenshots/fixtures-light.png), [dark](screenshots/fixtures-dark.png).
 
+## Doctor
+
+The sidebar Doctor row reads `hack doctor --json` once outside all projects and
+once per registered checkout. Machine checks are deduplicated by check id;
+project findings link from the project header. Unknown statuses, failed reads
+and projects not reached within the 90-second refresh budget remain unchecked.
+Checks refresh on opening the pane and every ten minutes while it is visible.
+
+Cards group findings by area and offer one copied command or documentation link.
+Project commands include the checkout path. The app never runs a Doctor fix:
+one-click fixes remain blocked on the CLI's explicit safe-fix metadata (R7a/R7b).
+The probes do not use `hack global status`, which can start Docker.
+Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
+[dark](screenshots/doctor-dark.png).
+
 ## What v0 does not do yet
 
-Logs, Env and Activity tabs, CPU and memory, Doctor view, onboarding, always-on,
+Logs, Env and Activity tabs, CPU and memory, onboarding, always-on,
 daemon actions and upgrades come in later units. The design and the CLI/daemon
 requests they need are in `DESIGN.md` (PR #800).

@@ -159,6 +159,13 @@ export type TrustPlanDeps = {
   readonly inspectIdentity: () => Promise<CaddyCaIdentity>;
   /** The export's text, or null when it is absent or unreadable. */
   readonly readExport: () => Promise<string | null>;
+  /**
+   * Linux, export not current: whether the export refresh may replace the
+   * file (caddyCaExportReplaceable); "unknown" when it could not be read.
+   */
+  readonly exportReplaceable: () => Promise<
+    "replaceable" | "refused" | "unknown"
+  >;
   /** Linux: the trust host (read-only use: files, tool and sudo lookup). */
   readonly linuxHost?: LinuxTrustHost;
   readonly prepareLinux: (opts: {
@@ -267,6 +274,32 @@ async function linuxTrustCa(
     }
     pem = exported;
   } else {
+    // The refresh refuses a symlinked or non-regular export; then the real
+    // run stops before any trust store (global-linux-trust.ts).
+    const replaceable = await deps.exportReplaceable();
+    if (replaceable === "refused") {
+      return {
+        stop: plan({
+          ...base,
+          refused: `${deps.certPath} is not current and is not a regular file; the export refresh refuses to replace it, so no trust store would be changed`,
+        }),
+      };
+    }
+    if (replaceable === "unknown") {
+      return {
+        stop: plan({
+          ...base,
+          blocked: [
+            {
+              phase: "system trust",
+              reason:
+                "Whether the stale exported CA can be replaced could not be read",
+              prerequisite: `a readable ${deps.certPath}`,
+            },
+          ],
+        }),
+      };
+    }
     steps.push(
       userStep(
         "refresh-ca-export",

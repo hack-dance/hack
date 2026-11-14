@@ -61,6 +61,7 @@ import {
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
+import { caddyCaExportReplaceable } from "../lib/caddy-ca-export.ts";
 import {
   copyRuntimeRoot,
   inspectCaddyCaIdentity,
@@ -3455,6 +3456,8 @@ function trustPlanDeps(): TrustPlanDeps {
         ...(isLinux() ? { exec: createTrustedDockerExec() } : {}),
       }),
     readExport: async () => await readTextFile(certPath),
+    exportReplaceable: async () =>
+      await caddyCaExportReplaceable(certPath).catch(() => "unknown" as const),
     ...(isLinux() ? { linuxHost: createLinuxTrustHost() } : {}),
     prepareLinux: prepareLinuxSystemTrust,
     dockerAnswers: async () =>

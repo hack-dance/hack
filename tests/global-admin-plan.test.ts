@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type AdminPlan,
   classifyDockerInfo,
@@ -14,6 +17,10 @@ import {
   macTrustAddArgv,
   prepareMacTrust,
 } from "../src/commands/global-mac-trust.ts";
+import {
+  caddyCaExportReplaceable,
+  repairCaddyCaExport,
+} from "../src/lib/caddy-ca-export.ts";
 import type { CaddyCaIdentity } from "../src/lib/caddy-ca-identity.ts";
 import { validateCaddyRootPem } from "../src/lib/linux-trust.ts";
 import {
@@ -96,6 +103,8 @@ function trustDeps(overrides: Partial<TrustPlanDeps>): TrustPlanDeps {
     certPath: CERT,
     inspectIdentity: async () => await Promise.resolve(current),
     readExport: async () => await Promise.resolve(CURRENT_CA_PEM),
+    exportReplaceable: async () =>
+      await Promise.resolve("replaceable" as const),
     linuxHost: linuxHost({ bundle: OLD_CA_PEM }),
     prepareLinux: prepareLinuxSystemTrust,
     dockerAnswers: async () => await Promise.resolve(false),
@@ -427,4 +436,73 @@ test("macOS: a Docker probe that times out or cannot start leaves the phase unkn
   );
   expect(plan).toMatchObject({ complete: false, refused: null });
   expect(rootSteps(plan)).toEqual([]);
+});
+
+test("Linux: a stale export the refresh refuses to replace gives a refused plan, as the real refresh does", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hack-admin-plan-export-"));
+  try {
+    const target = join(directory, "old.crt");
+    await Bun.write(target, OLD_CA_PEM);
+    const cases = {
+      symlink: join(directory, "link.crt"),
+      directory: join(directory, "dir.crt"),
+      regular: join(directory, "regular.crt"),
+      missing: join(directory, "missing.crt"),
+    };
+    await symlink(target, cases.symlink);
+    await mkdir(cases.directory);
+    await Bun.write(cases.regular, OLD_CA_PEM);
+    const staleIdentity: CaddyCaIdentity = {
+      state: "stale",
+      message: "stale",
+      currentPem: CURRENT_CA_PEM,
+    };
+    for (const [name, certPath] of Object.entries(cases)) {
+      const planned = await planGlobalTrust(
+        trustDeps({
+          certPath,
+          inspectIdentity: async () => await Promise.resolve(staleIdentity),
+          readExport: async () => await Promise.resolve(OLD_CA_PEM),
+          exportReplaceable: async () =>
+            await caddyCaExportReplaceable(certPath),
+        })
+      );
+      // The real refresh, confirmed, against the same path.
+      const repaired = await repairCaddyCaExport({
+        composeFile: join(directory, "compose.yml"),
+        certPath,
+        inspect: async () => await Promise.resolve(staleIdentity),
+        confirm: async () => await Promise.resolve(true),
+      });
+      if (name === "symlink" || name === "directory") {
+        expect(repaired.changed).toBe(false);
+        expect(planned).toMatchObject({ complete: false, steps: [] });
+        expect(planned.refused).toContain("not a regular file");
+      } else {
+        expect(repaired.changed).toBe(true);
+        expect(planned).toMatchObject({ complete: true, refused: null });
+        expect(planned.steps[0]).toMatchObject({ id: "refresh-ca-export" });
+        expect(rootSteps(planned).length).toBeGreaterThan(0);
+      }
+    }
+    expect(await Bun.file(target).text()).toBe(OLD_CA_PEM);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Linux: an unreadable export eligibility leaves the trust phase blocked", async () => {
+  const planned = await planGlobalTrust(
+    trustDeps({
+      inspectIdentity: async () =>
+        await Promise.resolve({
+          state: "stale",
+          message: "stale",
+          currentPem: CURRENT_CA_PEM,
+        }),
+      exportReplaceable: async () => await Promise.resolve("unknown" as const),
+    })
+  );
+  expect(planned).toMatchObject({ complete: false, refused: null, steps: [] });
+  expect(planned.blocked[0]?.phase).toBe("system trust");
 });

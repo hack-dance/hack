@@ -27,6 +27,8 @@ to run the listed commands.
   `docker info`, keychain and trust-store reads, and tool and `sudo` lookups. It
   never runs a planned step, a `sudo` probe, a write, a prompt, or anything that
   starts Docker.
+- Keychain reads have a plan-only deadline. A timeout or failure to start leaves
+  trust incomplete; it never establishes that a certificate is absent.
 - Nothing is invented. When a step depends on something the run itself creates or
   reads first, the plan says so (`blocked`, `complete: false`) instead of guessing
   argv.

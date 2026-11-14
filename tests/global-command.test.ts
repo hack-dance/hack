@@ -182,40 +182,45 @@ async function writeExecutable(path: string): Promise<void> {
   await chmod(path, 0o755);
 }
 
-test("global install --plan --json uses read-only probes and --plan requires JSON", async () => {
-  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
-  const chunks: string[] = [];
-  const stdout = spyOn(process.stdout, "write").mockImplementation((chunk) => {
-    chunks.push(String(chunk));
-    return true;
-  });
-  try {
-    const { runCli } = await import("../src/cli/run.ts");
-    expect(await runCli(["global", "install", "--plan"])).toBe(2);
-    expect(execCalls).toEqual([]);
-    expect(await runCli(["global", "install", "--plan", "--json"])).toBe(0);
-  } finally {
-    stdout.mockRestore();
+test.skipIf(process.platform !== "linux")(
+  "global install --plan --json uses read-only probes and --plan requires JSON",
+  async () => {
+    process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+    const chunks: string[] = [];
+    const stdout = spyOn(process.stdout, "write").mockImplementation(
+      (chunk) => {
+        chunks.push(String(chunk));
+        return true;
+      }
+    );
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(await runCli(["global", "install", "--plan"])).toBe(2);
+      expect(execCalls).toEqual([]);
+      expect(await runCli(["global", "install", "--plan", "--json"])).toBe(0);
+    } finally {
+      stdout.mockRestore();
+    }
+    expect(JSON.parse(chunks.join(""))).toMatchObject({
+      schema: "hack.global-admin-plan.v1",
+      command: "install",
+      complete: true,
+      refused: null,
+    });
+    expect(runCalls).toEqual([]);
+    expect(linuxDnsPrivileged).toEqual([]);
+    expect(
+      await Bun.file(
+        join(
+          tempDir!,
+          GLOBAL_HACK_DIR_NAME,
+          GLOBAL_CADDY_DIR_NAME,
+          GLOBAL_CADDY_COMPOSE_FILENAME
+        )
+      ).exists()
+    ).toBe(false);
   }
-  expect(JSON.parse(chunks.join(""))).toMatchObject({
-    schema: "hack.global-admin-plan.v1",
-    command: "install",
-    complete: true,
-    refused: null,
-  });
-  expect(runCalls).toEqual([]);
-  expect(linuxDnsPrivileged).toEqual([]);
-  expect(
-    await Bun.file(
-      join(
-        tempDir!,
-        GLOBAL_HACK_DIR_NAME,
-        GLOBAL_CADDY_DIR_NAME,
-        GLOBAL_CADDY_COMPOSE_FILENAME
-      )
-    ).exists()
-  ).toBe(false);
-});
+);
 
 async function writeStaticCaddyCompose(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });

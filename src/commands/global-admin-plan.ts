@@ -46,7 +46,7 @@ import {
 import {
   MAC_SUDO_PROBE_ARGV,
   type MacTrustCheck,
-  type PreparedMacTrust,
+  type PreparedMacTrustPlan,
 } from "./global-mac-trust.ts";
 
 export const ADMIN_PLAN_SCHEMA = "hack.global-admin-plan.v1";
@@ -106,7 +106,7 @@ export type AdminPlan = {
 type StepInput = Omit<PlanStep, "order">;
 
 function numbered(steps: readonly StepInput[]): readonly PlanStep[] {
-  return steps.map((step, index) => ({ order: index + 1, ...step }));
+  return steps.map((step, index) => ({ ...step, order: index + 1 }));
 }
 
 function rootStep(opts: {
@@ -171,6 +171,7 @@ export type MacInstallSnapshot = {
   readonly resolverDomains: readonly string[];
   readonly authorization: null | Parameters<typeof macAuthorizationArgv>[0];
   readonly authorizationRefusal: string | null;
+  readonly authorizationUnknown?: boolean;
 };
 
 export type InstallPlanDeps = {
@@ -309,7 +310,7 @@ async function finishMacInstallPlan(
       "An eligible exported Caddy CA, then plan again"
     );
   }
-  appendMacAuthorization(steps, mac);
+  appendMacAuthorization(steps, mac, blocked);
   steps.push(
     userStep(
       "daemon-login",
@@ -530,8 +531,18 @@ function appendMacInstall(opts: {
 
 function appendMacAuthorization(
   steps: StepInput[],
-  mac: MacInstallSnapshot
+  mac: MacInstallSnapshot,
+  blocked: AdminPlan["blocked"][number][]
 ): void {
+  if (mac.authorizationUnknown) {
+    blocked.push({
+      phase: "recovery authorization",
+      reason:
+        "Helper parent ownership could not be read within the probe deadline",
+      prerequisite: "Readable helper parent ownership, then plan again",
+    });
+    return;
+  }
   if (mac.authorizationRefusal !== null) {
     steps.push(
       userStep(
@@ -620,7 +631,7 @@ export type TrustPlanDeps = {
     readonly checkTrust?: (input: {
       readonly certPath: string;
     }) => Promise<MacTrustCheck>;
-  }) => Promise<PreparedMacTrust>;
+  }) => Promise<PreparedMacTrustPlan>;
   /** Whether the run is explicitly non-interactive (flag or env). */
   readonly explicitlyNonInteractive: () => boolean;
 };
@@ -941,6 +952,19 @@ async function planMacTrust(deps: TrustPlanDeps): Promise<AdminPlan> {
     });
   }
   const decided = await deps.prepareMac({ certPath: deps.certPath });
+  if (decided.status === "unknown") {
+    return plan({
+      ...base,
+      steps: [...steps, hostEnv],
+      blocked: [
+        {
+          phase: "keychain trust",
+          reason: decided.issue,
+          prerequisite: "Readable System keychain state, then plan again",
+        },
+      ],
+    });
+  }
   if (decided.status === "ineligible") {
     return plan({ ...base, refused: decided.issue });
   }

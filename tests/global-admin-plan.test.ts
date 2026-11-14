@@ -149,6 +149,23 @@ test("macOS install cannot decide keychain trust from an old export when the run
   expect(current.complete).toBe(true);
 });
 
+test("macOS an unavailable keychain read leaves the phase unknown rather than planning installation", async () => {
+  const planned = await planGlobalTrust(
+    trustDeps({
+      platform: "darwin",
+      prepareMac: () =>
+        Promise.resolve({
+          status: "unknown",
+          issue: "Keychain read timed out",
+        }),
+    })
+  );
+  expect(planned.complete).toBe(false);
+  expect(planned.refused).toBeNull();
+  expect(planned.blocked[0]?.phase).toBe("keychain trust");
+  expect(rootSteps(planned)).toEqual([]);
+});
+
 test("Linux: the plan's root steps are exactly what the real trust step spawns", async () => {
   const plan = await planGlobalTrust(trustDeps({}));
   expect(plan).toMatchObject({ complete: true, refused: null });

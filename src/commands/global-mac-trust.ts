@@ -67,6 +67,54 @@ export async function prepareMacTrust(input: {
   return { status: "ready", argv: macTrustAddArgv(input.certPath) };
 }
 
+export type PreparedMacTrustPlan =
+  | PreparedMacTrust
+  | {
+      readonly status: "unknown";
+      readonly issue: string;
+    };
+
+/**
+ * Bound plan-only keychain reads. A timed-out or unstartable security process
+ * cannot establish whether the real command would skip or install trust.
+ * Execution retains its existing checks through `prepareMacTrust`.
+ */
+export async function prepareMacTrustForPlan(input: {
+  readonly certPath: string;
+  readonly timeoutMs: number;
+  readonly execute?: typeof exec;
+}): Promise<PreparedMacTrustPlan> {
+  let unreadable = false;
+  const prepared = await prepareMacTrust({
+    certPath: input.certPath,
+    checkTrust: async ({ certPath }) =>
+      await checkMacCaTrust({
+        certPath,
+        exec: async (argv, opts) => {
+          const result = await (input.execute ?? exec)(argv, {
+            ...opts,
+            timeoutMs: input.timeoutMs,
+          }).catch(() => null);
+          if (
+            result === null ||
+            result.exitCode === 124 ||
+            result.exitCode === 127
+          ) {
+            unreadable = true;
+          }
+          return result ?? { exitCode: 127, stdout: "", stderr: "" };
+        },
+      }),
+  });
+  return unreadable
+    ? {
+        status: "unknown",
+        issue:
+          "The System keychain could not be read within the plan's probe deadline",
+      }
+    : prepared;
+}
+
 /** Effects of {@link ensureMacTrustCaddyLocalCa}; injectable for tests. */
 export type MacTrustDeps = {
   readonly confirm: () => Promise<boolean>;

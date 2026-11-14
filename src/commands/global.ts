@@ -204,7 +204,7 @@ import {
 import { observeMacHostDns } from "./global-mac-dns.ts";
 import {
   ensureMacTrustCaddyLocalCa,
-  prepareMacTrust,
+  prepareMacTrustForPlan,
 } from "./global-mac-trust.ts";
 import {
   inspectProxyNetwork,
@@ -1597,11 +1597,13 @@ async function verifyMacRootControlledPaths(
   paths: readonly string[],
   options?: {
     readonly allowMissingPaths?: readonly string[];
+    readonly timeoutMs?: number;
+    readonly onUnreadable?: () => void;
   }
 ): Promise<boolean> {
   const allowMissingPaths = new Set(options?.allowMissingPaths ?? []);
   for (const path of paths) {
-    const metadata = await readMacOwnershipAndMode(path);
+    const metadata = await readMacOwnershipAndMode(path, options);
     if (metadata === null) {
       if (allowMissingPaths.has(path)) {
         continue;
@@ -1628,14 +1630,32 @@ async function verifyMacRootControlledPaths(
   return true;
 }
 
-async function readMacOwnershipAndMode(path: string): Promise<{
+async function readMacOwnershipAndMode(
+  path: string,
+  options?: {
+    readonly timeoutMs?: number;
+    readonly onUnreadable?: () => void;
+  }
+): Promise<{
   readonly uid: number;
   readonly gid: number;
   readonly mode: number;
 } | null> {
   const result = await exec(["/usr/bin/stat", "-f", "%u:%g:%Lp", path], {
     stdin: "ignore",
+    ...(options?.timeoutMs === undefined
+      ? {}
+      : { timeoutMs: options.timeoutMs }),
+  }).catch((error: unknown) => {
+    if (!options?.onUnreadable) {
+      throw error;
+    }
+    options.onUnreadable();
+    return { exitCode: 127, stdout: "", stderr: "" };
   });
+  if (result.exitCode === 124 || result.exitCode === 127) {
+    options?.onUnreadable?.();
+  }
   if (result.exitCode !== 0) {
     return null;
   }
@@ -3475,7 +3495,12 @@ async function readMacInstallSnapshot(
 
 async function readMacAuthorizationSnapshot(
   brew: string | null
-): Promise<Pick<MacInstallSnapshot, "authorization" | "authorizationRefusal">> {
+): Promise<
+  Pick<
+    MacInstallSnapshot,
+    "authorization" | "authorizationRefusal" | "authorizationUnknown"
+  >
+> {
   const probe = async (argv: readonly string[]) =>
     await exec(argv, {
       stdin: "ignore",
@@ -3483,8 +3508,15 @@ async function readMacAuthorizationSnapshot(
     }).catch(() => null);
   let authorization: MacInstallSnapshot["authorization"] = null;
   let authorizationRefusal: string | null = null;
+  let authorizationUnknown = false;
   if (!(await pathExists(MAC_DNS_SUDOERS_PATH))) {
     const user = brew ? await probe(["id", "-un"]) : null;
+    if (
+      brew &&
+      (user === null || user.exitCode === 124 || user.exitCode === 127)
+    ) {
+      authorizationUnknown = true;
+    }
     if (!brew || user?.exitCode !== 0 || !user.stdout.trim()) {
       authorizationRefusal =
         "Recovery authorization cannot run without Homebrew and a readable current username";
@@ -3494,7 +3526,13 @@ async function readMacAuthorizationSnapshot(
           dirname(dirname(MAC_DNS_RECOVERY_HELPER_PATH)),
           dirname(MAC_DNS_RECOVERY_HELPER_PATH),
         ],
-        { allowMissingPaths: [dirname(MAC_DNS_RECOVERY_HELPER_PATH)] }
+        {
+          allowMissingPaths: [dirname(MAC_DNS_RECOVERY_HELPER_PATH)],
+          timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+          onUnreadable: () => {
+            authorizationUnknown = true;
+          },
+        }
       )
     ) {
       const tempDir = resolve(getGlobalPaths().root, "tmp");
@@ -3510,7 +3548,7 @@ async function readMacAuthorizationSnapshot(
         "Recovery authorization refuses insecure helper parent directories";
     }
   }
-  return { authorization, authorizationRefusal };
+  return { authorization, authorizationRefusal, authorizationUnknown };
 }
 
 /** The real `hack global trust` sources, used read-only by its plan. */
@@ -3571,7 +3609,11 @@ function trustPlanDeps(): TrustPlanDeps {
       }).catch(() => null);
       return root !== null && "pem" in root ? { pem: root.pem } : "unknown";
     },
-    prepareMac: prepareMacTrust,
+    prepareMac: async ({ certPath: path }) =>
+      await prepareMacTrustForPlan({
+        certPath: path,
+        timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+      }),
     explicitlyNonInteractive: isExplicitlyNonInteractive,
   };
 }

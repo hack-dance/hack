@@ -457,3 +457,64 @@ test("macOS unknown service or formula state and a future CA keep the plan incom
     prerequisite: "Export CA",
   });
 });
+
+test("macOS embedded trust steps preserve the install plan's global order and gate identifiers", async () => {
+  const defaults = deps();
+  const plan = await planGlobalInstall(
+    deps({
+      platform: "darwin",
+      trust: async () => ({
+        ...(await defaults.trust()),
+        steps: [
+          {
+            order: 1,
+            privilege: "root",
+            id: "probe",
+            description: "Probe",
+            argv: ["sudo", "-n", "true"],
+            shell: "sudo -n true",
+            when: "after confirmation",
+            gates: "keychain-trust",
+          },
+          {
+            order: 2,
+            privilege: "root",
+            id: "keychain-trust",
+            description: "Trust",
+            argv: ["sudo", "security", "add-trusted-cert"],
+            shell: "sudo security add-trusted-cert",
+            when: "after probe succeeds",
+          },
+        ],
+      }),
+    })
+  );
+  expect(plan.steps.map((step) => step.order)).toEqual(
+    plan.steps.map((_, index) => index + 1)
+  );
+  expect(plan.steps.find((step) => step.id === "install-probe")?.gates).toBe(
+    "install-keychain-trust"
+  );
+});
+
+test("macOS unknown recovery ownership cannot be reported as a definite skipped phase", async () => {
+  const plan = await planGlobalInstall(
+    deps({
+      platform: "darwin",
+      macSnapshot: () =>
+        Promise.resolve(
+          macSnapshot({
+            authorizationUnknown: true,
+            authorizationRefusal: "Ownership unavailable",
+          })
+        ),
+    })
+  );
+  expect(plan.complete).toBe(false);
+  expect(
+    plan.blocked.some((phase) => phase.phase === "recovery authorization")
+  ).toBe(true);
+  expect(
+    rootSteps(plan).filter((step) => step.id.startsWith("recovery-"))
+  ).toEqual([]);
+});

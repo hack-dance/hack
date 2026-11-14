@@ -658,13 +658,24 @@ or its `Label` is Hack's. That covers plists written by earlier Hack versions,
 which have no marker.
 
 The program is read as launchd reads it: `Program` when present, else
-`ProgramArguments[0]`. A plist whose program cannot be read (not a property
-list, a repeated key, a value that is not a plain string, an XML escape or a
-relative path) is never replaced automatically; `start` reports it and
+`ProgramArguments[0]`, and only from keys of the plist's root `<dict>`. Keys
+inside nested dicts (such as `EnvironmentVariables`) and inside comments do not
+count. Some plists cannot be read:
+
+- the text is not a property list, or its root is not a dict;
+- it has CDATA, an unterminated comment, a malformed or unbalanced tag, or a
+  value type the reader does not know;
+- a root key repeats;
+- the program value is not a plain string, uses an XML escape, or is a relative
+  path.
+
+Such a plist is never replaced automatically; `start` reports it and
 `hack daemon install` replaces it.
 
-- A plist whose program is gone (no program at all, a path that does not exist,
-  or a compiled-binary virtual path) is retargeted to this CLI.
+- A plist whose program is gone is retargeted to this CLI. Gone means no program
+  at all, a compiled-binary virtual path, or a path that `stat` reports as
+  `ENOENT` or `ENOTDIR`. Any other `stat` error (for example `EACCES` or `EIO`)
+  means the program cannot be checked, and the plist is left alone.
 - A plist that runs this CLI's executable (same file) is rewritten with the
   marker when it differs from what this CLI writes, if it is Hack's or its
   output paths are not `/dev/null` (the earlier output repair). launchd then

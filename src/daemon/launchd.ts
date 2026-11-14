@@ -15,7 +15,14 @@ import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 import { boundedTimeoutMs } from "../lib/process-deadline.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
+import { parseLaunchdPlistProgram } from "./launchd-plist.ts";
 import type { DaemonPaths } from "./paths.ts";
+
+// biome-ignore lint/performance/noBarrelFile: keeps launchd's public surface in one module
+export {
+  type LaunchdPlistProgram,
+  parseLaunchdPlistProgram,
+} from "./launchd-plist.ts";
 
 const PID_PATTERN = /pid\s*=\s*(\d+)/i;
 const STATE_PATTERN = /state\s*=\s*(\w+)/i;
@@ -429,85 +436,27 @@ export function isVirtualExecutablePath(path: string): boolean {
 }
 
 /**
- * The executable launchd runs for a plist, with launchd's precedence:
- * `Program` when present, else `ProgramArguments[0]` (HACK-2216).
- * `none`: neither key is present, so nothing is run (absence established).
- * `unknown`: the text is not a property list, a key appears twice, its
- * value is not a plain string (or array of strings), it uses an XML escape
- * this reader does not decode, or the path is not absolute. Unknown is
- * never evidence that the program is missing: callers leave such a plist
- * as it is.
+ * Whether a plist's program file exists, for deciding whether a retarget
+ * is allowed (HACK-2216). `missing` only for ENOENT or ENOTDIR; any other
+ * error (EACCES, EIO, ELOOP...) is `unknown`, which never authorizes an
+ * automatic replacement. {@link pathExists} is not used here: it reports
+ * every error as absence.
  */
-export type LaunchdPlistProgram =
-  | { readonly kind: "path"; readonly path: string }
-  | { readonly kind: "none" }
-  | { readonly kind: "unknown"; readonly reason: string };
-
-const PLIST_ROOT = /<plist[\s>/]/;
-const PROGRAM_KEY = /<key>\s*Program\s*<\/key>/g;
-const PROGRAM_ARGUMENTS_KEY = /<key>\s*ProgramArguments\s*<\/key>/g;
-const STRING_VALUE = /^\s*<string>([^<]*)<\/string>/;
-const ARRAY_FIRST_STRING = /^\s*<array>\s*<string>([^<]*)<\/string>/;
-
-export function parseLaunchdPlistProgram(opts: {
-  readonly plistText: string;
-}): LaunchdPlistProgram {
-  const text = opts.plistText;
-  if (!PLIST_ROOT.test(text)) {
-    return { kind: "unknown", reason: "not a property list" };
+export async function classifyLaunchdProgramPath(opts: {
+  readonly path: string;
+  /** Defaults to `fs.stat`; tests inject errors. */
+  readonly stat?: (path: string) => Promise<unknown>;
+}): Promise<"exists" | "missing" | "unknown"> {
+  try {
+    await (opts.stat ?? stat)(opts.path);
+    return "exists";
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
   }
-  const program = readKeyValue({ text, key: PROGRAM_KEY, value: STRING_VALUE });
-  if (program.kind !== "absent") {
-    return program.kind === "value"
-      ? programPath(program.value)
-      : { kind: "unknown", reason: `Program ${program.reason}` };
-  }
-  const args = readKeyValue({
-    text,
-    key: PROGRAM_ARGUMENTS_KEY,
-    value: ARRAY_FIRST_STRING,
-  });
-  if (args.kind === "absent") {
-    return { kind: "none" };
-  }
-  return args.kind === "value"
-    ? programPath(args.value)
-    : { kind: "unknown", reason: `ProgramArguments ${args.reason}` };
-}
-
-function readKeyValue(opts: {
-  readonly text: string;
-  readonly key: RegExp;
-  readonly value: RegExp;
-}):
-  | { readonly kind: "absent" }
-  | { readonly kind: "value"; readonly value: string }
-  | { readonly kind: "invalid"; readonly reason: string } {
-  const keys = [...opts.text.matchAll(opts.key)];
-  if (keys.length === 0) {
-    return { kind: "absent" };
-  }
-  if (keys.length > 1) {
-    return { kind: "invalid", reason: "appears more than once" };
-  }
-  const key = keys[0];
-  const rest = opts.text.slice((key?.index ?? 0) + (key?.[0].length ?? 0));
-  const match = opts.value.exec(rest);
-  if (match?.[1] === undefined) {
-    return { kind: "invalid", reason: "is not a plain string value" };
-  }
-  return { kind: "value", value: match[1] };
-}
-
-function programPath(raw: string): LaunchdPlistProgram {
-  const path = raw.trim();
-  if (path.includes("&")) {
-    return { kind: "unknown", reason: "the program path uses an XML escape" };
-  }
-  if (!path.startsWith("/")) {
-    return { kind: "unknown", reason: "the program path is not absolute" };
-  }
-  return { kind: "path", path };
 }
 
 /**
@@ -607,6 +556,8 @@ export type LaunchdProgramState =
 export async function readLaunchdProgramState(opts: {
   readonly paths: DaemonPaths;
   readonly plistText?: string | null;
+  /** Defaults to `fs.stat`; tests inject errors. */
+  readonly stat?: (path: string) => Promise<unknown>;
 }): Promise<LaunchdProgramState> {
   if (!resolveLaunchdAccess().allowed) {
     return { kind: "not-installed" };
@@ -625,13 +576,16 @@ export async function readLaunchdProgramState(opts: {
   }
   const program = parsed.kind === "path" ? parsed.path : null;
   // Absence is established only by no program at all, a virtual path, or
-  // a path that does not exist.
-  const exists =
-    program !== null &&
-    !isVirtualExecutablePath(program) &&
-    (await pathExists(program));
-  if (!exists) {
+  // a path stat reports as ENOENT/ENOTDIR; any other stat error is unknown.
+  if (program === null || isVirtualExecutablePath(program)) {
     return { kind: "missing", program, resolved };
+  }
+  const presence = await classifyLaunchdProgramPath({
+    path: program,
+    stat: opts.stat,
+  });
+  if (presence !== "exists") {
+    return { kind: presence, program, resolved };
   }
   const ours =
     resolved !== null && (await isSameExecutableFile(program, resolved));

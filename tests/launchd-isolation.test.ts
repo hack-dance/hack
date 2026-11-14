@@ -553,6 +553,83 @@ test("an unreadable plist program is never replaced", async () => {
   expect(verbs).toEqual([]);
 });
 
+// Review round 3 (HACK-2216).
+
+/** Hack's plist shape with a top-level program and extra root entries. */
+function rootPlist(opts: {
+  readonly firstArgument: string;
+  readonly extra: string;
+}): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n${opts.extra}\n  <key>ProgramArguments</key>\n  <array>\n    <string>${opts.firstArgument}</string>\n    <string>daemon</string>\n  </array>\n</dict>\n</plist>\n`;
+}
+
+test("a nested Program key does not make a foreign top-level program missing", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    written = rootPlist({
+      firstArgument: otherHack(fixture),
+      extra:
+        "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>Program</key>\n    <string>/missing/path</string>\n  </dict>",
+    });
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "other-program",
+    secondRepair: "other-program",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
+test("a commented-out Program key does not make a foreign top-level program missing", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    written = rootPlist({
+      firstArgument: otherHack(fixture),
+      extra: "  <!-- <key>Program</key>\n  <string>/missing/path</string> -->",
+    });
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "other-program",
+    secondRepair: "other-program",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
+test.skipIf(process.getuid?.() === 0)(
+  "a program path that cannot be checked (EACCES) is never replaced",
+  async () => {
+    let locked = "";
+    let written = "";
+    try {
+      const { results, after, verbs } = await repairPlist((fixture) => {
+        locked = join(fixture.root, "locked");
+        mkdirSync(locked, { recursive: true });
+        copyFileSync(join(fixture.root, "tools", "hack"), join(locked, "hack"));
+        // No search permission: stat of locked/hack fails with EACCES.
+        chmodSync(locked, 0o000);
+        written = rootPlist({
+          firstArgument: join(locked, "hack"),
+          extra: "",
+        });
+        return written;
+      });
+      expect(results).toEqual({
+        repair: "unknown-program",
+        secondRepair: "unknown-program",
+      });
+      expect(after).toBe(written);
+      expect(verbs).toEqual([]);
+    } finally {
+      if (locked) {
+        chmodSync(locked, 0o755);
+      }
+    }
+  }
+);
+
 test("macOS restart --json refuses a launchd service running another hack, before stopping anything", async () => {
   const fixture = await makeFixture();
   const plist = programPlist({ program: otherHack(fixture) });

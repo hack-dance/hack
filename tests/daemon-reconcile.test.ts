@@ -21,6 +21,7 @@ import {
   reconcileDaemonAfterUpdate,
 } from "../src/commands/daemon-upgrade.ts";
 import {
+  classifyLaunchdProgramPath,
   isHackManagedPlist,
   isLaunchdPlistCurrent,
   isSameExecutableFile,
@@ -828,4 +829,77 @@ test("after an update, a daemon that stopped before the child ran is not started
     action: "none",
     stale_reasons: [],
   });
+});
+
+// Review round 3 (HACK-2216): only root-dict keys count, and only
+// ENOENT/ENOTDIR establish a missing program.
+
+const ROUND3_PLIST = (body: string) =>
+  `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n${body}\n</dict>\n</plist>\n`;
+const ROUND3_ARGS = (first: string) =>
+  `  <key>ProgramArguments</key>\n  <array>\n    <string>${first}</string>\n    <string>daemon</string>\n  </array>`;
+
+test("a Program key nested in another dict does not count", () => {
+  const plist = ROUND3_PLIST(
+    `${ROUND3_ARGS("/opt/other/hack")}\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>Program</key>\n    <string>/missing/path</string>\n    <key>ProgramArguments</key>\n    <array><string>/missing/too</string></array>\n  </dict>`
+  );
+  expect(parseLaunchdPlistProgram({ plistText: plist })).toEqual({
+    kind: "path",
+    path: "/opt/other/hack",
+  });
+  // Nested only: the root names no program.
+  expect(
+    parseLaunchdPlistProgram({
+      plistText: ROUND3_PLIST(
+        "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>Program</key>\n    <string>/x/hack</string>\n  </dict>"
+      ),
+    })
+  ).toEqual({ kind: "none" });
+});
+
+test("a commented-out Program key does not count", () => {
+  const plist = ROUND3_PLIST(
+    `  <!-- <key>Program</key>\n  <string>/missing/path</string> -->\n${ROUND3_ARGS("/opt/other/hack")}`
+  );
+  expect(parseLaunchdPlistProgram({ plistText: plist })).toEqual({
+    kind: "path",
+    path: "/opt/other/hack",
+  });
+});
+
+test("structures the reader does not handle are unknown", () => {
+  for (const body of [
+    "  <key>Program</key>\n  <string><![CDATA[/opt/x/hack]]></string>",
+    `${ROUND3_ARGS("/opt/other/hack")}\n  <!-- unterminated`,
+    `${ROUND3_ARGS("/opt/other/hack")}\n  <key>Nested</key>\n  <dict>\n    <key>A</key>\n  </dict>`,
+    `${ROUND3_ARGS("/opt/other/hack")}\n  <key>Odd</key>\n  <set/>`,
+    `${ROUND3_ARGS("/opt/other/hack")}\n  <array>`,
+  ]) {
+    expect(
+      parseLaunchdPlistProgram({ plistText: ROUND3_PLIST(body) }).kind
+    ).toBe("unknown");
+  }
+  expect(
+    parseLaunchdPlistProgram({
+      plistText: '<plist version="1.0">\n<array/>\n</plist>\n',
+    }).kind
+  ).toBe("unknown");
+  expect(parseLaunchdPlistProgram({ plistText: "<plist/>" })).toEqual({
+    kind: "none",
+  });
+});
+
+test("only ENOENT and ENOTDIR make a plist program missing", async () => {
+  const failing = (code: string) => () =>
+    Promise.reject(Object.assign(new Error(code), { code }));
+  const classify = (stat: (path: string) => Promise<unknown>) =>
+    classifyLaunchdProgramPath({ path: "/opt/hack/bin/hack", stat });
+  expect(await classify(failing("ENOENT"))).toBe("missing");
+  expect(await classify(failing("ENOTDIR"))).toBe("missing");
+  expect(await classify(failing("EACCES"))).toBe("unknown");
+  expect(await classify(failing("EIO"))).toBe("unknown");
+  expect(await classify(() => Promise.reject(new Error("no code")))).toBe(
+    "unknown"
+  );
+  expect(await classify(() => Promise.resolve({}))).toBe("exists");
 });

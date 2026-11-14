@@ -169,6 +169,9 @@ impl Source for LiveSource {
         native: bool,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
+        // Actions run checkout-defined lifecycle commands as the user, so
+        // the registry's root must be the user's own directory.
+        check_owned_root(repo_root)?;
         let timeout = if action == Action::Start {
             Self::UP
         } else {
@@ -240,6 +243,37 @@ pub fn parse_log_tail(out: &str, err: &str, code: Option<i32>) -> Result<Vec<Log
         return Err(format!("hack logs exited with {code:?}: {}", err.trim()));
     }
     Ok(events.into_iter().filter_map(|e| e.entry).collect())
+}
+
+/// Refuse to act on a project root that is not an absolute, existing
+/// directory owned by the current user (not a symlink to one owned by
+/// someone else). The projects registry is not ownership-checked by the
+/// CLI today, so a root planted by another account must not get its
+/// lifecycle hooks run by a click here.
+///
+/// # Errors
+/// `E_APP_UNTRUSTED_ROOT` with the reason.
+pub fn check_owned_root(root: &Path) -> Result<(), SourceError> {
+    use std::os::unix::fs::MetadataExt;
+    let refuse = |why: &str| SourceError::Cli {
+        code: "E_APP_UNTRUSTED_ROOT".into(),
+        message: format!("Not running this action: the project folder {why}."),
+        failed: vec![],
+    };
+    if !root.is_absolute() {
+        return Err(refuse("is not an absolute path"));
+    }
+    let real = std::fs::canonicalize(root).map_err(|_| refuse("could not be read"))?;
+    let meta = std::fs::metadata(&real).map_err(|_| refuse("could not be read"))?;
+    if !meta.is_dir() {
+        return Err(refuse("is not a directory"));
+    }
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if meta.uid() != uid {
+        return Err(refuse("is owned by another user"));
+    }
+    Ok(())
 }
 
 /// Canned data for one designed state.
@@ -386,6 +420,35 @@ esac
             parse_log_tail(err_ev, "", Some(0)).unwrap_err(),
             "no engine"
         );
+    }
+
+    #[test]
+    fn actions_require_an_owned_absolute_root() {
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(check_owned_root(&dir).is_ok());
+        let file = dir.join("f");
+        std::fs::write(&file, "").unwrap();
+        assert!(check_owned_root(&file).is_err(), "not a directory");
+        assert!(check_owned_root(Path::new("relative/dir")).is_err());
+        assert!(check_owned_root(&dir.join("missing")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        // A directory owned by another user (root) is refused, unless the
+        // test itself runs as root.
+        // SAFETY: getuid has no preconditions and cannot fail.
+        if unsafe { libc::getuid() } != 0 {
+            let err = check_owned_root(Path::new("/")).unwrap_err();
+            assert!(
+                matches!(err, SourceError::Cli { ref code, .. } if code == "E_APP_UNTRUSTED_ROOT")
+            );
+        }
     }
 
     #[test]

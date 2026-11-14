@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
+import {
+  buildDoctorRemediationPlanLines,
+  type DoctorJsonCheck,
+} from "../src/commands/doctor.ts";
 import {
   ADOPTED_PROJECT_NOT_APPLICABLE_CHECKS,
   ADOPTED_PROJECT_NOT_APPLICABLE_MESSAGE,
@@ -85,13 +88,6 @@ async function doctorJson(): Promise<{
   return { exit, stdout, stderr };
 }
 
-type JsonCheck = {
-  readonly id: string;
-  readonly status: string;
-  readonly detail: string;
-  readonly durationMs: number;
-};
-
 test("doctor reports an adopted project with closed messages instead of refusing it as native input (HACK-1311)", async () => {
   await adopt();
   const receipt = await readFile(receiptPath(), "utf8");
@@ -100,7 +96,8 @@ test("doctor reports an adopted project with closed messages instead of refusing
   expect(run.stdout + run.stderr).not.toContain(SOURCE_BIND_CANARY);
   const parsed: unknown = JSON.parse(run.stdout);
   expect(parsed).toMatchObject({ ok: true, data: { schema: 1 } });
-  const checks = (parsed as { data: { checks: JsonCheck[] } }).data.checks;
+  const checks = (parsed as { data: { checks: DoctorJsonCheck[] } }).data
+    .checks;
   const byId = new Map(checks.map((check) => [check.id, check]));
 
   expect(byId.get("project")).toEqual({
@@ -207,7 +204,8 @@ test("doctor reports a pending adoption as a project warning that asks for recov
   const parsed: unknown = JSON.parse(run.stdout);
   // A warning, not an error: doctor still exits ok.
   expect(parsed).toMatchObject({ ok: true, data: { schema: 1 } });
-  const checks = (parsed as { data: { checks: JsonCheck[] } }).data.checks;
+  const checks = (parsed as { data: { checks: DoctorJsonCheck[] } }).data
+    .checks;
   const byId = new Map(checks.map((check) => [check.id, check]));
   expect(byId.get("project")).toEqual({
     id: "project",

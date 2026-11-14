@@ -264,6 +264,11 @@ try {
     ],
     checkout
   );
+  assert(
+    (await readdir(home)).length === 0,
+    "validation and planning leave HOME untouched"
+  );
+  // Lifecycle refusals still append activity; planning itself must stay read-only.
   const runtime = await invoke(["up", "web", "--detach"], checkout, false, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -283,7 +288,8 @@ try {
     );
   }
   assert(
-    (await readdir(join(home, ".hack")).catch(() => [])).length === 0,
+    JSON.stringify(await readdir(home)) === '[".hack"]' &&
+      (await readdir(join(home, ".hack"))).join() === "activity.jsonl",
     "planning creates no registry or runtime home state"
   );
   process.stdout.write(

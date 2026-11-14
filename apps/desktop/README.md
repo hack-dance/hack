@@ -109,3 +109,11 @@ Screenshots for this slice: [normal light](screenshots/env-normal-light.png),
 
 This Env change is stacked on `feat/desktop-app-core` for focused review;
 the completed desktop stack ultimately targets `next`.
+
+Env reads refuse missing project markers and nested `.dev` targets shadowed by
+an ancestor `.hack` project, using the CLI's discovery precedence. The adapter
+canonicalizes the selected root and checks markers before and after the read;
+concurrent filesystem edits are not an atomic fence. Empty legacy scope arrays
+are shown as `global`. macOS keychain prompting remains unverified. Rapid tab
+changes may launch overlapping bounded reads; stale results are discarded, but
+in-flight reads are not deduplicated.

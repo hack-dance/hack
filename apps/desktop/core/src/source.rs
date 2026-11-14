@@ -200,15 +200,29 @@ impl LiveSource {
 
 impl Source for LiveSource {
     fn env(&self, root: &Path, native: bool) -> crate::env::EnvView {
+        // env list walks ancestors. Refuse missing or shadowed project markers
+        // instead of attributing an ancestor's names to the selected project.
+        if !root.is_absolute() {
+            return crate::env::EnvView::Unreadable;
+        }
+        let Ok(root) = std::fs::canonicalize(root) else {
+            return crate::env::EnvView::Unreadable;
+        };
+        if !root.is_dir() || !cli_selects_exactly(&root) {
+            return crate::env::EnvView::Unreadable;
+        }
         match self
             .runner_for(native)
             .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
             .run_raw(
                 &["env", "list", "--json"],
-                Some(root),
+                Some(&root),
                 Duration::from_secs(10),
             ) {
-            Ok((out, _, code)) => crate::env::EnvView::parse(&out, code),
+            Ok((out, _, code)) if cli_selects_exactly(&root) => {
+                crate::env::EnvView::parse(&out, code)
+            }
+            Ok(_) => crate::env::EnvView::Unreadable,
             Err(_) => crate::env::EnvView::Unreadable,
         }
     }

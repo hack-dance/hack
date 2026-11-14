@@ -24,6 +24,7 @@ impl Scope {
     pub fn label(&self) -> String {
         match self {
             Self::Canonical(s) => s.clone(),
+            Self::Legacy(s) if s.is_empty() => "global".into(),
             Self::Legacy(s) => s.join(", "),
         }
     }
@@ -241,6 +242,13 @@ mod tests {
             panic!("report");
         };
         assert_eq!(empty.empty_label(), "This project has no env layers");
+    }
+
+    #[test]
+    fn legacy_empty_scope_is_global() {
+        assert_eq!(Scope::Legacy(vec![]).label(), "global");
+        assert_eq!(Scope::Legacy(vec!["api".into()]).label(), "api");
+        assert_eq!(Scope::Canonical("global".into()).label(), "global");
     }
 
     #[test]

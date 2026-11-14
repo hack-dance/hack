@@ -3,12 +3,12 @@ import { expect, test } from "bun:test";
 import { renderHelpMarkdownForPath } from "../src/cli/help.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 
-test("hack session help explains persistent workspaces and tmux-first fallback", () => {
+test("hack session help explains persistent workspaces and tmux workspaces", () => {
   const help = renderHelpMarkdownForPath(CLI_SPEC, ["session"]);
 
   expect(help).toContain("persistent project workspaces");
-  expect(help).toContain("tmux-first");
-  expect(help).toContain("zellij");
+  expect(help).toContain("tmux");
+  expect(help).not.toContain("zellij");
   expect(help).toContain("`hack setup tmux`");
 });
 
@@ -28,9 +28,9 @@ test("hack session attach and exec help explain workspace-oriented flows", () =>
   const execHelp = renderHelpMarkdownForPath(CLI_SPEC, ["session", "exec"]);
 
   expect(attachHelp).toContain("Attach to a running workspace by name");
-  expect(attachHelp).toContain("zellij attaches to the named session directly");
+  expect(attachHelp).toContain("Tmux switches clients");
   expect(execHelp).toContain("Queue a command in the workspace");
-  expect(execHelp).toContain("zellij opens a new pane");
+  expect(execHelp).toContain("Tmux sends it to the active pane");
   expect(execHelp).toContain("long-running agents");
   expect(execHelp).toContain("--env");
   expect(execHelp).toContain("--service");

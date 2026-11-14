@@ -276,3 +276,11 @@ and writes both service stdout and stderr to the CLI's stdout, so pipes receive 
 Remote, gateway, node and dispatch commands and the macOS app remain in the
 repository but are unsupported. See
 [unsupported retained surfaces](../extensions.md).
+
+## Breaking change: zellij workspaces removed
+
+v5 supports tmux for interactive workspaces. `sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij` now fail with migration guidance. Install tmux, then remove the setting or set it to `tmux`; `auto` detects tmux only. Existing zellij sessions are not stopped or migrated by Hack.
+
+**Before upgrading a project that used zellij for lifecycle processes:** with zellij installed, use the v4 CLI to run `hack down` for that project and confirm its lifecycle processes have stopped. Then switch to v5 and change the mux setting. Saved zellij lifecycle state blocks v5 start, restart and down because v5 cannot verify or stop that session. If already upgraded, use the retained v4 CLI to stop the affected project first; do not delete or edit managed state files. Removing a workspace setting alone does not clear saved lifecycle state. A stale-state migration path remains part of the lifecycle supervisor work.
+
+A leftover zellij setting also makes `hack global install` fail with the same migration guidance. Fix the setting before retrying.

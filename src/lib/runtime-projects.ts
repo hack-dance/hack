@@ -18,10 +18,14 @@ import {
   inspectProjectInputsAtRoot,
   ProjectInputSelectionError,
 } from "./project-input-selection.ts";
+import type { ServiceMemberEvidence } from "./project-state.ts";
 import { upsertProjectRegistration } from "./projects-registry.ts";
+import { readContainerState } from "./runtime-service-state.ts";
 import { exec, findExecutableInPath } from "./shell.ts";
 
 export type RuntimeContainer = {
+  /** Fresh inspect evidence only; cached static metadata never proves current health/exit. */
+  readonly observation?: ServiceMemberEvidence | null;
   readonly id: string;
   readonly project: string;
   readonly service: string;
@@ -79,6 +83,7 @@ export type RuntimeProjectsResult =
     };
 
 export type ContainerInspectData = {
+  readonly observation?: ServiceMemberEvidence | null;
   readonly labels: Record<string, string>;
   readonly image: string | null;
   readonly mounts: readonly RuntimeContainerMount[];
@@ -248,6 +253,8 @@ export async function readRuntimeProjects(opts: {
     }
 
     containers.push({
+      observation:
+        inspect?.observation?.state === state ? inspect.observation : null,
       id,
       project,
       service,
@@ -616,7 +623,7 @@ export async function readContainerLabels(opts: {
 
 // Request only fields used by the runtime model; Docker must not return env values or command arguments.
 const RUNTIME_INSPECT_FORMAT =
-  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"Mounts":{{json .Mounts}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
+  '{"Id":{{json .Id}},"Config":{"Labels":{{json .Config.Labels}},"Image":{{json .Config.Image}}},"State":{"Status":{{json .State.Status}},"ExitCode":{{json .State.ExitCode}},"StartedAt":{{json .State.StartedAt}},"Health":{{if .State.Health}}{"Status":{{json .State.Health.Status}}}{{else}}null{{end}}},"Mounts":{{json .Mounts}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}}}';
 
 async function readContainerInspectData(opts: {
   readonly ids: readonly string[];
@@ -663,6 +670,7 @@ async function readContainerInspectData(opts: {
     const networks = parseInspectNetworks(item.NetworkSettings);
 
     const detail: ContainerInspectData = {
+      observation: readContainerState(item.State),
       labels,
       image,
       mounts,
@@ -703,19 +711,21 @@ async function readCachedContainerInspectData(opts: {
     opts.cache.diagnostics.inspectCalls += 1;
     opts.cache.diagnostics.inspectIds += idsToInspect.length;
     const inspected = await readContainerInspectData({ ids: idsToInspect });
-    for (const id of idsToInspect) {
-      const detail = inspected.get(id);
-      if (detail) {
-        opts.cache.entries.set(id, detail);
-      }
-    }
+    reconcileInspectEvidence({
+      cache: opts.cache,
+      inspected,
+      ids: idsToInspect,
+    });
   }
 
   const out = new Map<string, ContainerInspectData>();
   for (const id of opts.ids) {
     const detail = opts.cache.entries.get(id);
     if (detail) {
-      out.set(id, detail);
+      out.set(
+        id,
+        idsToInspect.includes(id) ? detail : { ...detail, observation: null }
+      );
     }
   }
   return out;
@@ -845,4 +855,21 @@ function formatDockerError(opts: {
     return stdout;
   }
   return `docker ps failed (exit ${opts.exitCode})`;
+}
+
+/** Failed reinspection can retain static labels, never a previous health result. */
+function reconcileInspectEvidence(opts: {
+  readonly cache: RuntimeInspectCache;
+  readonly inspected: ReadonlyMap<string, ContainerInspectData>;
+  readonly ids: readonly string[];
+}): void {
+  for (const id of opts.ids) {
+    const detail = opts.inspected.get(id);
+    const previous = opts.cache.entries.get(id);
+    if (detail) {
+      opts.cache.entries.set(id, detail);
+    } else if (previous) {
+      opts.cache.entries.set(id, { ...previous, observation: null });
+    }
+  }
 }

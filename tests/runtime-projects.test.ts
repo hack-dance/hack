@@ -61,6 +61,9 @@ const shellMock = await registerScopedModuleMock({
       if (command[1] === "inspect") {
         expect(command[2]).toBe("--format");
         expect(command[3]).not.toContain(".Env");
+        expect(command[3]).not.toContain(".Log");
+        expect(command[3]).not.toContain(".Error");
+        expect(command[3]).toContain(".State.StartedAt");
         const ids = [...command.slice(4)];
         inspectCalls.push(ids);
         const returnedIds = inspectExitCode === 0 ? ids : ids.slice(0, 1);
@@ -271,6 +274,12 @@ function makeInspectRow(opts: {
 }): Record<string, unknown> {
   return {
     Id: `${opts.id}${"0".repeat(52)}`,
+    State: {
+      Status: "running",
+      ExitCode: 0,
+      StartedAt: "2026-01-01T00:00:00Z",
+      Health: { Status: "healthy" },
+    },
     Config: {
       Image: `image:${opts.id}`,
       Labels: {
@@ -291,3 +300,49 @@ function makeInspectRow(opts: {
     },
   };
 }
+
+test("cached static metadata never becomes fresh service health or start evidence", async () => {
+  dockerAvailable = true;
+  currentIds = ["aaaaaaaaaaaa"];
+  const cache = createRuntimeInspectCache();
+  const first = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: true,
+  });
+  const cached = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: false,
+  });
+  const member = (result: typeof first) =>
+    [...(result.runtime[0]?.services.values() ?? [])][0]?.containers[0];
+  expect(member(first)?.observation?.health).toBe("healthy");
+  expect(member(first)?.observation?.exitCode).toBeNull();
+  expect(member(cached)?.observation).toBeNull();
+  expect(inspectCalls).toHaveLength(1);
+});
+
+test("failed reinspection keeps static identity but clears old current-state evidence", async () => {
+  dockerAvailable = true;
+  currentIds = ["aaaaaaaaaaaa", "bbbbbbbbbbbb"];
+  const cache = createRuntimeInspectCache();
+  await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: true,
+  });
+  inspectExitCode = 1;
+  const result = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: true,
+  });
+  const services = result.runtime[0]?.services;
+  expect(
+    services?.get("service-aaaaaaaaaaaa")?.containers[0]?.observation?.health
+  ).toBe("healthy");
+  const second = services?.get("service-bbbbbbbbbbbb")?.containers[0];
+  expect(second?.image).toBe("image:bbbbbbbbbbbb");
+  expect(second?.observation).toBeNull();
+});

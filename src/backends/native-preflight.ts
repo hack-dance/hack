@@ -262,9 +262,13 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     fix: "Select at most 64 profiles.",
   },
   invalid_mount: {
+    message: "A mount is not in a form native accepts.",
+    fix: "Write each mount as source:target, or as one absolute container path for an anonymous volume. A bind mount needs a source, and a volume subpath needs a named volume.",
+  },
+  reserved_volume_name: {
     message:
-      "A mount is not in a form native accepts. Anonymous volumes, such as a bare /app/node_modules, are not supported.",
-    fix: "Write each mount as source:target, and replace an anonymous volume with a named volume declared under volumes.",
+      "A volume name starts with hack-anonymous-, which native reserves for anonymous volumes.",
+    fix: "Rename the volume.",
   },
   reserved_mount_target: {
     message: "A mount replaces a system or runtime directory in the container.",
@@ -450,6 +454,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
       "extra_hosts entries reach the host only through a reviewed host dependency binding.",
     fix: "Nothing to do if a dependency file is selected for this environment; otherwise select one with HACK_NATIVE_DEPENDENCIES.",
   },
+  anonymous_volume_named: {
+    message:
+      "An anonymous volume is stored as a named volume this project owns. Unlike Compose, it is kept across hack down and is not refilled from a rebuilt image.",
+    fix: "Nothing to do. Run hack down --remove-data to start it empty again, or declare a named volume to choose its name.",
+  },
   mount_host_hint_ignored: {
     message:
       "A mount carries a host-only hint (cached, delegated, consistent, z or Z), which is ignored.",
@@ -516,6 +525,7 @@ export const REVIEW_STOP_CODES: ReadonlySet<string> = new Set([
   "profile_budget",
   "registry_template_invalid",
   "registry_template_unsafe",
+  "reserved_volume_name",
   "service_budget",
   "source_budget",
   "source_escape",

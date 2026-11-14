@@ -2961,7 +2961,7 @@ async function checkComposeBackendFeatures(opts: {
 
 /**
  * Warning-only native data-service advisories (image entrypoint ownership
- * handoff and mutable tags on services with named data volumes). Reads only
+ * handoff and mutable tags on services with retained data volumes). Reads only
  * the project's Compose file; never blocks native up.
  */
 async function checkNativeDataAdvisories(opts: {

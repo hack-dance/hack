@@ -434,7 +434,9 @@ test(
       gate: "runtime",
       code: "invalid_mount",
     });
-    expect(first.report.blockers[0]?.message).toContain("Anonymous volumes");
+    expect(first.report.blockers[0]?.message).toContain(
+      "not in a form native accepts"
+    );
     expect(first.report.blockers[0]?.fix).toContain(
       "run the preflight again after fixing it"
     );

@@ -267,6 +267,17 @@ test("the startup source flags and the source limit share one capture predicate"
   ).toEqual(
     nativePlanServiceSourceUse({ active: true, mounts: [{ kind: "bind" }] })
   );
+  // An anonymous volume shares no source; an unclear form still counts as a bind.
+  for (const anonymous of ["/app/node_modules", { target: "/d" }]) {
+    expect(
+      nativeComposeServiceSourceUse({ volumes: [anonymous] }, []).bindsSource
+    ).toBe(false);
+  }
+  for (const bind of ["/host:/app", "/data:ro", ":/data", "data"]) {
+    expect(
+      nativeComposeServiceSourceUse({ volumes: [bind] }, []).bindsSource
+    ).toBe(true);
+  }
   expect(
     nativeComposeServiceSourceUse(
       { labels: { "hack.dependencies.cache-volume": "m" } },

@@ -112,6 +112,9 @@ pub(super) fn compile(
     if let Some(value) = m.get("volumes") {
         for (name, value) in object(value)? {
             identifier(name)?;
+            if name.starts_with(service::ANONYMOUS_PREFIX) {
+                return Err(service::reserved_volume_name());
+            }
             let field = format!("volumes.{name}");
             let empty = Map::new();
             let v = if value.is_null() {
@@ -240,7 +243,7 @@ pub(super) fn compile(
             problem("missing_services", "Compose services mapping is required.")
         })?)?,
         profiles,
-        &volumes,
+        &mut volumes,
         &mut diagnostics,
     )?;
     // Quarantining a directory that is, or contains, a mounted volume subpath

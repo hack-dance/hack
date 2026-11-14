@@ -103,11 +103,46 @@ fn host_hint_ignored(field: &str) -> Diagnostic {
     )
 }
 
+/// Volume names with this prefix belong to anonymous mounts and cannot be authored.
+pub(super) const ANONYMOUS_PREFIX: &str = "hack-anonymous-";
+
+/// The owned volume that stores one service's anonymous mount. The name
+/// depends only on the service and the reviewed target, so every review of an
+/// unchanged file finds the same storage, and two services never share one.
+fn anonymous_volume(service: &str, target: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(service.as_bytes());
+    hash.update([0]);
+    hash.update(target.as_bytes());
+    format!("{ANONYMOUS_PREFIX}{:.16}", format!("{:x}", hash.finalize()))
+}
+
+/// Refusal for an authored volume name, mount source or cache-volume label
+/// that carries the generated prefix.
+pub(super) fn reserved_volume_name() -> CandidateError {
+    problem(
+        "reserved_volume_name",
+        "Volume names that start with hack-anonymous- are reserved for anonymous volumes.",
+    )
+}
+
+fn anonymous_volume_plan() -> VolumePlan {
+    VolumePlan {
+        driver: "local".into(),
+        ownership:
+            "new candidate namespace; generated for an anonymous mount; retained on ordinary stop"
+                .into(),
+        disposable_caches: Vec::new(),
+    }
+}
+
 fn mounts(
     project: &Path,
     base: &Path,
     value: Option<&Value>,
-    declared: &BTreeMap<String, VolumePlan>,
+    service: &str,
+    declared: &mut BTreeMap<String, VolumePlan>,
     field: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<Vec<MountPlan>, CandidateError> {
@@ -123,27 +158,33 @@ fn mounts(
         let (kind, from, to, read_only, subpath) = match value {
             Value::String(s) => {
                 let parts: Vec<_> = s.split(':').collect();
-                if !(2..=3).contains(&parts.len()) {
-                    return Err(problem(
-                        "invalid_mount",
-                        "Use source:target[:ro|rw]; anonymous volumes and colon-bearing paths are outside this subset.",
-                    ));
+                // A lone absolute path names no source: an anonymous volume,
+                // the only short form Compose reads that way.
+                if parts.len() == 1 && parts[0].starts_with('/') {
+                    ("volume", None, parts[0], false, None)
+                } else {
+                    if !(2..=3).contains(&parts.len()) {
+                        return Err(problem(
+                            "invalid_mount",
+                            "Use source:target[:ro|rw] or one absolute path for an anonymous volume; colon-bearing paths are outside this subset.",
+                        ));
+                    }
+                    let (readonly, hinted) = short_mount_mode(parts.get(2).copied())?;
+                    if hinted {
+                        diagnostics.push(host_hint_ignored(field));
+                    }
+                    (
+                        if parts[0].starts_with('.') || parts[0].starts_with('/') {
+                            "bind"
+                        } else {
+                            "volume"
+                        },
+                        Some(parts[0]),
+                        parts[1],
+                        readonly,
+                        None,
+                    )
                 }
-                let (readonly, hinted) = short_mount_mode(parts.get(2).copied())?;
-                if hinted {
-                    diagnostics.push(host_hint_ignored(field));
-                }
-                (
-                    if parts[0].starts_with('.') || parts[0].starts_with('/') {
-                        "bind"
-                    } else {
-                        "volume"
-                    },
-                    parts[0],
-                    parts[1],
-                    readonly,
-                    None,
-                )
             }
             Value::Object(m) => {
                 let subpath = if let Some(options) = m.get("volume") {
@@ -191,12 +232,17 @@ fn mounts(
                     }
                     diagnostics.push(host_hint_ignored(field));
                 }
+                let kind = m.get("type").map(string).transpose()?.unwrap_or("volume");
+                let source = match m.get("source") {
+                    Some(source) => Some(string(source)?),
+                    // A whole volume without a source is an anonymous volume. A
+                    // bind has nothing to share, and a subpath has nothing to select.
+                    None if kind == "volume" && subpath.is_none() => None,
+                    None => return Err(problem("invalid_mount", "Mount source is required.")),
+                };
                 (
-                    m.get("type").map(string).transpose()?.unwrap_or("volume"),
-                    string(
-                        m.get("source")
-                            .ok_or_else(|| problem("invalid_mount", "Mount source is required."))?,
-                    )?,
+                    kind,
+                    source,
                     string(
                         m.get("target")
                             .ok_or_else(|| problem("invalid_mount", "Mount target is required."))?,
@@ -225,7 +271,7 @@ fn mounts(
                 "Mount targets must be unique per service.",
             ));
         }
-        if from.contains('$') || from.starts_with('~') {
+        if from.is_some_and(|from| from.contains('$') || from.starts_with('~')) {
             diagnostics.push(Diagnostic::error("unresolved_mount_source",field,"Interpolated or home-relative mount sources are not resolved from ambient environment. Credential directories require scoped credential delivery; declare ordinary source paths relative to the project."));
             result.push(MountPlan {
                 subpath,
@@ -238,13 +284,40 @@ fn mounts(
             });
             continue;
         }
-        let (source, policy) = match kind {
-            "bind" => (
+        let (source, policy) = match (kind, from) {
+            ("bind", Some(from)) => (
                 relative(project, &source::resolve(project, base, from, false)?),
                 "filtered node-native source; never a direct host mount",
             ),
-            "volume" => {
+            // No authored volume, mount source or cache label can carry the
+            // prefix, and targets are unique per service, so only a hash
+            // collision can find the name taken.
+            ("volume", None) => {
+                let name = anonymous_volume(service, &target);
+                if declared
+                    .insert(name.clone(), anonymous_volume_plan())
+                    .is_some()
+                {
+                    return Err(problem(
+                        "invalid_mount",
+                        "Two anonymous volumes resolve to the same owned volume.",
+                    ));
+                }
+                diagnostics.push(Diagnostic::warning(
+                    "anonymous_volume_named",
+                    field,
+                    "An anonymous volume on this service is stored as a named volume this project owns. Unlike Compose, it is kept across hack down and is not filled again from a rebuilt image.",
+                ));
+                (
+                    name,
+                    "candidate-owned volume generated for an anonymous mount",
+                )
+            }
+            ("volume", Some(from)) => {
                 identifier(from)?;
+                if from.starts_with(ANONYMOUS_PREFIX) {
+                    return Err(reserved_volume_name());
+                }
                 if !declared.contains_key(from) {
                     diagnostics.push(Diagnostic::error(
                         "undeclared_volume",
@@ -720,7 +793,7 @@ pub(super) fn compile(
     base: &Path,
     values: &Map<String, Value>,
     profiles: &[String],
-    volumes: &BTreeMap<String, VolumePlan>,
+    volumes: &mut BTreeMap<String, VolumePlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<BTreeMap<String, ServicePlan>, CandidateError> {
     if values.is_empty() || values.len() > super::super::MAX_COMPOSE_SERVICES {
@@ -1093,6 +1166,7 @@ pub(super) fn compile(
             project,
             base,
             m.get("volumes"),
+            name,
             volumes,
             &format!("{field}.volumes"),
             diagnostics,

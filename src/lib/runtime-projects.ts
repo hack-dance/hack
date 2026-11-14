@@ -9,6 +9,7 @@ import { pathExists } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import { parseJsonLines } from "./json-lines.ts";
 import { readLifecycleState } from "./lifecycle-runtime.ts";
+import { inspectLifecycleSupervisor } from "./lifecycle-supervisor.ts";
 import {
   createOperationTimings,
   type OperationTimings,
@@ -363,10 +364,11 @@ export async function autoRegisterRuntimeHackProjects(opts: {
 type LifecycleActivity = {
   readonly sessionActive: boolean;
   readonly runningWindows: ReadonlySet<string> | null;
+  readonly unknownWindows?: ReadonlySet<string>;
 };
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Lifecycle pseudo-services are derived from several runtime sources in one normalization step.
-async function addLifecycleProcessServices(opts: {
+export async function addLifecycleProcessServices(opts: {
   readonly runtime: readonly RuntimeProject[];
 }): Promise<RuntimeProject[]> {
   if (opts.runtime.length === 0) {
@@ -377,13 +379,18 @@ async function addLifecycleProcessServices(opts: {
     string,
     Awaited<ReturnType<typeof readLifecycleState>>
   >();
+  const unreadable = new Set<string>();
   for (const runtime of opts.runtime) {
     const workingDir = runtime.workingDir;
     if (!workingDir || stateByWorkingDir.has(workingDir)) {
       continue;
     }
-    const state = await readLifecycleState({ projectDir: workingDir });
-    stateByWorkingDir.set(workingDir, state);
+    try {
+      const state = await readLifecycleState({ projectDir: workingDir });
+      stateByWorkingDir.set(workingDir, state);
+    } catch {
+      unreadable.add(workingDir);
+    }
   }
 
   const tmuxWindowsBySession = new Map<string, ReadonlySet<string> | null>();
@@ -396,6 +403,36 @@ async function addLifecycleProcessServices(opts: {
       out.push(runtime);
       continue;
     }
+    if (unreadable.has(workingDir)) {
+      const services = new Map(runtime.services);
+      const service = "lifecycle-state";
+      const existing = services.get(service);
+      services.set(service, {
+        service,
+        containers: [
+          ...(existing?.containers ?? []),
+          {
+            id: `lifecycle-state-${runtime.project}`,
+            project: runtime.project,
+            service,
+            state: "unknown",
+            status: "Unknown (lifecycle: state_unreadable)",
+            name: `${runtime.project}-lifecycle-state`,
+            ports: "",
+            workingDir,
+            image: null,
+            labels: {
+              "hack.lifecycle.process": "true",
+              "hack.lifecycle.error": "state_unreadable",
+            },
+            mounts: [],
+            networks: [],
+          },
+        ],
+      });
+      out.push({ ...runtime, services });
+      continue;
+    }
     const state = stateByWorkingDir.get(workingDir) ?? [];
     const entry = state.find((item) => item.composeProject === runtime.project);
     if (!entry) {
@@ -403,18 +440,24 @@ async function addLifecycleProcessServices(opts: {
       continue;
     }
 
-    const activity = await resolveLifecycleActivity({
-      backend: entry.backend,
-      sessionName: entry.sessionName,
-      tmuxWindowsBySession,
-      getZellijSessions: async () => {
-        if (zellijSessions) {
-          return zellijSessions;
-        }
-        zellijSessions = await readZellijSessionNames();
-        return zellijSessions;
-      },
-    });
+    const activity =
+      entry.backend === "supervisor"
+        ? await readSupervisorLifecycleActivity({
+            entry,
+            projectDir: workingDir,
+          })
+        : await resolveLifecycleActivity({
+            backend: entry.backend,
+            sessionName: entry.sessionName,
+            tmuxWindowsBySession,
+            getZellijSessions: async () => {
+              if (zellijSessions) {
+                return zellijSessions;
+              }
+              zellijSessions = await readZellijSessionNames();
+              return zellijSessions;
+            },
+          });
 
     const services = new Map(runtime.services);
     for (const process of entry.processes) {
@@ -422,8 +465,15 @@ async function addLifecycleProcessServices(opts: {
         activity.runningWindows !== null
           ? activity.runningWindows.has(process.windowName)
           : activity.sessionActive;
-      const stateValue = running ? "running" : "exited";
-      const status = running ? "Up (lifecycle)" : "Exited (lifecycle)";
+      const unknown = activity.unknownWindows?.has(process.windowName) === true;
+      const observedState = running ? "running" : "exited";
+      const stateValue = unknown ? "unknown" : observedState;
+      const statusByState = {
+        unknown: "Unknown (lifecycle)",
+        running: "Up (lifecycle)",
+        exited: "Exited (lifecycle)",
+      };
+      const status = statusByState[stateValue];
       const id = `lifecycle-${runtime.project}-${sanitizeLifecycleToken(process.name)}`;
       const syntheticContainer: RuntimeContainer = {
         id,
@@ -466,6 +516,51 @@ async function addLifecycleProcessServices(opts: {
   }
 
   return out;
+}
+
+/** Native observations alone qualify supervisor service liveness. */
+export async function readSupervisorLifecycleActivity(opts: {
+  readonly entry: Awaited<ReturnType<typeof readLifecycleState>>[number];
+  readonly projectDir: string;
+  readonly inspect?: typeof inspectLifecycleSupervisor;
+}): Promise<LifecycleActivity> {
+  const unknown = () => ({
+    sessionActive: false,
+    runningWindows: new Set<string>(),
+    unknownWindows: new Set(
+      opts.entry.processes.map((process) => process.windowName)
+    ),
+  });
+  if (!opts.entry.ownershipToken) {
+    return unknown();
+  }
+  try {
+    const receipt = await (opts.inspect ?? inspectLifecycleSupervisor)({
+      projectDir: opts.projectDir,
+      composeProject: opts.entry.composeProject,
+      ownershipToken: opts.entry.ownershipToken,
+    });
+    if (receipt.outcome !== "observed") {
+      return unknown();
+    }
+    return {
+      sessionActive: receipt.liveProcessNames.length > 0,
+      runningWindows: new Set(
+        opts.entry.processes
+          .filter((process) => receipt.liveProcessNames.includes(process.name))
+          .map((process) => process.windowName)
+      ),
+      unknownWindows: new Set(
+        opts.entry.processes
+          .filter((process) =>
+            receipt.unknownProcessNames.includes(process.name)
+          )
+          .map((process) => process.windowName)
+      ),
+    };
+  } catch {
+    return unknown();
+  }
 }
 
 async function resolveLifecycleActivity(opts: {

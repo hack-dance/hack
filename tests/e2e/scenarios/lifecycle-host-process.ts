@@ -1,4 +1,8 @@
-import { join } from "node:path";
+import { readdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { isRecord } from "../../../src/lib/guards.ts";
+import { resolveLifecycleSupervisorRoot } from "../../../src/lib/lifecycle-supervisor.ts";
+import { restoreEnv } from "../../helpers/env.ts";
 
 import { createMonorepoFixture } from "../fixture.ts";
 import { expect, expectExit, runCommand, type Scenario } from "../harness.ts";
@@ -20,6 +24,7 @@ export const lifecycleHostProcessScenario: Scenario = {
   summary: "lifecycle hooks and command-group teardown run during up/down",
   run: async (ctx) => {
     await requireDockerPreconditions({ ctx });
+    const supervisor = process.env.HACK_LIFECYCLE_RUNNER === "supervisor";
 
     const markerFile = join(ctx.tempRoot, "lifecycle-marker.txt");
     const envMarkerFile = join(ctx.tempRoot, "lifecycle-env-marker.txt");
@@ -33,9 +38,39 @@ export const lifecycleHostProcessScenario: Scenario = {
         standaloneContainers: true,
       },
     });
+    if (supervisor) {
+      const binary =
+        process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY ??
+        resolve(
+          ctx.repoRoot,
+          ".hack-local/target/lifecycle-integration/debug/hack-lifecycle-supervisor"
+        );
+      expect({
+        that: await Bun.file(binary).exists(),
+        message:
+          "supervisor host scenario requires its current-source executable",
+      });
+      // Store only the runner choice in this disposable fixture. The native
+      // executable remains an explicit test environment override.
+      await runSupervisorHostProcess({
+        ctx,
+        fixture,
+        markerFile,
+        envMarkerFile,
+        binary,
+      });
+      return;
+    }
 
+    const previousTmuxRoot = process.env.TMUX_TMPDIR;
+    process.env.TMUX_TMPDIR = ctx.tempRoot;
+    const cli: typeof ctx.cli = (invocation) =>
+      ctx.cli({
+        ...invocation,
+        env: { ...invocation.env, TMUX_TMPDIR: ctx.tempRoot },
+      });
     try {
-      const up = await ctx.cli({
+      const up = await cli({
         args: ["up", "--detach"],
         cwd: fixture.root,
         timeoutMs: UP_TIMEOUT_MS,
@@ -140,7 +175,7 @@ export const lifecycleHostProcessScenario: Scenario = {
         result: owner,
       });
 
-      const repeatedUp = await ctx.cli({
+      const repeatedUp = await cli({
         args: ["up", "--detach"],
         cwd: fixture.root,
         timeoutMs: UP_TIMEOUT_MS,
@@ -202,7 +237,7 @@ export const lifecycleHostProcessScenario: Scenario = {
         message: "legacy fixture should have no session ownership token",
       });
 
-      const recoveredUp = await ctx.cli({
+      const recoveredUp = await cli({
         args: ["up", "--detach"],
         cwd: fixture.root,
         timeoutMs: UP_TIMEOUT_MS,
@@ -220,7 +255,7 @@ export const lifecycleHostProcessScenario: Scenario = {
         result: recoveredUp,
       });
 
-      const down = await ctx.cli({
+      const down = await cli({
         args: ["down"],
         cwd: fixture.root,
         timeoutMs: UP_TIMEOUT_MS,
@@ -260,7 +295,7 @@ export const lifecycleHostProcessScenario: Scenario = {
           standaloneContainers: true,
         },
       });
-      const failedUp = await ctx.cli({
+      const failedUp = await cli({
         args: ["up", "--detach", "--json"],
         cwd: failingFixture.root,
         timeoutMs: UP_TIMEOUT_MS,
@@ -298,10 +333,219 @@ export const lifecycleHostProcessScenario: Scenario = {
         result: failedUp,
       });
     } finally {
-      await downBestEffort({ ctx, fixture });
+      try {
+        await downBestEffort({ ctx: { ...ctx, cli }, fixture });
+      } finally {
+        await runCommand({ argv: ["tmux", "kill-server"], cwd: fixture.root });
+        restoreEnv("TMUX_TMPDIR", previousTmuxRoot);
+      }
     }
   },
 };
+
+async function runSupervisorHostProcess(opts: {
+  readonly ctx: Parameters<Scenario["run"]>[0];
+  readonly fixture: Awaited<ReturnType<typeof createMonorepoFixture>>;
+  readonly markerFile: string;
+  readonly envMarkerFile: string;
+  readonly binary: string;
+}): Promise<void> {
+  const env = {
+    HACK_LIFECYCLE_RUNNER: "supervisor",
+    HACK_LIFECYCLE_SUPERVISOR_BINARY: opts.binary,
+  };
+  const statePath = join(
+    opts.fixture.hackDir,
+    ".internal/lifecycle/state.json"
+  );
+  const cli = (args: readonly string[]) =>
+    opts.ctx.cli({
+      args,
+      cwd: opts.fixture.root,
+      env,
+      timeoutMs: UP_TIMEOUT_MS,
+    });
+  try {
+    const up = await cli(["up", "--detach"]);
+    expectExit({
+      result: up,
+      codes: [0],
+      message: "supervisor host fixture should start real Compose services",
+    });
+    expect({
+      that: (await Bun.file(opts.markerFile).text()).includes("up-before-ran"),
+      message: "supervisor before hook did not precede Compose",
+      result: up,
+    });
+    expect({
+      that:
+        (await Bun.file(opts.envMarkerFile).text()) === "host-value|host-only",
+      message: "supervisor before hook lost resolved environment",
+      result: up,
+    });
+    const first = (await readLifecycleState({ path: statePath })).entries[0];
+    const guard = first?.processes?.find(
+      (process) => process.name === "e2e-sleeper"
+    )?.processGroupId;
+    expect({
+      that:
+        first?.backend === "supervisor" &&
+        Boolean(first.ownershipToken) &&
+        Number.isInteger(guard) &&
+        (guard ?? 0) > 1,
+      message: "native lifecycle state lost owner/session identity",
+      result: up,
+    });
+    const leader = await runCommand({
+      argv: ["ps", "-o", "pid=,pgid=", "-p", String(guard)],
+      cwd: opts.fixture.root,
+    });
+    expectExit({
+      result: leader,
+      codes: [0],
+      message: "recorded native guard should be alive",
+    });
+    expect({
+      that: leader.stdout
+        .trim()
+        .split(/\s+/)
+        .every((value) => Number(value) === guard),
+      message: "native guard should lead its own group",
+      result: leader,
+    });
+    const repeated = await cli(["up", "--detach"]);
+    expectExit({
+      result: repeated,
+      codes: [0],
+      message: "supervisor host fixture should adopt healthy owner",
+    });
+    expect({
+      that:
+        (await readLifecycleState({ path: statePath })).entries[0]
+          ?.ownershipToken === first?.ownershipToken,
+      message: "native healthy adoption replaced ownership",
+      result: repeated,
+    });
+    const down = await cli(["down"]);
+    expectExit({
+      result: down,
+      codes: [0],
+      message: "native down should confirm host session retirement",
+    });
+    expect({
+      that:
+        (await readLifecycleState({ path: statePath })).entries.length === 0,
+      message: "native down retained stopped state",
+      result: down,
+    });
+    if (guard && guard > 1) {
+      let alive = true;
+      try {
+        process.kill(guard, 0);
+      } catch {
+        alive = false;
+      }
+      expect({
+        that: !alive,
+        message: "native guard survived confirmed down",
+        result: down,
+      });
+    }
+    const failing = await createMonorepoFixture({
+      parentDir: opts.ctx.tempRoot,
+      withHackConfig: true,
+      lifecycle: {
+        persistentProcess: true,
+        composeFailure: true,
+        standaloneContainers: true,
+      },
+    });
+    const failingState = join(
+      failing.hackDir,
+      ".internal/lifecycle/state.json"
+    );
+    try {
+      const failedUp = await opts.ctx.cli({
+        args: ["up", "--detach", "--json"],
+        cwd: failing.root,
+        env,
+        timeoutMs: UP_TIMEOUT_MS,
+      });
+      expect({
+        that: failedUp.exitCode !== 0 && !failedUp.timedOut,
+        message:
+          "real Compose failure must propagate after native lifecycle startup",
+        result: failedUp,
+      });
+      expect({
+        that:
+          (await readLifecycleState({ path: failingState })).entries.length ===
+          0,
+        message: "real Compose failure left native lifecycle ownership",
+        result: failedUp,
+      });
+      const priorHome = process.env.HACK_HOME;
+      let nativeRoot: string;
+      try {
+        process.env.HACK_HOME = opts.ctx.hackHome;
+        nativeRoot = resolveLifecycleSupervisorRoot({
+          projectDir: failing.hackDir,
+          composeProject: failing.name,
+        });
+      } finally {
+        restoreEnv("HACK_HOME", priorHome);
+      }
+      const receipts = (await readdir(nativeRoot)).filter((name) =>
+        name.endsWith(".json")
+      );
+      expect({
+        that: receipts.length > 0,
+        message: "failure fixture did not reach native lifecycle startup",
+        result: failedUp,
+      });
+      for (const name of receipts) {
+        const state: unknown = await Bun.file(join(nativeRoot, name)).json();
+        expect({
+          that:
+            isRecord(state) &&
+            Number.isInteger(state.commandPid) &&
+            (state.phase === "exited" || state.phase === "killed"),
+          message:
+            "Compose failure did not retain confirmed native retirement evidence",
+          result: failedUp,
+        });
+      }
+    } finally {
+      const cleanup = await opts.ctx.cli({
+        args: ["down"],
+        cwd: failing.root,
+        env,
+        timeoutMs: UP_TIMEOUT_MS,
+      });
+      if (
+        cleanup.timedOut ||
+        (await readLifecycleState({ path: failingState })).entries.length > 0
+      ) {
+        opts.ctx.retainFixtures(
+          "Failed Compose cleanup retained native ownership evidence."
+        );
+      }
+      await downBestEffort({ ctx: opts.ctx, fixture: failing });
+    }
+  } finally {
+    const cleanup = await cli(["down"]);
+    if (
+      cleanup.exitCode !== 0 ||
+      cleanup.timedOut ||
+      (await readLifecycleState({ path: statePath })).entries.length > 0
+    ) {
+      opts.ctx.retainFixtures(
+        "Supervisor host cleanup was not confirmed; retained private ownership evidence."
+      );
+    }
+    await downBestEffort({ ctx: opts.ctx, fixture: opts.fixture });
+  }
+}
 
 type LifecycleStateFixture = {
   readonly entries: ReadonlyArray<{

@@ -282,6 +282,7 @@ try {
   require(!(await readdir(join(checkout, ".hack"))).some(
     (name) => name === ".internal" || name === ".branch"
   ), "no registry or generated runtime state");
+
   process.stdout.write(
     "Relocated native env plan acceptance: offline validation, metadata-only output, missing overlays/refs, immutable directives, separate hashes, real linked-worktree layers, CI/slim/opt-out, unsafe-input and runtime refusal passed\n"
   );
@@ -300,6 +301,7 @@ async function invoke(
       PATH: "/usr/bin:/bin",
       HOME: home,
       HACK_LOGGER: "console",
+      HACK_DAEMON_AUTOSTART_DISABLE: "1",
       AWS_SECRET_ACCESS_KEY: sentinel,
       ...extraEnv,
     },

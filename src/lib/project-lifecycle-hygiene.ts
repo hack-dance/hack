@@ -10,6 +10,12 @@ import {
   readLifecycleState,
   removeLifecycleStateEntryIfMatching,
 } from "./lifecycle-runtime.ts";
+import {
+  inspectLifecycleSupervisor,
+  type LifecycleSupervisorReceipt,
+  stopLifecycleSupervisor,
+  withLifecycleSupervisorControllerLock,
+} from "./lifecycle-supervisor.ts";
 import { readProcessIdentities } from "./process-tree.ts";
 import {
   createLifecycleSessionRetirement,
@@ -80,8 +86,12 @@ export async function inspectProjectLifecycleHygiene(opts: {
 
   const [sessionsByBackend, snapshot, activeComposeProjects] =
     await Promise.all([
-      listSessionsByBackend(),
-      readProcessSnapshot(),
+      entries.some((entry) => entry.backend !== "supervisor")
+        ? listSessionsByBackend()
+        : Promise.resolve(new Map<LifecycleBackend, ReadonlySet<string>>()),
+      entries.some((entry) => entry.backend !== "supervisor")
+        ? readProcessSnapshot()
+        : Promise.resolve([]),
       readActiveComposeProjects({ projectDir: opts.projectDir }),
     ]);
   const stateInspection = inspectLifecycleStateEntries({
@@ -94,14 +104,44 @@ export async function inspectProjectLifecycleHygiene(opts: {
     projectRoot: opts.projectRoot,
   });
   const sessionHygiene = classifyLifecycleSessionHygiene({
-    entries,
+    entries: entries.filter((entry) => entry.backend !== "supervisor"),
     sessionInspections,
+    activeComposeProjects,
+  });
+  const supervisorReceipts = new Map<
+    string,
+    LifecycleSupervisorReceipt | null
+  >();
+  for (const entry of entries.filter((item) => item.backend === "supervisor")) {
+    const receipt = entry.ownershipToken
+      ? await inspectLifecycleSupervisor({
+          projectDir: opts.projectDir,
+          composeProject: entry.composeProject,
+          ownershipToken: entry.ownershipToken,
+        }).catch(() => null)
+      : null;
+    supervisorReceipts.set(entry.composeProject, receipt);
+  }
+  const supervisorInspection = classifySupervisorLifecycleHygiene({
+    entries,
+    receipts: supervisorReceipts,
     activeComposeProjects,
   });
 
   return {
-    ...stateInspection,
-    ...sessionHygiene,
+    staleEntries: [
+      ...stateInspection.staleEntries,
+      ...supervisorInspection.staleEntries,
+    ],
+    orphanedProcessGroups: stateInspection.orphanedProcessGroups,
+    orphanedSessions: [
+      ...sessionHygiene.orphanedSessions,
+      ...supervisorInspection.orphanedSessions,
+    ],
+    unverifiedSessions: [
+      ...sessionHygiene.unverifiedSessions,
+      ...supervisorInspection.unverifiedSessions,
+    ],
     runtimeAvailable: activeComposeProjects !== null,
   };
 }
@@ -119,6 +159,11 @@ export function inspectLifecycleStateEntries(opts: {
   const orphanedProcessGroups = new Set<number>();
 
   for (const entry of opts.entries) {
+    // Native status owns the supervisor's identity/liveness proof. Absence
+    // from a mux inventory never grants stale-state or cleanup authority.
+    if (entry.backend === "supervisor") {
+      continue;
+    }
     const sessions = opts.sessionsByBackend.get(entry.backend);
     const sessionPresent = sessions?.has(entry.sessionName) ?? false;
     if (sessionPresent) {
@@ -148,6 +193,61 @@ export function inspectLifecycleStateEntries(opts: {
       (left, right) => left - right
     ),
   };
+}
+
+/** Classify native read-only evidence without treating unknown as absence. */
+export function classifySupervisorLifecycleHygiene(opts: {
+  readonly entries: readonly LifecycleStateEntry[];
+  readonly receipts: ReadonlyMap<string, LifecycleSupervisorReceipt | null>;
+  readonly activeComposeProjects: ReadonlySet<string> | null;
+  readonly now?: Date;
+}): Pick<
+  LifecycleHygieneInspection,
+  "staleEntries" | "orphanedSessions" | "unverifiedSessions"
+> {
+  const staleEntries: StaleLifecycleStateEntry[] = [];
+  const orphanedSessions: OrphanedLifecycleSession[] = [];
+  const unverifiedSessions: UnverifiedLifecycleSession[] = [];
+  for (const entry of opts.entries) {
+    if (entry.backend !== "supervisor") {
+      continue;
+    }
+    const receipt = opts.receipts.get(entry.composeProject);
+    if (
+      !receipt ||
+      receipt.unknownProcessNames.length > 0 ||
+      receipt.outcome !== "observed"
+    ) {
+      unverifiedSessions.push({
+        entry,
+        reason:
+          "Lifecycle supervisor ownership or liveness could not be verified.",
+      });
+      continue;
+    }
+    if (receipt.liveProcessNames.length === 0) {
+      staleEntries.push({ entry, liveProcessGroups: [] });
+      continue;
+    }
+    if (
+      opts.activeComposeProjects === null ||
+      opts.activeComposeProjects.has(entry.composeProject)
+    ) {
+      continue;
+    }
+    const age =
+      (opts.now ?? new Date()).getTime() - Date.parse(entry.updatedAt);
+    if (!Number.isFinite(age) || age < LIFECYCLE_SESSION_ORPHAN_GRACE_MS) {
+      unverifiedSessions.push({
+        entry,
+        reason:
+          "Lifecycle supervisor is recent enough to belong to an in-flight startup.",
+      });
+      continue;
+    }
+    orphanedSessions.push({ entry, classification: "owned-healthy" });
+  }
+  return { staleEntries, orphanedSessions, unverifiedSessions };
 }
 
 export function classifyLifecycleSessionHygiene(opts: {
@@ -220,6 +320,8 @@ export async function repairProjectLifecycleSessions(opts: {
     readonly retireSession?: ReturnType<
       typeof createLifecycleSessionRetirement
     >;
+    readonly inspectSupervisor?: typeof inspectLifecycleSupervisor;
+    readonly stopSupervisor?: typeof stopLifecycleSupervisor;
   };
 }): Promise<LifecycleHygieneRepairResult> {
   const {
@@ -229,6 +331,8 @@ export async function repairProjectLifecycleSessions(opts: {
     readPanes = readRepairPanes,
     readIdentities = readProcessIdentities,
     retireSession,
+    inspectSupervisor = inspectLifecycleSupervisor,
+    stopSupervisor = stopLifecycleSupervisor,
   } = opts.boundary ?? {};
   const initial = await inspect(opts);
   const repairedSessions: string[] = [];
@@ -245,6 +349,25 @@ export async function repairProjectLifecycleSessions(opts: {
       );
       continue;
     }
+    if (!sameRepairEntry(candidate.entry, orphan.entry)) {
+      failures.push(
+        `${candidate.entry.sessionName}: lifecycle generation changed before repair`
+      );
+      continue;
+    }
+    if (orphan.entry.backend === "supervisor") {
+      const result = await repairSupervisorSession({
+        projectDir: opts.projectDir,
+        projectRoot: opts.projectRoot,
+        entry: orphan.entry,
+        inspect,
+        inspectSupervisor,
+        stopSupervisor,
+      });
+      repairedSessions.push(...result.repairedSessions);
+      failures.push(...result.failures);
+      continue;
+    }
     const backend = backends().get(orphan.entry.backend);
     if (!backend?.available) {
       failures.push(`${orphan.entry.sessionName}: mux backend unavailable`);
@@ -257,10 +380,7 @@ export async function repairProjectLifecycleSessions(opts: {
       expectedProjectRoot: opts.projectRoot,
       expectedDefinitionHash: orphan.entry.definitionHash ?? "",
     });
-    if (
-      inspection.decision.kind === "block" ||
-      inspection.decision.kind === "create"
-    ) {
+    if (["block", "create"].includes(inspection.decision.kind)) {
       failures.push(
         `${orphan.entry.sessionName}: ownership proof changed before repair`
       );
@@ -307,6 +427,104 @@ export async function repairProjectLifecycleSessions(opts: {
   }
 
   return { repairedSessions, failures };
+}
+
+async function repairSupervisorSession(opts: {
+  readonly projectDir: string;
+  readonly projectRoot: string;
+  readonly entry: LifecycleStateEntry;
+  readonly inspect: typeof inspectProjectLifecycleHygiene;
+  readonly inspectSupervisor: typeof inspectLifecycleSupervisor;
+  readonly stopSupervisor: typeof stopLifecycleSupervisor;
+}): Promise<LifecycleHygieneRepairResult> {
+  return await withLifecycleSupervisorControllerLock({
+    projectDir: opts.projectDir,
+    composeProject: opts.entry.composeProject,
+    run: () => repairSupervisorSessionLocked(opts),
+  });
+}
+
+async function repairSupervisorSessionLocked(opts: {
+  readonly projectDir: string;
+  readonly projectRoot: string;
+  readonly entry: LifecycleStateEntry;
+  readonly inspect: typeof inspectProjectLifecycleHygiene;
+  readonly inspectSupervisor: typeof inspectLifecycleSupervisor;
+  readonly stopSupervisor: typeof stopLifecycleSupervisor;
+}): Promise<LifecycleHygieneRepairResult> {
+  try {
+    const ownershipToken = opts.entry.ownershipToken;
+    if (!ownershipToken) {
+      throw new Error("Lifecycle supervisor ownership token is missing");
+    }
+    const control = {
+      projectDir: opts.projectDir,
+      composeProject: opts.entry.composeProject,
+      ownershipToken,
+    };
+    const observed = await opts.inspectSupervisor(control);
+    if (
+      observed.outcome !== "observed" ||
+      observed.unknownProcessNames.length > 0
+    ) {
+      throw new Error("Lifecycle supervisor ownership is unverified");
+    }
+    // Native observation can wait on a process census. Refresh runtime absence
+    // and startup grace after that wait, then fence the exact stored generation.
+    const fresh = await opts.inspect({
+      projectDir: opts.projectDir,
+      projectRoot: opts.projectRoot,
+    });
+    if (
+      !fresh.orphanedSessions.some((orphan) =>
+        sameRepairEntry(orphan.entry, opts.entry)
+      )
+    ) {
+      throw new Error("Lifecycle supervisor is no longer runtime-orphaned");
+    }
+    await assertRepairEntryCurrent({
+      projectDir: opts.projectDir,
+      entry: opts.entry,
+    });
+    const stopped = await opts.stopSupervisor(control);
+    if (
+      stopped.outcome !== "stopped" ||
+      stopped.liveProcessNames.length > 0 ||
+      stopped.unknownProcessNames.length > 0
+    ) {
+      throw new Error("Lifecycle supervisor stop was not confirmed");
+    }
+    if (
+      !(await removeLifecycleStateEntryIfMatching({
+        projectDir: opts.projectDir,
+        expectedEntry: opts.entry,
+      }))
+    ) {
+      throw new Error("Lifecycle state changed after supervisor stop");
+    }
+    return { repairedSessions: [opts.entry.sessionName], failures: [] };
+  } catch {
+    return {
+      repairedSessions: [],
+      failures: [
+        `${opts.entry.sessionName}: supervisor retirement unconfirmed; kept ownership state`,
+      ],
+    };
+  }
+}
+
+function sameRepairEntry(
+  left: LifecycleStateEntry,
+  right: LifecycleStateEntry
+): boolean {
+  return (
+    left.composeProject === right.composeProject &&
+    left.backend === right.backend &&
+    left.sessionName === right.sessionName &&
+    left.ownershipToken === right.ownershipToken &&
+    left.cleanupEpoch === right.cleanupEpoch &&
+    left.updatedAt === right.updatedAt
+  );
 }
 
 function repairFailureMessage(error: unknown): string {
@@ -436,6 +654,7 @@ async function assertRepairEntryCurrent(opts: {
     current.sessionName !== opts.entry.sessionName ||
     current.backend !== opts.entry.backend ||
     current.updatedAt !== opts.entry.updatedAt ||
+    current.cleanupEpoch !== opts.entry.cleanupEpoch ||
     current.ownershipToken !== opts.entry.ownershipToken
   ) {
     throw new Error("Lifecycle ownership changed before repair retirement");
@@ -446,9 +665,15 @@ async function inspectOwnedLifecycleSessions(opts: {
   readonly entries: readonly LifecycleStateEntry[];
   readonly projectRoot: string;
 }): Promise<ReadonlyMap<string, LifecycleSessionInspection>> {
-  const backends = getMuxBackends();
   const inspections = new Map<string, LifecycleSessionInspection>();
+  if (!opts.entries.some((entry) => entry.backend !== "supervisor")) {
+    return inspections;
+  }
+  const backends = getMuxBackends();
   for (const entry of opts.entries) {
+    if (entry.backend === "supervisor") {
+      continue;
+    }
     const backend = backends.get(entry.backend);
     if (!backend?.available) {
       continue;

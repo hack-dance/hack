@@ -1,0 +1,31 @@
+---
+title: Lifecycle controller · launch receipts and adoption
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Idle
+  Idle --> Starting : Begin
+  Starting --> AwaitReply : Launch [pending published]
+  AwaitReply --> Ready : Accept
+  AwaitReply --> InspectLate : LoseReply
+  InspectLate --> LatePublished : PublishLate [native live]
+  LatePublished --> Failed : FailUnknown
+  Ready --> Adopted : Adopt [native live]
+  Failed --> Adopted : Adopt [native live]
+  Adopted --> AwaitReply : Add [not stopped]
+  Ready --> Aborted : Abort [epoch matches]
+  Failed --> Aborted : Abort [epoch matches]
+  Ready --> Stopped : Stop [absence confirmed]
+  Adopted --> Stopped : Stop [absence confirmed]
+  Failed --> Stopped : Stop [absence confirmed]
+  note right of Starting
+    INV ownership precedes launch
+  end note
+  note right of Adopted
+    INV old cleanup cannot stop
+    Token stable, epoch changes
+  end note
+  note right of Failed
+    Unknown is not absence
+    Verified late effect retained
+  end note

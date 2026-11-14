@@ -101,10 +101,16 @@ staging directories. Unknown or edited entries are retained, reported as
 `payloadCleanup: "kept"` in the apply result. Original snapshot blobs remain for
 rollback. A private data home inside a Git working tree refuses apply; choose a
 private `HACK_HOME` outside repositories, including a home managed as dotfiles.
-Snapshot storage must also share a filesystem with every migration target:
-the snapshot library restores with rename and hard links. Apply refuses before
-project writes if that guarantee is unavailable. Choose a private `HACK_HOME`
-on the target filesystem, outside Git working trees, then retry the preview.
+Snapshot storage must also share a filesystem and mount with every migration
+target, with hard links permitted: the snapshot library restores with rename and
+hard links. Apply checks this before publishing any migration target. It briefly
+links an exclusively created, empty `.hack-env-restore-probe-*` file from the
+snapshot to each existing target parent, then removes both names. These temporary
+probes contain no input bytes and are not migration targets in `files`; preview
+never creates them. A process killed during this check can leave an empty probe.
+If admission refuses, choose a private `HACK_HOME` on the target mount outside
+Git working trees, then retry the preview. Matching device numbers alone do not
+prove that two paths share a mount, for example with Linux bind mounts.
 
 Migration never includes cleanup. A later explicit cleanup requires:
 

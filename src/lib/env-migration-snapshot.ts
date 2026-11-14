@@ -1,4 +1,6 @@
-import { lstat, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
+import { link, lstat, open, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
 import {
@@ -70,12 +72,68 @@ export function envMigrationSnapshots(): EnvMigrationSnapshots {
   });
 }
 
-/** The provider restores by rename/hard link; refuse before migration if that cannot work. */
+function restoreFilesystemRefusal(): ClosedCliError {
+  return new ClosedCliError(
+    "Env migration needs snapshot storage on the same filesystem and mount as every target, with hard links permitted, so rollback can restore it. Choose a private HACK_HOME on that filesystem outside Git working trees; no migration files were changed (values omitted)."
+  );
+}
+
+async function removeRestoreProbe(
+  path: string,
+  identity: Stats
+): Promise<void> {
+  const current = await lstat(path);
+  if (current.dev !== identity.dev || current.ino !== identity.ino) {
+    throw restoreFilesystemRefusal();
+  }
+  await unlink(path);
+}
+
+/** Empty, exclusively created probes contain no input bytes and never replace an existing name. */
+async function probeRestoreLink(input: {
+  readonly snapshotDir: string;
+  readonly parent: string;
+  readonly linkFile: typeof link;
+}): Promise<void> {
+  const name = `.hack-env-restore-probe-${randomUUID()}`;
+  const source = join(input.snapshotDir, name);
+  const destination = join(input.parent, name);
+  let identity: Stats | null = null;
+  let linked = false;
+  try {
+    try {
+      const handle = await open(source, "wx", 0o600);
+      try {
+        identity = await handle.stat();
+      } finally {
+        await handle.close();
+      }
+      await input.linkFile(source, destination);
+      linked = true;
+    } finally {
+      if (identity) {
+        try {
+          if (linked) {
+            await removeRestoreProbe(destination, identity);
+          }
+        } finally {
+          await removeRestoreProbe(source, identity);
+        }
+      }
+    }
+  } catch {
+    throw restoreFilesystemRefusal();
+  }
+}
+
+/** Device numbers alone miss distinct bind mounts on the same filesystem. */
 async function assertRestoreFilesystem(
   snapshotDir: string,
-  files: readonly EnvMigrationFileState[]
+  files: readonly EnvMigrationFileState[],
+  linkFile: typeof link
 ): Promise<void> {
   const snapshot = await stat(snapshotDir);
+  const checked = new Set<string>();
   for (const file of files) {
     let parent = dirname(file.path);
     for (;;) {
@@ -87,9 +145,11 @@ async function assertRestoreFilesystem(
       });
       if (info) {
         if (!info.isDirectory() || info.dev !== snapshot.dev) {
-          throw new ClosedCliError(
-            "Env migration needs snapshot storage on the same filesystem as every target so rollback can restore it. Choose a private HACK_HOME on that filesystem outside Git working trees; no migration files were changed (values omitted)."
-          );
+          throw restoreFilesystemRefusal();
+        }
+        if (!checked.has(parent)) {
+          await probeRestoreLink({ snapshotDir, parent, linkFile });
+          checked.add(parent);
         }
         break;
       }
@@ -100,7 +160,8 @@ async function assertRestoreFilesystem(
 
 /** Adapter checks both the snapshot owner's verdict and the journal's exact expectations. */
 export function bindEnvMigrationSnapshots(
-  library: SnapshotLibrary
+  library: SnapshotLibrary,
+  { linkRestoreProbe = link }: { readonly linkRestoreProbe?: typeof link } = {}
 ): EnvMigrationSnapshots {
   const load = async (manifestPath: string) => {
     const loaded = await library.readUpgradeSnapshot({ manifestPath });
@@ -176,7 +237,7 @@ export function bindEnvMigrationSnapshots(
     },
     assertCoverage: async ({ manifestPath, files }) => {
       const snapshot = await load(manifestPath);
-      await assertRestoreFilesystem(snapshot.dir, files);
+      await assertRestoreFilesystem(snapshot.dir, files, linkRestoreProbe);
       for (const expected of files) {
         const entry = snapshot.entries.find(
           (candidate) => candidate.path === expected.path

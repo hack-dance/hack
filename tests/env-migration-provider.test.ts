@@ -3,6 +3,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -278,3 +279,41 @@ test("apply refuses cross-filesystem snapshot storage before any project publica
     await rm(snapshotRoot, { recursive: true, force: true });
   }
 });
+
+for (const code of ["EXDEV", "EPERM"]) {
+  test(`apply refuses a same-device restore link failure (${code}) before publication`, async () => {
+    const project = await fixture();
+    const names = (
+      await readdir(project.projectRoot, { recursive: true })
+    ).sort();
+    let probed = false;
+    const snapshots = bindEnvMigrationSnapshots(snapshotLibrary, {
+      linkRestoreProbe: async (source, destination) => {
+        // Unlike the second-filesystem case, admission reached the real link
+        // boundary after proving matching devices and creating an empty probe.
+        expect((await lstat(source)).dev).toBe(
+          (await lstat(project.projectRoot)).dev
+        );
+        expect((await readFile(source)).length).toBe(0);
+        expect(String(destination)).toContain(".hack-env-restore-probe-");
+        probed = true;
+        throw Object.assign(new Error("synthetic link refusal"), { code });
+      },
+    });
+    await expect(
+      applyEnvMigration({ project, snapshots, acceptTrackedChanges: true })
+    ).rejects.toThrow("same filesystem and mount");
+    expect(probed).toBe(true);
+    expect(
+      (await readdir(project.projectRoot, { recursive: true })).sort()
+    ).toEqual(names);
+    expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+      `TOKEN=${sentinel}\n`
+    );
+    expect(
+      (await readdir(process.env.HACK_HOME ?? "", { recursive: true })).some(
+        (name) => name.includes(".hack-env-restore-probe-")
+      )
+    ).toBe(false);
+  });
+}

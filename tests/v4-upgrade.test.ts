@@ -111,6 +111,20 @@ for (const globalKeyPresent of [true, false]) {
           baseline.untracked,
           baseline.worktree,
         ]) {
+          if (project === baseline.worktree) {
+            // This route starts with a migrated primary and a legacy linked
+            // checkout, then resolves through the normal implicit migration.
+            expect(
+              await Bun.file(
+                join(baseline.tracked.path, ".hack/hack.env.default.yaml")
+              ).exists()
+            ).toBe(true);
+            expect(
+              await Bun.file(
+                join(baseline.worktree.path, ".hack/hack.env.default.yaml")
+              ).exists()
+            ).toBe(false);
+          }
           const resolution = await baseline.resolveValues(project);
           expect(resolution.code, `${project.path}: ${resolution.output}`).toBe(
             0

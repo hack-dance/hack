@@ -429,19 +429,96 @@ export function isVirtualExecutablePath(path: string): boolean {
 }
 
 /**
- * Extracts ProgramArguments[0] from rendered launchd plist text.
+ * The executable launchd runs for a plist, with launchd's precedence:
+ * `Program` when present, else `ProgramArguments[0]` (HACK-2216).
+ * `none`: neither key is present, so nothing is run (absence established).
+ * `unknown`: the text is not a property list, a key appears twice, its
+ * value is not a plain string (or array of strings), it uses an XML escape
+ * this reader does not decode, or the path is not absolute. Unknown is
+ * never evidence that the program is missing: callers leave such a plist
+ * as it is.
  */
-const PLIST_STRING_PATTERN = /<string>([^<]+)<\/string>/;
+export type LaunchdPlistProgram =
+  | { readonly kind: "path"; readonly path: string }
+  | { readonly kind: "none" }
+  | { readonly kind: "unknown"; readonly reason: string };
 
+const PLIST_ROOT = /<plist[\s>/]/;
+const PROGRAM_KEY = /<key>\s*Program\s*<\/key>/g;
+const PROGRAM_ARGUMENTS_KEY = /<key>\s*ProgramArguments\s*<\/key>/g;
+const STRING_VALUE = /^\s*<string>([^<]*)<\/string>/;
+const ARRAY_FIRST_STRING = /^\s*<array>\s*<string>([^<]*)<\/string>/;
+
+export function parseLaunchdPlistProgram(opts: {
+  readonly plistText: string;
+}): LaunchdPlistProgram {
+  const text = opts.plistText;
+  if (!PLIST_ROOT.test(text)) {
+    return { kind: "unknown", reason: "not a property list" };
+  }
+  const program = readKeyValue({ text, key: PROGRAM_KEY, value: STRING_VALUE });
+  if (program.kind !== "absent") {
+    return program.kind === "value"
+      ? programPath(program.value)
+      : { kind: "unknown", reason: `Program ${program.reason}` };
+  }
+  const args = readKeyValue({
+    text,
+    key: PROGRAM_ARGUMENTS_KEY,
+    value: ARRAY_FIRST_STRING,
+  });
+  if (args.kind === "absent") {
+    return { kind: "none" };
+  }
+  return args.kind === "value"
+    ? programPath(args.value)
+    : { kind: "unknown", reason: `ProgramArguments ${args.reason}` };
+}
+
+function readKeyValue(opts: {
+  readonly text: string;
+  readonly key: RegExp;
+  readonly value: RegExp;
+}):
+  | { readonly kind: "absent" }
+  | { readonly kind: "value"; readonly value: string }
+  | { readonly kind: "invalid"; readonly reason: string } {
+  const keys = [...opts.text.matchAll(opts.key)];
+  if (keys.length === 0) {
+    return { kind: "absent" };
+  }
+  if (keys.length > 1) {
+    return { kind: "invalid", reason: "appears more than once" };
+  }
+  const key = keys[0];
+  const rest = opts.text.slice((key?.index ?? 0) + (key?.[0].length ?? 0));
+  const match = opts.value.exec(rest);
+  if (match?.[1] === undefined) {
+    return { kind: "invalid", reason: "is not a plain string value" };
+  }
+  return { kind: "value", value: match[1] };
+}
+
+function programPath(raw: string): LaunchdPlistProgram {
+  const path = raw.trim();
+  if (path.includes("&")) {
+    return { kind: "unknown", reason: "the program path uses an XML escape" };
+  }
+  if (!path.startsWith("/")) {
+    return { kind: "unknown", reason: "the program path is not absolute" };
+  }
+  return { kind: "path", path };
+}
+
+/**
+ * The program launchd runs (see {@link parseLaunchdPlistProgram}), or null
+ * when there is none or it cannot be read.
+ */
 export function extractLaunchdProgramPath(opts: {
   readonly plistText: string;
 }): string | null {
-  const anchor = opts.plistText.indexOf("<key>ProgramArguments</key>");
-  if (anchor < 0) {
-    return null;
-  }
-  const match = opts.plistText.slice(anchor).match(PLIST_STRING_PATTERN);
-  return match?.[1] ?? null;
+  const parsed = parseLaunchdPlistProgram(opts);
+  return parsed.kind === "path" ? parsed.path : null;
 }
 
 /** launchd holds output descriptors open, so rename rotation cannot bound them.
@@ -463,13 +540,18 @@ export function hasBoundedLaunchdOutput(opts: {
  * `other-program`: it runs another existing program, left as it is;
  * `unmanaged`: it runs this CLI's executable and differs only in content,
  * but is not Hack's ({@link isHackManagedPlist}: no marker and another
- * `Label`), so it was left as it is.
+ * `Label`), so it was left as it is;
+ * `unknown-program`: its program cannot be read, left as it is;
+ * `failed`: a rewrite was needed but did not complete (unload, write or
+ * load failed, or no installable hack resolves); the service may be
+ * stopped.
  */
 export type LaunchdProgramRepairResult =
   | "ok"
   | "repaired"
   | "refreshed"
   | "other-program"
+  | "unknown-program"
   | "unmanaged"
   | "not-installed"
   | "failed";
@@ -509,12 +591,14 @@ export function isLaunchdPlistCurrent(opts: {
  * `missing` (absent, unreadable or a compiled-binary virtual path: never
  * runnable), `ours` (the same file as this CLI's resolution, see
  * {@link isSameExecutableFile}), or `other` (another existing program, which
- * the user may have chosen; only `hack daemon install` switches it).
+ * the user may have chosen; only `hack daemon install` switches it), or
+ * `unknown` (the plist's program cannot be read, see
+ * {@link parseLaunchdPlistProgram}; never replaced automatically).
  * `resolved` is this CLI's program, null when none resolves.
  */
 export type LaunchdProgramState =
   | {
-      readonly kind: "missing" | "ours" | "other";
+      readonly kind: "missing" | "ours" | "other" | "unknown";
       readonly program: string | null;
       readonly resolved: string | null;
     }
@@ -532,10 +616,16 @@ export async function readLaunchdProgramState(opts: {
   if (plistText === null) {
     return { kind: "not-installed" };
   }
-  const program = extractLaunchdProgramPath({ plistText });
+  const parsed = parseLaunchdPlistProgram({ plistText });
   const resolved = await resolveLaunchdHackBinPath({
     invocation: await resolveHackInvocation(),
   });
+  if (parsed.kind === "unknown") {
+    return { kind: "unknown", program: null, resolved };
+  }
+  const program = parsed.kind === "path" ? parsed.path : null;
+  // Absence is established only by no program at all, a virtual path, or
+  // a path that does not exist.
   const exists =
     program !== null &&
     !isVirtualExecutablePath(program) &&
@@ -585,6 +675,9 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   }
   if (state.kind === "other") {
     return "other-program";
+  }
+  if (state.kind === "unknown") {
+    return "unknown-program";
   }
   if (state.kind === "missing" && state.resolved === null) {
     return "failed";

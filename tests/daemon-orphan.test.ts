@@ -156,7 +156,9 @@ test("virtual bunfs executable paths are rejected", () => {
 });
 
 test("extracts the launchd program path from plist text", () => {
+  // A property list root is required: other text is unreadable (HACK-2216).
   const plist = [
+    '<plist version="1.0">',
     "<key>Label</key>",
     "<string>dance.hack.hackd</string>",
     "<key>ProgramArguments</key>",
@@ -164,6 +166,7 @@ test("extracts the launchd program path from plist text", () => {
     "  <string>/$bunfs/root/hack</string>",
     "  <string>daemon</string>",
     "</array>",
+    "</plist>",
   ].join("\n");
   expect(extractLaunchdProgramPath({ plistText: plist })).toBe(
     "/$bunfs/root/hack"

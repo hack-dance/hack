@@ -615,8 +615,12 @@ macOS it checks whether the launchd job's process is one of its ancestors. A job
 that hackd started (for example a supervisor job running `hack daemon start`)
 would otherwise stop itself. From inside, a compatible daemon is kept: `start`
 exits 0 with action `none` and `blocked: "inside-service"`. A daemon of another
-version is refused with exit 1 and nothing is stopped. If the check cannot be
-made, `start` treats the caller as inside.
+version is refused with exit 1 and nothing is stopped. The check fails closed:
+`start` treats the caller as inside when systemd reports no `ControlGroup` (or
+an empty one) for the running unit, when `/proc/self/cgroup` is unreadable,
+empty or malformed, or when launchd reports no usable pid for the loaded job or
+the ancestry cannot be read. Known limit: an explicit `hack daemon restart` run
+from inside the service is not guarded, and stops the service it runs in.
 
 `start` does not repair the service, and goes on as before, when it cannot
 prove the service is this CLI's:
@@ -640,8 +644,14 @@ not apply there. A plist counts as Hack's when it carries Hack's managed marker
 or its `Label` is Hack's. That covers plists written by earlier Hack versions,
 which have no marker.
 
-- A plist whose program is gone (or is a compiled-binary virtual path) is
-  retargeted to this CLI.
+The program is read as launchd reads it: `Program` when present, else
+`ProgramArguments[0]`. A plist whose program cannot be read (not a property
+list, a repeated key, a value that is not a plain string, an XML escape or a
+relative path) is never replaced automatically; `start` reports it and
+`hack daemon install` replaces it.
+
+- A plist whose program is gone (no program at all, a path that does not exist,
+  or a compiled-binary virtual path) is retargeted to this CLI.
 - A plist that runs this CLI's executable (same file) is rewritten with the
   marker when it differs from what this CLI writes, if it is Hack's or its
   output paths are not `/dev/null` (the earlier output repair). launchd then
@@ -649,7 +659,12 @@ which have no marker.
   `Label`) is only reported.
 - A plist that runs another existing `hack` is left as it is, even an older
   versioned install path. A running hackd of another version under it is
-  refused with `hack daemon install`.
+  refused with `hack daemon install`. A stopped service under it is not
+  kickstarted (earlier Hack versions retargeted such a plist to the running
+  CLI instead), and `hack daemon restart` refuses before it stops anything.
+- When a needed rewrite does not complete (unloading, writing or loading the
+  plist fails), `start` exits 1 with `E_DAEMON_SERVICE` instead of reporting
+  hackd as running: the unload may already have stopped it.
 
 ```mermaid
 stateDiagram-v2

@@ -55,6 +55,9 @@ case "$1" in
     echo DropInPaths=
     if [ -f "$state/enabled" ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
     if alive; then echo ActiveState=active; echo "MainPID=$(cat "$main")"; else echo ActiveState=inactive; echo MainPID=0; fi
+    # The fake's processes are not in a hackd.service cgroup; a running
+    # unit reports one anyway, as systemd does.
+    if alive; then echo ControlGroup=/fake.slice/hackd.service; else echo ControlGroup=; fi
     exit 0 ;;
   show-environment) echo "HOME=$HOME"; exit 0 ;;
   daemon-reload|reset-failed) exit 0 ;;

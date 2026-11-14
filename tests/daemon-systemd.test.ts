@@ -149,6 +149,10 @@ type Fake = {
  */
 const linuxTest = process.platform === "linux" ? test : test.skip;
 
+/** The cgroup the fake reports for a running hackd.service. */
+const FAKE_UNIT_CGROUP =
+  "/user.slice/user-1000.slice/user@1000.service/app.slice/hackd.service";
+
 const EXEC_START_RAW = /^ExecStart=(.*)$/m;
 const QUOTED_FIRST_WORD = /^"([^"]*)"/;
 
@@ -346,6 +350,8 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
             `NeedDaemonReload=${state.needsReload ? "yes" : "no"}`,
             `FragmentPath=${state.fragmentPath ?? unitPath}`,
             `DropInPaths=${state.dropInPaths}`,
+            // Like systemd: a running unit has a cgroup, a stopped one none.
+            `ControlGroup=${state.active ? FAKE_UNIT_CGROUP : ""}`,
           ].join("\n")
         )
       );
@@ -4401,6 +4407,9 @@ function runningHooks(fake: Fake, version: string | null) {
     version,
     cliVersion: "2.0.0",
     trace: createDaemonCommandTrace(),
+    // This test process: a login session, not the unit's cgroup.
+    readSelfCgroup: () =>
+      Promise.resolve("0::/user.slice/user-1000.slice/session-2.scope\n"),
   };
 }
 

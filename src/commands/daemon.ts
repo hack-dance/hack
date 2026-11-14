@@ -62,6 +62,7 @@ import {
 import { logger } from "../ui/logger.ts";
 import {
   checkRunningLaunchdDaemon,
+  refuseForeignLaunchdProgram,
   startViaLaunchdIfLoaded,
 } from "./daemon-launchd.ts";
 import { runDaemonCommand } from "./daemon-result.ts";
@@ -1098,6 +1099,20 @@ async function restartDaemon(opts: {
   readonly trace: DaemonCommandTrace;
 }): Promise<number> {
   const { paths, trace } = opts;
+  // A launchd service that runs another existing (or unreadable) program
+  // is refused before anything is stopped: the later start would kickstart
+  // a program this CLI does not own.
+  if (process.platform === "darwin") {
+    const foreign = await refuseForeignLaunchdProgram({
+      paths,
+      trace,
+      verb: "restart",
+      waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+    });
+    if (foreign !== null) {
+      return foreign;
+    }
+  }
   // Restarting an incompatible hackd that systemd runs from another,
   // still existing `hack` only starts the same version again.
   const status = await readDaemonStatus({ paths });

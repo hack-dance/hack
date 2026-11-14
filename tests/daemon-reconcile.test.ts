@@ -11,7 +11,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { checkRunningLaunchdDaemon } from "../src/commands/daemon-launchd.ts";
+import {
+  checkRunningLaunchdDaemon,
+  startViaLaunchdIfLoaded,
+} from "../src/commands/daemon-launchd.ts";
 import {
   observePostUpdateDaemon,
   parseStartEnvelope,
@@ -22,6 +25,7 @@ import {
   isLaunchdPlistCurrent,
   isSameExecutableFile,
   LAUNCHD_MANAGED_MARKER,
+  parseLaunchdPlistProgram,
   renderLaunchdPlist,
 } from "../src/daemon/launchd.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
@@ -487,9 +491,175 @@ test("the caller is inside hackd.service when its cgroup is the unit's or below"
   expect(await read(unit, unit)).toBe("inside");
   expect(await read(unit, `${unit}/job-1`)).toBe("inside");
   expect(await read(unit, `${unit}-other`)).toBe("outside");
-  expect(await read("", unit)).toBe("outside");
   expect(await read(null, unit)).toBe("unknown");
   expect(await read(unit, null)).toBe("unknown");
+});
+
+test("unreadable cgroup facts fail closed (review round 2)", async () => {
+  const unit =
+    "/user.slice/user-1000.slice/user@1000.service/app.slice/hackd.service";
+  const read = (deps: SystemdDeps, self: string | null) =>
+    readInvokerInSystemdUnit({
+      deps,
+      readSelfCgroup: () => Promise.resolve(self),
+    });
+  const outsideSelf = "0::/user.slice/user-1000.slice/session-2.scope\n";
+  // A response without the ControlGroup property, or an empty one.
+  const noProperty: SystemdDeps = {
+    env: {},
+    uid: 1000,
+    run: () =>
+      Promise.resolve({
+        exitCode: 0,
+        stdout: "ActiveState=active\n",
+        stderr: "",
+      }),
+  };
+  expect(await read(noProperty, outsideSelf)).toBe("unknown");
+  expect(await read(cgroupDeps(""), outsideSelf)).toBe("unknown");
+  expect(await read(cgroupDeps("not-a-path"), outsideSelf)).toBe("unknown");
+  // An empty or malformed /proc/self/cgroup.
+  expect(await read(cgroupDeps(unit), "")).toBe("unknown");
+  expect(await read(cgroupDeps(unit), "garbage\n0:cpu\n")).toBe("unknown");
+  expect(await read(cgroupDeps(unit), "x::/a\n")).toBe("unknown");
+  // A well-formed answer on both sides.
+  expect(await read(cgroupDeps(unit), outsideSelf)).toBe("outside");
+});
+
+test("launchd: a loaded job without a readable pid counts as inside (review round 2)", async () => {
+  const trace = createDaemonCommandTrace();
+  const ancestry: number[] = [];
+  const hooks = {
+    paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+    trace,
+    pid: 4242,
+    waitForReady: () => Promise.reject(new Error("must not start")),
+    readStatus: () =>
+      Promise.resolve({
+        installed: true,
+        loaded: true,
+        running: true,
+        pid: null,
+        exitStatus: null,
+      }),
+    isAncestor: (pid: number) => {
+      ancestry.push(pid);
+      return Promise.resolve(false);
+    },
+  };
+  expect(await checkRunningLaunchdDaemon({ ...hooks, compatible: false })).toBe(
+    1
+  );
+  expect(trace.blocked).toBe("inside-service");
+  expect(
+    await checkRunningLaunchdDaemon({ ...hooks, compatible: true })
+  ).toBeNull();
+  expect(ancestry).toEqual([]);
+});
+
+function loadedLaunchd(): () => Promise<{
+  installed: boolean;
+  loaded: boolean;
+  running: boolean;
+  pid: number | null;
+  exitStatus: number | null;
+}> {
+  return () =>
+    Promise.resolve({
+      installed: true,
+      loaded: true,
+      running: false,
+      pid: null,
+      exitStatus: null,
+    });
+}
+
+test("launchd: a failed refresh is an error, never 'already running' (review round 2)", async () => {
+  const kicked: string[] = [];
+  for (const onlyIfStale of [true, false]) {
+    const trace = createDaemonCommandTrace();
+    expect(
+      await startViaLaunchdIfLoaded({
+        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        trace,
+        onlyIfStale,
+        waitForReady: () => Promise.resolve(true),
+        readStatus: loadedLaunchd(),
+        repair: () => Promise.resolve("failed"),
+        kickstart: () => {
+          kicked.push("kickstart");
+          return Promise.resolve({ ok: true });
+        },
+      })
+    ).toBe(1);
+  }
+  expect(kicked).toEqual([]);
+});
+
+test("launchd: a stopped service running another program is not kickstarted (review round 2)", async () => {
+  const kicked: string[] = [];
+  for (const kind of ["other", "unknown"] as const) {
+    const trace = createDaemonCommandTrace();
+    expect(
+      await startViaLaunchdIfLoaded({
+        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        trace,
+        waitForReady: () => Promise.resolve(true),
+        readStatus: loadedLaunchd(),
+        repair: () =>
+          Promise.resolve(
+            kind === "other" ? "other-program" : "unknown-program"
+          ),
+        readProgram: () =>
+          Promise.resolve({ kind, program: null, resolved: null }),
+        kickstart: () => {
+          kicked.push("kickstart");
+          return Promise.resolve({ ok: true });
+        },
+      })
+    ).toBe(1);
+    expect(trace.blocked).toBe(
+      kind === "other" ? "other-program" : "unknown-program"
+    );
+  }
+  expect(kicked).toEqual([]);
+});
+
+test("launchd program follows Program over ProgramArguments, and unreadable is unknown (review round 2)", () => {
+  const wrap = (body: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n${body}\n</dict>\n</plist>\n`;
+  const args = (first: string) =>
+    `  <key>ProgramArguments</key>\n  <array>\n    <string>${first}</string>\n    <string>daemon</string>\n  </array>`;
+  const program = (path: string) =>
+    `  <key>Program</key>\n  <string>${path}</string>`;
+  expect(
+    parseLaunchdPlistProgram({ plistText: wrap(program("/opt/a/hack")) })
+  ).toEqual({ kind: "path", path: "/opt/a/hack" });
+  expect(
+    parseLaunchdPlistProgram({
+      plistText: wrap(`${program("/opt/a/hack")}\n${args("/opt/b/hack")}`),
+    })
+  ).toEqual({ kind: "path", path: "/opt/a/hack" });
+  expect(
+    parseLaunchdPlistProgram({ plistText: wrap(args("/opt/b/hack")) })
+  ).toEqual({ kind: "path", path: "/opt/b/hack" });
+  expect(parseLaunchdPlistProgram({ plistText: wrap("") })).toEqual({
+    kind: "none",
+  });
+  for (const body of [
+    "  <key>Program</key>\n  <array/>",
+    `${program("/opt/a/hack")}\n${program("/opt/c/hack")}`,
+    program("relative/hack"),
+    program("/opt/a&amp;b/hack"),
+    "  <key>ProgramArguments</key>\n  <string>/opt/b/hack</string>",
+  ]) {
+    expect(parseLaunchdPlistProgram({ plistText: wrap(body) }).kind).toBe(
+      "unknown"
+    );
+  }
+  expect(parseLaunchdPlistProgram({ plistText: "not xml" }).kind).toBe(
+    "unknown"
+  );
 });
 
 test("process ancestry walks parent pids and reports an unreadable chain", async () => {

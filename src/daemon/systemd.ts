@@ -538,8 +538,13 @@ export function findDroppedHomeBinding(opts: {
  * Whether this process runs inside hackd.service, compared by cgroup: its
  * own `/proc/self/cgroup` path is the unit's `ControlGroup` or below it.
  * Restarting the unit from inside it (a supervisor job running
- * `hack daemon start`) would stop the caller itself (HACK-2216). `unknown`
- * when either side cannot be read; callers then refuse.
+ * `hack daemon start`) would stop the caller itself (HACK-2216).
+ *
+ * Callers ask only while the unit runs hackd, so it must have a cgroup.
+ * `unknown` (callers then treat the caller as inside and refuse) when the
+ * query fails, reports no or an empty `ControlGroup`, or `/proc/self/cgroup`
+ * is unreadable, empty or has no well-formed `<id>:<controllers>:/<path>`
+ * line. Only a well-formed answer on both sides gives `outside`.
  */
 export async function readInvokerInSystemdUnit(opts: {
   readonly deps: SystemdDeps;
@@ -557,23 +562,33 @@ export async function readInvokerInSystemdUnit(opts: {
     return "unknown";
   }
   const group = (parseSystemdProperties(show.stdout).ControlGroup ?? "").trim();
-  if (group.length === 0) {
-    // No cgroup: the unit runs nothing, so nothing can run inside it.
-    return "outside";
+  if (!group.startsWith("/")) {
+    return "unknown";
   }
   const self = await (
     opts.readSelfCgroup ?? (() => readTextFile("/proc/self/cgroup"))
   )();
-  if (self === null) {
+  const paths = parseSelfCgroupPaths(self);
+  if (paths.length === 0) {
     return "unknown";
   }
-  const inside = self.split("\n").some((line) => {
-    // `<id>:<controllers>:<path>`; the path is everything after the 2nd `:`.
-    const parts = line.trimEnd().split(":");
-    const path = parts.slice(2).join(":");
-    return path === group || path.startsWith(`${group}/`);
-  });
+  const inside = paths.some(
+    (path) => path === group || path.startsWith(`${group}/`)
+  );
   return inside ? "inside" : "outside";
+}
+
+const CGROUP_LINE = /^\d+:[^:]*:(\/.*)$/;
+
+/** The cgroup paths of well-formed `/proc/<pid>/cgroup` lines. */
+function parseSelfCgroupPaths(text: string | null): string[] {
+  if (text === null) {
+    return [];
+  }
+  return text
+    .split("\n")
+    .map((line) => CGROUP_LINE.exec(line.trimEnd())?.[1])
+    .filter((path): path is string => path !== undefined);
 }
 
 /**

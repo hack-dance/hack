@@ -105,6 +105,8 @@ async function makeFixture(): Promise<Fixture> {
     join(tools, "launchctl"),
     [
       `printf '%s\\n' "$*" >> "${launchctlLog}"`,
+      // HACK_TEST_LAUNCHCTL_FAIL=<verb> makes that verb fail (HACK-2216).
+      'if [ -n "$HACK_TEST_LAUNCHCTL_FAIL" ] && [ "$1" = "$HACK_TEST_LAUNCHCTL_FAIL" ]; then echo "simulated $1 failure" >&2; exit 5; fi',
       `if [ "$1" = "print" ]; then printf 'state = running\\npid = 4242\\n'; fi`,
       `if [ "$1" = "kickstart" ]; then ${touchSocket}; fi`,
       "exit 0",
@@ -351,7 +353,10 @@ test("repairs legacy output paths even when the installed program is still curre
 });
 
 /** Runs the driver's two repairs against `plist`; returns results and calls. */
-async function repairPlist(plist: (fixture: Fixture) => string): Promise<{
+async function repairPlist(
+  plist: (fixture: Fixture) => string,
+  extraEnv: Readonly<Record<string, string>> = {}
+): Promise<{
   readonly results: unknown;
   readonly after: string;
   readonly verbs: string[];
@@ -361,7 +366,7 @@ async function repairPlist(plist: (fixture: Fixture) => string): Promise<{
   const run = await runAsDarwin({
     argv: [DRIVER, "repair-output"],
     cwd: fixture.root,
-    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack") }),
+    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack"), ...extraEnv }),
   });
   expect(run.code).toBe(0);
   return {
@@ -456,6 +461,128 @@ test("a managed plist for this hack with an older environment is refreshed (HACK
   expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
   expect(after).toBe(current);
   expect(verbs).toEqual(["bootout", "bootstrap"]);
+});
+
+// Review round 2 (HACK-2216).
+
+test("a refresh whose unload fails reports failed and leaves the plist", async () => {
+  let legacy = "";
+  const { results, after, verbs } = await repairPlist(
+    (fixture) => {
+      ({ legacy } = legacyPlist(fixture));
+      return legacy;
+    },
+    { HACK_TEST_LAUNCHCTL_FAIL: "bootout" }
+  );
+  expect(results).toEqual({ repair: "failed", secondRepair: "failed" });
+  expect(after).toBe(legacy);
+  expect(verbs).toEqual(["bootout", "bootout"]);
+});
+
+test("a refresh whose load fails after a successful unload reports failed", async () => {
+  const { results, verbs } = await repairPlist(
+    (fixture) => legacyPlist(fixture).legacy,
+    { HACK_TEST_LAUNCHCTL_FAIL: "bootstrap" }
+  );
+  expect((results as { repair: string }).repair).toBe("failed");
+  expect(verbs.slice(0, 2)).toEqual(["bootout", "bootstrap"]);
+});
+
+/** A plist whose program is set with `Program` (and optionally args). */
+function programPlist(opts: {
+  readonly program: string;
+  readonly firstArgument?: string;
+}): string {
+  const args =
+    opts.firstArgument === undefined
+      ? ""
+      : `  <key>ProgramArguments</key>\n  <array>\n    <string>${opts.firstArgument}</string>\n    <string>daemon</string>\n  </array>\n`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>Program</key>\n  <string>${opts.program}</string>\n${args}</dict>\n</plist>\n`;
+}
+
+function otherHack(fixture: Fixture): string {
+  const other = join(fixture.root, "other-bin", "hack");
+  mkdirSync(join(fixture.root, "other-bin"), { recursive: true });
+  copyFileSync(join(fixture.root, "tools", "hack"), other);
+  chmodSync(other, 0o755);
+  return other;
+}
+
+test("a plist with only Program set to another existing hack is not overwritten", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    written = programPlist({ program: otherHack(fixture) });
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "other-program",
+    secondRepair: "other-program",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
+test("Program wins over ProgramArguments[0], as in launchd", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    written = programPlist({
+      program: otherHack(fixture),
+      firstArgument: join(fixture.root, "tools", "hack"),
+    });
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "other-program",
+    secondRepair: "other-program",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
+test("an unreadable plist program is never replaced", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist(() => {
+    written = programPlist({ program: "relative/hack" });
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "unknown-program",
+    secondRepair: "unknown-program",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
+test("macOS restart --json refuses a launchd service running another hack, before stopping anything", async () => {
+  const fixture = await makeFixture();
+  const plist = programPlist({ program: otherHack(fixture) });
+  await writeFile(fixture.plistPath, plist);
+  const run = await runAsDarwin({
+    argv: [CLI, "daemon", "restart", "--json"],
+    cwd: fixture.root,
+    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack") }),
+  });
+  expect(run.code).toBe(1);
+  const envelope = JSON.parse(run.stdout) as {
+    ok: boolean;
+    error: { code: string; message: string; detail: Record<string, unknown> };
+  };
+  expect(envelope.ok).toBe(false);
+  expect(envelope.error.code).toBe("E_DAEMON_SERVICE");
+  expect(envelope.error.message).toContain("hack daemon install");
+  expect(envelope.error.detail).toMatchObject({
+    schema: "hack.daemon-restart/v1",
+    manager: "launchd",
+    action: "none",
+    blocked: "other-program",
+  });
+  // Only the status read reached launchctl: nothing was stopped,
+  // unloaded or kickstarted.
+  const verbs = (await launchctlCalls(fixture)).map(
+    (line) => line.split(" ")[0] ?? ""
+  );
+  expect(verbs.every((verb) => verb === "print")).toBe(true);
+  expect(await readFile(fixture.plistPath, "utf8")).toBe(plist);
 });
 
 const CLI_CASES = [

@@ -172,6 +172,7 @@ impl HackApp {
                             return None;
                         }
                         if previous != this.selected_root() {
+                            this.tail = Ok(Vec::new());
                             this.env.begin();
                             if this.tab == 2 {
                                 this.read_env(cx);
@@ -266,6 +267,7 @@ impl HackApp {
                 let previous = this.selected_root();
                 if this.model.finish_refresh(token, snap) {
                     if previous != this.selected_root() {
+                        this.tail = Ok(Vec::new());
                         this.env.begin();
                         if this.tab == 2 {
                             this.read_env(cx);

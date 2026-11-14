@@ -87,9 +87,10 @@ pub struct DetailView {
     pub note: Option<String>,
 }
 
-/// Native `up`/`restart` stay in the foreground and refuse `--json` and
-/// `--detach`, so the app cannot run them as request/response commands.
-pub const NATIVE_ACTIONS_NOTE: &str = "Native projects run in the foreground: start or stop them in a terminal with HACK_RUNTIME_BACKEND=native hack up / hack down. The app shows their state.";
+/// v0 scope: native projects are view-only. Native `restart` (and authored
+/// `down`/`restart`) stay in the foreground and refuse `--json`; native
+/// `up --json` is detached, but the app waits for one contract (design R2b).
+pub const NATIVE_ACTIONS_NOTE: &str = "Native projects are view-only in this preview: start, stop or restart them in a terminal with HACK_RUNTIME_BACKEND=native hack up / down / restart.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {

@@ -125,6 +125,7 @@ fn main() {
             }
             cx.new(|cx| {
                 let mut app = view::HackApp::new(source, fixture.is_none(), cx);
+                app.watch_window(window, cx);
                 if let Some(f) = fixture {
                     app.select(fixtures::selected(f));
                     if fixtures::loads_doctor(f) {

@@ -21,16 +21,14 @@ use gpui_kit::{
     AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, SharedString,
     Styled, Window, div, prelude::*, px,
 };
-use hack_desktop_core::doctor::{DoctorPane, Finish};
+use hack_desktop_core::doctor::{DoctorPane, Finish, should_auto_refresh};
 use hack_desktop_core::models::LogEntry;
 use hack_desktop_core::source::{ActionOutcome, DoctorTarget, Source};
 
 use crate::doctor_view::Pane;
 use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 
-fn target_names(targets: &[DoctorTarget]) -> Vec<String> {
-    targets.iter().map(|t| t.name.clone()).collect()
-}
+use hack_desktop_core::source::target_keys;
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
 use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
 
@@ -46,6 +44,10 @@ pub struct HackApp {
     live: bool,
     pane: Pane,
     doctor: DoctorPane,
+    /// Is the window visible (not minimised or hidden)? Automatic doctor
+    /// runs wait for it.
+    window_visible: bool,
+    _visibility: Option<gpui_kit::Subscription>,
 }
 
 impl HackApp {
@@ -57,6 +59,8 @@ impl HackApp {
             tab: 0,
             pane: Pane::Project,
             doctor: DoctorPane::default(),
+            window_visible: true,
+            _visibility: None,
             tail: Ok(Vec::new()),
             follow: true,
             live,
@@ -84,7 +88,7 @@ impl HackApp {
     pub fn show_doctor_now(&mut self) {
         self.pane = Pane::Doctor;
         let targets = self.doctor_targets();
-        let names = target_names(&targets);
+        let names = target_keys(&targets);
         let generation = self.doctor.begin(&names);
         let runs = self.source.doctor_runs(&targets);
         self.doctor
@@ -108,7 +112,7 @@ impl HackApp {
             return;
         }
         let targets = self.doctor_targets();
-        let names = target_names(&targets);
+        let names = target_keys(&targets);
         let generation = self.doctor.begin(&names);
         cx.notify();
         let source = self.source.clone();
@@ -118,12 +122,14 @@ impl HackApp {
                 .spawn(async move { source.doctor_runs(&targets) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let current = target_names(&this.doctor_targets());
+                let current = target_keys(&this.doctor_targets());
                 let outcome =
                     this.doctor
                         .finish(generation, &runs, &current, std::time::Instant::now());
                 if outcome == Finish::AppliedStale {
-                    this.load_doctor(cx);
+                    // Re-run now only if someone can see it; otherwise the
+                    // stale result re-runs when the window is shown again.
+                    this.maybe_auto_refresh(cx);
                 }
                 cx.notify();
             });
@@ -142,6 +148,34 @@ impl HackApp {
         cx.notify();
     }
 
+    /// Start a doctor run if the pane is shown in a visible window and the
+    /// result is missing, old or stale. Returns whether it started one.
+    fn maybe_auto_refresh(&mut self, cx: &mut Context<Self>) -> bool {
+        let start = should_auto_refresh(
+            self.pane == Pane::Doctor,
+            self.window_visible,
+            &self.doctor,
+            std::time::Instant::now(),
+        );
+        if start {
+            self.load_doctor(cx);
+        }
+        start
+    }
+
+    /// Track window visibility; when it becomes visible again, refresh a
+    /// missing, old or stale doctor result.
+    pub fn watch_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.window_visible = window.is_visible();
+        self._visibility = Some(cx.observe_window_visibility(
+            window,
+            |this, visibility, _window, cx| {
+                this.window_visible = visibility.is_visible();
+                this.maybe_auto_refresh(cx);
+            },
+        ));
+    }
+
     /// While the Doctor pane is visible, refresh every 10 minutes.
     fn start_doctor_refresh(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -150,10 +184,10 @@ impl HackApp {
                     .timer(std::time::Duration::from_secs(60))
                     .await;
                 let alive = this.update(cx, |this, cx| {
-                    let now = std::time::Instant::now();
-                    if this.pane == Pane::Doctor && this.doctor.needs_refresh(now) {
-                        this.load_doctor(cx);
-                    } else if this.pane == Pane::Doctor {
+                    if !this.maybe_auto_refresh(cx)
+                        && this.pane == Pane::Doctor
+                        && this.window_visible
+                    {
                         // Keep "Checked N min ago" current.
                         cx.notify();
                     }

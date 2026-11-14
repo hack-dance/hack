@@ -113,6 +113,15 @@ pub struct DoctorTarget {
     pub native: bool,
 }
 
+/// Identity of each target (name, checkout, backend) for the stale guard.
+#[must_use]
+pub fn target_keys(targets: &[DoctorTarget]) -> Vec<crate::doctor::TargetKey> {
+    targets
+        .iter()
+        .map(|t| (t.name.clone(), t.repo_root.clone(), t.native))
+        .collect()
+}
+
 impl DoctorTarget {
     fn run(&self, result: Result<crate::models::DoctorReport, String>) -> DoctorRun {
         DoctorRun {

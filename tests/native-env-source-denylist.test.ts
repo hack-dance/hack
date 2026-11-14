@@ -170,6 +170,24 @@ test("the decision is lexical, case-folded and Unicode-normalized", () => {
     hackHome: "/fixture/project/café",
   });
   expect(unicode.denies("/fixture/project/café/x.env")).toBe(true);
+  // Non-ASCII case aliases name the same directory on case-insensitive APFS.
+  const accented = nativeEnvSecretDenylist({
+    projectRoots: ["/fixture/project"],
+    hackHome: "/fixture/project/\u00c4",
+  });
+  expect(accented.denies("/fixture/project/\u00e4/secrets-file.key")).toBe(
+    true
+  );
+  expect(accented.denies("/fixture/project/a\u0308/secrets-file.key")).toBe(
+    true
+  );
+  expect(accented.denies("/fixture/project/a/secrets-file.key")).toBe(false);
+  expect(
+    nativeEnvSecretDenylist({
+      projectRoots: ["/p"],
+      hackHome: "/home/.hack",
+    }).denies("/p/nested/.H\u00c4CK.secret.key")
+  ).toBe(false);
   // A Hack home outside the project root denies nothing by location.
   const outside = nativeEnvSecretDenylist({
     projectRoots: ["/fixture/project"],

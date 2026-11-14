@@ -32,8 +32,8 @@ inspection or read, a service `env_file` or the automatic `.env` is refused with
 - under the Hack home (`HACK_HOME`, else `~/.hack`) when the Hack home lies inside
   the project root. A Hack home equal to the project root refuses every source.
 
-Names compare after Unicode NFC normalization and ASCII case folding, so a case
-alias is refused too. An absent optional entry with such a name is refused rather
+Paths compare after Unicode NFC normalization and Unicode case folding, so a
+case or normalization alias (`Ä` and `ä`, for example) is refused too. An absent optional entry with such a name is refused rather
 than skipped. The check uses paths only and opens nothing. It does not recognize
 a Hack home reached only through a symlink, or an encrypted store configured at
 another path; symlinked and multi-link sources are already refused below. A

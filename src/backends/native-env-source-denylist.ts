@@ -13,8 +13,8 @@ import { resolveGlobalHackDir } from "../lib/config-paths.ts";
  * denied file or the Hack home. Callers report the authored source path and a
  * closed reason, never a resolved private path or a value.
  *
- * Denied, after Unicode NFC normalization and ASCII case folding (so a case
- * alias on a case-insensitive filesystem is denied too):
+ * Denied, after Unicode NFC normalization and Unicode case folding (so a case
+ * or normalization alias on an insensitive filesystem is denied too):
  * - any file named like the project env key, `.hack.secret.key`, at any depth.
  *   This covers the checkout key, the shared key under the git common
  *   directory and the primary checkout's key;
@@ -54,11 +54,13 @@ const DENIED_NAMES: ReadonlySet<string> = new Set(
   [PROJECT_ENV_KEY_FILENAME, ...LEGACY_STORE_NAMES].map(fold)
 );
 
-/** Unicode NFC plus ASCII-only case folding. */
+/**
+ * Unicode NFC plus full Unicode case folding (upper then lower case), so
+ * aliases on a case- or normalization-insensitive filesystem compare equal.
+ * It may over-match (for example `ß` and `ss`); that only refuses more.
+ */
 function fold(path: string): string {
-  return path
-    .normalize("NFC")
-    .replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+  return path.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
 }
 
 function inside(parent: string, child: string): boolean {

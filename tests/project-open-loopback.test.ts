@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { JSON_COMMAND_SHAPES } from "../src/cli/json-contracts.ts";
 import { emitOpenOrigin } from "../src/commands/project.ts";
 
 test("open refuses a confirmed loopback failure before JSON or browser output", async () => {
@@ -25,6 +26,7 @@ test("open refuses a confirmed loopback failure before JSON or browser output", 
 });
 
 test("native loopback origin bypasses Compose DNS, Docker and CA probes even if a proxy failure would be reported", async () => {
+  expect(JSON_COMMAND_SHAPES.open).toBe("legacy-object");
   const write = spyOn(process.stdout, "write").mockImplementation(() => true);
   let checks = 0;
   try {

@@ -105,7 +105,7 @@ remains covered by its command-specific suites.
 | `hack node workspace list --json` | Legacy bare object (no `data` envelope) |
 | `hack node workspace remove --json` | Legacy bare object (no `data` envelope) |
 | `hack node workspace resolve --json` | Legacy bare object (no `data` envelope) |
-| `hack open --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
+| `hack open --json` | Legacy bare object (no `data` envelope) |
 | `hack project owner show --json` | Legacy bare object (no `data` envelope) |
 | `hack project target --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack project task inspect --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |

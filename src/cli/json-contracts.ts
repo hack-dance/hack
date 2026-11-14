@@ -23,7 +23,7 @@ export const JSON_COMMAND_SHAPES = {
   "commands show": "envelope",
   "commands cancel": "envelope",
   logs: "logs",
-  open: "envelope",
+  open: "legacy-object",
   activity: "schema-envelope",
   doctor: "envelope",
   "daemon status": "legacy-object",

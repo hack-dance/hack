@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   type AdminPlan,
   classifyDockerInfo,
+  planGlobalInstallTrust,
   planGlobalTrust,
   type TrustPlanDeps,
 } from "../src/commands/global-admin-plan.ts";
@@ -120,6 +121,33 @@ const rootSteps = (plan: AdminPlan) =>
 
 const sha256 = (text: string) =>
   createHash("sha256").update(text).digest("hex");
+
+test("macOS install cannot decide keychain trust from an old export when the runtime CA is not known", async () => {
+  const standalone = trustDeps({
+    platform: "darwin",
+    dockerAnswers: () => Promise.resolve(false),
+    readExportSource: () => Promise.resolve("none"),
+    prepareMac: () => Promise.resolve({ status: "trusted" }),
+  });
+  expect((await planGlobalTrust(standalone)).complete).toBe(true);
+  const install = await planGlobalInstallTrust(standalone);
+  expect(install.complete).toBe(false);
+  expect(rootSteps(install)).toEqual([]);
+  expect(install.blocked[0]?.phase).toBe("keychain trust");
+  for (const source of ["unknown", { pem: OLD_CA_PEM }] as const) {
+    const unknown = await planGlobalInstallTrust({
+      ...standalone,
+      readExportSource: () => Promise.resolve(source),
+    });
+    expect(unknown.complete).toBe(false);
+    expect(rootSteps(unknown)).toEqual([]);
+  }
+  const current = await planGlobalInstallTrust({
+    ...standalone,
+    readExportSource: () => Promise.resolve({ pem: CURRENT_CA_PEM }),
+  });
+  expect(current.complete).toBe(true);
+});
 
 test("Linux: the plan's root steps are exactly what the real trust step spawns", async () => {
   const plan = await planGlobalTrust(trustDeps({}));

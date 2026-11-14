@@ -38,6 +38,14 @@ const DAEMON_AUTOSTART_DENY_ENV = [
   "HACK_DAEMON_AUTOSTART_DISABLE",
 ] as const;
 const originalDenyEnv = new Map<string, string | undefined>();
+const ISOLATED_ENV = [
+  "HACK_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+] as const;
+const originalIsolatedEnv = new Map<string, string | undefined>();
 const execCalls: string[][] = [];
 const runCalls: string[][] = [];
 let runExitResponder: ((cmd: readonly string[]) => number | null) | null = null;
@@ -121,6 +129,13 @@ beforeEach(async () => {
   originalLogger = process.env.HACK_LOGGER;
   tempDir = await mkdtemp(join(tmpdir(), "hack-global-"));
   process.env.HOME = tempDir;
+  for (const key of ISOLATED_ENV) {
+    originalIsolatedEnv.set(key, process.env[key]);
+    process.env[key] = join(
+      tempDir,
+      key === "HACK_HOME" ? GLOBAL_HACK_DIR_NAME : key.toLowerCase()
+    );
+  }
   process.env.HACK_LOGGER = "console";
   for (const key of DAEMON_AUTOSTART_DENY_ENV) {
     originalDenyEnv.set(key, process.env[key]);
@@ -135,6 +150,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const key of ISOLATED_ENV) {
+    restoreEnv(key, originalIsolatedEnv.get(key));
+  }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
@@ -163,6 +181,41 @@ async function writeExecutable(path: string): Promise<void> {
   await writeFile(path, "#!/usr/bin/env sh\nexit 0\n");
   await chmod(path, 0o755);
 }
+
+test("global install --plan --json uses read-only probes and --plan requires JSON", async () => {
+  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+  const chunks: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  });
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "install", "--plan"])).toBe(2);
+    expect(execCalls).toEqual([]);
+    expect(await runCli(["global", "install", "--plan", "--json"])).toBe(0);
+  } finally {
+    stdout.mockRestore();
+  }
+  expect(JSON.parse(chunks.join(""))).toMatchObject({
+    schema: "hack.global-admin-plan.v1",
+    command: "install",
+    complete: true,
+    refused: null,
+  });
+  expect(runCalls).toEqual([]);
+  expect(linuxDnsPrivileged).toEqual([]);
+  expect(
+    await Bun.file(
+      join(
+        tempDir!,
+        GLOBAL_HACK_DIR_NAME,
+        GLOBAL_CADDY_DIR_NAME,
+        GLOBAL_CADDY_COMPOSE_FILENAME
+      )
+    ).exists()
+  ).toBe(false);
+});
 
 async function writeStaticCaddyCompose(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });

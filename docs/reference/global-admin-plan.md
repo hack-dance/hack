@@ -1,11 +1,14 @@
-# Admin plans: `hack global trust --plan --json`
+# Admin plans: `hack global install|trust --plan --json`
 
 `--plan` prints the steps a `hack global` command would take, in order, with the
 exact command line of every step that runs with administrator rights, and runs
 none of them. A script or app shows the plan and hands root steps to a terminal.
 
-Status: `hack global trust --plan --json` on macOS and Linux.
-`hack global install --plan` is not available yet.
+Use `hack global install --plan --json` or `hack global trust --plan --json`
+on macOS and Linux. Planning neither bootstraps the host nor grants permission
+to run the listed commands.
+
+![Admin plan preparation and execution](../diagrams/global-admin-plan.svg)
 
 ## Guarantees
 
@@ -101,3 +104,44 @@ macOS:
   is skipped when it fails.
 - Then a user step writes the host trust bundle and env script, and sets them for
   launchd.
+
+## What `hack global install` plans
+
+The initial user steps prepare optional tools, ensure Docker and shared networks,
+and materialize the Compose files and schemas. Compose startup and the optional
+user daemon need no administrator rights. Homebrew formula installation is a
+user step; any separate Homebrew authentication is outside Hack's root argv.
+
+On Linux, the planner reads the existing ingress network and host resolver. With
+a host-visible bridge and a static subnet, it uses the same DNS plan and stdin
+installer as the confirmed run: install managed systemd/udev files, reload them,
+and restart the bridge's DNS unit. Non-interactive runs and declined confirmation
+print manual instructions and run no root steps. A network without the fixed
+subnet skips DNS. An absent network or unreadable host state leaves DNS incomplete
+because install first creates or starts it. Already configured and manual-only
+resolvers have no automatic root steps.
+
+On macOS, the plan includes these phases in execution order:
+
+1. Before Compose startup, restart dnsmasq if Homebrew reports it installed but
+   not started as root. A recovery helper is tried first when installed, with
+   Homebrew as its fallback.
+2. After Compose startup, update the user-owned dnsmasq configuration, offer the
+   managed resolver files, restart dnsmasq and flush the DNS cache. Existing custom
+   resolver files are retained. If dnsmasq is not yet installed, its dependent
+   phase is incomplete until the formula and prefix can be read.
+3. Export the CA and prepare System keychain trust and the user TLS environment.
+   Install must find a running Caddy container: unlike `global trust`, it never
+   falls back to an old export. A new or unreadable CA leaves the keychain phase
+   incomplete until its exact bytes are known.
+4. When the recovery sudoers rule is absent, offer recovery authorization. The
+   plan lists the helper and sudoers installs, validation, `sudo -k` and the
+   passwordless verification probe. They run only after explicit confirmation,
+   user-level validation and the root-controlled-path checks. The per-user daemon
+   login-service offer is a user step.
+
+Each macOS service/cache command shows its `sudo -n` attempt. An interactive
+password attempt follows only when that attempt fails; helper fallbacks are also
+conditional. A plan lists possible operations with their guards, not a promise
+that every listed operation will execute. Completion still requires the real
+command's checks and prompts against the current host state.

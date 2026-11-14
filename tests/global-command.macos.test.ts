@@ -11,7 +11,7 @@ import { X509Certificate } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-
+import type { AdminPlan } from "../src/commands/global-admin-plan.ts";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_HOST_DNS_IP,
@@ -27,6 +27,7 @@ import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+import { asExecStdout, tarArchive } from "./helpers/tar.ts";
 
 // These fixtures exercise macOS host commands and require that platform.
 const test = bunTest.skipIf(process.platform !== "darwin");
@@ -47,6 +48,10 @@ let originalLogger: string | undefined;
 let originalUser: string | undefined;
 let originalNoInteractive: string | undefined;
 const isolatedEnvKeys = [
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
   "HACK_HOME",
   "HACK_CANDIDATE_ENTRYPOINT",
   "HACK_DAEMON_AUTOSTART_DISABLE",
@@ -274,6 +279,11 @@ beforeEach(async () => {
   resetNoInteractiveFlagForTests();
   tempDir = await mkdtemp(join(tmpdir(), "hack-global-macos-"));
   process.env.HOME = tempDir;
+  process.env.HACK_HOME = join(tempDir, GLOBAL_HACK_DIR_NAME);
+  process.env.XDG_CONFIG_HOME = join(tempDir, "config");
+  process.env.XDG_DATA_HOME = join(tempDir, "data");
+  process.env.XDG_STATE_HOME = join(tempDir, "state");
+  process.env.XDG_CACHE_HOME = join(tempDir, "cache");
   process.env.USER = "env-user";
   process.env.HACK_LOGGER = "console";
   runCalls.length = 0;
@@ -371,6 +381,76 @@ async function writeComposeFile(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, "services: {}\n");
 }
+
+test("global install plan root argv equals the command's fake-root execution, including startup and recovery", async () => {
+  await prepareManagedTools(tempDir!);
+  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+  const certPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(certPath), { recursive: true });
+  await writeFile(certPath, CURRENT_CA_PEM);
+  execMockResponder = (cmd) => {
+    if (cmd[0] === "docker" && cmd[1] === "compose" && cmd[4] === "ps") {
+      return { exitCode: 0, stdout: "fixture-caddy\n", stderr: "" };
+    }
+    if (cmd[0] === "docker" && cmd[1] === "cp" && cmd[3] === "-") {
+      return {
+        exitCode: 0,
+        stdout: asExecStdout(
+          tarArchive([{ name: "root.crt", content: CURRENT_CA_PEM }])
+        ),
+        stderr: "",
+      };
+    }
+    if (cmd[0] === "security" && cmd[1] === "find-certificate") {
+      return {
+        exitCode: 0,
+        stdout: runCalls.some((argv) => argv.includes("add-trusted-cert"))
+          ? CURRENT_CA_PEM
+          : OLD_CA_PEM,
+        stderr: "",
+      };
+    }
+    return null;
+  };
+  runResponder = (cmd) =>
+    cmd[0] === "sudo" && cmd[1] === "-n" && cmd.at(-1) !== "check" ? 1 : 0;
+  const chunks: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  });
+  const { runCli } = await import("../src/cli/run.ts");
+  let planCode: number;
+  try {
+    planCode = await runCli(["global", "install", "--plan", "--json"]);
+  } finally {
+    stdout.mockRestore();
+  }
+  const planned = JSON.parse(chunks.join("")) as AdminPlan;
+  expect(planCode).toBe(0);
+  expect(planned.complete).toBe(true);
+  expect(runCalls).toEqual([]);
+  expect(confirmCalls).toBe(0);
+  expect(await fileExists(join(tempDir!, GLOBAL_HACK_DIR_NAME, "tmp"))).toBe(
+    false
+  );
+  const roots = planned.steps.filter((step) => step.privilege === "root");
+  expect(roots[0]?.id).toStartWith("global-up-");
+  expect(roots.some((step) => step.id === "recovery-helperDirectory")).toBe(
+    true
+  );
+  const runCode = await runCli(["global", "install"]);
+  expect(runCode).toBe(0);
+  expect(runCalls.filter((argv) => argv[0] === "sudo")).toEqual(
+    roots.flatMap((step) => (step.argv === undefined ? [] : [[...step.argv]]))
+  );
+});
 
 test("global install keeps container ip host dns when bridge ip is reachable", async () => {
   await prepareManagedTools(tempDir!);

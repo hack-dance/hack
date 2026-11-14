@@ -8,7 +8,8 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { createServer } from "node:net";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertAutostartDockerConfigTrusted } from "../src/lib/autostart-docker-trust.ts";
 
@@ -66,7 +67,7 @@ test("writable Docker config or context inputs refuse before contacting an engin
   expect(() => assertAutostartDockerConfigTrusted({ home })).toThrow();
 });
 
-test("selected SSH contexts and direct SSH hosts refuse before contacting an engine", async () => {
+test("network contexts and direct hosts refuse before contacting an engine", async () => {
   const name = "remote-fixture";
   const context = join(
     home,
@@ -99,6 +100,7 @@ test("selected SSH contexts and direct SSH hosts refuse before contacting an eng
     "ssh://fixture",
     "unknown://fixture",
     "unix:///fixture/docker.sock",
+    "npipe:////./pipe/docker_engine",
     "tcp://127.0.0.1:2376",
   ]) {
     await writeFile(
@@ -112,19 +114,26 @@ test("selected SSH contexts and direct SSH hosts refuse before contacting an eng
         env: {},
         systemPluginDirectories: [],
       });
-    if (host.startsWith("ssh:") || host.startsWith("unknown:")) {
+    if (
+      host.startsWith("ssh:") ||
+      host.startsWith("unknown:") ||
+      host.startsWith("tcp:") ||
+      host.startsWith("npipe:")
+    ) {
       expect(check).toThrow();
     } else {
       expect(check).not.toThrow();
     }
   }
-  expect(() =>
-    assertAutostartDockerConfigTrusted({
-      home,
-      env: { DOCKER_CONTEXT: "default", DOCKER_HOST: "ssh://fixture" },
-      systemPluginDirectories: [],
-    })
-  ).toThrow();
+  for (const host of ["ssh://fixture", "tcp://127.0.0.1:2376"]) {
+    expect(() =>
+      assertAutostartDockerConfigTrusted({
+        home,
+        env: { DOCKER_CONTEXT: "default", DOCKER_HOST: host },
+        systemPluginDirectories: [],
+      })
+    ).toThrow();
+  }
   await writeFile(
     metadata,
     JSON.stringify({ Endpoints: { docker: { Host: "ssh://fixture" } } }),
@@ -137,4 +146,58 @@ test("selected SSH contexts and direct SSH hosts refuse before contacting an eng
       systemPluginDirectories: [],
     })
   ).toThrow();
+});
+
+test("socket endpoints refuse shared sticky parents and regular files", () => {
+  for (const host of [
+    "unix:///tmp/hack-unowned-socket-fixture/docker.sock",
+    "unix:///etc/passwd",
+    "npipe:////./pipe/docker_engine",
+  ]) {
+    expect(() =>
+      assertAutostartDockerConfigTrusted({
+        home,
+        env: { DOCKER_HOST: host },
+        systemPluginDirectories: [],
+      })
+    ).toThrow();
+  }
+});
+
+test("owned socket and symlink pass; writable or sticky parents refuse", async () => {
+  const socketRoot = await mkdtemp(join(homedir(), ".hack-socket-trust-test-"));
+  const socket = join(socketRoot, "docker.sock");
+  const alias = join(socketRoot, "engine.sock");
+  const server = createServer();
+  try {
+    await chmod(socketRoot, 0o700);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socket, resolve);
+    });
+    await chmod(socket, 0o660);
+    await symlink(socket, alias);
+    for (const path of [socket, alias]) {
+      expect(() =>
+        assertAutostartDockerConfigTrusted({
+          home,
+          env: { DOCKER_HOST: `unix://${path}` },
+          systemPluginDirectories: [],
+        })
+      ).not.toThrow();
+    }
+    for (const mode of [0o777, 0o1777]) {
+      await chmod(socketRoot, mode);
+      expect(() =>
+        assertAutostartDockerConfigTrusted({
+          home,
+          env: { DOCKER_HOST: `unix://${alias}` },
+          systemPluginDirectories: [],
+        })
+      ).toThrow();
+    }
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(socketRoot, { recursive: true, force: true });
+  }
 });

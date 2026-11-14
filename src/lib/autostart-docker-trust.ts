@@ -1,12 +1,18 @@
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import { assertAutostartPathAclsTrustedSync } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { walkReplaceableChain } from "./path-trust.ts";
 
-const LOGIN_DOCKER_TRANSPORT = /^(unix|tcp|npipe):\/\//;
+const LOGIN_DOCKER_TRANSPORT = /^unix:\/\//;
 
 /** Authenticate Docker's engine-selection inputs without exposing credentials. */
 export function assertAutostartDockerConfigTrusted(opts: {
@@ -118,11 +124,13 @@ export function assertAutostartDockerConfigTrusted(opts: {
       ) {
         throw new Error("Invalid Docker endpoint");
       }
-      assertLoginDockerTransport(metadata.Endpoints.docker.Host);
+      assertLoginDockerTransport(metadata.Endpoints.docker.Host, uid);
     }
-    // A direct host may select the transport when the default context is used.
-    if (host) {
-      assertLoginDockerTransport(host);
+    // Docker uses this socket when no named context or direct host is selected.
+    if (context === "default") {
+      assertLoginDockerTransport(host || "unix:///var/run/docker.sock", uid);
+    } else if (host) {
+      assertLoginDockerTransport(host, uid);
     }
   } catch {
     throw new HackCliError({
@@ -134,9 +142,45 @@ export function assertAutostartDockerConfigTrusted(opts: {
   }
 }
 
-/** SSH loads executable user configuration outside the authenticated Docker tree. */
-function assertLoginDockerTransport(host: unknown): void {
+/** Network transports need peer authentication beyond filesystem/context ownership. */
+function assertLoginDockerTransport(host: unknown, uid: number): void {
   if (typeof host !== "string" || !LOGIN_DOCKER_TRANSPORT.test(host)) {
     throw new Error("Docker transport requires manual startup");
   }
+  const path = host.slice("unix://".length);
+  const checked = new Set<string>();
+  let physical: string | null = null;
+  try {
+    physical = realpathSync(path);
+    const info = lstatSync(physical);
+    if (!info.isSocket() || (info.uid !== uid && info.uid !== 0)) {
+      throw new Error("Unsafe Docker socket");
+    }
+    // Socket write permissions grant connection, not replacement authority.
+    checked.add(physical);
+  } catch (error: unknown) {
+    if (!(isRecord(error) && error.code === "ENOENT")) {
+      throw error;
+    }
+  }
+  const trust = walkReplaceableChain({
+    path,
+    uid,
+    hackHome: null,
+    checked,
+    allowMissing: true,
+  });
+  if ("error" in trust) {
+    throw new Error("Unsafe socket path");
+  }
+  for (const entry of checked) {
+    if (entry === physical) {
+      continue;
+    }
+    const info = lstatSync(entry);
+    if (info.isDirectory() && (info.mode & 0o022) !== 0) {
+      throw new Error("Replaceable socket parent");
+    }
+  }
+  assertAutostartPathAclsTrustedSync(checked);
 }

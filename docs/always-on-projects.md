@@ -408,3 +408,15 @@ Dotenv template and backup copies (`.env.example`, `.env.sample`, `.env.template
 `.env.dist`, `.env.bak`, `.env.backup`, `.env.old`, `.env.orig`) in the checkout
 root or project directory do not block admission. Active `.env` overlays still
 require migration, and Compose `env_file` inputs still require a manual start.
+TCP Docker endpoints also require manual starts, including loopback and TLS
+contexts. Context ownership does not authenticate a TCP peer, and unattended
+startup does not validate a mutual TLS contract. Login transport admission accepts
+local Unix sockets only on supported hosts.
+On the supported Linux/macOS hosts, login uses Unix sockets only. Socket paths,
+symlinks and parent chains must be owned by the user or root; group/other-writable
+parents, including sticky directories, are refused. Existing endpoints must be
+sockets owned by the user or root. Missing endpoints are allowed only beneath a
+trusted existing chain while the daemon waits for the engine.
+The same check applies to Docker's implicit `/var/run/docker.sock` endpoint.
+Under the strict policy, a group-writable system socket directory also refuses
+login startup; use manual starts rather than changing system permissions.

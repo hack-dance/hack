@@ -1271,6 +1271,17 @@ test("unsafe Docker context selection refuses before engine access without consu
   ).toBeNull();
   await writeFile(
     metadata,
+    JSON.stringify({ Endpoints: { docker: { Host: "tcp://127.0.0.1:2376" } } }),
+    { mode: 0o600 }
+  );
+  await run();
+  expect(events).toEqual([]);
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+      ?.lastAttemptBootId
+  ).toBeNull();
+  await writeFile(
+    metadata,
     JSON.stringify({ Endpoints: { docker: { Host: "unix:///fixture.sock" } } }),
     { mode: 0o600 }
   );

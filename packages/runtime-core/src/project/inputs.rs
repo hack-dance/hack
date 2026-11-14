@@ -697,6 +697,24 @@ fn compile_inner(
             private,
         )?;
         let (environment, scoped) = resolver.environment(environment.as_ref(), private)?;
+        let unsets = &service.environment_unsets;
+        if unsets.iter().any(|key| {
+            private.is_some_and(|values| values.contains_key(key))
+                || review.plan.registry.as_ref().is_some_and(|registry| {
+                    service.dependency_cache.is_some()
+                        && registry.required_environment.contains(key)
+                })
+        }) {
+            return Err(error(
+                "execution_environment_owner",
+                "Environment removals cannot overlap private or registry-required bindings; values omitted.",
+            ));
+        }
+        let mut environment = environment;
+        // Docker Engine Config.Env accepts bare names as explicit removals from
+        // image defaults. These entries contain no value and need no launcher.
+        environment.extend(unsets.iter().cloned());
+        environment.sort();
         if !scoped.is_empty() {
             managed_environment.insert(name.clone(), scoped);
         }

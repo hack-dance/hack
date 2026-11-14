@@ -124,3 +124,16 @@ packages/config-compiler/target/
 
 # Python harness bytecode
 __pycache__/
+
+# Empty placeholders that an agent sandbox creates in the checkout root. This
+# repository uses Bun (bun.lock) and has no submodules, so none of these belong.
+/.env.development
+/.env.production
+/.env.test
+/.gitmodules
+/.npmrc
+/.yarnrc
+/.yarnrc.yml
+/package-lock.json
+/pnpm-lock.yaml
+/yarn.lock

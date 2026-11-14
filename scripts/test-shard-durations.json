@@ -624,7 +624,6 @@
     "tests/usage-details.test.ts": 0.4,
     "tests/worktree-git-inspection.test.ts": 0,
     "tests/worktree-runtime-target.test.ts": 0.1,
-    "tests/zellij-backend.test.ts": 0.7,
     "tests/zig-aarch64-musl-linker.test.ts": 0.4
   }
 }

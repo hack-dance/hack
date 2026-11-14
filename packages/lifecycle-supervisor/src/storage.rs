@@ -24,6 +24,8 @@ pub struct State {
     pub boot_id: String,
     pub uid: u32,
     pub command_pid: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_start_time: Option<u64>,
     pub phase: String,
     #[serde(default)]
     pub exit_code: Option<i32>,

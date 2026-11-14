@@ -30,6 +30,12 @@ unavailable in slim environments.
 
 ## Stop
 
+Use `hack activity --json --project <name> --limit 50` to read recent lifecycle
+actions, newest first. The private log records registered project, branch and
+service names, origin, outcome and duration. It excludes environment values,
+command lines and paths. Logging failures do not change the lifecycle command's
+exit code.
+
 ```sh
 hack down
 ```

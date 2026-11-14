@@ -7,6 +7,7 @@ import {
   LIFECYCLE_PROCESS_CLIENT,
   serveLifecycleProcessDelivery,
 } from "../lib/lifecycle-process-delivery.ts";
+import { traceLifecycleRetirement } from "../lib/lifecycle-retirement-trace.ts";
 import {
   type LifecycleStateEntry,
   resolveLifecycleStatePath,
@@ -555,6 +556,9 @@ export async function createNativeAuthoredHostProcesses(input: {
     name: string
   ) => Promise<Readonly<Record<string, string>>>;
   readonly assertFresh: () => Promise<void>;
+  /** Admission/hook ownership for this live owner's failed-launch cleanup.
+   * Must not depend on the canceled startup input acquisition. */
+  readonly assertCleanupFresh?: () => Promise<void>;
   readonly signal: AbortSignal;
   readonly remaining: () => number;
 }): Promise<NativeAuthoredHostProcesses> {
@@ -596,6 +600,7 @@ export async function createNativeAuthoredHostProcesses(input: {
     let active = true;
     let began = false;
     let launchIntent = false;
+    let abandoningLaunch = false;
     let abandoned = false;
     let stopped = false;
     let ready: Awaited<ReturnType<typeof capture>> | undefined;
@@ -610,13 +615,19 @@ export async function createNativeAuthoredHostProcesses(input: {
     await writeExclusive(path, JSON.stringify(owner));
     await synchronizeDirectories(directories);
     const saved = await capture(path);
-    const check = async () => {
+    const check = async (assertCurrent = opts.assertFresh) => {
+      traceLifecycleRetirement("native-owner-check", { active });
       if (!active) {
         return refuse();
       }
-      await opts.assertFresh();
+      await assertCurrent();
+      traceLifecycleRetirement("native-freshness-check-passed", {
+        startupInputsRequired: assertCurrent === opts.assertFresh,
+      });
       await recheckDirectories(directories);
+      traceLifecycleRetirement("native-directories-fresh");
       await unchanged(saved);
+      traceLifecycleRetirement("native-owner-fresh");
     };
     /** Groups this owner launched, recorded before their launch completes. */
     const launchedGroups = new Set<number>();
@@ -638,8 +649,19 @@ export async function createNativeAuthoredHostProcesses(input: {
       env: {},
       definitionHash: opts.semanticHash,
       assertFresh: async () => {
-        await check();
-        opts.remaining();
+        traceLifecycleRetirement("native-controller-fresh", {
+          abandoningLaunch,
+        });
+        await check(
+          abandoningLaunch
+            ? (opts.assertCleanupFresh ?? opts.assertFresh)
+            : opts.assertFresh
+        );
+        // Startup cancellation must not veto the missing-birth refresh during
+        // abandonment. Owner/artifact freshness still holds for every check.
+        if (!abandoningLaunch) {
+          opts.remaining();
+        }
       },
       mux: async () => {
         const mux = await resolveMux({});
@@ -710,10 +732,20 @@ export async function createNativeAuthoredHostProcesses(input: {
      * anything unproven stays retained.
      */
     const abandonLaunch = async () => {
+      abandoningLaunch = true;
+      traceLifecycleRetirement("native-abandon-begin");
       try {
         const launched = await currentEntry(opts.scope, composeProject);
-        await controller.abort();
+        traceLifecycleRetirement("native-abandon-entry", {
+          processes: launched?.processes.length ?? 0,
+          groups: [...launchedGroups],
+        });
+        const result = await controller.abort();
+        traceLifecycleRetirement("native-abandon-controller", {
+          retained: result !== undefined,
+        });
         if ((await currentEntry(opts.scope, composeProject)) !== null) {
+          traceLifecycleRetirement("native-abandon-retained");
           return;
         }
         const groups = new Set(launchedGroups);
@@ -727,7 +759,11 @@ export async function createNativeAuthoredHostProcesses(input: {
           await settledGroup(group);
         }
         abandoned = true;
-      } catch {
+        traceLifecycleRetirement("native-abandon-settled", {
+          groups: [...groups],
+        });
+      } catch (error) {
+        traceLifecycleRetirement("native-abandon-failed", {}, error);
         // Unproven teardown keeps the launch intent and owner retained.
       }
     };

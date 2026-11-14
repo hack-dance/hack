@@ -779,7 +779,9 @@ function logMultiResults(opts: {
     }
 
     if (result.status === "noop") {
-      logger.info({ message: `No changes for ${opts.okMessage} (${path})` });
+      logger.info({
+        message: result.message ?? `No changes for ${opts.okMessage} (${path})`,
+      });
       continue;
     }
 

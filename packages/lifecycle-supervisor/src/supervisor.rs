@@ -330,6 +330,7 @@ fn guard(request: GuardLaunch) -> Result<()> {
         boot_id: os::boot()?,
         uid: identity.uid,
         command_pid: None,
+        command_start_time: None,
         phase: "starting".into(),
         exit_code: None,
         signal: None,
@@ -372,6 +373,24 @@ fn guard(request: GuardLaunch) -> Result<()> {
     outcome
 }
 
+/// Only qualification builds can pause at these instruction boundaries. The
+/// requested checkpoint is read from the explicit test process plan, never the
+/// guard's ambient environment. Shipped/default builds contain no checkpoint.
+#[cfg(feature = "test-hooks")]
+fn test_pause(process: &protocol::Process, checkpoint: &str) {
+    if process
+        .env
+        .get("SUPERVISOR_TEST_CHECKPOINT")
+        .map(String::as_str)
+        == Some(checkpoint)
+    {
+        // SAFETY: affects only this guard, which the fixture owns and kills.
+        unsafe {
+            libc::raise(libc::SIGSTOP);
+        }
+    }
+}
+
 fn guard_command(
     process: &protocol::Process,
     root: &Root,
@@ -379,6 +398,8 @@ fn guard_command(
     log: &mut File,
 ) -> Result<()> {
     let log_name = sanitize_service(state.display_name.as_deref().unwrap_or(&state.name));
+    #[cfg(feature = "test-hooks")]
+    test_pause(process, "before-spawn");
     let mut command = Command::new(&process.argv[0]);
     command
         .args(&process.argv[1..])
@@ -401,7 +422,10 @@ fn guard_command(
             return Err(refused());
         }
     };
+    #[cfg(feature = "test-hooks")]
+    test_pause(process, "after-spawn");
     state.command_pid = Some(child.id() as i32);
+    state.command_start_time = os::inspect(child.id() as i32)?.map(|identity| identity.start);
     state.phase = "running".into();
     root.save(state)?;
     let mut stdout = child.stdout.take().ok_or_else(refused)?;

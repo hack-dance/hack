@@ -16,6 +16,11 @@ on:
         type: boolean
         required: true
         default: true
+      rust_repetitions:
+        description: Consecutive macOS Rust qualification passes (stops on first failure)
+        type: choice
+        options: ["1", "20"]
+        default: "1"
 
 concurrency:
   # Let the active next run finish, including jobs waiting for macOS capacity.
@@ -373,7 +378,10 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.changes.outputs.defer_macos == 'true' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_repetitions == '20' && 300 || 45 }}
+    env:
+      HACK_RUST_TEST_RUNNER: nextest
+      HACK_RUST_TEST_REPETITIONS: ${{ matrix.os == 'macos-latest' && github.event_name == 'workflow_dispatch' && inputs.rust_repetitions || '1' }}
     permissions:
       contents: read
     steps:
@@ -438,14 +446,30 @@ jobs:
           python3 tests/fixtures/environment-launcher-tty.py "$RUNNER_TEMP/interactive-environment-launcher"
       - name: Check candidate formatting
         run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
+      - name: Install pinned process-per-test runner
+        shell: bash
+        run: |
+          bash scripts/install-cargo-nextest.sh "$RUNNER_TEMP/candidate-nextest"
+          echo "$RUNNER_TEMP/candidate-nextest" >> "$GITHUB_PATH"
       - name: Lint candidate core
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings
       - name: Test candidate isolation contracts
-        run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2
+        env:
+          HACK_RUST_TEST_REPORT_DIR: ${{ runner.temp }}/candidate-rust-results
+        run: bash scripts/test-runtime-core.sh
       - name: Lint candidate optional features
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
       - name: Test candidate optional feature contracts
-        run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-features --jobs 2
+        env:
+          HACK_RUST_TEST_REPORT_DIR: ${{ runner.temp }}/candidate-rust-results
+        run: bash scripts/test-runtime-core.sh --all-features
+      - name: Preserve per-pass Rust counts and timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-rust-results-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-rust-results/
+          if-no-files-found: ignore
       - name: Build and inspect local candidate
         run: |
           ./scripts/build-hack-local.sh

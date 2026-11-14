@@ -78,6 +78,8 @@ jobs:
         run: cargo clippy --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml --all-targets -- -D warnings
       - name: Test standalone supervisor with private fake callers
         run: cargo test --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml -- --test-threads=4
+      - name: Test deterministic guard crash windows (qualification build only)
+        run: cargo test --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml --features test-hooks guard_killed_after_ -- --test-threads=1
       - name: Build standalone release executable
         run: cargo build --locked --release --manifest-path packages/lifecycle-supervisor/Cargo.toml
       - uses: oven-sh/setup-bun@v1

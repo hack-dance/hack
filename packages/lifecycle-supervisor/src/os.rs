@@ -327,20 +327,45 @@ pub fn absent_error(error: &io::Error) -> bool {
         || matches!(error.raw_os_error(), Some(libc::ESRCH) | Some(libc::ENOENT))
 }
 
-/// A boot change or a reused leader PID proves the old session is gone. A
-/// missing leader does not: descendants retain its SID and require a census.
+/// Terminal receipts prove the guard finished its census. With no leader, a
+/// matching SID alone is insufficient: that number may belong to a later session.
+/// An observed member born by the recorded command birth anchors the old session.
+/// Missing legacy birth evidence or only newer members is unknown, never authority.
 pub fn recorded_live(state: &crate::storage::State, excluding_guard: bool) -> Result<bool> {
-    if state.boot_id != boot()? {
+    if matches!(state.phase.as_str(), "exited" | "killed" | "failed-start")
+        || state.boot_id != boot()?
+    {
         return Ok(false);
     }
-    if let Some(identity) = inspect(state.guard_pid)?
+    let leader = inspect(state.guard_pid)?;
+    if let Some(identity) = &leader
         && (identity.start != state.guard_start_time
             || identity.uid != state.uid
             || identity.session != state.guard_pid)
     {
         return Ok(false);
     }
-    live_group(state.guard_pid, excluding_guard.then_some(state.guard_pid))
+    let members: Vec<_> = census()?
+        .into_iter()
+        .filter(|p| p.session == state.guard_pid && !p.zombie)
+        .collect();
+    if members.is_empty() {
+        return Ok(false);
+    }
+    if leader.is_none_or(|p| p.zombie)
+        && !members.iter().any(|p| {
+            p.uid == state.uid
+                && p.start >= state.guard_start_time
+                && state
+                    .command_start_time
+                    .is_some_and(|birth| p.start <= birth)
+        })
+    {
+        return Err(refused());
+    }
+    Ok(members
+        .iter()
+        .any(|p| !excluding_guard || p.pid != state.guard_pid))
 }
 
 pub enum Observation {
@@ -353,7 +378,7 @@ pub enum Observation {
 /// with remaining session members is unknown, never healthy or absent.
 pub fn observe_state(state: &crate::storage::State) -> Observation {
     let observed = (|| -> Result<Observation> {
-        if state.boot_id != boot()? {
+        if !recorded_live(state, true)? {
             return Ok(Observation::Absent);
         }
         let leader = inspect(state.guard_pid)?;

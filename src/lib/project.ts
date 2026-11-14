@@ -285,9 +285,8 @@ type ParsedProjectOwnership = {
 export interface ProjectSessionsConfig {
   /**
    * Mux backend for `hack session`.
-   * - "auto" (default): prefer tmux, fall back to zellij.
+   * - "auto" (default): detect tmux only.
    * - "tmux": require tmux.
-   * - "zellij": require zellij.
    * - "none": disable sessions.
    */
   readonly mux?: string;

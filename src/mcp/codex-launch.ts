@@ -53,8 +53,22 @@ function valueToToml(value: unknown): string {
   throw new Error("Unsupported value in Codex MCP configuration");
 }
 
+/**
+ * Codex's per-call limit for Hack's tools, in seconds: the largest timeoutMs
+ * a tool accepts (600 s) plus a margin for stopping the command and for the
+ * work around it, so a call that runs to Hack's own limit normally gets
+ * Hack's result (`timedOut: true`) rather than the client giving up with
+ * none. A margin, not a guarantee: a value the user already set is kept,
+ * even a smaller one.
+ */
+export const CODEX_TOOL_TIMEOUT_SEC = 660;
+
 export function renderCodexLaunch(launch: McpLaunch): string {
-  return renderEntry({ ...launch, args: [...launch.args] });
+  return renderEntry({
+    ...launch,
+    args: [...launch.args],
+    tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC,
+  });
 }
 
 function renderEntry(entry: Record<string, unknown>): string {
@@ -102,13 +116,108 @@ export function replaceCodexLaunch(opts: {
       ...(isRecord(existing.env) ? existing.env : {}),
       ...opts.launch.env,
     },
+    tool_timeout_sec: existing.tool_timeout_sec ?? CODEX_TOOL_TIMEOUT_SEC,
   };
-  const expected = { ...parsed, mcp_servers: { ...servers, hack: nextEntry } };
-  if (isDeepStrictEqual(parsed, expected)) {
+  return rewriteHackEntry({
+    text: opts.text,
+    parsed,
+    servers,
+    entry: nextEntry,
+  });
+}
+
+/**
+ * Add Hack's tool-call limit to an existing `[mcp_servers.hack]` entry that
+ * has none (one written before the limit existed), keeping every other value
+ * and table. Returns the text unchanged when there is no entry or it already
+ * sets a limit. Inserts one line without rewriting existing text; refuses a
+ * layout it cannot update verifiably.
+ */
+export function addCodexToolTimeout(text: string): string {
+  let parsed: unknown;
+  try {
+    parsed = Bun.TOML.parse(text);
+  } catch {
+    throw new Error("Invalid Codex configuration TOML");
+  }
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid Codex configuration root");
+  }
+  const servers = parsed.mcp_servers;
+  if (servers !== undefined && !isRecord(servers)) {
+    throw new Error("Invalid Codex MCP server table");
+  }
+  const existing = isRecord(servers) ? servers.hack : undefined;
+  if (
+    !(isRecord(servers) && isRecord(existing)) ||
+    existing.tool_timeout_sec !== undefined
+  ) {
+    return text;
+  }
+  const expected = {
+    ...parsed,
+    mcp_servers: {
+      ...servers,
+      hack: { ...existing, tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC },
+    },
+  };
+  return insertCodexToolTimeout(text, expected);
+}
+
+function isHackTableHeader(line: string): boolean {
+  if (!HEADER.test(line)) {
+    return false;
+  }
+  try {
+    return isDeepStrictEqual(Bun.TOML.parse(`${line}\n`), {
+      mcp_servers: { hack: {} },
+    });
+  } catch {
+    return false;
+  }
+}
+
+function insertCodexToolTimeout(text: string, expected: unknown): string {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    if (!isHackTableHeader(lines[index] ?? "")) {
+      continue;
+    }
+    let end = index + 1;
+    while (end < lines.length && !HEADER.test(lines[end] ?? "")) {
+      end++;
+    }
+    const newline = text.includes("\r\n") ? "\r\n" : "\n";
+    const offset = lines.slice(0, end).join("\n").length;
+    const insertion = end < lines.length ? offset + 1 : text.length;
+    const prefix = text.slice(0, insertion);
+    const next = `${prefix}${prefix.endsWith("\n") ? "" : newline}tool_timeout_sec = ${CODEX_TOOL_TIMEOUT_SEC}${newline}${text.slice(insertion)}`;
+    try {
+      if (isDeepStrictEqual(Bun.TOML.parse(next), expected)) {
+        return next;
+      }
+    } catch {
+      // Header-like content inside a string is not an insertion boundary.
+    }
+  }
+  throw new Error("Cannot safely update this Codex MCP layout");
+}
+
+function rewriteHackEntry(opts: {
+  readonly text: string;
+  readonly parsed: Record<string, unknown>;
+  readonly servers: Record<string, unknown>;
+  readonly entry: Record<string, unknown>;
+}): string {
+  const expected = {
+    ...opts.parsed,
+    mcp_servers: { ...opts.servers, hack: opts.entry },
+  };
+  if (isDeepStrictEqual(opts.parsed, expected)) {
     return opts.text;
   }
   const prefix = withoutHackSections(opts.text).trimEnd();
-  const next = `${prefix}${prefix ? "\n\n" : ""}${renderEntry(nextEntry)}\n`;
+  const next = `${prefix}${prefix ? "\n\n" : ""}${renderEntry(opts.entry)}\n`;
   let actual: unknown;
   try {
     actual = Bun.TOML.parse(next);

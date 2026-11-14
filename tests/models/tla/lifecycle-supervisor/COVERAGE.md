@@ -13,7 +13,7 @@ standalone Rust binary exercised by a fake caller; the CLI remains unchanged.
 | `ProcessExit`, `Reap` | Session census ignores zombies; reap direct/adopted children; release lock after no live members | Zombie liveness; child changes process group within session |
 | `StopUnknown` | Bounded confirmation can report uncertainty while live members remain | Honest unknown recovery outcome, never successful absence |
 
-Positive TLC exploration: 129 distinct states, queue exhausted, depth 11. Negative
+Positive TLC exploration: 168 distinct states, queue exhausted, depth 11. Negative
 control sets `SkipLiveFence = TRUE`; `Retry` then violates `NoDuplicate` with live,
 durable and duplicate all true in the same state. Both guard-loss and project-loss
 traces can witness this violation; the registry requires the named action and
@@ -23,14 +23,16 @@ Checker: checksum-pinned TLA+ 1.7.4 artifact (TLC reports version 2.19), Java 17
 two workers and a bounded heap. The maintained runner pins the positive count and
 validates the negative invariant/action/witness. Apalache is not qualified here.
 
-`NoForeignSignal` is true by construction: both signal actions require
-`identity = "match"` and preserve that value in their assignment to `unsafeSignal`.
-It does not independently validate observation freshness, PID/session reuse, or the
-source's effect boundary. `GuardRetainsLock` similarly checks the abstract action
+The guard-owned Stop and Kill checks still assume matching identity. The added
+orphan signal admission is exercised by a separate SID-reuse negative control.
+The orphan path includes an environment SID-reuse action and requires an old-birth
+witness, represented by matching identity. The sid-reuse negative control removes
+that witness guard and must violate NoForeignSignal at RecoverOrphan with identity
+sid-reused. Native clock units, enumeration and identity-to-effect races are omitted. `GuardRetainsLock` similarly checks the abstract action
 assignments, not descriptor inheritance or actual flock ownership. `NoDuplicate`
 checks the selected live fence and its negative control in this finite abstraction;
-it does not prove lock/census correctness. The positive state count is retained
-because no model actions, variables or checker registry have changed in this slice.
+it does not prove lock/census correctness. The positive count now includes ReuseSessionID and RecoverOrphan. Terminal phases
+have no recovery signal action.
 
 Assumptions: flock serialization, atomic/synchronized publication, reliable native
 identity and session census, and rechecking identity before effects. Signal delivery
@@ -50,8 +52,8 @@ Native recovery added after this abstraction is deliberately not claimed as mode
 coverage: dead-guard TERM/grace/KILL recovery, supervisor death before guard
 publication, inherited launch-admission lease, stop/exit inspection races, census
 errors and restricted views, high descriptor limits, EINTR retries, and idle
-poll scheduling. `GuardDeath` can reach `Orphaned`, but `Stop` requires `guard` and
-cannot recover it in this model. Native regressions include
+poll scheduling. RecoverOrphan models signal admission only, not grace, KILL timing or confirmation.
+ReuseSessionID represents a later survivor after its replacement leader exits. Native regressions include
 `dead_guard_with_live_session_recovers_term_then_kill`,
 `supervisor_and_guard_prepublication_crashes_keep_stop_admission_leased`,
 `supervisor_killed_while_ready_receipt_is_blocked_recovers`, and
@@ -67,3 +69,9 @@ use fresh tokens. The regression
 `completed_stop_fences_a_run_whose_frame_arrives_after_retirement` proves the
 late frame creates no command receipt. Linux executable replacement is qualified
 by the incremental integration test in the opt-in slice, not by this model.
+
+The real-process dead_reused_session_cannot_authorize_signals_from_old_receipt
+regression creates a dead session leader and surviving child, then relocates
+a stale receipt SID to reproduce reuse without forcing the host PID allocator
+to wrap. It checks terminal absence, non-terminal unknown without signals, and
+fresh-owner launch after a terminal receipt.

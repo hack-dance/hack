@@ -11,6 +11,13 @@ import {
 import { constants as osConstants, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
+import {
+  muxRemovalTargets,
+  removalAllowed,
+  resolveLiveInputScope,
+} from "../lib/live-inputs.ts";
+import { findProjectContext } from "../lib/project.ts";
+import type { SecretsHygieneScope } from "../lib/secrets-hygiene.ts";
 
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PREFIX = "hack-mux-env-";
@@ -26,19 +33,28 @@ export const MUX_ENVIRONMENT_TTL_MS = 10 * 60 * 1000;
 // file's: both are set within moments of each other at staging. A payload
 // whose mtime is in the future (clock skew) never counts as expired.
 
+/** Test seam: told the parent directory of every sweep this process runs. */
+export const sweepObserver: { onSweep?: (parent: string) => void } = {};
+
 /**
  * Remove this user's staged payloads older than the TTL from `parent`
  * (normally the temp directory). Only `hack-mux-env-*` directories owned by
  * this user with private modes are touched, and only their `env.json` when
- * it is a regular single-link file of this user. Failures are skipped: this
- * is cleanup, never a reason to refuse a new session.
+ * it is a regular single-link file of this user. Before each removal the
+ * configuration is resolved (from the current directory, strictly) and the
+ * same live-input check `hack doctor --fix` uses must allow it
+ * (`removalAllowed`, HACK-2181) for the exact targets, the payload's
+ * `env.json` and the directory: a payload is kept when either is a path
+ * current resolution reads, and nothing is removed when the configuration
+ * cannot be read. Any other file inside keeps the directory, since only an
+ * empty one is removed. Failures are skipped: this is cleanup, never a
+ * reason to refuse a new session.
  */
-/** Test seam: told the parent directory of every sweep this process runs. */
-export const sweepObserver: { onSweep?: (parent: string) => void } = {};
-
 export async function sweepStaleMuxEnvironments(opts: {
   readonly parent?: string;
   readonly now?: number;
+  /** The configuration to respect; resolved from the current directory by default. */
+  readonly scope?: () => Promise<SecretsHygieneScope>;
 }): Promise<void> {
   const parent = opts.parent ?? tmpdir();
   sweepObserver.onSweep?.(parent);
@@ -60,6 +76,14 @@ export async function sweepStaleMuxEnvironments(opts: {
       ) {
         continue;
       }
+      if (
+        !(await removalAllowed({
+          targets: muxRemovalTargets(root),
+          scopes: [opts.scope ?? currentLiveInputScope],
+        }))
+      ) {
+        continue;
+      }
       const payload = join(root, "env.json");
       const file = await lstat(payload).catch(() => null);
       if (file) {
@@ -73,6 +97,14 @@ export async function sweepStaleMuxEnvironments(opts: {
       // Another process removed or changed it; leave it.
     }
   }
+}
+
+function currentLiveInputScope(): Promise<SecretsHygieneScope> {
+  return resolveLiveInputScope({
+    startDir: process.cwd(),
+    strict: true,
+    findProject: findProjectContext,
+  });
 }
 
 function isMissing(error: unknown): boolean {

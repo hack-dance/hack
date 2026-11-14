@@ -1607,10 +1607,23 @@ fn anonymous_volume_forms_outside_the_subset_are_still_refused() {
         let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
         assert_eq!(error.code, code, "{mounts}");
     }
-    // The generated prefix cannot be authored, mounted or not.
-    let fixture = Fixture::new(&format!("{BASIC}volumes:\n  hack-anonymous-mine: {{}}\n"));
-    let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
-    assert_eq!(error.code, "reserved_volume_name");
+    // The generated prefix cannot be authored: not as a declared volume, not
+    // as a mount source that would share another service's anonymous volume,
+    // and not as a dependency cache.
+    let generated = "hack-anonymous-86491cc2da428ece";
+    for document in [
+        format!("{BASIC}volumes:\n  hack-anonymous-mine: {{}}\n"),
+        format!(
+            "{BASIC}    volumes: [/app/node_modules]\n  worker:\n    image: alpine:3.21\n    volumes: ['{generated}:/shared']\n"
+        ),
+        format!(
+            "{BASIC}    volumes: [/app/node_modules]\n    labels:\n      hack.dependencies.cache-volume: {generated}\n"
+        ),
+    ] {
+        let fixture = Fixture::new(&document);
+        let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
+        assert_eq!(error.code, "reserved_volume_name", "{document}");
+    }
     // A reserved target is reported the same way for an anonymous volume.
     let fixture = Fixture::new(&format!("{BASIC}    volumes: [/proc/sys]\n"));
     let plan = fixture.plan();

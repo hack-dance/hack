@@ -118,6 +118,15 @@ fn anonymous_volume(service: &str, target: &str) -> String {
     format!("{ANONYMOUS_PREFIX}{:.16}", format!("{:x}", hash.finalize()))
 }
 
+/// Refusal for an authored volume name, mount source or cache-volume label
+/// that carries the generated prefix.
+pub(super) fn reserved_volume_name() -> CandidateError {
+    problem(
+        "reserved_volume_name",
+        "Volume names that start with hack-anonymous- are reserved for anonymous volumes.",
+    )
+}
+
 fn anonymous_volume_plan() -> VolumePlan {
     VolumePlan {
         driver: "local".into(),
@@ -280,8 +289,9 @@ fn mounts(
                 relative(project, &source::resolve(project, base, from, false)?),
                 "filtered node-native source; never a direct host mount",
             ),
-            // Authored names cannot carry the prefix and targets are unique per
-            // service, so only a hash collision can find the name taken.
+            // No authored volume, mount source or cache label can carry the
+            // prefix, and targets are unique per service, so only a hash
+            // collision can find the name taken.
             ("volume", None) => {
                 let name = anonymous_volume(service, &target);
                 if declared
@@ -305,6 +315,9 @@ fn mounts(
             }
             ("volume", Some(from)) => {
                 identifier(from)?;
+                if from.starts_with(ANONYMOUS_PREFIX) {
+                    return Err(reserved_volume_name());
+                }
                 if !declared.contains_key(from) {
                     diagnostics.push(Diagnostic::error(
                         "undeclared_volume",

@@ -69,11 +69,6 @@ function labelValue(labels: unknown, key: string): string | undefined {
 }
 
 /**
- * Compose named-volume sources: a short-syntax source without a path prefix,
- * or a long-syntax `type: volume` source. Bind paths and interpolated values
- * are not named volumes here; anonymous volumes are found separately.
- */
-/**
  * Whether a service mounts an anonymous volume: one absolute path alone, or a
  * long-syntax volume without a source. Native stores it as a retained volume
  * the project owns, so it is data like a declared one.
@@ -90,6 +85,11 @@ function mountsAnonymousVolume(service: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * Compose named-volume sources: a short-syntax source without a path prefix,
+ * or a long-syntax `type: volume` source. Bind paths and interpolated values
+ * are not named volumes here; anonymous volumes are found separately.
+ */
 function namedVolumeSources(service: Record<string, unknown>): string[] {
   const mounts = Array.isArray(service.volumes) ? service.volumes : [];
   const names: string[] = [];
@@ -271,9 +271,9 @@ export async function readNativeDataAdvisories(
 
 const ADVICE: Readonly<Record<NativeDataAdvisoryCode, string>> = {
   native_data_owner_handoff_unqualified:
-    "named data volume with no explicit user: while cap_drop removes CHOWN, DAC_OVERRIDE, FOWNER, SETUID or SETGID (or ALL). An image entrypoint that starts as root and hands the data directory to another user then fails; set user: to the image's numeric data UID:GID, or keep those capabilities",
+    "retained data volume with no explicit user: while cap_drop removes CHOWN, DAC_OVERRIDE, FOWNER, SETUID or SETGID (or ALL). An image entrypoint that starts as root and hands the data directory to another user then fails; set user: to the image's numeric data UID:GID, or keep those capabilities",
   native_retained_data_mutable_image:
-    "named data volume on an image tag that can change (latest or no tag). Retained data restores only with the same image, so pin a digest (image@sha256:...) or a fixed version tag",
+    "retained data volume on an image tag that can change (latest or no tag). Retained data restores only with the same image, so pin a digest (image@sha256:...) or a fixed version tag",
 };
 
 /**

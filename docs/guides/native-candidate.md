@@ -1830,8 +1830,8 @@ derived from the service name and the container path, and reports the warning
 - It counts toward the limit of 16 volumes per project.
 
 Two services that name the same path get separate volumes, as on Compose. A
-top-level volume whose name starts with `hack-anonymous-` refuses with
-`reserved_volume_name`. A bind mount still needs a source, and a `volume.subpath`
+volume name, mount source or cache-volume label that starts with `hack-anonymous-`
+refuses with `reserved_volume_name`. A bind mount still needs a source, and a `volume.subpath`
 still needs a named volume. A read-only anonymous volume does not cover an
 image-declared `VOLUME` path; that cover must be writable. `hack doctor` gives the
 same retained-data advisories for a service with an anonymous volume as for one

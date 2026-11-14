@@ -119,13 +119,32 @@ export function doctorMetadata(opts: {
     "native root trust",
     "native ca repair",
   ].includes(opts.id);
+  const fix: DoctorMetadata["fix"] = {
+    kind: adminTrust ? "admin" : "manual",
+    args: opts.id === "local ca trust" ? ["global", "trust"] : [],
+    doc_url: DOC_URL,
+  };
+  if (opts.id === "hack gitignore") {
+    return {
+      area,
+      scope,
+      fix: {
+        kind: "safe",
+        args: [
+          "doctor",
+          "--fix",
+          "--only",
+          "hack gitignore",
+          "--yes",
+          "--json",
+        ],
+        doc_url: DOC_URL,
+      },
+    };
+  }
   return {
     area,
     scope,
-    fix: {
-      kind: adminTrust ? "admin" : "manual",
-      args: opts.id === "local ca trust" ? ["global", "trust"] : [],
-      doc_url: DOC_URL,
-    },
+    fix,
   };
 }

@@ -380,7 +380,7 @@ Each is small enough for one PR.
 7. **R5b** Activity reader: `hack activity --json [--project] [--limit]`.
 8. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope.
 9. **R7a — exists.** Doctor audit schema 1 adds per-check `area`, `scope: machine | project` and `fix: {kind: safe | admin | manual, args[], doc_url}` inside the existing `{ok,data}` envelope. Unknown checks default to Other/manual with no executable args. A category is guidance, not permission to run it.
-10. **R7b** One fix without prompts: `hack doctor --fix --only <id> --yes --json`, only for `kind: safe`.
+10. **R7b — exists.** `hack doctor --fix --only <id> --yes --json` executes one allowlisted safe fix and rechecks it. Initially only `hack gitignore` is safe; other IDs and mixed modes refuse before writes. Results use `{ok,data:{schema:1,checks,summary,counts,fix}}`; `fix` records `id`, `changed`, `confirmed`.
 11. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
 12. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
 13. **R9** (optional) Push updates: `GET /v1/projects?wait=<generated_at>` long-poll.

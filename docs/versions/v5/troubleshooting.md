@@ -8,6 +8,8 @@ an original key, not an automatic repair.
 
 `hack doctor --json` returns `{ok:true,data:{schema:1,checks,summary,counts}}`. Each check adds an area, machine/project scope and a fix category (`safe`, `admin` or `manual`), argv after `hack`, and a documentation URL. Empty argv means consult the docs. The audit remains read-only; `ok:true` means the audit ran, while error findings still exit 1. Unknown checks offer no runnable repair.
 
+For a targeted repair, `hack doctor --fix --only 'hack gitignore' --yes --json --path <repo>` repairs only Hack's managed ignore block, keeping user lines. It needs a Git checkout and leaves adopted, unsafe or read-only inputs alone. It rechecks the result and exits 1 when unconfirmed. `data.fix` reports `id`, `changed` and `confirmed`; no other check is run or repaired. Other IDs, absent consent and combinations with other repair modes refuse before writes. Broad `--fix --json` still refuses.
+
 The rows marked **next.17 source** describe merged code intended for next.17.
 They do not change an installed next.16 bundle. See the
 [release notes](../guides/v5-release-notes.md) for version boundaries.

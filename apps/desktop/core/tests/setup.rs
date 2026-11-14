@@ -357,6 +357,7 @@ fn confirmed_warnings_need_attention_and_focus_is_scoped() {
 fn installed_but_disabled_or_drifted_login_is_not_passed() {
     for service in [
         serde_json::json!({"installed":true,"enabled":false}),
+        serde_json::json!({"installed":true,"active":false}),
         serde_json::json!({"installed":true,"next_step":"hack daemon install"}),
         serde_json::json!({"installed":true,"severity":"warn"}),
     ] {
@@ -379,4 +380,56 @@ fn check_clears_old_output_but_preserves_immediate_action_receipt_and_skips() {
     p.pending_fix = true;
     p.begin();
     assert_eq!(p.result.as_deref(), Some("just finished"));
+}
+
+#[test]
+fn compose_remedies_override_native_but_keep_checked_home_and_program() {
+    let mut report = setup::Report::default();
+    report.cards.push(setup::Card {
+        id: "cli".into(),
+        title: "CLI".into(),
+        status: Status::Passed,
+        detail: String::new(),
+        remedy: setup::Remedy::Doc(String::new()),
+    });
+    report.cli_program = Some("/checked/hack-next".into());
+    report.context = Some(
+        hack_desktop_core::execution::ExecutionContext::from_values(&[
+            ("HOME".into(), "/private/home".into()),
+            ("HACK_RUNTIME_BACKEND".into(), "native".into()),
+        ])
+        .unwrap(),
+    );
+    for action in ["install", "trust"] {
+        let spec = report
+            .command(vec!["global".into(), action.into()])
+            .unwrap();
+        assert!(spec.args.contains(&"HACK_RUNTIME_BACKEND=compose".into()));
+        assert!(spec.args.contains(&"HOME=/private/home".into()));
+        assert!(spec.args.contains(&"/checked/hack-next".into()));
+        assert!(!spec.args.contains(&"HACK_RUNTIME_BACKEND=native".into()));
+    }
+    assert!(
+        report
+            .command(vec!["daemon".into(), "restart".into()])
+            .unwrap()
+            .args
+            .contains(&"HACK_RUNTIME_BACKEND=native".into())
+    );
+}
+
+#[test]
+fn failed_or_unloaded_launchd_never_passes_login_even_with_a_live_daemon() {
+    for launchd in [
+        serde_json::json!({"loaded":false}),
+        serde_json::json!({"loaded":true,"exit_status":78}),
+    ] {
+        let report = derive(
+            &[],
+            Platform::Mac,
+            serde_json::json!({"running":true,"service":{"installed":true,"available":true,"enabled":null,"active":true,"next_step":null}, "launchd":launchd}),
+            Some("5.0.0"),
+        );
+        assert_eq!(report.cards.last().unwrap().status, Status::NeedsAttention);
+    }
 }

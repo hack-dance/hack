@@ -234,3 +234,8 @@ including candidate launchers with a private default home. Missing or invalid
 paths leave daemon evidence unavailable; the app never falls back to a guessed
 parent-home socket or a registry-writing project listing. Socket version and
 project reads still have to succeed before project state is accepted.
+Compose routing/trust observations and their fixed `global install`/`global trust`
+remedies explicitly select Compose while retaining the checked executable and
+home. Daemon remedies retain the original backend. Login-service installation
+alone does not pass when available evidence says inactive, unloaded, or failed
+launchd exit status; these states need attention even if hackd runs separately.

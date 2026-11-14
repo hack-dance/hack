@@ -42,7 +42,7 @@ fn checks_are_observe_only_and_safe_action_does_not_prove_health() {
     let calls = t.0.join("calls");
     std::fs::write(&program,r#"#!/bin/sh
 [ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 99
-printf '%s\n' "$*" >> "$HOME/calls"
+printf '%s\n' "$* backend=$HACK_RUNTIME_BACKEND" >> "$HOME/calls"
 case "$*" in
 --version) printf '5.0.0\n';;
 'projects --json --no-daemon') printf '{"projects":[],"runtime_ok":true}';;
@@ -55,6 +55,7 @@ esac
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     warm_version(&program, &t.0);
     let runner = CliRunner::new(program)
+        .with_env("HACK_RUNTIME_BACKEND", "native")
         .with_env("CALLS", calls.to_str().unwrap())
         .with_env("HOME", t.0.to_str().unwrap())
         .with_env("HACK_HOME", t.0.join("hack").to_str().unwrap())
@@ -77,6 +78,7 @@ esac
         !read_calls.contains("projects"),
         "registry-writing listing is refused"
     );
+    assert!(read_calls.contains("doctor --json backend=compose"));
     assert!(!read_calls.contains("global"));
     assert!(!read_calls.contains("daemon start"));
     let out = source.setup_action(SafeAction::StartDaemon, &r);

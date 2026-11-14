@@ -30,6 +30,15 @@ pub(crate) fn login_card(
     );
     if bool_field("installed") == Some(true)
         && (bool_field("enabled") == Some(false)
+            || bool_field("active") == Some(false)
+            || daemon
+                .and_then(|s| s.pointer("/launchd/loaded"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            || daemon
+                .and_then(|s| s.pointer("/launchd/exit_status"))
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|code| code != 0)
             || next.is_some()
             || service
                 .and_then(|s| s.get("severity"))

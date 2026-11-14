@@ -92,6 +92,14 @@ impl ExecutionContext {
         }
         Ok(Self { entries })
     }
+    /// Preserve the checked home/program context while selecting an authored
+    /// backend for observations and fixes belonging exclusively to that backend.
+    pub fn with_backend(&self, backend: &str) -> Result<Self, String> {
+        let mut values = self.entries.clone();
+        values.retain(|(key, _)| key != "HACK_RUNTIME_BACKEND");
+        values.push(("HACK_RUNTIME_BACKEND".into(), backend.into()));
+        Self::from_values(&values)
+    }
     pub fn value(&self, key: &str) -> Option<&str> {
         self.entries
             .iter()

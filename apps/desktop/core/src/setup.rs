@@ -59,9 +59,20 @@ impl Report {
         if !self.cli_ready() {
             return Err("The CLI has not been checked".into());
         }
-        self.context
+        let context = self
+            .context
             .as_ref()
-            .ok_or("Execution context has not been checked")?
+            .ok_or("Execution context has not been checked")?;
+        let compose = if args.first().is_some_and(|s| s == "global")
+            && args.get(1).is_some_and(|s| s == "install" || s == "trust")
+        {
+            Some(context.with_backend("compose")?)
+        } else {
+            None
+        };
+        compose
+            .as_ref()
+            .unwrap_or(context)
             .bind(&crate::terminal::CommandSpec {
                 program: self
                     .cli_program

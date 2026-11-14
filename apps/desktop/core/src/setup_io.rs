@@ -112,8 +112,10 @@ impl LiveSource {
             .as_ref()
             .map(DoctorTarget::from_projects)
             .unwrap_or_default();
+        // These machine routing/trust cards describe Compose exclusively;
+        // project observers below still choose each project's own backend.
         let observer = LiveSource {
-            runner,
+            runner: runner.with_env("HACK_RUNTIME_BACKEND", "compose"),
             daemon: None,
         };
         let runs = observer.doctor_runs_within(

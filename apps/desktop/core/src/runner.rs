@@ -242,6 +242,11 @@ impl CliRunner {
         };
         let stdout = drain(&out, &mut child)?;
         let stderr = drain(&err, &mut child)?;
+        if let Some(e) = stdout.error.as_ref().or(stderr.error.as_ref()) {
+            return Err(RunError::Spawn(format!(
+                "reading the command's output failed: {e}"
+            )));
+        }
         if stdout.overflow {
             return Err(RunError::BadJson {
                 error: format!("output larger than {MAX_STDOUT} bytes"),
@@ -358,6 +363,8 @@ enum Keep {
 struct Drained {
     text: String,
     overflow: bool,
+    /// A read failed before end of file: the output is incomplete.
+    error: Option<String>,
 }
 
 /// Read a pipe to EOF on a thread, keeping memory bounded the whole time
@@ -367,12 +374,19 @@ fn read_all<R: Read + Send + 'static>(r: Option<R>, keep: Keep) -> mpsc::Receive
     thread::spawn(move || {
         let mut buf: Vec<u8> = Vec::new();
         let mut overflow = false;
+        let mut error = None;
         if let Some(mut r) = r {
             let mut chunk = [0u8; 16 * 1024];
             loop {
                 let n = match r.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
                     Ok(n) => n,
+                    // A signal interrupted the read; nothing was lost.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        error = Some(e.to_string());
+                        break;
+                    }
                 };
                 match keep {
                     Keep::Head(max) => {
@@ -393,6 +407,7 @@ fn read_all<R: Read + Send + 'static>(r: Option<R>, keep: Keep) -> mpsc::Receive
         let _ = tx.send(Drained {
             text: String::from_utf8_lossy(&buf).into_owned(),
             overflow,
+            error,
         });
     });
     rx
@@ -772,6 +787,49 @@ wait $!"#,
         let r: Value = f.runner().run_json_to_completion(&["up"], None).unwrap();
         assert_eq!(r["action"], "up");
         assert!(started.elapsed() >= Duration::from_millis(900));
+    }
+
+    /// A reader that replays scripted results.
+    struct Scripted(std::collections::VecDeque<std::io::Result<Vec<u8>>>);
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(Err(e)) => Err(e),
+                Some(Ok(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_reads_are_retried_and_other_errors_reported() {
+        use std::io::{Error, ErrorKind};
+        let r = Scripted(
+            vec![
+                Err(Error::from(ErrorKind::Interrupted)),
+                Ok(b"{\"ok\":".to_vec()),
+                Err(Error::from(ErrorKind::Interrupted)),
+                Ok(b"true}".to_vec()),
+            ]
+            .into(),
+        );
+        let d = read_all(Some(r), Keep::Head(1024)).recv().unwrap();
+        assert_eq!(d.text, "{\"ok\":true}");
+        assert!(d.error.is_none());
+
+        let r = Scripted(
+            vec![
+                Ok(b"{\"ok\":true".to_vec()),
+                Err(Error::new(ErrorKind::BrokenPipe, "gone")),
+            ]
+            .into(),
+        );
+        let d = read_all(Some(r), Keep::Head(1024)).recv().unwrap();
+        assert!(d.error.is_some(), "a failed read is not end of file");
     }
 
     #[test]

@@ -1,0 +1,37 @@
+---
+title: Session · admission and cleanup proof
+---
+stateDiagram-v2
+  direction TB
+  [*] --> new
+  new --> admitted : Admit
+  admitted --> withdrawn : Withdraw [undispatched]
+  admitted --> created : Create
+  created --> recorded : Record
+  recorded --> started : Start [fresh]
+  started --> attached : Attach
+  started --> ended : EOF
+  attached --> ended : EOF
+  admitted --> abandoned : Crash
+  created --> abandoned : Crash
+  recorded --> abandoned : Crash
+  started --> abandoned : Crash
+  attached --> abandoned : Crash
+  ended --> abandoned : Crash
+  ended --> retired : Retire [exact proof]
+  abandoned --> retired : Retire [exact proof]
+  note right of recorded
+    INV WriteAhead
+    Intent and exec ID durable before Start
+  end note
+  note right of abandoned
+    INV NoReplay
+    No recovered admission capability
+  end note
+  note right of retired
+    INV RetiredWithProof
+    ExecExitedValidated for exact exec
+    or same-incarnation container absence
+    or proven bound VM boot stop
+    EOF or failed inspect alone is unknown
+  end note

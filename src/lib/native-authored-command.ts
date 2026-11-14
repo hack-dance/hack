@@ -65,7 +65,7 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, single-service logs, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, single-service logs, single-service exec or noninteractive run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
 }
 
@@ -963,8 +963,8 @@ export async function tryNativeAuthoredCommand(
 }
 
 /**
- * Exec and one-off run share the closed noninteractive command domain: one
- * service, a literal argv, an optional absolute workdir, no TTY/stdin, no
+ * Exec and one-off run share the closed argument domain: one
+ * service, a literal argv, an optional absolute workdir, no
  * profile/env/service-list/JSON/detach/log options.
  */
 function assertCommandOptions(

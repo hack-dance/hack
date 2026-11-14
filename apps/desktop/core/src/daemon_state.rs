@@ -335,6 +335,20 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn recovery_and_machine_card_share_one_gate() {
+        use crate::source::DaemonRecovery;
+        let mut model = DaemonModel::default();
+        assert!(model.begin_with_recovery(DaemonAction::Start, Some(DaemonRecovery::Start)));
+        assert!(!model.begin_with_recovery(DaemonAction::Restart, Some(DaemonRecovery::Restart)));
+        assert!(!model.begin(DaemonAction::Install));
+        model.finished(&Ok(()));
+        assert!(!model.begin_with_recovery(DaemonAction::Start, Some(DaemonRecovery::Start)));
+        model.refreshed(Observation::default());
+        model.observed.cli_missing = true;
+        assert!(!model.begin_with_recovery(DaemonAction::Start, Some(DaemonRecovery::Start)));
+    }
+
+    #[test]
     fn every_daemon_fixture_and_missing_always_on_metadata() {
         use crate::fixtures::{Fixture, daemon_observation};
         for f in Fixture::ALL {

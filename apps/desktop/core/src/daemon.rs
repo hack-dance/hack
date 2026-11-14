@@ -158,7 +158,13 @@ fn connect_bounded(path: &Path, timeout: Duration) -> Result<UnixStream, DaemonE
     // SAFETY: socket has no pointer arguments; an owned descriptor closes on
     // every error path. sockaddr_un is zero-initialized and its path length
     // was checked by the caller before this helper.
-    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    #[cfg(target_os = "linux")]
+    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let kind = libc::SOCK_STREAM;
+    // SAFETY: socket arguments contain no pointers. Linux sets close-on-exec
+    // atomically; other platforms set it before the descriptor is used below.
+    let raw = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
     if raw < 0 {
         return Err(io_err(std::io::Error::last_os_error()));
     }
@@ -181,7 +187,9 @@ fn connect_bounded(path: &Path, timeout: Duration) -> Result<UnixStream, DaemonE
     // SAFETY: descriptor is owned/live, addr is initialized for len bytes;
     // fcntl changes only this task's new socket, never a shared descriptor.
     let result = unsafe {
-        if libc::fcntl(raw, libc::F_SETFL, libc::O_NONBLOCK) < 0 {
+        if libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) < 0
+            || libc::fcntl(raw, libc::F_SETFL, libc::O_NONBLOCK) < 0
+        {
             return Err(io_err(std::io::Error::last_os_error()));
         }
         libc::connect(

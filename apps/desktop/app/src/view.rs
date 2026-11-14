@@ -241,6 +241,7 @@ impl HackApp {
 
     fn run_daemon_action(&mut self, action: DaemonAction, cx: &mut Context<Self>) {
         if !self.live
+            || self.model.cli_missing()
             || !self
                 .daemon
                 .begin_with_recovery(action, self.model.daemon_recovery())
@@ -248,6 +249,8 @@ impl HackApp {
             return;
         }
         self.daemon_epoch += 1;
+        // Invalidate project reads started before this machine action.
+        self.model.begin_refresh();
         cx.notify();
         let source = self.source.clone();
         cx.spawn(async move |this, cx| {
@@ -299,7 +302,7 @@ impl HackApp {
                     .label(action.label())
                     .small()
                     .outline()
-                    .disabled(!self.live || self.daemon.busy.is_some())
+                    .disabled(!self.live || self.daemon.busy.is_some() || self.model.cli_missing())
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.run_daemon_action(action, cx)),
                     ),
@@ -536,7 +539,12 @@ impl HackApp {
                     .child(b.text()),
             );
         }
-        if let Some(action) = self.model.daemon_recovery() {
+        if let Some(action) = self.model.daemon_recovery()
+            && !self.daemon.observed.actions().contains(&match action {
+                DaemonRecovery::Start => DaemonAction::Start,
+                DaemonRecovery::Restart => DaemonAction::Restart,
+            })
+        {
             col = col.child(
                 h_flex()
                     .px_4()

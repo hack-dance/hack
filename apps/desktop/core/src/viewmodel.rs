@@ -138,6 +138,11 @@ pub struct AppModel {
 
 impl AppModel {
     #[must_use]
+    pub fn cli_missing(&self) -> bool {
+        matches!(self.last_error, Some(SourceError::CliMissing))
+    }
+
+    #[must_use]
     pub fn always_on_global(&self) -> Option<&crate::models::AutostartGlobal> {
         self.snapshot.as_ref()?.projects.autostart_global.as_ref()
     }

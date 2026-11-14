@@ -155,8 +155,14 @@ impl LiveSource {
     }
 
     const READ: Duration = Duration::from_secs(15);
-    const UP: Duration = Duration::from_secs(600);
-    const OTHER: Duration = Duration::from_secs(120);
+    /// Lifecycle commands (`up`, `down`, `restart`) are not cut short by
+    /// the app: the CLI owns their timeouts and retires the detached build
+    /// subprocesses it starts. Terminating it early can orphan those today
+    /// (its detached build path does not forward SIGTERM; requested of the
+    /// lead). This is only a safety net for a CLI that never returns.
+    pub const LIFECYCLE_SAFETY_NET: Duration = Duration::from_secs(6 * 60 * 60);
+    /// `open` starts nothing; a short limit is safe.
+    const OPEN: Duration = Duration::from_secs(120);
 }
 
 impl Source for LiveSource {
@@ -226,10 +232,10 @@ impl Source for LiveSource {
         // only on a validated root, by its canonical path.
         let real = trusted_root(repo_root)?;
         let repo_root = real.as_path();
-        let timeout = if action == Action::Start {
-            Self::UP
+        let timeout = if action == Action::Open {
+            Self::OPEN
         } else {
-            Self::OTHER
+            Self::LIFECYCLE_SAFETY_NET
         };
         let args = action.cli_args();
         let runner = self.runner_for(native);
@@ -764,6 +770,13 @@ esac
         );
         assert!(feed.poll(1000).events.is_empty(), "delivered once");
         assert!(src.open_logs(Path::new("/work/x"), true, &args).is_err());
+    }
+
+    #[test]
+    fn lifecycle_actions_are_not_cut_short_by_the_app() {
+        // The CLI owns lifecycle timeouts; the app only keeps a safety net
+        // far beyond any of them.
+        const { assert!(LiveSource::LIFECYCLE_SAFETY_NET.as_secs() >= 3600) };
     }
 
     #[test]

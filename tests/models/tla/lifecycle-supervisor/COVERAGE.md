@@ -96,7 +96,11 @@ after TERM ended its wrapper and checks KILL and confirmed absence for its child
 Recovery deadlines are not modeled: each recovered target receives a fresh five-second
 TERM grace plus two seconds for confirmation, independently of the original guard
 wait. guard_lost_late_in_stop_gets_full_recovery_deadline kills the guard three
-seconds after wrapper death and checks the full recovery grace and successful
-KILL confirmation; the early-loss variant checks the same boundary without delay.
+seconds after wrapper death and checks successful KILL confirmation and child absence; the early-loss variant checks the same boundary without delay.
 Live-guard admission snapshots are best-effort; a denied census does not prevent
 the guard-owned shutdown path. Orphan capture stays strict (unit-tested admission seam).
+
+The census-to-guard-loss handoff and multi-target timeout scheduling are native
+implementation boundaries, not modeled. guarded_live rechecks guard loss after
+a failed census. expired_target_does_not_abandon_other_recovery checks that one
+paused guard timing out does not prevent another target from completing KILL.

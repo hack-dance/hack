@@ -475,12 +475,30 @@ fn stop_capture<T>(
     }
 }
 
+fn guard_lost(state: &State) -> Result<bool> {
+    Ok(os::inspect(state.guard_pid)?.is_none_or(|p| p.zombie))
+}
+
+// None transfers to orphan recovery. A census error cannot bypass that transfer
+// when the guard disappears during the census or its witness recheck.
+fn guarded_live(state: &State) -> Result<Option<bool>> {
+    if guard_lost(state)? {
+        return Ok(None);
+    }
+    match os::recorded_live(state, false) {
+        Ok(live) => Ok(Some(live)),
+        Err(_) if guard_lost(state)? => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn stop(states: &[State]) -> Result<()> {
     struct Target {
         state: State,
         recovery: Option<os::Recovery>,
         admission: Option<os::Recovery>,
         orphan_term: Option<Instant>,
+        finished: bool,
     }
     impl Target {
         fn recover(&mut self) -> Result<()> {
@@ -493,79 +511,101 @@ fn stop(states: &[State]) -> Result<()> {
             self.recovery = Some(recovery);
             Ok(())
         }
+
+        fn advance(&mut self, start: Instant) -> Result<bool> {
+            if self.recovery.is_none() {
+                match guarded_live(&self.state)? {
+                    None => self.recover()?,
+                    Some(false) => return Ok(false),
+                    Some(true) => {
+                        if start.elapsed() >= GRACE + Duration::from_secs(2) {
+                            return Err(refused());
+                        }
+                        return Ok(true);
+                    }
+                }
+            }
+            let recovery = self.recovery.as_ref().ok_or_else(refused)?;
+            if !recovery.live()? {
+                return Ok(false);
+            }
+            let elapsed = self.orphan_term.ok_or_else(refused)?.elapsed();
+            if elapsed >= GRACE + Duration::from_secs(2) {
+                return Err(refused());
+            }
+            if elapsed >= GRACE {
+                recovery.signal(libc::SIGKILL)?;
+            }
+            Ok(true)
+        }
     }
     let mut active = Vec::new();
-    // Capture every target before effects, including live guards that may die mid-stop.
+    // Validate admission before effects. Capture while a live guard can still
+    // prove membership, so loss during the later liveness check retains authority.
     for state in states {
-        if !os::recorded_live(state, false)? {
-            continue;
-        }
         let guard_live = match os::inspect(state.guard_pid)? {
             Some(identity) if !identity.zombie => {
-                os::same(state, &identity)?;
+                if let Err(error) = os::same(state, &identity) {
+                    if !os::recorded_live(state, false)? {
+                        continue;
+                    }
+                    return Err(error);
+                }
                 true
             }
             _ => false,
         };
         let (recovery, admission) = stop_capture(guard_live, || os::Recovery::capture(state))?;
+        match os::recorded_live(state, false) {
+            Ok(false) => continue,
+            Ok(true) => (),
+            Err(_) if guard_lost(state)? && (recovery.is_some() || admission.is_some()) => (),
+            Err(error) => return Err(error),
+        }
         active.push(Target {
             state: state.clone(),
             recovery,
             admission,
             orphan_term: None,
+            finished: false,
         });
     }
+    let mut failure = None;
     for target in &mut active {
-        if let Some(recovery) = &target.recovery {
-            recovery.signal(libc::SIGTERM)?;
+        let signalled = if let Some(recovery) = &target.recovery {
             target.orphan_term = Some(Instant::now());
-        } else if let Err(error) = os::signal_guard(&target.state) {
-            if os::inspect(target.state.guard_pid)?.is_none_or(|p| p.zombie) {
-                target.recover()?;
-            } else if os::recorded_live(&target.state, false)? {
-                return Err(error);
+            recovery.signal(libc::SIGTERM)
+        } else {
+            match os::signal_guard(&target.state) {
+                Ok(()) => Ok(()),
+                Err(error) => match guarded_live(&target.state) {
+                    Ok(None) => target.recover(),
+                    Ok(Some(false)) => Ok(()),
+                    Ok(Some(true)) => Err(error),
+                    Err(error) => Err(error),
+                },
             }
+        };
+        if let Err(error) = signalled {
+            target.finished = true;
+            failure.get_or_insert(error);
         }
     }
     let start = Instant::now();
     loop {
         let mut live = false;
-        for target in &mut active {
-            if target.recovery.is_none() {
-                if os::inspect(target.state.guard_pid)?.is_none_or(|p| p.zombie) {
-                    // Guard loss gets a fresh census or the admission snapshot.
-                    target.recover()?;
-                } else {
-                    if os::recorded_live(&target.state, false)? {
-                        if start.elapsed() >= GRACE + Duration::from_secs(2) {
-                            return Err(refused());
-                        }
-                        live = true;
-                    }
-                    continue;
-                }
-            }
-            if let Some(recovery) = &target.recovery {
-                if !recovery.live()? {
-                    continue;
-                }
-                if target
-                    .orphan_term
-                    .is_some_and(|since| since.elapsed() >= GRACE + Duration::from_secs(2))
-                {
-                    return Err(refused());
-                }
-                live = true;
-                if target
-                    .orphan_term
-                    .is_some_and(|since| since.elapsed() >= GRACE)
-                {
-                    recovery.signal(libc::SIGKILL)?;
+        for target in active.iter_mut().filter(|target| !target.finished) {
+            match target.advance(start) {
+                Ok(true) => live = true,
+                Ok(false) => target.finished = true,
+                Err(error) => {
+                    target.finished = true;
+                    failure.get_or_insert(error);
                 }
             }
         }
         if !live {
-            return Ok(());
+            return failure.map_or(Ok(()), Err);
         }
         thread::sleep(TICK);
     }

@@ -52,7 +52,8 @@ is lost during stop, recovery prefers a fresh capture and falls back to those
 admitted identities, rechecking each before TERM/KILL. Each recovered target gets
 its own five-second TERM grace and two-second confirmation bound. Recovery begins
 at most once per target; late guard loss can extend stop to roughly fourteen seconds. Unobserved descendants
-still report unknown.
+still report unknown. A failed or expired target does not abandon other admitted
+targets: stop drives them to their own outcomes before returning unknown.
 
 Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
 `observed`, `stopped`, or `unknown`). A stop whose confirmation times out emits

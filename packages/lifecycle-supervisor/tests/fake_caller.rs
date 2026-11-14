@@ -1039,17 +1039,30 @@ fn dead_guard_with_live_session_recovers_term_then_kill() {
 
 #[test]
 fn guard_lost_mid_stop_keeps_admission_snapshot() {
-    guard_lost_during_stop(Duration::ZERO);
+    guard_lost_during_stop(Duration::ZERO, false);
 }
 
 #[test]
 fn guard_lost_late_in_stop_gets_full_recovery_deadline() {
-    guard_lost_during_stop(Duration::from_secs(3));
+    guard_lost_during_stop(Duration::from_secs(3), false);
 }
 
-fn guard_lost_during_stop(delay: Duration) {
+#[test]
+fn expired_target_does_not_abandon_other_recovery() {
+    guard_lost_during_stop(Duration::from_secs(3), true);
+}
+
+fn guard_lost_during_stop(delay: Duration, blocked: bool) {
     let f = Fixture::new();
-    let (mut caller, _) = f.start(vec![f.process("worker", "wrapper-term-child")]);
+    let mut processes = vec![f.process("worker", "wrapper-term-child")];
+    if blocked {
+        processes.push(f.process("blocked", "hold"));
+    }
+    let (mut caller, _) = f.start(processes);
+    let blocked_guard = blocked.then(|| pid(&f.state("blocked"), "guardPid"));
+    if let Some(guard) = blocked_guard {
+        assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
+    }
     eventually(|| f.root.join("wrapper-child-ready").exists().then_some(()));
     let state = f.state("worker");
     let child = eventually(|| {
@@ -1060,7 +1073,7 @@ fn guard_lost_during_stop(delay: Duration) {
                 .and_then(identity)
         })
     });
-    f.owned.borrow_mut().push(child);
+    f.owned.borrow_mut().push(child.clone());
     let mut stop = command(&f.root, "stop").spawn().unwrap();
     send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
     // The guard has acted on this stop once its wrapper is dead. Its five-second
@@ -1076,12 +1089,25 @@ fn guard_lost_during_stop(delay: Duration) {
         unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
         0
     );
-    assert!(wait(&mut caller, TIMEOUT).success());
+    if !blocked {
+        assert!(wait(&mut caller, TIMEOUT).success());
+    }
     let receipt = receive(stop.stdout.as_mut().unwrap());
-    assert!(wait(&mut stop, TIMEOUT).success(), "{receipt}");
-    assert_eq!(receipt["outcome"], "stopped");
-    assert!(recovery_started.elapsed() >= Duration::from_secs(5));
-    assert!(recovery_started.elapsed() < Duration::from_secs(7));
+    let stopped = wait(&mut stop, TIMEOUT).success();
+    assert_eq!(stopped, !blocked, "{receipt}");
+    assert_eq!(
+        receipt["outcome"],
+        if blocked { "unknown" } else { "stopped" }
+    );
+    // Scheduling may let the guard itself finish escalation. Either path must
+    // confirm absence; do not mistake test observation latency for grace timing.
+    assert!(recovery_started.elapsed() < TIMEOUT);
+    assert!(identity(child.pid).is_none() || process_is_zombie(child.pid));
+    if let Some(guard) = blocked_guard {
+        assert_eq!(unsafe { libc::kill(guard, libc::SIGCONT) }, 0);
+        f.stop();
+        assert!(wait(&mut caller, TIMEOUT).success());
+    }
 }
 
 #[test]

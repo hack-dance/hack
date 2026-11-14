@@ -598,6 +598,22 @@ test("a commented-out Program key does not make a foreign top-level program miss
   expect(verbs).toEqual([]);
 });
 
+test("an XML-escaped Program key pointing at another hack is never replaced", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    // `Progr&#97;m` is `Program` to launchd; no ProgramArguments, so a
+    // reader that missed it would see no program and retarget.
+    written = `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>Progr&#97;m</key>\n  <string>${otherHack(fixture)}</string>\n</dict>\n</plist>\n`;
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "unknown-program",
+    secondRepair: "unknown-program",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
 test.skipIf(process.getuid?.() === 0)(
   "a program path that cannot be checked (EACCES) is never replaced",
   async () => {

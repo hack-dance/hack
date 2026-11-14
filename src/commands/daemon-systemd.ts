@@ -336,6 +336,11 @@ export async function reconcileRunningSystemdDaemon(
   recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
   if (plan.service === "keep") {
     noteKeptStaleUnit({ plan });
+    if (plan.blocked === "read-only") {
+      logger.warn({
+        message: `${SYSTEMD_UNIT_NAME} has changes that are not loaded yet (a pending reload or restart); not reloading or restarting it here, and hackd already runs this version | Run: hack daemon install (or hack daemon start outside hack doctor --fix)`,
+      });
+    }
     return null;
   }
   if (plan.service === "refuse") {
@@ -456,6 +461,64 @@ async function refuseUnprovenRestart(opts: {
   return 1;
 }
 
+/**
+ * The reload may have changed what the unit is configured for: prove
+ * ownership again just before the restart lands, from a fresh state read
+ * only. A failed read reports no main process, which is not evidence that
+ * none runs, so it is refused ({@link refuseUnobservedRestart}), never
+ * replaced by an earlier snapshot. Returns 1 (reported) or null.
+ */
+async function proveOwnershipBeforeRestart(opts: {
+  readonly hooks: Omit<SystemdCommandHooks, "startDetached" | "stopDirect">;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  readonly homePid: number;
+}): Promise<number | null> {
+  const { hooks, deps } = opts;
+  const fresh = await readSystemdServiceStatus({
+    unitPath: opts.unitPath,
+    deps,
+  });
+  if (fresh === null) {
+    return refuseUnobservedRestart({
+      hooks,
+      detail: "systemd could not be asked",
+    });
+  }
+  if (!fresh.availability.available) {
+    return refuseUnobservedRestart({
+      hooks,
+      detail: describeSystemdUnavailable(fresh.availability),
+    });
+  }
+  if (fresh.stateError !== null) {
+    return refuseUnobservedRestart({ hooks, detail: fresh.stateError });
+  }
+  return await refuseUnprovenRestart({
+    hooks: { ...hooks, pid: opts.homePid },
+    status: fresh,
+    deps,
+  });
+}
+
+/**
+ * The final ownership proof could not observe the unit's state: refused
+ * like an unproven owner (`blocked: "unproven-owner"`, no restart).
+ */
+function refuseUnobservedRestart(opts: {
+  readonly hooks: Pick<SystemdCommandHooks, "trace">;
+  readonly detail: string;
+}): number {
+  if (opts.hooks.trace) {
+    opts.hooks.trace.action = "none";
+    opts.hooks.trace.blocked = "unproven-owner";
+  }
+  logger.warn({
+    message: `Not restarting ${SYSTEMD_UNIT_NAME} to update it: its state could not be read again just before the restart (${opts.detail}), so whose daemon it runs cannot be proven | Run hack daemon start again; check: systemctl --user status ${SYSTEMD_UNIT_NAME}`,
+  });
+  return 1;
+}
+
 /** The refusal for a running hackd whose version a restart cannot fix. */
 function describeRunningRefusal(opts: {
   readonly plan: DaemonReconcilePlan;
@@ -546,12 +609,11 @@ async function restartReconciledUnit(opts: {
     logger.error({ message: blocked });
     return 1;
   }
-  // The reload may have changed what the unit is configured for: prove
-  // ownership again just before the restart lands.
-  const unproven = await refuseUnprovenRestart({
-    hooks: { ...hooks, pid: opts.homePid },
-    status: (await readSystemdServiceStatus({ unitPath, deps })) ?? status,
+  const unproven = await proveOwnershipBeforeRestart({
+    hooks,
+    unitPath,
     deps,
+    homePid: opts.homePid,
   });
   if (unproven !== null) {
     return unproven;

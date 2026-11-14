@@ -617,6 +617,9 @@ pid runs in the unit's cgroup is not enough. This home's hackd may have been
 started by a job of another home's daemon, or a reload may have pointed the
 configuration at this home while the running daemon serves another. Without the
 proof, `start` exits 1 with `blocked: "unproven-owner"` and changes nothing.
+The final proof uses a fresh read of the unit's state. If that read fails or
+systemd is unavailable, the restart is refused the same way; an earlier read
+is never reused, because a failed read reports no main process.
 When an earlier repair wrote the unit but its `daemon-reload` failed, the next
 `start` finishes that reload (and checks the unit's home again) before it
 restarts. If the reload fails again, the restart is not attempted and the
@@ -648,7 +651,10 @@ prove the service is this CLI's:
   off the user service: hackd is started directly, as before;
 - `HACK_DAEMON_SERVICE_READ_ONLY=1` (`hack doctor --fix` without a TTY): the
   unit is never written or reloaded. A hackd of another version under this
-  CLI's unit is still restarted, which does not change the unit.
+  CLI's unit is still restarted, which does not change the unit. A pending
+  reload or restart stays pending and is reported (`blocked: "read-only"`), but
+  on its own it never restarts a hackd that already runs this version, so
+  repeated read-only starts do not keep restarting it.
 
 On macOS, Hack reads the plist only at its own LaunchAgents path for its label
 (`dance.hack.hackd`). launchd has no drop-ins, so the systemd header rule does
@@ -665,9 +671,11 @@ count. Some plists cannot be read:
 - the text is not a property list, or its root is not a dict;
 - it has CDATA, an unterminated comment, a malformed or unbalanced tag, or a
   value type the reader does not know;
-- a root key repeats;
-- the program value is not a plain string, uses an XML escape, or is a relative
-  path.
+- a root key repeats, or uses an XML entity or character reference (launchd
+  reads `Progr&#97;m` as `Program`). Keys are compared exactly as written, so
+  ` Program ` with spaces is another key;
+- the program value is not a plain string, uses an XML escape, or is not an
+  absolute path exactly as written (it is not trimmed).
 
 Such a plist is never replaced automatically; `start` reports it and
 `hack daemon install` replaces it.

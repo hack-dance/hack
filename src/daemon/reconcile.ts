@@ -204,9 +204,21 @@ function planWithoutCallerGuard(
         input.unit === "program-unknown" ? "unknown-program" : "other-program",
     };
   }
-  const restart =
-    mismatch || rewrite !== "none" || input.restartPending === true;
-  return { rewrite, service: restart ? "restart" : "keep", reasons, blocked };
+  // Under read-only a pending restart cannot load anything new (the reload
+  // that would is not allowed), so it alone never restarts a compatible
+  // daemon; that would repeat on every start. It stays reported.
+  const pendingRestart = input.restartPending === true && !input.readOnly;
+  const restart = mismatch || rewrite !== "none" || pendingRestart;
+  const pendingBlocked =
+    input.restartPending === true && input.readOnly && !restart
+      ? "read-only"
+      : null;
+  return {
+    rewrite,
+    service: restart ? "restart" : "keep",
+    reasons,
+    blocked: blocked ?? pendingBlocked,
+  };
 }
 
 function staleReasons(opts: {

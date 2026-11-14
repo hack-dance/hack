@@ -903,3 +903,57 @@ test("only ENOENT and ENOTDIR make a plist program missing", async () => {
   );
   expect(await classify(() => Promise.resolve({}))).toBe("exists");
 });
+
+// Review round 4 (HACK-2216).
+
+test("read-only: a pending restart alone keeps a compatible daemon", () => {
+  expect(
+    planDaemonReconcile({
+      ...base,
+      readOnly: true,
+      running: { version: "2.0.0" },
+      restartPending: true,
+    })
+  ).toEqual({
+    rewrite: "none",
+    service: "keep",
+    reasons: ["content"],
+    blocked: "read-only",
+  });
+  // A version mismatch is still restarted.
+  expect(
+    planDaemonReconcile({
+      ...base,
+      readOnly: true,
+      running: { version: "1.0.0" },
+      restartPending: true,
+    }).service
+  ).toBe("restart");
+});
+
+test("root keys are read exactly: escapes are unknown, whitespace is another key", () => {
+  const escaped = ROUND3_PLIST(
+    "  <key>Progr&#97;m</key>\n  <string>/opt/other/hack</string>"
+  );
+  expect(parseLaunchdPlistProgram({ plistText: escaped }).kind).toBe("unknown");
+  const named = ROUND3_PLIST(
+    "  <key>&#80;rogramArguments</key>\n  <array><string>/opt/other/hack</string></array>"
+  );
+  expect(parseLaunchdPlistProgram({ plistText: named }).kind).toBe("unknown");
+  // ` Program ` is not `Program` to launchd: ProgramArguments decides.
+  const spaced = ROUND3_PLIST(
+    `  <key> Program </key>\n  <string>/missing/path</string>\n${ROUND3_ARGS("/opt/other/hack")}`
+  );
+  expect(parseLaunchdPlistProgram({ plistText: spaced })).toEqual({
+    kind: "path",
+    path: "/opt/other/hack",
+  });
+  // Values are not trimmed either.
+  expect(
+    parseLaunchdPlistProgram({
+      plistText: ROUND3_PLIST(
+        "  <key>Program</key>\n  <string> /opt/other/hack</string>"
+      ),
+    }).kind
+  ).toBe("unknown");
+});

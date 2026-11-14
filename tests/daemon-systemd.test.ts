@@ -4840,3 +4840,89 @@ linuxTest(
     expect(await Bun.file(marker).exists()).toBe(false);
   }
 );
+
+// Review round 4 (HACK-2216).
+
+linuxTest(
+  "a failed fresh state read before the restart refuses it, without falling back",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.calls.length = 0;
+    let stateReads = 0;
+    const run = fake.deps.run;
+    fake.deps = {
+      ...fake.deps,
+      run: (command, args) => {
+        if (args.some((arg) => arg.includes("MainPID"))) {
+          stateReads += 1;
+          // The first read (the plan) works; the final re-read fails.
+          if (stateReads >= 2) {
+            return Promise.resolve({
+              exitCode: 1,
+              stdout: "",
+              stderr: "Failed to get properties: Connection timed out",
+            });
+          }
+        }
+        return run(command, args);
+      },
+    };
+    const hooks = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(stateReads).toBe(2);
+    expect(hooks.trace.blocked).toBe("unproven-owner");
+    expect(hooks.trace.action).toBe("none");
+    // The home queries still answered; the restart was refused anyway.
+    expect(fake.calls.some((call) => call.includes("Environment"))).toBe(true);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+  }
+);
+
+linuxTest(
+  "read-only: a pending reload does not restart a daemon that already runs this version",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    fake.deps = {
+      ...fake.deps,
+      env: { ...fake.deps.env, [SYSTEMD_READ_ONLY_ENV]: "1" },
+    };
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.needsReload = true;
+    const marker = join(
+      root,
+      ".hack",
+      "daemon",
+      "hackd.service.restart-pending"
+    );
+
+    // First start: another version runs, so it is restarted (without a
+    // reload, which read-only forbids); the pending state is kept.
+    fake.calls.length = 0;
+    expect(
+      await reconcileRunningSystemdDaemon(runningHooks(fake, "1.0.0"))
+    ).toBe(0);
+    expect(fake.calls).toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect(await Bun.file(marker).exists()).toBe(true);
+
+    // Second start: the daemon now runs this version. The marker alone
+    // does not restart it again.
+    fake.calls.length = 0;
+    const second = runningHooks(fake, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(second)).toBeNull();
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect(second.trace.action).toBe("none");
+    expect(second.trace.blocked).toBe("read-only");
+    expect(await Bun.file(marker).exists()).toBe(true);
+  }
+);

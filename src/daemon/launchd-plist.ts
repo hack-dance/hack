@@ -77,7 +77,8 @@ export function parseLaunchdPlistProgram(opts: {
 }
 
 function programPath(raw: string): LaunchdPlistProgram {
-  const path = raw.trim();
+  // Exactly as written: launchd does not trim string values.
+  const path = raw;
   if (path.includes("&")) {
     return { kind: "unknown", reason: "the program path uses an XML escape" };
   }
@@ -218,7 +219,13 @@ function readDictBody(
     }
     const key = readScalar(tokens, i, "key");
     const value = readValue(tokens, skipSpace(tokens, key.next));
-    const name = key.text.trim();
+    // Key identity is the exact text: launchd neither trims nor knows
+    // another spelling. An entity or character reference (`Progr&#97;m`
+    // is `Program` to launchd) is not decoded here, so it is unknown.
+    const name = key.text;
+    if (keep && name.includes("&")) {
+      throw new PlistShapeError("a root key uses an XML escape");
+    }
     if (keep && keys.has(name)) {
       throw new PlistShapeError(`the key ${name} appears twice`);
     }

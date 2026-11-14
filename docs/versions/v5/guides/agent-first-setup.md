@@ -41,4 +41,6 @@ an explicit user limit is preserved, even if smaller.
 
 Use `hack version --json` to read the running CLI version, release channel,
 install kind and executable path without starting services or checking the
-network. See [Version identity](../../reference/version.md).
+network. The JSON fields are `version`, `channel`, `install_kind` and
+`binary_path`; a source run reports Bun as its executable and `source` as its
+install kind.

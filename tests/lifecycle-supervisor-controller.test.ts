@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -40,20 +40,23 @@ afterAll(() => restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", previous));
 async function fixture(
   run: (project: { projectRoot: string; projectDir: string }) => Promise<void>
 ) {
-  const root = await mkdtemp(join(tmpdir(), "supervisor-controller-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "supervisor-controller-"))
+  );
   const projectRoot = join(root, "checkout");
   const project = { projectRoot, projectDir: join(projectRoot, ".hack") };
   await mkdir(project.projectDir, { recursive: true });
   const savedHackHome = process.env.HACK_HOME;
   process.env.HACK_HOME = join(root, "host-home");
-  // Fail before any native effect if path resolution reaches the real home.
-  expect(
-    resolveLifecycleSupervisorRoot({
-      ...project,
-      composeProject: "fixture",
-    }).startsWith(`${process.env.HACK_HOME}/`)
-  ).toBe(true);
   try {
+    // Compare canonical fixture paths (Darwin temp paths may alias /private).
+    // Fail before native effects if resolution reaches the real home.
+    expect(
+      resolveLifecycleSupervisorRoot({
+        ...project,
+        composeProject: "fixture",
+      }).startsWith(`${process.env.HACK_HOME}/`)
+    ).toBe(true);
     await run(project);
   } finally {
     await stopLifecycleProcessController({

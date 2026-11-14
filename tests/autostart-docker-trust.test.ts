@@ -201,3 +201,34 @@ test("owned socket and symlink pass; writable or sticky parents refuse", async (
     await rm(socketRoot, { recursive: true, force: true });
   }
 });
+
+test("sticky user and system plugin directories cannot admit late plugin creation", async () => {
+  const root = join(home, ".docker");
+  const plugins = join(root, "cli-plugins");
+  const check = (systemPluginDirectories: readonly string[] = []) =>
+    assertAutostartDockerConfigTrusted({
+      home,
+      env: {},
+      systemPluginDirectories,
+    });
+  await mkdir(plugins, { mode: 0o700 });
+  expect(() => check()).not.toThrow();
+  for (const mode of [0o777, 0o1777]) {
+    await chmod(plugins, mode);
+    expect(() => check()).toThrow();
+  }
+  await chmod(plugins, 0o700);
+  await rm(plugins, { recursive: true });
+  await chmod(root, 0o1777);
+  expect(() => check()).toThrow();
+  await chmod(root, 0o700);
+  const target = join(home, "system-plugins");
+  await mkdir(target, { mode: 0o700 });
+  await chmod(target, 0o1777);
+  expect(() => check([target])).toThrow();
+  expect(() => check([join(target, "missing-plugins")])).toThrow();
+  await symlink(target, plugins);
+  expect(() => check()).toThrow();
+  await chmod(target, 0o700);
+  expect(() => check()).not.toThrow();
+});

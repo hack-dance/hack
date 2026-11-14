@@ -420,3 +420,6 @@ trusted existing chain while the daemon waits for the engine.
 The same check applies to Docker's implicit `/var/run/docker.sock` endpoint.
 Under the strict policy, a group-writable system socket directory also refuses
 login startup; use manual starts rather than changing system permissions.
+Docker plugin directories must also prevent other accounts from creating names:
+sticky writable directories are refused even when empty. A missing plugin path
+is refused if its nearest existing parent permits new entries by another account.

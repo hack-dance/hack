@@ -151,3 +151,5 @@ TCP Docker contexts require manual starts too; login accepts local Unix socket
 transports, without claiming TCP peer authentication.
 On Linux/macOS, login also requires a Unix socket under trusted parents; shared
 or sticky socket directories are refused before engine access.
+Writable sticky Docker plugin directories also refuse login startup, including
+empty directories where a plugin could be planted after an audit.

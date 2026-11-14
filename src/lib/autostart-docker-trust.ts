@@ -44,6 +44,11 @@ export function assertAutostartDockerConfigTrusted(opts: {
       if ("error" in trust) {
         throw new Error("Unsafe selection input");
       }
+      // Sticky directories protect existing names, not absent plugin/config names.
+      const existing = statSync(trust.existing);
+      if (existing.isDirectory() && (existing.mode & 0o022) !== 0) {
+        throw new Error("Selection directory permits new entries");
+      }
       if (!trust.complete) {
         return;
       }

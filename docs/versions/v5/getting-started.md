@@ -130,3 +130,7 @@ This stops the project. It does not delete its named volumes or stop shared
 routing services. See [Run and inspect](guides/run-project.md) for service selection,
 log history and restarts. When this Compose run works, try native only on a
 [disposable project](native/start.md).
+
+Always-on login restores Caddy/CoreDNS routing only. Logging (Grafana, Loki and
+Alloy) starts through manual `hack global up`; login leaves existing logging
+containers running. Change default Grafana credentials before network exposure.

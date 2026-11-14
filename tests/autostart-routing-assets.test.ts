@@ -13,7 +13,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { globalRoutingUpArguments } from "../src/commands/global-autostart.ts";
+import {
+  globalLoggingUpArguments,
+  globalRoutingUpArguments,
+} from "../src/commands/global-autostart.ts";
 import {
   GLOBAL_ALLOY_FILENAME,
   GLOBAL_BRANCHES_SCHEMA_FILENAME,
@@ -410,4 +413,24 @@ test("missing assets are never created and unknown mounted content is refused", 
   await rm(root, { recursive: true });
   await expect(secure()).rejects.toMatchObject({ code: "E_PERMISSION" });
   expect(await Bun.file(root).exists()).toBe(false);
+});
+
+test("login plans routing without starting default-credential logging services", () => {
+  const composeFile = "/example/logging/compose.yml";
+  expect(globalLoggingUpArguments({ composeFile, login: true })).toBeNull();
+  expect(
+    globalRoutingUpArguments({
+      composeFile: "/example/caddy/compose.yml",
+      login: true,
+    })
+  ).toContain("--force-recreate");
+  expect(globalLoggingUpArguments({ composeFile, login: false })).toEqual([
+    "docker",
+    "compose",
+    "-f",
+    composeFile,
+    "up",
+    "-d",
+    "--remove-orphans",
+  ]);
 });

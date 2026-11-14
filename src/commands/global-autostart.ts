@@ -68,3 +68,11 @@ export async function reconcileGlobalRoutingBridge(opts: {
     });
   }
 }
+
+/** Login restores routing only; logging can expose retained logs through Grafana. */
+export function globalLoggingUpArguments(opts: {
+  readonly composeFile: string;
+  readonly login: boolean;
+}): readonly string[] | null {
+  return opts.login ? null : globalRoutingUpArguments(opts);
+}

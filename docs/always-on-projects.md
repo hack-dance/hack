@@ -157,8 +157,11 @@ ownership, file type and every directory component, refuses symlinks and unsafe
 parent directories, and compares bounded reads with those templates. All files
 must pass before matching non-secret bytes are republished on fresh `0644` inodes,
 so container users can read them while other host users cannot write them. Routing
-and logging containers are recreated to bind those new files; an old open writer
-or old file mount cannot modify the new assets. Compose `.env` imports and the
+containers are recreated to bind those new files; an old open writer or old file
+mount cannot modify their new assets. Login starts only Caddy/CoreDNS, not the
+logging stack (Grafana, Loki and Alloy). Start logging manually with `hack global up`;
+its default Grafana credentials must be changed before exposing it to a network.
+Already-running logging containers are left running and retain their existing mounts. Compose `.env` imports and the
 unsupported remote-route bridge are disabled for this automatic path.
 Customized, outdated, missing or unsafe assets cause `routing_failed` and no
 project starts. This path does not install or migrate assets. Review the paths,

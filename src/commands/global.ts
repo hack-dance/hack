@@ -180,6 +180,7 @@ import {
   type TrustPlanDeps,
 } from "./global-admin-plan.ts";
 import {
+  globalLoggingUpArguments,
   globalRoutingUpArguments,
   reconcileGlobalRoutingBridge,
   secureGlobalLoginRouting,
@@ -1944,13 +1945,18 @@ export async function globalUp(): Promise<number> {
   }
   await reconcileGlobalRoutingBridge({ enabled: !login });
 
-  logger.step({ message: "Starting logging stack…" });
-  const logExit = await run(
-    globalRoutingUpArguments({ composeFile: paths.loggingCompose, login }),
-    { cwd: dirname(paths.loggingCompose) }
-  );
-  if (logExit !== 0) {
-    return logExit;
+  const loggingArguments = globalLoggingUpArguments({
+    composeFile: paths.loggingCompose,
+    login,
+  });
+  if (loggingArguments) {
+    logger.step({ message: "Starting logging stack…" });
+    const logExit = await run(loggingArguments, {
+      cwd: dirname(paths.loggingCompose),
+    });
+    if (logExit !== 0) {
+      return logExit;
+    }
   }
 
   logger.success({ message: "Global infra is up" });

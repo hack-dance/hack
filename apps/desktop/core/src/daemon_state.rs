@@ -42,8 +42,15 @@ impl Observation {
     #[must_use]
     pub fn tone(&self) -> crate::state::Tone {
         use crate::state::Tone;
-        if self.status.as_ref().and_then(|s| s.service.as_ref()).is_some_and(|s| s.unit_stale == Some(true))
-            || matches!((&self.cli_version, &self.socket_version), (Some(c), Some(d)) if c != d) {return Tone::Warn;}
+        if self
+            .status
+            .as_ref()
+            .and_then(|s| s.service.as_ref())
+            .is_some_and(|s| s.unit_stale == Some(true))
+            || matches!((&self.cli_version, &self.socket_version), (Some(c), Some(d)) if c != d)
+        {
+            return Tone::Warn;
+        }
         match self.status.as_ref().map(|s| s.status.as_str()) {
             Some("running") if self.error.is_none() => Tone::Ok,
             Some("starting") => Tone::Busy,
@@ -204,7 +211,23 @@ pub struct DaemonModel {
 impl DaemonModel {
     /// Reject overlap and unavailable actions at the effect boundary.
     pub fn begin(&mut self, action: DaemonAction) -> bool {
-        if self.busy.is_some() || !self.observed.actions().contains(&action) {
+        self.begin_with_recovery(action, None)
+    }
+    /// The project reader can prove a recovery action before daemon status
+    /// answers. Both affordances use this same gate through their fresh reads.
+    pub fn begin_with_recovery(
+        &mut self,
+        action: DaemonAction,
+        recovery: Option<crate::source::DaemonRecovery>,
+    ) -> bool {
+        let recovery_action = recovery.map(|r| match r {
+            crate::source::DaemonRecovery::Start => DaemonAction::Start,
+            crate::source::DaemonRecovery::Restart => DaemonAction::Restart,
+        });
+        if self.busy.is_some()
+            || self.observed.cli_missing
+            || (!self.observed.actions().contains(&action) && recovery_action != Some(action))
+        {
             return false;
         }
         self.busy = Some(action);

@@ -23,7 +23,7 @@ use gpui_kit::{
 };
 use hack_desktop_core::daemon_state::{DaemonAction, DaemonModel, always_on};
 use hack_desktop_core::models::LogEntry;
-use hack_desktop_core::source::{ActionOutcome, Source};
+use hack_desktop_core::source::{ActionOutcome, DaemonRecovery, Source};
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
 use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
 
@@ -92,6 +92,23 @@ impl HackApp {
                 action,
             });
         }
+    }
+
+    /// Fixture-only unavailable daemon after a previously readable snapshot.
+    pub fn simulate_daemon_unavailable(&mut self, mismatch: bool) {
+        self.model.apply(Event::Refreshed(Err(
+            hack_desktop_core::source::SourceError::DaemonUnavailable {
+                cli: "5.0.0".into(),
+                daemon: mismatch.then(|| "4.3.0".into()),
+                message: if mismatch {
+                    "hackd v4.3.0, CLI v5.0.0: restart hackd"
+                } else {
+                    "hackd is off or unreachable: start hackd"
+                }
+                .into(),
+            },
+        )));
+        self.tail = Err("Project status could not be read".into());
     }
 
     fn selected_root(&self) -> Option<(PathBuf, bool)> {
@@ -223,7 +240,11 @@ impl HackApp {
     }
 
     fn run_daemon_action(&mut self, action: DaemonAction, cx: &mut Context<Self>) {
-        if !self.live || !self.daemon.begin(action) {
+        if !self.live
+            || !self
+                .daemon
+                .begin_with_recovery(action, self.model.daemon_recovery())
+        {
             return;
         }
         self.daemon_epoch += 1;
@@ -244,9 +265,25 @@ impl HackApp {
                 .background_executor()
                 .spawn(async move { source.daemon_observation() })
                 .await;
-            let _ = this.update(cx, |this, cx| {
+            let Ok(token) = this.update(cx, |this, _| {
                 this.daemon.refreshed(fresh);
+                this.daemon.busy = Some(action);
                 this.daemon_last_read = Some(std::time::Instant::now());
+                this.model.begin_refresh()
+            }) else {
+                return;
+            };
+            let source = this.update(cx, |this, _| this.source.clone()).ok();
+            let Some(source) = source else {
+                return;
+            };
+            let snap = cx
+                .background_executor()
+                .spawn(async move { source.snapshot() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.model.finish_refresh(token, snap);
+                this.daemon.busy = None;
                 cx.notify();
             });
         })
@@ -279,7 +316,11 @@ impl HackApp {
                 h_flex()
                     .gap_2()
                     .child(dot(tone_color(self.daemon.observed.tone(), cx)))
-                    .child(div().text_color(tone_color(self.daemon.observed.tone(), cx)).child(self.daemon.observed.label()))
+                    .child(
+                        div()
+                            .text_color(tone_color(self.daemon.observed.tone(), cx))
+                            .child(self.daemon.observed.label()),
+                    )
                     .child(div().flex_1())
                     .child(buttons),
             )
@@ -404,7 +445,18 @@ impl HackApp {
                     }
                 }
                 if !list.stopped.is_empty() {
-                    body = body.child(header("STOPPED"));
+                    let unknown = list
+                        .stopped
+                        .iter()
+                        .filter(|r| matches!(r.state, ProjectState::Unknown { .. }))
+                        .count();
+                    body = body.child(header(if unknown == list.stopped.len() {
+                        "UNKNOWN"
+                    } else if unknown > 0 {
+                        "STOPPED / UNKNOWN"
+                    } else {
+                        "STOPPED"
+                    }));
                     for r in &list.stopped {
                         body = body.child(self.project_row(r, cx));
                     }
@@ -473,14 +525,6 @@ impl HackApp {
         let t = cx.theme().clone();
         let mut col = v_flex();
         for b in &list.banners {
-            if matches!(
-                b,
-                hack_desktop_core::viewmodel::Banner::DaemonOff
-                    | hack_desktop_core::viewmodel::Banner::DaemonMismatch { .. }
-            ) {
-                continue;
-            }
-
             col = col.child(
                 div()
                     .px_4()
@@ -490,6 +534,40 @@ impl HackApp {
                     .border_b_1()
                     .border_color(t.border)
                     .child(b.text()),
+            );
+        }
+        if let Some(action) = self.model.daemon_recovery() {
+            col = col.child(
+                h_flex()
+                    .px_4()
+                    .py_2()
+                    .gap_3()
+                    .child(
+                        Button::new("recover-hackd")
+                            .label(action.label())
+                            .small()
+                            .disabled(
+                                !self.live
+                                    || self.daemon.busy.is_some()
+                                    || self.daemon.observed.cli_missing,
+                            )
+                            .loading(self.daemon.busy.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_daemon_action(
+                                    match action {
+                                        DaemonRecovery::Start => DaemonAction::Start,
+                                        DaemonRecovery::Restart => DaemonAction::Restart,
+                                    },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .children(
+                        self.daemon
+                            .action_error
+                            .clone()
+                            .map(|e| div().text_sm().text_color(t.danger).child(e)),
+                    ),
             );
         }
         col
@@ -753,7 +831,13 @@ impl HackApp {
 
     fn status_bar(&self, list: &ListView, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
-        let engine = if list
+        let stale = list
+            .banners
+            .iter()
+            .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::Stale { .. }));
+        let engine = if !self.model.engine_observed() {
+            ("Docker unknown", t.muted_foreground)
+        } else if list
             .banners
             .iter()
             .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::EngineDown { .. }))
@@ -762,7 +846,36 @@ impl HackApp {
         } else {
             ("Docker ok", t.success)
         };
-        let daemon = (self.daemon.observed.label(), tone_color(self.daemon.observed.tone(), cx));
+
+        let daemon = if list
+            .banners
+            .iter()
+            .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::DaemonOff))
+        {
+            ("hackd off".to_owned(), t.muted_foreground)
+        } else if list.banners.iter().any(|b| {
+            matches!(
+                b,
+                hack_desktop_core::viewmodel::Banner::DaemonMismatch { .. }
+            )
+        }) {
+            ("hackd version mismatch".to_owned(), t.warning)
+        } else if stale
+            || list.banners.iter().any(|b| {
+                matches!(
+                    b,
+                    hack_desktop_core::viewmodel::Banner::DaemonReadFailed { .. }
+                )
+            })
+        {
+            ("hackd unknown".to_owned(), t.muted_foreground)
+        } else {
+            (
+                self.daemon.observed.label(),
+                tone_color(self.daemon.observed.tone(), cx),
+            )
+        };
+
         h_flex()
             .h(px(26.))
             .px_3()
@@ -893,7 +1006,10 @@ impl Render for HackApp {
             Phase::Error { code, message } => self.full_pane(
                 "Could not read projects",
                 format!("{code}: {message}"),
-                Some("hack projects --json"),
+                self.model
+                    .daemon_recovery()
+                    .is_none()
+                    .then_some("hack projects --json"),
                 cx,
             ),
             Phase::Empty => self.full_pane(

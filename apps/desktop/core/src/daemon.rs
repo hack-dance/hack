@@ -4,7 +4,7 @@
 //! and write timeout. The socket API has no authentication; it is owner-only
 //! on disk, and the app only reads from it. A daemon whose version differs
 //! from the CLI is treated as unusable for data (the CLI does the same) and
-//! the app falls back to the CLI.
+//! project reads remain unavailable until a matching daemon can be read.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -100,7 +100,7 @@ impl DaemonClient {
         // hackd's API has no authentication: trust it only when the socket's
         // directory is this user's own and nobody else can replace entries
         // in it, and the peer process runs as this user. Otherwise the app
-        // falls back to the CLI (which applies its own checks).
+        // refuses this snapshot.
         check_socket_path_len(&self.socket)?;
         let uid = current_uid();
         check_private_dir(&self.socket, uid)?;
@@ -263,7 +263,7 @@ pub const MAX_SOCKET_PATH: usize = 103;
 pub const MAX_SOCKET_PATH: usize = 107;
 
 /// A socket path the OS cannot address (for example under a long home
-/// directory on macOS) is reported clearly; the app then uses the CLI.
+/// directory on macOS) is reported clearly, without attempting a connection.
 fn check_socket_path_len(socket: &Path) -> Result<(), DaemonError> {
     use std::os::unix::ffi::OsStrExt;
     let n = socket.as_os_str().as_bytes().len();

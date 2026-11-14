@@ -925,6 +925,11 @@ impl Render for HackApp {
                 Some("hack projects --json"),
                 cx,
             ),
+            // Machine checks matter most before any project exists, so the
+            // Doctor pane renders for an empty registry too.
+            Phase::Ready | Phase::Empty if self.pane == Pane::Doctor => {
+                crate::doctor_view::render(&self.doctor, cx)
+            }
             Phase::Empty => self.full_pane(
                 "No projects yet",
                 "Set up a repository with Hack and it appears here.".into(),
@@ -932,9 +937,6 @@ impl Render for HackApp {
                 cx,
             ),
             Phase::Loading => self.full_pane("Loading projects…", String::new(), None, cx),
-            Phase::Ready if self.pane == Pane::Doctor => {
-                crate::doctor_view::render(&self.doctor, cx)
-            }
             Phase::Ready => match self.model.detail() {
                 Some(d) => self.detail(&d, cx).into_any_element(),
                 None => self.full_pane("Select a project", String::new(), None, cx),

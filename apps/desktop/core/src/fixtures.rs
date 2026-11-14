@@ -41,10 +41,12 @@ pub enum Fixture {
     DoctorClean,
     /// A project whose header links to its doctor findings.
     DoctorLink,
+    /// No projects registered: the Doctor pane still shows machine checks.
+    DoctorEmpty,
 }
 
 impl Fixture {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -63,6 +65,7 @@ impl Fixture {
         Self::Doctor,
         Self::DoctorClean,
         Self::DoctorLink,
+        Self::DoctorEmpty,
     ];
 
     #[must_use]
@@ -86,6 +89,7 @@ impl Fixture {
             Self::Doctor => "doctor",
             Self::DoctorClean => "doctor-clean",
             Self::DoctorLink => "doctor-link",
+            Self::DoctorEmpty => "doctor-empty",
         }
     }
 
@@ -349,7 +353,7 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
         _ => {}
     }
     let mut projects = project(f);
-    if f == Fixture::Empty {
+    if matches!(f, Fixture::Empty | Fixture::DoctorEmpty) {
         projects.projects.clear();
     }
     if f == Fixture::ManyProjects {
@@ -435,7 +439,10 @@ pub fn log_tail(f: Fixture) -> Vec<LogEntry> {
 /// Fixtures that open the Doctor pane instead of a project.
 #[must_use]
 pub fn opens_doctor(f: Fixture) -> bool {
-    matches!(f, Fixture::Doctor | Fixture::DoctorClean)
+    matches!(
+        f,
+        Fixture::Doctor | Fixture::DoctorClean | Fixture::DoctorEmpty
+    )
 }
 
 /// Fixtures that load doctor results (and may still show a project).
@@ -471,6 +478,15 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
             c("dnsmasq:53", "ok", ""),
         ]
     };
+    if f == Fixture::DoctorEmpty {
+        let mut machine = ok_machine();
+        machine[5] = c(
+            "caddy local ca",
+            "warn",
+            "Local CA is not trusted by the system",
+        );
+        return vec![DoctorRun::machine(report(machine))];
+    }
     if f == Fixture::DoctorClean {
         return vec![
             DoctorRun::machine(report(ok_machine())),
@@ -574,7 +590,10 @@ mod tests {
                 (Fixture::Loading, Err(SourceError::Pending))
                 | (Fixture::CliMissing, Err(SourceError::CliMissing))
                 | (Fixture::Error, Err(SourceError::Cli { .. })) => {}
-                (_, Ok(s)) => assert_eq!(s.projects.projects.is_empty(), f == Fixture::Empty),
+                (_, Ok(s)) => assert_eq!(
+                    s.projects.projects.is_empty(),
+                    matches!(f, Fixture::Empty | Fixture::DoctorEmpty)
+                ),
                 (f, other) => panic!("{f:?}: {other:?}"),
             }
         }

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::models::ProjectRow;
-use crate::source::{ActionOutcome, Snapshot, SourceError};
+use crate::source::{ActionOutcome, DaemonRecovery, Snapshot, SourceError};
 use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -19,6 +19,7 @@ use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
 pub enum Banner {
     DaemonOff,
     DaemonMismatch { daemon: String, cli: String },
+    DaemonReadFailed { error: String },
     EngineDown { error: String },
     Stale { error: String },
 }
@@ -27,11 +28,14 @@ impl Banner {
     #[must_use]
     pub fn text(&self) -> String {
         match self {
-            Self::DaemonOff => "hackd is off: status refreshes slowly".into(),
+            Self::DaemonOff => {
+                "hackd is off or unreachable: start hackd to read project status".into()
+            }
             Self::DaemonMismatch { daemon, cli } => {
                 format!("hackd v{daemon} is running, CLI is v{cli}: restart hackd")
             }
             Self::EngineDown { error } => format!("Docker not reachable: {error}"),
+            Self::DaemonReadFailed { error } => error.clone(),
             Self::Stale { error } => format!("Showing last known state: {error}"),
         }
     }
@@ -157,6 +161,35 @@ impl AppModel {
         }
     }
 
+    #[must_use]
+    pub fn daemon_recovery(&self) -> Option<DaemonRecovery> {
+        match &self.last_error {
+            Some(SourceError::DaemonUnavailable { daemon: None, .. }) => {
+                Some(DaemonRecovery::Start)
+            }
+            Some(SourceError::DaemonUnavailable { .. }) => Some(DaemonRecovery::Restart),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn engine_observed(&self) -> bool {
+        self.last_error.is_none()
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.projects.runtime_ok.is_some())
+    }
+
+    fn observed_state(&self, row: &ProjectRow, local: &LocalContext) -> ProjectState {
+        if let Some(error) = &self.last_error {
+            return ProjectState::Unknown {
+                reason: describe(error),
+            };
+        }
+        state::derive(row, local)
+    }
+
     /// Apply an ordered live read; returns whether it was accepted.
     pub fn finish_refresh(
         &mut self,
@@ -269,9 +302,11 @@ impl AppModel {
     /// Can `action` start for `project` now?
     #[must_use]
     pub fn can_start(&self, project: &str) -> bool {
-        self.local
-            .get(project)
-            .is_none_or(|c| c.in_flight.is_none())
+        self.last_error.is_none()
+            && self
+                .local
+                .get(project)
+                .is_none_or(|c| c.in_flight.is_none())
     }
 
     /// The last good snapshot, if any.
@@ -301,20 +336,43 @@ impl AppModel {
                 code: code.clone(),
                 message: message.clone(),
             },
+            (None, Some(SourceError::DaemonUnavailable { message, .. })) => Phase::Error {
+                code: "E_APP_DAEMON_UNAVAILABLE".into(),
+                message: message.clone(),
+            },
             (None, _) => Phase::Loading,
             (Some(s), _) if s.projects.projects.is_empty() => Phase::Empty,
             (Some(_), _) => Phase::Ready,
         };
         let mut running = Vec::new();
         let mut stopped = Vec::new();
+        if let Some(SourceError::DaemonUnavailable {
+            cli,
+            daemon,
+            message,
+        }) = &self.last_error
+        {
+            banners.push(match daemon {
+                None => Banner::DaemonOff,
+                Some(d) if d != cli => Banner::DaemonMismatch {
+                    daemon: d.clone(),
+                    cli: cli.clone(),
+                },
+                Some(_) => Banner::DaemonReadFailed {
+                    error: message.clone(),
+                },
+            });
+        }
         if let Some(s) = &self.snapshot {
-            match (&s.daemon, s.daemon_mismatch()) {
-                (None, _) => banners.push(Banner::DaemonOff),
-                (Some(_), Some(v)) => banners.push(Banner::DaemonMismatch {
-                    daemon: v.to_owned(),
-                    cli: s.cli_version.clone(),
-                }),
-                _ => {}
+            if !matches!(self.last_error, Some(SourceError::DaemonUnavailable { .. })) {
+                match (&s.daemon, s.daemon_mismatch()) {
+                    (None, _) => banners.push(Banner::DaemonOff),
+                    (Some(_), Some(v)) => banners.push(Banner::DaemonMismatch {
+                        daemon: v.to_owned(),
+                        cli: s.cli_version.clone(),
+                    }),
+                    _ => {}
+                }
             }
             if s.projects.engine_down() {
                 banners.push(Banner::EngineDown {
@@ -326,7 +384,7 @@ impl AppModel {
             }
             for p in &s.projects.projects {
                 let row = Row {
-                    state: state::derive(
+                    state: self.observed_state(
                         p,
                         self.local.get(&p.name).unwrap_or(&LocalContext::default()),
                     ),
@@ -373,7 +431,16 @@ impl AppModel {
         let row = self.selected_row()?;
         let default = LocalContext::default();
         let local = self.local.get(&row.name).unwrap_or(&default);
-        let st = state::derive(row, local);
+        let st = self.observed_state(row, local);
+        let mut services = state::services(row);
+        if self.last_error.is_some() {
+            for service in &mut services {
+                service.running = false;
+                service.completed = false;
+                service.exit_code = None;
+                service.status = "Status unknown".into();
+            }
+        }
         Some(DetailView {
             name: row.name.clone(),
             backend: if row.is_native() {
@@ -383,14 +450,14 @@ impl AppModel {
             },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
-            actions: if row.is_native() {
+            actions: if row.is_native() || self.last_error.is_some() {
                 vec![]
             } else {
                 st.actions().to_vec()
             },
             note: row.is_native().then(|| NATIVE_ACTIONS_NOTE.to_owned()),
             busy: local.in_flight.is_some(),
-            services: state::services(row),
+            services,
             last_error: self.action_errors.get(&row.name).cloned(),
             state: st,
         })
@@ -416,6 +483,7 @@ fn describe(e: &SourceError) -> String {
     match e {
         SourceError::Pending => "still loading".into(),
         SourceError::CliMissing => "hack was not found on PATH".into(),
+        SourceError::DaemonUnavailable { message, .. } => message.clone(),
         SourceError::Cli { code, message, .. } => format!("{code}: {message}"),
     }
 }
@@ -425,6 +493,67 @@ mod tests {
     use super::*;
     use crate::fixtures::{self, Fixture};
     use crate::models::LifecycleResult;
+
+    #[test]
+    fn unavailable_daemon_invalidates_rows_and_offers_exact_recovery() {
+        for (daemon, expected) in [
+            (None, DaemonRecovery::Start),
+            (Some("4.0.0".into()), DaemonRecovery::Restart),
+        ] {
+            let mut m = model(Fixture::Running);
+            assert!(m.engine_observed());
+            m.apply(Event::Select("storefront".into()));
+            let token = m.begin_refresh();
+            let message = if daemon.is_some() {
+                "hackd v4.0.0, CLI v5.0.0: restart hackd"
+            } else {
+                "hackd is off: start hackd"
+            };
+            m.finish_refresh(
+                token,
+                Err(SourceError::DaemonUnavailable {
+                    cli: "5.0.0".into(),
+                    daemon,
+                    message: message.into(),
+                }),
+            );
+            let list = m.list();
+            assert!(list.running.is_empty());
+            assert_eq!(list.counts.unknown, 4);
+            assert_eq!(list.counts.stopped, 0);
+            assert!(list.stopped.iter().all(
+                |r| matches!(&r.state, ProjectState::Unknown { reason } if reason.contains("hackd"))
+            ));
+            assert!(list.banners.iter().any(|b| match expected {
+                DaemonRecovery::Start => matches!(b, Banner::DaemonOff),
+                DaemonRecovery::Restart => matches!(b, Banner::DaemonMismatch { .. }),
+            }));
+            assert_eq!(m.daemon_recovery(), Some(expected));
+            assert!(m.detail().unwrap().actions.is_empty());
+            assert!(!m.can_start("storefront"));
+            assert!(!m.engine_observed());
+            assert!(
+                m.detail()
+                    .unwrap()
+                    .services
+                    .iter()
+                    .all(|s| !s.running && s.status == "Status unknown")
+            );
+            let refreshed = m.begin_refresh();
+            m.finish_refresh(refreshed, fixtures::snapshot(Fixture::Running));
+            assert!(m.engine_observed());
+            assert!(m.can_start("storefront"));
+            assert!(!m.detail().unwrap().actions.is_empty());
+        }
+        let mut first_launch = AppModel::new();
+        first_launch.apply(Event::Refreshed(Err(SourceError::DaemonUnavailable {
+            cli: "5.0.0".into(),
+            daemon: None,
+            message: "hackd is off".into(),
+        })));
+        assert_eq!(first_launch.daemon_recovery(), Some(DaemonRecovery::Start));
+        assert!(matches!(first_launch.list().phase, Phase::Error { .. }));
+    }
 
     #[test]
     fn stale_reads_cannot_erase_startup_failure() {
@@ -558,8 +687,10 @@ mod tests {
         let v = m.list();
         assert_eq!(v.phase, Phase::Ready);
         assert!(matches!(v.banners.last(), Some(Banner::Stale { .. })));
-        assert_eq!(v.running.len(), 2);
         assert!(!m.project_list_readable());
+        assert!(v.running.is_empty());
+        assert_eq!(v.counts.unknown, 4);
+        assert!(m.detail().unwrap().actions.is_empty());
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub enum Pane {
     Project,
     Doctor,
     Setup,
+    Upgrade,
 }
 
 pub fn render(pane: &DoctorPane, cx: &mut Context<HackApp>) -> AnyElement {

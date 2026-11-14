@@ -1,33 +1,50 @@
 ---
-title: Upgrade · app view of the flow
+title: Upgrade · evidence before effects
 ---
 stateDiagram-v2
   direction TB
-  [*] --> Checking
-  Checking --> Done : nothing remains
-  Checking --> Blocked : blockers or incomplete
-  Checking --> Ready : work remains
-  Blocked --> Checking : Re-check
-  Ready --> Snapshotting : Upgrade
-  Snapshotting --> Blocked : gaps or refused
-  Snapshotting --> Applying : complete
-  Applying --> Unknown : no evidence
-  Applying --> Failed : step failed
-  Applying --> RestartingDaemon : steps verified
-  RestartingDaemon --> Checking : versions match
-  RestartingDaemon --> Failed : mismatch
-  Failed --> RollingBack : Roll back
-  RollingBack --> Restored : files restored
-  RollingBack --> Failed : partial restore
-  Restored --> Checking : re-check
-  Unknown --> Checking : re-check
+  [*] --> AvailabilityUnknown
+  AvailabilityUnknown --> Checking : Review click
+  Checking --> AvailabilityUnknown : no target evidence
+  Checking --> Blocked : incomplete readiness
+  Checking --> Ready : verified target, ready
+  Blocked --> Checking : Check again
+  Ready --> Snapshotting : Save snapshot click
+  AvailabilityUnknown --> Snapshotting : Save click, readiness checked
+  Snapshotting --> Incomplete : refused or gaps
+  Snapshotting --> Ready : complete, verified target
+  Snapshotting --> AvailabilityUnknown : complete, no target
+  Incomplete --> Checking : Check again
+  Ready --> Applying : Upgrade click, complete snapshot
+  Applying --> Checking : Check again
+  Checking --> Done : all fresh evidence
+  Checking --> Unknown : evidence missing
+  Unknown --> Checking : Check again
+  Unknown --> Restarting : Restart click
+  Restarting --> Checking : fresh versions match
+  Restarting --> Failed : mismatch or error
+  Failed --> RollingBack : Restore click, complete snapshot
+  RollingBack --> Restored : every file restored
+  RollingBack --> Failed : partial or refused
+  Restored --> Checking : Review click
+  note right of Ready
+    INV target evidence AND complete snapshot
+    required before terminal upgrade.
+    Live target discovery needs R14.
+  end note
+  note right of Done
+    INV CLI and installed app equal target,
+    daemon equals CLI, ready empty plan,
+    every previous scope and id explicitly ok.
+    Missing evidence stays Unknown.
+  end note
   note right of Restored
-    INV rollback restores files only,
-    never versions or containers
+    INV files only, never versions,
+    containers or services.
   end note
   classDef ok stroke-width:1.6px
   classDef wait stroke-dasharray:2 2
   classDef fail stroke-width:2px
-  class Done ok
-  class Snapshotting,Applying,RestartingDaemon,RollingBack wait
-  class Blocked,Failed,Unknown fail
+  class Done,Restored ok
+  class Checking,Snapshotting,Applying,Restarting,RollingBack wait
+  class Blocked,Incomplete,Failed,Unknown fail

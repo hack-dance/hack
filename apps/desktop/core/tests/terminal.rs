@@ -175,3 +175,44 @@ fn eof_cancels_and_controls_rejected() {
         );
     }
 }
+
+#[test]
+fn authored_sequence_waits_for_enter_runs_both_and_stops_on_failure() {
+    for exit in [0, 3] {
+        let t = Tree::new();
+        let fake_program = t.0.join("fake-brew");
+        let receipt = t.0.join("receipt");
+        std::fs::write(
+            &fake_program,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RECEIPT\"\nexit {exit}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let specs: Vec<_> = hack_desktop_core::upgrade::homebrew_commands()
+            .into_iter()
+            .map(|mut c| {
+                c.program = fake_program.to_str().unwrap().into();
+                c
+            })
+            .collect();
+        let script = Script::create_sequence(&t.0, &specs).unwrap();
+        let mut child = std::process::Command::new(script.path())
+            .env("RECEIPT", &receipt)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(!receipt.exists());
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(exit));
+        assert_eq!(
+            std::fs::read_to_string(receipt).unwrap(),
+            if exit == 0 {
+                "upgrade hack\nupgrade --cask hack-desktop\n"
+            } else {
+                "upgrade hack\n"
+            }
+        );
+        assert!(!script.path().exists());
+    }
+}

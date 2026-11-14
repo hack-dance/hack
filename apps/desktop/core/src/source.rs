@@ -149,6 +149,20 @@ pub trait Source: Send + Sync {
     fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
     -> Result<Vec<LogEntry>, String>;
 
+    /// Explicit upgrade Review; never a periodic poll.
+    fn upgrade_check(&self) -> Result<crate::upgrade::Observation, String> {
+        Err("Fixture: upgrade reads disabled".into())
+    }
+    fn upgrade_snapshot(&self) -> Result<crate::upgrade::Snapshot, String> {
+        Err("Fixture: snapshot writes disabled".into())
+    }
+    fn upgrade_rollback(
+        &self,
+        _snapshot: &crate::upgrade::Snapshot,
+    ) -> Result<crate::upgrade::Rollback, String> {
+        Err("Fixture: rollback writes disabled".into())
+    }
+
     /// Fresh setup checks. Fixture implementations stay fully offline.
     fn setup(&self) -> crate::setup::Report {
         crate::setup::fixture(self.snapshot(), &self.doctor_runs(&[]))
@@ -369,6 +383,19 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn upgrade_check(&self) -> Result<crate::upgrade::Observation, String> {
+        crate::upgrade_io::check(self)
+    }
+    fn upgrade_snapshot(&self) -> Result<crate::upgrade::Snapshot, String> {
+        crate::upgrade_io::snapshot(&self.runner)
+    }
+    fn upgrade_rollback(
+        &self,
+        snapshot: &crate::upgrade::Snapshot,
+    ) -> Result<crate::upgrade::Rollback, String> {
+        crate::upgrade_io::rollback(&self.runner, snapshot)
+    }
+
     fn cli_program(&self) -> Result<String, String> {
         self.runner
             .resolve_program()

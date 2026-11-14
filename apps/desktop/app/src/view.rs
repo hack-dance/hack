@@ -36,6 +36,8 @@ use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase,
 
 #[path = "setup_controller.rs"]
 mod setup_controller;
+#[path = "upgrade_controller.rs"]
+mod upgrade_controller;
 
 const TAIL_LINES: u32 = 20;
 
@@ -50,6 +52,7 @@ pub struct HackApp {
     doctor: DoctorPane,
     pub(crate) setup: hack_desktop_core::setup::Pane,
     setup_initial: bool,
+    pub(crate) upgrade: hack_desktop_core::upgrade::Flow,
     _activation: Option<gpui_kit::Subscription>,
     /// Is the window visible (not minimised or hidden)? Automatic doctor
     /// runs wait for it.
@@ -73,6 +76,7 @@ impl HackApp {
             doctor: DoctorPane::default(),
             setup: Default::default(),
             setup_initial: true,
+            upgrade: Default::default(),
             _activation: None,
             window_visible: true,
             _visibility: None,
@@ -342,7 +346,7 @@ impl HackApp {
     }
 
     fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
-        if self.recovery_busy || self.setup.action_busy {
+        if self.recovery_busy || self.setup.action_busy || self.upgrade.busy {
             return;
         }
         let Some(row) = self.model.selected_row() else {
@@ -423,7 +427,7 @@ impl HackApp {
     }
 
     fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
-        if self.recovery_busy || self.setup.action_busy || !self.live {
+        if self.recovery_busy || self.setup.action_busy || self.upgrade.busy || !self.live {
             return;
         }
         self.recovery_busy = true;
@@ -560,7 +564,14 @@ impl HackApp {
                 .py_2()
                 // v0 does not read routing status yet: shown as unknown.
                 .child(machine_row("Routing and DNS", None, t.muted_foreground))
-                .child(self.doctor_row(cx)),
+                .child(self.doctor_row(cx))
+                .child(
+                    Button::new("upgrade-pane")
+                        .label("Upgrade Hack")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| this.open_upgrade(cx))),
+                ),
         )
     }
 
@@ -691,7 +702,9 @@ impl HackApp {
                         Button::new("recover-hackd")
                             .label(action.label())
                             .small()
-                            .disabled(self.recovery_busy || self.setup.action_busy)
+                            .disabled(
+                                self.recovery_busy || self.setup.action_busy || self.upgrade.busy,
+                            )
                             .loading(self.recovery_busy)
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
@@ -714,10 +727,9 @@ impl HackApp {
             if !d.actions.contains(&a) {
                 continue;
             }
-            let mut b = Button::new(a.label())
-                .label(a.label())
-                .small()
-                .disabled(d.busy || self.recovery_busy || self.setup.action_busy);
+            let mut b = Button::new(a.label()).label(a.label()).small().disabled(
+                d.busy || self.recovery_busy || self.setup.action_busy || self.upgrade.busy,
+            );
             b = match a {
                 Action::Start => b.primary(),
                 Action::Stop => b.outline(),
@@ -1099,8 +1111,16 @@ impl Render for HackApp {
         let (bg, fg, font) = (t.background, t.foreground, t.font_family.clone());
         let main: AnyElement = match &list.phase {
             _ if self.pane == Pane::Setup => {
-                crate::setup_view::render(&self.setup, self.recovery_busy, cx)
+                crate::setup_view::render(&self.setup, self.recovery_busy || self.upgrade.busy, cx)
             }
+            _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(
+                &self.upgrade,
+                self.setup.action_busy
+                    || self.setup.loading
+                    || self.recovery_busy
+                    || !self.action_started.is_empty(),
+                cx,
+            ),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.

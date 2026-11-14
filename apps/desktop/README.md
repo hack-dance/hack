@@ -96,7 +96,7 @@ Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
 ## What v0 does not do yet
 
 Logs, Env and Activity tabs, CPU and memory, always-on, broader
-daemon controls and upgrades come in later units. The design and the CLI/daemon
+daemon controls come in later units. The design and the CLI/daemon
 requests they need are in `DESIGN.md` (PR #800).
 
 ## Setup
@@ -177,3 +177,69 @@ relaunch. Follow the installation page's platform limits and existing-v4 migrati
 steps before using a candidate against a shared home.
 On Linux, this preview requires a separately prepared source-built 5.x CLI; the
 Apple Silicon prerelease download is not a Linux installer.
+
+
+## Upgrade review (preview)
+
+![Upgrade evidence flow](diagrams/upgrade.svg) ([source](diagrams/upgrade.mmd))
+
+**Upgrade Hack** opens without probing for updates. **Review readiness** runs the
+selected CLI's read-only `upgrade check --json` on a background worker, keeping
+valid reports from exit 1. No `update --check` probe or daily check runs: R14's
+observe-only target and installation contract is still missing. Availability
+therefore stays Unknown for every live install kind, including candidates and
+Homebrew. Readiness is separate from update availability. Actual Upgrade stays
+disabled until verified target and installation evidence exists; the current
+live adapter never supplies that evidence.
+
+**Save file snapshot** is an explicit CLI write, available after a complete ready
+review. The app accepts a recovery point only for `status: created`, `complete:
+true`, an empty `gaps` list and an absolute `manifest.json` path under the returned
+snapshot id. Refused, malformed and incomplete receipts enable neither Upgrade
+nor rollback. The app never opens the saved files or reads file values or keys.
+The CLI remains responsible for private-manifest validation and file ownership.
+
+With proposed R14 evidence, the fixture flow offers **Upgrade in Terminal** only
+after a complete snapshot. The authored sequence is `brew upgrade hack` followed
+by `brew upgrade --cask hack-desktop`, stopping on failure. The shared terminal
+adapter quotes each argument, displays the sequence and waits for Enter. It never
+runs finding `command` text. Plan argv may be displayed/copied only after quoting;
+R17 safe metadata and an authored allowlist are required before any plan fix can
+be run in the app. Today those cards offer Copy and documentation only. No admin
+action, password prompt, self update or relaunch happens in the app.
+
+Terminal launch and window focus never confirm success. **Check again** requires
+fresh CLI and Homebrew-installed app versions at the exact target, hackd matching
+the CLI, and a live, fully readable ready report with no remaining plan. Every
+previous step needs the same scope, checkout root and explicit `ok` finding;
+a disappeared step, missing scope, unreadable checkout or unchecked registry
+entry stays Unknown. The snapshot plan entry is proven by its separate complete
+receipt. A read adapter for `brew info --json=v2 --cask hack-desktop` uses the
+installed version, never the catalog version; it stays unwired until R14 verifies
+installation ownership. **Restart hackd** is explicit, shares the machine-action
+gate with setup/recovery, and re-reads versions after the command. No poll starts
+or restarts a service. Upgrade reads run only on demand, including while hidden;
+there is no eager or background daily upgrade check.
+
+**Restore files from snapshot** calls only `upgrade rollback --rollback-manifest
+<exact snapshot path> --json`, without overwrite. Results list each path, status,
+kept-as path and reason. Incomplete restores stay failed. A complete result says
+**Files restored. Versions, containers and services were not changed.** Fresh
+readiness is required again. All state and receipts stay in memory for this app
+session. The desktop has no signing/cask distribution or production updater in
+this unit (DESIGN sections 4 and 8).
+
+Offline proposed-capability examples (no CLI, Homebrew or terminal effects):
+
+```sh
+cargo run -p hack-desktop -- --upgrade-fixture ready --theme dark
+cargo run -p hack-desktop -- --upgrade-fixture availability-unknown
+```
+
+Fixture names: `availability-unknown`, `available`, `checking`, `blocked`, `ready`,
+`snapshotting`, `incomplete`, `applying`, `unknown`, `restarting`, `done`, `failed`,
+`rolling-back`, `restored`. `--screenshots` renders all fourteen in both themes
+without a window. Evidence: [light](screenshots/upgrade-light.png),
+[dark](screenshots/upgrade-dark.png). Core tests use only fake executables, isolated homes, disabled
+autostart, injected launchers and pure evidence inputs. They do not qualify live
+Homebrew, terminal, platform focus, a published app or a real upgrade.

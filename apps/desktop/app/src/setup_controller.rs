@@ -16,7 +16,7 @@ impl HackApp {
             self.setup.refresh_again = true;
             return;
         }
-        if self.setup.action_busy || self.recovery_busy {
+        if self.setup.action_busy || self.recovery_busy || self.upgrade.busy {
             return;
         }
         let generation = self.setup.begin();
@@ -61,6 +61,7 @@ impl HackApp {
             && !self.setup.loading
             && !self.setup.action_busy
             && !self.recovery_busy
+            && !self.upgrade.busy
         {
             self.pane = Pane::Project;
             cx.notify();
@@ -73,6 +74,7 @@ impl HackApp {
     ) {
         use hack_desktop_core::setup::{Remedy, Status};
         if self.recovery_busy
+            || self.upgrade.busy
             || self.setup.loading
             || self.setup.action_busy
             || !self.setup.report.cli_ready()
@@ -117,6 +119,7 @@ impl HackApp {
             return;
         }
         if self.recovery_busy
+            || self.upgrade.busy
             || self.setup.loading
             || self.setup.action_busy
             || !self.setup.report.cli_ready()

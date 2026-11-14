@@ -12,6 +12,7 @@ import {
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
+import { boundedTimeoutMs } from "../lib/process-deadline.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
 import type { DaemonPaths } from "./paths.ts";
 
@@ -113,18 +114,36 @@ async function runLaunchctl(args: readonly string[]): Promise<LaunchctlRun> {
   if (!access.allowed) {
     return { exitCode: 1, stdout: "", stderr: access.message };
   }
+  // Within a process deadline (withProcessDeadline), never outlive it;
+  // outside one, unchanged.
+  const limitMs = boundedTimeoutMs();
+  if (limitMs !== undefined && limitMs <= 0) {
+    return {
+      exitCode: 124,
+      stdout: "",
+      stderr: "launchctl not run: deadline passed",
+    };
+  }
   const proc = Bun.spawn(["launchctl", ...args], {
     env: childEnvironment(),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  const timer =
+    limitMs === undefined
+      ? undefined
+      : setTimeout(() => proc.kill("SIGKILL"), limitMs);
+  try {
+    const [exitCode, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface LaunchdPlistOptions {

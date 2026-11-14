@@ -2041,6 +2041,108 @@ Notes:
 | `--version, -v` | Show version |
 
 
+## `hack upgrade`
+
+Guided upgrade: check, snapshot and roll back
+
+### Usage
+
+```bash
+hack upgrade <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack upgrade check` | Check this machine and every registered project for the upgrade (read-only) |
+| `hack upgrade snapshot` | Keep a private copy of the files the upgrade changes |
+| `hack upgrade rollback` | Put back the files kept by an upgrade snapshot |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade check`
+
+Check this machine and every registered project for the upgrade (read-only)
+
+### Usage
+
+```bash
+hack upgrade check [options]
+```
+
+Reads the installed versions, the daemon's service, the projects registry (dead entries apart
+from unreadable ones), Hack's global services, proxy ports and DNS, the global secret store, and
+for each live project its env format and key, tracked files, ignore rules, agent integrations
+and (Apple Silicon) native preflight. Ends with an ordered plan and the next command. Changes
+nothing and prints no value. Exits 1 when something blocks the upgrade, naming it.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade snapshot`
+
+Keep a private copy of the files the upgrade changes
+
+### Usage
+
+```bash
+hack upgrade snapshot [options]
+```
+
+Copies the global Hack config, the projects registry, the encrypted secret store and its key
+(when used), and each live project's .hack config, env files, env layers, .hack/.gitignore and
+env key files into a private directory under ~/.hack/upgrade/snapshots (0700, files 0600).
+Prints the rollback command. The manifest records paths, sizes, modes and digests, never values.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade rollback`
+
+Put back the files kept by an upgrade snapshot
+
+### Usage
+
+```bash
+hack upgrade rollback [options]
+```
+
+Restores each file in the manifest with its exact bytes and mode. A file that changed since the
+snapshot (or since the step that recorded it) is left as it is unless --overwrite is passed;
+whatever a restore replaces or removes is kept in the snapshot directory, never deleted.
+Without --rollback-manifest, lists the snapshots and changes nothing.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--rollback-manifest <manifest>` | The snapshot manifest to restore (from hack upgrade snapshot) |
+| `--overwrite` | Also restore files that changed since the snapshot (the current copies are kept in the snapshot) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack version`
 
 Print version

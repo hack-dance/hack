@@ -1589,6 +1589,11 @@ function resolveGlobalRegistryRoot(): string {
   return resolveGlobalHackDir();
 }
 
+/** The projects registry file this process reads (`projects.json`). */
+export function resolveProjectsRegistryPath(): string {
+  return getRegistryPath();
+}
+
 function getRegistryPath(): string {
   return resolve(
     resolveGlobalRegistryRoot(),

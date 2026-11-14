@@ -33,6 +33,7 @@ import { appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
+  BOTH_POOL_FILES,
   buildVerifiedPlan,
   DURATION_TABLE_PATH,
   DURATION_TABLE_SCHEMA,
@@ -81,7 +82,11 @@ export function prioritizeSlowFiles(files: readonly string[]): string[] {
 }
 
 export function deferredMacosSummary(files: readonly string[]): string {
-  return `### macOS files deferred to the integration run\n\n${files.length} selected platform-sensitive files are deferred to the integration run. Linux results do not qualify these files on macOS.\n\n\`\`\`json\n${JSON.stringify(files, null, 2)}\n\`\`\`\n`;
+  const both = files.filter((file) => Object.hasOwn(BOTH_POOL_FILES, file));
+  const macosOnly = files.filter(
+    (file) => !Object.hasOwn(BOTH_POOL_FILES, file)
+  );
+  return `### macOS files deferred to the integration run\n\n${macosOnly.length} selected platform-sensitive files are deferred to the integration run. Linux results do not qualify these files on macOS.\n\n\`\`\`json\n${JSON.stringify(macosOnly, null, 2)}\n\`\`\`\n\n### Files also run on Linux\n\n${both.length} selected files run on Linux in this PR; only their macOS coverage is deferred to the integration run.\n\n\`\`\`json\n${JSON.stringify(both, null, 2)}\n\`\`\`\n`;
 }
 
 /** Default shard limit, below the job's `timeout-minutes` so the report prints. */

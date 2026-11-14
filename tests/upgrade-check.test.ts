@@ -1449,6 +1449,23 @@ test("an invalid env layer entry uses the same refusal code and filename-only re
   expect(finding?.action).not.toContain(project.projectDir);
 });
 
+test("a case-variant refused env layer keeps the file remedy", async () => {
+  const project = await liveProject("case-layer");
+  const layer = "HACK.ENV.DEV.LOCAL.YAML";
+  const target = join(root, "outside-layer.yaml");
+  await writeFile(target, SENTINEL);
+  await symlink(target, join(project.projectDir, layer));
+  await writeRegistry([project]);
+  const report = await check(healthyProbes());
+  const finding = report.projects[0]?.findings.find(
+    (item) => item.id === "env-format"
+  );
+  expect(finding?.diagnostic?.layer).toBe(layer);
+  expect(finding?.action).toContain("replace the link");
+  expect(finding?.action).not.toContain("readable directory");
+  expect(JSON.stringify(report)).not.toContain(SENTINEL);
+});
+
 test("unclassified upgrade errors keep a fixed failing step and never echo the error", async () => {
   await writeRegistry([await liveProject("unknown-error")]);
   const report = await check(

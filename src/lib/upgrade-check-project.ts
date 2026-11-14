@@ -762,9 +762,10 @@ function refusedEnvLayerFinding(input: {
   readonly layer: string;
   readonly status: UpgradeFindingStatus;
 }): UpgradeFinding {
+  const canonicalName = input.layer.toLowerCase();
   const isLayer =
-    input.layer.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
-    input.layer.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX);
+    canonicalName.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+    canonicalName.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX);
   const remedy = isLayer
     ? "replace the link with a readable file in this checkout or remove the layer, then rerun hack upgrade check."
     : "repair the readable directory inside this checkout, then rerun hack upgrade check.";

@@ -1245,6 +1245,7 @@ test("an explicitly selected snapshot root admits its volume and is retained by 
           ...target.findings,
           {
             id: "fixture-blocker",
+            kind: "manual" as const,
             status: "blocker" as const,
             summary: "Blocked fixture",
             command: null,

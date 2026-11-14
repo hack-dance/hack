@@ -68,7 +68,22 @@ pub fn receive(
     Ok(bytes)
 }
 
-fn validate(file: &File) -> Result<(), CandidateError> {
+/// Validate the interactive report/leash channel before either reading or
+/// writing. A regular file or one-way pipe cannot be a duplex frontend channel.
+pub fn validate_duplex(file: &File) -> Result<(), CandidateError> {
+    use std::os::unix::fs::FileTypeExt;
+    if !file
+        .metadata()
+        .map_err(|_| refused())?
+        .file_type()
+        .is_socket()
+    {
+        return Err(refused());
+    }
+    validate(file)
+}
+
+pub(super) fn validate(file: &File) -> Result<(), CandidateError> {
     use std::os::unix::fs::FileTypeExt;
     let kind = file.metadata().map_err(|_| refused())?.file_type();
     let fd = file.as_raw_fd();

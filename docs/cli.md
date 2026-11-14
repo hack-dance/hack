@@ -22,6 +22,7 @@ terminal).
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
+- `hack upgrade check` — read-only upgrade check of this machine and every registered project, ending in an ordered plan and the next command; `hack upgrade snapshot` and `hack upgrade rollback --rollback-manifest <manifest>` keep and restore the files the upgrade changes
 - `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
 
 Candidate `hack-next doctor` and `hack-v5 doctor` report a missing hackd as optional

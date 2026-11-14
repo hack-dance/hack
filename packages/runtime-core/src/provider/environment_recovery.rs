@@ -57,7 +57,7 @@ fn hex(value: &str, len: usize) -> bool {
             .bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
-pub(super) fn uuid(value: &str) -> bool {
+pub(crate) fn uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, c)| {
             if [8, 13, 18, 23].contains(&i) {

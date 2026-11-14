@@ -367,7 +367,7 @@ A macOS system prompt could come later for single root-only lines from R11, neve
 
 Each is small enough for one PR.
 
-1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
+1. **R1** Exists: `hack version --json`: `{version, channel, install_kind, binary_path}`; see [Version identity](../../docs/reference/version.md).
 2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
 3. **R2b** Native lifecycle the app can drive: a `--json` contract for native `restart` and authored `down`/`restart`, and qualification of the existing detached `up --json` for app use.
 4. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
@@ -390,4 +390,4 @@ Each is small enough for one PR.
 21. **R15** `--json` for `hack daemon start|stop|restart|install`.
 22. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
 23. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.
-24. **R18** Observe-only project listing, including registered native projects: no auto-registration, `lastSeenAt` updates or registry writes. Until it exists, the desktop refuses CLI listing fallback and reports Unknown when a matching hackd snapshot is unavailable. The daemon-off screen names `hack daemon start` and offers Start hackd as its first recovery action.
+24. **R18 — exists** `hack projects --json --observe` (also `--summary`, `--project`, `--all`): no auto-registration, `lastSeenAt` update, registry write, daemon contact or engine contact. Includes registered native rows. Compose state defaults to unknown; `--runtime` explicitly opts in to Docker reads that can start a socket-activated engine. Rows add the R2 field vocabulary with null/unknown for unavailable evidence; native state still comes from native `ps` until R2 integrates that observer. Always-on fields follow their persistence owner. Desktop fallback can use the default non-contact command when a matching hackd snapshot is unavailable; adopting it in the app is separate work. The daemon-off screen still offers Start hackd.

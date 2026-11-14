@@ -61,6 +61,11 @@ import {
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
+import { caddyCaExportReplaceable } from "../lib/caddy-ca-export.ts";
+import {
+  copyRuntimeRoot,
+  inspectCaddyCaIdentity,
+} from "../lib/caddy-ca-identity.ts";
 import { observeGlobalCaddyIp } from "../lib/caddy-hosts.ts";
 import {
   resolveGlobalConfigPath,
@@ -92,6 +97,8 @@ import {
 } from "../lib/interactivity.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import { createLinuxDnsHost } from "../lib/linux-dns-host.ts";
+import { createLinuxTrustHost } from "../lib/linux-trust-host.ts";
+import { prepareLinuxSystemTrust } from "../lib/linux-trust-setup.ts";
 import {
   buildHackHostTrustEnvironment,
   renderHackHostTrustShellExports,
@@ -99,10 +106,7 @@ import {
   resolveHackHostTrustEnvScriptPath,
   resolveHackLocalCaCertPath,
 } from "../lib/local-ca.ts";
-import {
-  checkMacCaTrust,
-  inspectMacCaEligibility,
-} from "../lib/mac-ca-trust.ts";
+import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
 import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
@@ -132,6 +136,8 @@ import {
 } from "../lib/native-hack-local-route.ts";
 import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local-route-host.ts";
 import { isLinux, isMac } from "../lib/os.ts";
+import { resolveTrustedSudo } from "../lib/privileged-sudo.ts";
+import { withProcessDeadline } from "../lib/process-deadline.ts";
 import {
   readProxyBindFromCompose,
   resolveProxyBindAddress,
@@ -146,6 +152,7 @@ import {
   formatDockerConnectionGuidance,
 } from "../lib/runtime-guidance.ts";
 import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts";
+import { createTrustedDockerExec } from "../lib/trusted-docker.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalAlloyConfig,
@@ -167,6 +174,23 @@ import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
 import {
+  type AdminPlan,
+  classifyDockerInfo,
+  type MacInstallSnapshot,
+  planGlobalInstall,
+  planGlobalInstallTrust,
+  planGlobalTrust,
+  type TrustPlanDeps,
+} from "./global-admin-plan.ts";
+import {
+  executeMacPrivilegedCommand,
+  macAuthorizationArgv,
+  macDnsmasqNeedsStart,
+  macFlushCommands,
+  macResolverArgv,
+  macRestartCommands,
+} from "./global-install-actions.ts";
+import {
   bootstrapLinuxGlobalDns,
   inspectLinuxGlobalDns,
   linuxDnsStatusPayload,
@@ -178,6 +202,10 @@ import {
   type LinuxTrustResult,
 } from "./global-linux-trust.ts";
 import { observeMacHostDns } from "./global-mac-dns.ts";
+import {
+  ensureMacTrustCaddyLocalCa,
+  prepareMacTrustForPlan,
+} from "./global-mac-trust.ts";
 import {
   inspectProxyNetwork,
   proxyNetworkStatusPayload,
@@ -262,11 +290,19 @@ const globalSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const optAdminPlan = defineOption({
+  name: "plan",
+  type: "boolean",
+  long: "--plan",
+  description:
+    "Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json)",
+} as const);
+
 const globalInstallSpec = defineCommand({
   name: "install",
   summary: "Bootstrap ~/.hack and start Caddy + Grafana/Loki/Alloy",
   group: "Global",
-  options: [],
+  options: [optJson, optAdminPlan] as const,
   positionals: [],
   subcommands: [],
 } as const);
@@ -418,7 +454,7 @@ const globalTrustSpec = defineCommand({
   summary:
     "Trust Caddy Local CA (macOS keychain; Linux trust store and NSS) so https://*.hack is trusted",
   group: "Global",
-  options: [],
+  options: [optJson, optAdminPlan] as const,
   positionals: [],
   subcommands: [],
 } as const);
@@ -445,7 +481,21 @@ const globalAuthorizeSpec = defineCommand({
 export const globalCommand = defineCommand({
   ...globalSpec,
   subcommands: [
-    withHandler(globalInstallSpec, async () => await globalInstall()),
+    withHandler(globalInstallSpec, async ({ args }) => {
+      if (args.options.json === true && args.options.plan !== true) {
+        logger.error({
+          message: "Use --json with --plan: hack global install --plan --json",
+        });
+        return 2;
+      }
+      if (args.options.plan === true) {
+        return await printAdminPlan({
+          json: args.options.json === true,
+          build: buildGlobalInstallPlan,
+        });
+      }
+      return await globalInstall();
+    }),
     globalDnsSpec,
     withHandler(globalUpSpec, async () => await globalUp()),
     withHandler(globalDownSpec, async () => await globalDown()),
@@ -453,7 +503,21 @@ export const globalCommand = defineCommand({
     withHandler(globalLogsSpec, handleGlobalLogs),
     withHandler(globalCaSpec, handleGlobalCa),
     withHandler(globalCertSpec, handleGlobalCert),
-    withHandler(globalTrustSpec, async () => await globalTrust()),
+    withHandler(globalTrustSpec, async ({ args }) => {
+      if (args.options.json === true && args.options.plan !== true) {
+        logger.error({
+          message: "Use --json with --plan: hack global trust --plan --json",
+        });
+        return 2;
+      }
+      if (args.options.plan === true) {
+        return await printAdminPlan({
+          json: args.options.json === true,
+          build: async () => await planGlobalTrust(trustPlanDeps()),
+        });
+      }
+      return await globalTrust();
+    }),
     withHandler(globalLogsResetSpec, async () => await globalLogsReset()),
     withHandler(globalAuthorizeSpec, async () => await globalAuthorize()),
   ],
@@ -1343,6 +1407,13 @@ async function globalAuthorize(): Promise<number> {
   await Bun.write(tempPath, sudoersText);
 
   const visudo = (await findExecutableInPath("visudo")) ?? "/usr/sbin/visudo";
+  const authorization = macAuthorizationArgv({
+    helperPath: MAC_DNS_RECOVERY_HELPER_PATH,
+    helperTempPath,
+    sudoersPath: MAC_DNS_SUDOERS_PATH,
+    sudoersTempPath: tempPath,
+    visudo,
+  });
   const validateTempExit = await run([visudo, "-cf", tempPath], {
     stdin: "ignore",
   });
@@ -1373,23 +1444,9 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const installHelperDirExit = await run(
-    [
-      "sudo",
-      "install",
-      "-d",
-      "-o",
-      "root",
-      "-g",
-      "wheel",
-      "-m",
-      "0755",
-      dirname(MAC_DNS_RECOVERY_HELPER_PATH),
-    ],
-    {
-      stdin: "inherit",
-    }
-  );
+  const installHelperDirExit = await run(authorization.helperDirectory, {
+    stdin: "inherit",
+  });
   if (installHelperDirExit !== 0) {
     logger.error({
       message: `Failed to create ${dirname(MAC_DNS_RECOVERY_HELPER_PATH)} (exit ${installHelperDirExit})`,
@@ -1397,23 +1454,9 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const installHelperExit = await run(
-    [
-      "sudo",
-      "install",
-      "-o",
-      "root",
-      "-g",
-      "wheel",
-      "-m",
-      "0755",
-      helperTempPath,
-      MAC_DNS_RECOVERY_HELPER_PATH,
-    ],
-    {
-      stdin: "inherit",
-    }
-  );
+  const installHelperExit = await run(authorization.helper, {
+    stdin: "inherit",
+  });
   if (installHelperExit !== 0) {
     logger.error({
       message: `Failed to install ${MAC_DNS_RECOVERY_HELPER_PATH} (exit ${installHelperExit})`,
@@ -1435,23 +1478,9 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const installDirExit = await run(
-    [
-      "sudo",
-      "install",
-      "-d",
-      "-o",
-      "root",
-      "-g",
-      "wheel",
-      "-m",
-      "0755",
-      "/etc/sudoers.d",
-    ],
-    {
-      stdin: "inherit",
-    }
-  );
+  const installDirExit = await run(authorization.sudoersDirectory, {
+    stdin: "inherit",
+  });
   if (installDirExit !== 0) {
     logger.error({
       message: `Failed to create /etc/sudoers.d (exit ${installDirExit})`,
@@ -1459,23 +1488,9 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const installFileExit = await run(
-    [
-      "sudo",
-      "install",
-      "-o",
-      "root",
-      "-g",
-      "wheel",
-      "-m",
-      "0440",
-      tempPath,
-      MAC_DNS_SUDOERS_PATH,
-    ],
-    {
-      stdin: "inherit",
-    }
-  );
+  const installFileExit = await run(authorization.sudoers, {
+    stdin: "inherit",
+  });
   if (installFileExit !== 0) {
     logger.error({
       message: `Failed to install ${MAC_DNS_SUDOERS_PATH} (exit ${installFileExit})`,
@@ -1483,12 +1498,9 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const validateInstalledExit = await run(
-    ["sudo", visudo, "-cf", MAC_DNS_SUDOERS_PATH],
-    {
-      stdin: "inherit",
-    }
-  );
+  const validateInstalledExit = await run(authorization.validate, {
+    stdin: "inherit",
+  });
   if (validateInstalledExit !== 0) {
     logger.error({
       message: `Installed sudoers rule failed validation (visudo exit ${validateInstalledExit})`,
@@ -1496,7 +1508,7 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const verifyAuthorizationExit = await run(["sudo", "-k"], {
+  const verifyAuthorizationExit = await run(authorization.invalidate, {
     stdin: "ignore",
   });
   if (verifyAuthorizationExit !== 0) {
@@ -1505,12 +1517,9 @@ async function globalAuthorize(): Promise<number> {
     });
   }
 
-  const verifyPasswordlessExit = await run(
-    ["sudo", "-n", MAC_DNS_RECOVERY_HELPER_PATH, "check"],
-    {
-      stdin: "ignore",
-    }
-  );
+  const verifyPasswordlessExit = await run(authorization.check, {
+    stdin: "ignore",
+  });
   if (verifyPasswordlessExit !== 0) {
     logger.error({
       message: [
@@ -1587,30 +1596,36 @@ async function verifyMacRootControlledPaths(
   paths: readonly string[],
   options?: {
     readonly allowMissingPaths?: readonly string[];
+    readonly timeoutMs?: number;
+    readonly onUnreadable?: () => void;
+    readonly quiet?: boolean;
   }
 ): Promise<boolean> {
   const allowMissingPaths = new Set(options?.allowMissingPaths ?? []);
+  const report = (message: string) => {
+    if (!options?.quiet) {
+      logger.error({ message });
+    }
+  };
   for (const path of paths) {
-    const metadata = await readMacOwnershipAndMode(path);
+    const metadata = await readMacOwnershipAndMode(path, options);
     if (metadata === null) {
       if (allowMissingPaths.has(path)) {
         continue;
       }
-      logger.error({
-        message: `Unable to inspect ownership for ${path}.`,
-      });
+      report(`Unable to inspect ownership for ${path}.`);
       return false;
     }
     if (metadata.uid !== ROOT_UID || metadata.gid !== WHEEL_GID) {
-      logger.error({
-        message: `${path} must be owned by root:wheel before enabling passwordless sudo.`,
-      });
+      report(
+        `${path} must be owned by root:wheel before enabling passwordless sudo.`
+      );
       return false;
     }
     if ((metadata.mode & 0o022) !== 0) {
-      logger.error({
-        message: `${path} must not be writable by group or others before enabling passwordless sudo.`,
-      });
+      report(
+        `${path} must not be writable by group or others before enabling passwordless sudo.`
+      );
       return false;
     }
   }
@@ -1618,14 +1633,32 @@ async function verifyMacRootControlledPaths(
   return true;
 }
 
-async function readMacOwnershipAndMode(path: string): Promise<{
+async function readMacOwnershipAndMode(
+  path: string,
+  options?: {
+    readonly timeoutMs?: number;
+    readonly onUnreadable?: () => void;
+  }
+): Promise<{
   readonly uid: number;
   readonly gid: number;
   readonly mode: number;
 } | null> {
   const result = await exec(["/usr/bin/stat", "-f", "%u:%g:%Lp", path], {
     stdin: "ignore",
+    ...(options?.timeoutMs === undefined
+      ? {}
+      : { timeoutMs: options.timeoutMs }),
+  }).catch((error: unknown) => {
+    if (!options?.onUnreadable) {
+      throw error;
+    }
+    options.onUnreadable();
+    return { exitCode: 127, stdout: "", stderr: "" };
   });
+  if (result.exitCode === 124 || result.exitCode === 127) {
+    options?.onUnreadable?.();
+  }
   if (result.exitCode !== 0) {
     return null;
   }
@@ -2427,18 +2460,7 @@ async function runMacPrivilegedCommand(opts: {
   readonly command: readonly string[];
   readonly interactive: boolean;
 }): Promise<number> {
-  const silentExit = await run(["sudo", "-n", ...opts.command], {
-    stdin: "ignore",
-  });
-  if (silentExit === 0) {
-    return 0;
-  }
-  if (!opts.interactive) {
-    return silentExit;
-  }
-  return await run(["sudo", ...opts.command], {
-    stdin: "inherit",
-  });
+  return await executeMacPrivilegedCommand(opts);
 }
 
 function isInteractiveTerminal(): boolean {
@@ -2451,64 +2473,40 @@ async function resolveBrewPath(): Promise<string | null> {
 
 async function restartMacDnsmasq(): Promise<void> {
   const brew = await resolveBrewPath();
-  if (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH)) {
-    const restartExit = await runMacPrivilegedCommand({
-      command: [MAC_DNS_RECOVERY_HELPER_PATH, "restart-dnsmasq"],
-      interactive: isInteractiveTerminal(),
-    });
-    if (restartExit === 0) {
-      return;
-    }
-    if (!brew) {
-      throw new Error(
-        `sudo ${MAC_DNS_RECOVERY_HELPER_PATH} restart-dnsmasq failed (exit ${restartExit})`
-      );
-    }
-  }
-
-  if (!brew) {
+  const commands = macRestartCommands({
+    brew,
+    helperPath: MAC_DNS_RECOVERY_HELPER_PATH,
+    helperInstalled: await pathExists(MAC_DNS_RECOVERY_HELPER_PATH),
+  });
+  if (commands.length === 0) {
     throw new Error("Homebrew not found; cannot restart dnsmasq");
   }
-
-  const restartExit = await runMacPrivilegedCommand({
-    command: [brew, "services", "restart", "dnsmasq"],
-    interactive: isInteractiveTerminal(),
-  });
-  if (restartExit !== 0) {
-    throw new Error(
-      `sudo ${brew} services restart dnsmasq failed (exit ${restartExit})`
-    );
+  for (const [index, command] of commands.entries()) {
+    const exit = await runMacPrivilegedCommand({
+      command,
+      interactive: isInteractiveTerminal(),
+    });
+    if (exit === 0) {
+      return;
+    }
+    if (index === commands.length - 1) {
+      throw new Error(`sudo ${command.join(" ")} failed (exit ${exit})`);
+    }
   }
 }
 
 async function flushMacDnsCachePrivileged(): Promise<void> {
-  if (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH)) {
-    const flushExit = await runMacPrivilegedCommand({
-      command: [MAC_DNS_RECOVERY_HELPER_PATH, "flush-cache"],
+  for (const command of macFlushCommands({
+    helperPath: MAC_DNS_RECOVERY_HELPER_PATH,
+    helperInstalled: await pathExists(MAC_DNS_RECOVERY_HELPER_PATH),
+  })) {
+    const exit = await runMacPrivilegedCommand({
+      command,
       interactive: isInteractiveTerminal(),
     });
-    if (flushExit !== 0) {
-      throw new Error(
-        `sudo ${MAC_DNS_RECOVERY_HELPER_PATH} flush-cache failed (exit ${flushExit})`
-      );
+    if (exit !== 0) {
+      throw new Error(`sudo ${command.join(" ")} failed (exit ${exit})`);
     }
-    return;
-  }
-
-  const flushExit = await runMacPrivilegedCommand({
-    command: ["/usr/bin/dscacheutil", "-flushcache"],
-    interactive: isInteractiveTerminal(),
-  });
-  if (flushExit !== 0) {
-    throw new Error(`sudo dscacheutil -flushcache failed (exit ${flushExit})`);
-  }
-
-  const hupExit = await runMacPrivilegedCommand({
-    command: ["/usr/bin/killall", "-HUP", "mDNSResponder"],
-    interactive: isInteractiveTerminal(),
-  });
-  if (hupExit !== 0) {
-    throw new Error(`sudo killall -HUP mDNSResponder failed (exit ${hupExit})`);
   }
 }
 
@@ -3371,6 +3369,269 @@ function buildGatewayUrl(opts: {
   return `http://${host}:${opts.port}`;
 }
 
+/**
+ * Print an admin plan as JSON. Exit 0 for a complete plan, 1 when the real
+ * command would refuse, 3 when a later phase cannot be known yet.
+ */
+async function printAdminPlan(opts: {
+  readonly json: boolean;
+  readonly build: () => Promise<AdminPlan>;
+}): Promise<number> {
+  if (!opts.json) {
+    logger.error({ message: "--plan prints JSON only: add --json" });
+    return 2;
+  }
+  const result = await opts.build();
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (result.refused !== null) {
+    return 1;
+  }
+  return result.complete ? 0 : 3;
+}
+
+/** Install's read-only snapshot. Never enter the mutating install handler. */
+async function buildGlobalInstallPlan(): Promise<AdminPlan> {
+  let unreadableLinux = false;
+  const domains = managedLocalDomains(await resolveDefaultDomain());
+  return await planGlobalInstall({
+    platform: process.platform,
+    refusal: () => {
+      if (resolveNativeRuntimeSelection()) {
+        return "Native global DNS/TLS installation needs a scoped host-domain plan; hack global install refuses on the native runtime";
+      }
+      return isSlimExecutionMode()
+        ? "hack global install is unavailable in slim mode"
+        : null;
+    },
+    preflight: async () => {
+      const deadline = Date.now() + DOCKER_PROBE_TIMEOUT_MS;
+      try {
+        await withProcessDeadline(deadline, preflightCustomDomainDnsClaim);
+        return Date.now() >= deadline
+          ? {
+              unresolved:
+                "The host-domain ownership probe exceeded its read-only deadline",
+            }
+          : null;
+      } catch (error) {
+        if (Date.now() >= deadline) {
+          return {
+            unresolved:
+              "The host-domain ownership probe exceeded its read-only deadline",
+          };
+        }
+        return error instanceof Error
+          ? error.message
+          : "Custom-domain preflight failed";
+      }
+    },
+    domains,
+    dockerStartup: async () => {
+      const result = await exec(["docker", "info"], {
+        stdin: "ignore",
+        timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+      }).catch(() => null);
+      const reachable = classifyDockerInfo(result);
+      return {
+        reachable,
+        backend: reachable === false ? await detectDockerBackend() : null,
+      };
+    },
+    useStaticIps: async () => {
+      const inspected = await exec(
+        ["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK],
+        { stdin: "ignore", timeoutMs: DOCKER_PROBE_TIMEOUT_MS }
+      ).catch(() => null);
+      return inspected?.exitCode === 0
+        ? networkHasSubnet(inspected.stdout, DEFAULT_INGRESS_SUBNET)
+        : "unknown";
+    },
+    ...(isLinux()
+      ? {
+          linuxHost: createLinuxDnsHost({
+            onUnreadable: () => {
+              unreadableLinux = true;
+            },
+          }),
+        }
+      : {}),
+    unreadableLinux: () => unreadableLinux,
+    sudoPath: resolveTrustedSudo,
+    macSnapshot: async () => await readMacInstallSnapshot(domains),
+    trust: async () => await planGlobalInstallTrust(trustPlanDeps()),
+  });
+}
+
+async function readMacInstallSnapshot(
+  domains: readonly string[]
+): Promise<MacInstallSnapshot> {
+  const brew = await resolveBrewPath();
+  const probe = async (argv: readonly string[]) =>
+    await exec(argv, {
+      stdin: "ignore",
+      timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+    }).catch(() => null);
+  const formula = brew ? await probe(["brew", "list", "dnsmasq"]) : null;
+  const installed =
+    formula === null || formula.exitCode === 124 || formula.exitCode === 127
+      ? "unknown"
+      : formula.exitCode === 0;
+  const services =
+    brew && installed === true
+      ? await probe(["brew", "services", "list"])
+      : null;
+  const resolverDomains: string[] = [];
+  const builtInDomains: ReadonlySet<string> = new Set([
+    DEFAULT_PROJECT_TLD,
+    DEFAULT_NEW_PROJECT_TLD,
+    DEFAULT_OAUTH_ALIAS_ROOT,
+  ]);
+  for (const domain of domains) {
+    if (
+      builtInDomains.has(domain) ||
+      (await readTextFile(`/etc/resolver/${domain}`)) === null
+    ) {
+      resolverDomains.push(domain);
+    }
+  }
+  const recovery = await readMacAuthorizationSnapshot(brew);
+  return {
+    brew,
+    dnsmasqInstalled: brew ? installed : false,
+    services: services?.exitCode === 0 ? services.stdout : null,
+    helperPath: MAC_DNS_RECOVERY_HELPER_PATH,
+    helperInstalled: await pathExists(MAC_DNS_RECOVERY_HELPER_PATH),
+    resolverDomains,
+    ...recovery,
+  };
+}
+
+async function readMacAuthorizationSnapshot(
+  brew: string | null
+): Promise<
+  Pick<
+    MacInstallSnapshot,
+    "authorization" | "authorizationRefusal" | "authorizationUnknown"
+  >
+> {
+  const probe = async (argv: readonly string[]) =>
+    await exec(argv, {
+      stdin: "ignore",
+      timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+    }).catch(() => null);
+  let authorization: MacInstallSnapshot["authorization"] = null;
+  let authorizationRefusal: string | null = null;
+  let authorizationUnknown = false;
+  if (!(await pathExists(MAC_DNS_SUDOERS_PATH))) {
+    const user = brew ? await probe(["id", "-un"]) : null;
+    if (
+      brew &&
+      (user === null || user.exitCode === 124 || user.exitCode === 127)
+    ) {
+      authorizationUnknown = true;
+    }
+    if (!brew || user?.exitCode !== 0 || !user.stdout.trim()) {
+      authorizationRefusal =
+        "Recovery authorization cannot run without Homebrew and a readable current username";
+    } else if (
+      await verifyMacRootControlledPaths(
+        [
+          dirname(dirname(MAC_DNS_RECOVERY_HELPER_PATH)),
+          dirname(MAC_DNS_RECOVERY_HELPER_PATH),
+        ],
+        {
+          allowMissingPaths: [dirname(MAC_DNS_RECOVERY_HELPER_PATH)],
+          timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+          quiet: true,
+          onUnreadable: () => {
+            authorizationUnknown = true;
+          },
+        }
+      )
+    ) {
+      const tempDir = resolve(getGlobalPaths().root, "tmp");
+      authorization = {
+        helperPath: MAC_DNS_RECOVERY_HELPER_PATH,
+        helperTempPath: resolve(tempDir, MAC_DNS_RECOVERY_HELPER_TEMP_FILENAME),
+        sudoersPath: MAC_DNS_SUDOERS_PATH,
+        sudoersTempPath: resolve(tempDir, MAC_DNS_SUDOERS_TEMP_FILENAME),
+        visudo: (await findExecutableInPath("visudo")) ?? "/usr/sbin/visudo",
+      };
+    } else {
+      authorizationRefusal =
+        "Recovery authorization refuses insecure helper parent directories";
+    }
+  }
+  return { authorization, authorizationRefusal, authorizationUnknown };
+}
+
+/** The real `hack global trust` sources, used read-only by its plan. */
+function trustPlanDeps(): TrustPlanDeps {
+  const certPath = resolveHackLocalCaCertPath();
+  const native = resolveNativeRuntimeSelection();
+  return {
+    platform: process.platform,
+    refusal: () => {
+      if (native) {
+        return "Native trust needs an exact reviewed HTTPS origin; hack global trust refuses on the native runtime";
+      }
+      return isSlimExecutionMode()
+        ? "hack global trust is unavailable in slim mode"
+        : null;
+    },
+    certPath,
+    inspectIdentity: async () =>
+      await inspectCaddyCaIdentity({
+        certPath,
+        ...(isLinux() ? { exec: createTrustedDockerExec() } : {}),
+      }),
+    readExport: async () => await readTextFile(certPath),
+    exportReplaceable: async () =>
+      await caddyCaExportReplaceable(certPath).catch(() => "unknown" as const),
+    ...(isLinux() ? { linuxHost: createLinuxTrustHost() } : {}),
+    prepareLinux: prepareLinuxSystemTrust,
+    dockerAnswers: async () =>
+      classifyDockerInfo(
+        await exec(["docker", "info", "--format", "{{.ServerVersion}}"], {
+          stdin: "ignore",
+          timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+        }).catch(() => null)
+      ),
+    // The export's own selector (exportCaddyLocalCaCert), read without
+    // writing: no single container means the export keeps the current file.
+    readExportSource: async () => {
+      const composeFile = getGlobalPaths().caddyCompose;
+      const ps = await exec(
+        ["docker", "compose", "-f", composeFile, "ps", "-q", "caddy"],
+        {
+          cwd: dirname(composeFile),
+          stdin: "ignore",
+          timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+        }
+      ).catch(() => null);
+      if (ps === null || ps.exitCode === 124) {
+        return "unknown";
+      }
+      const id = ps.exitCode === 0 ? ps.stdout.trim() : "";
+      if (id.length === 0 || id.includes("\n")) {
+        return "none";
+      }
+      const root = await copyRuntimeRoot({
+        id,
+        execute: exec,
+        timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+      }).catch(() => null);
+      return root !== null && "pem" in root ? { pem: root.pem } : "unknown";
+    },
+    prepareMac: async ({ certPath: path }) =>
+      await prepareMacTrustForPlan({
+        certPath: path,
+        timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+      }),
+    explicitlyNonInteractive: isExplicitlyNonInteractive,
+  };
+}
+
 async function globalTrust(): Promise<number> {
   const native = resolveNativeRuntimeSelection();
   if (native) {
@@ -3915,12 +4176,7 @@ async function maybeWriteResolver(opts: {
     return;
   }
 
-  await run([
-    "sudo",
-    "sh",
-    "-c",
-    `mkdir -p /etc/resolver && printf '%s\\n' 'nameserver 127.0.0.1' > ${resolverPath}`,
-  ]);
+  await run(macResolverArgv(opts.domain));
   logger.success({ message: `Wrote ${resolverPath}` });
 }
 
@@ -4030,7 +4286,7 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
   const status = parts[1] ?? "";
   const user = parts[2] ?? "";
 
-  if (status === "started" && user === "root") {
+  if (!macDnsmasqNeedsStart(services.exitCode === 0 ? services.stdout : "")) {
     return;
   }
 
@@ -4043,17 +4299,16 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
 
   const interactive = isInteractiveTerminal();
   const helperInstalled = await pathExists(MAC_DNS_RECOVERY_HELPER_PATH);
-  let exit = await runMacPrivilegedCommand({
-    command: helperInstalled
-      ? [MAC_DNS_RECOVERY_HELPER_PATH, "restart-dnsmasq"]
-      : [brew, "services", "restart", "dnsmasq"],
-    interactive,
-  });
-  if (helperInstalled && exit !== 0) {
-    exit = await runMacPrivilegedCommand({
-      command: [brew, "services", "restart", "dnsmasq"],
-      interactive,
-    });
+  let exit = 1;
+  for (const command of macRestartCommands({
+    brew,
+    helperPath: MAC_DNS_RECOVERY_HELPER_PATH,
+    helperInstalled,
+  })) {
+    exit = await runMacPrivilegedCommand({ command, interactive });
+    if (exit === 0) {
+      break;
+    }
   }
   if (exit !== 0) {
     logger.warn({
@@ -4142,98 +4397,6 @@ async function ensureMacMkcert(): Promise<void> {
  * (`sudo -n true`). Used to avoid launching a `sudo` command that would hang
  * waiting on a password prompt when there is no TTY to answer it.
  */
-async function canSudoWithoutPassword(): Promise<boolean> {
-  const check = await exec(["sudo", "-n", "true"], { stdin: "ignore" });
-  return check.exitCode === 0;
-}
-
-async function ensureMacTrustCaddyLocalCa(input: {
-  readonly certPath: string;
-}): Promise<boolean> {
-  const ok = await confirmSafe({
-    message:
-      "Trust Caddy Local CA in macOS System keychain? (enables trusted https://*.hack; requires sudo)",
-    initialValue: true,
-    nonInteractive: "accept-default",
-  });
-  if (!ok) {
-    logger.info({
-      message:
-        "Skipped macOS System keychain trust; leaving host TLS env unchanged.",
-    });
-    return false;
-  }
-
-  const existing = await checkMacCaTrust(input);
-  if (!existing.installable) {
-    logger.warn({
-      message:
-        existing.issue ??
-        "Current Caddy Local CA is not eligible for installation",
-    });
-    return false;
-  }
-  if (existing.trusted) {
-    logger.info({
-      message: "Current Caddy Local CA is trusted in macOS System keychain",
-    });
-    return true;
-  }
-
-  if (isExplicitlyNonInteractive() && !(await canSudoWithoutPassword())) {
-    logger.info({
-      message:
-        "Skipped macOS System keychain trust (non-interactive; sudo would prompt for a password). Run `hack global trust` interactively to finish browser trust.",
-    });
-    return false;
-  }
-
-  logger.step({
-    message: "Installing Caddy Local CA to System keychain (requires sudo)…",
-  });
-  const installExit = await run(
-    [
-      "sudo",
-      "security",
-      "add-trusted-cert",
-      "-d",
-      "-r",
-      "trustRoot",
-      "-k",
-      "/Library/Keychains/System.keychain",
-      input.certPath,
-    ],
-    { stdin: "inherit" }
-  );
-
-  if (installExit !== 0) {
-    logger.warn({
-      message: `Failed to trust Caddy Local CA (exit ${installExit}). You may see HTTPS warnings in the browser.`,
-    });
-    return false;
-  }
-
-  const installed = await checkMacCaTrust(input);
-  if (!installed.trusted) {
-    logger.warn({
-      message:
-        installed.issue ??
-        "macOS TLS trust verification failed after installation",
-    });
-    return false;
-  }
-
-  logger.success({ message: "Trusted Caddy Local CA (macOS System keychain)" });
-  note(
-    [
-      "If your browser still shows a warning, restart the browser.",
-      "To remove later: Keychain Access → System → search 'Caddy Local Authority'.",
-    ].join("\n"),
-    "TLS"
-  );
-  return true;
-}
-
 /** Prepare local trust exports; only permitted homes may update launchd. */
 export async function configureMacHostTlsTrust(input: {
   readonly certPath: string;

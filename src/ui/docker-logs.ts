@@ -106,7 +106,10 @@ export async function dockerComposeLogsPlain(
   const composeExitCode = composeProc ? await composeProc.exited : null;
   await Promise.all([composeStdoutTask, composeStderrTask]);
 
+  // A follow's `tail -F` never ends, so it stops with Compose. A snapshot's
+  // `tail -n` ends by itself; killing it could drop lines it has not printed.
   if (
+    opts.follow &&
     composeProc &&
     lifecycleHandle &&
     lifecycleHandle.proc.exitCode === null
@@ -214,7 +217,10 @@ export async function dockerComposeLogsPretty(
   const composeExitCode = composeProc ? await composeProc.exited : null;
   await Promise.all([composeStdoutTask, composeStderrTask]);
 
+  // A follow's `tail -F` never ends, so it stops with Compose. A snapshot's
+  // `tail -n` ends by itself; killing it could drop lines it has not printed.
   if (
+    opts.follow &&
     composeProc &&
     lifecycleHandle &&
     lifecycleHandle.proc.exitCode === null
@@ -327,7 +333,10 @@ export async function dockerComposeLogsJson(
   const composeExitCode = composeProc ? await composeProc.exited : null;
   await Promise.all([composeStdoutTask, composeStderrTask]);
 
+  // A follow's `tail -F` never ends, so it stops with Compose. A snapshot's
+  // `tail -n` ends by itself; killing it could drop lines it has not printed.
   if (
+    opts.follow &&
     composeProc &&
     lifecycleHandle &&
     lifecycleHandle.proc.exitCode === null

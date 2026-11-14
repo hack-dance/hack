@@ -232,6 +232,14 @@ test("--services splits Compose services from lifecycle processes", async () => 
     ].join("\n")
   );
 
+  // A slow `tail`: Compose finishes first, and the snapshot must still wait
+  // for the lifecycle lines instead of stopping the reader.
+  await writeFile(
+    join(root, "bin", "tail"),
+    '#!/bin/sh\nsleep 0.5\nexec /usr/bin/tail "$@"\n'
+  );
+  await chmod(join(root, "bin", "tail"), 0o755);
+
   const result = await runLogs([
     "--json",
     "--no-follow",

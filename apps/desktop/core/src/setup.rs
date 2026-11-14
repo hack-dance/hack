@@ -210,8 +210,9 @@ pub fn derive(
         let state = p
             .native
             .as_ref()
+            .filter(|_| p.status != "missing" && p.repo_root.is_some())
             .map(|n| n.status.as_str())
-            .unwrap_or("unreadable");
+            .unwrap_or("unreadable or missing project");
         cards.push(card(
             &format!("native:{}", p.name),
             &format!("Native runtime · {}", p.name),

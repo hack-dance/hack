@@ -56,7 +56,8 @@ impl LiveSource {
             .and_then(|d| d.projects().ok());
         if let Some(p) = &mut projects {
             for row in p.projects.iter_mut().filter(|p| p.is_native()) {
-                if let Some(root) = &row.repo_root
+                if row.status != "missing"
+                    && let Some(root) = &row.repo_root
                     && !left().is_zero()
                 {
                     row.native = runner

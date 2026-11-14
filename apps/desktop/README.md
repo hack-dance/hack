@@ -172,3 +172,5 @@ so installing into an existing PATH directory can recover through **Check again*
 without restarting. The app inherits PATH at launch; a changed PATH still needs a
 relaunch. Follow the installation page's platform limits and existing-v4 migration
 steps before using a candidate against a shared home.
+On Linux, this preview requires a separately prepared source-built 5.x CLI; the
+Apple Silicon prerelease download is not a Linux installer.

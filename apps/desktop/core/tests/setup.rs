@@ -221,6 +221,7 @@ fn native_project_evidence_never_leaks_between_projects() {
         projects: vec![
             ProjectRow {
                 name: "alpha".into(),
+                repo_root: Some("/work/alpha".into()),
                 backend: Some("native".into()),
                 native: Some(NativePs {
                     status: "observed".into(),
@@ -230,6 +231,7 @@ fn native_project_evidence_never_leaks_between_projects() {
             },
             ProjectRow {
                 name: "beta".into(),
+                repo_root: Some("/work/beta".into()),
                 backend: Some("native".into()),
                 ..Default::default()
             },
@@ -290,6 +292,41 @@ fn native_project_evidence_never_leaks_between_projects() {
     );
     assert_eq!(
         r.cards.iter().find(|c| c.id == "dns:alpha").unwrap().status,
+        Status::Unknown
+    );
+}
+#[test]
+fn missing_native_project_cannot_pass_from_cached_runtime_evidence() {
+    use hack_desktop_core::models::{NativePs, ProjectRow};
+    let projects = ProjectsPayload {
+        projects: vec![ProjectRow {
+            name: "sample".into(),
+            repo_root: Some("/work/sample".into()),
+            status: "missing".into(),
+            backend: Some("native".into()),
+            native: Some(NativePs {
+                status: "observed".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let report = setup::derive(
+        Ok("5.0.0"),
+        Some(&projects),
+        None,
+        None,
+        &[],
+        Platform::Linux,
+    );
+    assert_eq!(
+        report
+            .cards
+            .iter()
+            .find(|c| c.id == "native:sample")
+            .unwrap()
+            .status,
         Status::Unknown
     );
 }

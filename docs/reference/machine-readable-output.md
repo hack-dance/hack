@@ -43,9 +43,10 @@ command-specific parser. Do not infer a success shape from an error envelope.
 
 Regenerate with `bun scripts/generate-machine-output-reference.ts`. Tests compare
 the inventory to the command definitions and exercise every command's shared
-usage-error boundary without entering its handler. The migrated success variants
-also have real CLI-boundary contract tests; existing legacy success behavior
-remains covered by its command-specific suites.
+usage-error boundary without entering its handler. Every listed command that can
+succeed without a runtime, engine or project is also run for real and checked
+against its row; legacy objects there pin their top-level keys. The remaining
+success behavior stays covered by command-specific suites.
 
 <!-- json-inventory:start -->
 | Canonical command / variant | Success shape |

@@ -10,6 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import {
+  assertNativePlanRefusalActivity,
+  snapshotNativePlanHome,
+} from "./lib/native-plan-home-state.ts";
 
 /** Qualify pure acquisition intent in a relocated bundle and a real linked worktree. */
 const root = resolve(import.meta.dir, "..");
@@ -264,6 +268,11 @@ try {
     ],
     checkout
   );
+  assert(
+    (await readdir(home)).length === 0,
+    "metadata planning creates no HOME state"
+  );
+  const beforeStartup = await snapshotNativePlanHome(home);
   const runtime = await invoke(["up", "web", "--detach"], checkout, false, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -282,10 +291,13 @@ try {
       "planning creates no runtime state"
     );
   }
-  assert(
-    (await readdir(join(home, ".hack")).catch(() => [])).length === 0,
-    "planning creates no registry or runtime home state"
-  );
+  await assertNativePlanRefusalActivity({
+    home,
+    before: beforeStartup,
+    attempts: 1,
+    sentinel: canary,
+    fixtureRoot: directory,
+  });
   process.stdout.write(
     `Relocated native acquisition planning: ${checks} checks passed; no hooks/pulls/builds/decryption/runtime effects\n`
   );

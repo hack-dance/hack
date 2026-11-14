@@ -306,8 +306,10 @@ the exact 1,048,576 test requires a host that permits that limit.
 Darwin compilation does not qualify execution, group-signal EPERM recovery or
 idle cost on a real Mac.
 
-The 322-state TLA+ artifact is an abstract phase/ownership exploration. It models SID reuse and a required old-birth witness for orphan signaling. It does
-not model actual kernel census observations, real flock behavior, full orphan recovery,
+The 426-state TLA+ artifact is an abstract phase/ownership exploration. It models
+SID reuse, an exact recorded-incarnation witness for orphan signaling, witness loss
+after capture and the retained-snapshot KILL step. It does
+not model actual kernel census observations, real flock behavior, recovery timing,
 startup descriptor leases or signal errors. Some safety predicates hold by
 construction. Native regressions, rather than that model, are the evidence for
 those boundaries; see the model coverage document for the reduced claims.

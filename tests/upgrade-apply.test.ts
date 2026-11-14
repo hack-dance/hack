@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -797,3 +798,80 @@ test("hack upgrade apply exits 1 when every selected checkout is blocked", async
   expect(JSON.parse(json.stdout).data.status).toBe("blocked");
   expect(await touched()).toEqual(before);
 }, 120_000);
+
+test("--project is ambiguous when another registration's primary is dead but its worktree lives", async () => {
+  const live = await project("dup");
+  const worktree = join(root, "other-wt", "feature");
+  await checkout(worktree, "dup");
+  const other = {
+    ...dead("dup"),
+    id: "id-dup-dead",
+    worktrees: [
+      { path: worktree, branch: "f", lastSeenAt: "2026-01-01T00:00:00.000Z" },
+    ],
+  };
+  await writeRegistry([live, other]);
+  const report = await check();
+  // The dead primary is not a live checkout, but its worktree is.
+  expect(report.projects.map((p) => p.root).sort()).toEqual(
+    [live.repoRoot, worktree].sort()
+  );
+  const before = await tree(root);
+  expect(
+    await runUpgradeApply({
+      report,
+      dryRun: false,
+      project: "dup",
+      home,
+      collect: collectUpgradeSnapshotTargets,
+    })
+  ).toMatchObject({ status: "refused", reason: "ambiguous-project" });
+  expect(await tree(root)).toEqual(before);
+}, 60_000);
+
+test("a backup that cannot be inspected after a failed migration keeps its journaled path", async () => {
+  await staleHomeAgentFile();
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const report = await check();
+  const backupDir = join(hackHome, "agent-migrations");
+  try {
+    const applied = await runUpgradeApply({
+      report,
+      dryRun: false,
+      only: ["agent-integrations"],
+      home,
+      collect: collectUpgradeSnapshotTargets,
+      agentBackupDir: backupDir,
+      applyPluginMigration: async (input) => {
+        await mkdir(input.backupDir, { recursive: true });
+        await writeFile(
+          join(input.backupDir, `${input.hooks?.id}.json`),
+          "{}\n"
+        );
+        // The backup directory becomes unreadable: existence is unknown.
+        await chmod(input.backupDir, 0o000);
+        throw Object.assign(new Error("rewrite failed"), { code: "EIO" });
+      },
+    });
+    if (applied.status !== "partial") {
+      throw new Error(`unexpected status ${applied.status}`);
+    }
+    const failed = applied.targets.filter((t) => t.status === "failed");
+    expect(failed.length).toBeGreaterThan(0);
+    expect(failed.every((t) => t.backup_manifest?.startsWith(backupDir))).toBe(
+      true
+    );
+    expect(applied.agent_backups).toHaveLength(failed.length);
+    const journal = (await readUpgradeSnapshotJournal({
+      manifestPath: applied.coverage.manifest_path,
+    })) as { targets: { status: string; backup_manifest: string | null }[] };
+    expect(
+      journal.targets
+        .filter((t) => t.status === "failed")
+        .every((t) => t.backup_manifest?.startsWith(backupDir))
+    ).toBe(true);
+  } finally {
+    await chmod(backupDir, 0o700).catch(() => undefined);
+  }
+}, 60_000);

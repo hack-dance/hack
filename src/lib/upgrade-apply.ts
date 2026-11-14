@@ -388,9 +388,14 @@ function selectionRefusal(opts: {
         "No live registered project has that name; nothing was changed. hack upgrade check lists them.",
     };
   }
-  // A project's primary checkout carries the project's own name.
+  // A registration is identified by its primary checkout, which carries
+  // the project's own name, whether that checkout is live, unreadable,
+  // dead or cut short (its worktrees can be live either way).
+  const { missing, unchecked } = opts.report.registry;
   const primaries = new Set(
-    checkouts.filter((p) => p.name === p.project).map((p) => p.root)
+    [...checkouts, ...missing, ...unchecked]
+      .filter((p) => p.project === opts.project && p.name === p.project)
+      .map((p) => normalize(p.root))
   );
   if (primaries.size > 1) {
     return {
@@ -508,8 +513,9 @@ async function applyTarget(opts: {
       hooks: { id: backup.id },
     });
   } catch (error) {
-    // Files may already be removed: keep the backup's name when it exists.
-    const kept = (await exists(backup.path)) ? backup.path : null;
+    // Files may already be removed: keep the backup's name unless it is
+    // confirmed absent (an unreadable path is not absence).
+    const kept = (await confirmedAbsent(backup.path)) ? null : backup.path;
     return {
       ...outcome(
         target,
@@ -674,12 +680,13 @@ async function snapshotable(path: string): Promise<boolean> {
   }
 }
 
-async function exists(path: string): Promise<boolean> {
+/** True only when `path` is known not to exist (ENOENT); any other error is unknown. */
+async function confirmedAbsent(path: string): Promise<boolean> {
   try {
     await lstat(path);
-    return true;
-  } catch {
     return false;
+  } catch (error) {
+    return (error as { code?: unknown }).code === "ENOENT";
   }
 }
 

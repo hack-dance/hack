@@ -308,6 +308,17 @@ test("production previews report deferred repair unavailable without failing, pr
       files: [],
     });
   }
+  const doctor = await runCliCommand(project.projectRoot, [
+    "doctor",
+    "--migrate-env-config",
+    "--path",
+    project.projectRoot,
+  ]);
+  expect(doctor.stdout + doctor.stderr).toContain("Compose repair unavailable");
+  expect(doctor.stdout + doctor.stderr).not.toContain(
+    "Env migration input changed"
+  );
+  expect(doctor.stdout + doctor.stderr).not.toContain(drift);
   const refused = await cli(project.projectRoot, ["--apply"]);
   expect(refused.exitCode).not.toBe(0);
   expect(refused.stdout + refused.stderr).not.toContain(drift);

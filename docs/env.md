@@ -1390,6 +1390,9 @@ deferred Compose repair. That later phase keeps existing layers and legacy
 files, rechecks delivery and snapshot coverage, and requires consent for tracked
 edits. It invalidates an earlier project run, so start the complete project
 again before cleanup.
+If retained legacy inputs have drifted, Doctor reports the deferred repair as
+unavailable and skips it, keeping current layers and legacy files. Explicit
+`env migrate --apply` still refuses that unverified repair.
 
 A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
 `.hack/.env` and `.hack/.env.<overlay>`, which are gitignored and may hold passwords or

@@ -171,6 +171,34 @@ function runDoctor(opts: {
 
 for (const backend of ["compose", "native"] as const) {
   test(
+    `${backend} doctor skips unavailable deferred repair and retains both legacy and current values`,
+    async () => {
+      const project = await createProject({ compose: COMPOSE_WITH_ENV_FILE });
+      expect((await runImplicit(project)).exitCode).toBe(0);
+      const drift = "synthetic-doctor-retained-drift";
+      const envPath = join(project.projectDir, ".env");
+      await writeFile(envPath, `${KEY}=${drift}\n`);
+      const before = await status(project);
+      const run = await runDoctor({ project, backend, accept: false });
+      expect(run.exitCode, run.output).toBe(backend === "compose" ? 1 : 0);
+      expect(run.output).toContain("Compose repair unavailable");
+      expect(run.output).not.toContain("Env migration input changed");
+      expect(run.output).not.toContain("Env migration completed.");
+      expect(run.output).not.toContain(drift);
+      expect(run.output).not.toContain(VALUE);
+      expect(await status(project)).toEqual(before);
+      expect(
+        await readFile(join(project.projectDir, "docker-compose.yml"), "utf8")
+      ).toBe(COMPOSE_WITH_ENV_FILE);
+      expect(await readFile(envPath, "utf8")).toBe(`${KEY}=${drift}\n`);
+      expect(
+        await readFile(join(project.projectDir, "hack.env.local.yaml"), "utf8")
+      ).toContain(VALUE);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
     `${backend} doctor repairs tracked Compose after implicit migration only with fresh consent`,
     async () => {
       const project = await createProject({ compose: COMPOSE_WITH_ENV_FILE });

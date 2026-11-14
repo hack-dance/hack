@@ -116,8 +116,11 @@ complete, another explicit apply is a no-op.
 
 If retained legacy inputs were edited or cannot be checked, default preview and
 Doctor's plan report the deferred repair as unavailable instead of failing the
-read-only report. They do not infer new write or cleanup authority. Keep the
-legacy copies and review them privately against current layers and Compose
+read-only report. They do not infer new write or cleanup authority.
+Doctor prints the same guidance and skips the deferred apply; explicit
+`hack env migrate --apply` keeps its refusal. Doctor's other hygiene repairs
+remain separate. Keep the legacy copies and review them privately against
+current layers and Compose
 references. Editing those references yourself is an alternative to restoring
 pre-migration inputs; a later explicit apply records that no repair remains,
 without rewriting the project. Such manual edits stay outside the journal and

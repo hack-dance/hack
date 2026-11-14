@@ -4015,6 +4015,9 @@ async function confirmTrackedEnvChange(opts: {
   });
 }
 
+const COMPOSE_REPAIR_UNAVAILABLE_HINT =
+  "Compose repair unavailable: keep legacy copies and review their values privately against current layers and Compose references, or explicitly restore the snapshot with --preserve-changes.";
+
 /** Confirms the Compose env_file repair, as a tracked change when git tracks the file. */
 async function maybeMigrateProjectEnvConfig(opts: {
   readonly startDir: string;
@@ -4034,6 +4037,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
     }),
   };
   const preview = await previewEnvMigration(migrationProject);
+  if (preview.composeRepair === "unavailable") {
+    note(COMPOSE_REPAIR_UNAVAILABLE_HINT, "env migration");
+    return;
+  }
   const tracked = preview.files.filter(
     (file) => file.tracked && file.action !== "removable"
   );
@@ -4290,7 +4297,7 @@ async function buildEnvMigrationPlanStep(opts: {
       }),
     });
     if (preview.composeRepair === "unavailable") {
-      return "Compose repair unavailable: keep legacy copies and review their values privately against current layers and Compose references, or explicitly restore the snapshot with --preserve-changes.";
+      return COMPOSE_REPAIR_UNAVAILABLE_HINT;
     }
     if (
       preview.files.some(

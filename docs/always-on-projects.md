@@ -433,3 +433,6 @@ trusted engine state; this does not claim registry-tag or image-digest verificat
 Machine-wide `autostart_global` progress is local-only and is omitted from the
 retained unsupported gateway's project responses. Those responses keep their
 existing enabled-project row filter.
+For a trusted checkout, project admission runs before Docker transport admission:
+projects requiring manual starts are refused without consulting an engine they
+cannot use. Eligible projects still pass Docker trust checks before startup.

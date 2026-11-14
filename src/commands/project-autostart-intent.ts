@@ -354,8 +354,8 @@ async function assertLoginCheckoutBeforeDiscovery(opts: {
     });
   }
   assertAutostartCheckoutTrusted(project);
-  assertAutostartDockerConfigTrusted({ home: homedir() });
   await assertAutostartStartPolicy(project);
+  assertAutostartDockerConfigTrusted({ home: homedir() });
 }
 
 function assertLoginProjectIdentity(opts: {

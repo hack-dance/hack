@@ -1,5 +1,5 @@
 import { test as boundedTest, expect, spyOn } from "bun:test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   resolveFinalAutostartDownTarget,
@@ -558,6 +558,11 @@ async function expectAdoptionLoginRefused() {
   if (!home) {
     throw new Error("Fixture HOME required");
   }
+  // Adoption admission must win even when the host's Docker selection is unsafe.
+  await mkdir(join(home, ".docker"), { mode: 0o700, recursive: true });
+  const dockerConfig = join(home, ".docker/config.json");
+  await writeFile(dockerConfig, "{}", { mode: 0o600 });
+  await chmod(dockerConfig, 0o666);
   await mkdir(join(home, ".hack"), { mode: 0o700, recursive: true });
   await writeFile(
     join(home, ".hack/projects.json"),

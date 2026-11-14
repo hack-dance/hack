@@ -21,11 +21,16 @@ use gpui_kit::{
     AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, SharedString,
     Styled, Window, div, prelude::*, px,
 };
-use hack_desktop_core::doctor::DoctorState;
+use hack_desktop_core::doctor::{DoctorPane, Finish};
 use hack_desktop_core::models::LogEntry;
 use hack_desktop_core::source::{ActionOutcome, DoctorTarget, Source};
 
 use crate::doctor_view::Pane;
+use hack_desktop_core::doctor::DoctorState as DoctorStateView;
+
+fn target_names(targets: &[DoctorTarget]) -> Vec<String> {
+    targets.iter().map(|t| t.name.clone()).collect()
+}
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
 use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
 
@@ -40,7 +45,7 @@ pub struct HackApp {
     follow: bool,
     live: bool,
     pane: Pane,
-    doctor: DoctorState,
+    doctor: DoctorPane,
 }
 
 impl HackApp {
@@ -51,13 +56,14 @@ impl HackApp {
             source,
             tab: 0,
             pane: Pane::Project,
-            doctor: DoctorState::NeverRun,
+            doctor: DoctorPane::default(),
             tail: Ok(Vec::new()),
             follow: true,
             live,
         };
         if live {
             this.start_polling(cx);
+            this.start_doctor_refresh(cx);
         } else {
             this.refresh_now();
         }
@@ -74,12 +80,15 @@ impl HackApp {
         );
     }
 
-    /// Fixtures: select a project by name.
     /// Fixtures and screenshots: open the Doctor pane with its data loaded.
     pub fn show_doctor_now(&mut self) {
         self.pane = Pane::Doctor;
         let targets = self.doctor_targets();
-        self.doctor = DoctorState::from_runs(&self.source.doctor_runs(&targets));
+        let names = target_names(&targets);
+        let generation = self.doctor.begin(&names);
+        let runs = self.source.doctor_runs(&targets);
+        self.doctor
+            .finish(generation, &runs, &names, std::time::Instant::now());
     }
 
     fn doctor_targets(&self) -> Vec<DoctorTarget> {
@@ -90,30 +99,76 @@ impl HackApp {
     }
 
     /// Run doctor (machine run plus one per project) off the UI thread.
+    /// A newer run supersedes an older one; a result whose project set no
+    /// longer matches is shown as stale and checked again.
     pub fn load_doctor(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.doctor, DoctorState::Loading) {
-            return;
-        }
         if !self.live {
             self.show_doctor_now();
             cx.notify();
             return;
         }
-        self.doctor = DoctorState::Loading;
+        let targets = self.doctor_targets();
+        let names = target_names(&targets);
+        let generation = self.doctor.begin(&names);
         cx.notify();
         let source = self.source.clone();
-        let targets = self.doctor_targets();
         cx.spawn(async move |this, cx| {
             let runs = cx
                 .background_executor()
                 .spawn(async move { source.doctor_runs(&targets) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.doctor = DoctorState::from_runs(&runs);
+                let current = target_names(&this.doctor_targets());
+                let outcome =
+                    this.doctor
+                        .finish(generation, &runs, &current, std::time::Instant::now());
+                if outcome == Finish::AppliedStale {
+                    this.load_doctor(cx);
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Open the Doctor pane, optionally filtered to one project, and run
+    /// doctor when it never ran or the result is older than 10 minutes.
+    pub fn open_doctor(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
+        self.pane = Pane::Doctor;
+        self.doctor.filter = filter;
+        if self.doctor.needs_refresh(std::time::Instant::now()) {
+            self.load_doctor(cx);
+        }
+        cx.notify();
+    }
+
+    /// While the Doctor pane is visible, refresh every 10 minutes.
+    fn start_doctor_refresh(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    let now = std::time::Instant::now();
+                    if this.pane == Pane::Doctor && this.doctor.needs_refresh(now) {
+                        this.load_doctor(cx);
+                    } else if this.pane == Pane::Doctor {
+                        // Keep "Checked N min ago" current.
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Fixtures: show the selected project (after loading doctor).
+    pub fn show_project(&mut self) {
+        self.pane = Pane::Project;
     }
 
     pub fn select(&mut self, name: &str) {
@@ -336,33 +391,18 @@ impl HackApp {
                 .py_2()
                 // v0 does not read routing status yet: shown as unknown.
                 .child(machine_row("Routing and DNS", None, t.muted_foreground))
-                .child(self.doctor_row(list, cx)),
+                .child(self.doctor_row(cx)),
         )
     }
 
     /// The sidebar Doctor row: opens the Doctor pane (and runs doctor the
     /// first time). Its badge counts the loaded findings when there are any.
-    fn doctor_row(&self, list: &ListView, cx: &mut Context<Self>) -> AnyElement {
+    fn doctor_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
-        let (count, color) = match &self.doctor {
-            DoctorState::Loaded(v) => (
-                v.attention_count(),
-                if v.has_errors() {
-                    t.danger
-                } else if v.attention_count() > 0 {
-                    t.warning
-                } else {
-                    t.success
-                },
-            ),
-            _ => (
-                list.doctor_count,
-                match (&list.cli_version, list.doctor_count) {
-                    (None, _) => t.muted_foreground,
-                    (Some(_), 0) => t.success,
-                    (Some(_), _) => t.warning,
-                },
-            ),
+        // Never green unless every run finished clean; grey until it ran.
+        let (count, color) = match &self.doctor.result {
+            DoctorStateView::Loaded(v) => (v.attention_count(), tone_color(self.doctor.tone(), cx)),
+            _ => (0, tone_color(self.doctor.tone(), cx)),
         };
         div()
             .id("doctor-row")
@@ -388,14 +428,35 @@ impl HackApp {
                             .child(count.to_string())
                     })),
             )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.pane = Pane::Doctor;
-                if matches!(this.doctor, DoctorState::NeverRun) {
-                    this.load_doctor(cx);
-                }
-                cx.notify();
-            }))
+            .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx)))
             .into_any_element()
+    }
+
+    /// "Doctor: N findings for this project", linking to the Doctor pane
+    /// filtered on the project. A link only: it never changes the state pill.
+    fn doctor_link(&self, project: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let n = self.doctor.findings_for(project);
+        if n == 0 {
+            return None;
+        }
+        let t = cx.theme().clone();
+        let name = project.to_owned();
+        Some(
+            div()
+                .id("doctor-link")
+                .text_sm()
+                .text_color(t.link)
+                .underline()
+                .cursor_pointer()
+                .child(format!(
+                    "Doctor: {n} finding{} for this project",
+                    if n == 1 { "" } else { "s" }
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_doctor(Some(name.clone()), cx);
+                }))
+                .into_any_element(),
+        )
     }
 
     fn project_row(&self, r: &Row, cx: &mut Context<Self>) -> AnyElement {
@@ -518,6 +579,7 @@ impl HackApp {
                     ),
             )
             .children(reason_line(&d.state, d.last_error.as_deref(), cx))
+            .children(self.doctor_link(&d.name, cx))
             .children(
                 d.note
                     .clone()

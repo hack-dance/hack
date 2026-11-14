@@ -114,6 +114,15 @@ pub struct DoctorTarget {
 }
 
 impl DoctorTarget {
+    fn run(&self, result: Result<crate::models::DoctorReport, String>) -> DoctorRun {
+        DoctorRun {
+            project: Some(self.name.clone()),
+            root: Some(self.repo_root.clone()),
+            native: self.native,
+            result,
+        }
+    }
+
     /// Doctor targets for every project row with a checkout.
     #[must_use]
     pub fn from_projects(p: &ProjectsPayload) -> Vec<Self> {
@@ -134,6 +143,26 @@ impl DoctorTarget {
 pub const DOCTOR_TIMEOUT: Duration = Duration::from_secs(60);
 /// At most this many doctor runs at once.
 const DOCTOR_PARALLEL: usize = 4;
+/// One refresh never takes longer than this.
+pub const DOCTOR_BUDGET: Duration = Duration::from_secs(90);
+/// The reason shown for projects the budget did not reach.
+pub const NOT_CHECKED_BUDGET: &str = "not checked (time budget)";
+
+/// Read one doctor report. Exit 1 still carries a report; a payload
+/// without a `checks` array is not a report.
+fn read_doctor(
+    runner: &CliRunner,
+    root: Option<&Path>,
+    timeout: Duration,
+) -> Result<crate::models::DoctorReport, String> {
+    let v: serde_json::Value = runner
+        .run_json(&["doctor", "--json"], root, timeout)
+        .map_err(|e| e.to_string())?;
+    if !v.get("checks").is_some_and(serde_json::Value::is_array) {
+        return Err("doctor printed no checks list".into());
+    }
+    serde_json::from_value(v).map_err(|e| e.to_string())
+}
 
 /// Live data: hackd when its version matches the CLI, else the CLI.
 pub struct LiveSource {
@@ -142,6 +171,63 @@ pub struct LiveSource {
 }
 
 impl LiveSource {
+    /// Doctor runs under one overall `budget`: each call gets the smaller of
+    /// `per_call` and the time left, and projects not started before the
+    /// budget runs out are reported as not checked.
+    pub fn doctor_runs_within(
+        &self,
+        projects: &[DoctorTarget],
+        budget: Duration,
+        per_call: Duration,
+    ) -> Vec<DoctorRun> {
+        let deadline = std::time::Instant::now() + budget;
+        let left = || deadline.saturating_duration_since(std::time::Instant::now());
+        let read = |runner: &CliRunner, root: Option<&Path>, timeout: Duration| {
+            read_doctor(runner, root, timeout)
+        };
+        // The machine run must happen outside every checkout, or doctor
+        // would report that checkout's project checks as machine checks.
+        let candidates = [std::env::temp_dir(), std::path::PathBuf::from("/")];
+        let machine = match crate::doctor::neutral_dir(&candidates) {
+            Some(dir) => read(
+                &self.runner.clone().with_cwd(dir),
+                None,
+                per_call.min(left()),
+            ),
+            None => Err("machine checks could not run outside a project".into()),
+        };
+        let mut runs = vec![DoctorRun::machine(machine)];
+        for chunk in projects.chunks(DOCTOR_PARALLEL) {
+            let chunk_runs: Vec<DoctorRun> = std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|t| {
+                        let runner = self.runner_for(t.native);
+                        let timeout = per_call.min(left());
+                        s.spawn(move || {
+                            let result = if timeout.is_zero() {
+                                Err(NOT_CHECKED_BUDGET.to_owned())
+                            } else {
+                                read(&runner, Some(&t.repo_root), timeout)
+                            };
+                            t.run(result)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .zip(chunk)
+                    .map(|(h, t)| {
+                        h.join()
+                            .unwrap_or_else(|_| t.run(Err("doctor read panicked".into())))
+                    })
+                    .collect()
+            });
+            runs.extend(chunk_runs);
+        }
+        runs
+    }
+
     fn runner_for(&self, native: bool) -> CliRunner {
         if native {
             self.runner
@@ -220,48 +306,7 @@ impl Source for LiveSource {
     }
 
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {
-        // The machine run happens outside any checkout, so it reports only
-        // machine checks whatever directory the app was started from.
-        let machine = self.runner.clone().with_cwd(std::env::temp_dir());
-        let read = |runner: &CliRunner, root: Option<&Path>| {
-            runner
-                .run_json::<crate::models::DoctorReport>(
-                    &["doctor", "--json"],
-                    root,
-                    DOCTOR_TIMEOUT,
-                )
-                .map_err(|e| e.to_string())
-        };
-        let mut runs = vec![DoctorRun {
-            project: None,
-            result: read(&machine, None),
-        }];
-        for chunk in projects.chunks(DOCTOR_PARALLEL) {
-            let chunk_runs: Vec<DoctorRun> = std::thread::scope(|s| {
-                let handles: Vec<_> = chunk
-                    .iter()
-                    .map(|t| {
-                        let runner = self.runner_for(t.native);
-                        s.spawn(move || DoctorRun {
-                            project: Some(t.name.clone()),
-                            result: read(&runner, Some(&t.repo_root)),
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .zip(chunk)
-                    .map(|(h, t)| {
-                        h.join().unwrap_or_else(|_| DoctorRun {
-                            project: Some(t.name.clone()),
-                            result: Err("doctor read panicked".into()),
-                        })
-                    })
-                    .collect()
-            });
-            runs.extend(chunk_runs);
-        }
-        runs
+        self.doctor_runs_within(projects, DOCTOR_BUDGET, DOCTOR_TIMEOUT)
     }
 
     fn log_tail(
@@ -470,6 +515,76 @@ esac
             parse_log_tail(err_ev, "", Some(0)).unwrap_err(),
             "no engine"
         );
+    }
+
+    fn fake_hack(tag: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        std::fs::write(&hack, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        hack
+    }
+
+    fn targets(n: usize) -> Vec<DoctorTarget> {
+        (0..n)
+            .map(|i| DoctorTarget {
+                name: format!("p{i}"),
+                repo_root: format!("/work/p{i}").into(),
+                native: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn doctor_payload_without_checks_is_not_a_report() {
+        let hack = fake_hack("doctor-empty", r#"echo '{"ok":true,"data":{}}'"#);
+        let src = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let runs = src.doctor_runs(&targets(1));
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert!(runs.iter().all(|r| r.result.is_err()), "{runs:?}");
+        assert!(matches!(
+            crate::doctor::DoctorState::from_runs(&runs),
+            crate::doctor::DoctorState::Error(_)
+        ));
+    }
+
+    #[test]
+    fn doctor_budget_marks_late_projects_not_checked() {
+        let hack = fake_hack("doctor-slow", "sleep 5");
+        let src = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let started = std::time::Instant::now();
+        let runs = src.doctor_runs_within(
+            &targets(6),
+            Duration::from_millis(400),
+            Duration::from_secs(5),
+        );
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "budget not honoured"
+        );
+        assert_eq!(runs.len(), 7);
+        let not_checked = runs
+            .iter()
+            .filter(|r| r.result.as_ref().err().map(String::as_str) == Some(NOT_CHECKED_BUDGET))
+            .count();
+        assert!(not_checked >= 2, "{runs:?}");
+        assert!(runs.iter().all(|r| r.result.is_err()));
     }
 
     /// Doctor exits 1 when a check errors but still prints the report.

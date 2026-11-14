@@ -36,8 +36,11 @@ pub fn run(dir: &Path) {
                         cx.new(|cx| {
                             let mut app = HackApp::new(crate::source_for(Some(f)), false, cx);
                             app.select(fixtures::selected(f));
-                            if fixtures::opens_doctor(f) {
+                            if fixtures::loads_doctor(f) {
                                 app.show_doctor_now();
+                                if !fixtures::opens_doctor(f) {
+                                    app.show_project();
+                                }
                             }
                             if let Some(a) = fixtures::local(f).in_flight {
                                 app.simulate_in_flight(a);

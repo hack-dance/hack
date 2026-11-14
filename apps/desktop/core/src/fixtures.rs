@@ -38,10 +38,12 @@ pub enum Fixture {
     Doctor,
     /// Every check passed.
     DoctorClean,
+    /// A project whose header links to its doctor findings.
+    DoctorLink,
 }
 
 impl Fixture {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -59,6 +61,7 @@ impl Fixture {
         Self::NeedsAttention,
         Self::Doctor,
         Self::DoctorClean,
+        Self::DoctorLink,
     ];
 
     #[must_use]
@@ -81,6 +84,7 @@ impl Fixture {
             Self::NeedsAttention => "needs-attention",
             Self::Doctor => "doctor",
             Self::DoctorClean => "doctor-clean",
+            Self::DoctorLink => "doctor-link",
         }
     }
 
@@ -422,6 +426,12 @@ pub fn opens_doctor(f: Fixture) -> bool {
     matches!(f, Fixture::Doctor | Fixture::DoctorClean)
 }
 
+/// Fixtures that load doctor results (and may still show a project).
+#[must_use]
+pub fn loads_doctor(f: Fixture) -> bool {
+    opens_doctor(f) || f == Fixture::DoctorLink
+}
+
 /// Canned doctor runs (machine run first, then per project).
 #[must_use]
 pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
@@ -451,14 +461,12 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
     };
     if f == Fixture::DoctorClean {
         return vec![
-            DoctorRun {
-                project: None,
-                result: report(ok_machine()),
-            },
-            DoctorRun {
-                project: Some("storefront".into()),
-                result: report(vec![c("project", "ok", ""), c("env key", "ok", "")]),
-            },
+            DoctorRun::machine(report(ok_machine())),
+            DoctorRun::project(
+                "storefront",
+                "/work/storefront",
+                report(vec![c("project", "ok", ""), c("env key", "ok", "")]),
+            ),
         ];
     }
     let machine = vec![
@@ -488,13 +496,11 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
         ),
     ];
     vec![
-        DoctorRun {
-            project: None,
-            result: report(machine),
-        },
-        DoctorRun {
-            project: Some("storefront".into()),
-            result: report(vec![
+        DoctorRun::machine(report(machine)),
+        DoctorRun::project(
+            "storefront",
+            "/work/storefront",
+            report(vec![
                 c("project", "ok", ""),
                 c("env key", "error", "The env key file is missing"),
                 c(
@@ -508,18 +514,20 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
                     "A generated file is tracked by git",
                 ),
             ]),
-        },
-        DoctorRun {
-            project: Some("billing-api".into()),
-            result: report(vec![
+        ),
+        DoctorRun::project(
+            "billing-api",
+            "/work/billing-api",
+            report(vec![
                 c("project", "ok", ""),
                 c("env key", "error", "The env key file is missing"),
             ]),
-        },
-        DoctorRun {
-            project: Some("notes".into()),
-            result: Err("hack did not answer within 60s".into()),
-        },
+        ),
+        DoctorRun::project(
+            "notes",
+            "/work/notes",
+            Err("hack did not answer within 60s".into()),
+        ),
     ]
 }
 

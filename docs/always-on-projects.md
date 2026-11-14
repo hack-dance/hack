@@ -51,6 +51,10 @@ projects paused by a manual `down`; start one with `hack up` or explicitly
 ![Login startup sequence](diagrams/autostart-login.svg)
 
 Only a daemon launched by the installed login service runs the automatic pass.
+A login service installed by an earlier Hack version does not carry the
+login-service marker, so its daemon never runs the pass. After upgrading to this
+version, run `hack daemon install` once to rewrite the service; `hack daemon start`
+alone does not update it.
 A daemon started manually or implicitly by another CLI command does not replay
 projects. To run the pass deliberately, use `hack autostart run --no-interactive`
 (optionally `--json`). Both entry points respect the same per-boot claims.

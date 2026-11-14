@@ -2,7 +2,8 @@
 //! and a private fake daemon, and checks the JSON.
 //! Hermetic: no real Hack home, daemon, Docker or network.
 
-use std::os::unix::fs::PermissionsExt;
+#[path = "../src/test_support.rs"]
+mod test_support;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -22,7 +23,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn serve_snapshot(home: &std::path::Path) -> std::thread::JoinHandle<()> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::unix::{fs::DirBuilderExt, net::UnixListener};
     let dir = home.join("daemon");
     std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
@@ -33,8 +34,8 @@ fn serve_snapshot(home: &std::path::Path) -> std::thread::JoinHandle<()> {
             r#"{"status":"ok","version":"5.0.0"}"#,
             r#"{"runtime_ok":true,"projects":[{"name":"alpha","status":"running","repo_root":"/work/alpha","defined_services":["api"],"runtime":{"services":[{"service":"api","containers":[{"state":"running","status":"Up 5 minutes"}]}]}},{"name":"beta","status":"stopped","repo_root":"/work/beta","defined_services":["web"]}]}"#,
         ];
+        let deadline = std::time::Instant::now() + test_support::DAEMON_BUDGET;
         for body in bodies {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
             let (mut stream, _) = loop {
                 match listener.accept() {
                     Ok(pair) => break pair,
@@ -47,12 +48,10 @@ fn serve_snapshot(home: &std::path::Path) -> std::thread::JoinHandle<()> {
                     Err(e) => panic!("fake daemon accept failed or timed out: {e}"),
                 }
             };
+            test_support::read_request(&mut stream, deadline);
             stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .set_write_timeout(Some(test_support::remaining(deadline)))
                 .unwrap();
-            let mut request = [0; 4096];
-            let n = stream.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /v1/"));
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
@@ -69,7 +68,7 @@ fn dump_state_reads_the_cli_like_the_app_and_prints_view_models() {
     let bin = temp_dir("bin");
     let home = temp_dir("home");
     let hack = bin.join("hack");
-    std::fs::write(
+    test_support::script(
         &hack,
         r#"#!/bin/sh
 case "$1" in
@@ -78,9 +77,7 @@ case "$1" in
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     // Keep macOS first-launch scanning outside the fake daemon's accept
     // deadline, using the same bounded runner as the application.
     hack_desktop_core::runner::CliRunner::new(&hack)
@@ -145,8 +142,10 @@ fn dump_state_without_hack_reports_the_missing_cli() {
 fn missing_daemon_never_runs_the_registry_writing_cli_listing() {
     let home = temp_dir("observe");
     let hack = home.join("hack");
-    std::fs::write(&hack, "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0';; *) echo called > \"$HACK_HOME/unexpected\"; exit 1;; esac\n").unwrap();
-    std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o700)).unwrap();
+    test_support::script(
+        &hack,
+        "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0';; *) echo called > \"$HACK_HOME/unexpected\"; exit 1;; esac\n",
+    );
     let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
         .env("PATH", &home)
         .env("HOME", &home)
@@ -174,8 +173,10 @@ fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
     use hack_desktop_core::source::{DaemonRecovery, LiveSource, Source};
     let home = temp_dir("recover");
     let hack = home.join("hack");
-    std::fs::write(&hack, "#!/bin/sh\nprintf '%s' \"$*\" > \"$HACK_HOME/called\"\nif [ \"$2\" = restart ]; then echo 'daemon could not restart' >&2; exit 1; fi\n").unwrap();
-    std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o700)).unwrap();
+    test_support::script(
+        &hack,
+        "#!/bin/sh\nprintf '%s' \"$*\" > \"$HACK_HOME/called\"\nif [ \"$2\" = restart ]; then echo 'daemon could not restart' >&2; exit 1; fi\n",
+    );
     let source = LiveSource {
         runner: CliRunner::new(hack)
             .with_env("HOME", home.to_str().unwrap())

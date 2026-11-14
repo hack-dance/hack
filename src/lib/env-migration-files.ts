@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { type FileHandle, lstat, open } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
 import type { EnvMigrationFileState } from "./env-migration-snapshot.ts";
 import { isRecord } from "./guards.ts";
@@ -80,4 +81,41 @@ export function sameMigrationFile(
     left.mode === right.mode &&
     left.size === right.size
   );
+}
+
+/** Admit metadata storage before copying inputs, shared by journals and snapshots. */
+export async function assertMigrationStorageOutsideWorkingTrees(
+  path: string,
+  project: { readonly projectRoot: string }
+): Promise<void> {
+  if (!isAbsolute(path)) {
+    throw new ClosedCliError(
+      "Env migration requires private journal and snapshot storage outside Git working trees. Choose a HACK_HOME outside your repositories; preview remains read-only."
+    );
+  }
+  const inside = relative(project.projectRoot, path);
+  if (
+    !(inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside))
+  ) {
+    throw new ClosedCliError(
+      "Env migration requires private journal and snapshot storage outside Git working trees. Choose a HACK_HOME outside your repositories; preview remains read-only."
+    );
+  }
+  for (let parent = dirname(path); ; parent = dirname(parent)) {
+    for (const name of [".git"]) {
+      try {
+        await lstat(join(parent, name));
+        throw new ClosedCliError(
+          "Env migration requires private journal and snapshot storage outside Git working trees. Choose a HACK_HOME outside your repositories; preview remains read-only."
+        );
+      } catch (error) {
+        if (!(isRecord(error) && error.code === "ENOENT")) {
+          throw error;
+        }
+      }
+    }
+    if (dirname(parent) === parent) {
+      break;
+    }
+  }
 }

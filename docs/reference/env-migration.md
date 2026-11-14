@@ -101,14 +101,26 @@ staging directories. Unknown or edited entries are retained, reported as
 `payloadCleanup: "kept"` in the apply result. Original snapshot blobs remain for
 rollback. A private data home inside a Git working tree refuses apply; choose a
 private `HACK_HOME` outside repositories, including a home managed as dotfiles.
+
 Snapshot storage must also share a filesystem and mount with every migration
 target, with hard links permitted: the snapshot library restores with rename and
-hard links. Apply checks this before publishing any migration target. It briefly
-links an exclusively created, empty `.hack-env-restore-probe-*` file from the
-snapshot to each existing target parent, then removes both names. These temporary
-probes contain no input bytes and are not migration targets in `files`; preview
-never creates them. A process killed during this check can leave an empty probe.
-If admission refuses, choose a private `HACK_HOME` on the target mount outside
+hard links. Apply admits the storage location before copying original inputs,
+then checks the completed snapshot again before publishing any migration target.
+Cleanup and rollback repeat the snapshot check. Admission briefly links an
+exclusively created, empty `.hack-env-restore-probe-*` file from the
+storage directory (or its nearest existing parent before capture) to each
+existing target parent, then removes both names. These temporary probes contain
+no input bytes and are not migration targets in `files`; preview
+never creates them. A process killed during an apply, cleanup or rollback check
+can leave an empty probe. It is retained rather than removed by matching its
+name alone.
+
+An interruption after snapshot capture but before journal publication
+can leave a private original-file snapshot; `hack upgrade rollback` without a
+manifest lists retained snapshots. The snapshot can contain original values and
+keys in private blobs, although its manifest contains metadata only. Keep it
+private even when no migration target was published. If admission refuses,
+choose a private `HACK_HOME` on the target mount outside
 Git working trees, then retry the preview. Matching device numbers alone do not
 prove that two paths share a mount, for example with Linux bind mounts.
 

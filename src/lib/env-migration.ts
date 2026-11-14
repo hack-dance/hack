@@ -1,16 +1,9 @@
 import { lstat, realpath } from "node:fs/promises";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
 import {
+  assertMigrationStorageOutsideWorkingTrees as assertOutsideWorkingTrees,
   migrationDigest as digest,
   readMigrationFile as readState,
   migrationRefusal as refuse,
@@ -171,42 +164,6 @@ export async function assertEnvMigrationFinished(input: {
   readonly projectDir: string;
 }): Promise<void> {
   await assertEnvMigrationReadable(input);
-}
-
-async function assertOutsideWorkingTrees(
-  path: string,
-  project: EnvMigrationProject
-): Promise<void> {
-  if (!isAbsolute(path)) {
-    throw new ClosedCliError(
-      "Env migration requires private journal and snapshot storage outside Git working trees. Choose a HACK_HOME outside your repositories; preview remains read-only."
-    );
-  }
-  const inside = relative(project.projectRoot, path);
-  if (
-    !(inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside))
-  ) {
-    throw new ClosedCliError(
-      "Env migration requires private journal and snapshot storage outside Git working trees. Choose a HACK_HOME outside your repositories; preview remains read-only."
-    );
-  }
-  for (let parent = dirname(path); ; parent = dirname(parent)) {
-    for (const name of [".git"]) {
-      try {
-        await lstat(join(parent, name));
-        throw new ClosedCliError(
-          "Env migration requires private journal and snapshot storage outside Git working trees. Choose a HACK_HOME outside your repositories; preview remains read-only."
-        );
-      } catch (error) {
-        if (!(isRecord(error) && error.code === "ENOENT")) {
-          throw error;
-        }
-      }
-    }
-    if (dirname(parent) === parent) {
-      break;
-    }
-  }
 }
 
 async function privateDirectory(path: string): Promise<void> {

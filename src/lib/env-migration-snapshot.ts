@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
-import { link, lstat, open, stat, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { link, lstat, open, realpath, stat, unlink } from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
 import {
+  assertMigrationStorageOutsideWorkingTrees,
   migrationRefusal,
   readMigrationFile,
   sameMigrationFile,
@@ -11,6 +12,7 @@ import {
 import { isRecord } from "./guards.ts";
 import {
   createUpgradeSnapshot,
+  defaultUpgradeSnapshotRoot,
   readUpgradeSnapshot,
   recordUpgradeSnapshotAfter,
   restoreUpgradeSnapshot,
@@ -57,6 +59,7 @@ export type EnvMigrationSnapshots = {
 
 type SnapshotLibrary = {
   readonly createUpgradeSnapshot: typeof createUpgradeSnapshot;
+  readonly defaultUpgradeSnapshotRoot: typeof defaultUpgradeSnapshotRoot;
   readonly readUpgradeSnapshot: typeof readUpgradeSnapshot;
   readonly recordUpgradeSnapshotAfter: typeof recordUpgradeSnapshotAfter;
   readonly restoreUpgradeSnapshot: typeof restoreUpgradeSnapshot;
@@ -66,6 +69,7 @@ type SnapshotLibrary = {
 export function envMigrationSnapshots(): EnvMigrationSnapshots {
   return bindEnvMigrationSnapshots({
     createUpgradeSnapshot,
+    defaultUpgradeSnapshotRoot,
     readUpgradeSnapshot,
     recordUpgradeSnapshotAfter,
     restoreUpgradeSnapshot,
@@ -97,7 +101,7 @@ async function probeRestoreLink(input: {
 }): Promise<void> {
   const name = `.hack-env-restore-probe-${randomUUID()}`;
   const source = join(input.snapshotDir, name);
-  const destination = join(input.parent, name);
+  const destination = join(input.parent, `${name}.link`);
   let identity: Stats | null = null;
   let linked = false;
   try {
@@ -123,6 +127,25 @@ async function probeRestoreLink(input: {
     }
   } catch {
     throw restoreFilesystemRefusal();
+  }
+}
+
+async function existingRestoreDirectory(path: string): Promise<string> {
+  let parent = path;
+  for (;;) {
+    const info = await stat(parent).catch((error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw migrationRefusal();
+    });
+    if (info) {
+      if (!info.isDirectory()) {
+        throw restoreFilesystemRefusal();
+      }
+      return parent;
+    }
+    parent = dirname(parent);
   }
 }
 
@@ -221,7 +244,27 @@ export function bindEnvMigrationSnapshots(
   };
   return {
     capture: async ({ projectRoot, files }) => {
+      const root = resolve(library.defaultUpgradeSnapshotRoot());
+      await assertMigrationStorageOutsideWorkingTrees(
+        join(root, "manifest.json"),
+        {
+          projectRoot,
+        }
+      );
+      const existing = await existingRestoreDirectory(root);
+      const canonical = resolve(
+        await realpath(existing),
+        relative(existing, root)
+      );
+      await assertMigrationStorageOutsideWorkingTrees(
+        join(canonical, "manifest.json"),
+        { projectRoot }
+      );
+      // Refuse ordinary storage failures before the provider copies any input
+      // bytes. The completed snapshot is checked again by assertCoverage.
+      await assertRestoreFilesystem(existing, files, linkRestoreProbe);
       const result = await library.createUpgradeSnapshot({
+        root,
         purpose: "env-migration",
         targets: files.map((file) => ({
           path: file.path,

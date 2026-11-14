@@ -6114,12 +6114,28 @@ function removeLegacyComposeEnvFileEntries(opts: {
   return kept.length > 0 ? kept : undefined;
 }
 
+function assertLegacyEnvMigrationOverlayNames(
+  overlayNames: readonly string[]
+): void {
+  if (overlayNames.includes("default")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
+  if (overlayNames.includes("local")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.local would collide with the machine-local hack.env.local.yaml layer. Rename the legacy local overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
+}
+
 /** Reject aliases between tracked and effective local destinations before any writes. */
 async function preflightLegacyEnvMigrationPaths(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly overlayNames: readonly string[];
 }): Promise<readonly string[]> {
+  assertLegacyEnvMigrationOverlayNames(opts.overlayNames);
   const destinations = new Set<string>();
   const localPaths: string[] = [];
   for (const envName of [null, ...opts.overlayNames]) {
@@ -7129,16 +7145,7 @@ async function migrateLegacyProjectEnvWithSources(opts: {
     overlays: overlaysResolved,
   });
 
-  if (overlayNames.includes("default")) {
-    throw new ClosedCliError(
-      "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
-    );
-  }
-  if (overlayNames.includes("local")) {
-    throw new ClosedCliError(
-      "Refusing legacy env migration: .env.local would collide with the machine-local hack.env.local.yaml layer. Rename the legacy local overlay and update its project references before retrying. No env migration files were written."
-    );
-  }
+  assertLegacyEnvMigrationOverlayNames(overlayNames);
   const localPaths = await preflightLegacyEnvMigrationPaths({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,

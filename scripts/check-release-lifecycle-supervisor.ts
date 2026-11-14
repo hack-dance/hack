@@ -12,6 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import {
+  LIFECYCLE_SUPERVISOR_HANDSHAKE_ARGUMENT,
+  LIFECYCLE_SUPERVISOR_VERSION,
+} from "../src/lib/lifecycle-supervisor-handshake.ts";
 
 const name = "hack-lifecycle-supervisor";
 const release = resolve(Bun.argv[2] ?? "dist/release");
@@ -95,6 +99,15 @@ try {
       Buffer.from(await Bun.file(installed).bytes()).equals(Buffer.from(bytes)),
       "installed bytes"
     );
+    // The installed CLI must declare the same handshake its sibling answers;
+    // its supervisor preflight refuses any other reply.
+    assert(
+      (await stdoutOf(
+        [join(bin, "hack"), LIFECYCLE_SUPERVISOR_HANDSHAKE_ARGUMENT],
+        env
+      )) === LIFECYCLE_SUPERVISOR_VERSION,
+      "installed CLI handshake"
+    );
     const relocated = join(fixture, name);
     await copyFile(installed, relocated);
     await chmod(relocated, 0o755);
@@ -102,6 +115,12 @@ try {
       if (process.platform === "darwin") {
         await run(["/usr/bin/codesign", "--verify", "--strict", binary], env);
       }
+      // Same empty environment as the CLI preflight; exact reply required.
+      assert(
+        (await stdoutOf([binary, "--version"], {})) ===
+          LIFECYCLE_SUPERVISOR_VERSION,
+        "installed supervisor handshake"
+      );
       // Empty framed input must refuse without launching work or consulting any home.
       const child = Bun.spawn([binary, "status"], {
         env,
@@ -139,7 +158,7 @@ try {
     assert((await readdir(home)).length === 0, "no home mutation");
   }
   process.stdout.write(
-    `Release supervisor acceptance (${process.platform}/${process.arch}): archive checksum, normal/slim/local-bin installs, exact bytes, modes, relocation and framed refusal passed\n`
+    `Release supervisor acceptance (${process.platform}/${process.arch}): archive checksum, normal/slim/local-bin installs, exact bytes, modes, CLI/supervisor handshake, relocation and framed refusal passed\n`
   );
 } finally {
   await rm(root, { recursive: true, force: true });
@@ -168,4 +187,23 @@ async function run(
     new Response(child.stderr).text(),
   ]);
   assert(code === 0, `installer/extraction: ${stderr}`);
+}
+async function stdoutOf(
+  command: string[],
+  env: Record<string, string>
+): Promise<string> {
+  const child = Bun.spawn(command, {
+    env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 15_000,
+  });
+  const [code, stdout] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  assert(code === 0, `${command.at(-1)} exit`);
+  return stdout.trim();
 }

@@ -14,6 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeReleaseArchive } from "../scripts/build-release.ts";
 import { download } from "../scripts/installer/download.ts";
+import {
+  LIFECYCLE_SUPERVISOR_HANDSHAKE_ARGUMENT,
+  LIFECYCLE_SUPERVISOR_VERSION,
+} from "../src/lib/lifecycle-supervisor-handshake.ts";
 import { publishRelease } from "../src/lib/release-install.ts";
 import { verifyReleaseDirectory } from "../src/lib/release-integrity.ts";
 import {
@@ -411,6 +415,71 @@ for (const phase of [
     ).toBe(false);
   });
 }
+/** A release CLI that declares a companion handshake, as current builds do. */
+async function requireCompanion(release: string, reply: string | null) {
+  const handshake = LIFECYCLE_SUPERVISOR_VERSION;
+  await writeFile(
+    join(release, "hack"),
+    `#!/bin/sh\ncase "$0" in */.hack-update-stage-*/hack) ;; *) exit 93 ;; esac\nif [ "$1" = '${LIFECYCLE_SUPERVISOR_HANDSHAKE_ARGUMENT}' ]; then printf '%s\\n' '${handshake}'; exit 0; fi\nprintf '%s\\n' 'hack v4.3.1'\n`,
+    { mode: 0o755 }
+  );
+  const companion = join(release, "hack-lifecycle-supervisor");
+  if (reply === null) {
+    await rm(companion);
+  } else {
+    await writeFile(
+      companion,
+      `#!/bin/sh\n[ "$1" = --version ] && printf '%s\\n' '${reply}'\n`,
+      { mode: 0o755 }
+    );
+  }
+}
+for (const [label, reply] of [
+  ["missing", null],
+  ["incompatible", "hack-lifecycle-supervisor 0.0.9 protocol=0 incremental=0"],
+] as const) {
+  test(`${label} companion for a handshake-declaring CLI leaves the installation unchanged`, async () => {
+    const root = await scratch();
+    const f = await releaseFixture(root);
+    await requireCompanion(f.release, reply);
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    const binary = join(bin, "hack");
+    const supervisor = join(bin, "hack-lifecycle-supervisor");
+    await writeFile(binary, "old CLI");
+    await writeFile(supervisor, "old supervisor", { mode: 0o700 });
+    await expect(
+      publishRelease({
+        version: "4.3.1",
+        extractedReleaseDir: f.release,
+        binaryPath: binary,
+        assetsDir: join(root, "assets"),
+      })
+    ).rejects.toThrow("companion is missing or does not match its CLI");
+    expect(await readFile(binary, "utf8")).toBe("old CLI");
+    expect(await readFile(supervisor, "utf8")).toBe("old supervisor");
+    expect((await readdir(bin)).sort()).toEqual([
+      "hack",
+      "hack-lifecycle-supervisor",
+    ]);
+  });
+}
+test("matching companion handshake publishes the pair", async () => {
+  const root = await scratch();
+  const f = await releaseFixture(root);
+  await requireCompanion(f.release, LIFECYCLE_SUPERVISOR_VERSION);
+  const binary = join(root, "bin/hack");
+  await publishRelease({
+    version: "4.3.1",
+    extractedReleaseDir: f.release,
+    binaryPath: binary,
+    assetsDir: join(root, "assets"),
+  });
+  expect(
+    await readFile(join(root, "bin/hack-lifecycle-supervisor"), "utf8")
+  ).toContain(LIFECYCLE_SUPERVISOR_VERSION);
+});
+
 test("failed first supervisor publication removes the new sibling", async () => {
   const root = await scratch();
   const f = await releaseFixture(root);

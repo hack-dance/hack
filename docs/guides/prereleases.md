@@ -280,5 +280,9 @@ covered by the bundle checksums. Retained managers accept older bundles without
 this helper. Packaging does not change the lifecycle runner default.
 
 Self-upgrades stage the helper before publishing the CLI, retain its previous
-bytes and SHA-256 in the backup, and restore it if publication fails. Keep the
+bytes and SHA-256 in the backup, and restore it if publication fails.
+Before publishing anything, a self-upgrade asks the staged CLI which helper
+handshake it requires and refuses the release, leaving the installation
+unchanged, if the staged helper is missing or answers differently. Releases
+whose CLI predates the helper are still accepted. Keep the
 helper with its matching CLI when moving an installation.

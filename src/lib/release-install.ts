@@ -17,7 +17,10 @@ import {
 import { dirname, join } from "node:path";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 import { markReleaseStage, reclaimReleaseStages } from "./release-staging.ts";
-import { verifyStagedReleaseVersion } from "./release-version.ts";
+import {
+  verifyStagedLifecycleSupervisor,
+  verifyStagedReleaseVersion,
+} from "./release-version.ts";
 
 async function present(path: string) {
   return await lstat(path).catch((error: NodeJS.ErrnoException) => {
@@ -229,6 +232,12 @@ export async function publishRelease(opts: {
         await syncTree(backup);
         await syncTree(binaryStage);
         await verifyStagedReleaseVersion(next, opts.version);
+        await verifyStagedLifecycleSupervisor({
+          cli: next,
+          supervisor: hasSupervisor
+            ? join(binaryStage, "hack-lifecycle-supervisor")
+            : null,
+        });
         opts.checkpoint?.("staged");
         assetsIdentity = await lstat(assetsStage);
         binaryIdentity = await lstat(next);

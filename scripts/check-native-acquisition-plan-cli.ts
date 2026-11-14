@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home.ts";
 
 /** Qualify pure acquisition intent in a relocated bundle and a real linked worktree. */
 const root = resolve(import.meta.dir, "..");
@@ -264,11 +265,7 @@ try {
     ],
     checkout
   );
-  assert(
-    (await readdir(home)).length === 0,
-    "validation and planning leave HOME untouched"
-  );
-  // Lifecycle refusals still append activity; planning itself must stay read-only.
+  await assertNativePlanHome({ home, failedUps: 0 });
   const runtime = await invoke(["up", "web", "--detach"], checkout, false, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -287,11 +284,7 @@ try {
       "planning creates no runtime state"
     );
   }
-  assert(
-    JSON.stringify(await readdir(home)) === '[".hack"]' &&
-      (await readdir(join(home, ".hack"))).join() === "activity.jsonl",
-    "planning creates no registry or runtime home state"
-  );
+  await assertNativePlanHome({ home, failedUps: 1 });
   process.stdout.write(
     `Relocated native acquisition planning: ${checks} checks passed; no hooks/pulls/builds/decryption/runtime effects\n`
   );

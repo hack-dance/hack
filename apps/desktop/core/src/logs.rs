@@ -296,7 +296,8 @@ impl LogsModel {
                 keep -= 1;
             }
             line.cut = line.message.len() - keep;
-            line.message.truncate(keep);
+            // A new string: `truncate` would keep the large allocation.
+            line.message = line.message[..keep].to_owned();
         }
         self.bytes += line.retained_bytes();
         self.lines.push_back(line);
@@ -632,6 +633,10 @@ mod tests {
         m.apply(&line(&"y".repeat(MAX_LINE_BYTES + 5000)));
         let l = m.visible()[0];
         assert_eq!(l.message.len(), MAX_LINE_BYTES);
+        assert!(
+            l.message.capacity() < MAX_LINE_BYTES + 1024,
+            "no oversized allocation kept"
+        );
         assert_eq!(l.cut, 5000);
         assert_eq!(m.bytes(), MAX_LINE_BYTES + "api".len());
     }

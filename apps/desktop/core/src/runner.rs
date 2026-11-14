@@ -212,15 +212,21 @@ impl CliRunner {
         let reader = thread::spawn(move || {
             let Some(stdout) = stdout else { return };
             let mut r = BufReader::new(stdout);
-            while let Some(line) = read_bounded_line(&mut r, MAX_RAW_LINE) {
+            while let Some((line, cut)) = read_bounded_line(&mut r, MAX_RAW_LINE) {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let event = serde_json::from_str::<LogEvent>(&line).unwrap_or_else(|_| LogEvent {
-                    kind: "notice".into(),
-                    message: Some(line),
-                    ..LogEvent::default()
-                });
+                // A record cut at MAX_RAW_LINE is no longer valid JSON: show
+                // a visible marker instead of dropping it silently.
+                let event = if cut {
+                    oversized_record_event()
+                } else {
+                    serde_json::from_str::<LogEvent>(&line).unwrap_or_else(|_| LogEvent {
+                        kind: "notice".into(),
+                        message: Some(line),
+                        ..LogEvent::default()
+                    })
+                };
                 if tx.send(event).is_err() {
                     break;
                 }
@@ -228,7 +234,7 @@ impl CliRunner {
         });
         Ok(LogStream {
             child,
-            rx,
+            rx: Some(rx),
             reader: Some(reader),
         })
     }
@@ -241,13 +247,14 @@ pub const MAX_RAW_LINE: usize = 1024 * 1024;
 
 /// Read one `\n`-terminated line, keeping at most `max` bytes of it.
 /// `None` at end of input (or on a read error).
-fn read_bounded_line<R: BufRead>(r: &mut R, max: usize) -> Option<String> {
+fn read_bounded_line<R: BufRead>(r: &mut R, max: usize) -> Option<(String, bool)> {
     let mut buf = Vec::new();
     let mut saw_any = false;
+    let mut cut = false;
     loop {
         let chunk = r.fill_buf().ok()?;
         if chunk.is_empty() {
-            return saw_any.then(|| String::from_utf8_lossy(&buf).into_owned());
+            return saw_any.then(|| (String::from_utf8_lossy(&buf).into_owned(), cut));
         }
         saw_any = true;
         let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
@@ -255,11 +262,31 @@ fn read_bounded_line<R: BufRead>(r: &mut R, max: usize) -> Option<String> {
             None => (chunk.len(), false),
         };
         let room = max.saturating_sub(buf.len());
+        cut |= take > room;
         buf.extend_from_slice(&chunk[..take.min(room)]);
         r.consume(if done { take + 1 } else { take });
         if done {
-            return Some(String::from_utf8_lossy(&buf).into_owned());
+            return Some((String::from_utf8_lossy(&buf).into_owned(), cut));
         }
+    }
+}
+
+/// Shown in place of a record longer than `MAX_RAW_LINE`.
+fn oversized_record_event() -> LogEvent {
+    LogEvent {
+        kind: "log".into(),
+        entry: Some(crate::models::LogEntry {
+            service: None,
+            message: format!(
+                "[a log record over {} KB was dropped by the app; use Copy command to read it in a terminal]",
+                MAX_RAW_LINE / 1024
+            ),
+            stream: None,
+            timestamp: None,
+            level: Some("warn".into()),
+            truncated: Some(true),
+        }),
+        ..LogEvent::default()
     }
 }
 
@@ -274,19 +301,23 @@ pub struct StreamPoll {
 /// A running log stream. Dropping it kills the process group.
 pub struct LogStream {
     child: Child,
-    rx: mpsc::Receiver<LogEvent>,
+    /// `None` only while dropping (see `Drop`).
+    rx: Option<mpsc::Receiver<LogEvent>>,
     reader: Option<thread::JoinHandle<()>>,
 }
 
 impl LogStream {
     /// Events received so far, without blocking.
     pub fn drain(&self) -> Vec<LogEvent> {
-        self.rx.try_iter().collect()
+        self.rx
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Wait up to `timeout` for the next event.
     pub fn next_timeout(&self, timeout: Duration) -> Option<LogEvent> {
-        self.rx.recv_timeout(timeout).ok()
+        self.rx.as_ref()?.recv_timeout(timeout).ok()
     }
 
     /// Up to `max` queued events. `exit` is set only when the reader has
@@ -299,7 +330,11 @@ impl LogStream {
             .reader
             .as_ref()
             .is_none_or(thread::JoinHandle::is_finished);
-        let events: Vec<LogEvent> = self.rx.try_iter().take(max).collect();
+        let events: Vec<LogEvent> = self
+            .rx
+            .as_ref()
+            .map(|rx| rx.try_iter().take(max).collect())
+            .unwrap_or_default();
         let exit = if reader_done && events.len() < max {
             self.child.try_wait().ok().flatten().map(|s| s.code())
         } else {
@@ -311,6 +346,9 @@ impl LogStream {
 
 impl Drop for LogStream {
     fn drop(&mut self) {
+        // Disconnect first: a reader blocked on a full queue then gets a
+        // send error and exits, so the join below cannot hang.
+        drop(self.rx.take());
         kill_group(&mut self.child);
         if let Some(r) = self.reader.take() {
             let _ = r.join();
@@ -560,11 +598,50 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_stream_with_a_full_queue_does_not_hang() {
+        // Far more lines than STREAM_QUEUE, never polled: the reader blocks
+        // on the full queue. Drop must still return promptly.
+        let f = FakeHack::new(
+            "i=0; while [ $i -lt 20000 ]; do echo '{\"type\":\"heartbeat\"}'; i=$((i+1)); done; sleep 30",
+        );
+        let s = f.runner().stream_logs(&["logs"], None).unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let t = Instant::now();
+        drop(s);
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "drop hung for {:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn oversized_records_leave_a_visible_marker() {
+        let f = FakeHack::new(&format!(
+            "printf '{{\"type\":\"log\",\"entry\":{{\"message\":\"'; head -c {} /dev/zero | tr '\\0' x; printf '\"}}}}\\n'; echo '{{\"type\":\"log\",\"entry\":{{\"message\":\"after\"}}}}'",
+            MAX_RAW_LINE + 1000
+        ));
+        let s = f.runner().stream_logs(&["logs"], None).unwrap();
+        let a = s.next_timeout(T).expect("marker");
+        let b = s.next_timeout(T).expect("next event");
+        let marker = a.entry.unwrap();
+        assert_eq!(marker.truncated, Some(true));
+        assert!(marker.message.contains("dropped by the app"));
+        assert_eq!(b.entry.unwrap().message, "after");
+    }
+
+    #[test]
     fn bounded_line_reader_skips_the_tail_of_huge_lines() {
         let data = format!("{}\nnext\n", "x".repeat(50));
         let mut r = std::io::BufReader::with_capacity(8, data.as_bytes());
-        assert_eq!(read_bounded_line(&mut r, 10).unwrap(), "x".repeat(10));
-        assert_eq!(read_bounded_line(&mut r, 10).unwrap(), "next");
+        assert_eq!(
+            read_bounded_line(&mut r, 10).unwrap(),
+            ("x".repeat(10), true)
+        );
+        assert_eq!(
+            read_bounded_line(&mut r, 10).unwrap(),
+            ("next".into(), false)
+        );
         assert!(read_bounded_line(&mut r, 10).is_none());
     }
 

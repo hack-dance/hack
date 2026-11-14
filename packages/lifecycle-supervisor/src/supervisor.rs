@@ -86,7 +86,14 @@ pub fn main() -> Result<()> {
                 }
             }
             let result = if args[0] == "stop" {
+                root.retire(&request.owner_token)?;
                 stop(&states)
+            } else if root.assert_not_retired(&request.owner_token).is_err()
+                && states
+                    .iter()
+                    .any(|state| !matches!(os::observe_state(state), os::Observation::Absent))
+            {
+                Err(refused())
             } else {
                 Ok(())
             };
@@ -129,6 +136,7 @@ fn run(request: Launch) -> Result<()> {
     let _instance_lock = instance_lock(&root)?;
     os::census_preflight()?;
     let launch_lock = root.lock_wait(".stop.lock")?;
+    root.assert_not_retired(&request.owner_token)?;
     // Validate every old claim before starting any new command. A guard survives
     // project-owner death; its command lock also closes concurrent restart races.
     for state in root.states()? {
@@ -145,7 +153,11 @@ fn run(request: Launch) -> Result<()> {
             if os::STOP.load(Ordering::Relaxed) {
                 return Err(refused());
             }
-            let mut command = Command::new(std::env::current_exe()?);
+            #[cfg(target_os = "linux")]
+            let executable = std::path::PathBuf::from("/proc/self/exe");
+            #[cfg(not(target_os = "linux"))]
+            let executable = std::env::current_exe()?;
+            let mut command = Command::new(executable);
             command
                 .arg("guard")
                 .env_clear()

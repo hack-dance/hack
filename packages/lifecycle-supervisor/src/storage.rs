@@ -37,6 +37,27 @@ pub struct Root {
 }
 
 impl Root {
+    fn retirement_key(token: &str) -> String {
+        // Stable non-authentication index. A collision can only refuse launch.
+        let hash = token.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+        format!(".retired-{hash:016x}")
+    }
+
+    pub fn retire(&self, token: &str) -> Result<()> {
+        self.file(&Self::retirement_key(token), libc::O_WRONLY | libc::O_CREAT)?
+            .sync_all()?;
+        self.directory.sync_all()
+    }
+
+    pub fn assert_not_retired(&self, token: &str) -> Result<()> {
+        match self.file(&Self::retirement_key(token), libc::O_RDONLY) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(refused()),
+        }
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let directory = OpenOptions::new()
             .read(true)

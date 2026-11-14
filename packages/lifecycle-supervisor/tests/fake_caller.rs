@@ -78,6 +78,17 @@ impl Fixture {
         self.request("run", &self.launch(processes))
     }
 
+    fn start_generation(&self, processes: Vec<Value>, token: &str) -> (Child, Value) {
+        let mut plan = self.launch(processes);
+        plan["ownerToken"] = json!(token);
+        self.request("run", &plan)
+    }
+
+    fn stop_generation(&self, token: &str) {
+        let (mut stop, _) = self.request("stop", &self.control(token));
+        assert!(wait(&mut stop, TIMEOUT).success());
+    }
+
     fn stop(&self) {
         let mut child = command(&self.root, "stop").spawn().unwrap();
         send(child.stdin.as_mut().unwrap(), &self.control(TOKEN));
@@ -561,12 +572,13 @@ fn child_descriptor_allowlist() {
 fn repeated_immediate_restart_waits_for_instance_lock_release() {
     let f = Fixture::new();
     let mut previous = None;
-    for _ in 0..8 {
-        let (caller, _) = f.start(vec![f.process("worker", "hold")]);
+    for generation in 0..8 {
+        let token = format!("synthetic-generation-{generation}");
+        let (caller, _) = f.start_generation(vec![f.process("worker", "hold")], &token);
         if let Some(mut old) = previous.take() {
             assert!(wait(&mut old, TIMEOUT).success());
         }
-        f.stop();
+        f.stop_generation(&token);
         previous = Some(caller);
     }
     assert!(wait(previous.as_mut().unwrap(), TIMEOUT).success());
@@ -680,9 +692,10 @@ fn idle_guard_cpu_and_wakeup_measurement() {
 #[test]
 fn natural_exit_during_stop_admission_is_successful_absence() {
     let f = Fixture::new();
-    for _ in 0..8 {
-        let (mut caller, _) = f.start(vec![f.process("worker", "unicode")]);
-        let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    for generation in 0..8 {
+        let token = format!("synthetic-generation-{generation}");
+        let (mut caller, _) = f.start_generation(vec![f.process("worker", "unicode")], &token);
+        let (mut stop, receipt) = f.request("stop", &f.control(&token));
         assert!(wait(&mut stop, TIMEOUT).success());
         assert_eq!(receipt["outcome"], "stopped");
         assert!(wait(&mut caller, TIMEOUT).success());
@@ -838,8 +851,11 @@ fn supervisor_and_guard_prepublication_crashes_keep_stop_admission_leased() {
     assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
     assert!(wait(&mut stop, TIMEOUT).success());
     drop(lock);
-    let (mut next, _) = f.start(vec![f.process("worker", "hold")]);
-    f.stop();
+    let (mut next, _) = f.start_generation(
+        vec![f.process("worker", "hold")],
+        "synthetic-next-generation",
+    );
+    f.stop_generation("synthetic-next-generation");
     assert!(wait(&mut next, TIMEOUT).success());
 }
 
@@ -1044,8 +1060,11 @@ fn stale_reused_session_leader_does_not_block_fresh_launch() {
         serde_json::to_vec(&state).unwrap(),
     )
     .unwrap();
-    let (mut next, _) = f.start(vec![f.process("worker", "hold")]);
-    f.stop();
+    let (mut next, _) = f.start_generation(
+        vec![f.process("worker", "hold")],
+        "synthetic-next-generation",
+    );
+    f.stop_generation("synthetic-next-generation");
     assert!(wait(&mut next, TIMEOUT).success());
     assert!(
         foreign.0.try_wait().unwrap().is_none(),
@@ -1137,8 +1156,11 @@ fn case_only_rename_accepts_terminal_receipt_with_previous_spelling() {
     // Also emulate the case-insensitive lookup on Linux: the payload retains
     // its original spelling while the lookup uses the new command name.
     fs::rename(f.root.join("Worker.json"), f.root.join("worker.json")).unwrap();
-    let (mut next, _) = f.start(vec![f.process("worker", "hold")]);
-    f.stop();
+    let (mut next, _) = f.start_generation(
+        vec![f.process("worker", "hold")],
+        "synthetic-next-generation",
+    );
+    f.stop_generation("synthetic-next-generation");
     assert!(wait(&mut next, TIMEOUT).success());
 }
 
@@ -1446,3 +1468,16 @@ fn fixture_process() {
 }
 
 use std::os::unix::fs::DirBuilderExt;
+
+#[test]
+fn completed_stop_fences_a_run_whose_frame_arrives_after_retirement() {
+    let f = Fixture::new();
+    let mut delayed = command(&f.root, "run").spawn().unwrap();
+    f.stop();
+    send(
+        delayed.stdin.as_mut().unwrap(),
+        &f.launch(vec![f.process("late", "hold")]),
+    );
+    assert!(!wait(&mut delayed, TIMEOUT).success());
+    assert!(!f.root.join("late.json").exists());
+}

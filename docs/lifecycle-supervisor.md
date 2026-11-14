@@ -193,3 +193,10 @@ not model kernel census observations, real flock behavior, orphan recovery,
 startup descriptor leases or signal errors. Some safety predicates hold by
 construction. Native regressions, rather than that model, are the evidence for
 those boundaries; see the model coverage document for the reduced claims.
+
+Stop durably retires its owner generation before confirming teardown, even if no
+command receipt exists. A delayed run checks that fence under the admission lock
+before spawning. New generations must use fresh owner tokens; markers persist in
+the private root and contain no command environment. Retired-but-live work remains
+unconfirmed. Linux guard spawning uses `/proc/self/exe`, preserving an executable
+reference even after atomic helper replacement.

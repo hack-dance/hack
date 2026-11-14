@@ -72,6 +72,8 @@ without `--json` exits 2.
 Linux:
 - If no running Caddy CA can be confirmed: blocked; run `hack global up` first.
 - If the export is stale: a user step rewrites it from the runtime CA first.
+  A symlink or other non-regular export is refused before any root steps;
+  an unreadable replacement check leaves the phase incomplete.
 - If the system bundle already holds the CA: no root step. If Hack cannot automate
   this distribution or its tools: no root step (the real command prints manual
   steps).

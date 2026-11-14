@@ -96,6 +96,14 @@ The probes do not use `hack global status`, which can start Docker.
 Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
 [dark](screenshots/doctor-dark.png).
 
+For integrations, `Card.authored_remedy` exposes an `AuthoredRemedy`: `argv()`
+returns authored arguments without an executable or environment, including each
+project root as one lossless argument. Bind these arguments to the integration's
+selected, checked CLI context and retain its action gates. Do not parse or execute
+the copy display string. Standalone Doctor's copy display names `hack` from the
+user's terminal PATH; it does not select a candidate CLI or home. A recipe grants
+no permission to run a fix, and Doctor has no dependency on Setup's context types.
+
 ## What v0 does not do yet
 
 Logs, Env and Activity tabs, CPU and memory, onboarding, always-on,

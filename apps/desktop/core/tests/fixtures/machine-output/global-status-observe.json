@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "data": {
+    "observe": true,
+    "docker": {
+      "state": "not_running"
+    },
+    "summary": {
+      "ok": "unknown"
+    },
+    "schema": "hack.global-status.observe.v1"
+  }
+}

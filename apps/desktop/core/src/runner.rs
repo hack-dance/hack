@@ -274,19 +274,41 @@ impl CliRunner {
         })
     }
 
-    /// `hack --version` → `"5.0.0"` (text output until request R1).
-    ///
-    /// # Errors
-    /// Any [`RunError`].
-    pub fn version(&self, timeout: Duration) -> Result<String, RunError> {
-        let (stdout, stderr, code) = self.run_raw(&["--version"], None, timeout)?;
-        if code != Some(0) {
-            return Err(RunError::Exit { code, stderr });
-        }
-        parse_version(&stdout).ok_or_else(|| RunError::BadJson {
-            error: "no version in output".into(),
+    /// Run a HACK-2218 command with a required envelope and payload schema.
+    /// Legacy JSON commands continue to use `run_json`.
+    pub fn run_schema_json<T: DeserializeOwned>(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        timeout: Duration,
+        schema: &str,
+    ) -> Result<T, RunError> {
+        let (stdout, stderr, code) = self.run_raw(args, path, timeout)?;
+        let value = parse_schema_result(&stdout, &stderr, code, schema)?;
+        serde_json::from_value(value).map_err(|e| RunError::BadJson {
+            error: e.to_string(),
             stdout_head: head(&stdout),
         })
+    }
+
+    /// Read the running CLI version through the schema-tagged JSON contract.
+    ///
+    /// # Errors
+    /// Any [`RunError`], including an unsupported or missing schema.
+    pub fn version(&self, timeout: Duration) -> Result<String, RunError> {
+        #[derive(serde::Deserialize)]
+        struct Version {
+            version: String,
+        }
+        let report: Version =
+            self.run_schema_json(&["version", "--json"], None, timeout, "hack.version.v1")?;
+        if report.version.is_empty() {
+            return Err(RunError::BadJson {
+                error: "empty version".into(),
+                stdout_head: String::new(),
+            });
+        }
+        Ok(report.version)
     }
 
     /// Start a long-running ndjson stream (`hack logs --json ...`).
@@ -322,7 +344,8 @@ impl CliRunner {
     }
 }
 
-/// A running log stream. Dropping it kills the process group.
+/// A running log stream. Drop retries group cleanup for at most two seconds,
+/// then detaches a reader still held open by a descendant outside that group.
 pub struct LogStream {
     child: Child,
     rx: mpsc::Receiver<LogEvent>,
@@ -343,10 +366,23 @@ impl LogStream {
 
 impl Drop for LogStream {
     fn drop(&mut self) {
-        kill_group(&mut self.child);
+        signal_kill_group(&mut self.child);
         if let Some(r) = self.reader.take() {
-            let _ = r.join();
+            // A group signal can race a descendant fork on macOS. Keep the
+            // leader unreaped while retrying, preserving ownership of its PID
+            // and catching late members of the same process group.
+            let until = Instant::now() + Duration::from_secs(2);
+            while !r.is_finished() && Instant::now() < until {
+                thread::sleep(Duration::from_millis(20));
+                signal_kill_group(&mut self.child);
+            }
+            // A descendant may have left our group while keeping stdout open.
+            // Detach that reader rather than block the dropping UI thread.
+            if r.is_finished() {
+                let _ = r.join();
+            }
         }
+        let _ = self.child.wait();
     }
 }
 
@@ -476,6 +512,18 @@ fn kill_group(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Only for the log-drop path, which has not reaped its child. Avoid
+/// Child::kill here: its status check may reap and release the PID reservation.
+fn signal_kill_group(child: &mut Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: plain syscall on the group we created with process_group(0).
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+}
+
 fn head(s: &str) -> String {
     s.chars().take(200).collect()
 }
@@ -532,6 +580,53 @@ pub fn parse_result(stdout: &str, stderr: &str, code: Option<i32>) -> Result<Val
         // Raw objects. Some commands (doctor, env list) exit 1 on findings
         // but still print a full report, which the app wants.
         _ => Ok(value),
+    }
+}
+
+/// Strict parser for the unpublished contracts migrated by HACK-2238.
+/// A nonzero result can never be accepted as successful data.
+pub fn parse_schema_result(
+    stdout: &str,
+    stderr: &str,
+    code: Option<i32>,
+    schema: &str,
+) -> Result<Value, RunError> {
+    let invalid = || RunError::BadJson {
+        error: format!("expected CLI envelope with schema {schema}"),
+        stdout_head: head(stdout),
+    };
+    let value: Value = serde_json::from_str(stdout).map_err(|_| invalid())?;
+    if value.as_object().is_none_or(|object| object.len() != 2) {
+        return Err(invalid());
+    }
+    match value.get("ok").and_then(Value::as_bool) {
+        Some(false) if code.is_some_and(|code| code != 0) => {
+            let error = value.get("error").ok_or_else(invalid)?;
+            if !error
+                .get("code")
+                .and_then(Value::as_str)
+                .is_some_and(|code| {
+                    code.strip_prefix("E_").is_some_and(|suffix| {
+                        !suffix.is_empty()
+                            && suffix.bytes().all(|byte| {
+                                byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                            })
+                    })
+                })
+                || error.get("message").and_then(Value::as_str).is_none()
+            {
+                return Err(invalid());
+            }
+            parse_result(stdout, stderr, code)
+        }
+        Some(true) if code == Some(0) => {
+            let data = value.get("data").ok_or_else(invalid)?;
+            if data.get("schema").and_then(Value::as_str) != Some(schema) {
+                return Err(invalid());
+            }
+            Ok(data.clone())
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -905,17 +1000,24 @@ wait $!"#,
             Some("5.0.0-next.3")
         );
         assert_eq!(parse_version("hack"), None);
-        let f = FakeHack::new("echo 'hack v5.0.0'");
+        let f = FakeHack::new(
+            r#"echo '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}'"#,
+        );
         assert_eq!(f.runner().version(T).unwrap(), "5.0.0");
     }
 
     #[test]
     fn log_stream_parses_ndjson_and_stops_on_drop() {
+        // Establish the pipe-holding descendant before publishing events. If
+        // sleep starts after the last event, drop can race that fork rather
+        // than exercise cleanup of an already-running process group.
         let f = FakeHack::new(
-            r#"echo '{"type":"start","backend":"compose"}'
+            r#"sleep 300 &
+echo $! > "$HACK_HOME/holder"
+echo '{"type":"start","backend":"compose"}'
 echo '{"type":"log","entry":{"service":"api","message":"hi"}}'
 echo 'plain text'
-exec sleep 300"#,
+wait $!"#,
         );
         let s = f.runner().stream_logs(&["logs", "--json"], None).unwrap();
         let mut got = Vec::new();
@@ -926,6 +1028,12 @@ exec sleep 300"#,
         assert_eq!(got[1].entry.as_ref().unwrap().message, "hi");
         assert_eq!(got[2].message.as_deref(), Some("plain text"));
         let pid = i32::try_from(s.child.id()).unwrap();
+        let holder: i32 = std::fs::read_to_string(f.dir.join("holder"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!process_gone(holder), "pipe holder is alive");
         assert!(
             !process_gone(pid),
             "positive control: stream child is alive"
@@ -936,5 +1044,54 @@ exec sleep 300"#,
         );
         completes(move || drop(s));
         assert_retired(pid);
+        assert_retired(holder);
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for log_stream_drop_is_bounded_with_an_escaped_writer"]
+    fn escaped_log_pipe_helper() {
+        // SAFETY: this fixture subprocess leaves its parent's group so the
+        // parent can test a writer that its owned-group signal cannot reach.
+        assert_eq!(unsafe { libc::setpgid(0, 0) }, 0);
+        let path = std::env::var("HACK_TEST_ESCAPED_LOG_PID").unwrap();
+        std::fs::write(path, std::process::id().to_string()).unwrap();
+        println!("escaped-ready");
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn log_stream_drop_is_bounded_with_an_escaped_writer() {
+        struct EscapedWriter(i32);
+        impl Drop for EscapedWriter {
+            fn drop(&mut self) {
+                // SAFETY: PID supplied only by our fixture subprocess, which
+                // remains alive until this guard retires it.
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+            }
+        }
+        let executable = std::env::current_exe().unwrap();
+        let quoted = executable.to_string_lossy().replace('\'', "'\\''");
+        let f = FakeHack::new(&format!(
+            "'{quoted}' --exact runner::tests::escaped_log_pipe_helper --ignored --nocapture &\nwait $!"
+        ));
+        let pid_file = f.dir.join("escaped.pid");
+        let runner = f
+            .runner()
+            .with_env("HACK_TEST_ESCAPED_LOG_PID", &pid_file.to_string_lossy());
+        let s = runner.stream_logs(&["logs", "--json"], None).unwrap();
+        loop {
+            let event = s.next_timeout(T).expect("escaped writer ready");
+            if event.message.as_deref() == Some("escaped-ready") {
+                break;
+            }
+        }
+        let escaped = EscapedWriter(std::fs::read_to_string(pid_file).unwrap().parse().unwrap());
+        let t = Instant::now();
+        drop(s);
+        assert!(t.elapsed() < Duration::from_secs(5));
+        // The fixture still holds stdout: bounded return did not require EOF.
+        // SAFETY: signal zero only checks our still-owned fixture process.
+        assert_eq!(unsafe { libc::kill(escaped.0, 0) }, 0);
+        drop(escaped);
     }
 }

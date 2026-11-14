@@ -65,6 +65,16 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "Compose exited successfully but printed output Hack cannot parse as JSON, usually an unsupported Compose version.",
     readFirst: "`docker compose version`",
   },
+  E_PLAN_REFUSED: {
+    meaning:
+      "A read-only administrator plan established that the command would refuse to run.",
+    readFirst: "Read `error.detail.plan.refused`; no planned step ran.",
+  },
+  E_PLAN_INCOMPLETE: {
+    meaning: "An administrator plan cannot yet determine every required phase.",
+    readFirst:
+      "Read `error.detail.plan.blocked` and re-plan after its prerequisites are satisfied.",
+  },
   E_STARTUP_INCOMPLETE: {
     meaning:
       "After start or restart, a service is neither running nor a successful one-shot.",

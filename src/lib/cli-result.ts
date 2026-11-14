@@ -1,10 +1,11 @@
 /**
  * Machine-readable CLI result envelope.
  *
- * Commands that support `--json` print exactly one envelope object to stdout:
+ * New structured `--json` contracts print one envelope object to stdout:
  * `{ok: true, data}` on success or `{ok: false, error: {code, message,
- * detail?}}` on failure. Exit codes keep their existing 0/1 semantics; the
- * envelope only adds structure, never changes them.
+ * detail?}}` on failure. New HACK-2218 successes also carry `data.schema`.
+ * Errors exit nonzero. Published legacy and streaming formats are inventoried
+ * in docs/reference/machine-readable-output.md and are not silently wrapped.
  */
 
 /**
@@ -28,6 +29,8 @@ export const HACK_ERROR_CODES = [
   "E_COMPOSE_FAILED",
   "E_COMPOSE_OUTPUT_INVALID",
   "E_STARTUP_INCOMPLETE",
+  "E_PLAN_REFUSED",
+  "E_PLAN_INCOMPLETE",
   "E_DEPENDENCY_BOOTSTRAP_FAILED",
   "E_STARTUP_TIMEOUT",
   "E_CANCELLED",

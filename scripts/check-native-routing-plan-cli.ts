@@ -381,6 +381,7 @@ try {
   await rm(join(checkout, ".hack/hack.local.json"));
   await assertNativePlanHome({
     home,
+    privateRoot: directory,
     failedUps: 0,
     preparedHackFiles: ["hack.config.json"],
   });
@@ -404,6 +405,7 @@ try {
   );
   await assertNativePlanHome({
     home,
+    privateRoot: directory,
     failedUps: 1,
     preparedHackFiles: ["hack.config.json"],
   });

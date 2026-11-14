@@ -18,7 +18,7 @@ hack activity --json --project shop --limit 100
   Historical entries remain selectable after a project leaves the registry.
 - `--limit <n>`: at most `n` entries, newest first (default 50, at most
   10,000).
-- `--json`: the standard envelope, `{"ok": true, "data": {"version": 1,
+- `--json`: the standard envelope, `{"ok": true, "data": {"schema": "hack.activity.v1", "version": 1,
   "entries": [...]}}`. A log that exists but cannot be read (not this user's
   regular file, a symlink, or a read error) is `{"ok": false, "error":
   {"code": "E_PATH_CONFLICT", ...}}` with exit 1, never an empty history.

@@ -184,6 +184,7 @@ test.skipIf(!supported)(
         HACK_NATIVE_HOME: "/foreign",
         HACK_GLOBAL_CONFIG_PATH: "/foreign",
       };
+      const nativeEnv = { ...env, HACK_NATIVE_HOME: undefined };
       const run = (args: string[], extra: NodeJS.ProcessEnv = {}) =>
         Bun.spawnSync([manager, "--root", channel, ...args], {
           cwd: root,
@@ -218,7 +219,23 @@ test.skipIf(!supported)(
         join(root, "bunfig.toml"),
         "this is deliberately not valid TOML [[["
       );
-      expect(run(["run", "hello"]).exitCode).toBe(0);
+      const refusedOverride = run(["run", "hello"]);
+      expect(refusedOverride.stderr.toString()).toContain(
+        "receipt-owned native home"
+      );
+      expect(refusedOverride.stdout.toString()).toBe("");
+      expect(refusedOverride.exitCode).toBe(1);
+      const ordinaryRun = run(["run", "hello"], {
+        HACK_NATIVE_HOME: undefined,
+      });
+      expect(ordinaryRun.stderr.toString()).toBe("");
+      expect(ordinaryRun.exitCode).toBe(0);
+      const selectedHome = `${channel}/versions/5.0.0-next.1/native-home`;
+      const matchingOverride = run(["run", "hello"], {
+        HACK_NATIVE_HOME: selectedHome,
+      });
+      expect(matchingOverride.stderr.toString()).toBe("");
+      expect(matchingOverride.exitCode).toBe(0);
       expect(Bun.which("python3", { PATH: path })).toBeNull();
       expect(Bun.which("bun", { PATH: path })).toBeNull();
       const launcher = join(channel, "bin/hack-next");
@@ -235,8 +252,19 @@ test.skipIf(!supported)(
           timeout: 30_000,
         }).stdout.toString()
       ).toContain("hack-next --manager");
-      const launch = Bun.spawnSync([launcher, "hello"], {
+      const refusedLaunch = Bun.spawnSync([launcher, "hello"], {
         env,
+        timeout: 30_000,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(refusedLaunch.stderr.toString()).toContain(
+        "receipt-owned native home"
+      );
+      expect(refusedLaunch.stdout.toString()).toBe("");
+      expect(refusedLaunch.exitCode).toBe(1);
+      const launch = Bun.spawnSync([launcher, "hello"], {
+        env: nativeEnv,
         timeout: 30_000,
       });
       expect(launch.stderr.toString()).toBe("");
@@ -248,11 +276,13 @@ test.skipIf(!supported)(
         `selectors:${channel}/versions/5.0.0-next.1/bundle/hack-native:${channel}/versions/5.0.0-next.1/native-home:<absent>`
       );
       expect(
-        Bun.spawnSync([launcher, "exit-seven"], { env, timeout: 30_000 })
-          .exitCode
+        Bun.spawnSync([launcher, "exit-seven"], {
+          env: nativeEnv,
+          timeout: 30_000,
+        }).exitCode
       ).toBe(7);
       const waiting = Bun.spawn([launcher, "wait-for-signal"], {
-        env,
+        env: nativeEnv,
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",

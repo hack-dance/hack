@@ -1,5 +1,6 @@
 import { realpath } from "node:fs/promises";
 
+import { runMuxCommand } from "../mux/mux-backend.ts";
 import { getMuxBackends } from "../mux/mux-resolver.ts";
 import type {
   LifecycleBackend,
@@ -9,13 +10,13 @@ import {
   readLifecycleState,
   removeLifecycleStateEntryIfMatching,
 } from "./lifecycle-runtime.ts";
+import { readProcessIdentities } from "./process-tree.ts";
 import {
+  createLifecycleSessionRetirement,
   type ProcessSnapshotRow,
   readProcessSnapshot,
   resolveLeaderlessPersistedLifecycleProcessGroupIds,
-  resolveLifecycleStopProcessGroupIds,
   resolvePersistedLifecycleProcessGroupIds,
-  terminateLifecycleProcessGroups,
 } from "./project-lifecycle-processes.ts";
 import {
   inspectLifecycleSession,
@@ -209,13 +210,32 @@ export function classifyLifecycleSessionHygiene(opts: {
 export async function repairProjectLifecycleSessions(opts: {
   readonly projectDir: string;
   readonly projectRoot: string;
+  /** Platform boundaries for repair ordering and failure regressions. */
+  readonly boundary?: {
+    readonly inspect?: typeof inspectProjectLifecycleHygiene;
+    readonly backends?: typeof getMuxBackends;
+    readonly inspectSession?: typeof inspectLifecycleSession;
+    readonly readPanes?: typeof readRepairPanes;
+    readonly readIdentities?: typeof readProcessIdentities;
+    readonly retireSession?: ReturnType<
+      typeof createLifecycleSessionRetirement
+    >;
+  };
 }): Promise<LifecycleHygieneRepairResult> {
-  const initial = await inspectProjectLifecycleHygiene(opts);
+  const {
+    inspect = inspectProjectLifecycleHygiene,
+    backends = getMuxBackends,
+    inspectSession = inspectLifecycleSession,
+    readPanes = readRepairPanes,
+    readIdentities = readProcessIdentities,
+    retireSession,
+  } = opts.boundary ?? {};
+  const initial = await inspect(opts);
   const repairedSessions: string[] = [];
   const failures: string[] = [];
 
   for (const candidate of initial.orphanedSessions) {
-    const current = await inspectProjectLifecycleHygiene(opts);
+    const current = await inspect(opts);
     const orphan = current.orphanedSessions.find(
       (item) => item.entry.composeProject === candidate.entry.composeProject
     );
@@ -225,12 +245,12 @@ export async function repairProjectLifecycleSessions(opts: {
       );
       continue;
     }
-    const backend = getMuxBackends().get(orphan.entry.backend);
+    const backend = backends().get(orphan.entry.backend);
     if (!backend?.available) {
       failures.push(`${orphan.entry.sessionName}: mux backend unavailable`);
       continue;
     }
-    const inspection = await inspectLifecycleSession({
+    const inspection = await inspectSession({
       backend,
       entry: orphan.entry,
       expectedSessionName: orphan.entry.sessionName,
@@ -246,20 +266,33 @@ export async function repairProjectLifecycleSessions(opts: {
       );
       continue;
     }
-    const processGroupIds = resolveLifecycleStopProcessGroupIds({
-      matchedLiveSession: true,
-      lifecycleEntry: orphan.entry,
-      snapshot: await readProcessSnapshot(),
-    });
-    const killed = await killInspectedLifecycleSession({
-      backend,
-      inspection,
-    });
+    let killed: boolean;
+    try {
+      const processes = await readRepairPaneIdentities({
+        entry: orphan.entry,
+        readPanes,
+        readIdentities,
+      });
+      killed = await (retireSession ?? createLifecycleSessionRetirement())({
+        processes,
+        stopSession: () =>
+          killInspectedLifecycleSession({ backend, inspection }),
+        assertFresh: () =>
+          assertRepairEntryCurrent({
+            projectDir: opts.projectDir,
+            entry: orphan.entry,
+          }),
+      });
+    } catch (error: unknown) {
+      failures.push(
+        `${orphan.entry.sessionName}: ${repairFailureMessage(error)}; kept ownership state`
+      );
+      continue;
+    }
     if (!killed) {
       failures.push(`${orphan.entry.sessionName}: mux teardown failed`);
       continue;
     }
-    await terminateLifecycleProcessGroups({ processGroupIds });
     const stateRemoved = await removeLifecycleStateEntryIfMatching({
       projectDir: opts.projectDir,
       expectedEntry: orphan.entry,
@@ -274,6 +307,139 @@ export async function repairProjectLifecycleSessions(opts: {
   }
 
   return { repairedSessions, failures };
+}
+
+function repairFailureMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : "process-group retirement unconfirmed";
+}
+
+/** Refresh only panes belonging to the already ownership-proven mux windows. */
+async function readRepairPaneIdentities(opts: {
+  readonly entry: LifecycleStateEntry;
+  readonly readPanes: typeof readRepairPanes;
+  readonly readIdentities: typeof readProcessIdentities;
+}): Promise<
+  readonly { readonly panePid?: number; readonly paneBirth?: string }[]
+> {
+  if (opts.entry.backend !== "tmux") {
+    return opts.entry.processes;
+  }
+  const windows = new Set(
+    opts.entry.processes.map((process) => process.windowName)
+  );
+  const panes = (
+    await opts.readPanes({ sessionName: opts.entry.sessionName })
+  ).filter((pane) => windows.has(pane.windowName));
+  const hasRecordedIdentity = opts.entry.processes.some(
+    (process) => process.paneBirth || process.processGroupBirth
+  );
+  if (panes.length === 0 && !hasRecordedIdentity) {
+    return [];
+  }
+  const identities = await opts.readIdentities();
+  if (
+    identities.length === 0 ||
+    panes.some((pane) => !identities.some((row) => row.pid === pane.panePid))
+  ) {
+    throw new Error(
+      "Current lifecycle pane identity is unavailable before repair"
+    );
+  }
+  const liveIdentities = identities.filter((row) => !row.zombie);
+  const activePanes = panes.filter((pane) =>
+    liveIdentities.some((row) => row.pid === pane.panePid)
+  );
+  const liveWindows = new Set(activePanes.map((pane) => pane.windowName));
+  if (
+    opts.entry.processes.some(
+      (process) =>
+        !liveWindows.has(process.windowName) &&
+        liveIdentities.some(
+          (row) =>
+            (process.paneBirth &&
+              row.pid === process.panePid &&
+              row.birth === process.paneBirth) ||
+            (process.processGroupBirth &&
+              row.pid === process.processGroupId &&
+              row.birth === process.processGroupBirth)
+        )
+    )
+  ) {
+    throw new Error(
+      "Recorded lifecycle identity remains alive outside current mux windows; retirement is unconfirmed"
+    );
+  }
+  return activePanes.map(({ panePid }) => ({
+    panePid,
+    paneBirth: liveIdentities.find((row) => row.pid === panePid)?.birth,
+  }));
+}
+
+async function readRepairPanes(opts: {
+  readonly sessionName: string;
+}): Promise<
+  readonly { readonly panePid: number; readonly windowName: string }[]
+> {
+  const result = await runMuxCommand(
+    [
+      "tmux",
+      "list-panes",
+      "-s",
+      "-t",
+      `=${opts.sessionName}`,
+      "-F",
+      "#{pane_pid}\t#{window_name}",
+    ],
+    { maxStdoutBytes: 256 * 1024 }
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      "Could not read current lifecycle pane identity before repair"
+    );
+  }
+  const lines = result.stdout.split("\n").filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    throw new Error(
+      "Current lifecycle pane identity is unavailable before repair"
+    );
+  }
+  return lines.map((line) => {
+    const fields = line.split("\t");
+    const panePid = Number(fields[0]);
+    const windowName = fields[1];
+    if (
+      fields.length !== 2 ||
+      !Number.isInteger(panePid) ||
+      panePid <= 1 ||
+      !windowName
+    ) {
+      throw new Error(
+        "Current lifecycle pane inventory is invalid before repair"
+      );
+    }
+    return { panePid, windowName };
+  });
+}
+
+/** Retained group identities cannot authorize signals after their owner changes. */
+async function assertRepairEntryCurrent(opts: {
+  readonly projectDir: string;
+  readonly entry: LifecycleStateEntry;
+}): Promise<void> {
+  const current = (await readLifecycleState(opts)).find(
+    (entry) => entry.composeProject === opts.entry.composeProject
+  );
+  if (
+    !current ||
+    current.sessionName !== opts.entry.sessionName ||
+    current.backend !== opts.entry.backend ||
+    current.updatedAt !== opts.entry.updatedAt ||
+    current.ownershipToken !== opts.entry.ownershipToken
+  ) {
+    throw new Error("Lifecycle ownership changed before repair retirement");
+  }
 }
 
 async function inspectOwnedLifecycleSessions(opts: {

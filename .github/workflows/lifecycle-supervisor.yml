@@ -4,11 +4,21 @@ on:
   pull_request:
     paths:
       - packages/lifecycle-supervisor/**
+      - src/lib/lifecycle-supervisor.ts
+      - src/lib/project-lifecycle-supervisor.ts
+      - src/lib/project-lifecycle-controller.ts
+      - src/lib/lifecycle-runtime.ts
+      - tests/lifecycle-supervisor-controller.test.ts
       - .github/workflows/lifecycle-supervisor.yml
   push:
     branches: [next, main]
     paths:
       - packages/lifecycle-supervisor/**
+      - src/lib/lifecycle-supervisor.ts
+      - src/lib/project-lifecycle-supervisor.ts
+      - src/lib/project-lifecycle-controller.ts
+      - src/lib/lifecycle-runtime.ts
+      - tests/lifecycle-supervisor-controller.test.ts
       - .github/workflows/lifecycle-supervisor.yml
   workflow_dispatch:
 
@@ -44,3 +54,13 @@ jobs:
         run: cargo test --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml -- --test-threads=4
       - name: Build standalone release executable
         run: cargo build --locked --release --manifest-path packages/lifecycle-supervisor/Cargo.toml
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - name: Install locked CLI test dependencies
+        run: bun install --frozen-lockfile
+      - name: Test current-source CLI controller against native supervisor
+        env:
+          HACK_TEST_REQUIRE_SUPERVISOR: '1'
+          HACK_TEST_SUPERVISOR_BINARY: ${{ env.CARGO_TARGET_DIR }}/debug/hack-lifecycle-supervisor
+        run: bun test tests/lifecycle-supervisor-controller.test.ts tests/lifecycle-runner-config.test.ts tests/lifecycle-state-publication.test.ts tests/lifecycle-supervisor-observers.test.ts

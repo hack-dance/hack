@@ -14,6 +14,11 @@ import { parseDotEnv } from "./env.ts";
 import { pathExists, readTextFile } from "./fs.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import {
+  LIFECYCLE_RUNNER_CONFIG_ERROR,
+  type LifecycleRunner,
+  parseLifecycleRunner,
+} from "./lifecycle-runner.ts";
+import {
   type OpenHostPreference,
   parseOpenHostPreference,
 } from "./open-host.ts";
@@ -252,6 +257,8 @@ export interface ProjectConfig {
    * `parseError`, which would otherwise launch services with no helper.
    */
   readonly sharedHelpersError?: string;
+  /** Invalid runner selection must refuse lifecycle effects, not fall back. */
+  readonly lifecycleRunnerError?: string;
 }
 
 export interface ProjectOpenConfig {
@@ -287,6 +294,8 @@ export interface ProjectSessionsConfig {
 }
 
 export interface ProjectLifecycleConfig {
+  /** Persistent host-process runner; omitted means mux. */
+  readonly runner?: LifecycleRunner;
   readonly up?: ProjectLifecycleHooks;
   readonly down?: ProjectLifecycleHooks;
   readonly processes?: readonly ProjectLifecycleProcess[];
@@ -549,6 +558,11 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
   const worktree = parseWorktreeConfig(getRecord(value, "worktree"));
   const sessions = parseSessionsConfig(getRecord(value, "sessions"));
   const lifecycleRecord = getRecord(value, "lifecycle");
+  const lifecycleRunnerError =
+    lifecycleRecord?.runner !== undefined &&
+    parseLifecycleRunner(lifecycleRecord.runner) === null
+      ? LIFECYCLE_RUNNER_CONFIG_ERROR
+      : undefined;
   const lifecycleBase = parseLifecycleConfig(lifecycleRecord);
   const sharedHelpers = parseProjectSharedHelpers(
     lifecycleRecord?.sharedHelpers
@@ -584,6 +598,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(parsedOwnership.parseError ? [parsedOwnership.parseError] : []),
     ...(parsedOpen.parseError ? [parsedOpen.parseError] : []),
     ...sharedHelpers.errors,
+    ...(lifecycleRunnerError ? [lifecycleRunnerError] : []),
   ];
 
   return {
@@ -605,6 +620,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(sharedHelpers.errors.length > 0
       ? { sharedHelpersError: sharedHelpers.errors.join(" ") }
       : {}),
+    ...(lifecycleRunnerError ? { lifecycleRunnerError } : {}),
     configPath: path,
   };
 }
@@ -815,6 +831,7 @@ function mergeLifecycleWithStartup(opts: {
   const processes = [...lifecycleProcesses, ...startup.processes];
 
   return buildLifecycleConfig({
+    runner: opts.lifecycle?.runner,
     upBefore,
     upAfter: lifecycleUpAfter,
     downBefore: lifecycleDownBefore,
@@ -857,6 +874,7 @@ function mapStartupEntriesToLifecycle(opts: {
 }
 
 function buildLifecycleConfig(opts: {
+  readonly runner?: LifecycleRunner;
   readonly upBefore: readonly ProjectLifecycleCommand[];
   readonly upAfter: readonly ProjectLifecycleCommand[] | undefined;
   readonly downBefore: readonly ProjectLifecycleCommand[] | undefined;
@@ -864,6 +882,7 @@ function buildLifecycleConfig(opts: {
   readonly processes: readonly ProjectLifecycleProcess[];
 }): ProjectLifecycleConfig | undefined {
   const lifecycle: ProjectLifecycleConfig = {
+    ...(opts.runner ? { runner: opts.runner } : {}),
     ...(opts.upBefore.length > 0 || opts.upAfter
       ? {
           up: {
@@ -896,8 +915,10 @@ function parseLifecycleConfig(
   const up = parseLifecycleHooks(getRecord(value, "up"));
   const down = parseLifecycleHooks(getRecord(value, "down"));
   const processes = parseLifecycleProcesses(value.processes);
+  const runner = parseLifecycleRunner(value.runner);
 
   const out: ProjectLifecycleConfig = {
+    ...(runner ? { runner } : {}),
     ...(up ? { up } : {}),
     ...(down ? { down } : {}),
     ...(processes ? { processes } : {}),

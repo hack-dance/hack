@@ -1,0 +1,313 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import {
+  readLifecycleState,
+  resolveLifecycleLogPath,
+} from "../src/lib/lifecycle-runtime.ts";
+import { inspectLifecycleSupervisor } from "../src/lib/lifecycle-supervisor.ts";
+import {
+  createLifecycleProcessController,
+  stopLifecycleProcessController,
+} from "../src/lib/project-lifecycle-controller.ts";
+import { restoreEnv } from "./helpers/env.ts";
+
+const previous = process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY;
+const supervisorBinary =
+  process.env.HACK_TEST_SUPERVISOR_BINARY ??
+  resolve(
+    ".hack-local/target/lifecycle-integration/debug/hack-lifecycle-supervisor"
+  );
+if (
+  process.env.HACK_TEST_REQUIRE_SUPERVISOR === "1" &&
+  !existsSync(supervisorBinary)
+) {
+  throw new Error(
+    "The required current-source supervisor executable was not prepared."
+  );
+}
+const nativeTest = existsSync(supervisorBinary) ? test : test.skip;
+beforeAll(() => {
+  process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY = supervisorBinary;
+});
+afterAll(() => restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", previous));
+
+async function fixture(
+  run: (project: { projectRoot: string; projectDir: string }) => Promise<void>
+) {
+  const root = await mkdtemp(join(tmpdir(), "supervisor-controller-"));
+  const project = { projectRoot: root, projectDir: join(root, ".hack") };
+  await mkdir(project.projectDir);
+  try {
+    await run(project);
+  } finally {
+    await stopLifecycleProcessController({
+      project,
+      projectName: "fixture",
+      composeProject: "fixture",
+      branch: null,
+      definitionHash: "synthetic",
+    }).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+}
+function controller(
+  project: { projectRoot: string; projectDir: string },
+  hash = "synthetic"
+) {
+  return createLifecycleProcessController({
+    runner: "supervisor",
+    project,
+    projectName: "fixture",
+    composeProject: "fixture",
+    branch: null,
+    definitionHash: hash,
+    env: { HOME: project.projectRoot, HACK_DAEMON_AUTOSTART_DISABLE: "1" },
+    mux: async () => {
+      throw new Error("mux must not be consulted");
+    },
+    installSignalCleanup: () => ({ dispose() {} }),
+  });
+}
+const command = "printf 'controller-ready\\n'; exec sleep 60";
+async function eventually(check: () => Promise<boolean>) {
+  const end = performance.now() + 5000;
+  while (!(await check())) {
+    if (performance.now() > end) {
+      throw new Error("fixture observation timed out");
+    }
+    await Bun.sleep(20);
+  }
+}
+
+nativeTest(
+  "supervisor controller starts persistent hooks incrementally without mux and keeps common logs",
+  () =>
+    fixture(async (project) => {
+      const owner = controller(project);
+      await owner.startFromCommand({
+        command: { command, persistent: true },
+        serviceName: "first",
+      });
+      let entries = await readLifecycleState(project);
+      expect(entries[0]?.processes.map((p) => p.name)).toEqual(["first"]);
+      await owner.startMany({ processes: [{ name: "second", command }] });
+      await owner.finalize();
+      entries = await readLifecycleState(project);
+      expect(entries[0]?.backend).toBe("supervisor");
+      expect(entries[0]?.processes.map((p) => p.name).sort()).toEqual([
+        "first",
+        "second",
+      ]);
+      const logPath = resolveLifecycleLogPath({
+        ...project,
+        composeProject: "fixture",
+      });
+      await eventually(async () =>
+        (await readFile(logPath, "utf8")).includes("controller-ready")
+      );
+      expect(await owner.abort()).toBeUndefined();
+      expect(await readLifecycleState(project)).toHaveLength(0);
+    })
+);
+
+nativeTest(
+  "adopting a healthy supervisor retains its token and does not acquire rollback authority",
+  () =>
+    fixture(async (project) => {
+      const first = controller(project);
+      await first.startMany({ processes: [{ name: "worker", command }] });
+      await first.finalize();
+      const original = (await readLifecycleState(project))[0];
+      const second = controller(project);
+      await second.startMany({ processes: [{ name: "worker", command }] });
+      await second.finalize();
+      expect((await readLifecycleState(project))[0]?.ownershipToken).toBe(
+        original?.ownershipToken
+      );
+      expect(second.getOperationCleanup()).toBeNull();
+      await second.abort();
+      expect((await readLifecycleState(project))[0]?.ownershipToken).toBe(
+        original?.ownershipToken
+      );
+    })
+);
+
+nativeTest(
+  "persisted supervisor stop works after owner SIGKILL and current runner changes",
+  () =>
+    fixture(async (project) => {
+      const owner = controller(project);
+      await owner.startMany({ processes: [{ name: "worker", command }] });
+      await owner.finalize();
+      const entry = (await readLifecycleState(project))[0];
+      if (!(entry?.supervisorPid && entry.ownershipToken)) {
+        throw new Error("fixture missing owner");
+      }
+      process.kill(entry.supervisorPid, "SIGKILL");
+      const status = await inspectLifecycleSupervisor({
+        ...project,
+        composeProject: "fixture",
+        ownershipToken: entry.ownershipToken,
+      });
+      expect(status.liveProcessNames).toEqual(["worker"]);
+      await stopLifecycleProcessController({
+        project,
+        projectName: "fixture",
+        composeProject: "fixture",
+        branch: null,
+        definitionHash: "changed",
+        mux: async () => {
+          throw new Error("mux must not be consulted");
+        },
+      });
+      expect(await readLifecycleState(project)).toHaveLength(0);
+    })
+);
+
+nativeTest(
+  "creator rollback cannot stop a supervisor another operation adopted",
+  () =>
+    fixture(async (project) => {
+      const first = controller(project);
+      await first.startMany({ processes: [{ name: "worker", command }] });
+      await first.finalize();
+      const second = controller(project);
+      await second.startMany({ processes: [{ name: "worker", command }] });
+      await second.finalize();
+      await first.abort();
+      const entry = (await readLifecycleState(project))[0];
+      if (!entry?.ownershipToken) {
+        throw new Error("adopted ownership discarded");
+      }
+      const status = await inspectLifecycleSupervisor({
+        ...project,
+        composeProject: "fixture",
+        ownershipToken: entry.ownershipToken,
+      });
+      expect(status.liveProcessNames).toEqual(["worker"]);
+    })
+);
+
+nativeTest(
+  "missing native root is absent while missing executable with retained root stays unknown",
+  () =>
+    fixture(async (project) => {
+      const empty = await inspectLifecycleSupervisor({
+        ...project,
+        composeProject: "fixture",
+        ownershipToken: "synthetic",
+      });
+      expect(empty.liveProcessNames).toEqual([]);
+      const owner = controller(project);
+      await owner.startMany({ processes: [{ name: "worker", command }] });
+      await owner.finalize();
+      const entry = (await readLifecycleState(project))[0];
+      if (!entry?.ownershipToken) {
+        throw new Error("fixture missing token");
+      }
+      const binary = process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY;
+      process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY =
+        "/missing-synthetic-supervisor";
+      try {
+        await expect(
+          inspectLifecycleSupervisor({
+            ...project,
+            composeProject: "fixture",
+            ownershipToken: entry.ownershipToken,
+          })
+        ).rejects.toThrow("unavailable");
+        expect((await readLifecycleState(project))[0]?.ownershipToken).toBe(
+          entry.ownershipToken
+        );
+      } finally {
+        restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", binary);
+      }
+    })
+);
+
+nativeTest(
+  "human service names stay distinct while native state names remain safe",
+  () =>
+    fixture(async (project) => {
+      const owner = controller(project);
+      const names = ["service with spaces/../label", "Web", "web"];
+      await owner.startMany({
+        processes: names.map((name) => ({ name, command })),
+      });
+      await owner.finalize();
+      const entry = (await readLifecycleState(project))[0];
+      expect(entry?.processes.map((p) => p.name).sort()).toEqual(
+        [...names].sort()
+      );
+      if (!entry?.ownershipToken) {
+        throw new Error("fixture missing token");
+      }
+      const observed = await inspectLifecycleSupervisor({
+        ...project,
+        composeProject: "fixture",
+        ownershipToken: entry.ownershipToken,
+      });
+      expect([...observed.liveProcessNames].sort()).toEqual([...names].sort());
+      expect(await owner.abort()).toBeUndefined();
+    })
+);
+
+nativeTest(
+  "lost incremental reply publishes the verified late command before failure",
+  () =>
+    fixture(async (project) => {
+      const wrapper = join(project.projectRoot, "drop-add-reply");
+      await Bun.write(
+        wrapper,
+        `#!${process.execPath} --no-env-file
+const reader = Bun.stdin.stream().getReader();
+let frame = Buffer.alloc(0);
+while (true) {
+  const part = await reader.read();
+  if (part.done) process.exit(91);
+  frame = Buffer.concat([frame, part.value]);
+  if (frame.length >= 4 && frame.length >= frame.readUInt32BE(0) + 4) break;
+}
+await reader.cancel();
+const action = process.argv.at(-1);
+const child = Bun.spawn([${JSON.stringify(supervisorBinary)}, action], {env:{},stdin:frame,stdout:"pipe",stderr:"ignore"});
+child.unref();
+const reply = await new Response(child.stdout).arrayBuffer();
+if (action === "add") { await child.exited; process.exit(1); }
+await Bun.write(Bun.stdout, reply);
+if (action !== "serve") process.exit(await child.exited);
+`
+      );
+      const { chmod } = await import("node:fs/promises");
+      await chmod(wrapper, 0o700);
+      const saved = process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY;
+      process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY = wrapper;
+      const owner = controller(project);
+      try {
+        await owner.startMany({ processes: [{ name: "first", command }] });
+        await expect(
+          owner.startMany({ processes: [{ name: "late", command }] })
+        ).rejects.toThrow("reply was lost");
+        const entry = (await readLifecycleState(project))[0];
+        expect(entry?.processes.map((p) => p.name).sort()).toEqual([
+          "first",
+          "late",
+        ]);
+        if (!entry?.ownershipToken) {
+          throw new Error("late ownership missing");
+        }
+        const status = await inspectLifecycleSupervisor({
+          ...project,
+          composeProject: "fixture",
+          ownershipToken: entry.ownershipToken,
+        });
+        expect([...status.liveProcessNames].sort()).toEqual(["first", "late"]);
+        await owner.abort();
+      } finally {
+        restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", saved);
+      }
+    })
+);

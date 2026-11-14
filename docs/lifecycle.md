@@ -4,9 +4,8 @@ Many projects need host-side setup around `hack up` (auth, local proxies, tunnel
 
 Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 
-The [standalone Rust supervisor contract](./lifecycle-supervisor.md) describes
-the separately tested supervisor work. It does not change the current mux runner
-or expose a new configuration setting in this slice.
+The [Rust supervisor contract](./lifecycle-supervisor.md) describes the experimental
+`lifecycle.runner: "supervisor"` opt-in. Omission keeps the current mux runner.
 
 With the Compose backend, the first Ctrl-C during foreground `hack up` asks
 Compose to stop the project containers. Hack waits for Compose to finish stopping
@@ -626,3 +625,18 @@ Notes:
   `--no-interactive` convention used across the CLI (documented defaults or `E_INTERACTIVE_REQUIRED`).
   It does not change hook `stdin` behavior — a hook that itself blocks on interactive auth still
   blocks under `--no-interactive`.
+
+## Experimental built-in runner
+
+Set `lifecycle.runner` to `"supervisor"` to use the built-in Rust host-process
+owner; the default remains `"mux"`. The supervisor executable must be available
+beside Hack. The [supervisor contract](./lifecycle-supervisor.md) records delivery
+and platform qualification. This opt-in does not provide a PTY: stdin is null,
+stdout/stderr are pipes, and commands requiring a terminal must use a
+noninteractive mode or an interactive workspace.
+
+Supervisor lifecycle processes do not appear as tmux sessions. Watch their output
+with `hack logs -f <name>`. Stop and restart use the recorded owner even after the
+runner setting changes. Unknown shutdown retains the ownership record and any
+shared helper holders, and fails so `hack down` can be retried. Shared helper
+commands themselves keep their existing ownership contract in this unit.

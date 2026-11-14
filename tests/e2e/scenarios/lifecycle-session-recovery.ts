@@ -1,5 +1,6 @@
 import { chmod, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { restoreEnv } from "../../helpers/env.ts";
 
 import { resolveExecutableCapability } from "../capabilities.ts";
 import { createMonorepoFixture } from "../fixture.ts";
@@ -20,6 +21,10 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
   tier: "local",
   summary: "owned lifecycle sessions reconcile and clean up without Docker",
   run: async (ctx) => {
+    if (process.env.HACK_LIFECYCLE_RUNNER === "supervisor") {
+      await runSupervisorRecovery({ ctx });
+      return;
+    }
     const tmux = resolveExecutableCapability({
       executable: "tmux",
       executablePath: Bun.which("tmux"),
@@ -44,7 +49,13 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
     await writeFakeDocker({ fakeBin });
     const path = `${fakeBin}:${process.env.PATH ?? ""}`;
     const dockerLog = join(ctx.tempRoot, "fake-docker.log");
-    const cliEnv = { PATH: path, E2E_DOCKER_LOG: dockerLog };
+    const previousTmuxRoot = process.env.TMUX_TMPDIR;
+    process.env.TMUX_TMPDIR = ctx.tempRoot;
+    const cliEnv = {
+      PATH: path,
+      E2E_DOCKER_LOG: dockerLog,
+      TMUX_TMPDIR: ctx.tempRoot,
+    };
     const sessionName = `${fixture.name}--lifecycle`;
     const statePath = join(
       fixture.hackDir,
@@ -555,9 +566,282 @@ export const lifecycleSessionRecoveryScenario: Scenario = {
         argv: ["tmux", "kill-session", "-t", sessionName],
         cwd: fixture.root,
       });
+      // This server is scoped to the scenario's private TMUX_TMPDIR; remove
+      // branch sessions too if an earlier assertion interrupted their cleanup.
+      await runCommand({ argv: ["tmux", "kill-server"], cwd: fixture.root });
+      restoreEnv("TMUX_TMPDIR", previousTmuxRoot);
     }
   },
 };
+
+/** The supervisor path needs no mux. Exercise the same public CLI ownership,
+ * overlays, branches, restart, rollback and doctor boundaries with native state. */
+async function runSupervisorRecovery(opts: {
+  readonly ctx: ScenarioContext;
+}): Promise<void> {
+  const { ctx } = opts;
+  const binary =
+    process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY ??
+    resolve(
+      ctx.repoRoot,
+      ".hack-local/target/lifecycle-integration/debug/hack-lifecycle-supervisor"
+    );
+  expect({
+    that: binary.startsWith("/") && (await Bun.file(binary).exists()),
+    message:
+      "supervisor recovery requires a built current-source supervisor executable",
+  });
+  const fakeBin = join(ctx.tempRoot, "fake-supervisor-bin");
+  await writeFakeDocker({ fakeBin });
+  const cliEnv = {
+    PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+    HACK_LIFECYCLE_RUNNER: "supervisor",
+    HACK_LIFECYCLE_SUPERVISOR_BINARY: binary,
+  };
+  const fixture = await createMonorepoFixture({
+    parentDir: ctx.tempRoot,
+    withHackConfig: true,
+    lifecycle: {
+      persistentUpBefore: true,
+      persistentProcess: true,
+      disableInternal: true,
+      persistentUpBeforeCommand:
+        'bun -e \'console.log("supervisor-ready " + process.env.E2E_PLAIN); let n=0; setInterval(() => console.log("supervisor-tick " + ++n), 100)\'',
+    },
+  });
+  const statePath = join(fixture.hackDir, ".internal/lifecycle/state.json");
+  const cli = (
+    args: readonly string[],
+    env: Readonly<Record<string, string>> = cliEnv
+  ) => ctx.cli({ args, cwd: fixture.root, env });
+  const assertOk = (result: Awaited<ReturnType<typeof cli>>, message: string) =>
+    expectExit({ result, codes: [0], message });
+  const readEntry = async (project = fixture.name) =>
+    (await readState({ statePath })).entries.find(
+      (entry) => entry.composeProject === project
+    );
+  const branches = ["feat-supervisor-handoff"];
+  try {
+    assertOk(
+      await cli(["up", "--detach", "--json"]),
+      "supervisor up should start persistent hook and process"
+    );
+    const initial = await readEntry();
+    expect({
+      that:
+        initial?.backend === "supervisor" &&
+        Boolean(initial.ownershipToken) &&
+        initial.processes?.length === 2,
+      message:
+        "supervisor state must persist both ordered commands and ownership",
+    });
+    assertOk(
+      await cli(["up", "--detach", "--json"]),
+      "supervisor repeated up should adopt"
+    );
+    expect({
+      that: (await readEntry())?.ownershipToken === initial?.ownershipToken,
+      message: "supervisor adoption replaced healthy ownership",
+    });
+    const logPath = join(
+      fixture.hackDir,
+      ".internal/lifecycle",
+      `${fixture.name}.log`
+    );
+    await waitForText({ path: logPath, text: "supervisor-ready host-value" });
+    const logs = await cli(["logs", "e2e-tunnel", "--no-follow"]);
+    assertOk(logs, "supervisor logs should read the common private log");
+    expect({
+      that: logs.combined.includes("supervisor-ready host-value"),
+      message: "supervisor output did not reach hack logs",
+      result: logs,
+    });
+    await expectSupervisorLogFollow({
+      ctx,
+      cwd: fixture.root,
+      env: cliEnv,
+      logPath,
+    });
+    await writeEnvOverlay({
+      hackDir: fixture.hackDir,
+      envName: "qa",
+      value: "qa-first",
+    });
+    assertOk(
+      await cli(["up", "--detach", "--json", "--env", "qa"]),
+      "supervisor overlay replacement should succeed"
+    );
+    expect({
+      that: (await readEntry())?.ownershipToken !== initial?.ownershipToken,
+      message: "supervisor overlay change reused old command environment",
+    });
+    await waitForText({ path: logPath, text: "supervisor-ready qa-first" });
+    const branch = branches[0] ?? "feat-supervisor-handoff";
+    assertOk(
+      await cli(["up", "--detach", "--json", "--branch", branch]),
+      "supervisor branch should start"
+    );
+    const branchProject = `${fixture.name}--${branch}`;
+    const branchToken = (await readEntry(branchProject))?.ownershipToken;
+    assertOk(
+      await cli(["restart", "--json"]),
+      "supervisor restart should succeed"
+    );
+    expect({
+      that: (await readEntry(branchProject))?.ownershipToken === branchToken,
+      message: "primary supervisor restart changed branch ownership",
+    });
+    const beforeKill = await readEntry();
+    const owner = beforeKill?.supervisorPid;
+    expect({
+      that: Number.isInteger(owner) && (owner ?? 0) > 1,
+      message: "supervisor owner PID was not recorded",
+    });
+    if (owner && owner > 1) {
+      // This PID is read immediately from the fixture's own current launch receipt.
+      process.kill(owner, "SIGKILL");
+    }
+    await Bun.sleep(150);
+    assertOk(
+      await cli(["down", "--json"]),
+      "down must recover native groups after project supervisor SIGKILL"
+    );
+    expect({
+      that: !(await readEntry()),
+      message: "recovery down retained confirmed-stopped supervisor entry",
+    });
+    assertOk(
+      await cli(["down", "--json", "--branch", branch]),
+      "branch supervisor down should succeed"
+    );
+    const failedUp = await cli(["up", "--detach", "--json"], {
+      ...cliEnv,
+      E2E_DOCKER_FAIL_UP: "1",
+    });
+    expect({
+      that: failedUp.exitCode !== 0 && !failedUp.timedOut,
+      message: "compose failure must propagate under supervisor",
+      result: failedUp,
+    });
+    expect({
+      that: !(await readEntry()),
+      message:
+        "compose failure retained confirmed-stopped supervisor ownership",
+    });
+    assertOk(
+      await cli(["up", "--detach", "--json"]),
+      "supervisor doctor fixture should start"
+    );
+    await ageLifecycleState({ statePath });
+    const doctor = await cli(["doctor"]);
+    expect({
+      that:
+        doctor.combined.includes("owned lifecycle session") &&
+        doctor.combined.includes("hack doctor --fix"),
+      message: "doctor did not classify native ownership-proven orphan",
+      result: doctor,
+    });
+    const fixed = await cli(["doctor", "--fix"]);
+    expect({
+      that: !fixed.timedOut && fixed.combined.includes("lifecycle repair"),
+      message: "doctor fix did not inspect supervisor retirement",
+      result: fixed,
+    });
+    expect({
+      that: !(await readEntry()),
+      message: "doctor repair did not retire native ownership",
+    });
+  } finally {
+    const cleanup = [await cli(["down", "--json"])];
+    for (const branch of branches) {
+      cleanup.push(await cli(["down", "--json", "--branch", branch]));
+    }
+    if (
+      cleanup.some((result) => result.exitCode !== 0 || result.timedOut) ||
+      (await readState({ statePath })).entries.length > 0
+    ) {
+      ctx.retainFixtures(
+        "Supervisor recovery cleanup was not confirmed; retained private ownership evidence."
+      );
+    }
+  }
+}
+
+async function expectSupervisorLogFollow(opts: {
+  readonly ctx: ScenarioContext;
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly logPath: string;
+}): Promise<void> {
+  const previous = Math.max(
+    0,
+    ...[
+      ...(await Bun.file(opts.logPath).text()).matchAll(
+        /supervisor-tick (\d+)/g
+      ),
+    ].map((match) => Number(match[1]))
+  );
+  const follower = Bun.spawn(
+    resolveCliSpawnArgs(["logs", "-f", "e2e-tunnel"]),
+    {
+      cwd: opts.cwd,
+      env: buildCliEnv({ hackHome: opts.ctx.hackHome, extra: opts.env }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const stderr = new Response(follower.stderr).text();
+  const reader = follower.stdout.getReader();
+  let text = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      (async () => {
+        while (
+          ![...text.matchAll(/supervisor-tick (\d+)/g)].some(
+            (match) => Number(match[1]) > previous
+          )
+        ) {
+          const result = await reader.read();
+          if (result.done) {
+            throw new Error("supervisor log follower ended before output");
+          }
+          text = (text + new TextDecoder().decode(result.value)).slice(-4096);
+        }
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("supervisor log follower timed out")),
+          SESSION_WAIT_TIMEOUT_MS
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    follower.kill("SIGINT");
+    await follower.exited;
+    await reader.cancel();
+    await stderr;
+  }
+}
+
+async function waitForText(opts: {
+  readonly path: string;
+  readonly text: string;
+}): Promise<void> {
+  const deadline = Date.now() + SESSION_WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const file = Bun.file(opts.path);
+    if ((await file.exists()) && (await file.text()).includes(opts.text)) {
+      return;
+    }
+    await Bun.sleep(100);
+  }
+  throw new Error(
+    "native lifecycle output did not reach the private log before deadline"
+  );
+}
 
 /**
  * HACK-1797: without a UTF-8 locale tmux rewrote the session listing's tab
@@ -798,6 +1082,7 @@ async function runSignalProbe(opts: {
       hackHome: opts.hackHome,
       extra: {
         PATH: opts.path,
+        TMUX_TMPDIR: process.env.TMUX_TMPDIR ?? "",
         E2E_DOCKER_BLOCK_UP: "1",
       },
     }),
@@ -891,6 +1176,8 @@ async function inspectSessionPresence(opts: {
 type LifecycleState = {
   readonly entries: ReadonlyArray<{
     readonly composeProject: string;
+    readonly backend?: string;
+    readonly supervisorPid?: number;
     readonly ownershipToken?: string;
     readonly processes?: ReadonlyArray<{
       readonly processGroupId?: number;

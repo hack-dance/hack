@@ -22,6 +22,7 @@
 //! leader. Killing that guard separately is an unknown-ownership outcome and
 //! fails closed when a live group remains.
 
+mod incremental;
 mod os;
 mod protocol;
 mod storage;

@@ -24,14 +24,51 @@ const LINE_LIMIT: usize = 64 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Receipt {
+pub(crate) struct Receipt {
     version: u32,
     supervisor_pid: u32,
     outcome: &'static str,
     processes: Vec<State>,
+    live_process_names: Vec<String>,
+    unknown_process_names: Vec<String>,
+}
+
+impl Receipt {
+    pub(crate) fn new(supervisor_pid: u32, outcome: &'static str, processes: Vec<State>) -> Self {
+        let mut live_process_names = Vec::new();
+        let mut unknown_process_names = Vec::new();
+        for state in &processes {
+            match os::observe_state(state) {
+                os::Observation::Live => live_process_names
+                    .push(state.display_name.as_ref().unwrap_or(&state.name).clone()),
+                os::Observation::Unknown => unknown_process_names
+                    .push(state.display_name.as_ref().unwrap_or(&state.name).clone()),
+                os::Observation::Absent => (),
+            }
+        }
+        Self {
+            version: 1,
+            supervisor_pid,
+            outcome,
+            processes,
+            live_process_names,
+            unknown_process_names,
+        }
+    }
 }
 
 pub fn main() -> Result<()> {
+    let result = dispatch();
+    if result.is_err() && !protocol::stdout_started() {
+        let _ = protocol::write(
+            &mut std::io::stdout(),
+            &Receipt::new(0, "refused", Vec::new()),
+        );
+    }
+    result
+}
+
+fn dispatch() -> Result<()> {
     os::close_inherited()?;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() != 1 {
@@ -39,6 +76,8 @@ pub fn main() -> Result<()> {
     }
     match args[0].to_str() {
         Some("run") => run(protocol::read(&mut std::io::stdin())?),
+        Some("serve") => crate::incremental::serve(protocol::read(&mut std::io::stdin())?),
+        Some("add") => crate::incremental::add(protocol::read(&mut std::io::stdin())?),
         Some("guard") => guard(protocol::read(&mut std::io::stdin())?),
         Some("stop") | Some("status") => {
             let request: Control = protocol::read(&mut std::io::stdin())?;
@@ -67,22 +106,20 @@ pub fn main() -> Result<()> {
             };
             protocol::write(
                 &mut std::io::stdout(),
-                &Receipt {
-                    version: 1,
-                    supervisor_pid: 0,
-                    outcome: if result.is_err() {
+                &Receipt::new(
+                    0,
+                    if result.is_err() {
                         "unknown"
                     } else if args[0] == "stop" {
                         "stopped"
                     } else {
                         "observed"
                     },
-                    processes: root
-                        .states()?
+                    root.states()?
                         .into_iter()
                         .filter(|state| state.owner_token == request.owner_token)
                         .collect(),
-                },
+                ),
             )?;
             result
         }
@@ -90,8 +127,15 @@ pub fn main() -> Result<()> {
     }
 }
 
-fn run(request: Launch) -> Result<()> {
+pub(crate) fn validate_launch(request: &Launch) -> Result<()> {
     protocol::validate_control(request.version, &request.root, &request.owner_token)?;
+    if request
+        .log_path
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute() || path.file_name().is_none())
+    {
+        return Err(refused());
+    }
     if request.processes.is_empty() || request.processes.len() > 128 {
         return Err(refused());
     }
@@ -102,6 +146,11 @@ fn run(request: Launch) -> Result<()> {
             return Err(refused());
         }
     }
+    Ok(())
+}
+
+fn run(request: Launch) -> Result<()> {
+    validate_launch(&request)?;
     let root = Root::open(&request.root)?;
     let _instance_lock = root.lock(".instance.lock")?;
     let launch_lock = root.lock_wait(".stop.lock")?;
@@ -121,45 +170,18 @@ fn run(request: Launch) -> Result<()> {
             if os::STOP.load(Ordering::Relaxed) {
                 return Err(refused());
             }
-            let mut command = Command::new(std::env::current_exe()?);
-            command
-                .arg("guard")
-                .env_clear()
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null());
-            // SAFETY: setsid is async-signal-safe, and this closure allocates no
-            // application state. It runs in the freshly forked child only.
-            unsafe {
-                command.pre_exec(os::session);
-            }
-            let child = command.spawn()?;
-            children.push(child);
-            let child = children.last_mut().ok_or_else(refused)?;
-            let plan = GuardLaunch {
-                version: 1,
-                root: request.root.clone(),
-                owner_token: request.owner_token.clone(),
+            let state = start_guard(
+                &request.root,
+                &request.owner_token,
+                request.log_path.as_deref(),
                 process,
-            };
-            protocol::write(&mut child.stdin.take().ok_or_else(refused)?, &plan)?;
-            let state: State = protocol::read(&mut child.stdout.take().ok_or_else(refused)?)?;
-            if state.guard_pid != child.id() as i32 || state.owner_token != request.owner_token {
-                return Err(refused());
-            }
-            if state.phase == "failed-start" {
-                return Err(refused());
-            }
+                &mut children,
+            )?;
             states.push(state);
         }
         protocol::write(
             &mut std::io::stdout(),
-            &Receipt {
-                version: 1,
-                supervisor_pid: std::process::id(),
-                outcome: "ready",
-                processes: states,
-            },
+            &Receipt::new(std::process::id(), "ready", states),
         )?;
         drop(launch_lock);
         detach_stdio()?;
@@ -193,7 +215,48 @@ fn run(request: Launch) -> Result<()> {
     outcome
 }
 
-fn rollback(children: &mut [Child]) {
+pub(crate) fn start_guard(
+    root: &std::path::Path,
+    owner_token: &str,
+    log_path: Option<&std::path::Path>,
+    process: protocol::Process,
+    children: &mut Vec<Child>,
+) -> Result<State> {
+    if os::STOP.load(Ordering::Relaxed) {
+        return Err(refused());
+    }
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("guard")
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // SAFETY: setsid only uses async-signal-safe operations in the fresh child.
+    unsafe {
+        command.pre_exec(os::session);
+    }
+    children.push(command.spawn()?);
+    let child = children.last_mut().ok_or_else(refused)?;
+    let plan = GuardLaunch {
+        version: 1,
+        root: root.into(),
+        owner_token: owner_token.into(),
+        process,
+        log_path: log_path.map(std::path::Path::to_path_buf),
+    };
+    protocol::write(&mut child.stdin.take().ok_or_else(refused)?, &plan)?;
+    let state: State = protocol::read(&mut child.stdout.take().ok_or_else(refused)?)?;
+    if state.guard_pid != child.id() as i32
+        || state.owner_token != owner_token
+        || state.phase == "failed-start"
+    {
+        return Err(refused());
+    }
+    Ok(state)
+}
+
+pub(crate) fn rollback(children: &mut [Child]) {
     for child in children.iter_mut() {
         if child.try_wait().ok().flatten().is_some() {
             continue;
@@ -239,6 +302,7 @@ fn guard(request: GuardLaunch) -> Result<()> {
     let mut state = State {
         version: 1,
         name: request.process.name.clone(),
+        display_name: request.process.display_name.clone(),
         owner_token: request.owner_token,
         guard_pid: pid,
         process_group_id: pid,
@@ -250,10 +314,25 @@ fn guard(request: GuardLaunch) -> Result<()> {
         exit_code: None,
         signal: None,
     };
-    let mut log = root.file(
-        "lifecycle.log",
-        libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
-    )?;
+    let mut log = if let Some(path) = request.log_path {
+        if !path.is_absolute() {
+            return Err(refused());
+        }
+        let parent = Root::open(path.parent().ok_or_else(refused)?)?;
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or_else(refused)?;
+        if name == "." || name == ".." || name.contains('/') {
+            return Err(refused());
+        }
+        parent.file(name, libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT)?
+    } else {
+        root.file(
+            "lifecycle.log",
+            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
+        )?
+    };
     root.save(&state)?;
     let outcome = guard_command(&request.process, &root, &mut state, &mut log);
     if outcome.is_err() && state.command_pid.is_some() {
@@ -279,6 +358,7 @@ fn guard_command(
     state: &mut State,
     log: &mut File,
 ) -> Result<()> {
+    let log_name = sanitize_service(state.display_name.as_deref().unwrap_or(&state.name));
     let mut command = Command::new(&process.argv[0]);
     command
         .args(&process.argv[1..])
@@ -318,8 +398,8 @@ fn guard_command(
     let mut drained_after_exit = None;
     loop {
         // Alternate bounded reads so stdout bursts cannot starve stderr/stop.
-        out.drain(&mut stdout, log, &state.name, "stdout")?;
-        err.drain(&mut stderr, log, &state.name, "stderr")?;
+        out.drain(&mut stdout, log, &log_name, "stdout")?;
+        err.drain(&mut stderr, log, &log_name, "stderr")?;
         if !direct_exited && let Some(status) = child.try_wait()? {
             direct_exited = true;
             state.exit_code = status.code();
@@ -348,10 +428,10 @@ fn guard_command(
             // inherit a pipe on Darwin. Drain a bounded final interval instead.
             if since.elapsed() >= Duration::from_millis(100) {
                 if !out.pending.is_empty() {
-                    out.flush(log, &state.name, "stdout", true)?;
+                    out.flush(log, &log_name, "stdout", true)?;
                 }
                 if !err.pending.is_empty() {
-                    err.flush(log, &state.name, "stderr", true)?;
+                    err.flush(log, &log_name, "stderr", true)?;
                 }
                 state.phase = if killed { "killed" } else { "exited" }.into();
                 root.save(state)?;
@@ -377,18 +457,29 @@ fn stop(states: &[State]) -> Result<()> {
         if !os::recorded_live(state, false)? {
             continue;
         }
-        let identity = os::inspect(state.guard_pid)?.ok_or_else(refused)?;
-        os::same(state, &identity)?;
+        let verified = os::inspect(state.guard_pid)?
+            .ok_or_else(refused)
+            .and_then(|identity| os::same(state, &identity));
+        if let Err(error) = verified {
+            if os::recorded_live(state, false)? {
+                return Err(error);
+            }
+            continue;
+        }
         active.push(state.clone());
     }
+    let mut first_error = None;
     for state in &active {
         if let Err(error) = os::signal_guard(state) {
             // Natural exit can race between admission and pidfd delivery.
             // Only a new kernel absence proof turns that race into success.
             if os::recorded_live(state, false)? {
-                return Err(error);
+                first_error.get_or_insert(error);
             }
         }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     let deadline = Instant::now() + GRACE + Duration::from_secs(2);
     while Instant::now() < deadline {
@@ -406,7 +497,7 @@ fn stop(states: &[State]) -> Result<()> {
     Err(refused())
 }
 
-fn detach_stdio() -> Result<()> {
+pub(crate) fn detach_stdio() -> Result<()> {
     let null = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -505,9 +596,21 @@ fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
     0
 }
 
+fn sanitize_service(name: &str) -> String {
+    let compact = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut units = 0;
+    compact
+        .chars()
+        .take_while(|ch| {
+            units += ch.len_utf16();
+            units <= 96
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::incomplete_utf8_tail;
+    use super::{incomplete_utf8_tail, sanitize_service};
 
     #[test]
     fn chunk_boundary_retains_only_incomplete_codepoints() {
@@ -519,5 +622,8 @@ mod tests {
             }
         }
         assert_eq!(incomplete_utf8_tail(b"abc\xff"), 0);
+        assert_eq!(sanitize_service("  API\t/\nworker  "), "API / worker");
+        assert_eq!(sanitize_service(&"x".repeat(120)).len(), 96);
+        assert_eq!(sanitize_service(&format!("{}🦀", "x".repeat(95))).len(), 95);
     }
 }

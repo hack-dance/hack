@@ -10,6 +10,11 @@ use std::{
 
 pub const LIMIT: usize = 1024 * 1024;
 pub const DEADLINE: Duration = Duration::from_secs(10);
+static STDOUT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn stdout_started() -> bool {
+    STDOUT_STARTED.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -18,6 +23,8 @@ pub struct Launch {
     pub root: PathBuf,
     pub owner_token: String,
     pub processes: Vec<Process>,
+    #[serde(default)]
+    pub log_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -27,6 +34,12 @@ pub struct Process {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub env: BTreeMap<String, String>,
+    #[serde(
+        rename = "displayName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_name: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -44,6 +57,8 @@ pub struct GuardLaunch {
     pub root: PathBuf,
     pub owner_token: String,
     pub process: Process,
+    #[serde(default)]
+    pub log_path: Option<PathBuf>,
 }
 
 pub fn valid_name(name: &str) -> bool {
@@ -71,6 +86,13 @@ pub fn validate_control(version: u32, root: &std::path::Path, token: &str) -> Re
 
 impl Process {
     pub fn validate(&self) -> Result<()> {
+        if self
+            .display_name
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty() || name.len() > 4096 || name.contains('\0'))
+        {
+            return Err(refused());
+        }
         if !valid_name(&self.name)
             || !self.cwd.is_absolute()
             || self.argv.is_empty()
@@ -166,6 +188,9 @@ pub fn write(output: &mut (impl Write + AsRawFd), value: &impl Serialize) -> Res
         return Err(refused());
     }
     let fd = output.as_raw_fd();
+    if fd == libc::STDOUT_FILENO {
+        STDOUT_STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // SAFETY: fcntl borrows this live, exclusively used protocol descriptor.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {

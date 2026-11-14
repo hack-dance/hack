@@ -663,6 +663,13 @@ export function renderProjectConfigSchemaJson(): string {
         type: "object",
         additionalProperties: false,
         properties: {
+          runner: {
+            type: "string",
+            enum: ["mux", "supervisor"],
+            default: "mux",
+            description:
+              "Runner for persistent host lifecycle processes. Interactive workspaces still use sessions.mux.",
+          },
           up: {
             type: "object",
             additionalProperties: false,

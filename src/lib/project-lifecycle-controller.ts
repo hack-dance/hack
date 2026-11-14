@@ -24,6 +24,10 @@ import {
   resolveLifecycleLogPath,
   upsertLifecycleStateEntry,
 } from "./lifecycle-runtime.ts";
+import {
+  stopLifecycleSupervisor,
+  withLifecycleSupervisorControllerLock,
+} from "./lifecycle-supervisor.ts";
 import { readProcessIdentities } from "./process-tree.ts";
 import {
   type ProjectLifecycleCommand,
@@ -49,6 +53,7 @@ import {
   inspectListeningTcpPorts,
   resolveLifecycleSingletonDecision,
 } from "./project-lifecycle-singleton.ts";
+import { createSupervisorLifecycleController } from "./project-lifecycle-supervisor.ts";
 import type { SharedHelperSessionOwnership } from "./project-shared-helpers.ts";
 import { exec } from "./shell.ts";
 export type LifecycleControllerProject = {
@@ -143,6 +148,16 @@ async function reconcileChangedLifecycleBackend(opts: {
   if (!opts.entry || opts.entry.backend === opts.resolvedBackend) {
     return opts.entry;
   }
+  if (opts.entry.backend === "supervisor") {
+    await stopLifecycleProcessController({
+      project: { projectRoot: opts.projectRoot, projectDir: opts.projectDir },
+      projectName: opts.entry.projectName,
+      branch: opts.entry.branch,
+      composeProject: opts.composeProject,
+      definitionHash: opts.definitionHash,
+    });
+    return null;
+  }
   const previousBackend = opts.mux.backends.get(opts.entry.backend);
   if (!previousBackend?.available) {
     throw new Error(
@@ -225,6 +240,7 @@ function describeSessionCreateFailure(opts: {
 
 /** The shared Hack mux owner. Callers supply selection; this owner retains session/token checks. */
 export function createLifecycleProcessController(opts: {
+  readonly runner?: "mux" | "supervisor";
   readonly mux: () => Promise<ResolvedMux>;
   readonly project: LifecycleControllerProject;
   readonly projectName: string;
@@ -278,6 +294,16 @@ export function createLifecycleProcessController(opts: {
   getOperationCleanup: () => LifecycleOperationCleanup | null;
   getSignalCleanup: () => { readonly dispose: () => void } | null;
 } {
+  if (opts.runner === "supervisor") {
+    return createSupervisorLifecycleController({
+      ...opts,
+      stopExisting: () =>
+        stopLifecycleProcessController({
+          ...opts,
+          supervisorControllerLocked: true,
+        }),
+    });
+  }
   const sessionName = resolveLifecycleSessionName({
     projectName: opts.projectName,
     branch: opts.branch,
@@ -902,7 +928,7 @@ export class LifecycleSessionDisplacedError extends Error {
   }
 }
 
-async function resolveLifecycleSingletonDecisionForProcess(opts: {
+export async function resolveLifecycleSingletonDecisionForProcess(opts: {
   readonly process: ProjectLifecycleProcess;
   readonly projectDir: string;
   readonly composeProject: string;
@@ -1099,6 +1125,8 @@ async function startLifecycleProcess(opts: {
 }
 
 export async function stopLifecycleProcessController(opts: {
+  /** Internal: the caller already serializes this supervisor transition. */
+  readonly supervisorControllerLocked?: boolean;
   readonly project: LifecycleControllerProject;
   readonly definitionHash: string;
   readonly projectName: string;
@@ -1124,6 +1152,10 @@ export async function stopLifecycleProcessController(opts: {
       (entry) => entry.composeProject === opts.composeProject
     ) ?? null;
 
+  if (lifecycleEntry?.backend === "supervisor") {
+    await stopSupervisorEntry(opts, lifecycleEntry);
+    return;
+  }
   const backend = lifecycleEntry
     ? (opts.mux ? (await opts.mux()).backends : getMuxBackends()).get(
         lifecycleEntry.backend
@@ -1204,6 +1236,40 @@ export async function stopLifecycleProcessController(opts: {
       composeProject: opts.composeProject,
     });
   }
+}
+
+async function stopSupervisorEntry(
+  opts: Parameters<typeof stopLifecycleProcessController>[0],
+  lifecycleEntry: LifecycleStateEntry
+): Promise<void> {
+  if (!opts.supervisorControllerLocked) {
+    return await withLifecycleSupervisorControllerLock({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+      run: () =>
+        stopLifecycleProcessController({
+          ...opts,
+          supervisorControllerLocked: true,
+        }),
+    });
+  }
+  if (!lifecycleEntry.ownershipToken) {
+    throw new Error(
+      "Lifecycle supervisor ownership is missing; cleanup was refused."
+    );
+  }
+  await opts.assertFresh?.();
+  await stopLifecycleSupervisor({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProject,
+    ownershipToken: lifecycleEntry.ownershipToken,
+  });
+  await opts.assertFresh?.();
+  await removeLifecycleStateEntryIfOwned({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProject,
+    ownershipToken: lifecycleEntry.ownershipToken,
+  });
 }
 
 /** Missing mux state grants no authority to kill a possibly reused group ID. */

@@ -1,9 +1,11 @@
-# Lifecycle supervisor: standalone contract
+# Lifecycle supervisor contract
 
-This first slice builds a standalone Rust supervisor with a fake caller. It does
-not change `hack up`, configuration, or the default runner. CLI integration follows
-lifecycle retirement changes; packaging is a separate change. The current default
-continues to use the lifecycle mux session described in [lifecycle](./lifecycle.md).
+The built-in Rust supervisor is an experimental opt-in for host lifecycle
+processes. `lifecycle.runner: "supervisor"` selects it; omission keeps the mux
+runner described in [lifecycle](./lifecycle.md). Its standalone process contracts
+and CLI integration are tested separately. Distribution packaging is a separate
+change: opt-in requires a matching supervisor executable alongside Hack or an
+explicit test executable path.
 
 ## Artifact choice
 
@@ -19,7 +21,7 @@ The supported build targets are `aarch64-apple-darwin`, `x86_64-apple-darwin`, a
 
 ## Protocol and private state
 
-The binary accepts `run`, `stop`, and `status`. Input and output are one four-byte
+The binary accepts `run`, `serve`, `add`, `stop`, and `status`. Input and output are one four-byte
 big-endian length followed by that many JSON bytes. Frames are bounded to 1 MiB;
 each frame read or write has one 10-second deadline. A complete frame, rather than descriptor close,
 commits delivery. Environment values travel only in the input frame and process
@@ -33,6 +35,11 @@ absolute `cwd`, and `env`. Names are safe file identifiers and must also be uniq
 without regard to ASCII case, including on case-sensitive filesystems. Commands execute argv
 directly. A shell-authored command can explicitly use `sh -c`; the supervisor adds
 no shell wrapper. The full environment is explicit, with no ambient inheritance.
+An optional `displayName` retains the user's service label while `name` stays a
+safe native file key. CLI callers use stable hashed keys so labels containing
+spaces or separators cannot change the native directory layout. Optional
+`logPath` selects the existing private lifecycle log; its parent and file must
+pass the same owner, mode and no-alias checks as the native root.
 
 `stop` and `status` accept `{version: 1, root, ownerToken}`. Read-only `status`
 returns persisted receipts; a receipt is not a health check. It creates no files,
@@ -50,8 +57,9 @@ Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
 the supervisor calls `setsid` itself. A caller using `detached: true` or
 `setpgid(0, 0)` is refused before authored code starts.
 
-The root contains per-command state and lock files, an instance lock and
-`lifecycle.log`. Directories are mode 0700; files are mode 0600. Symlinks,
+The root contains per-command state and lock files, an instance lock and,
+for incremental launches, `control.sock`. The default log is `lifecycle.log`.
+Directories are mode 0700; files and the control socket are mode 0600. Symlinks,
 hard-linked files, foreign owners and broad permissions are refused. State contains
 name, ownership token, guard PID, process group, OS start identity, boot identity,
 UID, command PID when known, phase, and the direct command's exit code or signal
@@ -138,7 +146,7 @@ Neither feature is part of this unit; interactive workspaces keep tmux by defaul
 
 ## Delivery gates
 
-The CLI opt-in is planned as `lifecycle.runner = "mux" | "supervisor"`, default
+The CLI opt-in is `lifecycle.runner = "mux" | "supervisor"`, default
 `mux`, plus a test environment override. Both runners must pass existing lifecycle
 unit and e2e scenarios before that integration is ready. Packaging must include the
 binary wherever the Compose CLI installs: stable archives, prerelease bundles,
@@ -167,3 +175,53 @@ Default migration removes the Python/FIFO wrapper in
 POSIX `sh -c` intentionally. Interactive tmux environment delivery stays separate.
 Zellij removal, its breaking-change notice, and the workspace-only `MuxBackend`
 contract belong to the third unit.
+
+## Opt-in CLI integration
+
+![Launch receipt and adoption state model](./diagrams/lifecycle-controller.svg)
+
+The [controller model coverage](../tests/models/tla/lifecycle-controller/COVERAGE.md)
+maps the finite ownership model to implementation tests, separately from the
+physical-process model above.
+
+The integration slice adds `lifecycle.runner: "supervisor"`; omission remains
+`"mux"`. `HACK_LIFECYCLE_RUNNER=mux|supervisor` overrides the project setting for
+verification. Invalid values fail before hooks or runtime effects. The executable
+must be installed beside Hack, or selected by an absolute
+`HACK_LIFECYCLE_SUPERVISOR_BINARY` test path. An unavailable executable is a refusal,
+not a fallback to another runner. Packaging remains a separate delivery gate.
+
+Persistent before hooks start immediately, in their configured order between
+blocking hooks. The native `serve` operation starts the first command and listens
+on a private Unix socket. Finite `add` clients forward later framed launch requests
+to that same project owner. Environment stays in the frame and process memory.
+The socket uses a relative address under an opened private directory, avoiding
+macOS pathname-length limits. Every handoff has an explicit deadline.
+
+The common lifecycle state records the native owner token and command identities;
+logs remain at the existing per-instance log path, so `hack logs -f <name>` watches
+them. Processes do not appear in tmux. Interactive `hack session` behavior is
+unchanged. Stop uses the persisted backend even if configuration changes later.
+Both runners use a five-second TERM grace, KILL escalation, and a bounded
+confirmation window; zombies do not count as running. Unknown outcomes keep
+ownership and shared helper holders for another `hack down` attempt.
+
+A healthy matching definition can be adopted. A definition whose recorded command
+has exited is replaced as a whole, including live siblings, matching the mux
+controller's healthy-window requirement. Adoption records a new cleanup generation
+without changing the native token, so an earlier start's rollback cannot stop
+adopted work. CLI publication and native effects share an instance lock; the common
+state file has a separate project-wide writer lock and atomic private publication.
+
+A failed incremental handoff is reconciled with native status. If the requested
+command became live after the reply was lost, its verified receipt is published
+and the failure remains explicit. It is never launched a second time. A new owner
+is retried only after native status proves the earlier commands absent. A missing
+native root with no possible state is absent; unreadable, malformed or unverifiable
+state remains unknown. Native status reports live and unknown names using kernel
+identity, not a persisted `running` string. Doctor and host status use those fields;
+missing tools and unknown identities cannot authorize repair or state removal.
+
+Sending TERM to the project owner invokes its owned rollback path; this is not a
+finite protocol request and has no response frame. Use the finite `stop` operation
+when a confirmation receipt is needed. Logs currently have no automatic rotation.

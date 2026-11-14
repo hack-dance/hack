@@ -11,6 +11,7 @@ import {
   type LifecycleStateEntry,
   readLifecycleState,
 } from "../lib/lifecycle-runtime.ts";
+import { inspectLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import { resolvePersistedLifecycleProcessGroupIds } from "../lib/project-lifecycle-processes.ts";
 import { inspectLifecycleSession } from "../lib/project-lifecycle-sessions.ts";
 import {
@@ -112,7 +113,12 @@ async function readLifecycleObservations({
   for (const [projectDir, projectRoot] of directories) {
     for (const entry of await readLifecycleState({ projectDir })) {
       lifecycle.push(
-        await observeLifecycleEntry({ entry, projectRoot, snapshot })
+        await observeLifecycleEntry({
+          entry,
+          projectDir,
+          projectRoot,
+          snapshot,
+        })
       );
     }
   }
@@ -120,13 +126,22 @@ async function readLifecycleObservations({
 }
 async function observeLifecycleEntry({
   entry,
+  projectDir,
   projectRoot,
   snapshot,
 }: {
   readonly entry: LifecycleStateEntry;
+  readonly projectDir: string;
   readonly projectRoot: string;
   readonly snapshot: readonly ObservedProcess[] | null;
 }): Promise<Record<string, unknown>> {
+  if (entry.backend === "supervisor") {
+    return await observeSupervisorLifecycleEntry({
+      entry,
+      projectDir,
+      projectRoot,
+    });
+  }
   const backends = getMuxBackends();
   const backend = backends.get(entry.backend);
   const inspection = backend
@@ -175,6 +190,62 @@ async function observeLifecycleEntry({
       : null,
     attention: lifecycleAttention(inspection?.classification),
   };
+}
+
+/** Read native session ownership without interpreting it as a mux session. */
+export async function observeSupervisorLifecycleEntry(opts: {
+  readonly entry: LifecycleStateEntry;
+  readonly projectDir: string;
+  readonly projectRoot: string;
+  readonly inspect?: typeof inspectLifecycleSupervisor;
+}): Promise<Record<string, unknown>> {
+  const base = {
+    project: opts.entry.projectName,
+    projectRoot: opts.projectRoot,
+    branch: opts.entry.branch,
+    session: opts.entry.sessionName,
+    backend: "supervisor",
+    lifetime: "persistent",
+    definitionSource: "persisted",
+    // The generic host snapshot does not include session IDs, so it cannot
+    // qualify every group or descendant after a command changes groups.
+    processGroupIds: [],
+    observedPids: [],
+    liveCpuTimeMs: null,
+    liveRssBytes: null,
+    elapsedMs: null,
+  };
+  if (!opts.entry.ownershipToken) {
+    return { ...base, ownership: "unknown", attention: "ownership_unverified" };
+  }
+  try {
+    const receipt = await (opts.inspect ?? inspectLifecycleSupervisor)({
+      projectDir: opts.projectDir,
+      composeProject: opts.entry.composeProject,
+      ownershipToken: opts.entry.ownershipToken,
+    });
+    if (
+      receipt.outcome !== "observed" ||
+      receipt.unknownProcessNames.length > 0
+    ) {
+      return {
+        ...base,
+        ownership: "unknown",
+        attention: "ownership_unverified",
+      };
+    }
+    const live = new Set(receipt.liveProcessNames);
+    return {
+      ...base,
+      ownership: live.size > 0 ? "owned-healthy" : "absent",
+      sessionIds: receipt.processes
+        .filter((process) => live.has(process.name))
+        .map((process) => process.processGroupId),
+      attention: live.size > 0 ? null : "session_absent_review_state",
+    };
+  } catch {
+    return { ...base, ownership: "unknown", attention: "ownership_unverified" };
+  }
 }
 
 function lifecycleAttention(classification: string | undefined): string | null {

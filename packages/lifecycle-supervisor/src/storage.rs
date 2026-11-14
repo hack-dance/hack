@@ -15,6 +15,8 @@ use std::{
 pub struct State {
     pub version: u32,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub owner_token: String,
     pub guard_pid: i32,
     pub process_group_id: i32,
@@ -37,6 +39,15 @@ pub struct Root {
 }
 
 impl Root {
+    /// Fresh internal binaries may use a descriptor-relative cwd to keep Unix
+    /// socket addresses below Darwin's 104-byte limit. Caller cwd is untouched.
+    pub fn enter(&self) -> Result<()> {
+        // SAFETY: the owned descriptor refers to the admitted private directory.
+        if unsafe { libc::fchdir(self.directory.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let directory = OpenOptions::new()
             .read(true)
@@ -120,6 +131,12 @@ impl Root {
     }
 
     pub fn save(&self, state: &State) -> Result<()> {
+        let bytes = serde_json::to_vec(state).map_err(|_| refused())?;
+        // Match the bounded read contract before publishing or spawning. Human
+        // labels can expand when JSON escapes control characters.
+        if bytes.len() > 8192 {
+            return Err(refused());
+        }
         let final_name = format!("{}.json", state.name);
         // Refuse unsafe pre-existing targets before atomically replacing an owned
         // regular receipt. Never truncate through a link.
@@ -151,7 +168,6 @@ impl Root {
                 Err(error) => return Err(error),
             }
         };
-        let bytes = serde_json::to_vec(state).map_err(|_| refused())?;
         temporary.write_all(&bytes)?;
         temporary.sync_all()?;
         let temporary_name = std::ffi::CString::new(temporary_name).map_err(|_| refused())?;

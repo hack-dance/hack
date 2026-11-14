@@ -101,10 +101,16 @@ pub fn census() -> Result<Vec<Identity>> {
     let mut result = Vec::new();
     for entry in fs::read_dir("/proc")? {
         let entry = entry?;
-        if let Some(pid) = entry.file_name().to_str().and_then(|v| v.parse().ok())
-            && let Some(identity) = inspect(pid)?
-        {
-            result.push(identity);
+        if let Some(pid) = entry.file_name().to_str().and_then(|v| v.parse().ok()) {
+            match inspect(pid) {
+                Ok(Some(identity)) => result.push(identity),
+                Ok(None) => (),
+                // Authored commands retain this user's UID. Linux hidepid and
+                // unrelated protected processes must not abort their census.
+                Err(error)
+                    if matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES)) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(result)
@@ -271,6 +277,41 @@ pub fn recorded_live(state: &crate::storage::State, excluding_guard: bool) -> Re
     live_group(state.guard_pid, excluding_guard.then_some(state.guard_pid))
 }
 
+pub enum Observation {
+    Absent,
+    Live,
+    Unknown,
+}
+
+/// Health observation is stricter than a persisted running phase. A lost guard
+/// with remaining session members is unknown, never healthy or absent.
+pub fn observe_state(state: &crate::storage::State) -> Observation {
+    let observed = (|| -> Result<Observation> {
+        if state.boot_id != boot()? {
+            return Ok(Observation::Absent);
+        }
+        let leader = inspect(state.guard_pid)?;
+        if let Some(identity) = &leader
+            && (identity.start != state.guard_start_time
+                || identity.uid != state.uid
+                || identity.session != state.guard_pid)
+        {
+            return Ok(Observation::Absent);
+        }
+        if !live_group(state.guard_pid, Some(state.guard_pid))? {
+            return Ok(Observation::Absent);
+        }
+        Ok(
+            if leader.is_some_and(|p| !p.zombie && p.group == state.guard_pid) {
+                Observation::Live
+            } else {
+                Observation::Unknown
+            },
+        )
+    })();
+    observed.unwrap_or(Observation::Unknown)
+}
+
 /// The guard is never a member of an authored process group. It retains the
 /// command lock while KILL is confirmed, including uninterruptible processes.
 pub fn session_signal(session: i32, signal: i32) -> Result<()> {
@@ -283,13 +324,18 @@ pub fn session_signal(session: i32, signal: i32) -> Result<()> {
         .filter(|p| p.group != session)
         .map(|p| p.group)
         .collect();
+    let mut first_error = None;
     for member in members.iter().filter(|p| p.group == session) {
-        signal_member(member, signal)?;
+        if let Err(error) = signal_member(member, signal) {
+            first_error.get_or_insert(error);
+        }
     }
     for group in groups {
-        group_signal(group, signal)?;
+        if let Err(error) = group_signal(group, signal) {
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn signal_member(expected: &Identity, signal: i32) -> Result<()> {

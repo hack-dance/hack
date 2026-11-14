@@ -529,7 +529,8 @@ hack logs [service] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--compose` | Read logs directly from docker compose (bypass Loki) |
 | `--loki` | Force Loki backend (do not fall back to docker compose logs) |
-| `--services <csv>` | Filter Loki logs by service(s), comma-separated (e.g. api,www) |
+| `--services <csv>` | Only these services, comma-separated (e.g. api,www); merged with the service argument |
+| `--max-line-bytes <n>` | With --json, keep at most n UTF-8 bytes of each line and mark it truncated |
 | `--query <logql>` | Raw LogQL selector/query (overrides auto selector built from project + services) |
 | `--since <time>` | Start time for Loki or native followed logs (RFC3339 or duration like 15m) |
 | `--until <time>` | End time for Loki logs (RFC3339 or duration like 15m) |

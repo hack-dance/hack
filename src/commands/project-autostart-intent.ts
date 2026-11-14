@@ -30,10 +30,137 @@ import {
 import { discoverProjectInputs } from "../lib/project-input-selection.ts";
 import { normalizeProjectName } from "../lib/project-name.ts";
 import {
+  type ProjectsRegistry,
   type RegisteredProject,
   readProjectsRegistry,
+  selectRegisteredProjectByName,
   setProjectAutostartPaused,
 } from "../lib/projects-registry.ts";
+
+import { readRuntimeProjects } from "../lib/runtime-projects.ts";
+import {
+  type DownSafetyNotice,
+  reconcileImplicitDownBranch,
+} from "./project-down-safety.ts";
+
+export interface AutostartDownTarget {
+  readonly branch: string | null;
+}
+interface AutostartCommandSelection {
+  readonly cwd: string;
+  readonly path?: string;
+  readonly project?: string;
+  readonly branch?: string;
+}
+
+/** Resolve once before pause, locking and shutdown; an owned base target is explicit null. */
+export async function resolveFinalAutostartDownTarget(
+  opts: AutostartCommandSelection & {
+    readonly writeNotice?: (notice: DownSafetyNotice) => void;
+  },
+  deps?: {
+    readonly readProjectsRegistry?: typeof readProjectsRegistry;
+    readonly readRuntimeProjects?: typeof readRuntimeProjects;
+    readonly isLocalTarget?: (project: ProjectContext) => Promise<boolean>;
+  }
+): Promise<AutostartDownTarget | undefined> {
+  const registry = await (deps?.readProjectsRegistry ?? readProjectsRegistry)();
+  const context = await discoverAutostartCommandContext({ ...opts, registry });
+  if (!context) {
+    return undefined;
+  }
+  const { project } = context;
+  const cfg = await readProjectConfig(project);
+  const raw = opts.branch?.trim();
+  const explicitBranch = raw ? sanitizeBranchSlug(raw) || "branch" : null;
+  const effective = await resolveEffectiveBranch({
+    explicitBranch,
+    projectRoot: project.projectRoot,
+    autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
+  });
+  if (effective.source === "detached-worktree") {
+    throw new CliUsageError(
+      "Detached linked worktree requires an explicit --branch."
+    );
+  }
+  if (explicitBranch !== null || effective.branch === null) {
+    return { branch: effective.branch };
+  }
+  if (deps?.isLocalTarget && !(await deps.isLocalTarget(project))) {
+    return undefined;
+  }
+  if (effective.source === "worktree" && effective.branch) {
+    opts.writeNotice?.({
+      level: "info",
+      message: `Linked worktree detected → using branch instance "${effective.branch}" (override with --branch <name>, disable with worktree.auto_branch=false)`,
+    });
+  }
+  const runtime = await (deps?.readRuntimeProjects ?? readRuntimeProjects)({
+    includeGlobal: false,
+  });
+  if (!runtime.ok) {
+    throw new HackCliError({
+      code: "E_DOCKER_UNAVAILABLE",
+      message: `Cannot inspect runtime ownership before down: ${runtime.error}`,
+    });
+  }
+  return {
+    branch: reconcileImplicitDownBranch({
+      baseProjectName: await resolveComposeProjectName({ project, cfg }),
+      branch: effective.branch,
+      projectDir: project.projectDir,
+      runtime: runtime.runtime,
+      writeNotice: opts.writeNotice ?? (() => undefined),
+    }),
+  };
+}
+
+/** Shared legacy discovery never crosses native inputs or guesses a duplicate named registration. */
+async function discoverAutostartCommandContext(
+  opts: AutostartCommandSelection & { readonly registry: ProjectsRegistry }
+): Promise<
+  | {
+      readonly project: ProjectContext;
+      readonly registration: RegisteredProject | undefined;
+    }
+  | undefined
+> {
+  const requested = resolve(opts.cwd, opts.path ?? ".");
+  const cwd = await realpath(requested).catch(() => requested);
+  const selected =
+    opts.project === undefined
+      ? undefined
+      : parseProjectSelectorOption({ projectOpt: opts.project });
+  const registration = selected
+    ? (selectRegisteredProjectByName({
+        projects: opts.registry.projects,
+        name: selected.name,
+      }) ?? undefined)
+    : opts.registry.projects
+        .filter((entry) =>
+          [
+            entry.repoRoot,
+            ...(entry.worktrees?.map((tree) => tree.path) ?? []),
+          ].some((root) => cwd === root || cwd.startsWith(`${root}/`))
+        )
+        .sort((a, b) => b.repoRoot.length - a.repoRoot.length)[0];
+  if (selected && !registration) {
+    return undefined;
+  }
+  const inputs = await discoverProjectInputs({
+    startDir: selected && registration ? registration.repoRoot : cwd,
+  });
+  if (!inputs || inputs.kind !== "legacy") {
+    return undefined;
+  }
+  const project = await findProjectContextAtRoot({
+    projectRoot: inputs.projectRoot,
+    projectDirName: inputs.composeDirectories.includes(".hack")
+      ? ".hack"
+      : ".dev",
+  });
+  return project ? { project, registration } : undefined;
+}
 
 /** Login must never continue with a legacy environment requiring migration. */
 export async function assertAutostartEnvironment(opts: {
@@ -133,6 +260,7 @@ export async function updateNativeAutostartIntent(opts: {
 /** Resolve the same registered instance for command serialization without native legacy discovery. */
 export async function withAutostartCommandLock<T>(opts: {
   readonly action: "up" | "down";
+  readonly resolvedDownTarget?: AutostartDownTarget;
   readonly cwd: string;
   readonly path?: string;
   readonly project?: string;
@@ -149,47 +277,19 @@ export async function withAutostartCommandLock<T>(opts: {
   const registry = await readProjectsRegistry(
     login ? { requireAutostartTrust: true } : undefined
   );
-  const requested = resolve(opts.cwd, opts.path ?? ".");
-  const cwd = await realpath(requested).catch(() => requested);
-  const selected =
-    opts.project === undefined
-      ? undefined
-      : parseProjectSelectorOption({ projectOpt: opts.project });
-  const registrations = registry.projects
-    .filter((project) =>
-      selected
-        ? normalizeProjectName(project.name) === selected.name
-        : [
-            project.repoRoot,
-            ...(project.worktrees?.map((tree) => tree.path) ?? []),
-          ].some((root) => cwd === root || cwd.startsWith(`${root}/`))
-    )
-    .sort((a, b) => b.repoRoot.length - a.repoRoot.length);
-  const registration = registrations[0];
-  if (selected && !registration) {
+  const context = await discoverAutostartCommandContext({ ...opts, registry });
+  if (!context) {
     return await opts.run();
   }
-  const inputs = await discoverProjectInputs({
-    startDir: selected && registration ? registration.repoRoot : cwd,
-  });
-  if (!inputs || inputs.kind !== "legacy") {
-    return await opts.run();
-  }
-  const project = await findProjectContextAtRoot({
-    projectRoot: inputs.projectRoot,
-    projectDirName: inputs.composeDirectories.includes(".hack")
-      ? ".hack"
-      : ".dev",
-  });
-  if (!project) {
-    return await opts.run();
-  }
+  const { project, registration } = context;
   const cfg = await readProjectConfig(project);
-  const effective = await resolveEffectiveBranch({
-    explicitBranch: branch,
-    projectRoot: project.projectRoot,
-    autoBranchEnabled: login ? false : resolveWorktreeAutoBranch(cfg),
-  });
+  const effective =
+    opts.resolvedDownTarget ??
+    (await resolveEffectiveBranch({
+      explicitBranch: branch,
+      projectRoot: project.projectRoot,
+      autoBranchEnabled: login ? false : resolveWorktreeAutoBranch(cfg),
+    }));
   const projectId = login
     ? process.env.HACK_AUTOSTART_PROJECT_ID
     : registration?.id;

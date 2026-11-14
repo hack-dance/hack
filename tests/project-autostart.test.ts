@@ -1063,6 +1063,82 @@ test("ordinary legacy republication records review provenance before later named
   expect((await read("beta"))?.autostartRequiresReview).toBe(true);
 });
 
+test("ordinary registration replaces an unmarked registry symlink without changing its target", async () => {
+  const project = await createTrustProject();
+  const target = join(root, "linked-legacy-registry.json");
+  await rename(registryPath, target);
+  await symlink(target, registryPath);
+  const targetBefore = await readFile(target, "utf8");
+  await expect(
+    setProjectAutostart({
+      id: "alpha",
+      registryPath,
+      observedProject: {
+        repoRoot: project.projectRoot,
+        projectDir: project.projectDir,
+      },
+    })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  expect((await upsertProjectRegistration({ project })).status).toBe("updated");
+  expect(await readFile(target, "utf8")).toBe(targetBefore);
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+  expect((await stat(registryPath)).ino).not.toBe((await stat(target)).ino);
+  expect((await read())?.autostartRequiresReview).toBe(true);
+  expect((await read("beta"))?.autostartRequiresReview).toBe(true);
+});
+
+test("ordinary prune can replace an unmarked registry symlink while retaining review flags", async () => {
+  const target = join(root, "prune-linked-registry.json");
+  await rename(registryPath, target);
+  await symlink(target, registryPath);
+  const targetBefore = await readFile(target, "utf8");
+  expect(
+    (await removeProjectsById({ ids: ["beta"] })).removed.map(
+      (project) => project.id
+    )
+  ).toEqual(["beta"]);
+  expect(await readFile(target, "utf8")).toBe(targetBefore);
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects.map(
+      (project) => project.id
+    )
+  ).toEqual(["alpha"]);
+  expect((await read())?.autostartRequiresReview).toBe(true);
+});
+
+test("ordinary oversized legacy registration and prune preserve data without granting intent", async () => {
+  const project = await createTrustProject();
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      version: 1,
+      projects: [
+        entry("alpha"),
+        { ...entry("beta"), devHost: "x".repeat(16 * 1024 * 1024) },
+      ],
+    })
+  );
+  expect((await stat(registryPath)).size).toBeGreaterThan(16 * 1024 * 1024);
+  expect((await upsertProjectRegistration({ project })).status).toBe("updated");
+  expect((await stat(registryPath)).size).toBeGreaterThan(16 * 1024 * 1024);
+  expect((await read("beta"))?.devHost?.length).toBe(16 * 1024 * 1024);
+  expect((await read("beta"))?.autostartRequiresReview).toBe(true);
+  await expect(
+    setProjectAutostart({
+      id: "alpha",
+      registryPath,
+      observedProject: {
+        repoRoot: project.projectRoot,
+        projectDir: project.projectDir,
+      },
+    })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await removeProjectsById({ ids: ["beta"] });
+  expect((await stat(registryPath)).size).toBeLessThan(16 * 1024 * 1024);
+  expect((await read())?.autostartRequiresReview).toBe(true);
+});
+
 test("an existing marker cannot bypass retained checkout-review provenance", async () => {
   const project = await createTrustProject();
   await setProjectAutostart({ id: "alpha", registryPath });

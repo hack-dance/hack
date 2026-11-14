@@ -426,6 +426,7 @@ import {
   assertAutostartEnvironment,
   assertLoginAutostartCurrent,
   findAutostartRegistration,
+  resolveFinalAutostartDownTarget,
   updateNativeAutostartIntent,
   withAutostartCommandLock,
 } from "./project-autostart-intent.ts";
@@ -724,7 +725,10 @@ const serviceLifecyclePositionals = [
 
 type InitArgs = CommandArgs<typeof initOptions, readonly []>;
 type UpArgs = CommandArgs<typeof upOptions, typeof serviceLifecyclePositionals>;
-type DownArgs = CommandArgs<typeof downOptions, readonly []>;
+type DownArgs = CommandArgs<typeof downOptions, readonly []> & {
+  /** Pin the reconciled instance through pause, admission and teardown. */
+  readonly resolvedAutostartBranch?: { readonly branch: string | null };
+};
 type RestartArgs = CommandArgs<
   typeof restartOptions,
   typeof serviceLifecyclePositionals
@@ -6404,6 +6408,7 @@ async function restartNativeImageProject({
 async function updateAutostartIntent(opts: {
   readonly ctx: CliContext;
   readonly action: "up" | "down";
+  readonly resolvedDownTarget?: { readonly branch: string | null };
   readonly args: {
     readonly options: {
       readonly path?: string;
@@ -6466,7 +6471,9 @@ async function updateAutostartIntent(opts: {
       "Detached linked worktree requires an explicit --branch."
     );
   }
-  const branch = resolvedBranch.branch;
+  const branch = opts.resolvedDownTarget
+    ? opts.resolvedDownTarget.branch
+    : resolvedBranch.branch;
   if (opts.action === "up" && opts.args.options.always) {
     await enableAutostartForUp({
       project,
@@ -7276,14 +7283,48 @@ async function handleDown(
 ): Promise<number> {
   parseRequestedTarget({ raw: input.args.options.target });
   // Publish stop intent before waiting for an earlier start to release its lock.
-  await updateAutostartIntent({ ...input, action: "down" });
+  const resolvedDownTarget =
+    process.env.HACK_RUNTIME_BACKEND === "native"
+      ? undefined
+      : await resolveFinalAutostartDownTarget(
+          {
+            cwd: input.ctx.cwd,
+            path: input.args.options.path,
+            project: input.args.options.project,
+            branch: input.args.options.branch,
+            writeNotice: (notice) =>
+              writeDownNotice({
+                json: input.args.options.json === true,
+                ...notice,
+              }),
+          },
+          {
+            isLocalTarget: async (project) =>
+              (
+                await resolveProjectLifecycleTarget({
+                  project,
+                  requestedTarget: input.args.options.target,
+                })
+              ).resolvedTarget === "local",
+          }
+        );
+  const pinned = {
+    ...input,
+    args: { ...input.args, resolvedAutostartBranch: resolvedDownTarget },
+  };
+  await updateAutostartIntent({
+    ...pinned,
+    action: "down",
+    resolvedDownTarget,
+  });
   return await withAutostartCommandLock({
     action: "down",
     cwd: input.ctx.cwd,
     path: input.args.options.path,
     project: input.args.options.project,
     branch: input.args.options.branch,
-    run: () => handleDownUnlocked(input),
+    resolvedDownTarget,
+    run: () => handleDownUnlocked(pinned),
   });
 }
 
@@ -7485,11 +7526,13 @@ async function runDownCommand({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  let branch = await resolveEffectiveBranchForCommand({
-    project,
-    branchOption: args.options.branch,
-    noticeToStderr: json,
-  });
+  let branch = args.resolvedAutostartBranch
+    ? args.resolvedAutostartBranch.branch
+    : await resolveEffectiveBranchForCommand({
+        project,
+        branchOption: args.options.branch,
+        noticeToStderr: json,
+      });
   const profiles = parseCsvList(args.options.profile);
   if (args.options.removeData) {
     throw new CliUsageError(
@@ -7553,7 +7596,9 @@ async function runDownCommand({
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   let runtime: readonly RuntimeProject[] | null = null;
   const implicitLinkedWorktreeTarget =
-    resolveBranchSlug(args.options.branch) === null && branch !== null;
+    !args.resolvedAutostartBranch &&
+    resolveBranchSlug(args.options.branch) === null &&
+    branch !== null;
   if (implicitLinkedWorktreeTarget || pruneCaches) {
     const runtimeResult = await readRuntimeProjects({ includeGlobal: false });
     if (!runtimeResult.ok) {

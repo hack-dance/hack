@@ -18,7 +18,9 @@ a branch instance uses the primary checkout's code, not a different Git checkout
 changes the marker; it does not start anything immediately.
 
 `hack down` pauses autostart for the selected marked instance before attempting to
-stop it. Start and stop serialize on a machine-local instance lock: `down` waits
+stop it. For a renamed linked-worktree branch, ownership reconciliation selects
+the existing instance before its pause is written; the same selected branch is
+used for the start/stop lock and teardown. Start and stop serialize on a machine-local instance lock: `down` waits
 for an in-flight login start, then stops it before returning success. The login
 child checks trusted intent under that lock and immediately before starting
 containers. This auxiliary lock covers login starts and Compose stops, including a stop
@@ -94,7 +96,11 @@ or `hack up -d --always`. Other copied registrations retain a review requirement
 until they are opted in from their own checkout. Trusted named targets continue
 to work from other directories. The old inode is never reused, so an already-open writer cannot change
 the replacement. This migration refuses symlinks, foreign ownership, malformed
-registries and preexisting intent in an unsafe file. That check repeats at every autostart read and mutation. Unsafe registry
+registries and preexisting intent in an unsafe file. Ordinary registration and
+prune operations keep their prior behavior for an unmarked registry, including
+replacing a registry symlink itself with a regular file while leaving its target
+unchanged. They retain review requirements on copied paths; this does not
+authorize autostart. That check repeats at every autostart read and mutation. Unsafe registry
 permissions refuse startup. Do not repair a formerly writable registry with
 in-place `chmod`: another user's already-open writer descriptor remains writable.
 Preserve the old file outside the active registry, start with a fresh registry,
@@ -236,6 +242,6 @@ one dispatch cap in this slice.
 
 An explicit upgrade snapshot rollback restores the registry at snapshot time.
 With `--overwrite` that can also restore old pauses and boot claims; it does not
-merge newer machine intent. Pause automatic starts before such a rollback and
-review the restored markers before resuming. Upgrade-aware state reconciliation
+merge newer machine intent. An overwrite rollback can undo a global pause as well. Review and reapply the
+restored machine intent before allowing another login pass. Upgrade-aware state reconciliation
 is part of HACK-2216.

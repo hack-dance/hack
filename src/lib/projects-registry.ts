@@ -402,16 +402,35 @@ export async function readProjectsRegistryStrict(
  */
 async function readProjectsRegistryForMutation(): Promise<ProjectsRegistry> {
   const observed = await readProjectsRegistry();
-  return observed.autostartGlobal ||
+  if (
+    observed.autostartGlobal ||
     observed.projects.some((project) => project.autostart)
-    ? await readProjectsRegistry({ requireAutostartTrust: true })
-    : (
-        await readAutostartMutationRegistry({
-          registryPath: getRegistryPath(),
-          allowLegacyPermissionRepair: true,
-          requireObservedLegacyProject: false,
-        })
-      ).registry;
+  ) {
+    return await readProjectsRegistry({ requireAutostartTrust: true });
+  }
+  try {
+    return (
+      await readAutostartMutationRegistry({
+        registryPath: getRegistryPath(),
+        allowLegacyPermissionRepair: true,
+        requireObservedLegacyProject: false,
+      })
+    ).registry;
+  } catch (error: unknown) {
+    if (!(error instanceof AutostartRegistryTrustError)) {
+      throw error;
+    }
+    // Preserve ordinary registration/prune behavior for unmarked legacy data.
+    // Replacing a link publishes a fresh file at the registry path and leaves
+    // its target untouched; none of the copied paths gains startup authority.
+    return {
+      ...observed,
+      projects: observed.projects.map((project) => ({
+        ...project,
+        autostartRequiresReview: true,
+      })),
+    };
+  }
 }
 
 type RegistrationUpsertOptions = {
@@ -1724,9 +1743,7 @@ async function writeRegistryAtomic(
   )}\n`;
   if (
     (registry.autostartGlobal ||
-      registry.projects.some(
-        (project) => project.autostart || project.autostartRequiresReview
-      )) &&
+      registry.projects.some((project) => project.autostart)) &&
     Buffer.byteLength(text) > AUTOSTART_REGISTRY_LIMIT_BYTES
   ) {
     throw new AutostartRegistryTrustError();

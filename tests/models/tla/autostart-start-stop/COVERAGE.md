@@ -14,7 +14,7 @@ separate transitions; they are not collapsed into one atomic command.
 
 | Model action | Source boundary | Regression mapping |
 | --- | --- | --- |
-| `DownPause` | `handleDown` publishes pause through `updateAutostartIntent` before waiting for the project lock. | `tests/autostart-lifecycle-intent.test.ts`: source down pauses before waiting for a start and holds admission through runtime shutdown. |
+| `DownPause` | `handleDown` first pins the reconciled runtime branch, then publishes pause through `updateAutostartIntent` before waiting for that instance lock. | `tests/autostart-lifecycle-intent.test.ts`: source down pauses before waiting for a start and holds admission through runtime shutdown. |
 | `LoginLock` / `LoginAdmit` / `LoginRefuse` | `withAutostartCommandLock` and `withAutostartProjectLock` serialize the actual CLI child; `assertAutostartProjectCurrent` rereads trusted intent while admission is held. | The same source-down regression rejects the earlier start after pause and a queued later start after successful down. |
 | `ChildStart` / `ChildSettle` | Runtime startup effects execute inside the login child's project lock; the owning command settles before lock release. A child admitted just before pause may finish before down obtains the lock. | `tests/autostart-project-lock.test.ts`: start/stop admission serializes the Compose instance even after registry identity changes. |
 | `DownLock` / `DownStop` / `DownReturn` | Foreground down holds the same instance lock through runtime shutdown and successful return. | The source-down regression blocks a queued start while fake shutdown is still running. |

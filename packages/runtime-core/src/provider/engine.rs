@@ -12,7 +12,11 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+#[cfg(any(target_os = "macos", test))]
+mod exec_io;
 pub(in crate::provider) mod inspection;
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::provider) mod interactive_exec;
 #[cfg(any(target_os = "macos", test))]
 pub(in crate::provider) mod log_follow;
 #[cfg(any(all(target_os = "macos", feature = "environment-launcher"), test))]
@@ -539,8 +543,8 @@ impl<'a> Engine<'a> {
         )
     }
 
-    /// One live-owner command keeps its original budget through every engine query.
-    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+    /// One service command keeps its original budget through every engine query.
+    #[cfg(target_os = "macos")]
     pub(in crate::provider) fn connect_command_until(
         candidate: &'a Candidate,
         deadline: Instant,
@@ -662,6 +666,18 @@ impl<'a> Observer<'a> {
         let value = self.transport.request(Method::GET, path, None)?;
         self.guest.verify()?;
         Ok(value)
+    }
+
+    /// Recheck after failures too: a new-boot 404 cannot prove old-boot absence.
+    #[cfg(target_os = "macos")]
+    pub(super) fn get_until(&self, path: &str, deadline: Instant) -> Result<Value, CandidateError> {
+        self.guest.verify()?;
+        let bytes = self
+            .transport
+            .request_bytes_until(Method::GET, path, None, Some(deadline));
+        self.guest.verify()?;
+        serde_json::from_slice(&bytes?)
+            .map_err(|_| failure("Malformed engine response; values omitted."))
     }
 
     pub(super) fn storage_usage(&self) -> Result<Value, CandidateError> {

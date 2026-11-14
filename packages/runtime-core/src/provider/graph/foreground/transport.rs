@@ -1525,7 +1525,7 @@ pub(in crate::provider::graph) fn resume_recovered_publisher(
 
 /// The framed client shuts down only its write side. A read-side EOF therefore
 /// cannot prove abandonment; EVFILT_WRITE reports EV_EOF when its read side closes.
-pub(super) struct ClientWatch {
+pub(in crate::provider::graph) struct ClientWatch {
     queue: OwnedFd,
 }
 impl ClientWatch {

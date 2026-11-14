@@ -1,11 +1,19 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeProjectExec } from "../src/backends/native-project-exec.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+
+let interactiveEnvironment: string | undefined;
+beforeEach(() => {
+  interactiveEnvironment = process.env.HACK_NO_INTERACTIVE;
+  process.env.HACK_NO_INTERACTIVE = "1";
+});
+afterEach(() => restoreEnv("HACK_NO_INTERACTIVE", interactiveEnvironment));
 
 const roots: string[] = [];
 afterEach(async () => {

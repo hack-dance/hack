@@ -39,7 +39,11 @@ export async function keyPermissionFiles(root: string): Promise<string[]> {
   const files: string[] = [];
   for (const candidate of candidates) {
     const info = await lstat(candidate.path).catch(() => null);
-    if (info?.isFile() && info.uid === process.getuid?.()) {
+    if (
+      info?.isFile() &&
+      info.uid === process.getuid?.() &&
+      (info.mode & 0o077) !== 0
+    ) {
       files.push(candidate.path);
     }
   }
@@ -101,7 +105,7 @@ function matchesPermissionState(input: {
     return false;
   }
   if (input.output) {
-    return current.mode === 0o600;
+    return current.mode === (entry.before.mode & ~0o077);
   }
   if (entry.after !== null) {
     return (
@@ -112,7 +116,7 @@ function matchesPermissionState(input: {
   }
   return (
     current.mode === entry.before.mode ||
-    (input.interrupted && current.mode === 0o600)
+    (input.interrupted && current.mode === (entry.before.mode & ~0o077))
   );
 }
 
@@ -154,8 +158,9 @@ export async function applyKeyPermissions(input: {
         ) {
           return "failed";
         }
-        if ((info.mode & 0o7777) !== 0o600) {
-          await file.chmod(0o600);
+        const privateMode = entry.before.mode & ~0o077;
+        if ((info.mode & 0o7777) !== privateMode) {
+          await file.chmod(privateMode);
           await file.sync();
           changed = true;
         }

@@ -34,6 +34,7 @@ import {
 } from "../src/lib/upgrade-review.ts";
 import {
   listUpgradeSnapshots,
+  readUpgradeSnapshot,
   readUpgradeSnapshotJournal,
   restoreUpgradeSnapshot,
 } from "../src/lib/upgrade-snapshot.ts";
@@ -1710,4 +1711,69 @@ test("linked worktrees sharing one primary key repair it once and retain a compl
     ).status
   ).toBe("restored");
   expect((await stat(key)).mode & 0o777).toBe(0o644);
+}, 60_000);
+
+test("permission repair selects only weak candidates and preserves owner bits", async () => {
+  const a = await project("app-a");
+  await writeFile(
+    join(a.repoRoot, ".gitignore"),
+    `${PROJECT_ENV_KEY_FILENAME}\n`
+  );
+  git(a.repoRoot, ["add", ".hack/hack.config.json", ".gitignore"]);
+  git(a.repoRoot, ["commit", "-q", "-m", "fixture"]);
+  const linked = join(root, "linked-checkout");
+  git(a.repoRoot, ["worktree", "add", "-q", "-b", "feature", linked]);
+  // Only this linked checkout is registered: the sibling candidates are outside
+  // the ordinary checkout snapshot set as well as outside the repair write set.
+  await writeRegistry([
+    { ...a, repoRoot: linked, projectDir: join(linked, ".hack") },
+  ]);
+  const primary = join(a.repoRoot, PROJECT_ENV_KEY_FILENAME);
+  const shared = join(a.repoRoot, ".git", PROJECT_ENV_KEY_FILENAME);
+  const local = join(linked, PROJECT_ENV_KEY_FILENAME);
+  for (const [path, mode] of [
+    [primary, 0o400],
+    [shared, 0o700],
+  ] as const) {
+    await writeFile(path, randomBytes(32).toString("base64url"));
+    await chmod(path, mode);
+  }
+  for (const mode of [0o640, 0o604, 0o444, 0o744]) {
+    await chmod(local, 0o600).catch(() => {});
+    await writeFile(local, randomBytes(32).toString("base64url"));
+    await chmod(local, mode);
+    const before = await tree(linked);
+    const result = await runUpgradeApply({
+      report: await check(),
+      home,
+      dryRun: false,
+      only: ["env-key-permissions"],
+      collect: collectUpgradeSnapshotTargets,
+    });
+    expect(result.status).toBe("applied");
+    if (result.status !== "applied") {
+      throw new Error("Expected permission repair");
+    }
+    expect(result.targets[0]?.files).toEqual([local]);
+    const snapshot = await readUpgradeSnapshot({
+      manifestPath: result.coverage.manifest_path,
+    });
+    if (snapshot.status !== "ok") {
+      throw new Error("Expected snapshot");
+    }
+    const paths = snapshot.snapshot.manifest.entries.map((entry) => entry.path);
+    expect(paths).not.toContain(primary);
+    expect(paths).not.toContain(shared);
+    expect((await stat(primary)).mode & 0o777).toBe(0o400);
+    expect((await stat(shared)).mode & 0o777).toBe(0o700);
+    expect((await stat(local)).mode & 0o777).toBe(mode & ~0o077);
+    expect(
+      (
+        await restoreUpgradeSnapshot({
+          manifestPath: result.coverage.manifest_path,
+        })
+      ).status
+    ).toBe("restored");
+    expect(await tree(linked)).toEqual(before);
+  }
 }, 60_000);

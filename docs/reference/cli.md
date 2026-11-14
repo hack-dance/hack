@@ -1934,7 +1934,7 @@ hack upgrade apply [options]
 ```
 
 Checks first, then runs the plan steps marked (apply) for every checkout they cover: refreshing
-outdated .hack/.gitignore files, tightening verified permission-only key findings to 0600,
+outdated .hack/.gitignore files, removing group/other access from verified weak keys without changing owner bits,
 and removing stale standalone agent files the hack plugin replaces
 (each removal covered by the same snapshot). Before changing anything it keeps an upgrade
 snapshot and writes a journal beside it with the snapshot's coverage and gaps and each checkout's

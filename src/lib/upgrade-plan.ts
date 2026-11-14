@@ -107,7 +107,7 @@ const PROJECT_ORDER = [
 /** What a step covering several checkouts is about (no counts, no values). */
 const GROUP_WHY: Readonly<Record<string, string>> = {
   "env-key-permissions":
-    "Make verified owner-held, untracked env keys private (0600); keep their exact bytes and snapshot the original mode.",
+    "Remove group/other access from verified weak, owner-held, untracked env keys; preserve owner bits and exact bytes and snapshot the original mode.",
   "project-config": "These live checkouts cannot be read.",
   "project-store": "The project's own secret store or its key needs attention.",
   "env-secrets": "Env layer secrets must open under the project env key.",

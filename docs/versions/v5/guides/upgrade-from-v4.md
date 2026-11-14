@@ -127,10 +127,16 @@ rollback command and then rechecks. Ignore-rule writes stage inside the snapshot
 so they leave no staging files in the checkout.
 
 Permission-only key findings can also be applied. This tightens an existing,
-owner-held regular key to mode 0600; it never creates, rotates, moves, changes
+owner-held regular key by removing group/other access and preserving owner bits
+(0640 becomes 0600; 0444 becomes 0400). Keys without group/other access are not
+selected for repair. It never creates, rotates, moves, changes
 ownership of or untracks a key. The journal freezes the selected paths, and the
 snapshot keeps their original bytes and modes. Resume verifies those bytes and
 the recorded mode before continuing; rollback restores the original mode too.
+Snapshot blobs also hold bytes of selected weak keys outside the checkout,
+including keys in the shared Git common directory. Treat the default snapshot
+root and any explicit `--snapshot-root` as key backups. Snapshots are retained
+until you remove them; apply and rollback do not expire them automatically.
 
 For findings that need a decision, run one traversal instead of copying a
 Doctor command for every checkout:

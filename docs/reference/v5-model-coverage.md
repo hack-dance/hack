@@ -207,7 +207,8 @@ failures or arbitrary concurrent writers.
 
 Permission-only key repair freezes its write-set paths in the journal, verifies
 snapshot bytes and owner identity, then uses an open descriptor to tighten mode
-to 0600. Four real SIGKILL boundaries cover journal creation, target start,
+by removing group/other access while preserving owner bits. Four real SIGKILL
+boundaries cover journal creation, target start,
 chmod-before-after-state recording and completion. Resume followed by rollback
 restores original bytes and mode. A linked-worktree regression covers two targets
 sharing one primary key. This adds implementation evidence, not finite-model

@@ -313,6 +313,9 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         for c in &service.containers {
             match c.state.to_ascii_lowercase().as_str() {
                 "restarting" | "dead" => failed_exit.push(service.service.clone()),
+                "exited" if c.exit_code().is_some_and(|code| code != 0) => {
+                    failed_exit.push(service.service.clone())
+                }
                 "running" | "exited" => {}
                 _ => uncertain.push(service.service.clone()),
             }
@@ -713,5 +716,44 @@ mod tests {
                 down: vec!["api".into()]
             }
         );
+    }
+
+    #[test]
+    fn any_failed_exited_replica_prevents_a_healthy_or_stopped_project() {
+        for (first_state, first_status, expected) in [
+            (
+                "running",
+                "Up 2 minutes",
+                ProjectState::Degraded {
+                    down: vec!["api".into()],
+                },
+            ),
+            (
+                "exited",
+                "Exited (0) 1 minute ago",
+                ProjectState::FailedStart {
+                    services: vec!["api".into()],
+                },
+            ),
+        ] {
+            for reversed in [false, true] {
+                let mut containers = vec![
+                    serde_json::json!({"state":first_state,"status":first_status}),
+                    serde_json::json!({"state":"exited","status":"Exited (1) 30 seconds ago"}),
+                ];
+                if reversed {
+                    containers.reverse();
+                }
+                let row: ProjectRow = serde_json::from_value(serde_json::json!({
+                    "name":"sample", "status":if first_state == "running" { "running" } else { "stopped" },
+                    "defined_services":["api"], "runtime":{"services":[{"service":"api","containers":containers}]}
+                })).unwrap();
+                assert_eq!(
+                    derive(&row, &LocalContext::default()),
+                    expected,
+                    "{first_state}, reversed={reversed}"
+                );
+            }
+        }
     }
 }

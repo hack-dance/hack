@@ -304,11 +304,20 @@ fn read_all<R: Read + Send + 'static>(r: Option<R>) -> mpsc::Receiver<String> {
     rx
 }
 
-/// `PATH` with empty and relative entries removed.
+/// Used when no absolute `PATH` entry remains: an empty `PATH` would make
+/// a shell search its working directory.
+pub const FALLBACK_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+/// `PATH` with empty and relative entries removed; never empty.
 #[must_use]
 pub fn sanitize_path(path: &std::ffi::OsStr) -> std::ffi::OsString {
-    std::env::join_paths(std::env::split_paths(path).filter(|d| d.is_absolute()))
-        .unwrap_or_default()
+    let kept = std::env::join_paths(std::env::split_paths(path).filter(|d| d.is_absolute()))
+        .unwrap_or_default();
+    if kept.is_empty() {
+        std::ffi::OsString::from(FALLBACK_PATH)
+    } else {
+        kept
+    }
 }
 
 /// Search absolute `PATH` entries for an executable regular file `name`.
@@ -555,6 +564,14 @@ mod tests {
     fn child_path_drops_empty_and_relative_entries() {
         let p = std::ffi::OsString::from(".::bin:/usr/bin:./x:/bin");
         assert_eq!(sanitize_path(&p), std::ffi::OsString::from("/usr/bin:/bin"));
+        // All relative or empty: a non-empty trusted fallback, never "".
+        for bad in [".::relative/bin:", "", ":", "."] {
+            assert_eq!(
+                sanitize_path(std::ffi::OsStr::new(bad)),
+                std::ffi::OsString::from(FALLBACK_PATH),
+                "{bad:?}"
+            );
+        }
         // And the child really receives an all-absolute PATH.
         let f = FakeHack::new(r#"printf '{"p":"%s"}' "$PATH""#);
         let v: Value = f.runner().run_json(&["x"], None, T).unwrap();

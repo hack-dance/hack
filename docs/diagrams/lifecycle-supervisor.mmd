@@ -12,6 +12,8 @@ stateDiagram-v2
   Running --> Orphaned : GuardDeath [members live]
   Recoverable --> Orphaned : GuardDeath [members live]
   Recoverable --> Stopping : Stop [identity matches]
+  Orphaned --> Stopping : RecoverStop [boot and session members verified]
+  Orphaned --> StopUnknown : RecoverStop [identity unconfirmed]
   Running --> Stopping : Stop [identity matches]
   Running --> Exited : Reap [no live members]
   Stopping --> Exited : Reap [no live members]
@@ -22,6 +24,7 @@ stateDiagram-v2
     INV identity precedes command
   end note
   note right of Orphaned
-    Unknown identity refuses stop
+    Unknown health retains ownership
+    Unverified identity refuses signals
     Live session refuses duplicate
   end note

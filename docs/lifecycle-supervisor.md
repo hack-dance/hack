@@ -35,7 +35,8 @@ directly. A shell-authored command can explicitly use `sh -c`; the supervisor ad
 no shell wrapper. The full environment is explicit, with no ambient inheritance.
 
 `stop` and `status` accept `{version: 1, root, ownerToken}`. Read-only `status`
-returns persisted receipts; a receipt is not a health check. It creates no files,
+returns saved phases plus kernel-verified `liveProcessNames` and
+`unknownProcessNames`; a saved phase alone is not a health check. It creates no files,
 processes or ownership. Stop
 requires matching ownership and a live identity before sending a signal. Unknown
 identity is a refusal, never proof that a process is absent. A different boot or a
@@ -97,7 +98,7 @@ not claims that a dead or paused guard rewrote its receipt.
 | Stopping/KillPending | Confirmation deadline expires with live members | Retain identity and command lock; report uncertainty | StopUnknown | `unresponsive_guard_stop_remains_unknown` |
 | Running | Project supervisor dies | Guard and durable identity remain | Running/recoverable | `supervisor_kill_then_recover_stop` |
 | Recoverable | Another start sees held command lock or live old identity | Refuse duplicate; preserve original | Recoverable | `supervisor_kill_then_recover_stop` |
-| Running/recoverable | Guard itself is separately killed with live session members | Retain recorded session, refuse duplicate and unsafe stop | Orphaned | `dead_guard_with_live_session_refuses_duplicate_and_stop` |
+| Running/recoverable | Guard itself is separately killed with live session members | Health unknown; refuse duplicate, permit verified session recovery stop | Orphaned | `dead_guard_with_live_session_recovers_term_then_kill` |
 | Any live recorded | Owner differs or identity is unknown | Refuse; signal nothing | Unchanged | `foreign_owner_cannot_stop` |
 | Any recorded | Boot differs or leader PID is reused | Treat old session as absent; signal no replacement | Unchanged | `stale_reused_session_leader_does_not_block_fresh_launch` |
 | Running | Command exits; only zombies remain | Reap direct child; zombies do not hold liveness | Exited | `zombies_do_not_hold_liveness` |
@@ -108,11 +109,13 @@ A resident guard closes the publication gap: command ownership is durable before
 spawn, and the group leader survives the project supervisor's death. The guard
 keeps the command lock until its session has no live members, so a restarted project
 supervisor cannot launch a second copy. If a guard itself is separately killed
-while its command survives, identity becomes unknown; recovery refuses unsafe
-signals and duplicate launch. This is a distinct failure from killing the project
-supervisor and remains visible to callers rather than being reported as a
-successful stop. Launch and stop share a bounded lock so stop cannot race past a
-partially launched plan.
+while its command survives, health becomes unknown and duplicate launch is
+refused. Stop can recover the recorded session after verifying the boot,
+leader identity and each remaining member's UID, birth and session. Recovery
+delivers TERM individually, grants a fresh five-second grace, then KILL and
+confirms absence. Unverified identity never authorizes signals or a successful
+stop. Launch and stop share a bounded lock; a startup descriptor lease keeps
+admission locked through guard publication even if the project owner dies.
 
 The table models process death and retry, not filesystem hardware failure, hostile
 same-user mutation, commands that deliberately create new sessions, or power-loss
@@ -167,3 +170,26 @@ Default migration removes the Python/FIFO wrapper in
 POSIX `sh -c` intentionally. Interactive tmux environment delivery stays separate.
 Zellij removal, its breaking-change notice, and the workspace-only `MuxBackend`
 contract belong to the third unit.
+
+## Resource and qualification boundaries
+
+A live direct child proves its guard is needed without a full-system census.
+Guards wait for output or SIGCHLD; once only descendants remain, a 500 ms
+fallback checks the session. Stop uses the short retirement tick. Startup closes
+actual open descriptors rather than iterating the open-file limit. A known
+restricted process view is refused before authored code; silently hidden
+same-user processes remain unsupported.
+
+Linux debug-build measurements with one quiet guard and owner recorded less than
+10 ms CPU accounting resolution per five-second sample and two voluntary context
+switches per second, across three samples. These are neither hardware wakeup
+counts nor macOS measurements. The host's hard descriptor limit was 524,288;
+the exact 1,048,576 test requires a host that permits that limit.
+Darwin compilation does not qualify execution, group-signal EPERM recovery or
+idle cost on a real Mac.
+
+The 129-state TLA+ artifact is an abstract phase/ownership exploration. It does
+not model kernel census observations, real flock behavior, orphan recovery,
+startup descriptor leases or signal errors. Some safety predicates hold by
+construction. Native regressions, rather than that model, are the evidence for
+those boundaries; see the model coverage document for the reduced claims.

@@ -1084,11 +1084,32 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
             .then_some(())
     });
     thread::sleep(delay);
-    let recovery_started = Instant::now();
+    // Freeze the guard before removing it, then prove it has not begun its own
+    // escalation: it persists kill-pending before its first KILL. The child must
+    // still be live, so only the stop's admission snapshot can KILL it.
+    let guard = pid(&state, "guardPid");
+    let guard_birth = identity(guard).expect("guard identity").birth;
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
+    // SIGSTOP delivery is asynchronous: wait until the kernel reports this
+    // guard incarnation stopped before trusting the observations below.
+    eventually(|| {
+        (identity(guard).is_some_and(|current| current.birth == guard_birth)
+            && process_is_stopped(guard))
+        .then_some(())
+    });
+    let frozen = f.state("worker");
     assert_eq!(
-        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
-        0
+        frozen["phase"], "stopping",
+        "guard escalated first: {frozen}"
     );
+    assert!(
+        identity(child.pid).is_some_and(|current| current.birth == child.birth)
+            && !process_is_zombie(child.pid),
+        "TERM-ignoring child exited before guard loss"
+    );
+    let recovery_started = Instant::now();
+    // SAFETY: the frozen guard belongs to this fixture.
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
     if !blocked {
         assert!(wait(&mut caller, TIMEOUT).success());
     }
@@ -1099,9 +1120,15 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
         receipt["outcome"],
         if blocked { "unknown" } else { "stopped" }
     );
-    // Scheduling may let the guard itself finish escalation. Either path must
-    // confirm absence; do not mistake test observation latency for grace timing.
-    assert!(recovery_started.elapsed() < TIMEOUT);
+    // Recovery starts its own TERM grace after detecting guard loss, so KILL of
+    // the captured child cannot precede a fresh five-second interval, even when
+    // the original guard deadline had almost expired.
+    let recovered_after = recovery_started.elapsed();
+    assert!(
+        recovered_after >= Duration::from_secs(5),
+        "recovery skipped its fresh grace: {recovered_after:?}"
+    );
+    assert!(recovered_after < TIMEOUT);
     assert!(identity(child.pid).is_none() || process_is_zombie(child.pid));
     if let Some(guard) = blocked_guard {
         assert_eq!(unsafe { libc::kill(guard, libc::SIGCONT) }, 0);
@@ -1153,12 +1180,24 @@ fn orphan_recovery_keeps_observed_child_after_term_ends_witness() {
 }
 
 fn process_is_zombie(pid: i32) -> bool {
+    process_state(pid) == Some(b'Z')
+}
+
+/// Job-control stop observed by the kernel, not merely a submitted SIGSTOP.
+fn process_is_stopped(pid: i32) -> bool {
+    matches!(process_state(pid), Some(b'T' | b't'))
+}
+
+/// Linux /proc state letter; Darwin maps SZOMB to Z and SSTOP to T.
+fn process_state(pid: i32) -> Option<u8> {
     #[cfg(target_os = "linux")]
     {
         fs::read_to_string(format!("/proc/{pid}/stat"))
             .ok()
-            .and_then(|s| s.rsplit_once(") ").map(|(_, rest)| rest.starts_with('Z')))
-            .unwrap_or(false)
+            .and_then(|s| {
+                s.rsplit_once(") ")
+                    .and_then(|(_, rest)| rest.bytes().next())
+            })
     }
     #[cfg(target_os = "macos")]
     {
@@ -1173,8 +1212,14 @@ fn process_is_zombie(pid: i32) -> bool {
                 std::mem::size_of::<libc::proc_bsdinfo>() as i32,
             )
         };
-        size as usize == std::mem::size_of::<libc::proc_bsdinfo>()
-            && unsafe { info.assume_init() }.pbi_status == libc::SZOMB
+        if size as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+            return None;
+        }
+        Some(match unsafe { info.assume_init() }.pbi_status {
+            libc::SZOMB => b'Z',
+            libc::SSTOP => b'T',
+            _ => b'R',
+        })
     }
 }
 

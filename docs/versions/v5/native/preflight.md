@@ -23,8 +23,8 @@ decrypts managed env and reads `.env` beside Compose (normally `.hack/.env`),
 using the same file checks as native start. A missing decryption key is a
 structured blocker with recovery guidance; the command still produces a report.
 A project-root `.env` outside the Compose directory is ignored with one notice.
-See the [environment-file rules](../../../native/environment-files.md) and
-[migration notes](../../../guides/v5-release-notes.md#next17-what-changed-and-what-to-do)
+See the [environment-file rules](https://github.com/hack-dance/hack/blob/e1fa21b7d16d1b2ba2c5aee4ae52ea44f564c087/docs/native/environment-files.md) and
+[migration notes](https://github.com/hack-dance/hack/blob/e1fa21b7d16d1b2ba2c5aee4ae52ea44f564c087/docs/guides/v5-release-notes.md#next17-what-changed-and-what-to-do)
 before upgrading an earlier prerelease.
 
 ## Read the result

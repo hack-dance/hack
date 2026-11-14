@@ -884,8 +884,17 @@ esac
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let hack = dir.join("hack");
-        std::fs::write(&hack, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::write(
+            &hack,
+            format!("#!/bin/sh\nif [ \"$1\" = __warmup ]; then echo '{{}}'; exit 0; fi\n{body}\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Match the core fixture warmup: macOS first-launch scanning must
+        // finish before Doctor's short budget tests start their clocks.
+        CliRunner::new(&hack)
+            .run_json::<serde_json::Value>(&["__warmup"], None, Duration::from_secs(60))
+            .expect("Doctor fake CLI warmup");
         hack
     }
 

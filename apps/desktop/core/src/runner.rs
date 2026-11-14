@@ -101,9 +101,9 @@ impl CliRunner {
     /// Find `name` on `PATH` and run it by absolute path.
     ///
     /// Only absolute `PATH` entries are searched: an empty or relative entry
-    /// (such as `.`) would resolve against the working directory, which for
-    /// machine checks is a shared temp directory another local user may
-    /// write. When nothing is found the runner reports `NotFound` without
+    /// (such as `.`) would resolve against the working directory, which may
+    /// differ from the user's checkout for machine checks. When nothing is
+    /// found the runner reports `NotFound` without
     /// spawning anything.
     #[must_use]
     pub fn on_path(name: &str) -> Self {

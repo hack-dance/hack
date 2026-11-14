@@ -1,0 +1,7 @@
+flowchart TD
+    P[Stale payload] --> R[Resolve current inputs]
+    F[Doctor finding] --> S[Inspected and current inputs]
+    R --> C{Removal allowed?}
+    S --> C
+    C -->|unknown, live, retired| K[Keep payload]
+    C -->|confirmed unused| D[Remove owned payload]

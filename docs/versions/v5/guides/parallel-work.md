@@ -1,5 +1,9 @@
 # Work on another branch
 
+Stale terminal-session cleanup preserves configuration and environment inputs
+that current resolution reads. When configuration cannot be verified, automatic
+cleanup skips removal rather than guessing which files are unused.
+
 Start from a configured repository. Read
 [Worktrees and watchers](../../guides/development-runtime-safety.md) before choosing
 shared or isolated files.

@@ -144,7 +144,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "lifecycle-supervisor",
     module: "LifecycleSupervisor",
-    states: 168,
+    states: 322,
     invariant: "NoDuplicate",
     action: "Retry",
     fields: ["duplicate = TRUE", "live = TRUE", "durable = TRUE"],
@@ -159,6 +159,13 @@ const contracts: readonly ModelContract[] = [
           "unsafeSignal = TRUE",
           "guard = FALSE",
         ],
+      },
+      {
+        name: "witness-loss",
+        negative: true,
+        invariant: "RecoveryAuthorityRetained",
+        action: "WitnessExit",
+        fields: ["snapshot = FALSE", "witness = FALSE", "live = TRUE"],
       },
     ],
   },

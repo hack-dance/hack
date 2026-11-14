@@ -80,8 +80,8 @@ pub fn main() -> Result<()> {
                     states.push(state);
                 } else if os::recorded_live(&state, false)? {
                     // Old terminal receipts survive renames and new generations.
-                    // Only a kernel census can prove they no longer hold work;
-                    // a persisted terminal phase alone is never sufficient.
+                    // Guard-written terminal phases prove completed retirement;
+                    // non-terminal receipts require native identity evidence.
                     return Err(refused());
                 }
             }
@@ -465,12 +465,20 @@ fn guard_command(
 fn stop(states: &[State]) -> Result<()> {
     struct Target {
         state: State,
-        guard_live: bool,
+        recovery: Option<os::Recovery>,
         orphan_term: Option<Instant>,
     }
+    impl Target {
+        fn recover(&mut self) -> Result<()> {
+            let recovery = os::Recovery::capture(&self.state)?;
+            recovery.signal(libc::SIGTERM)?;
+            self.orphan_term = Some(Instant::now());
+            self.recovery = Some(recovery);
+            Ok(())
+        }
+    }
     let mut active = Vec::new();
-    // Validate every receipt before the first effect. Absence may race a guard's
-    // natural exit; a dead leader still leaves a recoverable recorded session.
+    // Validate all receipts and capture orphan members before the first effect.
     for state in states {
         if !os::recorded_live(state, false)? {
             continue;
@@ -484,34 +492,23 @@ fn stop(states: &[State]) -> Result<()> {
         };
         active.push(Target {
             state: state.clone(),
-            guard_live,
+            recovery: if guard_live {
+                None
+            } else {
+                Some(os::Recovery::capture(state)?)
+            },
             orphan_term: None,
         });
     }
     for target in &mut active {
-        let state = &target.state;
-        let result = if target.guard_live {
-            os::signal_guard(state)
-        } else {
-            let result = os::signal_recorded_session(state, libc::SIGTERM);
+        if let Some(recovery) = &target.recovery {
+            recovery.signal(libc::SIGTERM)?;
             target.orphan_term = Some(Instant::now());
-            result
-        };
-        if let Err(error) = result {
-            if !os::recorded_live(state, false)? {
-                continue;
-            }
-            // Guard death during admission switches to verified session recovery.
-            match os::inspect(state.guard_pid)? {
-                None => {
-                    os::signal_recorded_session(state, libc::SIGTERM)?;
-                    target.orphan_term = Some(Instant::now());
-                }
-                Some(identity) if identity.zombie => {
-                    os::signal_recorded_session(state, libc::SIGTERM)?;
-                    target.orphan_term = Some(Instant::now());
-                }
-                _ => return Err(error),
+        } else if let Err(error) = os::signal_guard(&target.state) {
+            if os::inspect(target.state.guard_pid)?.is_none_or(|p| p.zombie) {
+                target.recover()?;
+            } else if os::recorded_live(&target.state, false)? {
+                return Err(error);
             }
         }
     }
@@ -519,25 +516,28 @@ fn stop(states: &[State]) -> Result<()> {
     while start.elapsed() < GRACE + Duration::from_secs(2) {
         let mut live = false;
         for target in &mut active {
-            let state = &target.state;
-            if !os::recorded_live(state, false)? {
-                continue;
-            }
-            live = true;
-            // Guard death after TERM admission must not skip authored TERM or
-            // borrow the dead guard's grace interval. Late loss may time out as
-            // unknown; it never shortens this recovered session's own grace.
-            let orphan = os::inspect(state.guard_pid)?.is_none_or(|p| p.zombie);
-            if orphan {
-                if target.orphan_term.is_none() {
-                    os::signal_recorded_session(state, libc::SIGTERM)?;
-                    target.orphan_term = Some(Instant::now());
+            if target.recovery.is_none() {
+                if !os::recorded_live(&target.state, false)? {
+                    continue;
                 }
+                if os::inspect(target.state.guard_pid)?.is_none_or(|p| p.zombie) {
+                    // Guard loss gets its own snapshot and full TERM grace.
+                    target.recover()?;
+                } else {
+                    live = true;
+                    continue;
+                }
+            }
+            if let Some(recovery) = &target.recovery {
+                if !recovery.live()? {
+                    continue;
+                }
+                live = true;
                 if target
                     .orphan_term
                     .is_some_and(|since| since.elapsed() >= GRACE)
                 {
-                    os::signal_recorded_session(state, libc::SIGKILL)?;
+                    recovery.signal(libc::SIGKILL)?;
                 }
             }
         }

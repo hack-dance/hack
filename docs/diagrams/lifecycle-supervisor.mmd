@@ -12,12 +12,13 @@ stateDiagram-v2
   Running --> Orphaned : GuardDeath [members live]
   Recoverable --> Orphaned : GuardDeath [members live]
   Recoverable --> Stopping : Stop [identity matches]
-  Orphaned --> Stopping : RecoverStop [boot, old birth witness and members verified]
+  Orphaned --> Stopping : RecoverStop [exact witness; capture members]
   Orphaned --> StopUnknown : RecoverStop [identity unconfirmed]
   Running --> Stopping : Stop [identity matches]
   Running --> Exited : Reap [no live members]
   Stopping --> Exited : Reap [no live members]
   Stopping --> KillPending : Kill [grace elapsed]
+  Stopping --> Stopping : WitnessExit [captured identities retained]
   KillPending --> Exited : Reap [no live members]
   KillPending --> StopUnknown : StopUnknown [members live]
   note right of Starting
@@ -25,6 +26,6 @@ stateDiagram-v2
   end note
   note right of Orphaned
     Unknown health retains ownership
-    No old birth witness refuses signals
+    No exact witness refuses capture
     Live session refuses duplicate
   end note

@@ -43,10 +43,9 @@ identity is a refusal, never proof that a process is absent. A different boot or
 leader with a different start identity proves that the old session ended; it
 grants no authority over the replacement. Guard-written terminal receipts are retained as proof that the old session ended.
 A missing leader plus a numeric SID is not ownership: orphan recovery requires
-a same-user surviving member born no later than the recorded command birth.
-Only newer members, or legacy receipts without that birth evidence, report
-unknown without signals. Descendants born after the command whose birth was
-recorded may therefore require manual recovery once that command exits.
+the exact recorded command PID/birth or a matching guard, including a zombie.
+Only unrecorded members, or legacy receipts without a surviving matching guard, report
+unknown without signals. Descendants alone may require manual recovery when both recorded processes are gone.
 
 Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
 `observed`, `stopped`, or `unknown`). A stop whose confirmation times out emits
@@ -116,8 +115,10 @@ supervisor cannot launch a second copy. If a guard itself is separately killed
 while its command survives, health becomes unknown and duplicate launch is
 refused. Stop can recover the recorded session after verifying the boot,
 leader identity and each remaining member's UID, birth and session. Recovery
-delivers TERM individually, grants a fresh five-second grace, then KILL and
-confirms absence. Unverified identity never authorizes signals or a successful
+delivers TERM individually, grants a fresh five-second grace, then KILL to the captured incarnations and
+confirms absence. The capture remains authoritative if TERM ends the witness;
+every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux).
+Unobserved descendants never inherit this authority and retain an unknown outcome. Unverified identity never authorizes signals or a successful
 stop. Launch and stop share a bounded lock; a startup descriptor lease keeps
 admission locked through guard publication even if the project owner dies.
 The guard temporarily inherits this stop-lock lease on stderr (fd 2), then closes
@@ -198,7 +199,7 @@ the exact 1,048,576 test requires a host that permits that limit.
 Darwin compilation does not qualify execution, group-signal EPERM recovery or
 idle cost on a real Mac.
 
-The 168-state TLA+ artifact is an abstract phase/ownership exploration. It models SID reuse and a required old-birth witness for orphan signaling. It does
+The 322-state TLA+ artifact is an abstract phase/ownership exploration. It models SID reuse and a required old-birth witness for orphan signaling. It does
 not model actual kernel census observations, real flock behavior, full orphan recovery,
 startup descriptor leases or signal errors. Some safety predicates hold by
 construction. Native regressions, rather than that model, are the evidence for
@@ -231,3 +232,37 @@ guard launch frames, and blocked ready delivery. Deterministic tests at the two
 smaller instruction windows (starting-state save to spawn, and spawn to running-state
 save) remain unqualified; polling a receipt cannot reliably stop a process in either
 window. They require a dedicated synchronization seam, not a timing-only test.
+
+## Manual recovery after an unknown stop
+
+Stop retires the owner token before validating all receipts. One unknown receipt
+can therefore leave otherwise healthy guards running and block every new start
+in that private root. Repeating up with a new token does not bypass the uncertainty.
+This also applies when a guard dies after spawn but before publishing running:
+the receipt has no command birth evidence, so an unanchored session is unknown.
+
+1. Keep the private root and all receipts. Run status with the recorded token;
+   use the reported guard/command PIDs and session as leads for inspection, never
+   as authority to kill. Inspect current processes with the OS process tools
+   (ps on macOS; ps and /proc on Linux), including PID, parent PID, SID, UID,
+   start time and command. Identify the actual application processes yourself.
+2. For each process you confirm belongs to this failed launch, record its current
+   start identity. Send TERM to those individual PIDs, wait at least five seconds,
+   and recheck each identity before sending KILL to any remaining process. Never
+   signal a numeric process group/session from the stale receipt alone. Leave
+   unfamiliar or inaccessible processes untouched and seek operator help.
+3. Retry stop with the original token (or hack down through the same persisted
+   project owner). Once the uncertain session is absent, normal stop can retire
+   the remaining healthy guards. If another receipt is unknown, inspect it in the
+   same way. Confirm stopped/status absence before a fresh up with a fresh token.
+4. Do not delete receipts, locks, retirement markers or the root to unblock up.
+   That discards the ownership evidence without stopping anything. Offline root
+   rotation is allowed only after all original callers/guards and authored work
+   have been independently confirmed gone.
+
+Darwin start timestamps come from the wall clock and can decrease between guard
+and command creation. Recovery therefore never orders those timestamps: it matches
+PID and the recorded birth exactly. A backward step between those starts does not
+invalidate a still-matching command witness. The native identity contract still
+assumes a PID and exact recorded birth value identify one incarnation; Darwin has
+no pidfd, so its short inspection-to-signal race remains as documented above.

@@ -80,8 +80,10 @@ The ignored `million_descriptor_limit_qualification` fixture requires a host har
 RLIMIT_NOFILE of at least 1048576; the ordinary raised-limit fixture uses the host's
 available limit. A host refusing that raise does not qualify the million-fd case.
 
-Orphan recovery requires a surviving member whose kernel birth is no later than
-the recorded command birth. A reused numeric SID alone never authorizes a signal.
+Orphan recovery requires an exact command PID/birth or matching guard, including
+a zombie. It captures verified members before TERM and retains those incarnations
+through KILL even after the witness exits. Darwin birth timestamps are matched,
+never ordered across processes. A reused numeric SID alone never authorizes a signal.
 Terminal receipts prove the old guard completed cleanup; uncertain legacy or
 newer-member-only sessions remain unknown without effects. See
 [resource and qualification boundaries](../../docs/lifecycle-supervisor.md#resource-and-qualification-boundaries)

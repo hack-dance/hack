@@ -190,7 +190,12 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
     // SAFETY: the kernel initialized exactly the expected struct size above.
     let info = unsafe { info.assume_init() };
     // SAFETY: getsid only observes the named PID. ESRCH is an exit race.
-    let session = unsafe { libc::getsid(pid) };
+    let mut session = unsafe { libc::getsid(pid) };
+    if session < 0 && info.pbi_status == libc::SZOMB && info.pbi_pgid as i32 == pid {
+        // Darwin may hide getsid for zombies. A matching recorded leader's
+        // immutable PID/birth/UID still proves it has not been reused.
+        session = pid;
+    }
     if session < 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
@@ -327,43 +332,62 @@ pub fn absent_error(error: &io::Error) -> bool {
         || matches!(error.raw_os_error(), Some(libc::ESRCH) | Some(libc::ENOENT))
 }
 
-/// Terminal receipts prove the guard finished its census. With no leader, a
-/// matching SID alone is insufficient: that number may belong to a later session.
-/// An observed member born by the recorded command birth anchors the old session.
-/// Missing legacy birth evidence or only newer members is unknown, never authority.
+fn incarnation_matches(expected: &Identity, current: &Identity) -> bool {
+    expected.pid == current.pid
+        && expected.start == current.start
+        && expected.uid == current.uid
+        && expected.session == current.session
+}
+
+/// Return one census with session identity proved across that census. A matching
+/// leader (including zombie) or exact recorded command birth is the witness.
+/// No ordering comparison uses Darwin's adjustable wall-clock start timestamps.
+fn recorded_members(state: &crate::storage::State) -> Result<Vec<Identity>> {
+    for _ in 0..2 {
+        if matches!(state.phase.as_str(), "exited" | "killed" | "failed-start")
+            || state.boot_id != boot()?
+        {
+            return Ok(Vec::new());
+        }
+        let leader = inspect(state.guard_pid)?;
+        if let Some(p) = &leader
+            && (p.start != state.guard_start_time
+                || p.uid != state.uid
+                || p.session != state.guard_pid)
+        {
+            return Ok(Vec::new());
+        }
+        let members: Vec<_> = census()?
+            .into_iter()
+            .filter(|p| p.session == state.guard_pid && !p.zombie)
+            .collect();
+        if members.is_empty() {
+            return Ok(members);
+        }
+        let witness = leader
+            .as_ref()
+            .or_else(|| {
+                members.iter().find(|p| {
+                    Some(p.pid) == state.command_pid
+                        && Some(p.start) == state.command_start_time
+                        && p.uid == state.uid
+                })
+            })
+            .ok_or_else(refused)?;
+        // Recheck after enumeration: the witness held the SID throughout the census.
+        if !inspect(witness.pid)?
+            .as_ref()
+            .is_some_and(|p| incarnation_matches(witness, p))
+        {
+            continue;
+        }
+        return Ok(members);
+    }
+    Err(refused())
+}
+
 pub fn recorded_live(state: &crate::storage::State, excluding_guard: bool) -> Result<bool> {
-    if matches!(state.phase.as_str(), "exited" | "killed" | "failed-start")
-        || state.boot_id != boot()?
-    {
-        return Ok(false);
-    }
-    let leader = inspect(state.guard_pid)?;
-    if let Some(identity) = &leader
-        && (identity.start != state.guard_start_time
-            || identity.uid != state.uid
-            || identity.session != state.guard_pid)
-    {
-        return Ok(false);
-    }
-    let members: Vec<_> = census()?
-        .into_iter()
-        .filter(|p| p.session == state.guard_pid && !p.zombie)
-        .collect();
-    if members.is_empty() {
-        return Ok(false);
-    }
-    if leader.is_none_or(|p| p.zombie)
-        && !members.iter().any(|p| {
-            p.uid == state.uid
-                && p.start >= state.guard_start_time
-                && state
-                    .command_start_time
-                    .is_some_and(|birth| p.start <= birth)
-        })
-    {
-        return Err(refused());
-    }
-    Ok(members
+    Ok(recorded_members(state)?
         .iter()
         .any(|p| !excluding_guard || p.pid != state.guard_pid))
 }
@@ -441,7 +465,8 @@ fn signal_member(expected: &Identity, signal: i32) -> Result<()> {
         let Some(current) = inspect(expected.pid)? else {
             return Ok(());
         };
-        if current.start != expected.start
+        if current.zombie
+            || current.start != expected.start
             || current.session != expected.session
             || current.uid != expected.uid
         {
@@ -470,7 +495,8 @@ fn signal_member(expected: &Identity, signal: i32) -> Result<()> {
         let Some(current) = inspect(expected.pid)? else {
             return Ok(());
         };
-        if current.start != expected.start
+        if current.zombie
+            || current.start != expected.start
             || current.session != expected.session
             || current.uid != expected.uid
         {
@@ -690,26 +716,49 @@ pub fn wait_activity(fds: &[i32], timeout: std::time::Duration) -> Result<()> {
     Ok(())
 }
 
-/// A dead leader's SID cannot be reused while any old session member remains.
-/// Validate the receipt and each incarnation again before individual delivery.
-/// Never use group delivery here: a group number can outlive its observed members.
-pub fn signal_recorded_session(state: &crate::storage::State, signal: i32) -> Result<()> {
-    if !recorded_live(state, false)? {
-        return Ok(());
-    }
-    for member in census()?
-        .into_iter()
-        .filter(|p| p.session == state.guard_pid && !p.zombie)
-    {
-        if member.uid != state.uid || member.start < state.guard_start_time {
+/// In-memory authority captured while a witness holds the old SID. It survives
+/// witness exit but never grants authority over a later, unobserved incarnation.
+/// A new stop invocation must establish its own witness again.
+pub struct Recovery {
+    session: i32,
+    members: Vec<Identity>,
+}
+
+impl Recovery {
+    pub fn capture(state: &crate::storage::State) -> Result<Self> {
+        let members: Vec<_> = recorded_members(state)?
+            .into_iter()
+            .filter(|p| p.pid != state.guard_pid)
+            .collect();
+        if members.iter().any(|p| p.uid != state.uid) {
             return Err(refused());
         }
-        if !recorded_live(state, false)? {
-            return Ok(());
-        }
-        signal_member(&member, signal)?;
+        Ok(Self {
+            session: state.guard_pid,
+            members,
+        })
     }
-    Ok(())
+
+    pub fn signal(&self, signal: i32) -> Result<()> {
+        for member in &self.members {
+            signal_member(member, signal)?;
+        }
+        Ok(())
+    }
+
+    pub fn live(&self) -> Result<bool> {
+        for member in &self.members {
+            if inspect(member.pid)?.is_some_and(|p| !p.zombie && incarnation_matches(member, &p)) {
+                return Ok(true);
+            }
+        }
+        // Unobserved descendants or an unrelated reused session cannot be
+        // signalled by this snapshot, and must not be claimed as stopped.
+        if live_group(self.session, Some(self.session))? {
+            return Err(refused());
+        }
+        Ok(false)
+    }
 }
 
 /// A successful census must contain our own readable identity. Known restricted

@@ -13,7 +13,7 @@ standalone Rust binary exercised by a fake caller; the CLI remains unchanged.
 | `ProcessExit`, `Reap` | Session census ignores zombies; reap direct/adopted children; release lock after no live members | Zombie liveness; child changes process group within session |
 | `StopUnknown` | Bounded confirmation can report uncertainty while live members remain | Honest unknown recovery outcome, never successful absence |
 
-Positive TLC exploration: 168 distinct states, queue exhausted, depth 11. Negative
+Positive TLC exploration: 322 distinct states, queue exhausted, depth 14. Negative
 control sets `SkipLiveFence = TRUE`; `Retry` then violates `NoDuplicate` with live,
 durable and duplicate all true in the same state. Both guard-loss and project-loss
 traces can witness this violation; the registry requires the named action and
@@ -25,7 +25,7 @@ validates the negative invariant/action/witness. Apalache is not qualified here.
 
 The guard-owned Stop and Kill checks still assume matching identity. The added
 orphan signal admission is exercised by a separate SID-reuse negative control.
-The orphan path includes an environment SID-reuse action and requires an old-birth
+The orphan path includes an environment SID-reuse action and requires an exact recorded incarnation
 witness, represented by matching identity. The sid-reuse negative control removes
 that witness guard and must violate NoForeignSignal at RecoverOrphan with identity
 sid-reused. Native clock units, enumeration and identity-to-effect races are omitted. `GuardRetainsLock` similarly checks the abstract action
@@ -52,7 +52,8 @@ Native recovery added after this abstraction is deliberately not claimed as mode
 coverage: dead-guard TERM/grace/KILL recovery, supervisor death before guard
 publication, inherited launch-admission lease, stop/exit inspection races, census
 errors and restricted views, high descriptor limits, EINTR retries, and idle
-poll scheduling. RecoverOrphan models signal admission only, not grace, KILL timing or confirmation.
+poll scheduling. RecoverOrphan and OrphanKill model capture, witness loss and KILL admission;
+wall-clock grace timing and native confirmation remain implementation tests.
 ReuseSessionID represents a later survivor after its replacement leader exits. Native regressions include
 `dead_guard_with_live_session_recovers_term_then_kill`,
 `supervisor_and_guard_prepublication_crashes_keep_stop_admission_leased`,
@@ -75,3 +76,14 @@ regression creates a dead session leader and surviving child, then relocates
 a stale receipt SID to reproduce reuse without forcing the host PID allocator
 to wrap. It checks terminal absence, non-terminal unknown without signals, and
 fresh-owner launch after a terminal receipt.
+
+Orphan recovery now models WitnessExit after RecoverOrphan captured the old
+incarnations. OrphanKill remains enabled after witness loss; the implementation
+retains those exact identities through its grace/KILL loop. RecoveryAuthorityRetained
+and OrphanKillEnabled check that availability boundary. The witness-loss negative
+control deliberately clears the captured snapshot on WitnessExit and must violate
+RecoveryAuthorityRetained with live work and no snapshot. SID reuse may follow
+an emptied session even during stopping; the old snapshot never authorizes a
+new incarnation. The native wrapper/TERM-ignoring-child regression checks this
+sequence with real processes. New descendants not in the snapshot remain an
+uncovered recovery/unknown boundary; no eventual-exit claim is made.

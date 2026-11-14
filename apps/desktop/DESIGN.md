@@ -283,7 +283,7 @@ killed with its process group on expiry; a timeout makes the screen Unknown.
 | Upgrades | R14 daily; `hack upgrade check --json` on Review | daily / on demand | 30 s / 60 s |
 | Actions | `hack up -d --json`, `down --json`, `restart --json`, `open --json`, `daemon start\|restart\|install` (exit code), `autostart …` | on click | 10 min for `up`, 2 min others |
 
-### Requests to the CLI and daemon (one PR each, for other sessions)
+### Requests to the CLI and daemon (each small enough for one PR)
 
 1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
 2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.

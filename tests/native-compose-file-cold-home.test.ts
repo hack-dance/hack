@@ -182,16 +182,24 @@ test.each([
   } else {
     await writeFile(home, "owned non-directory", { mode: 0o600 });
   }
-  // Journal admission may reject a non-directory home during acquisition;
-  // otherwise the private material owner rejects it before preparation.
-  await expect(
-    store.withMutation(async (mutation) => {
+  if (kind === "file") {
+    // Journal admission rejects a non-directory home during acquisition.
+    await expect(
+      store.withMutation(async (mutation) => {
+        const input = await selected(mutation);
+        await input.owner.prepare(input);
+      })
+    ).rejects.toMatchObject({
+      code: "E_NATIVE_COMPOSE_STATE",
+    });
+  } else {
+    await store.withMutation(async (mutation) => {
       const input = await selected(mutation);
-      await input.owner.prepare(input);
-    })
-  ).rejects.toMatchObject({
-    code: "E_NATIVE_COMPOSE_STATE",
-  });
+      await expect(input.owner.prepare(input)).rejects.toMatchObject({
+        code: "E_NATIVE_COMPOSE_STATE",
+      });
+    });
+  }
   expect(await readdir(foreign)).toEqual([]);
   await expect(lstat(join(home, "compose-files"))).rejects.toMatchObject({
     code: kind === "file" ? "ENOTDIR" : "ENOENT",

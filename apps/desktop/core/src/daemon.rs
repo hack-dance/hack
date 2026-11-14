@@ -83,7 +83,8 @@ impl DaemonClient {
     /// # Errors
     /// Any [`DaemonError`].
     pub fn projects(&self) -> Result<ProjectsPayload, DaemonError> {
-        self.get_json("/v1/projects")
+        let v: serde_json::Value = self.get_json("/v1/projects")?;
+        ProjectsPayload::from_value(v).map_err(DaemonError::BadResponse)
     }
 
     fn get(&self, path_and_query: &str) -> Result<Vec<u8>, DaemonError> {
@@ -172,11 +173,16 @@ fn dechunk(mut b: &[u8]) -> Result<Vec<u8>, DaemonError> {
         if size == 0 {
             return Ok(out);
         }
-        if b.len() < size + 2 || out.len() + size > MAX_BODY {
+        // Checked arithmetic: a huge size must be an error, not a panic.
+        let end = size.checked_add(2).ok_or_else(bad)?;
+        if size > MAX_BODY.saturating_sub(out.len()) || b.len() < end {
+            return Err(bad());
+        }
+        if &b[size..end] != b"\r\n" {
             return Err(bad());
         }
         out.extend_from_slice(&b[..size]);
-        b = &b[size + 2..];
+        b = &b[end..];
     }
 }
 
@@ -248,6 +254,28 @@ mod tests {
         let r = DaemonClient::new(&sock, Duration::from_secs(2)).status();
         assert!(matches!(r, Err(DaemonError::Http { status: 404, .. })));
         h.join().unwrap();
+    }
+
+    #[test]
+    fn malformed_chunks_are_errors_not_panics() {
+        let huge = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\nab\r\n0\r\n\r\n",
+            usize::MAX
+        );
+        assert!(matches!(
+            parse_http(huge.as_bytes()),
+            Err(DaemonError::BadResponse(_))
+        ));
+        let bad_delim = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nabXY0\r\n\r\n";
+        assert!(matches!(
+            parse_http(bad_delim),
+            Err(DaemonError::BadResponse(_))
+        ));
+        let short = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nff\r\nab";
+        assert!(matches!(
+            parse_http(short),
+            Err(DaemonError::BadResponse(_))
+        ));
     }
 
     #[test]

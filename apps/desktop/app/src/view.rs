@@ -577,11 +577,14 @@ impl HackApp {
             .border_t_1()
             .border_color(t.status_bar_border)
             .text_color(t.muted_foreground)
-            .child(format!(
-                "{} running · {} stopped",
-                list.running.len(),
-                list.stopped.len()
-            ))
+            .child({
+                let c = list.counts;
+                let mut text = format!("{} running · {} stopped", c.running, c.stopped);
+                if c.unknown > 0 {
+                    text.push_str(&format!(" · {} unknown", c.unknown));
+                }
+                text
+            })
             // Without a snapshot the engine and hackd states are unknown.
             .when(list.cli_version.is_some(), |d| {
                 d.child(h_flex().gap_1().child(dot(engine.1)).child(engine.0))

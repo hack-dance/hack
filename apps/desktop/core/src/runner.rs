@@ -22,7 +22,7 @@ use crate::models::{CliError, LogEvent};
 
 const STDERR_KEEP: usize = 8 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RunError {
     /// The `hack` executable was not found.
     NotFound,
@@ -101,13 +101,23 @@ impl CliRunner {
     }
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
-        self.command(args, path).spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                RunError::NotFound
-            } else {
-                RunError::Spawn(e.to_string())
+        // ETXTBSY: the executable was just written (a fresh upgrade, or a test
+        // script whose write descriptor a concurrent fork still holds). Retry
+        // briefly instead of reporting a spawn failure.
+        let mut attempt = 0;
+        loop {
+            match self.command(args, path).spawn() {
+                Ok(c) => return Ok(c),
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
+                    attempt += 1;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(RunError::NotFound);
+                }
+                Err(e) => return Err(RunError::Spawn(e.to_string())),
             }
-        })
+        }
     }
 
     /// Run and return raw stdout, stderr tail and exit code.
@@ -315,12 +325,14 @@ pub fn parse_result(stdout: &str, stderr: &str, code: Option<i32>) -> Result<Val
                     Value::String(message) => Some(CliError {
                         code: "E_UNEXPECTED".into(),
                         message,
+                        detail: None,
                     }),
                     other => serde_json::from_value::<CliError>(other).ok(),
                 })
                 .unwrap_or_else(|| CliError {
                     code: "E_UNEXPECTED".into(),
                     message: head(stdout),
+                    detail: None,
                 });
             Err(RunError::Cli(err))
         }
@@ -403,7 +415,8 @@ mod tests {
             r,
             Err(RunError::Cli(CliError {
                 code: "E_DOCKER_UNAVAILABLE".into(),
-                message: "down".into()
+                message: "down".into(),
+                detail: None,
             }))
         );
     }
@@ -434,7 +447,7 @@ mod tests {
         let r = f
             .runner()
             .run_json::<Value>(&["up"], None, Duration::from_millis(300));
-        assert!(matches!(r, Err(RunError::Timeout { .. })));
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
         assert!(started.elapsed() < Duration::from_secs(5));
         let pid: i32 = std::fs::read_to_string(f.dir.join("grandchild"))
             .unwrap()

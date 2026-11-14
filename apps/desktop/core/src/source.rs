@@ -41,6 +41,8 @@ pub enum SourceError {
     Cli {
         code: String,
         message: String,
+        /// Services the CLI reported as failed to start (`detail.failed`).
+        failed: Vec<String>,
     },
 }
 
@@ -49,12 +51,14 @@ impl From<RunError> for SourceError {
         match e {
             RunError::NotFound => Self::CliMissing,
             RunError::Cli(c) => Self::Cli {
+                failed: c.failed_services(),
                 code: c.code,
                 message: c.message,
             },
             other => Self::Cli {
                 code: "E_APP_RUN".into(),
                 message: other.to_string(),
+                failed: vec![],
             },
         }
     }

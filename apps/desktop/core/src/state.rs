@@ -240,10 +240,24 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
             reason: d.message.clone(),
         };
     }
-    if matches!(row.status.as_str(), "unknown" | "unavailable") {
-        return ProjectState::Unknown {
-            reason: "The container runtime could not be read".into(),
-        };
+    match row.status.as_str() {
+        "running" | "stopped" => {}
+        "unknown" | "unavailable" => {
+            return ProjectState::Unknown {
+                reason: "The container runtime could not be read".into(),
+            };
+        }
+        // Missing or unfamiliar status: no evidence, so not "stopped".
+        "" => {
+            return ProjectState::Unknown {
+                reason: "The CLI reported no status".into(),
+            };
+        }
+        other => {
+            return ProjectState::Unknown {
+                reason: format!("Unrecognised status {other:?}"),
+            };
+        }
     }
 
     let svcs = services(row);
@@ -397,6 +411,21 @@ mod tests {
             ..LocalContext::default()
         };
         assert_eq!(derive(&row("storefront"), &local), ProjectState::Stopping);
+    }
+
+    #[test]
+    fn unfamiliar_or_missing_status_is_unknown() {
+        for status in ["", "unregistered", "something_new"] {
+            let mut r = row("storefront");
+            r.status = status.into();
+            assert!(
+                matches!(
+                    derive(&r, &LocalContext::default()),
+                    ProjectState::Unknown { .. }
+                ),
+                "{status:?}"
+            );
+        }
     }
 
     #[test]

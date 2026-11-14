@@ -33,6 +33,18 @@ pub struct ProjectsPayload {
 }
 
 impl ProjectsPayload {
+    /// Parse a payload that must carry a `projects` array. `{}` or a
+    /// payload without it is malformed, not an empty registry.
+    ///
+    /// # Errors
+    /// A message naming what is wrong.
+    pub fn from_value(v: serde_json::Value) -> Result<Self, String> {
+        if !v.get("projects").is_some_and(serde_json::Value::is_array) {
+            return Err("projects payload has no projects array".into());
+        }
+        serde_json::from_value(v).map_err(|e| e.to_string())
+    }
+
     /// The engine is known to be unavailable (not merely unreported).
     #[must_use]
     pub fn engine_down(&self) -> bool {
@@ -325,11 +337,31 @@ pub struct LogEntry {
 }
 
 /// The `{ok:false,error}` half of the CLI result envelope.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CliError {
     pub code: String,
     pub message: String,
+    /// Structured detail, for example `E_STARTUP_INCOMPLETE`'s
+    /// `{running, completed, failed}` service lists.
+    pub detail: Option<serde_json::Value>,
+}
+
+impl CliError {
+    /// Services named in `detail.failed` (startup failures).
+    #[must_use]
+    pub fn failed_services(&self) -> Vec<String> {
+        self.detail
+            .as_ref()
+            .and_then(|d| d.get("failed"))
+            .and_then(|f| f.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +410,22 @@ mod tests {
         assert_eq!(p.projects.len(), 2);
         assert!(p.projects[0].defined_services.is_empty());
         assert!(p.projects[0].service_hosts.is_empty());
+    }
+
+    #[test]
+    fn payload_without_projects_is_malformed() {
+        assert!(ProjectsPayload::from_value(serde_json::json!({})).is_err());
+        assert!(ProjectsPayload::from_value(serde_json::json!({"projects": null})).is_err());
+        assert!(ProjectsPayload::from_value(serde_json::json!({"projects": []})).is_ok());
+    }
+
+    #[test]
+    fn startup_failure_detail_is_kept() {
+        let e: CliError = serde_json::from_str(
+            r#"{"code":"E_STARTUP_INCOMPLETE","message":"m","detail":{"running":["db"],"completed":[],"failed":["api","worker"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(e.failed_services(), vec!["api", "worker"]);
     }
 
     #[test]

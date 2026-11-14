@@ -61,6 +61,15 @@ pub struct ListView {
     pub stopped: Vec<Row>,
     pub doctor_count: usize,
     pub cli_version: Option<String>,
+    /// Counts by state for the status bar; unknown is never "stopped".
+    pub counts: Counts,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub running: usize,
+    pub stopped: usize,
+    pub unknown: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,9 +149,7 @@ impl AppModel {
                 if ctx.in_flight.is_some() {
                     return false;
                 }
-                if action != Action::Open {
-                    ctx.in_flight = Some(action);
-                }
+                ctx.in_flight = Some(action);
                 self.action_errors.remove(&project);
                 false
             }
@@ -165,6 +172,11 @@ impl AppModel {
                     }
                     Ok(ActionOutcome::Opened(_)) => {}
                     Err(e) => {
+                        if let SourceError::Cli { failed, .. } = &e
+                            && matches!(action, Action::Start | Action::Restart)
+                        {
+                            ctx.last_failed.clone_from(failed);
+                        }
                         self.action_errors.insert(project, describe(&e));
                     }
                 }
@@ -193,7 +205,7 @@ impl AppModel {
         let mut banners = Vec::new();
         let phase = match (&self.snapshot, &self.last_error) {
             (_, Some(SourceError::CliMissing)) => Phase::CliMissing,
-            (None, Some(SourceError::Cli { code, message })) => Phase::Error {
+            (None, Some(SourceError::Cli { code, message, .. })) => Phase::Error {
                 code: code.clone(),
                 message: message.clone(),
             },
@@ -239,6 +251,15 @@ impl AppModel {
         }
         running.sort_by(|a, b| a.name.cmp(&b.name));
         stopped.sort_by(|a, b| a.name.cmp(&b.name));
+        let unknown = stopped
+            .iter()
+            .filter(|r| matches!(r.state, ProjectState::Unknown { .. }))
+            .count();
+        let counts = Counts {
+            running: running.len(),
+            stopped: stopped.len() - unknown,
+            unknown,
+        };
         ListView {
             phase,
             banners,
@@ -250,6 +271,7 @@ impl AppModel {
                 .and_then(|s| s.doctor.as_ref())
                 .map_or(0, crate::models::DoctorReport::attention_count),
             cli_version: self.snapshot.as_ref().map(|s| s.cli_version.clone()),
+            counts,
         }
     }
 
@@ -296,7 +318,7 @@ fn describe(e: &SourceError) -> String {
     match e {
         SourceError::Pending => "still loading".into(),
         SourceError::CliMissing => "hack was not found on PATH".into(),
-        SourceError::Cli { code, message } => format!("{code}: {message}"),
+        SourceError::Cli { code, message, .. } => format!("{code}: {message}"),
     }
 }
 
@@ -332,6 +354,8 @@ mod tests {
         let engine = model(Fixture::EngineDown).list();
         assert!(matches!(engine.banners[..], [Banner::EngineDown { .. }]));
         assert!(engine.running.is_empty(), "unknown is not running");
+        assert_eq!(engine.counts.stopped, 0, "unknown is not stopped");
+        assert_eq!(engine.counts.unknown, 4);
     }
 
     #[test]
@@ -351,6 +375,7 @@ mod tests {
         m.apply(Event::Refreshed(Err(SourceError::Cli {
             code: "E_UNEXPECTED".into(),
             message: "boom".into(),
+            failed: vec![],
         })));
         let v = m.list();
         assert_eq!(v.phase, Phase::Ready);
@@ -397,6 +422,64 @@ mod tests {
     }
 
     #[test]
+    fn open_is_single_flight_too() {
+        let mut m = model(Fixture::Running);
+        m.apply(Event::Select("storefront".into()));
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Open,
+        });
+        assert!(!m.can_start("storefront"));
+        assert!(m.detail().unwrap().busy);
+        assert!(matches!(
+            m.detail().unwrap().state,
+            ProjectState::Running { .. }
+        ));
+    }
+
+    #[test]
+    fn startup_failure_error_names_failed_services() {
+        let mut m = model(Fixture::Running);
+        m.apply(Event::Select("storefront".into()));
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Restart,
+        });
+        m.apply(Event::ActionFinished {
+            project: "storefront".into(),
+            action: Action::Restart,
+            result: Err(SourceError::Cli {
+                code: "E_STARTUP_INCOMPLETE".into(),
+                message: "m".into(),
+                failed: vec!["worker".into()],
+            }),
+        });
+        // Fixture still shows all running; the failure shows once a service is down.
+        assert!(m.detail().unwrap().last_error.is_some());
+        let mut d = model(Fixture::Degraded);
+        d.apply(Event::Select("storefront".into()));
+        d.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Start,
+        });
+        d.apply(Event::ActionFinished {
+            project: "storefront".into(),
+            action: Action::Start,
+            result: Err(SourceError::Cli {
+                code: "E_STARTUP_INCOMPLETE".into(),
+                message: "m".into(),
+                failed: vec!["worker".into()],
+            }),
+        });
+        assert_eq!(
+            d.detail().unwrap().state,
+            ProjectState::FailedStart {
+                services: vec!["worker".into()]
+            }
+        );
+    }
+
+    #[test]
     fn action_error_is_shown_on_the_project() {
         let mut m = model(Fixture::Running);
         m.apply(Event::Select("storefront".into()));
@@ -410,6 +493,7 @@ mod tests {
             result: Err(SourceError::Cli {
                 code: "E_DOCKER_UNAVAILABLE".into(),
                 message: "down".into(),
+                failed: vec![],
             }),
         });
         let d = m.detail().unwrap();

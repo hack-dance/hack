@@ -316,6 +316,7 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
             return Err(SourceError::Cli {
                 code: "E_UNEXPECTED".into(),
                 message: "projects registry could not be read".into(),
+                failed: vec![],
             });
         }
         _ => {}

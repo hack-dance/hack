@@ -36,7 +36,7 @@ One JSON object per line, in `<hack home>/activity.jsonl` (`~/.hack` unless
 | `v` | Schema version, `1`. Readers skip lines of another version. |
 | `ts` | When the action started (ISO 8601, UTC). |
 | `project` | The project's registered name, or `null` when the target is not a registered project. Resolved from `--project` with the same canonical-name rules the command uses (`My_App` records `my-app`), or from the registered checkout, `.hack` directory or linked worktree containing `--path` or the working directory. Never a path. |
-| `branch` | The branch instance targeted (`--branch`, or the linked worktree's instance), or `null`. |
+| `branch` | The branch instance the command acted on (`--branch`, or the linked worktree's instance; for an implicit `down` the running instance it was reconciled to), or `null` for the base instance. |
 | `action` | `up`, `down`, `restart`; `autostart` is reserved for always-on starts. |
 | `origin` | Who asked: `cli`, `app`, `autostart` or `agent`, from `HACK_ORIGIN`. |
 | `outcome` | `ok` (exit 0), `interrupted` (exit 130 or 143, such as Ctrl-C on a foreground `up`), or `failed`. |

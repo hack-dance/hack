@@ -103,7 +103,8 @@ export function resolveActivityPath(): string {
 // ---------------------------------------------------------------------------
 
 type ActivityNotes = {
-  branch?: string;
+  /** Undefined: nothing noted. Null: the base instance. */
+  branch?: string | null;
   failedServices: Set<string>;
 };
 
@@ -119,11 +120,16 @@ export function suppressActivityRecording(): void {
   suppressed = true;
 }
 
-/** Note the branch instance the running action targets. */
-export function noteActivityBranch(branch: string | null | undefined): void {
+/**
+ * Note the branch instance the running action targets; null for the base
+ * instance. A later note replaces an earlier one, so a command that retargets
+ * (an implicit `down` reconciled to the instance actually running) records
+ * where it acted. A name that is not a plain name records no branch.
+ */
+export function noteActivityBranch(branch: string | null): void {
   const current = notes.getStore();
-  if (current && branch && NAME.test(branch)) {
-    current.branch = branch;
+  if (current) {
+    current.branch = branch && NAME.test(branch) ? branch : null;
   }
 }
 
@@ -173,7 +179,8 @@ export async function recordActivity(opts: {
         startedAt: started,
         durationMs: Math.max(0, now() - started),
         project: await opts.project().catch(() => null),
-        branch: current.branch ?? opts.branch ?? null,
+        branch:
+          current.branch === undefined ? (opts.branch ?? null) : current.branch,
         exitCode,
         failedServices: [...current.failedServices],
       });

@@ -21,6 +21,7 @@ import {
   appendActivityRecord,
   buildActivityRecord,
   encodeActivityRecord,
+  noteActivityBranch,
   noteActivityFailedServices,
   parseActivityText,
   readActivity,
@@ -475,4 +476,31 @@ test("the reader returns only the known fields", async () => {
   const [entry] = await readActivity({ path, limit: 1 });
   expect(entry).toBeDefined();
   expect(Object.hasOwn(entry as object, "extra")).toBe(false);
+});
+
+test("a later branch note replaces an earlier one, and null records the base instance", async () => {
+  process.env.HACK_HOME = join(root, "home");
+  try {
+    for (const [notes, expected] of [
+      [["feature"], "feature"],
+      // An implicit down reconciled to the old instance, or to the base one.
+      [["renamed", "old-branch"], "old-branch"],
+      [["renamed", null], null],
+    ] as const) {
+      await recordActivity({
+        action: "down",
+        branch: "explicit",
+        project: async () => "shop",
+        run: async () => {
+          for (const note of notes) {
+            noteActivityBranch(note);
+          }
+          return 0;
+        },
+      });
+      expect((await readActivity({ limit: 1 }))[0]?.branch).toBe(expected);
+    }
+  } finally {
+    restoreEnv("HACK_HOME", savedHome);
+  }
 });

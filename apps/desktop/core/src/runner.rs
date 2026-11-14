@@ -274,19 +274,41 @@ impl CliRunner {
         })
     }
 
-    /// `hack --version` → `"5.0.0"` (text output until request R1).
-    ///
-    /// # Errors
-    /// Any [`RunError`].
-    pub fn version(&self, timeout: Duration) -> Result<String, RunError> {
-        let (stdout, stderr, code) = self.run_raw(&["--version"], None, timeout)?;
-        if code != Some(0) {
-            return Err(RunError::Exit { code, stderr });
-        }
-        parse_version(&stdout).ok_or_else(|| RunError::BadJson {
-            error: "no version in output".into(),
+    /// Run a HACK-2218 command with a required envelope and payload schema.
+    /// Legacy JSON commands continue to use `run_json`.
+    pub fn run_schema_json<T: DeserializeOwned>(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        timeout: Duration,
+        schema: &str,
+    ) -> Result<T, RunError> {
+        let (stdout, stderr, code) = self.run_raw(args, path, timeout)?;
+        let value = parse_schema_result(&stdout, &stderr, code, schema)?;
+        serde_json::from_value(value).map_err(|e| RunError::BadJson {
+            error: e.to_string(),
             stdout_head: head(&stdout),
         })
+    }
+
+    /// Read the running CLI version through the schema-tagged JSON contract.
+    ///
+    /// # Errors
+    /// Any [`RunError`], including an unsupported or missing schema.
+    pub fn version(&self, timeout: Duration) -> Result<String, RunError> {
+        #[derive(serde::Deserialize)]
+        struct Version {
+            version: String,
+        }
+        let report: Version =
+            self.run_schema_json(&["version", "--json"], None, timeout, "hack.version.v1")?;
+        if report.version.is_empty() {
+            return Err(RunError::BadJson {
+                error: "empty version".into(),
+                stdout_head: String::new(),
+            });
+        }
+        Ok(report.version)
     }
 
     /// Start a long-running ndjson stream (`hack logs --json ...`).
@@ -532,6 +554,53 @@ pub fn parse_result(stdout: &str, stderr: &str, code: Option<i32>) -> Result<Val
         // Raw objects. Some commands (doctor, env list) exit 1 on findings
         // but still print a full report, which the app wants.
         _ => Ok(value),
+    }
+}
+
+/// Strict parser for the unpublished contracts migrated by HACK-2238.
+/// A nonzero result can never be accepted as successful data.
+pub fn parse_schema_result(
+    stdout: &str,
+    stderr: &str,
+    code: Option<i32>,
+    schema: &str,
+) -> Result<Value, RunError> {
+    let invalid = || RunError::BadJson {
+        error: format!("expected CLI envelope with schema {schema}"),
+        stdout_head: head(stdout),
+    };
+    let value: Value = serde_json::from_str(stdout).map_err(|_| invalid())?;
+    if value.as_object().is_none_or(|object| object.len() != 2) {
+        return Err(invalid());
+    }
+    match value.get("ok").and_then(Value::as_bool) {
+        Some(false) if code.is_some_and(|code| code != 0) => {
+            let error = value.get("error").ok_or_else(invalid)?;
+            if !error
+                .get("code")
+                .and_then(Value::as_str)
+                .is_some_and(|code| {
+                    code.strip_prefix("E_").is_some_and(|suffix| {
+                        !suffix.is_empty()
+                            && suffix.bytes().all(|byte| {
+                                byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                            })
+                    })
+                })
+                || error.get("message").and_then(Value::as_str).is_none()
+            {
+                return Err(invalid());
+            }
+            parse_result(stdout, stderr, code)
+        }
+        Some(true) if code == Some(0) => {
+            let data = value.get("data").ok_or_else(invalid)?;
+            if data.get("schema").and_then(Value::as_str) != Some(schema) {
+                return Err(invalid());
+            }
+            Ok(data.clone())
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -884,7 +953,9 @@ wait $!"#,
             Some("5.0.0-next.3")
         );
         assert_eq!(parse_version("hack"), None);
-        let f = FakeHack::new("echo 'hack v5.0.0'");
+        let f = FakeHack::new(
+            r#"echo '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}'"#,
+        );
         assert_eq!(f.runner().version(T).unwrap(), "5.0.0");
     }
 

@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "data": {
+    "version": "5.0.0",
+    "channel": "stable",
+    "install_kind": "standalone",
+    "binary_path": "/example/bin/hack",
+    "schema": "hack.version.v1"
+  }
+}

@@ -31,6 +31,11 @@ cargo run -p hack-desktop -- --list-fixtures
 cargo run -p hack-desktop -- --fixtures failed-start --theme dark
 ```
 
+The core reads version identity through `hack version --json` and validates its
+`hack.version.v1` schema inside the success envelope. New schema-tagged commands
+use the strict parser; daemon and published legacy payloads keep their existing
+parsers. Shared boundary fixtures are checked against the CLI producers.
+
 ## Check the live data path without a window
 
 ```sh

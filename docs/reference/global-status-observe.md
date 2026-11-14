@@ -49,24 +49,50 @@ could not tell; it is never reported as absent or as a failure of the thing.
 
 ```json
 {
-  "schema": "hack.global-status.observe.v1",
-  "generated_at": "2026-11-14T00:00:00.000Z",
-  "observe": true,
-  "platform": "linux",
-  "docker": { "state": "running", "detail": null },
-  "caddy": { "ok": true, "error": null, "services": [] },
-  "logging": { "ok": true, "error": null, "services": [] },
-  "networks": { "ok": true, "missing": [], "networks": [] },
-  "proxy_network": { "ok": true, "readable": true, "issues": [] },
-  "host_dns": { "platform": "linux", "state": "configured", "ok": true },
-  "summary": {
-    "docker_ok": true,
-    "caddy_ok": true,
-    "logging_ok": true,
-    "networks_ok": true,
-    "proxy_network_ok": true,
-    "host_dns_ok": true,
-    "ok": true
+  "ok": true,
+  "data": {
+    "schema": "hack.global-status.observe.v1",
+    "generated_at": "2026-11-14T00:00:00.000Z",
+    "observe": true,
+    "platform": "linux",
+    "docker": {
+      "state": "running",
+      "detail": null
+    },
+    "caddy": {
+      "ok": true,
+      "error": null,
+      "services": []
+    },
+    "logging": {
+      "ok": true,
+      "error": null,
+      "services": []
+    },
+    "networks": {
+      "ok": true,
+      "missing": [],
+      "networks": []
+    },
+    "proxy_network": {
+      "ok": true,
+      "readable": true,
+      "issues": []
+    },
+    "host_dns": {
+      "platform": "linux",
+      "state": "configured",
+      "ok": true
+    },
+    "summary": {
+      "docker_ok": true,
+      "caddy_ok": true,
+      "logging_ok": true,
+      "networks_ok": true,
+      "proxy_network_ok": true,
+      "host_dns_ok": true,
+      "ok": true
+    }
   }
 }
 ```
@@ -83,8 +109,10 @@ could not tell; it is never reported as absent or as a failure of the thing.
 | `host_dns` (other) | `state: "unknown"`, `ok: "unknown"` |
 | `summary.ok` | `false` if any part is `false`; otherwise `"unknown"` if any part is; otherwise `true` |
 
-Exit code: 0 whenever the JSON was printed, whatever it says; read the `ok`
-fields.
+Exit code 0 means the observation was collected, with the report inside `data`
+and `data.schema: "hack.global-status.observe.v1"`. Read `data.summary.ok` and
+the individual report parts for health; top-level `ok` is not a health claim.
+A command failure uses the standard error envelope and a nonzero exit.
 
 Not included: the gateway section of plain `hack global status --json` (it reads
 the daemon and token store and is not routing state).

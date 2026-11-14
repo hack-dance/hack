@@ -132,7 +132,8 @@ ps/inspect reads, which can start a socket-activated engine (for example a
 systemd Docker socket or an on-demand macOS engine). Both modes bypass hackd,
 including when a daemon is available. `--all` discovers runtime-only projects
 only with `--runtime`.
-Observe returns the normal listing fields plus `observe: true` and
+Observe returns a success envelope with `data.schema: "hack.projects.observe.v1"`.
+The `data` payload contains the normal listing fields plus `observe: true` and
 `runtime_requested: false|true`. Without runtime queries, `runtime_error` and
 `runtime_checked_at` are null rather than claiming Docker failed. Each full or
 summary row adds `backend`, `state`, `state_reason`, `started_at` and `services`.

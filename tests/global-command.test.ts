@@ -10,7 +10,6 @@ import {
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
@@ -28,6 +27,7 @@ import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
 import * as interactivity from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { machineData, machineError } from "./helpers/machine-output.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 let tempDir: string | null = null;
@@ -187,6 +187,11 @@ test.each([
   "install",
   "trust",
 ])("global %s --json without --plan refuses before any effect", async (command) => {
+  const chunks: string[] = [];
+  const output = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  });
   const confirm = spyOn(interactivity, "confirmSafe").mockImplementation(() => {
     throw new Error("No confirmation expected");
   });
@@ -197,8 +202,10 @@ test.each([
     expect(runCalls).toEqual([]);
     expect(linuxDnsPrivileged).toEqual([]);
     expect(confirm).not.toHaveBeenCalled();
+    machineError(chunks.join(""), "E_USAGE");
   } finally {
     confirm.mockRestore();
+    output.mockRestore();
   }
 });
 
@@ -221,7 +228,9 @@ test.skipIf(process.platform !== "linux")(
     } finally {
       stdout.mockRestore();
     }
-    expect(JSON.parse(chunks.join(""))).toMatchObject({
+    expect(
+      machineData(chunks.join(""), "hack.global-admin-plan.v1")
+    ).toMatchObject({
       schema: "hack.global-admin-plan.v1",
       command: "install",
       complete: true,
@@ -962,7 +971,8 @@ test.skipIf(process.platform !== "linux")(
     }
     expect(dockerStarted).toBe(false);
     expect(runCalls).toEqual([]);
-    const planned: unknown = JSON.parse(chunks.join(""));
+    const planned: unknown = machineError(chunks.join(""), "E_PLAN_INCOMPLETE")
+      .detail.plan;
     expect(planned).toMatchObject({
       steps: expect.arrayContaining([
         expect.objectContaining({

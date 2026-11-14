@@ -61,6 +61,7 @@ import {
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
+import { resolveGlobalCaddyIp } from "../lib/caddy-hosts.ts";
 import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
@@ -175,10 +176,19 @@ import {
   type LinuxTrustResult,
 } from "./global-linux-trust.ts";
 import {
+  checkMacDnsmasqConfigForDomain,
+  checkMacDnsmasqPort53,
+  checkMacResolverForDomain,
+} from "./global-mac-dns.ts";
+import {
   inspectProxyNetwork,
   proxyNetworkStatusPayload,
   repairProxyNetworkBeforeUp,
 } from "./global-proxy-network.ts";
+import {
+  DOCKER_PROBE_TIMEOUT_MS,
+  observeGlobalStatus,
+} from "./global-status-observe.ts";
 
 /** Regex to split strings on whitespace. */
 const WHITESPACE_PATTERN = /\s+/;
@@ -344,11 +354,22 @@ const globalDownSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const globalStatusOptions = [
+  optJson,
+  defineOption({
+    name: "observe",
+    type: "boolean",
+    long: "--observe",
+    description:
+      "Read only: never start Docker, a container or hackd; unknown parts say unknown (needs --json)",
+  } as const),
+] as const;
+
 const globalStatusSpec = defineCommand({
   name: "status",
   summary: "Show status for global infra (containers + networks)",
   group: "Global",
-  options: [optJson] as const,
+  options: globalStatusOptions,
   positionals: [],
   subcommands: [],
 } as const);
@@ -2505,7 +2526,61 @@ async function handleGlobalStatus({
   readonly ctx: CliContext;
   readonly args: GlobalStatusArgs;
 }): Promise<number> {
+  if (args.options.observe === true) {
+    if (args.options.json !== true) {
+      logger.error({
+        message:
+          "--observe prints JSON only: run hack global status --json --observe",
+      });
+      return 2;
+    }
+    return await globalStatusObserve();
+  }
   return await globalStatus({ json: args.options.json ?? false });
+}
+
+/**
+ * `hack global status --json --observe`: never starts anything (see
+ * global-status-observe.ts). Not gated by slim mode: it starts nothing.
+ */
+async function globalStatusObserve(): Promise<number> {
+  const paths = getGlobalPaths();
+  const payload = await observeGlobalStatus({
+    platform: process.platform,
+    dockerInstalled: () => findExecutableInPath("docker") !== null,
+    probeDocker: async () =>
+      await exec(["docker", "info", "--format", "{{.ServerVersion}}"], {
+        stdin: "ignore",
+        timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+      }),
+    readCaddy: async () => await readInstalledComposeStatus(paths.caddyCompose),
+    readLogging: async () =>
+      await readInstalledComposeStatus(paths.loggingCompose),
+    readNetworks: async () =>
+      await readNetworksStatus([
+        DEFAULT_INGRESS_NETWORK,
+        DEFAULT_LOGGING_NETWORK,
+      ]),
+    readProxyNetwork: async () =>
+      (await pathExists(paths.caddyCompose))
+        ? proxyNetworkStatusPayload(
+            await inspectProxyNetwork({ composeFile: paths.caddyCompose })
+          )
+        : {
+            ok: false,
+            readable: false,
+            issues: [],
+            error: `Missing ${paths.caddyCompose} (run: hack global install)`,
+          },
+    caddyIp: resolveGlobalCaddyIp,
+    inspectLinuxDns: async () => await inspectLinuxGlobalDns(),
+    macResolver: checkMacResolverForDomain,
+    macDnsmasqConfig: checkMacDnsmasqConfigForDomain,
+    macDnsmasqPort53: checkMacDnsmasqPort53,
+    now: () => new Date(),
+  });
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  return 0;
 }
 
 async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
@@ -2598,6 +2673,23 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
   }
 
   return 0;
+}
+
+/**
+ * A global Compose group, or a definite "not installed" when its file is
+ * missing (Docker is not asked about a stack that was never installed).
+ */
+async function readInstalledComposeStatus(
+  composeFile: string
+): Promise<ComposeStatusGroup> {
+  if (!(await pathExists(composeFile))) {
+    return {
+      ok: false,
+      error: `Missing ${composeFile} (run: hack global install)`,
+      services: [],
+    };
+  }
+  return await readComposeStatus(composeFile);
 }
 
 /** Linux host DNS route, or `null` on other platforms. */

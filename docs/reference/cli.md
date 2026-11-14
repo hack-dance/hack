@@ -1294,6 +1294,7 @@ hack global status [options]
 | Option | Description |
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
+| `--observe` | Read only: never start Docker, a container or hackd; unknown parts say unknown (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

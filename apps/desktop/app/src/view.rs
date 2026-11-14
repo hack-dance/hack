@@ -21,8 +21,11 @@ use gpui_kit::{
     AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, SharedString,
     Styled, Window, div, prelude::*, px,
 };
+use hack_desktop_core::doctor::DoctorState;
 use hack_desktop_core::models::LogEntry;
-use hack_desktop_core::source::{ActionOutcome, Source};
+use hack_desktop_core::source::{ActionOutcome, DoctorTarget, Source};
+
+use crate::doctor_view::Pane;
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
 use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
 
@@ -36,6 +39,8 @@ pub struct HackApp {
     tail: Result<Vec<LogEntry>, String>,
     follow: bool,
     live: bool,
+    pane: Pane,
+    doctor: DoctorState,
 }
 
 impl HackApp {
@@ -45,6 +50,8 @@ impl HackApp {
             model: AppModel::new(),
             source,
             tab: 0,
+            pane: Pane::Project,
+            doctor: DoctorState::NeverRun,
             tail: Ok(Vec::new()),
             follow: true,
             live,
@@ -68,6 +75,47 @@ impl HackApp {
     }
 
     /// Fixtures: select a project by name.
+    /// Fixtures and screenshots: open the Doctor pane with its data loaded.
+    pub fn show_doctor_now(&mut self) {
+        self.pane = Pane::Doctor;
+        let targets = self.doctor_targets();
+        self.doctor = DoctorState::from_runs(&self.source.doctor_runs(&targets));
+    }
+
+    fn doctor_targets(&self) -> Vec<DoctorTarget> {
+        self.model
+            .snapshot()
+            .map(|s| DoctorTarget::from_projects(&s.projects))
+            .unwrap_or_default()
+    }
+
+    /// Run doctor (machine run plus one per project) off the UI thread.
+    pub fn load_doctor(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.doctor, DoctorState::Loading) {
+            return;
+        }
+        if !self.live {
+            self.show_doctor_now();
+            cx.notify();
+            return;
+        }
+        self.doctor = DoctorState::Loading;
+        cx.notify();
+        let source = self.source.clone();
+        let targets = self.doctor_targets();
+        cx.spawn(async move |this, cx| {
+            let runs = cx
+                .background_executor()
+                .spawn(async move { source.doctor_runs(&targets) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.doctor = DoctorState::from_runs(&runs);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn select(&mut self, name: &str) {
         self.model.apply(Event::Select(name.to_owned()));
         self.refresh_now();
@@ -288,16 +336,66 @@ impl HackApp {
                 .py_2()
                 // v0 does not read routing status yet: shown as unknown.
                 .child(machine_row("Routing and DNS", None, t.muted_foreground))
-                .child(machine_row(
-                    "Doctor",
-                    (list.doctor_count > 0).then_some(list.doctor_count),
-                    match (&list.cli_version, list.doctor_count) {
-                        (None, _) => t.muted_foreground,
-                        (Some(_), 0) => t.success,
-                        (Some(_), _) => t.warning,
-                    },
-                )),
+                .child(self.doctor_row(list, cx)),
         )
+    }
+
+    /// The sidebar Doctor row: opens the Doctor pane (and runs doctor the
+    /// first time). Its badge counts the loaded findings when there are any.
+    fn doctor_row(&self, list: &ListView, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme().clone();
+        let (count, color) = match &self.doctor {
+            DoctorState::Loaded(v) => (
+                v.attention_count(),
+                if v.has_errors() {
+                    t.danger
+                } else if v.attention_count() > 0 {
+                    t.warning
+                } else {
+                    t.success
+                },
+            ),
+            _ => (
+                list.doctor_count,
+                match (&list.cli_version, list.doctor_count) {
+                    (None, _) => t.muted_foreground,
+                    (Some(_), 0) => t.success,
+                    (Some(_), _) => t.warning,
+                },
+            ),
+        };
+        div()
+            .id("doctor-row")
+            .rounded_md()
+            .cursor_pointer()
+            .when(self.pane == Pane::Doctor, |d| {
+                d.bg(t.sidebar_accent)
+                    .text_color(t.sidebar_accent_foreground)
+            })
+            .hover(|d| d.bg(t.sidebar_accent))
+            .mx_2()
+            .px_2()
+            .py_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(dot(color))
+                    .child(div().flex_1().child("Doctor"))
+                    .children((count > 0).then(|| {
+                        Tag::warning()
+                            .xsmall()
+                            .rounded_full()
+                            .child(count.to_string())
+                    })),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.pane = Pane::Doctor;
+                if matches!(this.doctor, DoctorState::NeverRun) {
+                    this.load_doctor(cx);
+                }
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     fn project_row(&self, r: &Row, cx: &mut Context<Self>) -> AnyElement {
@@ -310,7 +408,7 @@ impl HackApp {
             .py_1()
             .gap_2()
             .rounded_md()
-            .when(r.selected, |d| {
+            .when(r.selected && self.pane == Pane::Project, |d| {
                 d.bg(t.sidebar_accent)
                     .text_color(t.sidebar_accent_foreground)
             })
@@ -328,6 +426,7 @@ impl HackApp {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.model.apply(Event::Select(name.clone()));
+                this.pane = Pane::Project;
                 this.tail = Ok(Vec::new());
                 if !this.live {
                     this.refresh_now();
@@ -727,6 +826,9 @@ impl Render for HackApp {
                 cx,
             ),
             Phase::Loading => self.full_pane("Loading projects…", String::new(), None, cx),
+            Phase::Ready if self.pane == Pane::Doctor => {
+                crate::doctor_view::render(&self.doctor, cx)
+            }
             Phase::Ready => match self.model.detail() {
                 Some(d) => self.detail(&d, cx).into_any_element(),
                 None => self.full_pane("Select a project", String::new(), None, cx),

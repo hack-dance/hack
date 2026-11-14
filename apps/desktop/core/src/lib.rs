@@ -11,6 +11,7 @@
 //! credentials; every action is one CLI command.
 
 pub mod daemon;
+pub mod doctor;
 pub mod fixtures;
 pub mod models;
 pub mod runner;

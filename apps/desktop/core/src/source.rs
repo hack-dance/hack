@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::daemon::DaemonClient;
+use crate::doctor::DoctorRun;
 use crate::fixtures::{self, Fixture};
 use crate::models::{
     DaemonApiStatus, DoctorReport, LifecycleResult, LogEntry, OpenResult, ProjectsPayload,
@@ -98,7 +99,41 @@ pub trait Source: Send + Sync {
     /// Why no tail could be read; shown in place of the tail.
     fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
     -> Result<Vec<LogEntry>, String>;
+
+    /// Doctor runs: one outside any project, then one per project
+    /// (DESIGN.md section 3). Each run fails on its own.
+    fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun>;
 }
+
+/// A project to run doctor for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorTarget {
+    pub name: String,
+    pub repo_root: std::path::PathBuf,
+    pub native: bool,
+}
+
+impl DoctorTarget {
+    /// Doctor targets for every project row with a checkout.
+    #[must_use]
+    pub fn from_projects(p: &ProjectsPayload) -> Vec<Self> {
+        p.projects
+            .iter()
+            .filter_map(|r| {
+                Some(Self {
+                    name: r.name.clone(),
+                    repo_root: r.repo_root.clone()?.into(),
+                    native: r.is_native(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Doctor reads take long (they probe DNS, trust and the engine).
+pub const DOCTOR_TIMEOUT: Duration = Duration::from_secs(60);
+/// At most this many doctor runs at once.
+const DOCTOR_PARALLEL: usize = 4;
 
 /// Live data: hackd when its version matches the CLI, else the CLI.
 pub struct LiveSource {
@@ -184,6 +219,51 @@ impl Source for LiveSource {
         })
     }
 
+    fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun> {
+        // The machine run happens outside any checkout, so it reports only
+        // machine checks whatever directory the app was started from.
+        let machine = self.runner.clone().with_cwd(std::env::temp_dir());
+        let read = |runner: &CliRunner, root: Option<&Path>| {
+            runner
+                .run_json::<crate::models::DoctorReport>(
+                    &["doctor", "--json"],
+                    root,
+                    DOCTOR_TIMEOUT,
+                )
+                .map_err(|e| e.to_string())
+        };
+        let mut runs = vec![DoctorRun {
+            project: None,
+            result: read(&machine, None),
+        }];
+        for chunk in projects.chunks(DOCTOR_PARALLEL) {
+            let chunk_runs: Vec<DoctorRun> = std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|t| {
+                        let runner = self.runner_for(t.native);
+                        s.spawn(move || DoctorRun {
+                            project: Some(t.name.clone()),
+                            result: read(&runner, Some(&t.repo_root)),
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .zip(chunk)
+                    .map(|(h, t)| {
+                        h.join().unwrap_or_else(|_| DoctorRun {
+                            project: Some(t.name.clone()),
+                            result: Err("doctor read panicked".into()),
+                        })
+                    })
+                    .collect()
+            });
+            runs.extend(chunk_runs);
+        }
+        runs
+    }
+
     fn log_tail(
         &self,
         repo_root: &Path,
@@ -248,6 +328,10 @@ pub struct FixtureSource(pub Fixture);
 impl Source for FixtureSource {
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
+    }
+
+    fn doctor_runs(&self, _projects: &[DoctorTarget]) -> Vec<DoctorRun> {
+        fixtures::doctor_runs(self.0)
     }
 
     fn act(
@@ -386,6 +470,50 @@ esac
             parse_log_tail(err_ev, "", Some(0)).unwrap_err(),
             "no engine"
         );
+    }
+
+    /// Doctor exits 1 when a check errors but still prints the report.
+    #[test]
+    fn doctor_runs_keep_reports_from_exit_1() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-doctor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        std::fs::write(
+            &hack,
+            r#"#!/bin/sh
+case "$*" in
+  *--path*) echo '{"ok":true,"data":{"checks":[{"id":"env key","status":"error","detail":"key missing"}],"summary":[],"counts":{"ok":0,"warn":0,"error":1}}}'; exit 1 ;;
+  *) echo '{"ok":true,"data":{"checks":[{"id":"docker daemon","status":"ok","detail":""}],"summary":[],"counts":{"ok":1,"warn":0,"error":0}}}' ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let src = LiveSource {
+            runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
+            daemon: None,
+        };
+        let runs = src.doctor_runs(&[DoctorTarget {
+            name: "alpha".into(),
+            repo_root: "/work/alpha".into(),
+            native: false,
+        }]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(runs.len(), 2);
+        assert!(runs[0].project.is_none());
+        let alpha = runs[1].result.as_ref().expect("exit 1 keeps the report");
+        assert_eq!(alpha.checks[0].id, "env key");
+        let v = crate::doctor::aggregate(&runs);
+        assert_eq!(v.attention_count(), 1);
+        assert_eq!(v.passed, 1);
     }
 
     #[test]

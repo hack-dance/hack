@@ -224,6 +224,12 @@ impl AppModel {
             .is_none_or(|c| c.in_flight.is_none())
     }
 
+    /// The last good snapshot, if any.
+    #[must_use]
+    pub fn snapshot(&self) -> Option<&Snapshot> {
+        self.snapshot.as_ref()
+    }
+
     #[must_use]
     pub fn selected_row(&self) -> Option<&ProjectRow> {
         let s = self.snapshot.as_ref()?;

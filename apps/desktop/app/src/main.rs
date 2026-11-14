@@ -9,6 +9,7 @@
 //!                                      fixture, light and dark, offscreen
 //! ```
 
+mod doctor_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod view;
@@ -126,6 +127,9 @@ fn main() {
                 let mut app = view::HackApp::new(source, fixture.is_none(), cx);
                 if let Some(f) = fixture {
                     app.select(fixtures::selected(f));
+                    if fixtures::opens_doctor(f) {
+                        app.show_doctor_now();
+                    }
                 }
                 if let Some(a) = fixture.and_then(|f| fixtures::local(f).in_flight) {
                     app.simulate_in_flight(a);

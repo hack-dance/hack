@@ -33,10 +33,15 @@ pub enum Fixture {
     Stopping,
     FailedStart,
     NeedsAttention,
+    // Doctor pane.
+    /// Findings across areas, machine and project scoped, one failed run.
+    Doctor,
+    /// Every check passed.
+    DoctorClean,
 }
 
 impl Fixture {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -52,6 +57,8 @@ impl Fixture {
         Self::Stopping,
         Self::FailedStart,
         Self::NeedsAttention,
+        Self::Doctor,
+        Self::DoctorClean,
     ];
 
     #[must_use]
@@ -72,6 +79,8 @@ impl Fixture {
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
+            Self::Doctor => "doctor",
+            Self::DoctorClean => "doctor-clean",
         }
     }
 
@@ -407,9 +416,128 @@ pub fn log_tail(f: Fixture) -> Vec<LogEntry> {
     }
 }
 
+/// Fixtures that open the Doctor pane instead of a project.
+#[must_use]
+pub fn opens_doctor(f: Fixture) -> bool {
+    matches!(f, Fixture::Doctor | Fixture::DoctorClean)
+}
+
+/// Canned doctor runs (machine run first, then per project).
+#[must_use]
+pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
+    use crate::doctor::DoctorRun;
+    let c = |id: &str, status: &str, detail: &str| DoctorCheck {
+        id: id.into(),
+        status: status.into(),
+        detail: detail.into(),
+    };
+    let report = |checks: Vec<DoctorCheck>| {
+        Ok(DoctorReport {
+            checks,
+            summary: vec![],
+        })
+    };
+    let ok_machine = || {
+        vec![
+            c("bun", "ok", ""),
+            c("docker", "ok", ""),
+            c("docker compose", "ok", ""),
+            c("docker daemon", "ok", ""),
+            c("daemon", "ok", ""),
+            c("caddy local ca", "ok", ""),
+            c("resolver:hack", "ok", ""),
+            c("dnsmasq:53", "ok", ""),
+        ]
+    };
+    if f == Fixture::DoctorClean {
+        return vec![
+            DoctorRun {
+                project: None,
+                result: report(ok_machine()),
+            },
+            DoctorRun {
+                project: Some("storefront".into()),
+                result: report(vec![c("project", "ok", ""), c("env key", "ok", "")]),
+            },
+        ];
+    }
+    let machine = vec![
+        c("bun", "ok", ""),
+        c("docker", "ok", ""),
+        c("docker daemon", "ok", ""),
+        c(
+            "daemon",
+            "warn",
+            "hackd is not running; status refreshes slowly",
+        ),
+        c(
+            "caddy local ca",
+            "warn",
+            "Local CA is not trusted by the system",
+        ),
+        c(
+            "resolver:hack",
+            "error",
+            "No resolver file routes .hack to the local DNS server",
+        ),
+        c("dnsmasq:53", "ok", ""),
+        c(
+            "brand new check",
+            "warn",
+            "A check this app does not know yet",
+        ),
+    ];
+    vec![
+        DoctorRun {
+            project: None,
+            result: report(machine),
+        },
+        DoctorRun {
+            project: Some("storefront".into()),
+            result: report(vec![
+                c("project", "ok", ""),
+                c("env key", "error", "The env key file is missing"),
+                c(
+                    "caddy local ca",
+                    "warn",
+                    "Local CA is not trusted by the system",
+                ),
+                c(
+                    "generated files",
+                    "warn",
+                    "A generated file is tracked by git",
+                ),
+            ]),
+        },
+        DoctorRun {
+            project: Some("billing-api".into()),
+            result: report(vec![
+                c("project", "ok", ""),
+                c("env key", "error", "The env key file is missing"),
+            ]),
+        },
+        DoctorRun {
+            project: Some("notes".into()),
+            result: Err("hack did not answer within 60s".into()),
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_fixtures_aggregate_as_designed() {
+        let v = crate::doctor::aggregate(&doctor_runs(Fixture::Doctor));
+        // daemon, caddy ca, resolver, unknown (machine); env key, generated files (project).
+        assert_eq!(v.attention_count(), 6);
+        assert_eq!(v.failed_runs.len(), 1);
+        let clean = crate::doctor::aggregate(&doctor_runs(Fixture::DoctorClean));
+        assert_eq!(clean.attention_count(), 0);
+        assert!(clean.passed >= 8);
+        assert!(opens_doctor(Fixture::Doctor) && !opens_doctor(Fixture::Running));
+    }
 
     #[test]
     fn names_round_trip() {

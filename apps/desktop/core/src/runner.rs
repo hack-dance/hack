@@ -63,6 +63,7 @@ impl std::fmt::Display for RunError {
 pub struct CliRunner {
     program: PathBuf,
     env: Vec<(String, String)>,
+    cwd: Option<PathBuf>,
 }
 
 impl CliRunner {
@@ -72,7 +73,16 @@ impl CliRunner {
         Self {
             program: program.into(),
             env: vec![("HACK_NO_INTERACTIVE".into(), "1".into())],
+            cwd: None,
         }
+    }
+
+    /// Run every command from `dir` (for checks that must run outside any
+    /// project, such as the machine-level doctor run).
+    #[must_use]
+    pub fn with_cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
     }
 
     /// Add an environment variable for every command (tests use this for
@@ -92,6 +102,9 @@ impl CliRunner {
         }
         for (k, v) in &self.env {
             cmd.env(k, v);
+        }
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())

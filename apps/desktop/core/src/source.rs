@@ -1566,6 +1566,56 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
     }
 
     #[test]
+    fn unsafe_optional_mkcert_preserves_certificate_errors_and_remedies() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack("doctor-mkcert-independent", "echo '{}'");
+        let root = hack.parent().unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for name in ["mkcert", "openssl"] {
+            let tool = bin.join(name);
+            std::fs::copy(&hack, &tool).unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        let tools = trusted_probe_path(bin.as_os_str()).unwrap();
+        assert_eq!(
+            tools.unchecked.iter().copied().collect::<Vec<_>>(),
+            vec!["mkcert"]
+        );
+        let checks = [
+            ("caddy local ca", "stale CA"),
+            ("host tls trust", "missing host trust bundle"),
+        ]
+        .map(|(id, detail)| crate::models::DoctorCheck {
+            id: id.into(),
+            status: "error".into(),
+            detail: detail.into(),
+        })
+        .to_vec();
+        let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
+            checks,
+            summary: vec![],
+        }))];
+        let before = crate::doctor::aggregate(&runs);
+        apply_tool_coverage(&mut runs, &tools);
+        let after = crate::doctor::aggregate(&runs);
+        for original in before.cards() {
+            let preserved = after.cards().find(|card| card.id == original.id).unwrap();
+            assert_eq!(
+                preserved, original,
+                "independent error, detail and authored remedy must remain unchanged"
+            );
+            assert_eq!(preserved.severity, crate::doctor::Severity::Error);
+            assert!(matches!(
+                preserved.action,
+                crate::doctor::CardAction::Copy(_)
+            ));
+        }
+        assert!(!after.is_clean());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn filtered_doctor_tools_only_downgrade_dependent_checks() {
         use std::os::unix::fs::PermissionsExt;
         let hack = fake_hack("doctor-scoped-coverage", "echo '{}'");

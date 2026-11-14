@@ -1,6 +1,5 @@
 //! Fixed read-only Doctor tool dependencies (doctor.ts and its check helpers).
 //! This is coverage attribution, not an executable or plugin discovery framework.
-use crate::doctor::{Area, classify};
 
 pub(crate) const NAMES: &[&str] = &[
     "bun",
@@ -18,7 +17,6 @@ pub(crate) const NAMES: &[&str] = &[
     "git",
     "dig",
     "security",
-    "openssl",
     "systemctl",
     "resolvectl",
     "scutil",
@@ -30,7 +28,6 @@ pub(crate) fn affected(tool: &str, id: &str) -> bool {
     if id == tool || id == format!("{tool} (optional)") || id == format!("{tool} (sessions)") {
         return true;
     }
-    let area = classify(id).map(|(area, _)| area);
     match tool {
         "docker" => {
             id.starts_with("docker ")
@@ -50,14 +47,26 @@ pub(crate) fn affected(tool: &str, id: &str) -> bool {
                         | "lifecycle hygiene"
                 )
         }
-        "git" => {
-            matches!(area, Some(Area::EnvSecrets | Area::ProjectFiles)) && id != "project"
-                || id == "native source size"
-        }
-        "security" | "openssl" | "mkcert" => {
-            matches!(area, Some(Area::Certificates))
-                || matches!(id, "native root trust" | "native ca repair")
-        }
+        "git" => matches!(
+            id,
+            "env key"
+                | "worktree keys"
+                | "generated files"
+                | "hack gitignore"
+                | "worktree instances"
+                | "secrets hygiene"
+                | "native source size"
+        ),
+        // mkcert is only an optional tool-presence check above. Certificate
+        // inspection uses Node parsing, Docker and security, never mkcert or openssl.
+        "security" => matches!(
+            id,
+            "host tls trust"
+                | "local ca trust"
+                | "superseded caddy roots"
+                | "native root trust"
+                | "native ca repair"
+        ),
         "brew" | "dnsmasq" => id.starts_with("dnsmasq") || id == "dnsmasq:53",
         "dig" | "scutil" | "resolvectl" => {
             id.starts_with("dns:")
@@ -68,9 +77,6 @@ pub(crate) fn affected(tool: &str, id: &str) -> bool {
         }
         "systemctl" => id == "daemon service" || id == "linux dns route",
         "tmux" => id == "sessions mux",
-        "caddy" => {
-            id == "caddy local ca" || id == "native https owner" || id == "native https route"
-        }
         "ps" | "lsof" => id == "proxy ports" || id == "dnsmasq:53" || id == "native https owner",
         _ => false,
     }

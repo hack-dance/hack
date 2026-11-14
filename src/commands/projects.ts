@@ -27,6 +27,7 @@ import {
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
+import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import {
   createOperationTimings,
@@ -867,7 +868,12 @@ function outputProjectsJson(opts: {
     ),
   };
   writeProfiledProjects({
-    payload,
+    payload: opts.observe
+      ? machineSuccess({
+          schema: MACHINE_SCHEMAS.projectsObserve,
+          data: payload,
+        })
+      : payload,
     profiler: opts.profiler,
     started: opts.started,
     enabled: opts.timings,

@@ -1,7 +1,8 @@
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, withHandler } from "../cli/command.ts";
-
 import { optJson } from "../cli/options.ts";
+import { emitCliResult } from "../lib/cli-result.ts";
+import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { buildVersionReport } from "../lib/version-report.ts";
 
 const versionSpec = defineCommand({
@@ -23,7 +24,9 @@ const handleVersion: CommandHandlerFor<typeof versionSpec> = async ({
       executable: process.execPath,
       compiled: Bun.main.startsWith("/$bunfs/"),
     });
-    console.log(JSON.stringify(report));
+    emitCliResult({
+      result: machineSuccess({ schema: MACHINE_SCHEMAS.version, data: report }),
+    });
     return 0;
   }
   console.log(`${ctx.cli.name} v${ctx.cli.version}`);

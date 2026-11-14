@@ -40,29 +40,78 @@ to run the listed commands.
 
 ```json
 {
-  "schema": "hack.global-admin-plan.v1",
-  "command": "trust",
-  "platform": "linux",
-  "refused": null,
-  "complete": true,
-  "blocked": [],
-  "steps": [
-    {
-      "order": 1,
-      "privilege": "root",
-      "id": "system-trust-install",
-      "description": "Install the CA (SHA-256 …) into the debian trust anchors; root accepts only these exact bytes",
-      "argv": ["/usr/bin/sudo", "/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "/bin/sh", "-c", "<install script>", "hack-install", "<bytes>", "<sha256>", "/usr/local/share/ca-certificates/hack-caddy-local-ca.crt", "0644"],
-      "shell": "/usr/bin/sudo /usr/bin/env -i … 0644",
-      "stdin": { "bytes": 652, "sha256": "…", "content": "the verified Caddy Local CA (PEM)" },
-      "when": "after you confirm the system-wide trust prompt on an interactive terminal; …"
-    },
-    { "order": 2, "privilege": "root", "id": "system-trust-refresh", "argv": ["/usr/bin/sudo", "/usr/bin/env", "-i", "…", "/usr/sbin/update-ca-certificates"], "…": "…" },
-    { "order": 3, "privilege": "user", "id": "nss-trust", "description": "Add or update Hack's CA in each browser NSS database you own (certutil, as you)", "when": "…" },
-    { "order": 4, "privilege": "user", "id": "host-tls-env", "description": "…", "when": "…" }
-  ]
+  "ok": true,
+  "data": {
+    "schema": "hack.global-admin-plan.v1",
+    "command": "trust",
+    "platform": "linux",
+    "refused": null,
+    "complete": true,
+    "blocked": [],
+    "steps": [
+      {
+        "order": 1,
+        "privilege": "root",
+        "id": "system-trust-install",
+        "description": "Install the CA (SHA-256 \u2026) into the debian trust anchors; root accepts only these exact bytes",
+        "argv": [
+          "/usr/bin/sudo",
+          "/usr/bin/env",
+          "-i",
+          "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+          "LANG=C",
+          "LC_ALL=C",
+          "/bin/sh",
+          "-c",
+          "<install script>",
+          "hack-install",
+          "<bytes>",
+          "<sha256>",
+          "/usr/local/share/ca-certificates/hack-caddy-local-ca.crt",
+          "0644"
+        ],
+        "shell": "/usr/bin/sudo /usr/bin/env -i \u2026 0644",
+        "stdin": {
+          "bytes": 652,
+          "sha256": "\u2026",
+          "content": "the verified Caddy Local CA (PEM)"
+        },
+        "when": "after you confirm the system-wide trust prompt on an interactive terminal; \u2026"
+      },
+      {
+        "order": 2,
+        "privilege": "root",
+        "id": "system-trust-refresh",
+        "argv": [
+          "/usr/bin/sudo",
+          "/usr/bin/env",
+          "-i",
+          "\u2026",
+          "/usr/sbin/update-ca-certificates"
+        ],
+        "\u2026": "\u2026"
+      },
+      {
+        "order": 3,
+        "privilege": "user",
+        "id": "nss-trust",
+        "description": "Add or update Hack's CA in each browser NSS database you own (certutil, as you)",
+        "when": "\u2026"
+      },
+      {
+        "order": 4,
+        "privilege": "user",
+        "id": "host-tls-env",
+        "description": "\u2026",
+        "when": "\u2026"
+      }
+    ]
+  }
 }
 ```
+
+Fields below are inside `data` on success. Refused or incomplete plans use an
+error envelope with `error.detail.plan` retaining the same plan payload.
 
 | Field | Meaning |
 |---|---|
@@ -72,7 +121,8 @@ to run the listed commands.
 | `steps[].when` | when the real command takes the step: after a confirmation, only interactively, only if a check passes |
 | `steps[].gates` | on a probe: the step it can skip (macOS non-interactive runs check `sudo -n true` before the keychain step) |
 
-Exit code: 0 for a complete plan, 1 when `refused`, 3 when incomplete; `--plan`
+Exit code: 0 for a complete success envelope, 1 with `E_PLAN_REFUSED` when
+refused, 3 with `E_PLAN_INCOMPLETE` when incomplete; `--plan`
 without `--json` exits 2. `--json` without `--plan` also exits 2 before any effect.
 
 ## What `hack global trust` plans

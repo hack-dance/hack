@@ -1,11 +1,19 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   readLifecycleState,
   resolveLifecycleLogPath,
+  resolveLifecycleStatePath,
 } from "../src/lib/lifecycle-runtime.ts";
 import {
   inspectLifecycleSupervisor,
@@ -621,6 +629,57 @@ nativeTest(
       expect((await readLifecycleState(project))[0]?.ownershipToken).not.toBe(
         previous.ownershipToken
       );
+    }),
+  30_000
+);
+
+nativeTest(
+  "lost common state keeps native work unconfirmed instead of stopped",
+  () =>
+    fixture(async (project) => {
+      const owner = controller(project);
+      await owner.startMany({ processes: [{ name: "worker", command }] });
+      await owner.finalize();
+      const entry = (await readLifecycleState(project))[0];
+      const commandPid = entry?.processes[0]?.commandPid;
+      const ownershipToken = entry?.ownershipToken;
+      if (!(commandPid && ownershipToken)) {
+        throw new Error("fixture command was not recorded");
+      }
+      const statePath = resolveLifecycleStatePath(project);
+      const aside = `${statePath}.test-aside`;
+      await rename(statePath, aside);
+      const stop = () =>
+        stopLifecycleProcessController({
+          project,
+          projectName: "fixture",
+          composeProject: "fixture",
+          branch: null,
+          definitionHash: "synthetic",
+          mux: async () => {
+            throw new Error("mux must not be consulted");
+          },
+        });
+      await expect(stop()).rejects.toThrow("Lifecycle ownership state");
+      await expect(
+        inspectLifecycleSupervisor({
+          ...project,
+          composeProject: "fixture",
+          ownershipToken,
+        })
+      ).rejects.toThrow();
+      // Nothing was signalled: the native command still runs.
+      expect(() => process.kill(commandPid, 0)).not.toThrow();
+      await rename(aside, statePath);
+      await stop();
+      await eventually(async () => {
+        try {
+          process.kill(commandPid, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      });
     }),
   30_000
 );

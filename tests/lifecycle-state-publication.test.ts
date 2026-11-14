@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
   chmod,
   link,
@@ -283,5 +284,36 @@ test("supervisor ownership disables legacy JSON recovery", async () => {
       "Lifecycle ownership state"
     );
     expect(await readFile(path, "utf8")).toBe("{");
+  });
+});
+
+test("missing state after supervisor ownership refuses instead of proving absence", async () => {
+  await fixture(async ({ projectDir, root, path }) => {
+    // First supervisor publication starts with no state file at all.
+    await upsertLifecycleStateEntry({ projectDir, entry: entry("native") });
+    expect(await lstat(join(root, "supervisor-state"))).toBeTruthy();
+    await rm(path);
+    await expect(readLifecycleState({ projectDir })).rejects.toThrow(
+      "Lifecycle ownership state"
+    );
+    await expect(
+      upsertLifecycleStateEntry({ projectDir, entry: entry("other") })
+    ).rejects.toThrow("Lifecycle ownership state");
+    await expect(
+      removeLifecycleStateEntry({ projectDir, composeProject: "native" })
+    ).rejects.toThrow("Lifecycle ownership state");
+    expect(existsSync(path)).toBe(false);
+  });
+});
+
+test("missing state without supervisor history remains empty", async () => {
+  await fixture(async ({ projectDir, root }) => {
+    await upsertLifecycleStateEntry({
+      projectDir,
+      entry: { ...entry("mux"), backend: "tmux" },
+    });
+    await rm(resolveLifecycleStatePath({ projectDir }));
+    expect(existsSync(join(root, "supervisor-state"))).toBe(false);
+    expect(await readLifecycleState({ projectDir })).toEqual([]);
   });
 });

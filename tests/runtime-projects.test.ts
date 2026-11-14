@@ -18,6 +18,8 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 let dockerAvailable = false;
 let currentIds: string[] = [];
 let inspectExitCode = 0;
+const memberStates = new Map<string, string>();
+const memberExitCodes = new Map<string, number>();
 const inspectCalls: string[][] = [];
 let tempDir: string | null = null;
 let originalHackHome: string | undefined;
@@ -61,6 +63,9 @@ const shellMock = await registerScopedModuleMock({
       if (command[1] === "inspect") {
         expect(command[2]).toBe("--format");
         expect(command[3]).not.toContain(".Env");
+        expect(command[3]).not.toContain(".Log");
+        expect(command[3]).not.toContain(".Error");
+        expect(command[3]).toContain(".State.StartedAt");
         const ids = [...command.slice(4)];
         inspectCalls.push(ids);
         const returnedIds = inspectExitCode === 0 ? ids : ids.slice(0, 1);
@@ -102,6 +107,8 @@ beforeEach(async () => {
   dockerAvailable = false;
   currentIds = [];
   inspectExitCode = 0;
+  memberStates.clear();
+  memberExitCodes.clear();
   inspectCalls.length = 0;
 });
 
@@ -254,7 +261,7 @@ test("runtime auto-registration skips an input family that changes before regist
 function makePsRow(opts: { readonly id: string }): Record<string, string> {
   return {
     ID: opts.id,
-    State: "running",
+    State: memberStates.get(opts.id) ?? "running",
     Status: "Up 10 seconds",
     Names: `container-${opts.id}`,
     Ports: "3000/tcp",
@@ -271,6 +278,12 @@ function makeInspectRow(opts: {
 }): Record<string, unknown> {
   return {
     Id: `${opts.id}${"0".repeat(52)}`,
+    State: {
+      Status: memberStates.get(opts.id) ?? "running",
+      ExitCode: memberExitCodes.get(opts.id) ?? 0,
+      StartedAt: "2026-01-01T00:00:00Z",
+      Health: { Status: "healthy" },
+    },
     Config: {
       Image: `image:${opts.id}`,
       Labels: {
@@ -291,3 +304,86 @@ function makeInspectRow(opts: {
     },
   };
 }
+
+test("cached static metadata never becomes fresh service health or start evidence", async () => {
+  dockerAvailable = true;
+  currentIds = ["aaaaaaaaaaaa"];
+  const cache = createRuntimeInspectCache();
+  const first = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: true,
+  });
+  const cached = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: false,
+  });
+  const member = (result: typeof first) =>
+    [...(result.runtime[0]?.services.values() ?? [])][0]?.containers[0];
+  expect(member(first)?.observation?.health).toBe("healthy");
+  expect(member(first)?.observation?.exitCode).toBeNull();
+  expect(member(cached)?.observation).toBeNull();
+  expect(inspectCalls).toHaveLength(1);
+});
+
+test("failed reinspection keeps static identity but clears old current-state evidence", async () => {
+  dockerAvailable = true;
+  currentIds = ["aaaaaaaaaaaa", "bbbbbbbbbbbb"];
+  const cache = createRuntimeInspectCache();
+  await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: true,
+  });
+  inspectExitCode = 1;
+  const result = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: true,
+  });
+  const services = result.runtime[0]?.services;
+  expect(
+    services?.get("service-aaaaaaaaaaaa")?.containers[0]?.observation?.health
+  ).toBe("healthy");
+  const second = services?.get("service-bbbbbbbbbbbb")?.containers[0];
+  expect(second?.image).toBe("image:bbbbbbbbbbbb");
+  expect(second?.observation).toBeNull();
+});
+
+test("event refresh reinspects changed and terminated IDs without polling unchanged running peers", async () => {
+  dockerAvailable = true;
+  const job = "aaaaaaaaaaaa";
+  const api = "bbbbbbbbbbbb";
+  currentIds = [job, api];
+  const cache = createRuntimeInspectCache();
+  await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: true,
+  });
+  memberStates.set(job, "exited");
+  const finished = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: false,
+  });
+  const completed = finished.runtime[0]?.services.get(`service-${job}`)
+    ?.containers[0];
+  expect(completed?.observation?.exitCode).toBe(0);
+  expect(
+    finished.runtime[0]?.services.get(`service-${api}`)?.containers[0]
+      ?.observation
+  ).toBeNull();
+  memberExitCodes.set(job, 2);
+  const failed = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: false,
+  });
+  expect(
+    failed.runtime[0]?.services.get(`service-${job}`)?.containers[0]
+      ?.observation?.exitCode
+  ).toBe(2);
+  expect(inspectCalls).toEqual([[job, api], [job], [job]]);
+});

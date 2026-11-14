@@ -250,7 +250,7 @@ try {
   await Bun.write(join(checkout, ".hack/hack.config.json"), "{}");
   await refused([], "E_NATIVE_PROJECT_CONFLICT", checkout);
   await rm(join(checkout, ".hack/hack.config.json"));
-  await assertNativePlanHome({ home, failedUps: 0 });
+  await assertNativePlanHome({ home, privateRoot: directory, failedUps: 0 });
   const unsupported = await invoke(
     ["up", "web", "--detach", "--json"],
     checkout,
@@ -278,7 +278,7 @@ try {
     detachedResult.ok === false &&
     record(detachedResult.error).code ===
       "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
-  await assertNativePlanHome({ home, failedUps: 2 });
+  await assertNativePlanHome({ home, privateRoot: directory, failedUps: 2 });
   require(!(await readdir(join(checkout, ".hack"))).some(
     (name) => name === ".internal" || name === ".branch"
   ), "no registry or generated runtime state");

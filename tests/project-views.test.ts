@@ -32,6 +32,39 @@ let tempDir: string | null = null;
 let originalGlobalConfigPath: string | undefined;
 let blockedReadRoot: string | null = null;
 const blockedReadPaths: string[] = [];
+let nativeReadCount = 0;
+let nativeActive = 0;
+let nativePeak = 0;
+const nativeObservationMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/project-native-observation.ts",
+  overrides: {
+    observeNativeProject: async () => {
+      nativeReadCount++;
+      nativeActive++;
+      nativePeak = Math.max(nativePeak, nativeActive);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      nativeActive--;
+      return {
+        backend: "native",
+        state: "running",
+        state_reason: null,
+        started_at: null,
+        services: [
+          {
+            name: "api",
+            state: "running",
+            ready: true,
+            completed: null,
+            health: "healthy",
+            exit_code: null,
+            started_at: null,
+          },
+        ],
+      };
+    },
+  },
+});
 
 const projectReadMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -53,13 +86,18 @@ const projectReadMock = await registerScopedModuleMock({
 
 beforeAll(() => {
   projectReadMock.activate();
+  nativeObservationMock.activate();
 });
 
 afterAll(() => {
   projectReadMock.deactivate();
+  nativeObservationMock.deactivate();
 });
 
 beforeEach(async () => {
+  nativeReadCount = 0;
+  nativeActive = 0;
+  nativePeak = 0;
   blockedReadRoot = null;
   blockedReadPaths.length = 0;
   tempDir = await mkdtemp(join(tmpdir(), "hack-views-"));
@@ -762,4 +800,210 @@ test("project views accept an unambiguous legacy alias without rewriting runtime
       includeUnregistered: true,
     })
   ).rejects.toThrow("Ambiguous project name");
+});
+
+test("full and summary rows share Compose state, readiness, completion and timestamps", async () => {
+  const registration = await createProject({
+    name: "state-fixture",
+    services: ["api", "task"],
+  });
+  await writeFile(
+    join(registration.projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api:\n    depends_on:\n      task: {condition: service_completed_successfully}\n  task: {}\n"
+  );
+  const api = {
+    ...makeContainer({
+      project: registration.name,
+      service: "api",
+      name: "api",
+      state: "running",
+    }),
+    observation: {
+      state: "running",
+      health: null,
+      exitCode: null,
+      startedAt: "2026-01-01T00:00:00Z",
+    },
+  };
+  const task = {
+    ...makeContainer({
+      project: registration.name,
+      service: "task",
+      name: "task",
+      state: "exited",
+    }),
+    observation: {
+      state: "exited",
+      health: null,
+      exitCode: 0,
+      startedAt: "2026-01-01T00:00:01Z",
+    },
+  };
+  const views = await buildProjectViews({
+    registryProjects: [registration],
+    runtime: [
+      makeRuntimeProject({
+        name: registration.name,
+        workingDir: registration.projectDir,
+        containersByService: { api: [api], task: [task] },
+      }),
+    ],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+  const view = views[0];
+  if (!view) {
+    throw new Error("missing fixture view");
+  }
+  const full = serializeProjectView(view);
+  const summary = serializeProjectSummary(view);
+  for (const key of ["backend", "state", "services", "started_at"]) {
+    expect(summary[key]).toEqual(full[key]);
+  }
+  expect(full.backend).toBe("compose");
+  expect(full.state).toBe("running");
+  expect(full.started_at).toBe("2026-01-01T00:00:00Z");
+  expect(full.services).toMatchObject([
+    { name: "api", ready: true },
+    { name: "task", completed: true, exit_code: 0 },
+  ]);
+});
+
+test("registered authored native rows use the observer only with explicit live-read admission", async () => {
+  const registration = await createProject({
+    name: "native-observed",
+    services: ["api"],
+  });
+  await rm(join(registration.projectDir, PROJECT_COMPOSE_FILENAME));
+  await writeFile(join(registration.projectDir, "hack.project.json"), "{}\n");
+  blockedReadRoot = registration.repoRoot;
+  const options = {
+    registryProjects: [registration],
+    runtime: [],
+    runtimeOk: false,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  };
+  const passive = await buildProjectViews(options);
+  expect(nativeReadCount).toBe(0);
+  expect(passive[0]?.observation?.state).toBe("unknown");
+  const live = await buildProjectViews({ ...options, observeNative: true });
+  expect(nativeReadCount).toBe(1);
+  const row = live[0];
+  if (!row) {
+    throw new Error("missing native row");
+  }
+  expect(serializeProjectView(row)).toMatchObject({
+    backend: "native",
+    state: "running",
+  });
+  expect(serializeProjectSummary(row).services).toEqual(
+    serializeProjectView(row).services
+  );
+  expect(blockedReadPaths).toEqual([]);
+});
+
+test("native listing bounds status subprocess fan-out regardless of registry size", async () => {
+  const registrations: RegisteredProject[] = [];
+  for (let index = 0; index < 9; index++) {
+    const registration = await createProject({
+      name: `native-${index}`,
+      services: [],
+    });
+    await rm(join(registration.projectDir, PROJECT_COMPOSE_FILENAME));
+    await writeFile(join(registration.projectDir, "hack.project.json"), "{}\n");
+    registrations.push(registration);
+  }
+  const views = await buildProjectViews({
+    registryProjects: registrations,
+    runtime: [],
+    runtimeOk: false,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+    observeNative: true,
+  });
+  expect(views).toHaveLength(9);
+  expect(nativeReadCount).toBe(9);
+  expect(nativePeak).toBe(4);
+  expect(nativeActive).toBe(0);
+});
+
+test.each([
+  { dependency: "", member: "absent", expected: "running" },
+  {
+    dependency: "    depends_on: [tool]\n",
+    member: "absent",
+    expected: "degraded",
+  },
+  {
+    dependency: "    depends_on:\n      tool: {required: false}\n",
+    member: "absent",
+    expected: "running",
+  },
+  { dependency: "", member: "exited", expected: "degraded" },
+])("profile activation keeps required aggregation honest: %j", async ({
+  dependency,
+  member,
+  expected,
+}) => {
+  const registration = await createProject({
+    name: "profiles-fixture",
+    services: ["api", "tool"],
+  });
+  await writeFile(
+    join(registration.projectDir, PROJECT_COMPOSE_FILENAME),
+    `services:\n  api:\n    image: example\n${dependency}  tool:\n    image: example\n    profiles: [tools]\n`
+  );
+  const api = makeContainer({
+    project: registration.name,
+    service: "api",
+    name: "api",
+    state: "running",
+  });
+  const tools =
+    member === "absent"
+      ? []
+      : [
+          {
+            ...makeContainer({
+              project: registration.name,
+              service: "tool",
+              name: "tool",
+              state: member,
+            }),
+            observation: {
+              state: member,
+              health: null,
+              exitCode: 0,
+              startedAt: null,
+            },
+          },
+        ];
+  const [view] = await buildProjectViews({
+    registryProjects: [registration],
+    runtime: [
+      makeRuntimeProject({
+        name: registration.name,
+        workingDir: registration.projectDir,
+        containersByService: {
+          api: [api],
+          ...(tools.length ? { tool: tools } : {}),
+        },
+      }),
+    ],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+  if (!view) {
+    throw new Error("missing fixture view");
+  }
+  expect(serializeProjectView(view).state).toBe(expected);
+  expect(serializeProjectSummary(view).state).toBe(expected);
+  expect(view.observation?.services).toHaveLength(2);
 });

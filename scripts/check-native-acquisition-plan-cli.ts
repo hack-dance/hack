@@ -265,7 +265,7 @@ try {
     ],
     checkout
   );
-  await assertNativePlanHome({ home, failedUps: 0 });
+  await assertNativePlanHome({ home, privateRoot: directory, failedUps: 0 });
   const runtime = await invoke(["up", "web", "--detach"], checkout, false, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -284,7 +284,7 @@ try {
       "planning creates no runtime state"
     );
   }
-  await assertNativePlanHome({ home, failedUps: 1 });
+  await assertNativePlanHome({ home, privateRoot: directory, failedUps: 1 });
   process.stdout.write(
     `Relocated native acquisition planning: ${checks} checks passed; no hooks/pulls/builds/decryption/runtime effects\n`
   );

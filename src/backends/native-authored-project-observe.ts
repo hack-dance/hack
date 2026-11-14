@@ -28,6 +28,7 @@ type Item = {
   readonly state: string;
   readonly health: string | null;
   readonly exitCode: number | null;
+  readonly readiness?: "started" | "healthy" | "completed";
 };
 export type NativeAuthoredProjectStatus = {
   readonly backend: "native";
@@ -52,6 +53,7 @@ export async function nativeAuthoredProjectPs(input: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeAuthoredProjectRunScope;
   readonly signal?: AbortSignal;
+  readonly includeReadiness?: boolean;
   readonly invoke?: typeof invokeNativeRuntime;
   /** Control seam; production always uses the held saved-status owner. */
   readonly withStatus?: typeof withNativeAuthoredProjectStatus;
@@ -145,6 +147,9 @@ export async function nativeAuthoredProjectPs(input: {
               }
               return {
                 service,
+                ...(input.includeReadiness
+                  ? { readiness: current.receipt.readiness[service] }
+                  : {}),
                 container: resource.id,
                 state: observation?.state ?? "absent",
                 health:

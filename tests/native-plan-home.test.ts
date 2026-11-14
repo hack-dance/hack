@@ -14,7 +14,17 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-const failedUp = { action: "up", outcome: "failed", project: null };
+const failedUp = {
+  v: 1,
+  ts: "2026-01-01T00:00:00Z",
+  project: null,
+  branch: null,
+  action: "up",
+  origin: "cli",
+  outcome: "failed",
+  failed_services: [],
+  duration_ms: 1,
+};
 
 async function writeActivity(records: readonly unknown[]): Promise<void> {
   await mkdir(join(home, ".hack"), { recursive: true });
@@ -66,6 +76,7 @@ for (const records of [
   [{ ...failedUp, outcome: "ok" }],
   [{ ...failedUp, action: "down" }],
   [{ ...failedUp, project: "registered" }],
+  [{ ...failedUp, extra: "unexpected" }],
   [null],
 ]) {
   test(`rejects missing, duplicate or unrelated activity: ${JSON.stringify(records)}`, async () => {
@@ -82,4 +93,9 @@ test("rejects a torn activity record", async () => {
   await expect(assertNativePlanHome({ home, failedUps: 1 })).rejects.toThrow(
     "Expected one complete activity record per failed up"
   );
+});
+
+test("rejects private paths in known activity fields", async () => {
+  await writeActivity([{ ...failedUp, branch: home }]);
+  await expect(assertNativePlanHome({ home, failedUps: 1 })).rejects.toThrow();
 });

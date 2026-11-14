@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "data": {
+    "observe": true,
+    "runtime_requested": false,
+    "runtime_ok": false,
+    "projects": [],
+    "schema": "hack.projects.observe.v1"
+  }
+}

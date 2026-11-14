@@ -26,6 +26,7 @@ import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { machineData, machineError } from "./helpers/machine-output.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 import { asExecStdout, tarArchive } from "./helpers/tar.ts";
 
@@ -440,7 +441,10 @@ test("global install plan root argv equals the command's fake-root execution, in
       value: true,
     });
   }
-  const planned = JSON.parse(chunks.join("")) as AdminPlan;
+  const planned = machineData(
+    chunks.join(""),
+    "hack.global-admin-plan.v1"
+  ) as AdminPlan;
   expect(planCode).toBe(0);
   expect(planned.complete).toBe(true);
   expect(runCalls).toEqual([]);
@@ -475,7 +479,8 @@ test("global install plan keeps JSON stdout pure when helper ownership refuses r
   } finally {
     stdout.mockRestore();
   }
-  const planned: unknown = JSON.parse(chunks.join(""));
+  const planned: unknown = machineError(chunks.join(""), "E_PLAN_INCOMPLETE")
+    .detail.plan;
   expect(planned).toMatchObject({
     command: "install",
     steps: expect.arrayContaining([

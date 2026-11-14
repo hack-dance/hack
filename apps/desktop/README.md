@@ -151,3 +151,19 @@ script after launch. `Launcher::launch(program, args)` is the injected boundary;
 `SystemLauncher` is used only on explicit live clicks. `linux_adapter()` discovers
 an absolute `xdg-terminal-exec`. Build upgrade commands from authored argv, never
 from arbitrary CLI finding text.
+
+The CLI setup card links to [v5 installation](../../docs/versions/v5/install.md),
+not the stable v4 Homebrew command. A terminal shell function does not change the
+app's executable. Select a prepared supported CLI explicitly when launching:
+
+```sh
+HACK_DESKTOP_CLI="$HOME/.hack-next/bin/hack-next" HACK_RUNTIME_BACKEND=compose hack-desktop
+```
+
+`HACK_DESKTOP_CLI` must be an absolute executable path. This selects the CLI for
+checks, safe actions and terminal hand-offs; it does not install anything or
+change PATH. Without it, each command rediscovers `hack` on absolute PATH entries,
+so installing into an existing PATH directory can recover through **Check again**
+without restarting. The app inherits PATH at launch; a changed PATH still needs a
+relaunch. Follow the installation page's platform limits and existing-v4 migration
+steps before using a candidate against a shared home.

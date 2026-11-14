@@ -169,7 +169,7 @@ check, in order. Every check is read-only; every card offers **Check again**.
 
 | Step | Read-only check | Fix | Admin | Skipped / unknown shows |
 |---|---|---|---|---|
-| CLI | `hack --version` (text; R1 for JSON) | `brew install hack-dance/tap/hack` (copy) | no | Cannot skip |
+| CLI | `hack --version` (text; R1 for JSON) | v5 install documentation; select the supported executable for the app | no | Cannot skip |
 | Docker (Compose projects) | `runtime_ok` from `/v1/projects` or `hack projects --json` (Docker only) | open Docker Desktop / Docker docs | no | "Docker not reachable" on Compose projects only |
 | Native runtime (native projects) | native `ps` `data.status` per native project (`runtime_not_running` etc.) | native setup doc (HACK-2193) | no | that native project shows Unknown; Compose projects unaffected |
 | hackd | `hack daemon status --json` | `hack daemon start` | no | Status bar "hackd off"; slower refresh |

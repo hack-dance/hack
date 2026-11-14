@@ -46,6 +46,7 @@ pub struct Card {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Report {
     pub cards: Vec<Card>,
+    pub cli_program: Option<String>,
 }
 impl Report {
     pub fn needed(&self) -> bool {
@@ -175,7 +176,9 @@ pub fn derive(
         "cli",
         "Hack CLI · required",
         cli_evidence,
-        Remedy::Copy("brew install hack-dance/tap/hack".into()),
+        Remedy::Doc(
+            "https://github.com/hack-dance/hack/blob/next/docs/versions/v5/install.md".into(),
+        ),
     )];
     let native: Vec<_> = projects
         .into_iter()
@@ -318,7 +321,10 @@ pub fn derive(
         ),
         Remedy::Run(SafeAction::InstallDaemon),
     ));
-    Report { cards }
+    Report {
+        cards,
+        cli_program: cli.ok().filter(|v| supported_cli(v)).map(|_| "hack".into()),
+    }
 }
 fn routing(
     runs: &[DoctorRun],

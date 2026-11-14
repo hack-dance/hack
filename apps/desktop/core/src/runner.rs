@@ -69,6 +69,7 @@ pub struct CliRunner {
     cwd: Option<PathBuf>,
     /// `on_path` found no executable: spawn reports `NotFound`.
     missing: bool,
+    path_name: Option<String>,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
     term_grace: Duration,
 }
@@ -87,6 +88,7 @@ impl CliRunner {
             env: vec![("HACK_NO_INTERACTIVE".into(), "1".into())],
             cwd: None,
             missing: false,
+            path_name: None,
             term_grace: TERM_GRACE,
         }
     }
@@ -107,14 +109,44 @@ impl CliRunner {
     /// spawning anything.
     #[must_use]
     pub fn on_path(name: &str) -> Self {
-        let path = std::env::var_os("PATH");
-        match resolve_on_path(name, path.as_deref()) {
-            Some(p) => Self::new(p),
-            None => {
-                let mut r = Self::new(name);
-                r.missing = true;
-                r
+        let mut runner = Self::new(name);
+        runner.path_name = Some(name.into());
+        runner
+    }
+
+    /// Select an explicit absolute CLI path, or discover `hack` on each call.
+    /// Relative selections fail closed, rather than falling back to another CLI.
+    pub fn selected(value: Option<&std::ffi::OsStr>) -> Self {
+        match value {
+            None => Self::on_path("hack"),
+            Some(path) if Path::new(path).is_absolute() => Self::new(PathBuf::from(path)),
+            Some(_) => {
+                let mut runner = Self::new("hack");
+                runner.missing = true;
+                runner
             }
+        }
+    }
+
+    /// Resolve again for every use so Check again and later actions recover
+    /// after installation. Explicit test/selected programs remain pinned.
+    pub fn resolve_program(&self) -> Result<PathBuf, RunError> {
+        if self.missing {
+            return Err(RunError::NotFound);
+        }
+        match &self.path_name {
+            Some(name) => {
+                let inherited = std::env::var_os("PATH");
+                let path = self
+                    .env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == "PATH")
+                    .map(|(_, value)| std::ffi::OsStr::new(value))
+                    .or(inherited.as_deref());
+                resolve_on_path(name, path).ok_or(RunError::NotFound)
+            }
+            None => Ok(self.program.clone()),
         }
     }
 
@@ -134,9 +166,9 @@ impl CliRunner {
         self
     }
 
-    fn command(&self, args: &[&str], path: Option<&Path>) -> Command {
+    fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
         use std::os::unix::process::CommandExt;
-        let mut cmd = Command::new(&self.program);
+        let mut cmd = Command::new(program);
         cmd.args(args);
         if let Some(p) = path {
             cmd.arg("--path").arg(p);
@@ -161,15 +193,13 @@ impl CliRunner {
     }
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
-        if self.missing {
-            return Err(RunError::NotFound);
-        }
+        let program = self.resolve_program()?;
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match self.command(args, path).spawn() {
+            match self.command(args, path, &program).spawn() {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;

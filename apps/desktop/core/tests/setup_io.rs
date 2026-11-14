@@ -103,3 +103,56 @@ fn exhausted_budget_never_spawns_fake_cli() {
     assert!(!marker.exists());
     assert!(r.cards.iter().all(|c| c.status != Status::Passed));
 }
+#[test]
+fn shared_source_recovers_after_cli_install_and_actions_use_same_executable() {
+    let t = Tree::new();
+    let hack = t.0.join("hack");
+    let marker = t.0.join("action");
+    let runner = CliRunner::on_path("hack")
+        .with_env("PATH", t.0.to_str().unwrap())
+        .with_env("HOME", t.0.to_str().unwrap())
+        .with_env("HACK_HOME", t.0.join("home").to_str().unwrap())
+        .with_env("MARKER", marker.to_str().unwrap());
+    let source = LiveSource {
+        runner,
+        daemon: None,
+    };
+    assert!(!source.setup().cli_ready());
+    std::fs::write(
+        &hack,
+        r#"#!/bin/sh
+case "$1 $2" in
+'--version ') printf '5.0.0-next.16';;
+'daemon status') printf '{"running":false,"service":{"installed":false}}';;
+'doctor --json') printf '{"ok":true,"data":{"checks":[]}}';;
+'daemon start') printf action > "$MARKER";;
+*) exit 98;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let report = source.setup();
+    assert!(report.cli_ready());
+    assert_eq!(report.cli_program.as_deref(), hack.to_str());
+    assert_eq!(source.cli_program().unwrap(), hack.to_str().unwrap());
+    source.setup_action(SafeAction::StartDaemon);
+    assert!(marker.exists());
+}
+#[test]
+fn explicit_cli_selection_is_absolute_and_never_falls_back() {
+    use std::ffi::OsStr;
+    assert!(
+        CliRunner::selected(Some(OsStr::new("relative/hack-next")))
+            .resolve_program()
+            .is_err()
+    );
+    let t = Tree::new();
+    let selected = t.0.join("candidate");
+    assert_eq!(
+        CliRunner::selected(Some(selected.as_os_str()))
+            .resolve_program()
+            .unwrap(),
+        selected
+    );
+}

@@ -95,14 +95,34 @@ impl LiveSource {
             Duration::from_secs(90).min(left()),
             Duration::from_secs(60),
         );
-        setup::derive(
+        let mut report = setup::derive(
             cli.as_deref().map_err(|_| "CLI unavailable"),
             projects.as_ref(),
             socket.as_ref().map(|d| d.version.as_str()),
             daemon.as_ref(),
             &runs,
             setup::Platform::current(),
-        )
+        );
+        report.cli_program = observer
+            .runner
+            .resolve_program()
+            .ok()
+            .and_then(|p| p.into_os_string().into_string().ok());
+        if let Some(program) = &report.cli_program {
+            for card in &mut report.cards {
+                if card.remedy == setup::Remedy::Copy("hack daemon restart".into()) {
+                    card.remedy = setup::Remedy::Copy(
+                        crate::terminal::CommandSpec {
+                            program: program.clone(),
+                            args: vec!["daemon".into(), "restart".into()],
+                        }
+                        .display()
+                        .unwrap_or_else(|_| "CLI command unavailable".into()),
+                    );
+                }
+            }
+        }
+        report
     }
 }
 

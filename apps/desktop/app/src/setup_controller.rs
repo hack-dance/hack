@@ -115,9 +115,10 @@ impl HackApp {
             return;
         }
         self.setup.action_busy = true;
+        let source = self.source.clone();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
-                let spec = CommandSpec { program: "hack".into(), args };
+                let spec = CommandSpec { program: source.cli_program()?, args };
                 let adapter = linux_adapter();
                 if !cfg!(target_os = "macos") && adapter.is_none() {
                     return Err("xdg-terminal-exec unavailable; use Copy command".into());

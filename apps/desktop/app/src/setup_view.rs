@@ -68,6 +68,7 @@ pub fn render(pane: &Pane, cx: &mut Context<HackApp>) -> AnyElement {
                             .label("Copy command")
                             .small()
                             .ghost()
+                            .disabled(!pane.report.cli_ready())
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(command.clone()))
                             }),
@@ -100,15 +101,22 @@ pub fn render(pane: &Pane, cx: &mut Context<HackApp>) -> AnyElement {
                 }
                 Remedy::Admin(args) => {
                     let args = args.clone();
-                    let command = std::iter::once("hack".to_owned())
-                        .chain(args.clone())
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                    let command = hack_desktop_core::terminal::CommandSpec {
+                        program: pane
+                            .report
+                            .cli_program
+                            .clone()
+                            .unwrap_or_else(|| "hack".into()),
+                        args: args.clone(),
+                    }
+                    .display()
+                    .unwrap_or_else(|_| "CLI command unavailable".into());
                     actions = actions.child(
                         Button::new(("setup-copy", i))
                             .label("Copy command")
                             .small()
                             .ghost()
+                            .disabled(!pane.report.cli_ready())
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(command.clone()))
                             }),

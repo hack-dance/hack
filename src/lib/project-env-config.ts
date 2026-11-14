@@ -80,6 +80,11 @@ import {
   resolveHackEnv,
 } from "./hack-env.ts";
 import { resolveUserHomeDir } from "./home-dir.ts";
+import {
+  type LegacyEnvCleanupReceipt,
+  legacyEnvCleanupReceipt,
+  legacyEnvCleanupReceiptMatches,
+} from "./legacy-env-cleanup-receipt.ts";
 import { quoteShellWord } from "./logs.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
@@ -106,6 +111,7 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { boundedTimeoutMs } from "./process-deadline.ts";
 import {
   parseEnvConfigSelection,
   readProjectDefaultEnvConfig,
@@ -123,6 +129,8 @@ import {
 import {
   type FileSecretStoreListing,
   listFileSecretStoreEntries,
+  withEncryptedFileKeyLock,
+  withEncryptedStoreMutation,
 } from "./secret-store.ts";
 import {
   hasPrimaryLocalInputs,
@@ -523,6 +531,10 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
+  /** Private same-filesystem staging for snapshot-owned upgrade writes. */
+  readonly stagingDirectory?: string;
+  /** Last snapshot identity check before atomic publication. */
+  readonly beforePublish?: () => Promise<void>;
   /** Test seam; see {@link HackDirGitignoreWriteAccess}. */
   readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
 }): Promise<HackDirGitignoreEnsureResult> {
@@ -547,8 +559,13 @@ export async function ensureHackDirGitignore(opts: {
   }
   await replacePrivateFileAtomic({
     ...options,
+    staging:
+      opts.stagingDirectory === undefined
+        ? undefined
+        : { directory: opts.stagingDirectory },
     text: next,
     mode: current ? current.mode & 0o777 : 0o644,
+    beforeRename: opts.beforePublish,
   });
   return { changed: true, readOnly: false };
 }
@@ -678,7 +695,7 @@ function hackDirGitignoreFileOptions(opts: {
   };
 }
 
-function mergeHackDirGitignore(opts: {
+export function mergeHackDirGitignore(opts: {
   readonly existing: string | null;
 }): string {
   return mergeManagedGitignoreBlock({
@@ -749,20 +766,48 @@ function toGitRelativePath(opts: {
   readonly projectRoot: string;
   readonly path: string;
 }): string {
-  return relative(opts.projectRoot, opts.path).split("\\").join("/");
+  const rel = relative(opts.projectRoot, opts.path);
+  // Only the platform separator is one: on POSIX a backslash is part of the
+  // name, and rewriting it would ask git about a different file (HACK-2165).
+  return sep === "\\" ? rel.split(sep).join("/") : rel;
+}
+
+/**
+ * The path as git must read it in a probe: `./`-prefixed, so a configured
+ * name that starts with `:` (`:(literal)x`, say) is never pathspec magic
+ * (HACK-2165). `ls-files` also gets `--literal-pathspecs` for glob characters.
+ */
+function toGitProbePath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): string {
+  const relativePath = toGitRelativePath(opts);
+  return relativePath.startsWith("../") ? relativePath : `./${relativePath}`;
+}
+
+/** Bound on a git ignore/tracking probe; a slower git reads as unknown. */
+const GIT_PROBE_TIMEOUT_MS = 10_000;
+
+/** The probe's timeout within any process deadline; at least 1 ms (Bun's 0 means none). */
+function gitProbeTimeoutMs(): number {
+  return Math.max(
+    1,
+    boundedTimeoutMs(GIT_PROBE_TIMEOUT_MS) ?? GIT_PROBE_TIMEOUT_MS
+  );
 }
 
 async function isGitTrackedProjectEnvPath(opts: {
   readonly projectRoot: string;
   readonly path: string;
 }): Promise<boolean | null> {
-  const relativePath = toGitRelativePath(opts);
+  const relativePath = toGitProbePath(opts);
   let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
   try {
     proc = Bun.spawn({
       env: childEnvironment(),
       cmd: [
         "git",
+        "--literal-pathspecs",
         "-C",
         opts.projectRoot,
         "ls-files",
@@ -773,6 +818,9 @@ async function isGitTrackedProjectEnvPath(opts: {
       stderr: "ignore",
       stdin: "ignore",
       stdout: "ignore",
+      // A hung git is unknown (null), never a wait without end.
+      timeout: gitProbeTimeoutMs(),
+      killSignal: "SIGKILL",
     });
   } catch {
     return null;
@@ -810,11 +858,14 @@ export async function isGitIgnoredProjectEnvPath(opts: {
         "-q",
         "--no-index",
         "--",
-        toGitRelativePath(opts),
+        toGitProbePath(opts),
       ],
       stderr: "ignore",
       stdin: "ignore",
       stdout: "ignore",
+      // A hung git is unknown (null), never a wait without end.
+      timeout: gitProbeTimeoutMs(),
+      killSignal: "SIGKILL",
     });
   } catch {
     return null;
@@ -842,7 +893,7 @@ export async function isGitIgnoredProjectEnvPath(opts: {
  * but "absent"), counts as inside, since only confirmed absence may exempt a
  * write from git's privacy checks.
  */
-async function isInsideGitCheckoutMarker(opts: {
+export async function isInsideGitCheckoutMarker(opts: {
   readonly startDir: string;
 }): Promise<boolean> {
   if ((process.env.GIT_DIR ?? "").trim().length > 0) {
@@ -4493,9 +4544,11 @@ async function writeProjectEnvConfigFile(opts: {
   readonly expectedExisting?: string | null;
   /**
    * A machine-local layer, which may hold plaintext values: when this write
-   * creates it, it is private (0600) from creation. An existing layer keeps
-   * its mode. The write is refused unless
-   * {@link assertMachineLocalLayerWriteDestination} admits the path.
+   * creates it, it is private (0600) from creation, and an existing layer
+   * that predates that rule (or was made by hand) loses its group and other
+   * permission bits when this write changes it (HACK-2165). The write is
+   * refused unless {@link assertMachineLocalLayerWriteDestination} admits the
+   * path.
    */
   readonly machineLocal?: boolean;
 }): Promise<boolean> {
@@ -4514,7 +4567,7 @@ async function writeProjectEnvConfigFile(opts: {
         ? {}
         : { expectedExisting: opts.expectedExisting }),
       ...(opts.machineLocal === true
-        ? { createMode: 0o600, noFollowTarget: true }
+        ? { createMode: 0o600, noFollowTarget: true, tightenExisting: true }
         : {}),
       validatePath: async (path) => {
         await assertProjectEnvLayerPath({
@@ -4577,6 +4630,8 @@ async function isGitTrackedProjectEnvPathAnyCase(opts: {
       stderr: "ignore",
       stdin: "ignore",
       stdout: "pipe",
+      timeout: gitProbeTimeoutMs(),
+      killSignal: "SIGKILL",
     });
     const [listed, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
@@ -6113,6 +6168,9 @@ async function ensureLegacyMigrationLocalLayersIgnored(opts: {
 
 /** Outcome of {@link migrateLegacyProjectEnv}. */
 export type LegacyProjectEnvMigration = {
+  /** Ephemeral authority from the source inventory, carried across confirmation prompts. */
+  readonly cleanupContext?: LegacyEnvCleanupContext;
+  readonly cleanupStore?: { readonly path: string; readonly keyPath: string };
   readonly wroteFiles: readonly string[];
   readonly migratedOverlays: readonly string[];
   readonly movedPlainValues: readonly {
@@ -6131,6 +6189,16 @@ export type LegacyProjectEnvMigration = {
    * Absent or null when no pointer was kept for that reason.
    */
   readonly keptSecretStorePointer?: KeptSecretStorePointer | null;
+};
+
+export type LegacyEnvCleanupContext = {
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+  readonly contract: HackEnvContract;
+  readonly receipts: readonly LegacyEnvCleanupReceipt[];
+  readonly store?: { readonly path: string; readonly keyPath: string };
 };
 
 /**
@@ -6225,7 +6293,48 @@ export function describeRetainedLegacyEnvFile(opts: {
  * callers in commands/project.ts, commands/doctor.ts, commands/session.ts,
  * and commands/env.ts (`maybeMigrateLegacyProjectEnv`).
  */
-export async function migrateLegacyProjectEnv(opts: {
+export async function migrateLegacyProjectEnv(
+  opts: Parameters<typeof migrateLegacyProjectEnvWithSources>[0]
+): Promise<LegacyProjectEnvMigration> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  const planned = await planLegacyProjectConfigChanges(opts);
+  const names = await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  });
+  const paths = new Set([
+    resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    ...names.map((name) =>
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${name}`)
+    ),
+    ...planned.cleanupCandidates,
+  ]);
+  const receipts: LegacyEnvCleanupReceipt[] = [];
+  for (const path of paths) {
+    const receipt = await legacyEnvCleanupReceipt(path);
+    if (receipt) {
+      receipts.push(receipt);
+    }
+  }
+  const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  const migrated = await migrateLegacyProjectEnvWithSources(opts);
+  return {
+    ...migrated,
+    cleanupContext: {
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      serviceNames: opts.serviceNames,
+      overlayNames: migrated.migratedOverlays,
+      contract: contract.contract,
+      receipts,
+      store: migrated.cleanupStore,
+    },
+  };
+}
+
+async function migrateLegacyProjectEnvWithSources(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly projectName: string;
@@ -6566,6 +6675,10 @@ export async function migrateLegacyProjectEnv(opts: {
     legacyDetected: true,
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,
+    cleanupStore: {
+      path: secretStoreListing.storePath,
+      keyPath: secretStoreListing.keyPath,
+    },
     blockedCleanupCandidates: cleanupCandidates.blocked,
     retainedEnvFiles: [
       ...cleanupCandidates.retainedEnvFiles,
@@ -6852,14 +6965,25 @@ export async function finishImplicitLegacyEnvMigration(opts: {
       resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlay}`)
     ),
   ]);
-  const removable = await filterUntrackedLegacyCleanupCandidates({
-    projectRoot: opts.projectRoot,
-    paths: migrated.cleanupCandidates.filter((path) => dotenvFiles.has(path)),
-  });
-  const removed = await removeLegacyProjectEnvArtifacts({
-    projectRoot: opts.projectRoot,
-    paths: removable,
-  });
+  let removed: readonly string[] = [];
+  try {
+    const removable = await filterUntrackedLegacyCleanupCandidates({
+      projectRoot: opts.projectRoot,
+      paths: migrated.cleanupCandidates.filter((path) => dotenvFiles.has(path)),
+    });
+    removed = await removeLegacyProjectEnvArtifacts({
+      projectRoot: opts.projectRoot,
+      paths: removable,
+      context: migrated.cleanupContext,
+    });
+  } catch (error) {
+    const failure =
+      error instanceof LegacyEnvCleanupError
+        ? error
+        : new LegacyEnvCleanupError({ reason: "unverified" });
+    removed = failure.removedPaths;
+    lines.push(`Warning: kept remaining legacy env files. ${failure.message}`);
+  }
   if (removed.length > 0) {
     lines.push(
       `Removed ${removed.map(shown).join(", ")}: env layers now hold every value ${removed.length === 1 ? "it" : "they"} set.`
@@ -9275,21 +9399,62 @@ async function readLegacyDotenvText(opts: {
 }
 
 /** Keys and YAML inputs remain live after legacy migration, even if a backend named them. */
+/**
+ * The git-named inputs' locations: the shared key and the primary worktree.
+ * With the family known, the primary worktree comes from the same common
+ * directory (as resolveGitPrimaryWorktreeRoot derives it), never from a second
+ * git call that could fail on its own. With `strictGit`, a checkout whose
+ * family git cannot name throws instead of naming nothing.
+ */
+async function liveInputGitFamily(opts: {
+  readonly projectRoot: string;
+  readonly strictGit?: boolean;
+}): Promise<{
+  readonly shared: ProjectEnvSharedKeyLocation | null;
+  readonly primaryRoot: string | null;
+}> {
+  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  if (shared) {
+    const commonDir = dirname(shared.path);
+    return {
+      shared,
+      primaryRoot: commonDir.endsWith("/.git") ? dirname(commonDir) : null,
+    };
+  }
+  if (opts.strictGit !== true) {
+    return {
+      shared: null,
+      primaryRoot: await resolveGitPrimaryWorktreeRoot({
+        repoRoot: opts.projectRoot,
+      }),
+    };
+  }
+  if (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot })) {
+    throw new Error(
+      "Project env inputs are unknown: git could not name this checkout's shared inputs"
+    );
+  }
+  return { shared: null, primaryRoot: null };
+}
+
 async function legacyCleanupLiveInputs(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
+  /**
+   * Refuse instead of omitting git-named inputs (HACK-2165): in a checkout (a
+   * `.git` marker, failing closed) git must name the repository family, and
+   * that one answer names both the shared key and the primary worktree.
+   */
+  readonly strictGit?: boolean;
 }): Promise<{
   readonly paths: ReadonlySet<string>;
   readonly identities: ReadonlySet<string>;
 }> {
   const paths = new Set([resolveProjectEnvKeyPath(opts)]);
-  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  const { shared, primaryRoot } = await liveInputGitFamily(opts);
   if (shared) {
     paths.add(shared.path);
   }
-  const primaryRoot = await resolveGitPrimaryWorktreeRoot({
-    repoRoot: opts.projectRoot,
-  });
   const directories = new Set([
     opts.projectDir,
     resolve(opts.projectRoot, HACK_PROJECT_DIR_PRIMARY),
@@ -9326,6 +9491,20 @@ async function legacyCleanupLiveInputs(opts: {
     }
   }
   return { paths, identities };
+}
+
+/**
+ * The paths current env resolution reads for a project: its key, the shared
+ * key, the primary worktree's key, `hack.config.json` and every YAML layer in
+ * the project and primary-worktree `.hack` directories (HACK-2165, the same
+ * set legacy cleanup keeps). Any cleanup that deletes files must keep these.
+ * Throws when an input cannot be inspected; a caller must then delete nothing.
+ */
+export async function projectEnvLiveInputPaths(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<ReadonlySet<string>> {
+  return (await legacyCleanupLiveInputs({ ...opts, strictGit: true })).paths;
 }
 
 async function legacyCleanupInputStat(opts: {
@@ -9368,9 +9547,7 @@ async function assertLegacyCleanupDoesNotRemoveLiveInputs(opts: {
   });
   for (const path of opts.paths) {
     if (await legacyCleanupIsLiveInput({ path, live })) {
-      throw new ClosedCliError(
-        "Refusing legacy env cleanup: a target is a current project env key, configuration or YAML layer. Keep live env inputs; migrated values still need them (values omitted)."
-      );
+      throw new LegacyEnvCleanupError({ reason: "live_input" });
     }
   }
 }
@@ -9378,23 +9555,285 @@ async function assertLegacyCleanupDoesNotRemoveLiveInputs(opts: {
 export async function removeLegacyProjectEnvArtifacts(opts: {
   readonly projectRoot: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyEnvCleanupContext;
+}): Promise<readonly string[]> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  const removed: string[] = [];
+  try {
+    return await removeLegacyProjectEnvArtifactsUnderLocks({
+      ...opts,
+      removed,
+    });
+  } catch (error) {
+    throw new LegacyEnvCleanupError({
+      reason:
+        error instanceof LegacyEnvCleanupError ? error.reason : "unverified",
+      removedPaths: removed,
+    });
+  }
+}
+
+async function removeLegacyProjectEnvArtifactsUnderLocks(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+  readonly context?: LegacyEnvCleanupContext;
+  readonly removed: string[];
 }): Promise<readonly string[]> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   await assertLegacyCleanupDoesNotRemoveLiveInputs(opts);
-  const removed: string[] = [];
-  for (const path of opts.paths) {
+  if (opts.paths.length === 0) {
+    return [];
+  }
+  const context = opts.context;
+  if (!context) {
+    throw legacyCleanupChanged();
+  }
+  // Take the same source and destination locks as their writers. Sorted order
+  // avoids competing cleanup calls taking these locks in opposite orders.
+  const layers = new Set([
+    ...opts.paths,
+    ...context.receipts.map((receipt) => receipt.path),
+  ]);
+  // Key writers have their own shared <key>.lock (HACK-2169). Take it as well
+  // as the store lock; env-layer locks would create .internal beside the key.
+  if (context.store && layers.has(context.store.keyPath)) {
+    layers.add(context.store.path);
+  }
+  for (const envName of [null, ...context.overlayNames]) {
+    layers.add(
+      resolveProjectEnvConfigPath({ projectDir: context.projectDir, envName })
+    );
+    layers.add(
+      resolveProjectEnvLocalConfigPath({
+        projectDir: context.projectDir,
+        envName,
+      })
+    );
+    const metadata = await resolveProjectEnvMetadata({
+      ...opts,
+      ...context,
+      envName,
+    });
+    for (const file of Object.values(metadata?.files ?? {})) {
+      if (typeof file === "string") {
+        layers.add(file);
+      }
+    }
+  }
+  const paths = [...layers].sort();
+  const locked = async (index: number): Promise<readonly string[]> => {
+    const path = paths[index];
+    if (path === undefined) {
+      await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+      await assertLegacyCleanupDoesNotRemoveLiveInputs(opts);
+      await assertLegacyCleanupReceipts({ paths: opts.paths, context });
+      await assertLegacyCleanupDelivery({ ...opts, context });
+      // Keep a store readable if unlinking it fails: its key is always last.
+      const targets = [
+        ...opts.paths.filter((path) => path !== context.store?.keyPath),
+        ...opts.paths.filter((path) => path === context.store?.keyPath),
+      ];
+      for (const target of targets) {
+        if (!(await pathExists(target))) {
+          continue;
+        }
+        const receipt = context.receipts.find((entry) => entry.path === target);
+        if (!(receipt && (await legacyEnvCleanupReceiptMatches(receipt)))) {
+          throw legacyCleanupChanged();
+        }
+        await assertLegacyCleanupDoesNotRemoveLiveInputs({
+          ...opts,
+          paths: [target],
+        });
+        await rm(target, { recursive: false, force: false });
+        opts.removed.push(target);
+      }
+      return opts.removed;
+    }
+    const run = () => locked(index + 1);
+    if (path === context.store?.keyPath) {
+      return await withEncryptedFileKeyLock({ keyPath: path, run });
+    }
+    return path === context.store?.path
+      ? await withEncryptedStoreMutation({ filePath: path, run })
+      : await withEnvLayerLock({ layerPath: path, run });
+  };
+  return await locked(0);
+}
+
+const LEGACY_CLEANUP_RECOVERY =
+  "Keep the remaining legacy copies and existing keys. Once YAML layers exist, rerunning migration may not import changed legacy values. Reconcile chosen values with hack env set KEY --value-stdin (use --local for machine-local values, add --secret for secrets and preserve --env/--service), check delivery, then remove only copies confirmed obsolete. Values omitted.";
+
+/** A value-free cleanup outcome, including every removal confirmed before failure. */
+export class LegacyEnvCleanupError extends ClosedCliError {
+  readonly removedPaths: readonly string[];
+  readonly reason: "changed" | "live_input" | "unverified";
+
+  constructor(opts: {
+    readonly reason: "changed" | "live_input" | "unverified";
+    readonly removedPaths?: readonly string[];
+  }) {
+    const removedPaths = [...(opts.removedPaths ?? [])];
+    const reasons = {
+      changed:
+        "Refusing legacy env cleanup: source inventory or current delivery changed.",
+      live_input:
+        "Refusing legacy env cleanup: a target is a current project env key, configuration or YAML layer.",
+      unverified:
+        "Legacy env cleanup could not be confirmed; a writer may still hold a lock, or an input may be unreadable.",
+    };
+    const outcome =
+      removedPaths.length > 0
+        ? `Confirmed removals: ${removedPaths.map((path) => JSON.stringify(path)).join(", ")}.`
+        : "No removals were confirmed.";
+    super(`${reasons[opts.reason]} ${outcome} ${LEGACY_CLEANUP_RECOVERY}`);
+    this.removedPaths = removedPaths;
+    this.reason = opts.reason;
+  }
+}
+
+function legacyCleanupChanged(): LegacyEnvCleanupError {
+  return new LegacyEnvCleanupError({ reason: "changed" });
+}
+
+async function assertLegacyCleanupReceipts(opts: {
+  readonly paths: readonly string[];
+  readonly context: LegacyEnvCleanupContext;
+}): Promise<void> {
+  for (const path of new Set([
+    ...opts.paths,
+    ...opts.context.receipts.map((entry) => entry.path),
+  ])) {
     if (!(await pathExists(path))) {
       continue;
     }
-    await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-    await assertLegacyCleanupDoesNotRemoveLiveInputs({
-      ...opts,
-      paths: [path],
-    });
-    await rm(path, { recursive: false, force: true });
-    removed.push(path);
+    const receipt = opts.context.receipts.find((entry) => entry.path === path);
+    if (!(receipt && (await legacyEnvCleanupReceiptMatches(receipt)))) {
+      throw legacyCleanupChanged();
+    }
   }
-  return removed;
+}
+
+/** Re-evaluate delivery and Compose references after prompts, while writer locks are held. */
+async function assertLegacyCleanupDelivery(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+  readonly context: LegacyEnvCleanupContext;
+}): Promise<void> {
+  const context = {
+    ...opts.context,
+    serviceNames: await discoverComposeServiceNames({
+      composeFile: resolve(opts.context.projectDir, PROJECT_COMPOSE_FILENAME),
+    }),
+  };
+  const resolved = new Map<string | null, ProjectEnvResolvedConfig>();
+  const preserves = async (
+    key: string,
+    value: string,
+    envName: string | null
+  ) => {
+    let modern = resolved.get(envName);
+    if (!modern) {
+      modern =
+        (await resolveProjectEnvConfig({
+          ...context,
+          projectRoot: opts.projectRoot,
+          envName,
+        })) ?? undefined;
+      if (!modern) {
+        throw legacyCleanupChanged();
+      }
+      resolved.set(envName, modern);
+    }
+    const scopes = context.contract.vars.find((entry) => entry.key === key)
+      ?.services ?? ["global"];
+    for (const scope of scopes.length > 0 ? scopes : ["global"]) {
+      let actual: string | undefined;
+      try {
+        actual = selectProjectEnvValues({
+          resolved: modern,
+          scopeName: scope.trim() || "global",
+        })[key];
+      } catch {
+        throw legacyCleanupChanged();
+      }
+      if (actual !== value) {
+        throw legacyCleanupChanged();
+      }
+    }
+  };
+  const references = await inspectLegacyComposeEnvFileReferences({
+    projectDir: context.projectDir,
+    composeFile: resolve(context.projectDir, PROJECT_COMPOSE_FILENAME),
+  });
+  const contractSelected = opts.paths.includes(
+    resolve(context.projectDir, PROJECT_ENV_CONTRACT_FILENAME)
+  );
+  for (const envName of [null, ...context.overlayNames]) {
+    const path = resolveEnvFilePath({
+      projectDir: context.projectDir,
+      envName,
+    });
+    if (opts.paths.includes(path) && (await pathExists(path))) {
+      if (references.some((entry) => entry.resolvedPath === path)) {
+        throw legacyCleanupChanged();
+      }
+      for (const [key, value] of Object.entries(
+        await readLegacyDotenvCleanupEntries({ path })
+      )) {
+        await preserves(key, value, envName);
+      }
+    }
+    if (contractSelected || (envName === null && opts.paths.includes(path))) {
+      const legacy = await resolveHackEnv({ ...context, envName });
+      if (contractSelected) {
+        for (const entry of legacy.values) {
+          if (entry.value !== null) {
+            await preserves(entry.key, entry.value, envName);
+          }
+        }
+      }
+      if (envName === null && opts.paths.includes(path)) {
+        const interpolated = await composeInterpolatedServiceOnlyKeys({
+          projectDir: context.projectDir,
+          resolvedValues: legacy.values,
+        });
+        const entries = await readLegacyDotenvCleanupEntries({ path });
+        if (Object.keys(entries).some((key) => interpolated.has(key))) {
+          throw legacyCleanupChanged();
+        }
+      }
+    }
+  }
+  if (
+    !(
+      context.store &&
+      opts.paths.some(
+        (path) =>
+          path === context.store?.path || path === context.store?.keyPath
+      )
+    )
+  ) {
+    return;
+  }
+  if (!(await pathExists(context.store.path))) {
+    return;
+  }
+  if (!opts.paths.includes(context.store.path)) {
+    throw legacyCleanupChanged();
+  }
+  const listing = await listFileSecretStoreEntries(context);
+  if (
+    listing.storePath !== context.store.path ||
+    listing.kind !== "listed" ||
+    listing.foreignEntryCount > 0
+  ) {
+    throw legacyCleanupChanged();
+  }
+  for (const [storeKey, value] of listing.ownEntries) {
+    const parsed = parseStoreOverlayKey(storeKey);
+    await preserves(parsed?.key ?? storeKey, value, parsed?.envName ?? null);
+  }
 }
 
 /**
@@ -9998,6 +10437,55 @@ function collectLegacyEncryptedBackendCleanupCandidates(opts: {
   }
 
   return [...candidates].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Read-only preview for `hack upgrade snapshot` (HACK-2189): the legacy
+ * overlays a migration of this project would convert into env layers, from
+ * the migration's own selection (files plus overlays only the secret store
+ * holds). Writes and provisions nothing, and returns names only. When the
+ * contract is absent or the migration would refuse, the file-discovered
+ * overlays (what an undeclared-dotenv migration converts).
+ */
+/**
+ * Read-only (HACK-2189): the overlays a migration of this project finds
+ * without its secret store: `.env.<name>` files and the configured default
+ * overlay, exactly as the migration discovers them. Empty when the
+ * directory cannot be read.
+ */
+export async function discoverLegacyMigrationOverlays(opts: {
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  return await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  }).catch(() => [] as string[]);
+}
+
+export async function previewLegacyMigrationOverlayNames(opts: {
+  readonly projectDir: string;
+  readonly projectName: string;
+}): Promise<readonly string[]> {
+  const discovered = await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  }).catch(() => [] as string[]);
+  const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  if (!contract.exists || contract.parseError !== undefined) {
+    return discovered;
+  }
+  try {
+    return (
+      await selectContractMigrationOverlays({
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
+        contract: contract.contract,
+        composeRepairFollows: true,
+      })
+    ).overlayNames;
+  } catch {
+    return discovered;
+  }
 }
 
 /**

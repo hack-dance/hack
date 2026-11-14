@@ -1,8 +1,8 @@
-import { candidateVersion, requireThat, SHA256 } from "./integrity.ts";
 import {
   TRANSFER_INACTIVITY_MS,
   TRANSFER_TOTAL_MS,
-} from "./transfer-budget.ts";
+} from "../../src/lib/release-transfer-budget.ts";
+import { candidateVersion, requireThat, SHA256 } from "./integrity.ts";
 /** Curl's low-speed window bounds sustained inactivity; max-time independently caps progress. */
 export function curlTransferFlags({
   inactivitySeconds = TRANSFER_INACTIVITY_MS / 1000,

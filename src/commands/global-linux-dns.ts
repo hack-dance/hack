@@ -163,10 +163,16 @@ function reportInspection(opts: {
 /** Read-only state for `hack doctor` and `hack global status`. */
 export async function inspectLinuxGlobalDns(opts?: {
   readonly host?: LinuxDnsHost;
+  /**
+   * The routed suffixes to check; default: the built-ins and the configured
+   * default domain, read tolerantly. Observe-only reads pass a strictly
+   * resolved list.
+   */
+  readonly domains?: readonly string[];
 }): Promise<LinuxDnsInspection> {
   return await inspectLinuxDns({
     host: opts?.host ?? defaultHost(),
-    domains: await resolveRoutedDomains(),
+    domains: opts?.domains ?? (await resolveRoutedDomains()),
   });
 }
 

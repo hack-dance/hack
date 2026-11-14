@@ -66,32 +66,106 @@ executable to v5. Review env migration before the Compose trial.
 
 ## Secrets after upgrading
 
-This section will link the Doctor env hygiene check (HACK-2165) and the
-protect-in-place command (HACK-2166) after their implementations merge. They are
-pending at this audit; no command form is promised here.
+The next.17 env changes hide all values in ordinary `env list` output and add
+`env protect` to encrypt selected plaintext YAML entries in place. Check that
+the installed release contains those changes before using the new command.
+For scripts, use `env list --json` and `has_value` for metadata, or an explicit
+`env get KEY` with the same scope/overlay when a value is needed. `env get`
+prints plaintext; keep it out of logs and reports. `--show-values` (also spelled
+`--show-secrets`) requires terminal stdin/stdout and interaction enabled, so it
+is not a bulk script interface.
 
-Until then, check by hand:
+Run `hack env protect` for a names-only inventory, then select the keys to
+protect. This preserves their values, scopes and layers; it does not remove
+legacy compatibility copies. Keep `--secret --value-stdin` on later secret
+updates. See [the env command guidance](../env.md#common-commands).
+
+Keep these manual checks too:
 
 - Check ownership and permissions of `.hack/hack.env.local.yaml` and
   `.hack/hack.env.<name>.local.yaml`. New local layers are created mode 0600,
-  but existing layers keep their modes. Keep local layers owner-only and do
-  not assume an upgrade tightened old files.
+  but next.16 keeps existing modes. The merged #764 change, intended for
+  next.17, tightens a local layer on a write and lets Doctor fix loose files
+  without waiting for that write. Keep local layers owner-only.
 - Check Git's tracked-file list for `.hack/.env.<name>` and
-  `hack.env*.local.yaml`. The managed ignore block does not cover legacy
-  overlay dotenv names, and ignoring an already tracked file does not untrack
-  it. Review and remove any tracked sensitive files from the index without
+  `hack.env*.local.yaml`. next.16's managed ignore block omitted legacy overlay
+  dotenv names; newer ignore rules still cannot untrack an existing file.
+  Review and remove any tracked sensitive files from the index without
   deleting the local copy; treat earlier commits as a possible disclosure.
-- Values migrated from v4 plaintext dotenv files remain plain until re-added
-  with `--secret`. `hack env list` can print those values. Inspect names and
-  provenance instead; re-add a sensitive value through a hidden prompt or
-  `--value-stdin`, never as a command argument.
+- Values migrated from v4 plaintext dotenv files remain plain until explicitly
+  protected or re-added with `--secret`. next.16's `env list`, including JSON,
+  prints plain values; hiding them in a newer listing is not encryption.
 - Keep the project key and all backup copies private. Review logs, MCP results,
   multiplexer temporary files and retained background output as possible
   plaintext sinks; encryption at rest does not protect those outputs.
 
+**On next.16 or an earlier prerelease, keep a private readable copy of
+`.hack.secret.key` before `doctor --migrate-env-config`.** HACK-2172 lets
+explicit cleanup delete that key when a legacy store's `keyPath` names it.
+The live-input protection fix is merged for next.17: current project/shared
+keys, config and YAML inputs are not cleanup targets, including filesystem
+aliases, and cleanup refuses a request that names one. It cannot recover a key already removed by an older
+build. Back up original keys and env state before migration on any version.
+
+Merged #764 (HACK-2165), intended for next.17, adds the
+[Doctor secrets-hygiene report and fixes](#after-upgrading-check-secrets-at-rest)
+below. next.16 already reports `env-key-weak-permissions` with a `chmod 600`
+remedy, but does not include the broader hygiene report.
+
 See [Env and secrets](../env.md#legacy-repos-and-migration) and the
 [threat model](../security/env-secrets-threat-model.md). These are manual checks,
 not evidence that the real-machine upgrade or rollback has passed.
+
+## After upgrading, check secrets at rest
+
+Earlier versions could leave env values and keys more exposed than v5 does:
+machine-local env files created by hand or by an older release with mode 0644,
+staging copies of `.hack/.env` or the project key under names git does not
+ignore, env values staged for a terminal session that never ran, or an
+encrypted secret store whose key file is gone. In a build containing #764, run this once
+in each project, and once outside any project for the global Hack home:
+
+```bash
+hack doctor          # read the "secrets hygiene" section
+hack doctor --fix    # apply the fixes after reviewing the report
+```
+
+The "secrets hygiene" section reports loose modes, links, tracked or unignored
+secret-bearing files, staging leftovers and stale terminal-session payloads.
+It names files and what they hold, never values. `hack doctor --fix` removes
+group and other permission bits from eligible files owned by this user, adds
+missing ignore entries inside the project, and removes Hack's staging leftovers
+and terminal payloads older than ten minutes. It prints each change.
+
+Removal never includes a live input: the configured store or key, project/shared
+keys, config and env layers are protected by their paths and resolved paths.
+Doctor rechecks the configuration before each removal and leaves the file when
+it cannot prove removal is allowed. Retired stores are kept too. It never deletes
+a store, a key or a file you wrote, and never untracks a file git already tracks.
+Review any suggested `git rm --cached` and treat earlier shared copies as exposed.
+For a store whose key is lost, use the restore-or-retire choices below, not hygiene
+cleanup. Keep these repairs separate from `--migrate-env-config` and its backup step.
+
+### An old global secret store whose key is gone
+
+Merged #779, intended for next.17, makes an old store with a missing or wrong
+key a Doctor error only where the project's runtime reads it. Other projects
+receive a warning. Choose one: restore the original key from a private backup,
+or retire the store if the key is gone for good. A new key cannot open the old
+entries.
+
+`hack secrets retire-store --path <project>` selects the store for that project
+and moves it into a timestamped directory beside it. It deletes nothing, leaves
+the key file alone and prints how to put the encrypted file back. Retirement
+does not decrypt or print entries. Doctor then lists the retired file as
+information.
+
+Retiring requires `--allow-unchecked` because another shell may hold the key in
+`HACK_SECRETS_FILE_KEY`, which Hack cannot check. Pass it only after confirming
+that no shell for a project selecting the store has that key; it also acknowledges
+registered projects Hack could not check. Without a terminal, add `--yes` to
+confirm the move. A store that an available key opens is refused. See
+[the recovery and retirement details](../env.md#compatibility-notes).
 
 ## The daemon after an upgrade
 

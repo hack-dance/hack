@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -59,6 +60,7 @@ import {
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
 import {
+  invokeNativeRuntime,
   NativeRuntimeRequestError,
   nativeRuntimeFailure,
 } from "../src/backends/native-runtime-client.ts";
@@ -420,6 +422,38 @@ test("foreground saves after readiness and retains mapping after confirmed stop"
     "cleanup",
   ]);
 });
+
+test("a pool bridge boot failure reaches foreground up with recovery guidance before any project mapping", async () => {
+  const { opts, events } = await fixture(false);
+  const message =
+    "Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.";
+  await writeFile(
+    opts.runtime.binary,
+    `#!/usr/bin/env bun
+console.error(JSON.stringify({ code: "bridge_socket_timeout", message: ${JSON.stringify(message)}, message_fixed: true, private_detail: "synthetic-secret" }));
+process.exit(2);
+`
+  );
+  await chmod(opts.runtime.binary, 0o755);
+  const invoke = opts.dependencies.invoke;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      return await invokeNativeRuntime(request);
+    }
+    return await invoke?.(request);
+  };
+  const failure: unknown = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(ClosedCliError);
+  expect(String(failure)).toContain("runtime recover --json");
+  expect(String(failure)).toContain("--candidate-root");
+  expect(String(failure)).not.toContain("synthetic-secret");
+  expect(nativeRuntimeFailure(failure)?.code).toBe("bridge_socket_timeout");
+  expect(events).not.toContain("save");
+  expect(events).not.toContain("ready");
+  expect(events).toContain("cleanup");
+});
 test("foreground reports value-free digests of the selected env after publishing the mapping", async () => {
   const { opts, events } = await fixture();
   const seen: { run: string; fingerprint: ComposeEnvFingerprintRecord }[] = [];
@@ -605,8 +639,8 @@ function failedStartupFixture(
     };
   };
   opts.dependencies.invoke = async (request) => {
-    if (request.args[1] === "inspect") {
-      events.push("graph inspect");
+    if (request.args[1] === "inspect" || request.args[1] === "status") {
+      events.push(`graph ${request.args[1]}`);
       return {
         journal_incomplete: receipt.journalIncomplete === true,
         receipt: {
@@ -3155,6 +3189,82 @@ test("HTTPS startup refuses a non-2xx reviewed health response", async () => {
   ).rejects.toThrow("HTTP_STATUS_403");
   expect(events).not.toContain("save");
   expect(events).toContain("https-close");
+});
+
+test("inferred HTTPS readiness accepts 2xx-4xx without following redirects and rejects 5xx", async () => {
+  const probe = {
+    policy: "route",
+    port: 3000,
+    path: "/",
+    interval_ms: 30_000,
+    timeout_ms: 1000,
+    retries: 3,
+    start_period_ms: 240_000,
+  };
+  const plan = {
+    services: {
+      web: {
+        routing: { port: 3000, hostnames: ["web.example.hack"] },
+        healthcheck: { disabled: false, native_http: probe },
+      },
+    },
+  };
+  for (const statusCode of [200, 204, 299, 301, 399, 400, 404, 499]) {
+    const calls: string[] = [];
+    await verifyHttpsRoutes(
+      {
+        httpsPort: 18_443,
+        verifyHostname: async (hostname, path) => {
+          calls.push(hostname);
+          expect(path).toBe("/");
+          return {
+            statusCode,
+            location: "https://foreign.invalid/",
+            upstreamVerified: true,
+          };
+        },
+      },
+      plan,
+      new Set(["web"])
+    );
+    expect(calls).toEqual(["web.example.hack"]);
+  }
+  for (const statusCode of [199, 500, 503, 599, 600]) {
+    await expect(
+      verifyHttpsRoutes(
+        {
+          httpsPort: 18_443,
+          verifyHostname: async () => ({ statusCode, upstreamVerified: true }),
+        },
+        plan,
+        new Set(["web"])
+      )
+    ).rejects.toThrow();
+  }
+  for (const statusCode of [200, 403, 404, 421, 502]) {
+    await expect(
+      verifyHttpsRoutes(
+        { httpsPort: 18_443, verifyHostname: async () => ({ statusCode }) },
+        plan,
+        new Set(["web"])
+      )
+    ).rejects.toThrow("UPSTREAM_RESPONSE_UNCONFIRMED");
+  }
+  const explicit = {
+    services: {
+      web: {
+        ...plan.services.web,
+        healthcheck: { native_http: { ...probe, policy: undefined } },
+      },
+    },
+  };
+  await expect(
+    verifyHttpsRoutes(
+      { httpsPort: 18_443, verifyHostname: async () => ({ statusCode: 404 }) },
+      explicit,
+      new Set(["web"])
+    )
+  ).rejects.toThrow();
 });
 
 test("HTTPS redirects terminate only at verified same-service reviewed aliases", async () => {

@@ -30,6 +30,10 @@ import {
 } from "../backends/native-authored-project-start.ts";
 import { NativeAuthoredProjectNotStartedError } from "../backends/native-authored-runtime-binary.ts";
 import {
+  NativeAuthoredReservedStartError,
+  NativeAuthoredStopUnavailableError,
+} from "../backends/native-authored-stop-errors.ts";
+import {
   nativeAuthoredUnreservedStartSelected,
   retireNativeAuthoredUnreservedStart,
 } from "../backends/native-authored-unreserved-start.ts";
@@ -61,7 +65,7 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, single-service logs, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, single-service logs, single-service exec or noninteractive run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
 }
 
@@ -403,9 +407,11 @@ const STATUS_NOTES: Readonly<
 > = {
   not_started: "Native project has not been started.",
   pending:
-    "Native project startup is pending: a start reserved its intent but has not reached Ready (it is still starting, or it failed and its startup evidence is retained). No current service status is confirmed. If no startup is running, `hack down --recover` retires an attempt that never reserved runtime state.",
+    "Native project startup is pending: a start reserved its intent but has not reached Ready (it is still starting, or it failed and its startup evidence is retained). No current service status is confirmed. Stop a live foreground start there; after it exits, `hack down` attempts exact-proof recovery of settled runtime state or retirement of an unreserved attempt.",
   runtime_not_running:
     "Native runtime is not running; no services are running.",
+  runtime_busy:
+    "Native project changed during status observation; retry `hack ps` for a current snapshot.",
 };
 
 async function showStatus(options: {
@@ -447,10 +453,15 @@ function commandFailure(options: {
     });
   }
   if (options.mode === "recovery" || options.mode === "stop") {
+    if (options.signal.aborted) {
+      return options.signal.reason === 143 ? 143 : 130;
+    }
     throw new HackCliError({
       code: "E_LIFECYCLE_FAILED",
       message:
-        "Native project recovery is incomplete or its ownership changed; selected state is retained. Values omitted.",
+        options.mode === "stop"
+          ? "Native project stop is unconfirmed or its ownership changed; selected state is retained. Run hack ps to inspect it. Values omitted. No request was replayed."
+          : "Native project recovery is incomplete or its ownership changed; selected state is retained. Run hack ps to inspect it. Values omitted.",
     });
   }
   if (options.mode === "restart") {
@@ -525,21 +536,30 @@ async function runRecovery(input: LifecycleInput): Promise<number> {
       input.seams.unreservedSelected ?? nativeAuthoredUnreservedStartSelected
     )(input.scope)
   ) {
-    // A startup intent without a Ready generation: only a provably unreserved
-    // attempt is retired; every other retained attempt refuses unchanged.
-    await (input.seams.retireUnreserved ?? retireNativeAuthoredUnreservedStart)(
-      {
+    try {
+      await (
+        input.seams.retireUnreserved ?? retireNativeAuthoredUnreservedStart
+      )({
         runtime: input.runtime,
         scope: input.scope,
         timeoutMs: input.startupTimeoutMs,
         signal: input.signal,
+      });
+      logger.info({
+        message:
+          "Retired an incomplete native startup that never reserved runtime state; nothing else was changed.",
+      });
+      return 0;
+    } catch (error) {
+      if (
+        input.signal.aborted ||
+        !(error instanceof NativeAuthoredReservedStartError)
+      ) {
+        throw error;
       }
-    );
-    logger.info({
-      message:
-        "Retired an incomplete native startup that never reserved runtime state; nothing else was changed.",
-    });
-    return 0;
+      // A successful inspection found a journal. Only independent settled
+      // recovery can authorize its cleanup; other refusals keep their outcome.
+    }
   }
   if (
     await (
@@ -567,11 +587,21 @@ async function runRecovery(input: LifecycleInput): Promise<number> {
 }
 
 async function runStop(input: LifecycleInput): Promise<number> {
-  await (input.seams.stop ?? stopNativeAuthoredProject)({
-    scope: input.scope,
-    timeoutMs: input.startupTimeoutMs,
-    signal: input.signal,
-  });
+  try {
+    await (input.seams.stop ?? stopNativeAuthoredProject)({
+      scope: input.scope,
+      timeoutMs: input.startupTimeoutMs,
+      signal: input.signal,
+    });
+  } catch (error) {
+    if (
+      input.signal.aborted ||
+      !(error instanceof NativeAuthoredStopUnavailableError)
+    ) {
+      throw error;
+    }
+    return await runRecovery(input);
+  }
   logger.info({
     message: "Selected native project stopped; persistent data is retained.",
   });
@@ -735,10 +765,12 @@ async function runAuthoredLifecycle(
   }
   const controller = new AbortController();
   const forceController = new AbortController();
-  const cancel = () =>
-    (controller.signal.aborted ? forceController : controller).abort();
-  process.on("SIGINT", cancel);
-  process.on("SIGTERM", cancel);
+  const cancel = (code: number) =>
+    (controller.signal.aborted ? forceController : controller).abort(code);
+  const interrupt = () => cancel(130);
+  const terminate = () => cancel(143);
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", terminate);
   try {
     const root = await realpath(input.projectRoot);
     return await action({
@@ -756,8 +788,8 @@ async function runAuthoredLifecycle(
   } catch (error: unknown) {
     return commandFailure({ error, mode, signal: controller.signal });
   } finally {
-    process.off("SIGINT", cancel);
-    process.off("SIGTERM", cancel);
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
   }
 }
 
@@ -931,8 +963,8 @@ export async function tryNativeAuthoredCommand(
 }
 
 /**
- * Exec and one-off run share the closed noninteractive command domain: one
- * service, a literal argv, an optional absolute workdir, no TTY/stdin, no
+ * Exec and one-off run share the closed argument domain: one
+ * service, a literal argv, an optional absolute workdir, no
  * profile/env/service-list/JSON/detach/log options.
  */
 function assertCommandOptions(

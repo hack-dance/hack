@@ -64,7 +64,7 @@ async function fixture(): Promise<string> {
     join(root, ".hack", "hack.project.json"),
     "malformed authored input must never be parsed for saved open"
   );
-  for (const name of ["docker", "compiler", "open"]) {
+  for (const name of ["docker", "compiler", "open", "getent"]) {
     const path = join(root, name);
     await Bun.write(
       path,
@@ -72,6 +72,26 @@ async function fixture(): Promise<string> {
     );
     await chmod(path, 0o700);
   }
+  // This child-only transport injection also catches macOS's absolute resolver
+  // path. A PATH shim alone cannot prevent /usr/bin/dscacheutil from running.
+  const shell = resolve(import.meta.dir, "../src/lib/shell.ts");
+  await Bun.write(
+    join(root, "resolver-preload.ts"),
+    `import { mock } from "bun:test";
+const shell = { ...await import(${JSON.stringify(shell)}) };
+const execute = shell.exec;
+mock.module(${JSON.stringify(shell)}, () => ({
+  ...shell,
+  exec: async (command, options) => {
+    if (command[0] === "getent" || command[0] === "/usr/bin/dscacheutil") {
+      await Bun.write(${JSON.stringify(join(root, "unexpected-effect"))}, JSON.stringify(command));
+      return { exitCode: 1, stdout: "", stderr: "Fixture resolver is disabled" };
+    }
+    return execute(command, options);
+  },
+}));
+`
+  );
   return root;
 }
 
@@ -192,13 +212,13 @@ async function save(opts: {
   }
 }
 
-async function invoke(root: string, args: readonly string[]) {
+async function runFixtureChild(root: string, args: readonly string[]) {
   const child = Bun.spawn(
     [
       process.execPath,
       "--no-env-file",
-      resolve(import.meta.dir, "../index.ts"),
-      "open",
+      "--preload",
+      join(root, "resolver-preload.ts"),
       ...args,
     ],
     {
@@ -229,8 +249,43 @@ async function invoke(root: string, args: readonly string[]) {
     new Response(child.stderr).text(),
   ]);
   expect(`${stdout}\n${stderr}`).not.toContain(PRIVATE_CANARY);
-  expect(await Bun.file(join(root, "unexpected-effect")).exists()).toBe(false);
   return { code, stdout, stderr };
+}
+
+async function invoke(root: string, args: readonly string[]) {
+  const result = await runFixtureChild(root, [
+    resolve(import.meta.dir, "../index.ts"),
+    "open",
+    ...args,
+  ]);
+  expect(await Bun.file(join(root, "unexpected-effect")).exists()).toBe(false);
+  return result;
+}
+
+for (const platform of ["linux", "darwin"] as const) {
+  test(`CLI fixture intercepts the ${platform} resolver transport before the host is reached`, async () => {
+    const root = await fixture();
+    const module = resolve(import.meta.dir, "../src/lib/proxy-loopback.ts");
+    const result = await runFixtureChild(root, [
+      "-e",
+      `const { resolveProxyLoopbackAddresses } = await import(${JSON.stringify(module)});
+console.log(JSON.stringify(await resolveProxyLoopbackAddresses({ hostname: "fixture.oauth.test", platform: ${JSON.stringify(platform)} })));`,
+    ]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([]);
+    expect(await Bun.file(join(root, "unexpected-effect")).json()).toEqual(
+      platform === "darwin"
+        ? [
+            "/usr/bin/dscacheutil",
+            "-q",
+            "host",
+            "-a",
+            "name",
+            "fixture.oauth.test",
+          ]
+        : ["getent", "ahosts", "fixture.oauth.test"]
+    );
+  });
 }
 
 test("native open JSON uses the saved compiler preference with no authored/env/compiler/engine/browser effects", async () => {
@@ -293,14 +348,15 @@ test("legacy open JSON preserves authored host behavior without a native store",
     join(root, ".hack", "hack.config.json"),
     JSON.stringify({
       name: "fixture",
-      dev_host: "legacy.dev.test",
+      // A literal keeps this authored-host selection test independent of host DNS.
+      dev_host: "192.0.2.10",
       oauth: { enabled: false },
     })
   );
   await Bun.write(join(root, ".hack", "docker-compose.yml"), "services: {}\n");
   const result = await invoke(root, ["--json"]);
   expect(result.code).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({ url: "https://legacy.dev.test" });
+  expect(JSON.parse(result.stdout)).toEqual({ url: "https://192.0.2.10" });
   expect(
     await Bun.file(
       join(root, ".hack", ".internal", "native-compose", ".gitignore")

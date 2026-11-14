@@ -1038,6 +1038,182 @@ fn finite_logs_wire_authenticates_the_live_native_owner_and_exact_member() {
     assert!(logs(&fixture.candidate, RUN, "web", 17).is_err());
 }
 #[test]
+fn initial_console_size_is_required_only_for_interactive_owner_requests() {
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    let wire = json!({
+        "version": 2, "kind": "native-graph-control", "run": RUN,
+        "review": receipt.review.review_id(), "action": "interactive-exec",
+        "session": "12345678-abcd-abcd-abcd-123456789abc",
+        "exec": {"service":"web", "argv":["stty", "size"], "workdir":null},
+        "console_size": [43, 91]
+    });
+    let input: Request = serde_json::from_value(wire.clone()).unwrap();
+    input.validate(&receipt.review).unwrap();
+    assert_eq!(input.console_size, Some([43, 91]));
+    assert_eq!(
+        serde_json::to_value(input).unwrap()["console_size"],
+        json!([43, 91])
+    );
+    for size in [
+        json!(null),
+        json!([0, 91]),
+        json!([43, 0]),
+        json!([43]),
+        json!([43, 91, 1]),
+        json!([-1, 91]),
+        json!([65536, 91]),
+    ] {
+        let mut invalid = wire.clone();
+        invalid["console_size"] = size;
+        if let Ok(input) = serde_json::from_value::<Request>(invalid) {
+            assert!(input.validate(&receipt.review).is_err());
+        }
+    }
+    let mut finite = wire;
+    finite["action"] = json!("exec");
+    assert!(
+        serde_json::from_value::<Request>(finite.clone())
+            .unwrap()
+            .validate(&receipt.review)
+            .is_err()
+    );
+    finite.as_object_mut().unwrap().remove("console_size");
+    finite.as_object_mut().unwrap().remove("session");
+    serde_json::from_value::<Request>(finite)
+        .unwrap()
+        .validate(&receipt.review)
+        .unwrap();
+}
+
+#[test]
+fn interactive_handoff_failures_keep_only_the_attempted_session() {
+    use crate::provider::{
+        graph::interactive_exec::Options, interactive_handoff, interactive_terminal::Leash,
+    };
+    use std::os::unix::net::UnixStream;
+
+    const SESSION: &str = "12345678-abcd-abcd-abcd-123456789abc";
+    for case in [
+        "disconnect-before-descriptor",
+        "disconnect-after-descriptor",
+        "malformed-reply",
+        "wrong-binding",
+        "wrong-session",
+        "retained-refusal",
+        "refusal-with-descriptor",
+        "pre-intent-refusal",
+    ] {
+        let fixture = Fixture::new();
+        let receipt = fixture.receipt();
+        let mut publication =
+            owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+        journal::reserve(&fixture.candidate, &receipt).unwrap();
+        let (input, mut frontend) = UnixStream::pair().unwrap();
+        frontend.write_all(&[0; 4]).unwrap();
+        let (leash, _) = Leash::receive(input.into()).unwrap();
+        let argv = vec!["tool".into()];
+        let options = Options {
+            session: SESSION,
+            run: RUN,
+            service: "web",
+            owner: &receipt.owner,
+            plan: receipt.review.review_id(),
+            namespace: receipt.review.scope().namespace,
+            native: true,
+            argv: &argv,
+            workdir: None,
+            expected_container: None,
+            expected_generation: None,
+        };
+        let invalid = Options {
+            argv: &[],
+            ..options
+        };
+        assert!(
+            interactive(&fixture.candidate, &invalid, [43, 91], &leash)
+                .err()
+                .unwrap()
+                .session()
+                .is_none()
+        );
+        assert!(publication.accept().unwrap().is_none());
+        std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| interactive(&fixture.candidate, &options, [43, 91], &leash));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut stream = loop {
+                if let Some(stream) = publication.accept().unwrap() {
+                    break stream;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let request: Request =
+                transport::read(&mut stream, Duration::from_secs(1), LIMIT).unwrap();
+            request.validate(&receipt.review).unwrap();
+            assert_eq!(request.session.as_deref(), Some(SESSION));
+            if case != "disconnect-before-descriptor" {
+                let (attached, _engine) = UnixStream::pair().unwrap();
+                let descriptor = matches!(
+                    case,
+                    "disconnect-after-descriptor" | "refusal-with-descriptor"
+                )
+                .then_some(attached);
+                interactive_handoff::send(&stream, descriptor, deadline).unwrap();
+                if case == "malformed-reply" {
+                    transport::write(
+                        &mut stream,
+                        &json!({"unexpected": true}),
+                        Duration::from_secs(1),
+                    )
+                    .unwrap();
+                } else if case != "disconnect-after-descriptor" {
+                    let result = match case {
+                        "wrong-session" => Outcome::InteractiveRefused {
+                            session: "87654321-abcd-abcd-abcd-123456789abc".into(),
+                        },
+                        "retained-refusal" => Outcome::InteractiveRefused {
+                            session: SESSION.into(),
+                        },
+                        _ => Outcome::Refused {
+                            code: "native_graph_foreground".into(),
+                            stop_failures: None,
+                        },
+                    };
+                    let reply = Reply {
+                        version: 2,
+                        kind: ReplyKind::NativeGraphControlReply,
+                        run: if case == "wrong-binding" {
+                            "a".repeat(32)
+                        } else {
+                            RUN.into()
+                        },
+                        review: receipt.review.review_id().into(),
+                        result,
+                    };
+                    transport::write(&mut stream, &reply, Duration::from_secs(1)).unwrap();
+                }
+            }
+            drop(stream);
+            let error = caller.join().unwrap().err().unwrap();
+            assert_eq!(
+                error.session(),
+                if case == "pre-intent-refusal" {
+                    None
+                } else {
+                    Some(SESSION)
+                },
+                "{case}"
+            );
+            // A failure never retries the authenticated request.
+            assert!(publication.accept().unwrap().is_none());
+        });
+        publication.finish().unwrap();
+    }
+}
+
+#[test]
 fn finite_exec_wire_authenticates_owner_member_and_binary_nonzero_completion() {
     let fixture = Fixture::new();
     let mut receipt = fixture.receipt();
@@ -1370,6 +1546,29 @@ fn finite_exec_request_closes_argv_workdir_and_action_without_reusing_logs_autho
         serde_json::from_value::<Request>(bad)
             .unwrap()
             .validate(&receipt.review)
+            .is_err()
+    );
+}
+
+#[test]
+fn presentation_observation_never_satisfies_readiness_status() {
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    let verified = status(receipt.clone());
+    assert!(
+        verified
+            .validate(&receipt, Action::Observe, None, None, None)
+            .is_err()
+    );
+    let mut encoded = serde_json::to_value(verified).unwrap();
+    encoded["result"]["outcome"] = json!("observed");
+    let observed: Reply = serde_json::from_value(encoded).unwrap();
+    observed
+        .validate(&receipt, Action::Observe, None, None, None)
+        .unwrap();
+    assert!(
+        observed
+            .validate(&receipt, Action::Status, None, None, None)
             .is_err()
     );
 }

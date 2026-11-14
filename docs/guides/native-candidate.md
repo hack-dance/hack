@@ -1,9 +1,9 @@
 # Native backend reference
 
 This is the detailed reference for the native backend (beta). It is long and
-precise. For a short introduction, read the [overview](../native/README.md),
-[try it](../native/try-it.md) and
-[what works and known limits](../native/limits.md). The
+precise. For the first run, use [Try native on Apple Silicon](https://hack.foo/docs/v5/native/start).
+The [overview](../native/README.md) and
+[known limits](../native/limits.md) explain its scope. The
 [reference map](../native/reference.md) lists this page's sections by topic.
 
 The native backend is beta. `hack-native` is an opt-in Apple Silicon macOS executor installed alongside
@@ -108,40 +108,17 @@ for this stable home; `channel` reports `installed-candidate`. State remains und
 child processes bind to its identity. Moving an executable is supported; moving
 an active home or adopting another installation's state is not.
 
-Run the normal project CLI through the bundle's `hack-v5` entrypoint:
-
-```sh
-export HACK_NATIVE_HOME=/absolute/private/candidate-home
-/absolute/copied/hack-native-bundle/hack-v5 ps --path /absolute/project
-```
-
-Keep the bundle together and invoke this entrypoint by its full path (do not copy
-or symlink only the script). With `HACK_RUNTIME_BACKEND` unset (or `native`) it
-selects the native backend and the adjacent executor, even if an inherited
-`HACK_NATIVE_BINARY` selects another binary. An explicit
-`HACK_RUNTIME_BACKEND=compose` runs the same bundled CLI on the Compose backend
-with your own Hack home and existing global routing services. It needs no
-`HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
-code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends)
-describes Compose testing and its shared-state limits: run stable `hack global up`,
-then any stable `hack doctor` or `hack doctor --fix`, then stable `hack daemon stop`,
-confirm `pgrep -fl "hack daemon start"` prints nothing, and run no stable `hack`
-command while the candidate uses your Hack home. Stable `hack global up` (v4.2.0)
-starts a stopped `hackd` again, and so does stable `hack doctor --fix` (it asks
-first only in a terminal). If the check lists a process, the guide gives the
-launchd remedy. The entrypoint turns off daemon autostart in newer builds, so the
-candidate does not start the stable `hackd` on its own: a candidate
-`hack doctor --fix` skips its `hackd` repair without asking and prints the
-command to run yourself, which runs the stable CLI. Do not commit the
-project's generated `.hack/.internal/` directory; newer generators rewrite files
-such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
-signals through `exec`, and never replaces the installed `hack`. Project-specific
-native adaptation, dependency and routing selections remain explicit; this entrypoint
-does not prepare a provider or migrate existing projects. An unversioned local
-build reports the repository package version. A versioned prerelease build reports
-its explicit candidate version and includes source provenance. The `hack-v5`
-entrypoint alone does not identify a published release. Unsupported native workflows still
-report their existing refusal rather than falling back to Docker.
+For normal project commands, follow the short
+[native start page](https://hack.foo/docs/v5/native/start). Manual bundle users
+use the adjacent `hack-v5` entrypoint with an explicit `HACK_NATIVE_HOME`;
+keep the bundle together. The [candidate installer guide](candidate-install.md#test-both-backends)
+defines backend selectors, private versus shared homes, stable-daemon quiescence
+and returning to Compose. Neither entrypoint prepares the provider, migrates a
+project or falls back to Docker for an unsupported native command. An unversioned
+local build reports its repository version; only a versioned bundle includes
+candidate version provenance. The entrypoint alone does not identify a release.
+`hack-v5` passes arguments, exit codes and signals through `exec`; it never replaces
+the installed stable executable.
 
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
 worktree when its exact source root can be shared with a fresh or matching pool.
@@ -599,11 +576,11 @@ HTTPS frontend it says that routes are not served on this host. Ctrl-C prints th
 stop sequence and, once owned cleanup is confirmed, one stopped line that says
 whether named volumes and the stopped run mapping were kept (`Native project
 stopped.` when no run mapping was published). Until the ready line,
-startup holds the runtime's exclusive provider lease, so graph admission cannot
-interleave with another operation. A `hack ps` from another terminal during that
-window waits briefly, then reports that the runtime is busy (`runtime_busy`,
-exit 0) instead of failing. After the ready line, `hack ps` and `hack logs` run
-alongside the foreground command.
+startup uses the runtime's exclusive provider lease for its effect stages.
+`hack ps` observes without that lease, including when another project is starting
+in the same pool. If the journal changes during its read, it reports
+`runtime_busy` (exit 0); retry for a current snapshot. After the ready line,
+`hack ps` and `hack logs` run alongside the foreground command.
 
 While the project runs, foreground `up` reports each service container that stops,
 as attached Compose `up` does (`SERVICE exited with code N`), including one-shot
@@ -698,6 +675,31 @@ symlink to `<home>/.hack-local/run/smolvm/home` that keeps its Unix socket paths
 within the macOS length limit. A clean `runtime down` keeps this alias, so no other
 local user can take its name while the pool is stopped. It removes only the provider
 socket files the stop proved closed, through the real data directory.
+
+On a fresh pool boot or a boot after stopping the pool, native waits up to 10 seconds
+for every declared bridge socket to appear with the required private ownership and mode.
+The provider's guest-ready signal can arrive before its bridge threads bind. Native
+rechecks the same provider identity around each observation; it never accepts an unsafe
+socket, changes its permissions or removes it to make startup pass. Existing running-pool
+audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
+stop path and names the recovery command. Use the same selected executor and identical
+`--candidate-root` argument as the failed start, followed by `runtime recover --json`.
+If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
+`HACK_NATIVE_HOME`, use those same non-empty values:
+
+```sh
+"$HACK_NATIVE_BINARY" --candidate-root "$HACK_NATIVE_HOME" runtime recover --json
+```
+
+Otherwise use the bundled executor path and the selected home from the failed
+invocation; do not run this variable-based example with either variable unset.
+
+For a checkout-local executor, `--candidate-root` is the source checkout, not the native
+home or `.hack-local` directory; from that checkout run `./hack-local runtime recover --json`.
+Provider-verification failures during the wait carry this guidance too; recovery still
+independently proves ownership before stopping anything. Then retry. This preserves
+retained disks and records an unclean stop; it does not claim the guest shut down cleanly.
+`hack down` may say the project was not started because no project mapping was published.
 
 Host cleanup or a reboot can still remove the alias. For a clean stop, observation
 commands such as `runtime status` accept the absent alias and create nothing, and the
@@ -909,20 +911,16 @@ compatibility. V4 and candidate homes remain separate; this procedure does not
 migrate V4 data into the candidate or replace the installed `hack`. DNS, trust and
 client configuration are outside this bundle-selection procedure.
 
-Provider setup is separate and explicit. Prepare the native runtime with:
-
-```sh
-./hack-native --candidate-root /absolute/private/candidate-home runtime setup
-```
-
-`runtime setup` lists the pinned SmolVM, Docker engine and four Alpine guest
-packages with their exact compressed byte lengths, source hosts, SHA-256 hashes, private cache and
-install destination, then asks once when preparation is needed. `--no-interactive` (or
+For ordinary setup and consent, use the short
+[native start page](https://hack.foo/docs/v5/native/start#prepare-the-runtime).
+The remainder describes the setup and recovery contract. `--no-interactive` (or
 truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case and
 surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
 `--accept-downloads` explicitly consents. No provider download happens from `up`,
 the installer, the probe or any other implicit path. The optional BuildKit client
 is still prepared separately below.
+Setup lists the pinned SmolVM, Docker engine and four Alpine guest packages,
+including exact compressed sizes, hosts, hashes, private cache and destinations.
 
 The executable embeds `provider-pins.json` and checks its hashes against the
 manual preparation pins. HTTPS redirects may use only the original host and the
@@ -1881,9 +1879,11 @@ owner could not be authenticated, while `runtime_degraded` means its runtime che
 failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
 present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
 and text output prints "Native runtime is not running; no services are running."
-A provider lease held for the whole bounded read, for example by a starting
-foreground `up`, is also an ordinary state: `ps` exits 0 and reports
-`runtime_busy` (no phase, no service rows). Reads retry brief lease contention.
+Status reads take no provider lease and never reap publishers or write journals.
+A journal change during a read is an ordinary transitional state: `ps` exits 0
+and reports `runtime_busy` (no phase, no service rows). Status is presentation,
+not a storage-witness or source-continuity proof; mutating commands keep their
+locked verification.
 `hack ps --json` prints the standard `{ok: true, data}` envelope; `data` holds
 `backend: "native"`, `status` (`not_started`, `pending`, `runtime_not_running`,
 `runtime_busy`, `observed`, `owner_unconfirmed` or `runtime_degraded`), `run`,
@@ -2337,10 +2337,11 @@ Host dependencies use the equivalent `--minimum-dependency-sockets N` selection;
 an exact capacity or a minimum. The combined physical transport limit still applies
 to the pool's actual capacities, including any spare slots. A minimum does not resize
 an existing pool or guarantee that enough slots are currently free.
-Each routed service
-must already declare a matching `healthcheck.x-hack-http` (see
-[Native HTTP readiness probe](#native-http-readiness-probe)); command healthchecks
-and missing probes are not replaced or inferred. Native review still validates
+Each routed service needs a matching native route probe (see
+[Native HTTP readiness probe](#native-http-readiness-probe)). If no `healthcheck`
+key was authored, native infers one on the reviewed Caddy route port without
+changing the Compose file. Explicit healthchecks are never replaced; command-only
+or disabled checks on routed services still refuse in this increment. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
 retires Unix route publishers. Without explicit HTTPS selection, this enrollment does not start a hostname authority
 or Caddy HTTPS server. It never installs trust, configures DNS, or widens an existing pool.
@@ -2859,7 +2860,59 @@ shared-source mode; active project bind mounts still use the explicit project sh
 
 #### Native HTTP readiness probe
 
-`healthcheck.x-hack-http` declares the readiness probe native startup uses for a
+For a complete Caddy route with no authored `healthcheck`, native reviews a default
+probe: `GET /` on the route port, a 1000 ms timeout, three consecutive
+failures, and a 240000 ms initial startup grace. It checks every second until its
+first success, then every 30 seconds for the rest of that probe generation.
+This allows slow first-page compilation, including a server first answering after
+120 seconds. With a full timeout on each request, the grace plus three failed
+startup samples takes at most about 246 seconds of probe time, leaving about
+54 seconds of the usual 300-second graph budget for earlier startup work.
+An inferred probe observed unhealthy names its service and route port. For a
+missing listener or HTTP 5xx during boot, check `hack logs <service>` in the same
+project/branch, fix the route
+port, or declare `healthcheck.x-hack-http` with a longer `start_period_ms` and a
+readiness path that answers 2xx.
+
+The 300-second deadline belongs to the whole graph; it is not renewed when a
+service starts. Slow earlier services or `service_healthy` dependencies consume
+it too. A routed service started after a dependency taking 240 seconds can reach
+the graph deadline before its own probe finishes. That path still returns the
+generic `graph_timeout`, without naming the waiting services. Use `hack logs`
+and inspect the dependencies as well as the route. An explicit probe with a longer
+grace does not extend the whole-graph deadline.
+A successful TCP connection and complete HTTP/1.0 or HTTP/1.1 response headers are
+required. HTTP 200–499, including `/` returning 404, is ready; 5xx, EOF, non-HTTP
+bytes, a timeout or partial headers are not. Redirects are not followed. At most
+four interim 1xx responses may precede the final response, within the same 8 KiB
+header and timeout budgets. The request uses `Host: 127.0.0.1:<port>`.
+
+This proves endpoint readiness, not application correctness. After the first
+success, three consecutive failures at the 30-second interval make the service
+unhealthy. Status no longer exposes a ready route endpoint, and a new publication
+or rebind cannot proceed until healthy evidence returns. This does not stop or restart the
+container, withdraw an existing publication, or close its existing relay: route
+traffic continues to the application and may receive its error responses. A
+later successful check restores health; it does not resume one-second probing.
+An inferred probe does not satisfy `depends_on: condition: service_healthy`:
+that condition still requires an explicit enabled healthcheck, as on Compose.
+Final HTTPS publication verification accepts 2xx–4xx only with a fresh challenge added
+by the upstream proxy response handler. Authority denials and routing errors do
+not qualify as the application's 404. No readiness decision follows an external
+redirect. Explicit probes retain the stricter policy below. The generated
+`policy` field is internal and refuses in authored `x-hack-http` declarations.
+The native bundle embeds the matching guest probe; its content hash binds the
+published helper. An older helper refuses the new policy argument. These inferred
+defaults are retained-run compatibility values and cannot change without migration.
+
+Native reserves `X-Hack-Probe-Request` and `X-Hack-Upstream-Proof` for the HTTPS
+verification exchange. The challenge is stripped before either the authority or
+application sees it. Normal traffic has no challenge, so no non-empty proof
+header is emitted. The shared HTTPS reader permits up to four interim 1xx
+responses before the final status for both inferred and explicit routes; explicit
+final-status and reviewed-redirect rules remain unchanged.
+
+`healthcheck.x-hack-http` declares an explicit readiness probe native startup uses for a
 service. It must be the only key in that service's `healthcheck`: it cannot be
 combined with `test`, `disable`, `interval`, `timeout`, `start_period`,
 `start_interval` or `retries`. Docker Compose ignores the extension field. All six
@@ -3699,7 +3752,7 @@ owner as dead or bypass its cleanup checks.
 `hack up` and `hack restart` refuse a run whose foreground publication is still
 present and name the next step: a running owner must be stopped with Ctrl-C or
 `hack down`; an owner that exited while its services were running is stopped by
-`hack down --recover`. That command selects the run's exact receipt with the
+plain `hack down` (or `hack down --recover`). That command selects the run's exact receipt with the
 read-only `graph foreground-owner --run-id RUN --json` and then uses the
 same-boot `graph recover-live-owner` described below, retaining data and
 retiring the stale publication. If its recorded frontend also exited before
@@ -3727,11 +3780,54 @@ and data is retained. Then `hack up` restores the run. An owner that exited
 after its restore was admitted is still reported without a supported
 retirement.
 
-Read-only `hack ps` and `hack logs` hold the provider lease only briefly. Native
-startup, retained-start eligibility, restore admission, inspections inside
-mutating commands and owned foreground cleanup wait out such a holder within a
-bound instead of failing, so polling status during `up` or `restart` does not
-make them fail or strand a foreground publication.
+`hack ps` uses lock-free reads for both adopted and authored projects. Finite
+`hack logs` and inspections used by mutating commands retain their existing
+lease behavior. Startup's initial bounded wait preserves its deadline and
+names the recorded holder kind when it expires. That advisory record grants no
+authority. A second concurrent mutation still refuses under the existing rules.
+Authored `up` readiness still uses locked `status`; only authored `ps` uses the
+presentation-only `observe` action. Contention between two starts is unchanged.
+
+For adopted projects, plain `down` also selects exact-proof recovery of a
+`failed-retained` start when every startup binding is settled (`released` or
+`completed`), initializers are resolved, and the journal has no pending effect.
+Recovery rechecks owner death, boot, incarnation, selected receipt and resource
+inventories under its lease. Unsettled bindings, uncertain owners, corrupt or
+partial journals and changed identities still refuse by name; they grant no
+cleanup authority.
+
+For authored projects, plain `down` and `down --recover` use the same recovery
+proof when the frontend never saved Ready. A saved start and source envelope,
+an absent Ready mapping, an exact dead admission owner (or a freshly held
+admission), and a settled native receipt are required. Runtime Ready, failed,
+and cleanup phases may be selected; `preparing`, pending writes and uncertain
+resource effects refuse. Never-created resources must have no ID and must be
+proved absent by exact name and labels before cleanup marks them removed.
+Existing host-process and hook records require proof of settlement; recovery
+does not signal saved PIDs. The original receipt and resource identities stay
+fixed, cleanup progress only advances, and files retire only after authenticated
+Removed with null observations. A version 3 frontend intent keeps incomplete
+recovery blocking startup, including the gap between admission release and
+completion. Graph2 and fully enrolled Graph4 receipts are supported; source and
+topology recovery remain outside this proof. Nothing recompiles or replays startup.
+
+Failure evidence is retained by startup and effectful verification, and by owned
+cleanup for listeners that exited before cleanup stops them. The first recorded
+failure wins. Cleanup captures in memory and includes it in the required cleanup
+journal commit, so an extra diagnostic write cannot obstruct stopping. Settling
+an exited listener may add up to ten seconds per inspected listener to cleanup.
+Incomplete-rebind cleanup does not capture new listener-exit evidence; restore
+cleanup admits no listener children. Status reports live classifications but
+never writes them. If an owner crashes after a post-ready listener exit and
+before cleanup, dead-owner recovery can observe container state but cannot
+reconstruct that host child's exit. This was also unguaranteed when recording
+depended on an incidental `ps` call.
+
+HACK-2110 live acceptance remains a lead-owned Mac check: poll `ps` every 0.5 s
+across ten starts, require all starts and polls to succeed, and verify plain
+`down` after an injected post-service startup failure. Also poll project A while
+project B starts in the same pool. Portable tests and the interleaving model do
+not qualify that VM behavior.
 
 For a fully ready graph whose foreground owner died while its pool remains on the
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects
@@ -3993,8 +4089,9 @@ are allowed.
 With the same explicit native binary/home selection used for `up`, run
 `hack exec --path /absolute/project SERVICE -- /bin/echo hello`. The command targets
 the current owned project/branch mapping, preserves binary stdout/stderr and the
-command exit code, and never falls back to Compose. It is noninteractive, with a
-30-second observation budget; a timeout may leave the command running and is not
+command exit code, and never falls back to Compose. With piped input/output or
+`HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
+a timeout may leave the command running and is not
 retried. `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. Normal
 `hack exec` resolves the saved startup overlay and AWS profile again, and delivers
@@ -4009,6 +4106,86 @@ Legacy mappings without explicit selectors and services with older launcher moun
 refuse before execution; restart with the matching candidate to adopt this path.
 Services without managed values use ordinary exec. The native live qualification
 of this fresh-delivery path remains separate from its unit and transport tests.
+
+With terminal stdin and stdout in the foreground, `hack exec SERVICE -- /bin/sh` selects interactive
+exec. It streams both guest output channels through the terminal, forwards resize
+and terminal control bytes, and releases the provider mutation lease after attach.
+`down` and `restart` can proceed while the session is open. Authored projects use
+their foreground owner for admission and inherit startup environment values.
+
+For adopted services with managed values, the pinned guest launcher disables echo
+and enters raw mode before announcing readiness. Hack then sends a bounded base64
+private envelope, waits for the launcher's acknowledgement after terminal
+restoration, and only then forwards user input. The envelope cannot contain Docker
+detach-control bytes. Old launcher mounts refuse before any value is sent; restart
+the service with the matching runtime to enable this mode, or use
+`HACK_NO_INTERACTIVE=1 hack exec SERVICE -- COMMAND` for finite exec. The launcher returns
+125 if admission or exec fails, including an exec failure after acknowledgement.
+This does not isolate values from other processes running as the same container
+user, which already share access to the command's environment.
+
+Interactive managed-env exec refuses if fresh delivery is unavailable; it does
+not reuse mounted startup values. This requirement applies only to the selected
+service: a peer service with no managed values still uses ordinary interactive exec.
+Finite exec retains its existing behavior.
+
+Normal stream closure plus a validated Engine exit returns the exit code and
+restores the terminal before attempting to retire the session receipt. A busy or
+failed receipt store preserves that known exit code silently and leaves the receipt
+for later reconciliation. Surviving background processes are the
+user's responsibility, as with Docker. Lost connections or processes before a
+known outcome, uncertain create/start dispatch and failed inspection retain a
+value-free receipt and `session_cleanup_uncertain` with the attempted session ID.
+No uncertain command is replayed.
+If an authored owner disconnects during handoff or its reply cannot be validated,
+Hack checks only the attempted session ID for retained evidence. A confirmed
+refusal before the intent does not query unrelated sessions.
+
+| stdin | stdout | Foreground group | `HACK_NO_INTERACTIVE` | Selection |
+| --- | --- | --- | --- | --- |
+| TTY | TTY | Yes | unset or not `1` | Interactive |
+| TTY | TTY | No (`&` job) | any | Existing finite exec |
+| TTY | redirected | any | any | Existing finite exec |
+| pipe or file | any | any | any | Existing finite exec |
+| any | any | any | `1` | Existing finite exec |
+
+`hack exec-sessions` lists current service names and run/session IDs without
+taking a mutation lock or writing state. It works after project mappings are
+retired because it selects the native home. `hack exec-sessions --reconcile`
+clears only a validated known exec exit, exact same-boot container absence or
+proven stopped-boot evidence; intents without an exec ID require one of the
+latter two proofs. It reports the exact remaining count and IDs after its bounded
+pass. Use `hack down` for an affected project if uncertainty remains. A new boot
+alone is not proof. Ordinary successful exec does not consume the 1024 retained
+session limit when retirement succeeds. `hack down` names remaining receipts only
+for the selected run; receipts for other runs are reported as a count without
+their service names or run/session IDs.
+
+### Interactive exec acceptance
+
+On the built current-branch runtime and CLI, exercise authored and adopted services:
+
+- A shell with foreground/background jobs; Ctrl-C, Ctrl-Z, `fg` and resize.
+- A 2000-line burst and exit 7, followed by finite exec, second and third terminal
+  sessions, `down` and `up -d`; ordinary exits leave no retained receipts.
+- `hack exec SERVICE -- stty size` reports the host terminal's dimensions on its
+  first output, before any subsequent window resize.
+- Ctrl-P Ctrl-Q disconnect, retaining its UUID and cleanup remedy.
+- A background process that survives shell exit; a validated shell exit is silent
+  and retires its receipt under the Docker-compatible policy.
+- `down` and restart from another terminal while the session is active; the owner
+  stays responsive and the old session never attaches to the new generation.
+- Native child death and frontend death, including an idle terminal; attributes
+  restore, owned children settle, and uncertain sessions remain discoverable.
+- VM loss, followed by exact stopped-boot proof; a new boot alone cannot retire
+  an older receipt.
+- Fresh adopted env with a synthetic canary and detach-control bytes; no private
+  bytes echo, the intended command receives the values, and an old launcher refuses
+  before delivery.
+- In a mixed adopted project, interactive exec also works on a service without
+  managed values while another service has a managed environment.
+
+Linux PTY and fake-Engine tests do not qualify these real Engine/VM effects.
 
 
 Managed HTTPS authority startup uses the same five-second provider-lock admission

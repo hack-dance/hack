@@ -55,3 +55,11 @@ test("HTTP preflight accepts runtime boundary values and command probes", () => 
     admitNativeHttpProbe("web", { healthcheck: { test: ["CMD", "true"] } })
   ).not.toThrow();
 });
+
+test("an authored probe cannot opt into the generated route policy", () => {
+  expect(() =>
+    admitNativeHttpProbe("web", {
+      healthcheck: { "x-hack-http": { ...valid, policy: "route" } },
+    })
+  ).toThrow("healthcheck.x-hack-http");
+});

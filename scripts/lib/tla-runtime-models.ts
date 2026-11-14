@@ -20,7 +20,7 @@ type ModelContract = {
   readonly alternativeWitnesses?: readonly ModelWitness[];
   readonly additionalControls?: readonly {
     readonly name: string;
-    readonly module?: "TerminalReuse" | "MetadataAliasing";
+    readonly module?: "TerminalReuse" | "MetadataAliasing" | "PreReady";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
@@ -141,6 +141,80 @@ const restartPolicyStaleUses = [
   { engine: "exited", bound: 3 },
 ] as const;
 const contracts: readonly ModelContract[] = [
+  {
+    name: "interactive-session",
+    module: "Session",
+    states: 459,
+    invariant: "NoReplay",
+    action: "ReplayStart",
+    fields: [
+      'stage = "started"',
+      "starts = 2",
+      "recorded = TRUE",
+      "intent = TRUE",
+      "capable = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "failed-inspect",
+        negative: true,
+        invariant: "RetiredWithProof",
+        action: "Retire",
+        fields: [
+          'stage = "retired"',
+          "inspectFailed = TRUE",
+          "exitedValidated = FALSE",
+          "stopped = FALSE",
+          "absent = FALSE",
+        ],
+      },
+
+      {
+        name: "eof-retirement",
+        negative: true,
+        invariant: "RetiredWithProof",
+        action: "Retire",
+        fields: [
+          'stage = "retired"',
+          "ended = TRUE",
+          "stopped = FALSE",
+          "absent = FALSE",
+        ],
+      },
+      {
+        name: "wrong-boot",
+        negative: true,
+        invariant: "RetiredWithProof",
+        action: "Retire",
+        fields: [
+          'stage = "retired"',
+          'boot = "replacement"',
+          "replacementStopped = TRUE",
+          "stopped = FALSE",
+          "absent = FALSE",
+        ],
+      },
+    ],
+  },
+  {
+    name: "interactive-envelope",
+    module: "Envelope",
+    states: 15,
+    invariant: "NoRestoreOverPrivate",
+    action: "Fail",
+    fields: ['stage = "failed"', "pending = 2", "echo = TRUE", "ack = FALSE"],
+    alternativeWitnesses: [
+      {
+        action: "Fail",
+        fields: [
+          'stage = "failed"',
+          "pending = 1",
+          "echo = TRUE",
+          "ack = FALSE",
+        ],
+      },
+    ],
+  },
   {
     name: "shutdown-rebase",
     module: "ShutdownRebase",
@@ -310,6 +384,41 @@ const contracts: readonly ModelContract[] = [
       "pending = 0",
     ],
     additionalControls: [
+      {
+        name: "pre-ready-positive",
+        module: "PreReady",
+        negative: false,
+        states: 160,
+      },
+      {
+        name: "pre-ready-negative",
+        module: "PreReady",
+        negative: true,
+        invariant: "OnlySettledCleanup",
+        action: "Cleanup",
+        fields: ["unsafeCleanup = TRUE", "intent = TRUE", "removed = TRUE"],
+      },
+      {
+        name: "pre-ready-release",
+        module: "PreReady",
+        negative: true,
+        invariant: "ReleaseRecorded",
+        action: "Release",
+        fields: ["unsafeRelease = TRUE", "release = FALSE", 'owner = "none"'],
+      },
+      {
+        name: "pre-ready-replay",
+        module: "PreReady",
+        negative: true,
+        invariant: "NoReplay",
+        action: "StartAnother",
+        fields: [
+          "starts = 2",
+          "intent = TRUE",
+          "complete = FALSE",
+          "files = FALSE",
+        ],
+      },
       {
         name: "live-launcher-recovery",
         negative: true,
@@ -953,6 +1062,19 @@ const contracts: readonly ModelContract[] = [
           "unsafeAfter = FALSE",
         ],
       },
+    ],
+  },
+  {
+    name: "native-status-start",
+    module: "StatusStart",
+    states: 110,
+    invariant: "ReaderNeverFailsStart",
+    action: "ReaderRefusal",
+    fields: [
+      "failedByReader = TRUE",
+      "services = TRUE",
+      "reader = TRUE",
+      'lease = "reader"',
     ],
   },
   {

@@ -1,12 +1,17 @@
-import { lstat, mkdir, readdir, readlink, rename, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
-import { ensureDir } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import { publishRelease } from "./release-install.ts";
+import { verifyReleaseDirectory } from "./release-integrity.ts";
+import { type ReleaseFetch, transferRelease } from "./release-transfer.ts";
 import { compareSemver } from "./semver.ts";
 import { execOrThrow } from "./shell.ts";
 
+const RELEASE_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?$/;
+const ARCHIVE_NAME = /^[A-Za-z0-9._/-]+$/;
+const ASSET_DIGEST = /^sha256:[a-f0-9]{64}$/;
 const DEFAULT_REPO_OWNER = "hack-dance" as const;
 const DEFAULT_REPO_NAME = "hack" as const;
 const HOMEBREW_PREFIXES = ["/opt/homebrew", "/usr/local"] as const;
@@ -30,6 +35,7 @@ export type UpdateTarget = {
 export type GithubReleaseAsset = {
   readonly name: string;
   readonly url: string;
+  readonly sha256?: string;
 };
 
 export type GithubRelease = {
@@ -271,10 +277,11 @@ export async function resolveGithubRelease(opts: {
         accept: "application/vnd.github+json",
         "user-agent": "hack-cli",
       },
+      signal: AbortSignal.timeout(30_000),
     });
-  } catch (error: unknown) {
+  } catch (_error: unknown) {
     const message =
-      error instanceof Error ? error.message : "Failed to reach GitHub";
+      "Network unavailable; installation unchanged. Retry when connectivity returns.";
     return { ok: false, error: message };
   }
 
@@ -314,95 +321,94 @@ export type DownloadExtractResult =
 export async function downloadAndExtractRelease(opts: {
   readonly url: string;
   readonly version: string;
+  readonly sha256?: string;
+  readonly request?: ReleaseFetch;
 }): Promise<DownloadExtractResult> {
+  if (!RELEASE_VERSION.test(opts.version)) {
+    return {
+      ok: false,
+      error: "Invalid release version; installation unchanged.",
+    };
+  }
   const tmpRoot = await mkTmpDir({ prefix: "hack-update-" });
   const tarballPath = resolve(tmpRoot, "release.tar.gz");
-
-  const downloadOk = await downloadToFile({
-    url: opts.url,
-    outPath: tarballPath,
-  });
-  if (!downloadOk.ok) {
-    await rm(tmpRoot, { recursive: true, force: true });
-    return downloadOk;
-  }
-
-  const tarExit = await extractTarGz({ tarballPath, outDir: tmpRoot });
-  if (!tarExit.ok) {
-    await rm(tmpRoot, { recursive: true, force: true });
-    return tarExit;
-  }
-
-  const dirName = `hack-${opts.version}-release`;
-  const extractedReleaseDir = resolve(tmpRoot, dirName);
-
-  const exists = await pathExists(extractedReleaseDir);
-  if (!exists) {
+  try {
+    await transferRelease({
+      url: opts.url,
+      path: tarballPath,
+      sha256: opts.sha256,
+      request: opts.request,
+    });
+    const rootName = `hack-${opts.version}-release`;
+    const { stdout: names } = await execOrThrow(["tar", "-tzf", tarballPath], {
+      stdin: "ignore",
+      timeoutMs: 30_000,
+    });
+    const { stdout: details } = await execOrThrow(
+      ["tar", "-tvzf", tarballPath],
+      { stdin: "ignore", timeoutMs: 30_000 }
+    );
+    if (
+      !names.trim() ||
+      names
+        .trim()
+        .split("\n")
+        .some(
+          (name) =>
+            !(
+              ARCHIVE_NAME.test(name) &&
+              (name === rootName || name.startsWith(`${rootName}/`))
+            ) || name.split("/").some((part) => part === ".." || part === ".")
+        ) ||
+      details
+        .trim()
+        .split("\n")
+        .some((line) => !["-", "d"].includes(line[0] ?? ""))
+    ) {
+      throw new Error("Unsafe release archive layout; installation unchanged.");
+    }
+    const tarExit = await extractTarGz({ tarballPath, outDir: tmpRoot });
+    if (!tarExit.ok) {
+      throw new Error(
+        "Release archive extraction failed; installation unchanged."
+      );
+    }
+    const extractedReleaseDir = resolve(tmpRoot, rootName);
+    await verifyReleaseDirectory(extractedReleaseDir);
+    return { ok: true, tmpDir: tmpRoot, extractedReleaseDir };
+  } catch (error) {
     await rm(tmpRoot, { recursive: true, force: true });
     return {
       ok: false,
-      error: `Missing extracted release dir: ${extractedReleaseDir}`,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Release download failed; installation unchanged.",
     };
   }
-
-  return { ok: true, tmpDir: tmpRoot, extractedReleaseDir };
 }
 
 export type InstallReleaseResult =
-  | { readonly ok: true }
+  | { readonly ok: true; readonly backupManifest: string }
   | { readonly ok: false; readonly error: string };
 
 export async function installExtractedRelease(opts: {
+  readonly version: string;
   readonly extractedReleaseDir: string;
   readonly binaryPath: string;
   readonly assetsDir: string;
 }): Promise<InstallReleaseResult> {
-  const srcHack = resolve(opts.extractedReleaseDir, "hack");
-  const srcAssets = resolve(opts.extractedReleaseDir, "assets");
-  const srcBinaries = resolve(opts.extractedReleaseDir, "binaries");
-
-  const hackExists = await pathExists(srcHack);
-  if (!hackExists) {
-    return { ok: false, error: `Missing hack binary in release: ${srcHack}` };
+  try {
+    return { ok: true, ...(await publishRelease(opts)) };
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Unable to publish release; previous installation retained.",
+    };
   }
-
-  await ensureDir(dirname(opts.binaryPath));
-  await ensureDir(opts.assetsDir);
-
-  const replaceOk = await atomicReplaceFile({
-    srcPath: srcHack,
-    destPath: opts.binaryPath,
-    chmodMode: 0o755,
-  });
-  if (!replaceOk.ok) {
-    return replaceOk;
-  }
-
-  const assetsExists = await pathExists(srcAssets);
-  if (assetsExists) {
-    const copyOk = await copyDirContents({
-      srcDir: srcAssets,
-      destDir: opts.assetsDir,
-    });
-    if (!copyOk.ok) {
-      return copyOk;
-    }
-  }
-
-  const binariesExists = await pathExists(srcBinaries);
-  if (binariesExists) {
-    const destBinaries = resolve(opts.assetsDir, "binaries");
-    await ensureDir(destBinaries);
-    const copyOk = await copyDirContents({
-      srcDir: srcBinaries,
-      destDir: destBinaries,
-    });
-    if (!copyOk.ok) {
-      return copyOk;
-    }
-  }
-
-  return { ok: true };
 }
 
 export function compareVersions(opts: {
@@ -436,7 +442,15 @@ function parseGithubRelease(json: unknown): GithubRelease | null {
       const name = getString(entry, "name");
       const url = getString(entry, "browser_download_url");
       if (typeof name === "string" && typeof url === "string" && name && url) {
-        assets.push({ name, url });
+        const digest = getString(entry, "digest");
+        if (digest && !ASSET_DIGEST.test(digest)) {
+          return null;
+        }
+        assets.push({
+          name,
+          url,
+          ...(digest ? { sha256: digest.slice(7) } : {}),
+        });
       }
     }
   }
@@ -455,55 +469,7 @@ async function safeReadText(res: Response): Promise<string | null> {
 }
 
 async function mkTmpDir(opts: { readonly prefix: string }): Promise<string> {
-  const dir = join(
-    tmpdir(),
-    `${opts.prefix}${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`
-  );
-  await mkdir(dir, { recursive: true });
-  return dir;
-}
-
-async function downloadToFile(opts: {
-  readonly url: string;
-  readonly outPath: string;
-}): Promise<
-  { readonly ok: true } | { readonly ok: false; readonly error: string }
-> {
-  let res: Response;
-  try {
-    res = await fetch(opts.url, {
-      headers: {
-        accept: "application/octet-stream",
-        "user-agent": "hack-cli",
-      },
-    });
-  } catch (error: unknown) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Failed to download release asset";
-    return { ok: false, error: message };
-  }
-
-  if (!res.ok) {
-    const text = await safeReadText(res);
-    return {
-      ok: false,
-      error: `Download failed (${res.status}): ${text ?? res.statusText}`,
-    };
-  }
-
-  try {
-    const buf = await res.arrayBuffer();
-    await Bun.write(opts.outPath, buf);
-    return { ok: true };
-  } catch (error: unknown) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Failed to write downloaded file";
-    return { ok: false, error: message };
-  }
+  return await mkdtemp(join(tmpdir(), opts.prefix));
 }
 
 async function extractTarGz(opts: {
@@ -515,6 +481,7 @@ async function extractTarGz(opts: {
   try {
     await execOrThrow(["tar", "-xzf", opts.tarballPath, "-C", opts.outDir], {
       stdin: "ignore",
+      timeoutMs: 30_000,
     });
     return { ok: true };
   } catch (error: unknown) {
@@ -522,93 +489,4 @@ async function extractTarGz(opts: {
       error instanceof Error ? error.message : "Failed to extract tarball";
     return { ok: false, error: message };
   }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await Bun.file(path).stat();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function atomicReplaceFile(opts: {
-  readonly srcPath: string;
-  readonly destPath: string;
-  readonly chmodMode?: number;
-}): Promise<
-  { readonly ok: true } | { readonly ok: false; readonly error: string }
-> {
-  const destDir = dirname(opts.destPath);
-  const tmpName = `${basename(opts.destPath)}.tmp.${process.pid}.${Math.random().toString(16).slice(2)}`;
-  const tmpPath = resolve(destDir, tmpName);
-
-  try {
-    await Bun.write(tmpPath, Bun.file(opts.srcPath));
-    if (typeof opts.chmodMode === "number") {
-      await execOrThrow(["chmod", `${opts.chmodMode.toString(8)}`, tmpPath], {
-        stdin: "ignore",
-      });
-    }
-    await rename(tmpPath, opts.destPath);
-    return { ok: true };
-  } catch (error: unknown) {
-    await rm(tmpPath, { force: true }).catch(() => undefined);
-    const message =
-      error instanceof Error ? error.message : "Failed to install file";
-    return { ok: false, error: message };
-  }
-}
-
-async function copyDirContents(opts: {
-  readonly srcDir: string;
-  readonly destDir: string;
-}): Promise<
-  { readonly ok: true } | { readonly ok: false; readonly error: string }
-> {
-  let entries: string[];
-  try {
-    entries = await readdir(opts.srcDir);
-  } catch (error: unknown) {
-    const message =
-      error instanceof Error ? error.message : `Failed to read ${opts.srcDir}`;
-    return { ok: false, error: message };
-  }
-
-  for (const entry of entries) {
-    if (entry.startsWith(".")) {
-      continue;
-    }
-
-    const srcPath = resolve(opts.srcDir, entry);
-    const destPath = resolve(opts.destDir, entry);
-
-    const stat = await Bun.file(srcPath)
-      .stat()
-      .catch(() => null);
-    if (!stat) {
-      continue;
-    }
-
-    if (stat.isDirectory()) {
-      await ensureDir(destPath);
-      const nested = await copyDirContents({
-        srcDir: srcPath,
-        destDir: destPath,
-      });
-      if (!nested.ok) {
-        return nested;
-      }
-      continue;
-    }
-
-    if (stat.isFile()) {
-      await ensureDir(dirname(destPath));
-      await rm(destPath, { force: true }).catch(() => undefined);
-      await Bun.write(destPath, Bun.file(srcPath));
-    }
-  }
-
-  return { ok: true };
 }

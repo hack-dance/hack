@@ -813,6 +813,9 @@ test.each([
   }
 }, 30_000);
 
+// Preparing the real retained store performs bounded child probes before the
+// invalid-deadline assertions. Give setup the same outer budget as adjacent
+// prepared-store tests; the rejected mutation deadlines remain unchanged.
 test("HACK-1359: file8 rejects missing and non-finite mutation deadlines without effects", async () => {
   const { store, generation } = await prepared();
   try {
@@ -828,4 +831,4 @@ test("HACK-1359: file8 rejects missing and non-finite mutation deadlines without
   } finally {
     await store.close();
   }
-});
+}, 30_000);

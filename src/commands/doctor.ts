@@ -66,6 +66,13 @@ import {
   resolveSystemdUnitPath,
   SYSTEMD_READ_ONLY_ENV,
 } from "../daemon/systemd.ts";
+import {
+  type CaTrustReport,
+  inspectCaTrust,
+  listDirOutcome,
+  pathExistsOutcome,
+  readTextOutcome,
+} from "../lib/ca-trust-status.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
@@ -85,6 +92,7 @@ import {
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
 import { resolveDefaultDomain } from "../lib/default-domain.ts";
+import { queryDnsARecord } from "../lib/dns-query.ts";
 import {
   adoptedProjectCheckResult,
   adoptedProjectNotApplicableResults,
@@ -168,6 +176,7 @@ import {
   requireInteractive,
 } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
+import { createLinuxTrustHost } from "../lib/linux-trust-host.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -239,6 +248,7 @@ import {
   isGitTrackedOrUnknownProjectPath,
   type LegacyComposeEnvFileReference,
   LegacyDotenvMigrationRefusalError,
+  LegacyEnvCleanupError,
   type LegacyProjectEnvMigration,
   listProjectEnvPlaintextEntries,
   migrateLegacyProjectEnv,
@@ -248,6 +258,7 @@ import {
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
+  resolveProjectEnvSharedKeyPath,
   type TrackedEnvMigrationChange,
 } from "../lib/project-env-config.ts";
 import {
@@ -262,13 +273,22 @@ import {
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
+import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
+import { resolveFileSecretStorePaths } from "../lib/secret-store.ts";
+import {
+  applySecretsHygieneFixes,
+  inspectSecretsHygiene,
+  type SecretsHygieneFinding,
+  type SecretsHygieneScope,
+} from "../lib/secrets-hygiene.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import {
   type PausableProgress,
   pausableSpinner,
   withTerminalHandoff,
 } from "../lib/terminal-handoff.ts";
+import { vettedHelperEnv } from "../lib/vetted-env.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalCaddyCompose,
@@ -284,11 +304,14 @@ import {
 import { runNativePreflightCommand } from "./doctor-native-preflight.ts";
 import {
   analyzeComposeNetworkHygiene,
-  dnsmasqConfigHasDomain,
   resolvePreferredHostDnsTarget,
-  resolverHasNameserver,
 } from "./doctor-utils.ts";
 import { inspectLinuxGlobalDns } from "./global-linux-dns.ts";
+import {
+  checkMacDnsmasqConfigForDomain,
+  checkMacDnsmasqPort53,
+  checkMacResolverForDomain,
+} from "./global-mac-dns.ts";
 import { inspectProxyNetwork } from "./global-proxy-network.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import {
@@ -309,6 +332,8 @@ interface CheckResult {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Closed, value-free env key findings; project-relative subjects only. */
   readonly envKey?: EnvKeyInspection;
+  /** Trust-store states for the local CA; paths and fingerprints only. */
+  readonly caTrust?: CaTrustReport;
   /** Closed Compose-backend feature names only; never authored values. */
   readonly composeBackend?: ComposeBackendReport;
   /** Closed native data advisory codes and service names only. */
@@ -1005,10 +1030,10 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     });
   }
 
-  // Check proxy port forwarding (detects VPN/Tailscale conflicts)
+  // Authenticate loopback independently of direct container reachability.
   results.push(
-    await runCheck(s, "proxy ports", () => checkProxyPortForwarding(), {
-      timeoutMs: 5000,
+    await runCheck(s, "proxy ports", () => inspectProxyLoopback(), {
+      timeoutMs: 8000,
     })
   );
   results.push(
@@ -1026,6 +1051,12 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     await runCheck(s, "caddy local ca", () => checkCaddyLocalCa(), {
       // The identity probe allows three sequential Docker calls up to 5s each.
       timeoutMs: 16_000,
+    })
+  );
+  results.push(
+    await runCheck(s, LOCAL_CA_TRUST_CHECK, () => checkLocalCaTrust(), {
+      // A few bounded trust-store queries (5s each), plus one per NSS db.
+      timeoutMs: 30_000,
     })
   );
   if (isMac()) {
@@ -1555,6 +1586,8 @@ export type DoctorJsonCheck = {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
   readonly envKey?: EnvKeyInspection;
+  /** Present only on the local CA trust check (`docs/reference/local-ca-trust.md`). */
+  readonly caTrust?: CaTrustReport;
   /** Present only on the Compose-backend feature check: closed feature names. */
   readonly composeBackend?: ComposeBackendReport;
   /** Present only on the native data-service check: closed codes and service names. */
@@ -1602,6 +1635,7 @@ export function buildDoctorJsonData(opts: {
         ? { hackLocalRoute: result.hackLocalRoute }
         : {}),
       ...(result.envKey ? { envKey: result.envKey } : {}),
+      ...(result.caTrust ? { caTrust: result.caTrust } : {}),
       ...(result.composeBackend
         ? { composeBackend: result.composeBackend }
         : {}),
@@ -2034,6 +2068,55 @@ export async function checkCoreDnsForwarding(): Promise<CheckResult> {
   };
 }
 
+const LOCAL_CA_TRUST_CHECK = "local ca trust";
+
+/**
+ * Whether the system trust store (and, on Linux, NSS) trusts the exported
+ * Caddy Local CA (HACK-2218, R16). Read-only and bounded; `caddy local ca`
+ * checks the export itself. Unknown is a warning that says so.
+ */
+export async function checkLocalCaTrust(): Promise<CheckResult> {
+  const helperEnv = vettedHelperEnv();
+  const report = await inspectCaTrust({
+    platform: process.platform,
+    caPath: getGlobalPaths().caddyCaCert,
+    readText: readTextOutcome,
+    query: async (argv, queryOpts) =>
+      await exec(argv, {
+        stdin: "ignore",
+        timeoutMs: queryOpts.timeoutMs,
+        env: { ...helperEnv.env },
+        unsetEnvKeys: helperEnv.unsetEnvKeys,
+      }).catch(() => ({ exitCode: 127, stdout: "", stderr: "" })),
+    ...(isLinux() ? { linuxHost: createLinuxTrustHost() } : {}),
+    exists: pathExistsOutcome,
+    listDir: listDirOutcome,
+    now: () => Date.now(),
+  });
+  return {
+    name: LOCAL_CA_TRUST_CHECK,
+    status: report.state === "trusted" ? "ok" : "warn",
+    message: describeCaTrust(report),
+    caTrust: report,
+  };
+}
+
+function describeCaTrust(report: CaTrustReport): string {
+  const nss = report.nss
+    .filter((db) => db.state !== "trusted")
+    .map((db) => `${db.db}: ${db.detail}`);
+  if (report.state === "trusted") {
+    const browsers =
+      report.nss.length > 0 ? ` and ${report.nss.length} NSS database(s)` : "";
+    return `Trusted by ${report.system.store ?? "the system"}${browsers}`;
+  }
+  const lead =
+    report.state === "unknown"
+      ? "Could not tell whether the local CA is trusted"
+      : "The local CA is not trusted everywhere";
+  return [`${lead}: ${report.system.detail}`, ...nss].join("; ");
+}
+
 export async function checkCaddyLocalCa(): Promise<CheckResult> {
   const paths = getGlobalPaths();
   const identity = await inspectCaddyCaIdentity({
@@ -2059,363 +2142,6 @@ async function checkLinuxDnsRoute(): Promise<CheckResult> {
       ...inspection.fix.map((line) => `fix: ${line}`),
     ].join("\n"),
   };
-}
-
-async function checkMacResolverForDomain(domain: string): Promise<CheckResult> {
-  const resolverPath = `/etc/resolver/${domain}`;
-  const exists = await pathExists(resolverPath);
-  if (!exists) {
-    return {
-      name: `resolver:${domain}`,
-      status: "warn",
-      message: `Missing ${resolverPath} (run: hack global install)`,
-    };
-  }
-
-  const text = (await readTextFile(resolverPath)) ?? "";
-  const hasNameserver = resolverHasNameserver({
-    text,
-    nameserver: "127.0.0.1",
-  });
-
-  return {
-    name: `resolver:${domain}`,
-    status: hasNameserver ? "ok" : "warn",
-    message: hasNameserver
-      ? resolverPath
-      : `Unexpected contents in ${resolverPath} (expected "nameserver 127.0.0.1")`,
-  };
-}
-
-async function checkMacDnsmasqConfigForDomain(
-  domain: string
-): Promise<CheckResult> {
-  const brew = await findExecutableInPath("brew");
-  if (!brew) {
-    return {
-      name: `dnsmasq.conf:${domain}`,
-      status: "warn",
-      message: "Homebrew not found; cannot locate dnsmasq.conf",
-    };
-  }
-
-  const prefixRes = await exec(["brew", "--prefix"], { stdin: "ignore" });
-  const brewPrefix =
-    prefixRes.exitCode === 0 ? prefixRes.stdout.trim() : "/opt/homebrew";
-  const dnsmasqConf = resolve(brewPrefix, "etc", "dnsmasq.conf");
-  const text = await readTextFile(dnsmasqConf);
-
-  if (text === null) {
-    return {
-      name: `dnsmasq.conf:${domain}`,
-      status: "warn",
-      message: `Unable to read ${dnsmasqConf} (run: hack global install)`,
-    };
-  }
-
-  let ok = dnsmasqConfigHasDomain({ text, domain });
-  if (!ok) {
-    const dynamicIp = await resolveGlobalCaddyIp();
-    ok =
-      dynamicIp !== null &&
-      text
-        .split("\n")
-        .some((line) => line.trim() === `address=/.${domain}/${dynamicIp}`);
-  }
-  return {
-    name: `dnsmasq.conf:${domain}`,
-    status: ok ? "ok" : "warn",
-    message: ok
-      ? dnsmasqConf
-      : `Missing .${domain} dnsmasq address line in ${dnsmasqConf} (run: hack global install)`,
-  };
-}
-
-async function checkMacDnsmasqPort53(): Promise<CheckResult> {
-  const ip = await queryDnsARecord({
-    hostname: LEGACY_GRAFANA_HOST,
-    server: "127.0.0.1",
-    port: 53,
-    timeoutMs: 900,
-  });
-
-  if (!ip) {
-    return {
-      name: "dnsmasq:53",
-      status: "warn",
-      message:
-        "No DNS response from 127.0.0.1:53 (run: sudo brew services restart dnsmasq)",
-    };
-  }
-
-  const ok = ip === DEFAULT_CADDY_IP || ip === "::1" || ip === "127.0.0.1";
-  return {
-    name: "dnsmasq:53",
-    status: ok ? "ok" : "warn",
-    message: `${LEGACY_GRAFANA_HOST} → ${ip} (from 127.0.0.1:53)`,
-  };
-}
-
-async function queryDnsARecord(opts: {
-  readonly hostname: string;
-  readonly server: string;
-  readonly port: number;
-  readonly timeoutMs: number;
-}): Promise<string | null> {
-  // Try AAAA (IPv6) first, then fall back to A (IPv4)
-  const ipv6 = await queryDnsRecord({ ...opts, recordType: "AAAA" });
-  if (ipv6) {
-    return ipv6;
-  }
-  return await queryDnsRecord({ ...opts, recordType: "A" });
-}
-
-async function queryDnsRecord(opts: {
-  readonly hostname: string;
-  readonly server: string;
-  readonly port: number;
-  readonly timeoutMs: number;
-  readonly recordType: "A" | "AAAA";
-}): Promise<string | null> {
-  const { createSocket } = await import("node:dgram");
-
-  const id = Math.floor(Math.random() * 65_535);
-  const header = Buffer.alloc(12);
-  header.writeUInt16BE(id, 0);
-  header.writeUInt16BE(0x01_00, 2); // recursion desired
-  header.writeUInt16BE(1, 4); // QDCOUNT
-  header.writeUInt16BE(0, 6); // ANCOUNT
-  header.writeUInt16BE(0, 8); // NSCOUNT
-  header.writeUInt16BE(0, 10); // ARCOUNT
-
-  const qname = encodeDnsName(opts.hostname);
-  // A = 0x0001, AAAA = 0x001c, IN = 0x0001
-  const qtype = opts.recordType === "AAAA" ? 0x00_1c : 0x00_01;
-  const question = Buffer.concat([
-    qname,
-    Buffer.from([(qtype >> 8) & 0xff, qtype & 0xff, 0x00, 0x01]),
-  ]);
-  const packet = Buffer.concat([header, question]);
-
-  return await new Promise<string | null>((resolve) => {
-    const socket = createSocket("udp4");
-    const eventfulSocket = socket as typeof socket & {
-      on(
-        eventName: "message",
-        listener: (msg: Buffer<ArrayBufferLike>) => void
-      ): typeof socket;
-    };
-
-    const finish = (value: string | null) => {
-      try {
-        socket.close();
-      } catch {
-        // ignore
-      }
-      resolve(value);
-    };
-
-    const timeout = setTimeout(() => finish(null), opts.timeoutMs);
-
-    eventfulSocket.on("message", (msg) => {
-      clearTimeout(timeout);
-      finish(
-        parseDnsResponse({ msg, expectedId: id, recordType: opts.recordType })
-      );
-    });
-
-    socket.send(packet, opts.port, opts.server, (err: Error | null) => {
-      if (err) {
-        clearTimeout(timeout);
-        finish(null);
-      }
-    });
-  });
-}
-
-function encodeDnsName(hostname: string): Buffer {
-  const parts = hostname.split(".").filter((p) => p.length > 0);
-  const bytes: number[] = [];
-  for (const part of parts) {
-    const buf = Buffer.from(part, "utf8");
-    bytes.push(buf.length);
-    for (const b of buf) {
-      bytes.push(b);
-    }
-  }
-  bytes.push(0);
-  return Buffer.from(bytes);
-}
-
-function parseDnsResponse(opts: {
-  readonly msg: Buffer;
-  readonly expectedId: number;
-  readonly recordType: "A" | "AAAA";
-}): string | null {
-  const header = parseDnsHeader(opts.msg);
-  if (!header) {
-    return null;
-  }
-  if (header.id !== opts.expectedId) {
-    return null;
-  }
-
-  const answersOffset = skipDnsQuestions({
-    msg: opts.msg,
-    offset: header.offsetAfterHeader,
-    qd: header.qd,
-  });
-  if (answersOffset === null) {
-    return null;
-  }
-
-  return parseDnsAnswers({
-    msg: opts.msg,
-    offset: answersOffset,
-    an: header.an,
-    recordType: opts.recordType,
-  });
-}
-
-type DnsHeader = {
-  readonly id: number;
-  readonly qd: number;
-  readonly an: number;
-  readonly offsetAfterHeader: number;
-};
-
-function parseDnsHeader(msg: Buffer): DnsHeader | null {
-  if (msg.length < 12) {
-    return null;
-  }
-  return {
-    id: msg.readUInt16BE(0),
-    qd: msg.readUInt16BE(4),
-    an: msg.readUInt16BE(6),
-    offsetAfterHeader: 12,
-  };
-}
-
-function skipDnsQuestions(opts: {
-  readonly msg: Buffer;
-  readonly offset: number;
-  readonly qd: number;
-}): number | null {
-  let offset = opts.offset;
-  for (let i = 0; i < opts.qd; i += 1) {
-    offset = skipDnsName(opts.msg, offset);
-    offset += 4; // QTYPE + QCLASS
-    if (offset > opts.msg.length) {
-      return null;
-    }
-  }
-  return offset;
-}
-
-type DnsAnswerHeader = {
-  readonly type: number;
-  readonly klass: number;
-  readonly rdlength: number;
-  readonly rdataOffset: number;
-  readonly nextOffset: number;
-};
-
-function readDnsAnswerHeader(opts: {
-  readonly msg: Buffer;
-  readonly offset: number;
-}): DnsAnswerHeader | null {
-  if (opts.offset + 10 > opts.msg.length) {
-    return null;
-  }
-  const type = opts.msg.readUInt16BE(opts.offset);
-  const klass = opts.msg.readUInt16BE(opts.offset + 2);
-  const rdlength = opts.msg.readUInt16BE(opts.offset + 8);
-  const rdataOffset = opts.offset + 10;
-  const nextOffset = rdataOffset + rdlength;
-  if (nextOffset > opts.msg.length) {
-    return null;
-  }
-  return { type, klass, rdlength, rdataOffset, nextOffset };
-}
-
-function parseDnsAnswers(opts: {
-  readonly msg: Buffer;
-  readonly offset: number;
-  readonly an: number;
-  readonly recordType: "A" | "AAAA";
-}): string | null {
-  const expectedType = opts.recordType === "AAAA" ? 28 : 1;
-  const expectedRdlength = opts.recordType === "AAAA" ? 16 : 4;
-
-  let offset = opts.offset;
-  for (let i = 0; i < opts.an; i += 1) {
-    offset = skipDnsName(opts.msg, offset);
-
-    const header = readDnsAnswerHeader({ msg: opts.msg, offset });
-    if (!header) {
-      return null;
-    }
-
-    if (
-      header.type === expectedType &&
-      header.klass === 1 &&
-      header.rdlength === expectedRdlength
-    ) {
-      return opts.recordType === "A"
-        ? parseDnsARecord({ msg: opts.msg, rdataOffset: header.rdataOffset })
-        : parseDnsAAAARecord({
-            msg: opts.msg,
-            rdataOffset: header.rdataOffset,
-          });
-    }
-
-    offset = header.nextOffset;
-  }
-
-  return null;
-}
-
-function parseDnsARecord(opts: {
-  readonly msg: Buffer;
-  readonly rdataOffset: number;
-}): string {
-  const a = opts.msg[opts.rdataOffset];
-  const b = opts.msg[opts.rdataOffset + 1];
-  const c = opts.msg[opts.rdataOffset + 2];
-  const d = opts.msg[opts.rdataOffset + 3];
-  return `${a}.${b}.${c}.${d}`;
-}
-
-function parseDnsAAAARecord(opts: {
-  readonly msg: Buffer;
-  readonly rdataOffset: number;
-}): string {
-  const parts: string[] = [];
-  for (let j = 0; j < 16; j += 2) {
-    const word = opts.msg.readUInt16BE(opts.rdataOffset + j);
-    parts.push(word.toString(16));
-  }
-
-  const ipv6 = parts.join(":");
-  return ipv6 === "0:0:0:0:0:0:0:1" ? "::1" : ipv6;
-}
-
-function skipDnsName(buf: Buffer, startOffset: number): number {
-  let offset = startOffset;
-  while (offset < buf.length) {
-    const len = buf[offset];
-    if (len === undefined) {
-      return offset;
-    }
-    if ((len & 0b1100_0000) === 0b1100_0000) {
-      return offset + 2; // pointer
-    }
-    if (len === 0) {
-      return offset + 1;
-    }
-    offset += 1 + len;
-  }
-  return offset;
 }
 
 async function appendCustomDomainDnsChecks(opts: {
@@ -2596,90 +2322,6 @@ async function checkGrafanaReachable(): Promise<CheckResult> {
       message: `Unable to reach http://${host} (is global infra up?)`,
     };
   }
-}
-
-/**
- * Checks if proxy port forwarding is working correctly.
- * Detects the specific issue where IPv4 port 443 fails while IPv6 works,
- * which is often caused by VPN software (e.g., Tailscale) interfering
- * with Docker/OrbStack port forwarding.
- */
-async function checkProxyPortForwarding(): Promise<CheckResult> {
-  const { createConnection } = await import("node:net");
-
-  const testTcpConnect = (
-    host: string,
-    port: number,
-    timeoutMs: number
-  ): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const socket = createConnection({ host, port, timeout: timeoutMs });
-      socket.on("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.on("error", () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.on("timeout", () => {
-        socket.destroy();
-        resolve(false);
-      });
-    });
-  };
-
-  // Test container IP directly (primary method - bypasses port forwarding)
-  const containerPort443 = await testTcpConnect(DEFAULT_CADDY_IP, 443, 2000);
-
-  // If container IP works, everything is fine
-  if (containerPort443) {
-    return {
-      name: "proxy ports",
-      status: "ok",
-      message: `Caddy reachable (${DEFAULT_CADDY_IP}:443)`,
-    };
-  }
-
-  // Container IP failed, check localhost as fallback
-  const [ipv4Port80, ipv4Port443] = await Promise.all([
-    testTcpConnect("127.0.0.1", 80, 2000),
-    testTcpConnect("127.0.0.1", 443, 2000),
-  ]);
-
-  // If localhost port 443 works, still OK
-  if (ipv4Port443) {
-    return {
-      name: "proxy ports",
-      status: "ok",
-      message: "Port 80 and 443 forwarding OK (127.0.0.1)",
-    };
-  }
-
-  // Both container IP and localhost fail - Caddy probably isn't running
-  if (!(ipv4Port80 || ipv4Port443)) {
-    return {
-      name: "proxy ports",
-      status: "warn",
-      message: "Caddy not reachable (run: hack global up)",
-    };
-  }
-
-  // Port 80 works but 443 fails - OrbStack port forwarding issue
-  if (ipv4Port80 && !ipv4Port443) {
-    return {
-      name: "proxy ports",
-      status: "warn",
-      message:
-        "Port 443 not forwarding properly. Fix: hack global install (configures DNS to use container IP)",
-    };
-  }
-
-  return {
-    name: "proxy ports",
-    status: "warn",
-    message: `Port forwarding partial: container=${containerPort443}, localhost:443=${ipv4Port443}`,
-  };
 }
 
 async function checkProject({
@@ -3094,7 +2736,7 @@ async function checkProjectEnvOverlayWarnings({
   return {
     name: "env overlay warnings",
     status: "warn",
-    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack doctor --migrate-env-config" or "hack env add --env ${cfg.defaultEnvConfig} --secret KEY VALUE".`,
+    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack doctor --migrate-env-config" or "<value-source> | hack env add --env ${cfg.defaultEnvConfig} KEY --secret --value-stdin".`,
   };
 }
 
@@ -3250,11 +2892,16 @@ async function checkSecretIntegrity({
       message: "Every stored secret opens with the key in use",
     };
   }
+  // Information alone (a retired store kept beside its old name) is ok.
+  let status: CheckResult["status"] = "ok";
+  if (findings.some((finding) => finding.status === "error")) {
+    status = "error";
+  } else if (findings.some((finding) => finding.status === "warn")) {
+    status = "warn";
+  }
   return {
     name: SECRET_INTEGRITY_CHECK,
-    status: findings.some((finding) => finding.status === "error")
-      ? "error"
-      : "warn",
+    status,
     message: findings.map((finding) => finding.message).join("\n"),
   };
 }
@@ -3615,6 +3262,104 @@ export async function checkHackDirGitignore({
   }
 }
 
+const SECRETS_HYGIENE_CHECK = "secrets hygiene";
+
+/**
+ * What the "secrets hygiene" section covers from `startDir`: the project, when
+ * there is a legacy (not adopted) one, its shared key, and the encrypted-file
+ * stores the global and project configuration name. Reads configuration and
+ * git only. A report tolerates what it cannot read; with `strict` (used to
+ * authorize a removal) any discovery, read or parse failure rejects instead,
+ * so an unknown configuration never looks like one that names nothing.
+ */
+export async function resolveSecretsHygieneScope(opts: {
+  readonly startDir: string;
+  readonly strict?: boolean;
+}): Promise<SecretsHygieneScope> {
+  const strict = opts.strict === true;
+  const tolerate = <T>(promise: Promise<T>): Promise<T | null> =>
+    strict ? promise : promise.catch(() => null);
+  const project = await tolerate(findDoctorLegacyProjectContext(opts.startDir));
+  const stores = new Map<string, SecretsHygieneScope["stores"][number]>();
+  for (const projectDir of [undefined, project?.projectDir]) {
+    const resolved = await tolerate(
+      resolveFileSecretStorePaths({ projectDir, strict })
+    );
+    const paths = resolved
+      ? { storePath: resolved.storePath, keyPath: resolved.keyPath }
+      : null;
+    const key = paths ? `${paths.storePath}\0${paths.keyPath}` : null;
+    if (!(paths && key) || stores.has(key)) {
+      continue;
+    }
+    // Paths only a project's configuration chose (a cloned repository's
+    // may name any file of the user's) are fixed only inside the checkout
+    // or the Hack home.
+    stores.set(
+      key,
+      projectDir && project
+        ? { ...paths, fixRoots: [project.projectRoot, resolveGlobalHackDir()] }
+        : paths
+    );
+  }
+  return {
+    project: project
+      ? { projectRoot: project.projectRoot, projectDir: project.projectDir }
+      : null,
+    sharedKeyPath: project
+      ? await tolerate(
+          resolveProjectEnvSharedKeyPath({ projectRoot: project.projectRoot })
+        )
+      : null,
+    stores: [...stores.values()],
+    storeKeyFromEnvironment:
+      (process.env.HACK_SECRETS_FILE_KEY ?? "").trim().length > 0,
+  };
+}
+
+/**
+ * Secret-bearing files at rest for the project and the global Hack home
+ * (HACK-2165): loose modes, links, tracked or unignored files, leftover
+ * staging copies and terminal-session payloads, and a store whose key is
+ * missing. File names only, never values; `hack doctor --fix` applies the
+ * safe fixes (see `secrets-hygiene.ts`).
+ */
+export async function checkSecretsHygiene(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const findings = await inspectSecretsHygiene(
+    await resolveSecretsHygieneScope(opts)
+  );
+  return { name: SECRETS_HYGIENE_CHECK, ...describeSecretsHygiene(findings) };
+}
+
+function describeSecretsHygiene(findings: readonly SecretsHygieneFinding[]): {
+  readonly status: "ok" | "warn" | "error";
+  readonly message: string;
+} {
+  if (findings.length === 0) {
+    return {
+      status: "ok",
+      message:
+        "Env files, keys and stores are private, ignored by git, and no staging copies are left behind",
+    };
+  }
+  const fixable = findings.some((finding) => finding.fix !== null);
+  return {
+    status: findings.some((finding) => finding.status === "error")
+      ? "error"
+      : "warn",
+    message: [
+      ...findings.map((finding) => finding.message),
+      ...(fixable
+        ? [
+            "Run 'hack doctor --fix' to tighten modes, add the ignore entries and remove Hack's leftovers; it never deletes a store, a key or a file you wrote.",
+          ]
+        : []),
+    ].join("\n"),
+  };
+}
+
 const COMPOSE_ENV_AT_REST_CHECK = "compose env at rest";
 
 /**
@@ -3708,6 +3453,15 @@ async function runProjectChecks(opts: {
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
       durationMs: 0,
     });
+    // The global Hack home is covered without a project.
+    results.push(
+      await runCheck(
+        s,
+        SECRETS_HYGIENE_CHECK,
+        () => checkSecretsHygiene({ startDir }),
+        { timeoutMs: 10_000 }
+      )
+    );
     return results;
   }
   if (dockerOk) {
@@ -3794,6 +3548,14 @@ async function runProjectChecks(opts: {
       checkComposeEnvOverrideAtRest({ startDir })
     )
   );
+  results.push(
+    await runCheck(
+      s,
+      SECRETS_HYGIENE_CHECK,
+      () => checkSecretsHygiene({ startDir }),
+      { timeoutMs: 10_000 }
+    )
+  );
   if (dockerOk) {
     results.push(
       await runCheck(
@@ -3846,6 +3608,12 @@ async function runAdoptedProjectChecks(opts: {
     ),
     await runCheck(progress, COMPOSE_ENV_AT_REST_CHECK, () =>
       checkComposeEnvOverrideAtRest({ startDir: opts.startDir })
+    ),
+    await runCheck(
+      progress,
+      SECRETS_HYGIENE_CHECK,
+      () => checkSecretsHygiene({ startDir: opts.startDir }),
+      { timeoutMs: 10_000 }
     ),
     ...adoptedProjectNotApplicableResults().map((result) => ({
       ...result,
@@ -4107,6 +3875,7 @@ async function runDoctorFix(opts: {
     await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
+  await maybeFixSecretsHygiene({ startDir: opts.startDir });
   const serviceWrites = await maybeInstallDaemonService();
   await maybeRepairHackd({ serviceWrites });
   // Env migration changes project files only, so it runs before the Docker
@@ -4529,6 +4298,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     projectDir: project.projectDir,
     projectName,
     paths: cleanupCandidates,
+    context: migrated.cleanupContext,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
   await printMigrationProtectionHint(project);
@@ -4575,6 +4345,7 @@ async function offerDoctorEnvCleanup(opts: {
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
   readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
   const untracked: string[] = [];
@@ -4587,6 +4358,17 @@ async function offerDoctorEnvCleanup(opts: {
       ? tracked
       : untracked
     ).push(path);
+  }
+
+  // A key cannot be removed while its tracked store still exists. Include an
+  // untracked key in that store's later consent batch, keeping the dependency
+  // intact whether tracked cleanup is accepted, declined or refused.
+  const store = opts.context?.store;
+  if (store && tracked.includes(store.path)) {
+    const keyIndex = untracked.indexOf(store.keyPath);
+    if (keyIndex !== -1) {
+      tracked.push(...untracked.splice(keyIndex, 1));
+    }
   }
 
   if (untracked.length > 0) {
@@ -4609,6 +4391,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: untracked,
+        context: opts.context,
       });
     }
   }
@@ -4616,7 +4399,7 @@ async function offerDoctorEnvCleanup(opts: {
   if (tracked.length > 0) {
     note(
       [
-        "These legacy env files are tracked by git and can now be removed. Teammates share them, so commit the removal together with the new env layers:",
+        "These legacy env files are tracked by git, or are keys kept with a tracked store, and can now be removed. Teammates share the tracked files, so commit their removal together with the new env layers:",
         ...tracked.map((path) => `- ${path}`),
       ].join("\n"),
       "env cleanup"
@@ -4632,6 +4415,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: tracked,
+        context: opts.context,
       });
     } else {
       note(
@@ -4645,18 +4429,41 @@ async function offerDoctorEnvCleanup(opts: {
 /**
  * Removes confirmed legacy env files. Once the encrypted secret store itself is
  * gone, its pointer leaves `hack.config.json` too; the migration kept it so a
- * declined or failed removal leaves the store readable.
+ * declined removal keeps the store readable. Partial failures reconcile the
+ * pointer against confirmed removals before the cleanup error is rethrown.
  */
-async function removeDoctorEnvCleanup(opts: {
+export async function removeDoctorEnvCleanup(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
 }): Promise<void> {
-  const removed = await removeLegacyProjectEnvArtifacts({
-    paths: opts.paths,
-    projectRoot: opts.projectRoot,
-  });
+  let removed: readonly string[];
+  try {
+    removed = await removeLegacyProjectEnvArtifacts({
+      paths: opts.paths,
+      projectRoot: opts.projectRoot,
+      context: opts.context,
+    });
+  } catch (error) {
+    if (error instanceof LegacyEnvCleanupError) {
+      try {
+        await dropRemovedLegacySecretStorePointer({
+          projectRoot: opts.projectRoot,
+          projectDir: opts.projectDir,
+          projectName: opts.projectName,
+          removed: error.removedPaths,
+        });
+      } catch {
+        note(
+          "Could not reconcile the legacy secret store pointer. Check hack.config.json for a pointer to the removed store before retrying cleanup (values omitted).",
+          "env cleanup"
+        );
+      }
+    }
+    throw error;
+  }
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
   }
@@ -4958,6 +4765,30 @@ async function maybeUntrackGeneratedFiles(opts: {
     );
   }
   note(notes.join("\n"), "generated files");
+}
+
+/**
+ * `hack doctor --fix` step: applies the "secrets hygiene" fixes and prints
+ * each change. Safe by construction (modes, ignore entries, Hack's own
+ * leftovers), so it needs no confirmation of its own.
+ */
+async function maybeFixSecretsHygiene(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const findings = await inspectSecretsHygiene(
+    await resolveSecretsHygieneScope(opts)
+  );
+  if (!findings.some((finding) => finding.fix !== null)) {
+    return;
+  }
+  const lines: string[] = [];
+  await applySecretsHygieneFixes({
+    findings,
+    report: (line) => lines.push(line),
+    // Removals check the configuration as it is then, not as inspected.
+    currentScope: () => resolveSecretsHygieneScope({ ...opts, strict: true }),
+  });
+  note(lines.join("\n"), SECRETS_HYGIENE_CHECK);
 }
 
 /**
@@ -5923,6 +5754,7 @@ async function renderRecoveryGuidance(
   const hasActions =
     guidance.temporaryBreakage.length > 0 ||
     guidance.configurationRepair.length > 0 ||
+    (guidance.choices?.length ?? 0) > 0 ||
     guidance.followUp.length > 0;
 
   if (!hasActions) {

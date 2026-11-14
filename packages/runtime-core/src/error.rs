@@ -130,11 +130,23 @@ pub struct PlanChangeDiagnostic {
     pub field: PlanChangeField,
 }
 
+/// Only the public reviewed port of an unhealthy inferred probe. No path,
+/// response, other configuration or application output crosses this boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteProbeDiagnostic {
+    pub version: u8,
+    pub port: u16,
+}
+
 /// Value-free refusal locations, boxed together so every
 /// `Result<_, CandidateError>` stays small; serialized flat as
-/// `process_refusals` and `plan_change`.
+/// `process_refusals`, `plan_change` and `route_probe`.
 #[derive(Debug, Default, Serialize)]
 pub struct RefusalDiagnostics {
+    /// Value-free durable interactive-session UUID, never argv or environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// Every service whose selected process a private wrapper refused, found in
     /// one pass before any runtime state is reserved.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,6 +154,8 @@ pub struct RefusalDiagnostics {
     /// Value-free location of a refused retained-run edit; see [`PlanChangeDiagnostic`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_change: Option<PlanChangeDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_probe: Option<RouteProbeDiagnostic>,
 }
 
 /// Closed diagnostic vocabulary for the read-only log follower. No stream bytes.
@@ -190,6 +204,24 @@ pub struct CandidateError {
 }
 
 impl CandidateError {
+    pub fn with_session(mut self, session: &str) -> Self {
+        // This file is also compiled by the guest, which has no host provider.
+        if session.len() == 36
+            && session.bytes().enumerate().all(|(i, c)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    c == b'-'
+                } else {
+                    c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
+                }
+            })
+        {
+            self.refusals.get_or_insert_default().session = Some(session.into());
+        }
+        self
+    }
+    pub fn session(&self) -> Option<&str> {
+        self.refusals.as_ref()?.session.as_deref()
+    }
     pub fn new(code: &'static str, message: impl Into<ErrorMessage>) -> Self {
         let message = message.into();
         Self {
@@ -229,6 +261,12 @@ impl CandidateError {
             service: service.to_owned(),
             field,
         });
+        self
+    }
+
+    pub fn with_route_probe(mut self, port: u16) -> Self {
+        self.refusals.get_or_insert_default().route_probe =
+            Some(RouteProbeDiagnostic { version: 1, port });
         self
     }
 

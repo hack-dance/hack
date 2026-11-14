@@ -266,16 +266,20 @@ fn operation_lease<T>(
     deadline: Option<Instant>,
     verify: impl FnOnce() -> Result<T, CandidateError>,
 ) -> Result<(state::Lock, T), CandidateError> {
+    let mut holder = None;
     let lock = loop {
         if deadline.is_some_and(|limit| Instant::now() >= limit) {
-            return Err(CandidateError::new(
-                "provider_busy",
-                "Provider lease acquisition deadline expired; no operation was admitted.",
-            ));
+            return Err(holder.unwrap_or_else(|| {
+                CandidateError::new(
+                    "provider_busy",
+                    "Provider lease acquisition deadline expired; no operation was admitted.",
+                )
+            }));
         }
         match state::Lock::acquire(root) {
             Ok(lock) => break lock,
             Err(error) if error.code == "provider_busy" && deadline.is_some() => {
+                holder = Some(error);
                 let remaining = deadline
                     .expect("bounded acquisition")
                     .saturating_duration_since(Instant::now());
@@ -289,14 +293,14 @@ fn operation_lease<T>(
 }
 
 /// How long owned cleanup and recovery wait for a provider lease that another operation
-/// holds, such as the `graph inspect` behind a polling `hack ps`. Acquisition admits nothing,
+/// holds, such as a finite `graph inspect`. Acquisition admits nothing,
 /// and a foreground owner that gives up its cleanup exits with its publication and services
 /// still bound, so this waits longer than startup does.
 #[cfg(target_os = "macos")]
 pub(super) const OWNED_CLEANUP_LEASE_WAIT: Duration = Duration::from_secs(30);
 
 /// How long ordinary startup waits for a provider lease that another operation holds, such as
-/// the `graph inspect` behind `hack ps`.
+/// a finite `graph inspect` (presentation `ps` takes no provider lease).
 pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 
 /// Startup's provider lease. Everything `start_pool` does before taking it is read-only
@@ -327,7 +331,7 @@ pub(super) struct ObservedGuest<'a> {
 }
 
 impl<'a> ObservedGuest<'a> {
-    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+    #[cfg(target_os = "macos")]
     pub(super) fn boot_id(&self) -> Result<&str, CandidateError> {
         self.owner.guest_boot_id.as_deref().ok_or_else(|| {
             CandidateError::new("runtime_changed", "Observed guest boot is unavailable.")
@@ -1604,7 +1608,7 @@ fn start_pool(
         if cleanup.is_ok() {
             phase(candidate, &mut owner, "failed-boot-stopped")?;
         }
-        cleanup?;
+        cleanup.map_err(failed_boot_stop_error)?;
     }
     result
 }
@@ -1694,20 +1698,81 @@ fn verify_disk_allocation(
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "lifecycle/boot_sequence_tests.rs"]
+mod boot_sequence_tests;
+
+fn failed_boot_stop_error(failure: CandidateError) -> CandidateError {
+    CandidateError::new(
+        failure.code,
+        "Failed-boot provider cleanup could not be confirmed. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+    )
+}
+
 fn finish_boot(
     candidate: &Candidate,
     owner: &mut Owner,
     previous_boot: Option<&str>,
     lock: &state::Lock,
 ) -> Result<RuntimeStatus, CandidateError> {
-    // Before any disk is adopted: a refusal here takes the caller's failed-boot path.
-    verify_templates(
-        candidate,
+    finish_boot_with(
         owner,
-        lock,
-        super::disk_template::Stage::AfterFirstStart,
-    )?;
-    audit_boot(candidate, owner)?;
+        |owner| {
+            verify_templates(
+                candidate,
+                owner,
+                lock,
+                super::disk_template::Stage::AfterFirstStart,
+            )?;
+            owner
+                .application_bridge
+                .map(|bridge| {
+                    owner
+                        .real_data_dir(candidate)
+                        .map(|directory| (directory, bridge))
+                })
+                .transpose()
+        },
+        |owner| verify_live(candidate, owner),
+        |owner| audit_boot(candidate, owner),
+        |owner| adopt_boot(candidate, owner, previous_boot, lock),
+        &process::MonotonicClock::new(),
+    )
+}
+
+/// Fresh boot's ordering boundary. Only effectful host/guest operations are
+/// injected: the real complete-set socket wait always precedes audit/adoption.
+fn finish_boot_with<S, T>(
+    owner: &mut S,
+    prepare: impl FnOnce(
+        &S,
+    ) -> Result<
+        Option<(std::path::PathBuf, super::bridge::BridgeIntent)>,
+        CandidateError,
+    >,
+    mut verify_provider: impl FnMut(&S) -> Result<(), CandidateError>,
+    audit: impl FnOnce(&S) -> Result<(), CandidateError>,
+    adopt: impl FnOnce(&mut S) -> Result<T, CandidateError>,
+    clock: &impl process::Clock,
+) -> Result<T, CandidateError> {
+    // Before any disk is adopted: a refusal here takes the caller's failed-boot path.
+    let bridge = prepare(owner)?;
+    // The provider's agent-ready signal can precede expose-thread socket binds.
+    // Wait before adoption, without weakening the immediate audit used by
+    // running-pool commands. Failure keeps the existing verified-stop path.
+    if let Some((directory, bridge)) = bridge {
+        super::bridge::wait_for_sockets(&directory, bridge, || verify_provider(owner), clock)?;
+    }
+    audit(owner)?;
+    adopt(owner)
+}
+
+fn adopt_boot(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    previous_boot: Option<&str>,
+    lock: &state::Lock,
+) -> Result<RuntimeStatus, CandidateError> {
     let dir = owner.real_data_dir(candidate)?;
     let storage = identity::disk(&dir.join("storage.raw"))?;
     let overlay = identity::disk(&dir.join("overlay.raw"))?;
@@ -2661,6 +2726,8 @@ fn finish_absent_locked(
             .sync_all()
             .map_err(io)?;
     }
+    #[cfg(target_os = "macos")]
+    super::interactive_session::after_boot_stopped(candidate, owner);
     phase(candidate, owner, value)
 }
 

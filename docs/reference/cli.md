@@ -1294,6 +1294,7 @@ hack global status [options]
 | Option | Description |
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
+| `--observe` | Read only: never start Docker, a container or hackd; unknown parts say unknown (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1535,6 +1536,27 @@ hack projects prune [options]
 
 
 ## Diagnostics
+
+## `hack exec-sessions`
+
+List retained native interactive exec sessions in this native home
+
+### Usage
+
+```bash
+hack exec-sessions [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--reconcile` | Retire only sessions with proven exit, container absence or a stopped boot |
+| `--json` | Print value-free session evidence as JSON |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
 
 ## `hack log-pipe`
 
@@ -1839,6 +1861,146 @@ Notes:
 | `--check` | Check for updates (do not install) |
 | `--yes` | Apply update without prompting |
 | `--tag <tag>` | Update to a specific release tag (e.g. v1.4.0) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack upgrade`
+
+Guided upgrade: check, apply, snapshot and roll back
+
+### Usage
+
+```bash
+hack upgrade <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack upgrade check` | Check this machine and every registered project for the upgrade (read-only) |
+| `hack upgrade apply` | Run the plan's apply steps for every checkout (snapshot and journal first) |
+| `hack upgrade snapshot` | Keep a private copy of the files the upgrade changes |
+| `hack upgrade rollback` | Put back the files kept by an upgrade snapshot |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade check`
+
+Check this machine and every registered project for the upgrade (read-only)
+
+### Usage
+
+```bash
+hack upgrade check [options]
+```
+
+Reads the installed versions, the daemon's service, the projects registry (dead entries apart
+from unreadable ones), Hack's global services, proxy ports and DNS, the global secret store, and
+for each live project its env format and key, tracked files, ignore rules, agent integrations
+and (Apple Silicon) native preflight. Prints a one-screen summary, the projects with findings
+(worktrees folded under their project) and a plan with one step per kind of change, then the
+next command. Changes nothing and prints no value. Exits 1 when something blocks the upgrade.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--verbose` | Also list every checkout's findings and the dead registry entries (--json always has everything) |
+| `--all` | Same as --verbose |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade apply`
+
+Run the plan's apply steps for every checkout (snapshot and journal first)
+
+### Usage
+
+```bash
+hack upgrade apply [options]
+```
+
+Checks first, then runs the plan steps marked (apply) for every checkout they cover: refreshing
+outdated .hack/.gitignore files and removing stale standalone agent files the hack plugin replaces
+(each removal covered by the same snapshot). Before changing anything it keeps an upgrade
+snapshot and writes a journal beside it with the snapshot's coverage and gaps and each checkout's
+outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback
+command. --dry-run lists what would change. Exits 1 when anything selected was not done.
+After interruption, --resume <manifest> reuses that run's selection and snapshot; unexpected edits refuse.
+Other-volume checkouts are skipped before writing. Select one project with --snapshot-root on its volume
+to keep recovery bytes in an explicit private directory outside every Git working tree.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--only <fix>` | Run only this plan step: ignore-rules or agent-integrations (comma-separated for both) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--dry-run` | List what would change and change nothing |
+| `--resume <manifest>` | Resume the apply journal beside this explicit snapshot manifest |
+| `--snapshot-root <directory>` | Keep recovery bytes in this private directory outside Git, on the selected targets' filesystem |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade snapshot`
+
+Keep a private copy of the files the upgrade changes
+
+### Usage
+
+```bash
+hack upgrade snapshot [options]
+```
+
+Copies the global Hack config, the projects registry, the encrypted secret store and its key
+(when used), and each live project's .hack config, env files, env layers, .hack/.gitignore and
+env key files into a private directory under ~/.hack/upgrade/snapshots (0700, files 0600).
+Prints the rollback command. The manifest records paths, sizes, modes and digests, never values.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade rollback`
+
+Put back the files kept by an upgrade snapshot
+
+### Usage
+
+```bash
+hack upgrade rollback [options]
+```
+
+Restores each file in the manifest with its exact bytes and mode. A file that changed since the
+snapshot (or since the step that recorded it) is left as it is unless --overwrite is passed;
+whatever a restore replaces or removes is kept in the snapshot directory, never deleted.
+Without --rollback-manifest, lists the snapshots and changes nothing.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--rollback-manifest <manifest>` | The snapshot manifest to restore (from hack upgrade snapshot) |
+| `--overwrite` | Also restore files that changed since the snapshot (the current copies are kept in the snapshot) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2338,6 +2500,7 @@ hack secrets <subcommand> [options]
 | `hack secrets set [name]` | Store a secret |
 | `hack secrets get [name]` | Print a secret (exit 1 if missing) |
 | `hack secrets delete [name]` | Delete a stored secret |
+| `hack secrets retire-store` | Move an encrypted secret store whose key is gone aside (reversible) |
 
 ### Options
 
@@ -2423,6 +2586,37 @@ the deletion is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
 | --- | --- |
 | `--service <service>` | Override Bun.secrets service name (default: hack-cli) |
 | `--yes` | Confirm the deletion without prompting (required without a TTY or with HACK_NO_INTERACTIVE) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack secrets retire-store`
+
+Move an encrypted secret store whose key is gone aside (reversible)
+
+### Usage
+
+```bash
+hack secrets retire-store [options]
+```
+
+For an encrypted_file (or cloud shim) store that hack doctor reports with a missing or wrong key.
+Moves the store into a new directory <store>.retired-<UTC time>/ beside it: nothing is deleted, read or printed,
+and the key file is left alone. It prints how to put the store back. The store is the one this project
+selects (--path or the current directory), or the global one outside a project. Refused for a store that
+opens with the key in use, that another registered project's key still opens, or that is unreadable for
+another reason. HACK_SECRETS_FILE_KEY set in another shell cannot be inspected, so retiring needs --allow-unchecked:
+pass it once you have confirmed no shell for a project that selects the store sets it (it also covers registered
+projects that could not be checked). Without a TTY (or with
+HACK_NO_INTERACTIVE / --no-interactive) it is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--yes` | Confirm moving the store aside without prompting (required without a TTY or with HACK_NO_INTERACTIVE) |
+| `--allow-unchecked` | Accept what cannot be checked: a HACK_SECRETS_FILE_KEY set in another shell for a project that selects the store, and registered projects that could not be checked. Retiring needs it; a key known to open the store still refuses |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

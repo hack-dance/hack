@@ -1,7 +1,12 @@
 import { noteNativeExitConfirmed } from "../lib/background-command/native-exit.ts";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
+import {
+  nativeInteractiveExec,
+  nativeInteractiveRequested,
+} from "./native-interactive-exec.ts";
 import { refreshNativeProjectDependencies } from "./native-project-dependency-refresh.ts";
 import { nativeProjectPs } from "./native-project-observe.ts";
 import type { NativeProjectRunScope } from "./native-project-run.ts";
@@ -13,7 +18,6 @@ import {
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
-const SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
 function refused(): Error {
   return new ClosedCliError(
     "Native exec identity or response is unconfirmed; command effects may have occurred. No request was replayed."
@@ -84,7 +88,7 @@ async function freshDelivery(opts: {
     throw refused();
   }
   if (Object.keys(values).length === 0) {
-    return { payload: undefined, extra };
+    return { payload: undefined, extra, generation: selected.generation };
   }
   const payload = Buffer.from(
     JSON.stringify({
@@ -104,7 +108,7 @@ async function freshDelivery(opts: {
     selected.generation,
     "--environment-stdin"
   );
-  return { payload, extra };
+  return { payload, extra, generation: selected.generation };
 }
 /** One bounded noninteractive command; fresh values use private stdin when a Compose source is supplied. */
 export async function nativeProjectExec(opts: {
@@ -116,20 +120,7 @@ export async function nativeProjectExec(opts: {
   readonly composeFile?: string;
   readonly invoke?: typeof invokeNativeRuntime;
 }) {
-  if (
-    !SERVICE.test(opts.service) ||
-    opts.argv.length < 1 ||
-    opts.argv.length > 256 ||
-    !opts.argv[0] ||
-    opts.argv.some(
-      (arg) => arg.includes("\0") || Buffer.byteLength(arg) > 16_384
-    ) ||
-    opts.argv.reduce((n, arg) => n + Buffer.byteLength(arg), 0) > 65_536 ||
-    (opts.workdir !== undefined &&
-      (!opts.workdir.startsWith("/") ||
-        opts.workdir.includes("\0") ||
-        Buffer.byteLength(opts.workdir) > 4096))
-  ) {
+  if (!nativeAuthoredExecOptions(opts.service, opts.argv, opts.workdir)) {
     throw new ClosedCliError(
       "Native exec requires one service and bounded command arguments with an optional absolute workdir."
     );
@@ -172,14 +163,42 @@ export async function nativeProjectExec(opts: {
     throw refused();
   }
   const invoke = opts.invoke ?? invokeNativeRuntime;
-  const { payload, extra } = opts.composeFile
+  const { payload, extra, generation } = opts.composeFile
     ? await freshDelivery({
         ...opts,
         run: before.run,
         container: service.container,
         composeFile: opts.composeFile,
       })
-    : { payload: undefined, extra: [] };
+    : { payload: undefined, extra: [], generation: undefined };
+  if (nativeInteractiveRequested()) {
+    try {
+      const exitCode = await nativeInteractiveExec({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        branch: opts.scope.branch,
+        run: before.run,
+        owner: refreshed.mapping.owner,
+        plan: refreshed.mapping.planId,
+        namespace: refreshed.mapping.namespace,
+        service: opts.service,
+        command: opts.argv,
+        workdir: opts.workdir,
+        native: false,
+        payload,
+        expectedContainer: generation ? service.container : undefined,
+        expectedGeneration: generation,
+      });
+      return {
+        exitCode,
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+        truncated: false,
+      };
+    } finally {
+      payload?.fill(0);
+    }
+  }
   let value: unknown;
   try {
     value = await invoke({

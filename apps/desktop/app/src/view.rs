@@ -21,6 +21,7 @@ use gpui_kit::{
     AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, SharedString,
     Styled, Window, div, prelude::*, px,
 };
+use hack_desktop_core::daemon_state::{DaemonAction, DaemonModel, always_on};
 use hack_desktop_core::models::LogEntry;
 use hack_desktop_core::source::{ActionOutcome, Source};
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
@@ -31,6 +32,9 @@ const TAIL_LINES: u32 = 20;
 
 pub struct HackApp {
     model: AppModel,
+    daemon: DaemonModel,
+    daemon_epoch: u64,
+    daemon_last_read: Option<std::time::Instant>,
     source: Arc<dyn Source>,
     tab: usize,
     tail: Result<Vec<LogEntry>, String>,
@@ -46,6 +50,9 @@ impl HackApp {
     pub fn new(source: Arc<dyn Source>, live: bool, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             model: AppModel::new(),
+            daemon: DaemonModel::default(),
+            daemon_epoch: 0,
+            daemon_last_read: None,
             source,
             tab: 0,
             tail: Ok(Vec::new()),
@@ -63,6 +70,7 @@ impl HackApp {
 
     /// Synchronous refresh, for fixtures and screenshots.
     pub fn refresh_now(&mut self) {
+        self.daemon.observed = self.source.daemon_observation();
         let snap = self.source.snapshot();
         self.model.apply(Event::Refreshed(snap));
         self.tail = self.selected_root().map_or_else(
@@ -105,9 +113,37 @@ impl HackApp {
                         async move { source.snapshot() }
                     })
                     .await;
+                let daemon_epoch = this
+                    .update(cx, |this, _| {
+                        (this.daemon.busy.is_none()
+                            && this
+                                .daemon_last_read
+                                .is_none_or(|last| last.elapsed() >= Duration::from_secs(10)))
+                        .then_some(this.daemon_epoch)
+                    })
+                    .ok()
+                    .flatten();
+                let daemon = if let Some(epoch) = daemon_epoch {
+                    let source = source.clone();
+                    Some((
+                        epoch,
+                        cx.background_executor()
+                            .spawn(async move { source.daemon_observation() })
+                            .await,
+                    ))
+                } else {
+                    None
+                };
                 let root = this
                     .update(cx, |this, cx| {
                         this.model.apply(Event::Refreshed(snap));
+                        if this.daemon.busy.is_none()
+                            && let Some((epoch, o)) = daemon
+                            && epoch == this.daemon_epoch
+                        {
+                            this.daemon.observed = o;
+                            this.daemon_last_read = Some(std::time::Instant::now());
+                        }
                         cx.notify();
                         this.follow.then(|| this.selected_root()).flatten()
                     })
@@ -142,7 +178,7 @@ impl HackApp {
         let Some(root) = row.repo_root.clone().map(PathBuf::from) else {
             return;
         };
-        if !self.model.can_start(&project) {
+        if self.daemon.observed.cli_missing || !self.model.can_start(&project) {
             return;
         }
         self.model.apply(Event::ActionStarted {
@@ -177,6 +213,85 @@ impl HackApp {
             });
         })
         .detach();
+    }
+
+    fn run_daemon_action(&mut self, action: DaemonAction, cx: &mut Context<Self>) {
+        if !self.live || !self.daemon.begin(action) {
+            return;
+        }
+        self.daemon_epoch += 1;
+        cx.notify();
+        let source = self.source.clone();
+        cx.spawn(async move |this, cx| {
+            let action_source = source.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { action_source.daemon_action(action) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon.finished(&result);
+                cx.notify();
+            });
+            // This read starts only after the action process and output have settled.
+            let fresh = cx
+                .background_executor()
+                .spawn(async move { source.daemon_observation() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon.refreshed(fresh);
+                this.daemon_last_read = Some(std::time::Instant::now());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn daemon_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let mut buttons = h_flex().gap_2();
+        for action in self.daemon.observed.actions() {
+            buttons = buttons.child(
+                Button::new(action.verb())
+                    .label(action.label())
+                    .small()
+                    .outline()
+                    .disabled(!self.live || self.daemon.busy.is_some())
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.run_daemon_action(action, cx)),
+                    ),
+            );
+        }
+        v_flex()
+            .px_5()
+            .py_2()
+            .gap_1()
+            .border_b_1()
+            .border_color(t.border)
+            .text_sm()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(self.daemon.observed.label())
+                    .child(div().flex_1())
+                    .child(buttons),
+            )
+            .children(self.daemon.busy.map(|a| {
+                div()
+                    .text_color(t.info)
+                    .child(format!("{}… checking fresh status after exit", a.label()))
+            }))
+            .children(
+                self.daemon
+                    .observed
+                    .detail()
+                    .map(|s| div().text_xs().text_color(t.muted_foreground).child(s)),
+            )
+            .children(self.daemon.action_error.clone().map(|e| {
+                div()
+                    .text_xs()
+                    .text_color(t.danger)
+                    .child(format!("Last daemon action failed: {e}"))
+            }))
     }
 
     fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
@@ -349,6 +464,14 @@ impl HackApp {
         let t = cx.theme().clone();
         let mut col = v_flex();
         for b in &list.banners {
+            if matches!(
+                b,
+                hack_desktop_core::viewmodel::Banner::DaemonOff
+                    | hack_desktop_core::viewmodel::Banner::DaemonMismatch { .. }
+            ) {
+                continue;
+            }
+
             col = col.child(
                 div()
                     .px_4()
@@ -373,7 +496,7 @@ impl HackApp {
             let mut b = Button::new(a.label())
                 .label(a.label())
                 .small()
-                .disabled(d.busy);
+                .disabled(d.busy || self.daemon.observed.cli_missing);
             b = match a {
                 Action::Start => b.primary(),
                 Action::Stop => b.outline(),
@@ -419,13 +542,41 @@ impl HackApp {
                     .child(div().flex_1())
                     .child(
                         Switch::new("always-on")
-                            .label("Always on")
+                            .label(
+                                if self
+                                    .model
+                                    .selected_row()
+                                    .and_then(|r| r.autostart.as_ref())
+                                    .and_then(|a| a.enabled)
+                                    .is_none()
+                                {
+                                    "Always on · unknown"
+                                } else {
+                                    "Always on"
+                                },
+                            )
                             .checked(d.always_on)
                             .small()
                             .disabled(true)
-                            .tooltip("Needs hack autostart (HACK-2213)"),
+                            .tooltip("Read-only: needs R12a/R12b"),
                     ),
             )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(t.muted_foreground)
+                    .child(always_on(
+                        self.model.selected_row().and_then(|r| r.autostart.as_ref()),
+                        self.model.always_on_global(),
+                        &self.daemon.observed,
+                    )),
+            )
+            .children(self.source.always_on_error().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(t.danger)
+                    .child(format!("Last always-on command failed: {error}"))
+            }))
             .children(reason_line(&d.state, d.last_error.as_deref(), cx))
             .children(
                 self.slow_action_warning(&d.name)
@@ -602,22 +753,7 @@ impl HackApp {
         } else {
             ("Docker ok", t.success)
         };
-        let daemon = if list
-            .banners
-            .iter()
-            .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::DaemonOff))
-        {
-            ("hackd off", t.muted_foreground)
-        } else if list.banners.iter().any(|b| {
-            matches!(
-                b,
-                hack_desktop_core::viewmodel::Banner::DaemonMismatch { .. }
-            )
-        }) {
-            ("hackd version mismatch", t.warning)
-        } else {
-            ("hackd on", t.success)
-        };
+        let daemon = (self.daemon.observed.label(), t.muted_foreground);
         h_flex()
             .h(px(26.))
             .px_3()
@@ -780,6 +916,7 @@ impl Render for HackApp {
                             .h_full()
                             .min_w_0()
                             .child(self.banners(&list, cx))
+                            .child(self.daemon_panel(cx))
                             .child(main),
                     ),
             )

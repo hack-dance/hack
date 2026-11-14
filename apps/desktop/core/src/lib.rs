@@ -17,3 +17,5 @@ pub mod runner;
 pub mod source;
 pub mod state;
 pub mod viewmodel;
+
+pub mod daemon_state;

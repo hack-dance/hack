@@ -14,7 +14,7 @@ use hack_desktop_core::fixtures::{self, Fixture};
 
 use crate::view::HackApp;
 
-pub fn run(dir: &Path) {
+pub fn run(dir: &Path, selected: Option<Fixture>) {
     std::fs::create_dir_all(dir).expect("create screenshot dir");
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
@@ -23,7 +23,10 @@ pub fn run(dir: &Path) {
     );
     cx.update(gpui_kit::init);
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
-        for f in Fixture::ALL {
+        for f in Fixture::ALL
+            .into_iter()
+            .filter(|f| selected.is_none_or(|s| s == *f))
+        {
             cx.update(|cx| Theme::change(mode, None, cx));
             let opts = WindowOptions {
                 focus: false,

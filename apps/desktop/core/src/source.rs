@@ -92,6 +92,22 @@ pub trait Source: Send + Sync {
         action: Action,
     ) -> Result<ActionOutcome, SourceError>;
 
+    /// Session error fixture; no local always-on policy is inferred.
+    fn always_on_error(&self) -> Option<String> {
+        None
+    }
+
+    /// Observe daemon state without starting anything.
+    fn daemon_observation(&self) -> crate::daemon_state::Observation {
+        crate::daemon_state::Observation::default()
+    }
+    /// Explicit non-admin action; no terminal adapter is involved.
+    /// # Errors
+    /// CLI missing or command failure.
+    fn daemon_action(&self, _action: crate::daemon_state::DaemonAction) -> Result<(), RunError> {
+        Err(RunError::NotFound)
+    }
+
     /// Last log lines for a project (no follow).
     ///
     /// # Errors
@@ -182,6 +198,13 @@ impl Source for LiveSource {
             daemon,
             doctor: None,
         })
+    }
+
+    fn daemon_observation(&self) -> crate::daemon_state::Observation {
+        crate::daemon_state::observe(&self.runner, self.daemon.as_ref())
+    }
+    fn daemon_action(&self, action: crate::daemon_state::DaemonAction) -> Result<(), RunError> {
+        crate::daemon_state::act(&self.runner, action)
     }
 
     fn act(
@@ -396,6 +419,15 @@ pub struct FixtureSource(pub Fixture);
 impl Source for FixtureSource {
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
+    }
+
+    fn always_on_error(&self) -> Option<String> {
+        (self.0 == Fixture::AlwaysCommandFailed)
+            .then(|| "E_COMMAND_FAILED (fixture; observed switch retained)".into())
+    }
+
+    fn daemon_observation(&self) -> crate::daemon_state::Observation {
+        fixtures::daemon_observation(self.0)
     }
 
     fn act(

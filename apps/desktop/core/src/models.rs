@@ -30,6 +30,7 @@ pub struct ProjectsPayload {
     pub runtime_error: Option<String>,
     #[serde(deserialize_with = "null_default")]
     pub projects: Vec<ProjectRow>,
+    pub autostart_global: Option<AutostartGlobal>,
 }
 
 impl ProjectsPayload {
@@ -195,7 +196,8 @@ impl Container {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Autostart {
-    pub enabled: bool,
+    pub enabled: Option<bool>,
+    pub max_failures: Option<u32>,
     /// `off | on | paused | starting | needs_attention`.
     #[serde(deserialize_with = "null_default")]
     pub state: String,
@@ -206,9 +208,9 @@ pub struct Autostart {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AutostartFailures {
-    pub count: u32,
+    pub count: Option<u32>,
     pub last_at: Option<String>,
-    pub failed_services: Vec<String>,
+    pub failed_services: Option<Vec<String>>,
     pub last_error_code: Option<String>,
 }
 
@@ -231,10 +233,10 @@ pub struct DaemonStatus {
     /// `running | starting | incompatible | stale | stopped`.
     #[serde(deserialize_with = "null_default")]
     pub status: String,
-    pub running: bool,
-    pub api_ok: bool,
+    pub running: Option<bool>,
+    pub api_ok: Option<bool>,
     pub api_compatible: Option<bool>,
-    pub stale: bool,
+    pub stale: Option<bool>,
     pub stale_reason: Option<String>,
     pub issue: Option<String>,
     pub next_step: Option<String>,
@@ -247,10 +249,12 @@ pub struct DaemonStatus {
 pub struct DaemonService {
     /// `launchd | systemd`.
     pub manager: Option<String>,
-    pub available: bool,
-    pub installed: bool,
-    pub enabled: bool,
-    pub active: bool,
+    pub available: Option<bool>,
+    pub installed: Option<bool>,
+    pub enabled: Option<bool>,
+    pub active: Option<bool>,
+    pub unit_stale: Option<bool>,
+    pub unit_stale_reason: Option<String>,
     pub summary: Option<String>,
     pub next_step: Option<String>,
 }
@@ -361,6 +365,45 @@ impl CliError {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+/// Proposed R12b metadata. Missing fields remain unknown.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AutostartGlobal {
+    pub paused: Option<bool>,
+    pub service_ready: Option<bool>,
+    pub login_run: Option<LoginRun>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct LoginRun {
+    pub in_progress: Option<bool>,
+    pub started_at: Option<String>,
+    pub pending: Option<Vec<String>>,
+    pub started: Option<Vec<String>>,
+    pub failed: Option<Vec<String>>,
+}
+
+impl DaemonStatus {
+    /// Require an explicit observation, not an empty object or an envelope.
+    /// Missing service installation metadata stays unknown.
+    /// # Errors
+    /// A malformed or contradictory observation.
+    pub fn from_value(value: serde_json::Value) -> Result<Self, String> {
+        let status: Self = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        if status.status.is_empty() || status.running.is_none() {
+            return Err("daemon status requires status and running".into());
+        }
+        if (status.status == "running" && status.running != Some(true))
+            || (matches!(status.status.as_str(), "stopped" | "stale")
+                && status.running != Some(false))
+        {
+            return Err("contradictory daemon observation".into());
+        }
+        Ok(status)
     }
 }
 

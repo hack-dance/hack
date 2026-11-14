@@ -93,7 +93,14 @@ impl Fixture {
         let mut child = command(&self.root, "stop").spawn().unwrap();
         send(child.stdin.as_mut().unwrap(), &self.control(TOKEN));
         drop(child.stdin.take());
-        assert!(wait(&mut child, TIMEOUT).success(), "owned stop failed");
+        let status = wait(&mut child, TIMEOUT);
+        if !status.success() {
+            // Receipts contain only identity/phase metadata, never argv/env.
+            // Read after the same exit deadline so diagnostic collection cannot
+            // change stop admission or hide a resumed-guard timing failure.
+            let receipt = receive(child.stdout.as_mut().unwrap());
+            panic!("owned stop failed: {receipt}");
+        }
     }
 
     fn state(&self, name: &str) -> Value {
@@ -1031,6 +1038,192 @@ fn dead_guard_with_live_session_recovers_term_then_kill() {
 }
 
 #[test]
+fn guard_lost_mid_stop_keeps_admission_snapshot() {
+    guard_lost_during_stop(Duration::ZERO, false);
+}
+
+#[test]
+fn guard_lost_late_in_stop_gets_full_recovery_deadline() {
+    guard_lost_during_stop(Duration::from_secs(3), false);
+}
+
+#[test]
+fn expired_target_does_not_abandon_other_recovery() {
+    guard_lost_during_stop(Duration::from_secs(3), true);
+}
+
+fn guard_lost_during_stop(delay: Duration, blocked: bool) {
+    let f = Fixture::new();
+    let mut processes = vec![f.process("worker", "wrapper-term-child")];
+    if blocked {
+        processes.push(f.process("blocked", "hold"));
+    }
+    let (mut caller, _) = f.start(processes);
+    let blocked_guard = blocked.then(|| pid(&f.state("blocked"), "guardPid"));
+    if let Some(guard) = blocked_guard {
+        assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
+    }
+    eventually(|| f.root.join("wrapper-child-ready").exists().then_some(()));
+    let state = f.state("worker");
+    let child = eventually(|| {
+        f.log().lines().find_map(|line| {
+            line.split("wrapper-child ")
+                .nth(1)
+                .and_then(|pid| pid.parse::<i32>().ok())
+                .and_then(identity)
+        })
+    });
+    f.owned.borrow_mut().push(child.clone());
+    let mut stop = command(&f.root, "stop").spawn().unwrap();
+    send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    // The guard has acted on this stop once its wrapper is dead. Its five-second
+    // grace leaves time to remove the guard before it can KILL the child.
+    eventually(|| {
+        identity(pid(&state, "commandPid"))
+            .is_none_or(|_| process_is_zombie(pid(&state, "commandPid")))
+            .then_some(())
+    });
+    thread::sleep(delay);
+    let recovery_started = Instant::now();
+    assert_eq!(
+        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+        0
+    );
+    if !blocked {
+        assert!(wait(&mut caller, TIMEOUT).success());
+    }
+    let receipt = receive(stop.stdout.as_mut().unwrap());
+    let stopped = wait(&mut stop, TIMEOUT).success();
+    assert_eq!(stopped, !blocked, "{receipt}");
+    assert_eq!(
+        receipt["outcome"],
+        if blocked { "unknown" } else { "stopped" }
+    );
+    // Scheduling may let the guard itself finish escalation. Either path must
+    // confirm absence; do not mistake test observation latency for grace timing.
+    assert!(recovery_started.elapsed() < TIMEOUT);
+    assert!(identity(child.pid).is_none() || process_is_zombie(child.pid));
+    if let Some(guard) = blocked_guard {
+        assert_eq!(unsafe { libc::kill(guard, libc::SIGCONT) }, 0);
+        f.stop();
+        assert!(wait(&mut caller, TIMEOUT).success());
+    }
+}
+
+#[test]
+fn orphan_recovery_keeps_observed_child_after_term_ends_witness() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "wrapper-term-child")]);
+    f.await_log("fixture-ready");
+    eventually(|| f.root.join("wrapper-child-ready").exists().then_some(()));
+    let state = f.state("worker");
+    let child = eventually(|| {
+        f.log().lines().find_map(|line| {
+            line.split("wrapper-child ")
+                .nth(1)
+                .and_then(|pid| pid.parse::<i32>().ok())
+                .and_then(identity)
+        })
+    });
+    f.owned.borrow_mut().push(child.clone());
+    assert!(child.birth > state["commandStartTime"].as_u64().unwrap());
+    // SAFETY: captured guard belongs to this fixture; command/wrapper survives.
+    assert_eq!(
+        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+        0
+    );
+    assert!(wait(&mut caller, TIMEOUT).success());
+    let start = Instant::now();
+    let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    assert!(wait(&mut stop, TIMEOUT).success());
+    assert_eq!(receipt["outcome"], "stopped");
+    assert!(
+        start.elapsed() >= Duration::from_secs(5),
+        "child did not get a full TERM grace"
+    );
+    assert!(start.elapsed() < Duration::from_secs(7));
+    // A zombie is harmless and may await the host's subreaper; no live member remains.
+    assert!(
+        census()
+            .into_iter()
+            .all(|p| p.session != pid(&state, "guardPid")
+                || identity(p.pid).is_none()
+                || process_is_zombie(p.pid))
+    );
+}
+
+fn process_is_zombie(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.rsplit_once(") ").map(|(_, rest)| rest.starts_with('Z')))
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: native output buffer is writable and exactly sized.
+        let size = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                1,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        size as usize == std::mem::size_of::<libc::proc_bsdinfo>()
+            && unsafe { info.assume_init() }.pbi_status == libc::SZOMB
+    }
+}
+
+#[test]
+fn unreaped_matching_guard_proves_legacy_session_ownership() {
+    let f = Fixture::new();
+    let (caller, _) = f.start(vec![f.process("worker", "hold")]);
+    let mut caller = ForeignChild(caller);
+    f.await_log("fixture-ready");
+    let mut state = f.state("worker");
+    // Keep the parent from reaping its guard, then exercise legacy birth absence.
+    assert_eq!(
+        unsafe { libc::kill(caller.0.id() as i32, libc::SIGSTOP) },
+        0
+    );
+    // SIGSTOP delivery is asynchronous. Observe our own child's stopped
+    // wait status before killing its guard, so it cannot win the reap race.
+    eventually(|| {
+        let mut status = 0;
+        // SAFETY: this is our unreaped child; status is writable for waitpid.
+        let observed = unsafe {
+            libc::waitpid(
+                caller.0.id() as i32,
+                &mut status,
+                libc::WNOHANG | libc::WUNTRACED,
+            )
+        };
+        (observed == caller.0.id() as i32 && libc::WIFSTOPPED(status)).then_some(())
+    });
+    assert_eq!(
+        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+        0
+    );
+    eventually(|| process_is_zombie(pid(&state, "guardPid")).then_some(()));
+    state["commandStartTime"] = Value::Null;
+    fs::write(
+        f.root.join("worker.json"),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    f.stop();
+    assert_eq!(
+        unsafe { libc::kill(caller.0.id() as i32, libc::SIGCONT) },
+        0
+    );
+    assert!(wait(&mut caller.0, TIMEOUT).success());
+}
+
+#[test]
 fn guard_dying_during_stop_gets_a_fresh_authored_term_grace() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![f.process("worker", "ignore-term")]);
@@ -1728,6 +1921,33 @@ fn fixture_process() {
             println!("session-child {child}");
             std::io::stdout().flush().unwrap();
             std::process::exit(0);
+        }
+        "wrapper-term-child" => {
+            // Make the child newer than the command even with Linux clock-tick
+            // resolution, so it cannot accidentally satisfy the old birth bound.
+            thread::sleep(Duration::from_millis(100));
+            // SAFETY: fork child invokes only libc operations and never returns
+            // into Rust/libtest's inherited multithreaded allocator state.
+            let child = unsafe { libc::fork() };
+            assert!(child >= 0);
+            if child == 0 {
+                unsafe {
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    let fd = libc::open(
+                        c"wrapper-child-ready".as_ptr(),
+                        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                        0o600,
+                    );
+                    if fd < 0 {
+                        libc::_exit(98);
+                    }
+                    libc::close(fd);
+                    loop {
+                        libc::pause();
+                    }
+                }
+            }
+            println!("wrapper-child {child}");
         }
         "hold" | "hold-checkpoint" => (),
         _ => std::process::exit(99),

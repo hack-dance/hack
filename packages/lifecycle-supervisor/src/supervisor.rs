@@ -95,8 +95,8 @@ fn dispatch() -> Result<()> {
                     states.push(state);
                 } else if os::recorded_live(&state, false)? {
                     // Old terminal receipts survive renames and new generations.
-                    // Only a kernel census can prove they no longer hold work;
-                    // a persisted terminal phase alone is never sufficient.
+                    // Guard-written terminal phases prove completed retirement;
+                    // non-terminal receipts require native identity evidence.
                     return Err(refused());
                 }
             }
@@ -524,91 +524,153 @@ fn guard_command(
     }
 }
 
+// A live guard owns shutdown even when a complete recovery census is unavailable
+// (for example, a different-UID descendant). Orphans require strict capture.
+fn stop_capture<T>(
+    guard_live: bool,
+    capture: impl FnOnce() -> Result<T>,
+) -> Result<(Option<T>, Option<T>)> {
+    if guard_live {
+        Ok((None, capture().ok()))
+    } else {
+        Ok((Some(capture()?), None))
+    }
+}
+
+fn guard_lost(state: &State) -> Result<bool> {
+    Ok(os::inspect(state.guard_pid)?.is_none_or(|p| p.zombie))
+}
+
+// None transfers to orphan recovery. A census error cannot bypass that transfer
+// when the guard disappears during the census or its witness recheck.
+fn guarded_live(state: &State) -> Result<Option<bool>> {
+    if guard_lost(state)? {
+        return Ok(None);
+    }
+    match os::recorded_live(state, false) {
+        Ok(live) => Ok(Some(live)),
+        Err(_) if guard_lost(state)? => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn stop(states: &[State]) -> Result<()> {
     struct Target {
         state: State,
-        guard_live: bool,
+        recovery: Option<os::Recovery>,
+        admission: Option<os::Recovery>,
         orphan_term: Option<Instant>,
+        finished: bool,
+    }
+    impl Target {
+        fn recover(&mut self) -> Result<()> {
+            // Prefer a fresh census, but retain already-proved identities if
+            // TERM ended the command witness before the guard was lost.
+            let recovery = os::Recovery::capture(&self.state)
+                .or_else(|error| self.admission.take().ok_or(error))?;
+            recovery.signal(libc::SIGTERM)?;
+            self.orphan_term = Some(Instant::now());
+            self.recovery = Some(recovery);
+            Ok(())
+        }
+
+        fn advance(&mut self, start: Instant) -> Result<bool> {
+            if self.recovery.is_none() {
+                match guarded_live(&self.state)? {
+                    None => self.recover()?,
+                    Some(false) => return Ok(false),
+                    Some(true) => {
+                        if start.elapsed() >= GRACE + Duration::from_secs(2) {
+                            return Err(refused());
+                        }
+                        return Ok(true);
+                    }
+                }
+            }
+            let recovery = self.recovery.as_ref().ok_or_else(refused)?;
+            if !recovery.live()? {
+                return Ok(false);
+            }
+            let elapsed = self.orphan_term.ok_or_else(refused)?.elapsed();
+            if elapsed >= GRACE + Duration::from_secs(2) {
+                return Err(refused());
+            }
+            if elapsed >= GRACE {
+                recovery.signal(libc::SIGKILL)?;
+            }
+            Ok(true)
+        }
     }
     let mut active = Vec::new();
-    // Validate every receipt before the first effect. Absence may race a guard's
-    // natural exit; a dead leader still leaves a recoverable recorded session.
+    // Validate admission before effects. Capture while a live guard can still
+    // prove membership, so loss during the later liveness check retains authority.
     for state in states {
-        if !os::recorded_live(state, false)? {
-            continue;
-        }
         let guard_live = match os::inspect(state.guard_pid)? {
             Some(identity) if !identity.zombie => {
-                os::same(state, &identity)?;
+                if let Err(error) = os::same(state, &identity) {
+                    if !os::recorded_live(state, false)? {
+                        continue;
+                    }
+                    return Err(error);
+                }
                 true
             }
             _ => false,
         };
+        let (recovery, admission) = stop_capture(guard_live, || os::Recovery::capture(state))?;
+        match os::recorded_live(state, false) {
+            Ok(false) => continue,
+            Ok(true) => (),
+            Err(_) if guard_lost(state)? && (recovery.is_some() || admission.is_some()) => (),
+            Err(error) => return Err(error),
+        }
         active.push(Target {
             state: state.clone(),
-            guard_live,
+            recovery,
+            admission,
             orphan_term: None,
+            finished: false,
         });
     }
+    let mut failure = None;
     for target in &mut active {
-        let state = &target.state;
-        let result = if target.guard_live {
-            os::signal_guard(state)
-        } else {
-            let result = os::signal_recorded_session(state, libc::SIGTERM);
+        let signalled = if let Some(recovery) = &target.recovery {
             target.orphan_term = Some(Instant::now());
-            result
+            recovery.signal(libc::SIGTERM)
+        } else {
+            match os::signal_guard(&target.state) {
+                Ok(()) => Ok(()),
+                Err(error) => match guarded_live(&target.state) {
+                    Ok(None) => target.recover(),
+                    Ok(Some(false)) => Ok(()),
+                    Ok(Some(true)) => Err(error),
+                    Err(error) => Err(error),
+                },
+            }
         };
-        if let Err(error) = result {
-            if !os::recorded_live(state, false)? {
-                continue;
-            }
-            // Guard death during admission switches to verified session recovery.
-            match os::inspect(state.guard_pid)? {
-                None => {
-                    os::signal_recorded_session(state, libc::SIGTERM)?;
-                    target.orphan_term = Some(Instant::now());
-                }
-                Some(identity) if identity.zombie => {
-                    os::signal_recorded_session(state, libc::SIGTERM)?;
-                    target.orphan_term = Some(Instant::now());
-                }
-                _ => return Err(error),
-            }
+        if let Err(error) = signalled {
+            target.finished = true;
+            failure.get_or_insert(error);
         }
     }
     let start = Instant::now();
-    while start.elapsed() < GRACE + Duration::from_secs(2) {
+    loop {
         let mut live = false;
-        for target in &mut active {
-            let state = &target.state;
-            if !os::recorded_live(state, false)? {
-                continue;
-            }
-            live = true;
-            // Guard death after TERM admission must not skip authored TERM or
-            // borrow the dead guard's grace interval. Late loss may time out as
-            // unknown; it never shortens this recovered session's own grace.
-            let orphan = os::inspect(state.guard_pid)?.is_none_or(|p| p.zombie);
-            if orphan {
-                if target.orphan_term.is_none() {
-                    os::signal_recorded_session(state, libc::SIGTERM)?;
-                    target.orphan_term = Some(Instant::now());
-                }
-                if target
-                    .orphan_term
-                    .is_some_and(|since| since.elapsed() >= GRACE)
-                {
-                    os::signal_recorded_session(state, libc::SIGKILL)?;
+        for target in active.iter_mut().filter(|target| !target.finished) {
+            match target.advance(start) {
+                Ok(true) => live = true,
+                Ok(false) => target.finished = true,
+                Err(error) => {
+                    target.finished = true;
+                    failure.get_or_insert(error);
                 }
             }
         }
         if !live {
-            return Ok(());
+            return failure.map_or(Ok(()), Err);
         }
         thread::sleep(TICK);
     }
-    Err(refused())
 }
 
 pub(crate) fn detach_stdio() -> Result<()> {
@@ -719,6 +781,17 @@ fn sanitize_service(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{incomplete_utf8_tail, sanitize_service};
+
+    #[test]
+    fn live_guard_admission_tolerates_unavailable_recovery_census() {
+        let denied = || Err::<(), _>(std::io::Error::from_raw_os_error(libc::EPERM));
+        let (recovery, admission) = super::stop_capture(true, denied).unwrap();
+        assert!(recovery.is_none() && admission.is_none());
+        assert!(super::stop_capture(false, denied).is_err());
+        let (recovery, admission) = super::stop_capture(true, || Ok(42)).unwrap();
+        assert!(recovery.is_none());
+        assert_eq!(admission, Some(42));
+    }
 
     #[test]
     fn chunk_boundary_retains_only_incomplete_codepoints() {

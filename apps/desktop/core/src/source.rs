@@ -1569,6 +1569,51 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
     }
 
     #[test]
+    fn filtered_docker_preserves_file_only_compose_and_native_warnings() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack("doctor-file-only-coverage", "echo '{}'");
+        let root = hack.parent().unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::copy(&hack, bin.join("docker")).unwrap();
+        std::fs::set_permissions(bin.join("docker"), std::fs::Permissions::from_mode(0o775))
+            .unwrap();
+        let tools = trusted_probe_path(bin.as_os_str()).unwrap();
+        assert!(tools.unchecked.contains("docker"));
+        for native in [false, true] {
+            let checks = vec![
+                crate::models::DoctorCheck { id: "project".into(), status: "ok".into(), detail: format!("Found .hack/ (or legacy .dev/) at {}", root.join(".hack").display()) },
+                crate::models::DoctorCheck { id: "compose networks".into(), status: "warn".into(), detail: "Internal services attached to hack-dev without Caddy labels: worker".into() },
+                crate::models::DoctorCheck { id: "compose backend features".into(), status: "warn".into(), detail: "External network blocks native up; select the Compose backend or documented isolatedNetworks adaptation.".into() },
+            ];
+            let mut run = DoctorRun::project(
+                "fixture",
+                root.to_str().unwrap(),
+                Ok(crate::models::DoctorReport {
+                    checks,
+                    summary: vec![],
+                }),
+            );
+            run.native = native;
+            run.exact_native_root = native;
+            let mut runs = vec![run];
+            let before = crate::doctor::aggregate(&runs);
+            assert_eq!(before.cards().count(), 2);
+            apply_tool_coverage(&mut runs, &tools);
+            let after = crate::doctor::aggregate(&runs);
+            for original in before.cards() {
+                let preserved = after.cards().find(|c| c.id == original.id).unwrap();
+                assert_eq!(
+                    preserved, original,
+                    "warn, ingress/native guidance and any authored recipe must survive filtered Docker"
+                );
+                assert_eq!(preserved.severity, crate::doctor::Severity::Warn);
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn rejected_later_path_directory_cannot_invalidate_selected_tool() {
         use std::os::unix::fs::PermissionsExt;
         let hack = fake_hack("doctor-path-priority", "echo '{}'");

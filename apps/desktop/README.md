@@ -133,7 +133,8 @@ keeps already checked tools and runs Doctor with explicit incomplete coverage;
 only checks dependent on filtered or unsearched Doctor tools become Unknown,
 so those tools cannot look missing or healthy. One coverage card names the
 unchecked tools; independently established checks keep their result. The fixed
-Doctor tool/dependency table excludes unrelated executables. For a scan cutoff
+[Doctor tool/dependency audit](DOCTOR_TOOLS.md) excludes unrelated executables
+and documents actual read calls and file-only exclusions. For a scan cutoff
 or unreadable directory, tools already checked remain available and only
 unsearched Doctor tools receive incomplete coverage.
 A root:admin group-writable `/Applications` or app-bundle target is refused too;

@@ -1,4 +1,5 @@
 //! Fixed read-only Doctor tool dependencies (doctor.ts and its check helpers).
+//! Audit and exclusions: apps/desktop/DOCTOR_TOOLS.md. Only read-path dependencies belong here.
 //! This is coverage attribution, not an executable or plugin discovery framework.
 
 pub(crate) const NAMES: &[&str] = &[
@@ -15,11 +16,13 @@ pub(crate) const NAMES: &[&str] = &[
     "caddy",
     "asdf",
     "git",
-    "dig",
     "security",
     "systemctl",
     "resolvectl",
-    "scutil",
+    "ip",
+    "loginctl",
+    "zellij",
+    "ss",
     "lsof",
     "ps",
 ];
@@ -30,21 +33,20 @@ pub(crate) fn affected(tool: &str, id: &str) -> bool {
     }
     match tool {
         "docker" => {
-            id.starts_with("docker ")
+            matches!(id, "docker compose" | "docker daemon")
                 || id.starts_with("network:")
+                || id.starts_with("dnsmasq.conf:")
+                || (id.starts_with("dns:") && !matches!(id, "dns:hack" | "dns:hack.gy"))
                 || matches!(
                     id,
                     "proxy network"
                         | "proxy ports"
                         | "coredns forwarding"
-                        | "grafana"
                         | "caddy hosts"
                         | "caddy local ca"
-                        | "compose networks"
-                        | "compose backend features"
-                        | "compose env at rest"
                         | "runtime hygiene"
                         | "lifecycle hygiene"
+                        | "worktree instances"
                 )
         }
         "git" => matches!(
@@ -53,31 +55,78 @@ pub(crate) fn affected(tool: &str, id: &str) -> bool {
                 | "worktree keys"
                 | "generated files"
                 | "hack gitignore"
-                | "worktree instances"
                 | "secrets hygiene"
-                | "native source size"
+                | "secret integrity"
+                | "env materialization"
         ),
         // mkcert is only an optional tool-presence check above. Certificate
         // inspection uses Node parsing, Docker and security, never mkcert or openssl.
         "security" => matches!(
             id,
             "host tls trust"
-                | "local ca trust"
                 | "superseded caddy roots"
                 | "native root trust"
-                | "native ca repair"
+                | "native https owner"
+                | "native https route"
         ),
-        "brew" | "dnsmasq" => id.starts_with("dnsmasq") || id == "dnsmasq:53",
-        "dig" | "scutil" | "resolvectl" => {
-            id.starts_with("dns:")
-                || matches!(
-                    id,
-                    "linux dns route" | "native host dns" | "native hack.local route"
-                )
-        }
-        "systemctl" => id == "daemon service" || id == "linux dns route",
-        "tmux" => id == "sessions mux",
-        "ps" | "lsof" => id == "proxy ports" || id == "dnsmasq:53" || id == "native https owner",
+        "brew" => id.starts_with("dnsmasq.conf:") || id == "native hack.local route",
+        "systemctl" => matches!(id, "daemon service" | "linux dns route"),
+        "loginctl" => id == "daemon service",
+        "ip" | "resolvectl" => id == "linux dns route",
+        "tmux" => matches!(
+            id,
+            "sessions mux" | "lifecycle hygiene" | "runtime hygiene" | "worktree instances"
+        ),
+        "zellij" => matches!(
+            id,
+            "lifecycle hygiene" | "runtime hygiene" | "worktree instances"
+        ),
+        "ps" => id == "lifecycle hygiene",
+        // lsof/ss only enrich an already-failed proxy diagnostic. Their absence
+        // is covered by the tool card, never erases the verified port failure.
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_only_checks_never_inherit_path_tool_dependencies() {
+        for tool in NAMES {
+            for id in [
+                "project",
+                "compose networks",
+                "compose backend features",
+                "compose env at rest",
+                "native source size",
+                "resolver:hack.local",
+                "dnsmasq:53",
+                "grafana",
+                "env mode",
+                "env overlay warnings",
+                "global files",
+            ] {
+                assert!(
+                    !affected(tool, id),
+                    "{tool} cannot invalidate file-only/internal observation {id}"
+                );
+            }
+        }
+        for tool in ["dig", "scutil", "openssl"] {
+            assert!(!NAMES.contains(&tool));
+        }
+        for tool in [
+            "mkcert", "caddy", "dnsmasq", "go", "asdf", "bun", "gum", "fzf", "mutagen",
+        ] {
+            assert!(affected(tool, tool));
+            for id in ["caddy local ca", "host tls trust", "native root trust"] {
+                assert!(
+                    !affected(tool, id),
+                    "optional/presence-only {tool} cannot invalidate {id}"
+                );
+            }
+        }
     }
 }

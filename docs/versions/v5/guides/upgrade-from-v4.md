@@ -559,6 +559,10 @@ mode still cannot be combined with `--json`.
 - Migration can repair Compose `env_file` references and legacy config keys,
   but keeps every old contract, dotenv file, store, backend key and store pointer.
   Cleanup never runs as part of apply or Doctor migration.
+  If a contract and env layers already coexist without a journal, removing a
+  legacy Compose input requires the layers to deliver its contract values.
+  Preview and apply refuse missing or changed delivery without writes; keep the
+  legacy inputs and repair the layers before retrying.
 - Env-consuming commands can migrate implicitly. The implicit path keeps the
   legacy files and does not edit Compose, but can rewrite legacy config keys.
   It is still a write. An unfinished apply or rollback blocks env readers until

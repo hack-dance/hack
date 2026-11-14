@@ -111,6 +111,11 @@ When implicit migration retained legacy Compose `env_file` references, a later
 explicit preview or `doctor --migrate-env-config` can offer their repair. This is
 a new journalled phase: completed env layers are not published again, tracked
 Compose edits require fresh consent, and migrated values must still resolve.
+The first explicit migration also checks delivery before removing Compose inputs
+when a contract and env layers already coexist without a journal. Missing,
+changed or unavailable contract values refuse preview and apply without writes;
+keep the legacy inputs and repair the layers before retrying. Implicit migration
+continues to retain those Compose references.
 The Compose before image must be unchanged and covered by the original intact
 snapshot; the same manifest rolls back the whole migration, including this
 later repair. A fresh read revision permits unrelated additions in existing

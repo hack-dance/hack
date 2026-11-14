@@ -238,6 +238,33 @@ for (const location of ["HOME", "HACK_HOME", "missing-child"] as const) {
   }, 45_000);
 }
 
+test("production CLI refuses first Compose repair when pre-existing layers do not deliver legacy contract values", async () => {
+  const project = await fixture();
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  const compose =
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n";
+  const layerPath = join(project.projectDir, "hack.env.default.yaml");
+  const layer =
+    "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n";
+  await writeFile(composePath, compose);
+  await writeFile(layerPath, layer);
+  const before = (await readdir(project.projectDir)).sort();
+  for (const args of [[], ["--apply"]]) {
+    const result = await cli(project.projectRoot, args);
+    expect(result.exitCode).toBe(1);
+    expect(result.envelope.ok).toBe(false);
+    expect(await readFile(composePath, "utf8")).toBe(compose);
+    expect(await readFile(layerPath, "utf8")).toBe(layer);
+    expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+      `TOKEN=${sentinel}\n`
+    );
+    expect((await readdir(project.projectDir)).sort()).toEqual(before);
+    expect(
+      await Bun.file(envMigrationJournalPath(project.projectRoot)).exists()
+    ).toBe(false);
+  }
+});
+
 test("production CLI explicitly repairs Compose after implicit env exec, then rolls the whole migration back", async () => {
   const project = await fixture();
   const composePath = join(project.projectDir, "docker-compose.yml");

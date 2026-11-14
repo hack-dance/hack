@@ -258,6 +258,90 @@ test("an already modern project without legacy inputs previews complete and appl
   expect(await Bun.file(preview.journalPath).exists()).toBe(false);
 });
 
+for (const delivery of [
+  "missing-base",
+  "changed-base",
+  "missing-overlay",
+  "delivered",
+] as const) {
+  test(`first Compose repair verifies existing contract layers (${delivery})`, async () => {
+    const compose = join(project.projectDir, "docker-compose.yml");
+    await writeFile(
+      compose,
+      "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n"
+    );
+    const writeLayer = async (name: string, value: string | null) => {
+      await writeFile(
+        join(project.projectDir, `hack.env.${name}.yaml`),
+        JSON.stringify({
+          version: 1,
+          environment: name,
+          secretsprovider: "project_key",
+          values: { global: value === null ? {} : { TOKEN: value } },
+        })
+      );
+    };
+    await writeLayer(
+      "default",
+      delivery === "missing-base"
+        ? null
+        : delivery === "changed-base"
+          ? QA
+          : SENTINEL
+    );
+    if (delivery !== "missing-overlay") {
+      await writeLayer("qa", QA);
+    }
+    const before = await projectFiles();
+    const path = envMigrationJournalPath(project.projectRoot);
+    if (delivery !== "delivered") {
+      await expect(previewEnvMigration(project)).rejects.toThrow();
+      await expect(
+        applyEnvMigration({
+          project,
+          snapshots: envMigrationSnapshots(),
+          acceptTrackedChanges: true,
+        })
+      ).rejects.toThrow();
+      expect(await projectFiles()).toEqual(before);
+      expect(await Bun.file(path).exists()).toBe(false);
+      // Keeping Compose references is safe even before the layers deliver them.
+      await migrateLegacyEnvForCommand({ ...project, materialize: false });
+      expect(await readFile(compose, "base64")).toBe(before.get(compose));
+      expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+        `TOKEN=${SENTINEL}\n`
+      );
+      return;
+    }
+    const preview = await previewEnvMigration(project);
+    expect(preview.files).toContainEqual(
+      expect.objectContaining({ path: compose, action: "change" })
+    );
+    expect(JSON.stringify(preview)).not.toContain(SENTINEL);
+    const snapshots = envMigrationSnapshots();
+    const applied = await apply({
+      project,
+      snapshots,
+      acceptTrackedChanges: true,
+    });
+    expect(await readFile(compose, "utf8")).not.toContain("env_file");
+    expect(
+      (await resolveProjectEnvConfig({ ...project, envName: null }))?.globalEnv
+        .TOKEN
+    ).toBe(SENTINEL);
+    expect(
+      (await resolveProjectEnvConfig({ ...project, envName: "qa" }))?.globalEnv
+        .TOKEN
+    ).toBe(QA);
+    await rollbackEnvMigration({
+      project,
+      snapshots,
+      manifestPath: applied.manifestPath,
+    });
+    expectRestored(await projectFiles(), before);
+  });
+}
+
 test("preview makes no writes and exactly names what apply publishes; completed retry is a no-op", async () => {
   const before = await projectFiles();
   const preview = await previewEnvMigration(project);

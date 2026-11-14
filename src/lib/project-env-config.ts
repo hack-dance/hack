@@ -6692,7 +6692,10 @@ async function prepareUndeclaredMigration(
 }
 
 async function prepareMigrationCompose(
-  opts: PreparedMigrationProject,
+  opts: PreparedMigrationProject & {
+    readonly hasContract: boolean;
+    readonly existingContractOverlays?: readonly string[];
+  },
   add: AddPreparedMigrationFile
 ): Promise<void> {
   const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
@@ -6701,6 +6704,14 @@ async function prepareMigrationCompose(
     composeFile,
   });
   if (references.length > 0) {
+    // Existing layers are kept, so they must already deliver every contract
+    // value before the first journal can remove its legacy Compose inputs.
+    if (opts.hasContract && opts.existingContractOverlays) {
+      await assertLegacyEnvMigrationDelivery({
+        ...opts,
+        overlayNames: opts.existingContractOverlays,
+      });
+    }
     const parsed = await readComposeFile({ composeFile });
     if (!parsed) {
       throw new ClosedCliError(
@@ -6907,7 +6918,14 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
   }
   const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
   if (opts.repairCompose !== false) {
-    await prepareMigrationCompose(opts, add);
+    await prepareMigrationCompose(
+      {
+        ...opts,
+        hasContract: contract.exists,
+        existingContractOverlays: layersExist ? overlayNames : undefined,
+      },
+      add
+    );
   }
   const composeEnvFileReferences =
     opts.repairCompose === false

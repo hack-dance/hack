@@ -258,6 +258,7 @@ mod tests {
             drop(sibling_listener);
             // The child's Publication::finish already removed its endpoint names.
             // Dispose only this test's now-empty publication directory/lock.
+            // owner-root: deliberate removal
             fs::remove_dir_all(transport::root(&candidate, &run).unwrap()).unwrap();
             fs::remove_dir_all(socket_home).unwrap();
             files.dispose().unwrap();

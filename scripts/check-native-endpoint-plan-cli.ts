@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home.ts";
 
 /** Exercise pure endpoint planning through the relocated CLI and real Git linkage. */
 const root = resolve(import.meta.dir, "..");
@@ -367,11 +368,7 @@ try {
     "actual resolution rejects unbound logical reference"
   );
   await authored(checkout, project);
-  assert(
-    (await readdir(home)).length === 0,
-    "validation and planning leave HOME untouched"
-  );
-  // Lifecycle refusals still append activity; planning itself must stay read-only.
+  await assertNativePlanHome({ home, failedUps: 0 });
   const runtime = await invoke(
     ["up", "web", "--detach"],
     checkout,
@@ -398,11 +395,8 @@ try {
       "no generated runtime state"
     );
   }
-  assert(
-    JSON.stringify(await readdir(home)) === '[".hack"]' &&
-      (await readdir(join(home, ".hack"))).join() === "activity.jsonl",
-    "no registry or runtime home writes beyond lifecycle activity"
-  );
+
+  await assertNativePlanHome({ home, failedUps: 1 });
   process.stdout.write(
     `Relocated native endpoint planning: ${checks} checks passed; no hooks/DNS/trust/runtime effects\n`
   );

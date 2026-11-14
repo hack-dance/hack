@@ -15,13 +15,10 @@ mod screenshots;
 mod view;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
-use hack_desktop_core::daemon::{DaemonClient, default_socket_path};
 use hack_desktop_core::fixtures::{self, Fixture};
-use hack_desktop_core::runner::CliRunner;
 use hack_desktop_core::source::{FixtureSource, LiveSource, Source};
 
 pub(crate) struct Args {
@@ -93,16 +90,7 @@ fn parse_args() -> Args {
 pub(crate) fn source_for(fixture: Option<Fixture>) -> Arc<dyn Source> {
     match fixture {
         Some(f) => Arc::new(FixtureSource(f)),
-        None => {
-            let socket = default_socket_path(
-                std::env::var("HACK_HOME").ok().as_deref(),
-                std::env::var("HOME").ok().as_deref(),
-            );
-            Arc::new(LiveSource {
-                runner: CliRunner::on_path("hack"),
-                daemon: socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
-            })
-        }
+        None => Arc::new(LiveSource::from_env()),
     }
 }
 

@@ -17,6 +17,10 @@ import {
   withPinnedRuntimeBinary,
 } from "./native-authored-runtime-binary.ts";
 import {
+  nativeInteractiveExec,
+  nativeInteractiveRequested,
+} from "./native-interactive-exec.ts";
+import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -136,6 +140,49 @@ export async function nativeAuthoredProjectExec(input: {
     runtime.home !== scope.nativeHome
   ) {
     return refused();
+  }
+  if (nativeInteractiveRequested()) {
+    // Finish the held saved-status observation before attaching. A normal down
+    // may advance these records while the terminal session is still open.
+    const selected = await withStatus(scope, async (saved) => {
+      await saved.assertFresh();
+      const unstarted = unstartedNativeAuthoredProject(saved);
+      if (unstarted) {
+        return unstarted;
+      }
+      return requireReadyServiceReceipt(saved, scope, service) ?? refused();
+    });
+    if (selected instanceof NativeAuthoredProjectNotStartedError) {
+      throw selected;
+    }
+    const container = selected.resources[`container:${service}`]?.id;
+    if (!container) {
+      return refused();
+    }
+    const exitCode = await nativeInteractiveExec({
+      runtime,
+      projectRoot: scope.projectRoot,
+      branch: scope.branch,
+      run: selected.review.provenance.run,
+      owner: selected.owner,
+      plan: selected.review.review_id,
+      namespace: selected.review.provenance.namespace,
+      service,
+      command,
+      workdir,
+      native: true,
+      signal,
+    });
+    return {
+      backend: "native",
+      run: selected.review.provenance.run,
+      service,
+      container,
+      exitCode,
+      stdout: new Uint8Array(),
+      stderr: new Uint8Array(),
+      truncated: false,
+    };
   }
   const result = await withStatus(scope, async (saved) => {
     active();

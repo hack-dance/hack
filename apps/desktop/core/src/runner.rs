@@ -21,6 +21,9 @@ use serde_json::Value;
 use crate::models::{CliError, LogEvent};
 
 const STDERR_KEEP: usize = 8 * 1024;
+/// Most stdout kept from one command; more is an error (`OutputTooLarge`),
+/// never silently parsed half-way. Far above any real `--json` result.
+pub const MAX_STDOUT: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunError {
@@ -206,8 +209,8 @@ impl CliRunner {
         timeout: Option<Duration>,
     ) -> Result<(String, String, Option<i32>), RunError> {
         let mut child = self.spawn(args, path)?;
-        let out = read_all(child.stdout.take());
-        let err = read_all(child.stderr.take());
+        let out = read_all(child.stdout.take(), Keep::Head(MAX_STDOUT));
+        let err = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
         let deadline = timeout.map(|t| (Instant::now() + t, t));
         let status = loop {
             match child.try_wait() {
@@ -225,7 +228,7 @@ impl CliRunner {
         // open after `hack` exits must not hold the caller past the timeout.
         // Without a deadline, wait for the pipes to close.
         let grace = self.term_grace;
-        let drain = |rx: &mpsc::Receiver<String>, child: &mut Child| match deadline {
+        let drain = |rx: &mpsc::Receiver<Drained>, child: &mut Child| match deadline {
             Some((d, t)) => {
                 let left = d.saturating_duration_since(Instant::now());
                 rx.recv_timeout(left).map_err(|_| {
@@ -238,15 +241,19 @@ impl CliRunner {
                 .map_err(|_| RunError::Spawn("output reader stopped".into())),
         };
         let stdout = drain(&out, &mut child)?;
-        let mut stderr = drain(&err, &mut child)?;
-        if stderr.len() > STDERR_KEEP {
-            let cut = stderr.len() - STDERR_KEEP;
-            let cut = (cut..stderr.len())
-                .find(|i| stderr.is_char_boundary(*i))
-                .unwrap_or(cut);
-            stderr = stderr.split_off(cut);
+        let stderr = drain(&err, &mut child)?;
+        if let Some(e) = stdout.error.as_ref().or(stderr.error.as_ref()) {
+            return Err(RunError::Spawn(format!(
+                "reading the command's output failed: {e}"
+            )));
         }
-        Ok((stdout, stderr, status.code()))
+        if stdout.overflow {
+            return Err(RunError::BadJson {
+                error: format!("output larger than {MAX_STDOUT} bytes"),
+                stdout_head: head(&stdout.text),
+            });
+        }
+        Ok((stdout.text, stderr.text, status.code()))
     }
 
     /// Run a `--json` command and deserialize its (unwrapped) result.
@@ -502,15 +509,65 @@ impl Drop for LogStream {
     }
 }
 
-/// Read a pipe to EOF on a thread; the result arrives on the channel.
-fn read_all<R: Read + Send + 'static>(r: Option<R>) -> mpsc::Receiver<String> {
+/// Which part of a pipe to keep while draining it.
+#[derive(Clone, Copy)]
+enum Keep {
+    /// The first `n` bytes; anything beyond marks the output as too large.
+    Head(usize),
+    /// Only the last `n` bytes (a rolling window).
+    Tail(usize),
+}
+
+/// What a drained pipe yielded.
+struct Drained {
+    text: String,
+    overflow: bool,
+    /// A read failed before end of file: the output is incomplete.
+    error: Option<String>,
+}
+
+/// Read a pipe to EOF on a thread, keeping memory bounded the whole time
+/// (a lifecycle command can run for hours and print without limit).
+fn read_all<R: Read + Send + 'static>(r: Option<R>, keep: Keep) -> mpsc::Receiver<Drained> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut buf = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut overflow = false;
+        let mut error = None;
         if let Some(mut r) = r {
-            let _ = r.read_to_end(&mut buf);
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                let n = match r.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    // A signal interrupted the read; nothing was lost.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        error = Some(e.to_string());
+                        break;
+                    }
+                };
+                match keep {
+                    Keep::Head(max) => {
+                        let room = max.saturating_sub(buf.len());
+                        buf.extend_from_slice(&chunk[..n.min(room)]);
+                        overflow |= n > room;
+                    }
+                    Keep::Tail(max) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > max {
+                            let cut = buf.len() - max;
+                            buf.drain(..cut);
+                        }
+                    }
+                }
+            }
         }
-        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+        let _ = tx.send(Drained {
+            text: String::from_utf8_lossy(&buf).into_owned(),
+            overflow,
+            error,
+        });
     });
     rx
 }
@@ -733,29 +790,49 @@ mod tests {
         assert_eq!(v["ni"], "1");
     }
 
+    /// Evidence that `pid` has exited: `kill(pid, 0)` fails, or (Linux only)
+    /// `/proc` shows a zombie. An unreadable `/proc` is no evidence.
+    fn process_gone(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks existence.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        if cfg!(target_os = "linux") {
+            return std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|s| s.contains(") Z "));
+        }
+        false
+    }
+
     #[test]
     fn timeout_kills_the_process_group() {
         // The child spawns a grandchild that would outlive a plain kill.
-        let f = FakeHack::new("sleep 30 & echo $! > \"$HACK_HOME/grandchild\"; wait");
+        // The timeout leaves room for a slow first start of a new script
+        // (macOS scans freshly written executables); `ready` tells a slow
+        // start apart from a runner failure.
+        let f = FakeHack::new(
+            "echo ready > \"$HACK_HOME/ready\"\nsleep 30 &\necho $! > \"$HACK_HOME/grandchild\"\nwait",
+        );
         let started = Instant::now();
         let r = f
             .runner()
-            .run_json::<Value>(&["up"], None, Duration::from_millis(300));
+            .with_term_grace(Duration::from_millis(500))
+            .run_json::<Value>(&["up"], None, Duration::from_secs(2));
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(f.dir.join("ready").exists(), "the fake CLI never started");
         assert!(started.elapsed() < Duration::from_secs(5));
         let pid: i32 = std::fs::read_to_string(f.dir.join("grandchild"))
-            .unwrap()
+            .expect("grandchild pid written")
             .trim()
             .parse()
             .unwrap();
         // Give the kernel a moment to deliver SIGKILL and reparent/reap.
+        // Positive control: a live process must never count as gone, so
+        // the assertion below cannot pass just because a probe is missing.
+        assert!(!process_gone(i32::try_from(std::process::id()).unwrap()));
         let gone = (0..100).any(|_| {
             thread::sleep(Duration::from_millis(20));
-            // SAFETY: signal 0 only checks existence.
-            (unsafe { libc::kill(pid, 0) != 0 })
-                || std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                    .map(|s| s.contains(") Z "))
-                    .unwrap_or(true)
+            process_gone(pid)
         });
         assert!(gone, "grandchild {pid} survived the timeout");
     }
@@ -926,20 +1003,27 @@ mod tests {
 
     #[test]
     fn timeout_sends_sigterm_first_so_the_cli_can_retire_its_children() {
+        // `wait` on a background job is interrupted at once by a trapped
+        // signal in every POSIX shell; a foreground `sleep` loop is not
+        // portable for this. `ready` separates a slow start from a failure.
         let f = FakeHack::new(
             r#"trap 'echo term > "$HACK_HOME/got"; exit 0' TERM
-while :; do sleep 0.05; done"#,
+echo ready > "$HACK_HOME/ready"
+sleep 30 &
+wait $!"#,
         );
         let started = Instant::now();
         let r = f
             .runner()
             .with_term_grace(Duration::from_secs(3))
-            .run_json::<Value>(&["up"], None, Duration::from_millis(300));
+            .run_json::<Value>(&["up"], None, Duration::from_secs(2));
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(f.dir.join("ready").exists(), "the fake CLI never started");
         assert!(f.dir.join("got").exists(), "SIGTERM reached the CLI");
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "exited on TERM, no full grace"
+            started.elapsed() < Duration::from_millis(4500),
+            "exited on TERM without the full grace: {:?}",
+            started.elapsed()
         );
     }
 
@@ -963,6 +1047,67 @@ while :; do sleep 0.05; done"#,
         let r: Value = f.runner().run_json_to_completion(&["up"], None).unwrap();
         assert_eq!(r["action"], "up");
         assert!(started.elapsed() >= Duration::from_millis(900));
+    }
+
+    /// A reader that replays scripted results.
+    struct Scripted(std::collections::VecDeque<std::io::Result<Vec<u8>>>);
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(Err(e)) => Err(e),
+                Some(Ok(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_reads_are_retried_and_other_errors_reported() {
+        use std::io::{Error, ErrorKind};
+        let r = Scripted(
+            vec![
+                Err(Error::from(ErrorKind::Interrupted)),
+                Ok(b"{\"ok\":".to_vec()),
+                Err(Error::from(ErrorKind::Interrupted)),
+                Ok(b"true}".to_vec()),
+            ]
+            .into(),
+        );
+        let d = read_all(Some(r), Keep::Head(1024)).recv().unwrap();
+        assert_eq!(d.text, "{\"ok\":true}");
+        assert!(d.error.is_none());
+
+        let r = Scripted(
+            vec![
+                Ok(b"{\"ok\":true".to_vec()),
+                Err(Error::new(ErrorKind::BrokenPipe, "gone")),
+            ]
+            .into(),
+        );
+        let d = read_all(Some(r), Keep::Head(1024)).recv().unwrap();
+        assert!(d.error.is_some(), "a failed read is not end of file");
+    }
+
+    #[test]
+    fn pipes_are_drained_within_bounded_memory() {
+        // 2 MiB to stderr: only the last STDERR_KEEP bytes are retained.
+        let f = FakeHack::new(
+            "head -c 2097152 /dev/zero | tr '\\0' e >&2\nprintf 'TAIL' >&2\necho '{}'",
+        );
+        let (out, err, code) = f.runner().run_raw(&["x"], None, T).unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(out.trim(), "{}");
+        assert!(err.len() <= STDERR_KEEP, "{}", err.len());
+        assert!(err.ends_with("TAIL"));
+        // Head keeping stops at the cap and flags the overflow.
+        let rx = read_all(Some(&b"abcdef"[..]), Keep::Head(4));
+        let d = rx.recv().unwrap();
+        assert_eq!(d.text, "abcd");
+        assert!(d.overflow);
     }
 
     #[test]

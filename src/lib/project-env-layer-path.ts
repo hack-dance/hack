@@ -1,7 +1,27 @@
 import { lstat, readlink, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
+
+/** Closed identity for callers; never retains a target path, OS error or file bytes. */
+export class ProjectEnvLayerRefusalError extends ClosedCliError {
+  readonly layer: string;
+
+  constructor(path: string) {
+    super(
+      "Refused env layer: its path must resolve inside the project and be inspectable (values omitted)."
+    );
+    this.name = "ProjectEnvLayerRefusalError";
+    this.layer = basename(path);
+  }
+}
 
 /**
  * Resolve links component by component, including missing targets. Unlike lexical
@@ -72,7 +92,5 @@ export async function assertProjectEnvLayerPath(opts: {
   } catch {
     // Fail closed, including dangling outside links, loops and inspection errors.
   }
-  throw new ClosedCliError(
-    "Refused env layer: its path must resolve inside the project and be inspectable (values omitted)."
-  );
+  throw new ProjectEnvLayerRefusalError(opts.path);
 }

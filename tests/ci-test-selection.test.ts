@@ -8,6 +8,7 @@ import {
   touchesCompilerHost,
 } from "../scripts/ci-pr-plan.ts";
 import { selectTests } from "../scripts/ci-test-selection.ts";
+import { requiresWorkflowFull } from "../scripts/ci-workflow-guard.ts";
 import {
   buildVerifiedPlan,
   classifyTestPools,
@@ -523,7 +524,9 @@ describe("PR matrix policy", () => {
     for (const path of [
       "scripts/check-native-env-plan-cli.ts",
       "scripts/check-native-plan-clis.ts",
+      "scripts/lib/native-plan-home.ts",
     ]) {
+      expect(requiresWorkflowFull([path]), path).toBe(true);
       const plan = await planPullRequest({
         repoRoot,
         changed: [path],

@@ -184,6 +184,7 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
   });
 });
 for (const path of [
+  "scripts/lib/native-plan-home.ts",
   "scripts/ci-test-selection.ts",
   "scripts/ci-change-scope.ts",
   "scripts/ci-pr-plan.ts",
@@ -311,33 +312,40 @@ for (const path of [
     expect(mac.defer_macos).toBe("false");
   });
 }
-test("the inline boundary keeps relocated acceptance for HOME-writing CLI changes even with old base policy", async () => {
-  for (const path of [
-    "src/lib/activity-log.ts",
-    "src/commands/project.ts",
-    "src/backends/native-project-start.ts",
-    "src/cli/run.ts",
-    "index.ts",
-    "packages/cli/index.ts",
-  ]) {
-    expect(await scope({ path, tamper: true })).toMatchObject({
-      policy: "base",
-      compiler_hosts:
-        '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
-      runtime_core: "false",
-      test_shards: "[4,5,6,7,8]",
-      defer_macos: "true",
-      docker_suite: "false",
-    });
-    expect(await scope({ path, mac: true, tamper: true })).toMatchObject({
-      compiler_hosts:
-        '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
-      defer_macos: "false",
-    });
-    expect(await scope({ path, draft: true })).toMatchObject({
-      compiler_hosts: "[]",
-    });
-  }
+// Each case owns one repository. Exercise the host-tier variants once rather
+// than rebuilding all six repositories for each variant (18 fixtures in one test).
+test.each([
+  "src/lib/activity-log.ts",
+  "src/commands/project.ts",
+  "src/backends/native-project-start.ts",
+  "src/cli/run.ts",
+  "index.ts",
+  "packages/cli/index.ts",
+])("the inline boundary keeps relocated acceptance with old base policy: %s", async (path) => {
+  expect(await scope({ path, tamper: true })).toMatchObject({
+    policy: "base",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
+    runtime_core: "false",
+    test_shards: "[4,5,6,7,8]",
+    defer_macos: "true",
+    docker_suite: "false",
+  });
+});
+test("the inline boundary retains the HOME-write acceptance leg with ci:mac", async () => {
+  expect(
+    await scope({ path: "src/lib/activity-log.ts", mac: true, tamper: true })
+  ).toMatchObject({
+    policy: "base",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
+    defer_macos: "false",
+  });
+});
+test("the inline boundary keeps HOME-write acceptance deferred for drafts", async () => {
+  expect(
+    await scope({ path: "src/lib/activity-log.ts", draft: true })
+  ).toMatchObject({
+    compiler_hosts: "[]",
+  });
 });
 test("retargeting reclassifies through the ordinary pull_request event", () => {
   expect(workflow.on.pull_request.types).toContain("edited");

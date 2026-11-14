@@ -217,6 +217,11 @@ fn read_doctor(
     // those observations into fsmonitor or hook execution.
     let v: serde_json::Value = runner
         .clone()
+        .with_env(
+            "PATH",
+            &trusted_probe_path(std::env::var_os("PATH").unwrap_or_default().as_os_str())
+                .to_string_lossy(),
+        )
         .with_env("GIT_CONFIG_PARAMETERS", "")
         .with_env("GIT_CONFIG_COUNT", "2")
         .with_env("GIT_CONFIG_KEY_0", "core.fsmonitor")
@@ -232,6 +237,32 @@ fn read_doctor(
         return Err("doctor printed no checks list".into());
     }
     serde_json::from_value(v).map_err(|e| e.to_string())
+}
+
+/// Doctor invokes bare-name tools. Pin PATH directories to canonical paths
+/// whose directory chains cannot be replaced by another local user.
+fn trusted_probe_path(path: &std::ffi::OsStr) -> std::ffi::OsString {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let dirs = std::env::split_paths(path).filter_map(|p| {
+        if !p.is_absolute() {
+            return None;
+        }
+        let real = std::fs::canonicalize(p).ok()?;
+        for (index, ancestor) in real.ancestors().enumerate() {
+            let meta = std::fs::metadata(ancestor).ok()?;
+            let sticky_root = index > 0 && meta.uid() == 0 && meta.mode() & 0o1000 != 0;
+            if !meta.is_dir()
+                || (meta.uid() != uid && meta.uid() != 0)
+                || (meta.mode() & 0o022 != 0 && !sticky_root)
+            {
+                return None;
+            }
+        }
+        Some(real)
+    });
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 /// Live data from a matching hackd. CLI listing fallback needs R18:
@@ -1016,6 +1047,42 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         };
         let runs = source.doctor_runs(&[]);
         assert!(runs[0].result.is_ok());
+        assert!(!dir.join("executed").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn doctor_nested_tools_cannot_use_writable_absolute_path_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack(
+            "doctor-path",
+            "git --version >/dev/null || exit 2\necho '{}'",
+        );
+        let dir = hack.parent().unwrap();
+        let hostile = dir.join("writable");
+        std::fs::create_dir(&hostile).unwrap();
+        std::fs::set_permissions(&hostile, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let git = hostile.join("git");
+        std::fs::write(&git, "#!/bin/sh\nprintf called > \"$HACK_HOME/executed\"\n").unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let inherited = format!("{}:/usr/bin:/bin", hostile.display());
+        let runner = CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy());
+        runner
+            .clone()
+            .with_env("PATH", &inherited)
+            .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
+            .unwrap();
+        assert!(
+            dir.join("executed").exists(),
+            "negative control must execute the harmless nested tool"
+        );
+        std::fs::remove_file(dir.join("executed")).unwrap();
+        let trusted = trusted_probe_path(std::ffi::OsStr::new(&inherited));
+        assert!(!std::env::split_paths(&trusted).any(|p| p == hostile));
+        runner
+            .with_env("PATH", &trusted.to_string_lossy())
+            .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
+            .unwrap();
         assert!(!dir.join("executed").exists());
         let _ = std::fs::remove_dir_all(dir);
     }

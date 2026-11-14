@@ -83,7 +83,7 @@ Header: name, state pill (+ uptime when known), backend pill, URL, buttons,
 | Starting | this app's `up` in flight, or native `pending` | blue "Starting…" | none (no cancel in v0) |
 | Running | every defined service has a running container | green "Running · 2 hours" (from Docker status text) | Open, Restart, Stop |
 | Running, some exited (0) | the rest run; some exited 0 and their completion role is unknown | green "Running · migrate exited (0)" with tooltip "completion role unknown" | Open, Restart, Stop |
-| Degraded | some running; a long-running service down, exited ≠ 0, or `(unhealthy)` | amber "Degraded · worker down" | Open, Restart, Stop |
+| Degraded | some running; a service with a container that is down, exited ≠ 0, or `(unhealthy)`. A defined service with no container is not counted: it may be in an inactive Compose profile (expected services need R2) | amber "Degraded · worker down" | Open, Restart, Stop |
 | Stopping | this app's `down` in flight | grey "Stopping…" | none |
 | Failed start | last `up` reported `services.failed`, or nothing runs and a service exited ≠ 0 | red "Failed to start: api, worker" | Start (retry), Stop, logs filtered to those services |
 | Needs attention | always-on gave up (R12b), `status: missing`, or an `input_diagnostic` that is not the native one | red "Needs attention" + one line why | the one fix |

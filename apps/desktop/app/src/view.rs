@@ -597,13 +597,23 @@ impl HackApp {
                 this.tab = *ix;
                 cx.notify();
             }));
+        // The header and tabs stay fixed; the tab content scrolls within the
+        // remaining height so every service row and log line is reachable.
         v_flex()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .child(header)
             .child(div().px_5().pt_2().child(tabs))
-            .child(services_table(&d.services, cx))
-            .child(self.log_tail(cx))
+            .child(
+                v_flex()
+                    .id("detail-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(services_table(&d.services, cx))
+                    .child(self.log_tail(cx)),
+            )
     }
 
     fn log_tail(&self, cx: &mut Context<Self>) -> impl IntoElement {

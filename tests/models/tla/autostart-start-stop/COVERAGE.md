@@ -57,6 +57,14 @@ Closed manual-start refusals can release a boot claim through a boot/branch
 compare-and-set before any start. This model does not cover that registry ledger;
 `project-autostart.test.ts` covers stale, changed-target and real-failure refusal
 cases, and daemon tests cover neutral progress and same-boot recovery.
+The unattended effective-model guard rejects host-file execution inputs and
+checks named-volume driver/options/Compose labels immediately before preparation
+and start. Only fixed, authenticated read-only generated TLS mounts are admitted.
+Runtime-backend tests include hidden generated binds, old bind-backed engine
+volumes, ownership labels, safe missing/default volumes and withdrawn TLS trust.
+These are implementation regressions; the finite model does not model Docker
+storage metadata, certificate parsing, privileged engine actors or application
+code/data inside prepared images and engine-managed volumes.
 Multiple projects, multiple login attempts, reboot, upgrades, global pause, retries,
 network prompts, native backends and real login-service behavior are outside this
 model. Component model success does not qualify installed binaries or real login.

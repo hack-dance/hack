@@ -218,6 +218,92 @@ test("global and project command/cloud provider declarations refuse without invo
   );
 });
 
+test("unattended mounts allow default engine storage but refuse host files and indirect sources", async () => {
+  await writeFile(join(opts.repoRoot, "start.sh"), "synthetic-code", {
+    mode: 0o600,
+  });
+  await chmod(join(opts.repoRoot, "start.sh"), 0o666);
+  for (const volumes of [
+    ["../start.sh:/start.sh:ro"],
+    [`${opts.repoRoot}/start.sh:/start.sh:ro`],
+    [
+      {
+        type: "bind",
+        source: "../start.sh",
+        target: "/start.sh",
+        read_only: true,
+      },
+    ],
+    ["${MOUNT_SOURCE}:/start.sh"],
+    [{ type: "image", source: "unverified/image", target: "/start.sh" }],
+  ]) {
+    await compose({
+      services: {
+        web: {
+          image: "example/web:1",
+          volumes,
+          entrypoint: ["sh", "/start.sh"],
+        },
+      },
+    });
+    expect(await autostartStartPolicyRefusal(opts)).toBe(
+      "compose_inputs_require_manual_start"
+    );
+  }
+  for (const settings of [
+    {
+      volumes: {
+        data: {
+          driver_opts: { type: "none", o: "bind", device: opts.repoRoot },
+        },
+      },
+    },
+    { volumes: { data: { external: true } } },
+    { volumes: { data: { name: "unverified-existing-volume" } } },
+    { configs: { script: { file: "../start.sh" } } },
+    { secrets: { script: { file: "../start.sh" } } },
+  ]) {
+    await compose({
+      ...settings,
+      services: { web: { image: "example/web:1" } },
+    });
+    expect(await autostartStartPolicyRefusal(opts)).toBe(
+      "compose_inputs_require_manual_start"
+    );
+  }
+  for (const settings of [
+    { volumes_from: ["other"] },
+    { label_file: "../labels" },
+    { configs: ["script"] },
+    { secrets: ["script"] },
+  ]) {
+    await compose({
+      services: { web: { image: "example/web:1", ...settings } },
+    });
+    expect(await autostartStartPolicyRefusal(opts)).toBe(
+      "compose_inputs_require_manual_start"
+    );
+  }
+  await compose({
+    volumes: { data: {}, cache: { driver: "local" } },
+    services: {
+      web: {
+        image: "example/web:1",
+        volumes: [
+          "data:/data:ro",
+          "/scratch",
+          { type: "volume", source: "cache", target: "/cache" },
+          { type: "tmpfs", target: "/tmp" },
+        ],
+      },
+    },
+  });
+  expect(await autostartStartPolicyRefusal(opts)).toBeNull();
+  expect((await stat(join(opts.repoRoot, "start.sh"))).mode & 0o777).toBe(
+    0o666
+  );
+});
+
 test("managed graph and process-control keys refuse by name even when ciphertext is opaque", async () => {
   for (const key of [
     "COMPOSE_PROFILES",

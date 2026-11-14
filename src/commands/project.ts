@@ -1,4 +1,5 @@
 import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
+import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   createLifecycleProcessController,
@@ -6988,6 +6989,10 @@ async function runUpCommand({
         composeRuntimeBackend.up({
           unattended:
             process.env.HACK_AUTOSTART_LOGIN === "1" ? true : undefined,
+          unattendedTrustedBinds:
+            process.env.HACK_AUTOSTART_LOGIN === "1"
+              ? resolveAutostartTrustedTlsBinds
+              : undefined,
           beforeStart: async () => {
             await assertLoginAutostartCurrent(branch, project.projectRoot);
             await beforeStart?.();

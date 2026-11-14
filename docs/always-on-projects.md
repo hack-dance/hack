@@ -108,6 +108,27 @@ These manual-start requirements produce a closed skip and consume no boot claim
 or failure entry. Doctor reports the reason. Fix the unsupported prerequisite or
 start manually; ordinary manual starts retain their behavior.
 
+Host-file bind mounts, file-backed configs/secrets and indirect `volumes_from`
+sources also require manual startup, including source-code mounts used by many
+development projects. Anonymous volumes, tmpfs and default local named volumes
+remain supported. The resolved model, including Hack's generated overrides, is
+checked before effects. Existing named volumes must have no driver options and
+must carry the matching Compose project/volume labels; aliases, external volumes
+and custom drivers require manual startup. Storage is checked again before
+creation and before start.
+
+The only host-file exception is Hack's generated read-only TLS certificate mounts
+at `/etc/hack/ca/`. Their fixed installed paths must be regular, publicly readable
+CA-only PEM files with trusted ownership, safe parent directories and no writable
+group/other permissions. Bounded no-follow reads validate the content and repeat
+before effects. This does not change certificates or permissions. Prepared images
+and engine-managed data remain trusted inputs; this policy is not a container
+privilege sandbox and does not remove configured devices or privileged access.
+TLS checks observe current permissions and cannot revoke an older open writer.
+If a trust file was formerly writable, preserve it outside the active PKI and
+reinstall reviewed trust material manually; in-place `chmod` does not revoke
+that descriptor. Automatic startup never repairs or republishes trust material.
+
 Already-running eligible instances are adopted. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
 
@@ -148,8 +169,9 @@ saved registry pathname still matches. Startup configuration, Compose and enviro
 input files and their symlink targets also require trusted ownership and modes;
 generated JSON/YAML/env inputs under `.hack/.internal` and `.hack/.branch` are included.
 protected directories alone do not make a writable lifecycle configuration safe.
-Normal owner Git updates remain allowed. This is not a recursive audit of app
-source mounted into containers. Unattended host hooks and image builds are refused
+Normal owner Git updates remain allowed. Application code inside prepared images
+and engine-managed volumes is not recursively audited. Unattended host hooks,
+host-file execution inputs and image builds are refused
 rather than relying on filename parsing to authenticate arbitrary shell code.
 Login's Git identity, tracking and ignore probes disable system/global Git
 configuration, filesystem-monitor callbacks and hooks. Managed env layers cannot

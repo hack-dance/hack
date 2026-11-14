@@ -10,6 +10,12 @@ import { withDependencyStartupProgress } from "../lib/dependency-startup-progres
 import { exec, run } from "../lib/shell.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
+import {
+  inspectUnattendedInputs,
+  inspectUnattendedStorage,
+  type UnattendedNamedVolume,
+  type UnattendedTrustedBind,
+} from "./compose-unattended-preflight.ts";
 
 export type RuntimeBackendName = "compose";
 const DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS = 15_000;
@@ -40,6 +46,10 @@ export interface RuntimeBaseOptions {
 export interface RuntimeUpOptions extends RuntimeBaseOptions {
   /** Unattended startup may only reuse local images, never build, pull or load an implicit .env. */
   readonly unattended?: boolean;
+  /** Re-authenticated machine-owned TLS files only; authored binds remain ineligible. */
+  readonly unattendedTrustedBinds?: () => Promise<
+    readonly UnattendedTrustedBind[]
+  >;
   readonly dependencyProgress?: {
     readonly project: string;
     readonly services: readonly string[];
@@ -154,89 +164,43 @@ export function buildComposeExecCommand(opts: {
   ];
 }
 
-const UNATTENDED_IMAGE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._/:@+[\]-]{0,511}$/;
-const LOCAL_IMAGE_ID = /^sha256:[a-f0-9]{64}\s*$/;
+async function guardStartupStorage(
+  opts: RuntimeUpOptions,
+  volumes: readonly UnattendedNamedVolume[],
+  binds: readonly UnattendedTrustedBind[],
+  timeoutMs: number
+): Promise<number> {
+  await opts.beforeStart?.();
+  if (!opts.unattended || (volumes.length === 0 && binds.length === 0)) {
+    return 0;
+  }
+  const code = await inspectUnattendedStorage(opts, volumes, binds, timeoutMs);
+  if (code === 0) {
+    await opts.beforeStart?.();
+  }
+  return code;
+}
 
-/** Only an exact daemon missing-image diagnostic authorizes a neutral manual-start refusal. */
-async function inspectUnattendedImages(
+async function prepareUnattendedStartup(
   opts: RuntimeUpOptions,
   composeArgs: readonly string[],
   timeoutMs: number
-): Promise<number> {
-  const deadline = Date.now() + Math.min(timeoutMs, 15_000);
-  const probe = async (args: readonly string[]) => {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      return { exitCode: 124, stdout: "", stderr: "" };
-    }
-    return await exec(args, {
-      cwd: opts.cwd,
-      env: opts.env,
-      stdin: "ignore",
-      timeoutMs: remaining,
-      maxStdoutBytes: 65_536,
-      maxStderrBytes: 4096,
-      forwardSignals: true,
-    });
-  };
-  try {
-    const config = await probe([...composeArgs, "config", "--images"]);
-    if (config.exitCode !== 0) {
-      return config.exitCode;
-    }
-    const images = [
-      ...new Set(
-        config.stdout
-          .split("\n")
-          .map((image) => image.trim())
-          .filter(Boolean)
-      ),
-    ];
-    if (
-      images.length > 256 ||
-      images.some((image) => !UNATTENDED_IMAGE_REFERENCE.test(image))
-    ) {
-      return 1;
-    }
-    for (const image of images) {
-      const reference =
-        image.includes("@") ||
-        image.slice(image.lastIndexOf("/") + 1).includes(":")
-          ? image
-          : `${image}:latest`;
-      const result = await probe([
-        "docker",
-        "image",
-        "inspect",
-        "--format",
-        "{{.Id}}",
-        reference,
-      ]);
-      if (result.exitCode === 0 && LOCAL_IMAGE_ID.test(result.stdout)) {
-        continue;
-      }
-      if (
-        result.exitCode === 1 &&
-        result.stdout.trim() === "" &&
-        result.stderr.trim() ===
-          `Error response from daemon: No such image: ${reference}`
-      ) {
-        throw new HackCliError({
-          code: "E_PERMISSION",
-          message:
-            "Autostart requires prepared local images. Run hack up manually before retrying.",
-          detail: { reason: "image_requires_manual_start" },
-        });
-      }
-      return result.exitCode || 1;
-    }
-    return 0;
-  } catch (error: unknown) {
-    if (error instanceof HackCliError) {
-      throw error;
-    }
-    return 1;
+) {
+  if (!opts.unattended) {
+    return { exitCode: 0, volumes: [], binds: [] };
   }
+  await opts.beforeStart?.();
+  const inputs = await inspectUnattendedInputs(opts, composeArgs, timeoutMs);
+  if (inputs.exitCode !== 0) {
+    return inputs;
+  }
+  const storage = await guardStartupStorage(
+    opts,
+    inputs.volumes,
+    inputs.binds,
+    timeoutMs
+  );
+  return { ...inputs, exitCode: storage };
 }
 
 export const composeRuntimeBackend: RuntimeBackend = {
@@ -282,17 +246,13 @@ export const composeRuntimeBackend: RuntimeBackend = {
       // start invocation then only starts the prepared containers and waits on
       // Compose dependency conditions; --no-build keeps it from rebuilding.
       const launch = async () => {
-        if (opts.unattended) {
-          await opts.beforeStart?.();
-          const images = await inspectUnattendedImages(
-            opts,
-            composeArgs,
-            imageTimeoutMs
-          );
-          if (images !== 0) {
-            return images;
-          }
-          await opts.beforeStart?.();
+        const inputs = await prepareUnattendedStartup(
+          opts,
+          composeArgs,
+          imageTimeoutMs
+        );
+        if (inputs.exitCode !== 0) {
+          return inputs.exitCode;
         }
         opts.onStartupPhase?.("images");
         const prepared = await runPhase(
@@ -310,7 +270,15 @@ export const composeRuntimeBackend: RuntimeBackend = {
           return prepared;
         }
         opts.onStartupPhase?.("start");
-        await opts.beforeStart?.();
+        const storage = await guardStartupStorage(
+          opts,
+          inputs.volumes,
+          inputs.binds,
+          startupTimeoutMs
+        );
+        if (storage !== 0) {
+          return storage;
+        }
         return await runPhase(
           [
             ...composeArgs,

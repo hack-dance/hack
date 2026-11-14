@@ -12,6 +12,7 @@ import {
   PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
 import { assertAutostartCheckoutTrusted } from "./autostart-checkout-trust.ts";
+import { hasOnlyEngineManagedMounts } from "./autostart-compose-mounts.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
@@ -188,7 +189,8 @@ function composePolicyReason(
     !(isRecord(compose) && isRecord(compose.services)) ||
     Object.keys(compose.services).length === 0 ||
     compose.include !== undefined ||
-    compose["<<"] !== undefined
+    compose["<<"] !== undefined ||
+    !hasOnlyEngineManagedMounts(compose)
   ) {
     return "compose_inputs_require_manual_start";
   }

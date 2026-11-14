@@ -22,7 +22,15 @@ const shellMock = await registerScopedModuleMock({
   overrides: {
     exec: async (cmd: readonly string[]) => {
       execCalls.push([...cmd]);
-      return execResults.shift() ?? { exitCode: 0, stdout: "", stderr: "" };
+      return (
+        execResults.shift() ?? {
+          exitCode: 0,
+          stdout: cmd.includes("config")
+            ? JSON.stringify({ name: "fixture", services: {} })
+            : "",
+          stderr: "",
+        }
+      );
     },
     execOrThrow: async (cmd: readonly string[]) => {
       execCalls.push([...cmd]);
@@ -561,7 +569,14 @@ test("withdrawn unattended intent refuses before create, pull or build phases", 
 test("only an exact missing image diagnostic authorizes an unattended manual-start refusal", async () => {
   const backend = await loadComposeRuntimeBackend();
   execResults.push(
-    { exitCode: 0, stdout: "example.invalid/app\n", stderr: "" },
+    {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        name: "fixture",
+        services: { app: { image: "example.invalid/app" } },
+      }),
+      stderr: "",
+    },
     {
       exitCode: 1,
       stdout: "",
@@ -594,7 +609,14 @@ test("only an exact missing image diagnostic authorizes an unattended manual-sta
 test("images present plus a failed prepare phase remains an ordinary claimed failure", async () => {
   const backend = await loadComposeRuntimeBackend();
   execResults.push(
-    { exitCode: 0, stdout: "example.invalid/app\n", stderr: "" },
+    {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        name: "fixture",
+        services: { app: { image: "example.invalid/app" } },
+      }),
+      stderr: "",
+    },
     { exitCode: 0, stdout: `sha256:${"a".repeat(64)}\n`, stderr: "" }
   );
   runResults.push(17);
@@ -618,7 +640,14 @@ for (const diagnostic of [
   test(`image inspection refuses unknown errors without a neutral missing-image result: ${diagnostic.split("\n")[0]}`, async () => {
     const backend = await loadComposeRuntimeBackend();
     execResults.push(
-      { exitCode: 0, stdout: "example.invalid/app\n", stderr: "" },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          name: "fixture",
+          services: { app: { image: "example.invalid/app" } },
+        }),
+        stderr: "",
+      },
       { exitCode: 1, stdout: "", stderr: diagnostic }
     );
     expect(
@@ -665,3 +694,292 @@ test("attached unattended startup refuses before invoking Compose", async () => 
   });
   expect(runCalls).toEqual([]);
 });
+
+function ordinaryVolumeModel(
+  mount: unknown = { type: "volume", source: "data", target: "/data" }
+) {
+  return {
+    name: "fixture",
+    services: { app: { image: "example.invalid/app", volumes: [mount] } },
+    volumes: { data: { name: "fixture_data" } },
+  };
+}
+function existingVolume(
+  options: unknown = null,
+  labels: unknown = {
+    "com.docker.compose.project": "fixture",
+    "com.docker.compose.volume": "data",
+  }
+) {
+  return {
+    Name: "fixture_data",
+    Driver: "local",
+    Options: options,
+    Labels: labels,
+  };
+}
+function queueModelAndImage(model: unknown) {
+  execResults.push(
+    { exitCode: 0, stdout: JSON.stringify(model), stderr: "" },
+    { exitCode: 0, stdout: `sha256:${"a".repeat(64)}\n`, stderr: "" }
+  );
+}
+function queueVolume(value: unknown) {
+  execResults.push({ exitCode: 0, stdout: JSON.stringify(value), stderr: "" });
+}
+
+for (const badVolume of [
+  existingVolume({ device: "/host/private", o: "bind", type: "none" }),
+  existingVolume(null, null),
+  existingVolume(null, {
+    "com.docker.compose.project": "other",
+    "com.docker.compose.volume": "data",
+  }),
+  { ...existingVolume(), Driver: "custom" },
+]) {
+  test("unattended runtime refuses unsafe existing named-volume options or ownership labels before up", async () => {
+    const backend = await loadComposeRuntimeBackend();
+    queueModelAndImage(ordinaryVolumeModel());
+    queueVolume(badVolume);
+    await expect(
+      backend.up({
+        composeFiles: ["compose.yml"],
+        cwd: "/fixture",
+        detach: true,
+        unattended: true,
+      })
+    ).rejects.toMatchObject({
+      code: "E_PERMISSION",
+      detail: { reason: "compose_inputs_require_manual_start" },
+    });
+    expect(runCalls).toEqual([]);
+  });
+}
+for (const options of [null, {}]) {
+  test("an ordinary Compose-owned local named volume is checked before create and start", async () => {
+    const backend = await loadComposeRuntimeBackend();
+    queueModelAndImage(ordinaryVolumeModel());
+    queueVolume(existingVolume(options));
+    queueVolume(existingVolume(options));
+    expect(
+      await backend.up({
+        composeFiles: ["compose.yml"],
+        cwd: "/fixture",
+        detach: true,
+        unattended: true,
+      })
+    ).toBe(0);
+    expect(execCalls.filter((args) => args[1] === "volume")).toHaveLength(2);
+    expect(runCalls).toHaveLength(2);
+  });
+}
+
+test("a missing default local named volume is eligible to create only on an exact expected-name diagnostic", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  queueModelAndImage(ordinaryVolumeModel());
+  execResults.push({
+    exitCode: 1,
+    stdout: "",
+    stderr: "Error response from daemon: get fixture_data: no such volume\n",
+  });
+  queueVolume(existingVolume());
+  expect(
+    await backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+    })
+  ).toBe(0);
+  expect(runCalls).toHaveLength(2);
+});
+for (const message of [
+  "Cannot connect to the Docker daemon",
+  "Error response from daemon: unauthorized",
+  "Error response from daemon: get other: no such volume",
+]) {
+  test("unknown volume probe errors remain claimed failures without preparation", async () => {
+    const backend = await loadComposeRuntimeBackend();
+    queueModelAndImage(ordinaryVolumeModel());
+    execResults.push({ exitCode: 1, stdout: "", stderr: message });
+    expect(
+      await backend.up({
+        composeFiles: ["compose.yml"],
+        cwd: "/fixture",
+        detach: true,
+        unattended: true,
+      })
+    ).toBe(1);
+    expect(runCalls).toEqual([]);
+  });
+}
+
+test("a generated resolved bind is refused even when the primary authored model had only an ordinary volume", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  execResults.push({
+    exitCode: 0,
+    stdout: JSON.stringify(
+      ordinaryVolumeModel({
+        type: "bind",
+        source: "/host/private",
+        target: "/data",
+        read_only: true,
+      })
+    ),
+    stderr: "",
+  });
+  await expect(
+    backend.up({
+      composeFiles: ["compose.yml", "generated.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+    })
+  ).rejects.toMatchObject({
+    code: "E_PERMISSION",
+    detail: { reason: "compose_inputs_require_manual_start" },
+  });
+  expect(runCalls).toEqual([]);
+  expect(execCalls).toHaveLength(1);
+});
+
+test("anonymous volumes and tmpfs do not require a named-volume inspection", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  queueModelAndImage({
+    name: "fixture",
+    services: {
+      app: {
+        image: "example.invalid/app",
+        volumes: [
+          { type: "volume", target: "/data" },
+          { type: "tmpfs", target: "/tmp" },
+        ],
+      },
+    },
+  });
+  expect(
+    await backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+    })
+  ).toBe(0);
+  expect(execCalls).toHaveLength(2);
+});
+
+const trustedTls = {
+  source: "/trusted/caddy/root.crt",
+  target: "/etc/hack/ca/caddy-local-authority.crt",
+  readOnly: true,
+} as const;
+function tlsModel(readOnly = true) {
+  return {
+    name: "fixture",
+    services: {
+      app: {
+        image: "example.invalid/app",
+        volumes: [
+          {
+            type: "bind",
+            source: trustedTls.source,
+            target: trustedTls.target,
+            read_only: readOnly,
+            bind: { create_host_path: true },
+          },
+        ],
+      },
+    },
+  };
+}
+test("only exact read-only authenticated machine TLS binds survive resolved-model checks", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  queueModelAndImage(tlsModel());
+  let authenticated = 0;
+  expect(
+    await backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+      unattendedTrustedBinds: async () => {
+        authenticated += 1;
+        return [trustedTls];
+      },
+    })
+  ).toBe(0);
+  expect(authenticated).toBe(3);
+  expect(runCalls).toHaveLength(2);
+});
+test("an approved TLS source must still authenticate at the create boundary", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  queueModelAndImage(tlsModel());
+  let authenticated = 0;
+  await expect(
+    backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+      unattendedTrustedBinds: async () =>
+        ++authenticated === 1 ? [trustedTls] : [],
+    })
+  ).rejects.toMatchObject({
+    code: "E_PERMISSION",
+    detail: { reason: "compose_inputs_require_manual_start" },
+  });
+  expect(runCalls).toEqual([]);
+});
+test("a writable bind cannot borrow the authenticated TLS allowlist", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  execResults.push({
+    exitCode: 0,
+    stdout: JSON.stringify(tlsModel(false)),
+    stderr: "",
+  });
+  await expect(
+    backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+      unattendedTrustedBinds: async () => [trustedTls],
+    })
+  ).rejects.toMatchObject({
+    code: "E_PERMISSION",
+    detail: { reason: "compose_inputs_require_manual_start" },
+  });
+  expect(runCalls).toEqual([]);
+});
+
+for (const withVolume of [false, true]) {
+  test("unused installed TLS state cannot reject an unattended model without binds", async () => {
+    const backend = await loadComposeRuntimeBackend();
+    queueModelAndImage(
+      withVolume
+        ? ordinaryVolumeModel()
+        : {
+            name: "fixture",
+            services: { app: { image: "example.invalid/app" } },
+          }
+    );
+    if (withVolume) {
+      queueVolume(existingVolume());
+      queueVolume(existingVolume());
+    }
+    let authCalls = 0;
+    expect(
+      await backend.up({
+        composeFiles: ["compose.yml"],
+        cwd: "/fixture",
+        detach: true,
+        unattended: true,
+        unattendedTrustedBinds: async () => {
+          authCalls += 1;
+          throw new Error("unused TLS installation is unsafe");
+        },
+      })
+    ).toBe(0);
+    expect(authCalls).toBe(0);
+  });
+}

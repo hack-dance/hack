@@ -10,6 +10,7 @@ import {
 import { runLifecycleCommandChild } from "../src/lib/lifecycle-command-child.ts";
 import { exec, run } from "../src/lib/shell.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv, privateCliRunEnv } from "./helpers/private-cli-env.ts";
 
 const SENTINEL = "synthetic-child-key-sentinel";
@@ -295,9 +296,12 @@ test("login Git observations disable monitor hooks despite local config and inhe
     mode: 0o700,
   });
   const env = privateCliEnv({ root });
-  const git = async (args: readonly string[], childEnv = env) => {
+  const git = async (
+    args: readonly string[],
+    childEnv?: Record<string, string>
+  ) => {
     const child = Bun.spawn(["git", "-C", root, ...args], {
-      env: childEnv,
+      env: childEnv ?? fixtureGitEnv({ env }),
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
@@ -307,7 +311,7 @@ test("login Git observations disable monitor hooks despite local config and inhe
   expect(await git(["init"])).toBe(0);
   expect(await git(["config", "core.fsmonitor", monitor])).toBe(0);
   const unattended = childEnvironment(
-    { ...env, HACK_AUTOSTART_LOGIN: "1" },
+    { ...fixtureGitEnv({ env }), HACK_AUTOSTART_LOGIN: "1" },
     {
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "core.fsmonitor",

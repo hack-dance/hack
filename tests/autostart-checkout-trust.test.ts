@@ -253,6 +253,7 @@ test.each([
   "directory",
   "config",
   "hook",
+  "bind",
 ])("source login CLI refuses a writable %s before hooks or engine commands", async (kind) => {
   const hook = join(root, "hook-ran");
   const engine = join(root, "engine-ran");
@@ -266,7 +267,9 @@ test.each([
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "example",
-      lifecycle: { up: { before: [`sh ${quoteShellWord(script)}`] } },
+      ...(kind === "bind"
+        ? {}
+        : { lifecycle: { up: { before: [`sh ${quoteShellWord(script)}`] } } }),
     })
   );
   await writeFile(
@@ -274,13 +277,19 @@ test.each([
     `#!${process.execPath}\nawait Bun.write(${JSON.stringify(engine)}, "ran");\nprocess.exit(99);\n`,
     { mode: 0o700 }
   );
+  if (kind === "bind") {
+    await writeFile(
+      join(projectDir, "docker-compose.yml"),
+      "services:\n  app:\n    image: example.invalid/app\n    volumes:\n      - ../start-hook.sh:/start.sh:ro\n    entrypoint: [sh, /start.sh]\n"
+    );
+  }
   const unsafe =
-    kind === "hook"
+    kind === "hook" || kind === "bind"
       ? script
       : kind === "directory"
         ? join(root, "projects")
         : join(projectDir, "hack.config.json");
-  const mode = kind === "hook" ? 0o666 : 0o770;
+  const mode = kind === "hook" || kind === "bind" ? 0o666 : 0o770;
   await chmod(unsafe, mode);
   const child = Bun.spawn(
     [
@@ -316,9 +325,11 @@ test.each([
   ]);
   expect(code, stdout + stderr).not.toBe(0);
   expect(stdout + stderr).toContain(
-    kind === "hook"
-      ? "host_commands_require_manual_start"
-      : "checkout_untrusted"
+    kind === "bind"
+      ? "compose_inputs_require_manual_start"
+      : kind === "hook"
+        ? "host_commands_require_manual_start"
+        : "checkout_untrusted"
   );
   expect(await Bun.file(hook).exists()).toBe(false);
   expect(await Bun.file(engine).exists()).toBe(false);

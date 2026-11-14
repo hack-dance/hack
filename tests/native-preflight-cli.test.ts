@@ -294,7 +294,7 @@ test("preflight and start refuse the project key as an env file before reading i
     "Hack key and secret-store files cannot be environment sources"
   );
   expect(report.output).not.toContain(PRIVATE);
-  const before = await f.calls();
+  const before = await f.argv();
   // Foreground start: a detached owner discards the refusal text.
   const up = await cli(f, ["up"], env);
   expect(up.code).toBe(1);
@@ -302,12 +302,31 @@ test("preflight and start refuse the project key as an env file before reading i
     "Hack key and secret-store files cannot be environment sources"
   );
   expect(up.output).not.toContain(PRIVATE);
-  expect((await f.argv()).join("\n")).not.toContain(PRIVATE);
-  expect(
-    (await f.calls())
-      .slice(before.length)
-      .every((call) => call === "project plan")
-  ).toBe(true);
+  const after = await f.argv();
+  expect(after.join("\n")).not.toContain(PRIVATE);
+  // Start may review the plan and, with first-use setup guidance, inspect the
+  // runtime setup read-only. Nothing else may run: no pool, file delivery or
+  // start call reaches the runtime.
+  const readOnly = (line: string) => {
+    const words = line.split(" ").slice(2);
+    if (words[0] === "project" && words[1] === "plan") {
+      return true;
+    }
+    const [runtime, setup, inspect, ...flags] = words;
+    return (
+      runtime === "runtime" &&
+      setup === "setup" &&
+      inspect === "inspect" &&
+      flags.includes("--json") &&
+      flags.every((flag) => flag === "--json" || flag === "--quiescence")
+    );
+  };
+  const started = after.slice(before.length);
+  expect(started.filter((line) => !readOnly(line))).toEqual([]);
+  expect(readOnly("--home h runtime setup --no-interactive --json")).toBe(
+    false
+  );
+  expect(readOnly("--home h project start --json")).toBe(false);
 });
 
 test("preflight and static start refuse oversized file delivery before pool effects", async () => {

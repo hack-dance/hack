@@ -1,5 +1,10 @@
 /** PR and next-push policy layered over the coarse change-scope classifier. */
-import { COMPILER_HOSTS, planScope, scopeOutputs } from "./ci-change-scope.ts";
+import {
+  COMPILER_HOSTS,
+  planScope,
+  scopeOutputs,
+  touchesRelocatedCli,
+} from "./ci-change-scope.ts";
 import { selectTests, type TestSelection } from "./ci-test-selection.ts";
 import { requiresWorkflowFull } from "./ci-workflow-guard.ts";
 import { classifyTestPools } from "./test-shard-plan.ts";
@@ -29,6 +34,7 @@ function selectedCompilerHosts(opts: {
   readonly draft: boolean;
   readonly mac: boolean;
   readonly linuxRust: boolean;
+  readonly changed: readonly string[] | null;
   readonly releaseHosts: boolean;
   readonly nativeHosts: boolean;
   readonly coarseHosts: string;
@@ -36,9 +42,11 @@ function selectedCompilerHosts(opts: {
   if (opts.draft) {
     return [];
   }
+  const relocatedCli = opts.changed?.some(touchesRelocatedCli) ?? true;
   return compilerHosts(opts.releaseHosts).filter(
     (host) =>
       (opts.linuxRust && host.platform === "linux") ||
+      (relocatedCli && host.os === "ubuntu-latest") ||
       (opts.mac &&
         (opts.nativeHosts ||
           opts.coarseHosts.includes(JSON.stringify(host.os))))
@@ -139,6 +147,7 @@ export async function planPullRequest(opts: {
     draft: opts.draft,
     mac,
     linuxRust,
+    changed: opts.changed,
     releaseHosts: stablePr || opts.releaseHosts === true,
     nativeHosts: allJobs || (opts.changed?.some(touchesCompilerHost) ?? false),
     coarseHosts: coarse.compiler_hosts,

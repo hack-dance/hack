@@ -120,3 +120,11 @@ concurrent filesystem edits are not an atomic fence. Empty legacy scope arrays
 are shown as `global`. macOS keychain prompting remains unverified. Rapid tab
 changes may launch overlapping bounded reads; stale results are discarded, but
 in-flight reads are not deduplicated.
+
+## Process-cleanup tests
+
+Process-cleanup regression tests use a generous 60-second scheduling deadline,
+then check process retirement rather than enforcing a short wall-clock latency.
+The stream-drop test also proves the reader was waiting before Drop and that
+Drop's reader join completes. These test allowances do not change CLI timeouts.
+

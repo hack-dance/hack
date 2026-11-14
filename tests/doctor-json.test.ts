@@ -26,7 +26,8 @@ test("buildDoctorJsonData maps checks to id/status/detail and counts", () => {
     ],
   });
 
-  expect(data.checks).toEqual([
+  expect(data.schema).toBe(1);
+  expect(data.checks.map(({ area, scope, fix, ...check }) => check)).toEqual([
     {
       id: "docker",
       status: "ok",
@@ -79,7 +80,7 @@ test("buildDoctorJsonData adds only superseded-root counts and fingerprints", ()
       { name: "bun", status: "ok", message: "/usr/bin/bun", durationMs: 2 },
     ],
   });
-  expect(data.checks[0]).toStrictEqual({
+  expect(data.checks[0]).toMatchObject({
     id: "superseded caddy roots",
     status: "warn",
     detail: "2 superseded Caddy roots remain",
@@ -88,6 +89,9 @@ test("buildDoctorJsonData adds only superseded-root counts and fingerprints", ()
   });
   expect(Object.keys(data.checks[1] ?? {})).toEqual([
     "id",
+    "area",
+    "scope",
+    "fix",
     "status",
     "detail",
     "durationMs",

@@ -13,6 +13,7 @@ export async function secureGlobalLoginRouting(opts: {
   if (!opts.login) {
     return;
   }
+  assertAutostartDockerConfigTrusted({ home: homedir() });
   try {
     await secureAutostartRoutingAssets({
       root: opts.root,
@@ -23,7 +24,7 @@ export async function secureGlobalLoginRouting(opts: {
     throw new HackCliError({
       code: "E_PERMISSION",
       message:
-        "Automatic routing refused untrusted or outdated installed assets. Review the routing paths and reinstall current assets before retrying. Values omitted.",
+        "Automatic routing refused untrusted or outdated installed assets. Review and move unexpected schema/dashboard files aside, then reinstall current assets before retrying. Values omitted.",
       detail: { reason: "routing_assets_untrusted" },
     });
   }
@@ -65,3 +66,6 @@ export async function reconcileGlobalRoutingBridge(opts: {
     });
   }
 }
+
+import { homedir } from "node:os";
+import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";

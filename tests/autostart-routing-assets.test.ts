@@ -23,6 +23,7 @@ import {
   GLOBAL_COREDNS_FILENAME,
   GLOBAL_ENV_SCHEMA_FILENAME,
   GLOBAL_GRAFANA_DASHBOARD_FILENAME,
+  GLOBAL_GRAFANA_DASHBOARDS_DIR,
   GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
@@ -203,7 +204,7 @@ test("source global up refuses poisoned login assets before any Docker effect", 
   }
 });
 
-test("canonical installed assets are preserved byte-for-byte on fresh private inodes", async () => {
+test("canonical nonsecret assets use fresh read-only-to-others inodes readable by container service users", async () => {
   const previous = new Map<string, number>();
   for (const path of assets.keys()) {
     previous.set(path, (await lstat(path)).ino);
@@ -211,9 +212,83 @@ test("canonical installed assets are preserved byte-for-byte on fresh private in
   await secure();
   for (const [path, text] of assets) {
     expect(await readFile(path, "utf8")).toBe(text);
-    expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    expect((await lstat(path)).mode & 0o777).toBe(0o644);
     expect((await lstat(path)).ino).not.toBe(previous.get(path));
   }
+});
+
+test("publication stages outside mounted directories and preserves their exact entries throughout", async () => {
+  const mounted = [
+    join(root, GLOBAL_SCHEMAS_DIR_NAME),
+    join(root, GLOBAL_LOGGING_DIR_NAME, GLOBAL_GRAFANA_DASHBOARDS_DIR),
+  ];
+  const expected = await Promise.all(
+    mounted.map(async (path) => (await readdir(path)).sort())
+  );
+  const staged: string[] = [];
+  await secureAutostartRoutingAssets({
+    root,
+    bindAddress,
+    defaultDomain,
+    beforePublish: async ({ stagingPath, targetPath }) => {
+      staged.push(stagingPath);
+      expect(dirname(stagingPath)).toBe(root);
+      expect((await lstat(stagingPath)).dev).toBe(
+        (await lstat(targetPath)).dev
+      );
+      for (const [index, path] of mounted.entries()) {
+        const expectedNames = expected[index];
+        if (!expectedNames) {
+          throw new Error("Missing mounted-directory expectation");
+        }
+        expect((await readdir(path)).sort()).toEqual(expectedNames);
+      }
+    },
+  });
+  expect(staged).toHaveLength(assets.size);
+  for (const path of staged) {
+    expect(await Bun.file(path).exists()).toBe(false);
+  }
+});
+
+test("SIGKILL during schema staging leaves only an ignored root file and the next login can authenticate", async () => {
+  const schemas = join(root, GLOBAL_SCHEMAS_DIR_NAME);
+  const dashboards = join(
+    root,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_GRAFANA_DASHBOARDS_DIR
+  );
+  const schemaEntries = (await readdir(schemas)).sort();
+  const dashboardEntries = (await readdir(dashboards)).sort();
+  const marker = join(root, "staging-interruption-observed");
+  const script = `import { secureAutostartRoutingAssets } from ${JSON.stringify(resolve("src/lib/autostart-routing-assets.ts"))};\nawait secureAutostartRoutingAssets({root:${JSON.stringify(root)},bindAddress:${JSON.stringify(bindAddress)},defaultDomain:${JSON.stringify(defaultDomain)},beforePublish:async({stagingPath,targetPath})=>{if(targetPath===${JSON.stringify(join(schemas, GLOBAL_CONFIG_SCHEMA_FILENAME))}){await Bun.write(${JSON.stringify(marker)},stagingPath);process.kill(process.pid,"SIGKILL");}}});`;
+  const child = Bun.spawn([process.execPath, "--no-env-file", "-e", script], {
+    env: privateCliEnv({ root }),
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+  try {
+    const [code, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+    ]);
+    expect(code, stderr).toBe(137);
+    expect(child.signalCode).toBe("SIGKILL");
+  } finally {
+    clearTimeout(timer);
+  }
+  const staging = await Bun.file(marker).text();
+  expect(dirname(staging)).toBe(root);
+  expect(await Bun.file(staging).exists()).toBe(true);
+  const stagedBytes = await Bun.file(staging).text();
+  expect((await readdir(schemas)).sort()).toEqual(schemaEntries);
+  expect((await readdir(dashboards)).sort()).toEqual(dashboardEntries);
+  await secure();
+  expect(await Bun.file(staging).text()).toBe(stagedBytes);
+  expect((await readdir(schemas)).sort()).toEqual(schemaEntries);
+  expect((await readdir(dashboards)).sort()).toEqual(dashboardEntries);
 });
 
 test("current renderer static address variants and IPv6 bind settings are authenticated", async () => {

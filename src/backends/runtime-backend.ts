@@ -173,6 +173,8 @@ export const composeRuntimeBackend: RuntimeBackend = {
           env: opts.env,
           stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
           timeoutMs,
+          forwardSignals: true,
+          settleProcessGroupOnCancel: true,
         });
       // Image build/pull can take far longer than starting containers, so it
       // runs (with container creation/recreation) under its own budget. The

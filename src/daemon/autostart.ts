@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readdir } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,8 +9,13 @@ import {
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
   GLOBAL_PROJECTS_REGISTRY_FILENAME,
+  PROJECT_ENV_CONFIG_FILENAME_PREFIX,
+  PROJECT_ENV_CONFIG_FILENAME_SUFFIX,
+  PROJECT_ENV_CONTRACT_FILENAME,
+  PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { assertAutostartCheckoutTrusted } from "../lib/autostart-checkout-trust.ts";
+import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";
 import { assertAutostartExecutablePathTrusted } from "../lib/autostart-executable-trust.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { readTextFile } from "../lib/fs.ts";
@@ -38,6 +44,7 @@ type StartResult = Omit<AutostartResult, "at">;
 type AutostartStartupRefusal =
   | "native_unsupported"
   | "executable_path_untrusted"
+  | "docker_config_untrusted"
   | null;
 
 /** Side effects are explicit so ordering, bounds and restart recovery can be tested without an engine. */
@@ -162,7 +169,7 @@ async function runAutostartLoginPass(opts: {
   }
   let waitingForEngine = false;
   try {
-    if (machineBootId === null) {
+    if (machineBootId === null || startupRefusal) {
       await recordUnclaimedAutostartRefusal({
         pending,
         runId: loginRun.runId,
@@ -529,7 +536,8 @@ export function classifyAutostartExit(opts: {
     code === "E_PERMISSION" &&
     isRecord(detail) &&
     (detail.reason === "checkout_untrusted" ||
-      detail.reason === "executable_path_untrusted")
+      detail.reason === "executable_path_untrusted" ||
+      detail.reason === "docker_config_untrusted")
   ) {
     return { status: "skipped", reason: detail.reason };
   }
@@ -593,6 +601,11 @@ export function createAutostartProductionDependencies(
         });
       } catch {
         return "executable_path_untrusted";
+      }
+      try {
+        assertAutostartDockerConfigTrusted({ home: runtime.home });
+      } catch {
+        return "docker_config_untrusted";
       }
       return autostartRuntimeRefusal(env);
     },
@@ -706,6 +719,18 @@ async function inspectComposeProject(
   } catch {
     return "untrusted";
   }
+  // An uncertain selected graph must run ordinary up rather than adopt a subset.
+  if (
+    project.autostart?.branch ||
+    env.COMPOSE_FILE ||
+    env.COMPOSE_PROFILES ||
+    !(await canAdoptAutostartEnvironment({
+      projectRoot: project.repoRoot,
+      projectDir: project.projectDir,
+    }))
+  ) {
+    return "stopped";
+  }
   const context = await findProjectContextAtRoot({
     projectRoot: project.repoRoot,
     projectDirName: project.projectDirName,
@@ -716,10 +741,6 @@ async function inspectComposeProject(
   const cfg = await readProjectConfig(context);
   if (cfg.parseError) {
     return "unknown";
-  }
-  // An uncertain selected graph must run ordinary up rather than adopt a subset.
-  if (project.autostart?.branch || env.COMPOSE_FILE || env.COMPOSE_PROFILES) {
-    return "stopped";
   }
   const model = await readAutostartComposeModel(context.composeFile);
   if (!model) {
@@ -768,6 +789,38 @@ async function inspectComposeProject(
     model.completedServices,
     model.requiredServices
   );
+}
+
+/**
+ * Managed global/project values can select a different Compose graph, including
+ * values reachable only through secret references. Presence is enough to decline
+ * adoption: observation never decrypts layers or asks a keychain for graph values.
+ * Ordinary up remains the authority for resolving those sources and overlays.
+ */
+export async function canAdoptAutostartEnvironment(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<boolean> {
+  try {
+    for (const directory of new Set([opts.projectRoot, opts.projectDir])) {
+      const entries = await readdir(directory);
+      if (
+        entries.some(
+          (name) =>
+            name === PROJECT_ENV_CONTRACT_FILENAME ||
+            name === PROJECT_ENV_FILENAME ||
+            name.startsWith(`${PROJECT_ENV_FILENAME}.`) ||
+            (name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+              name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX))
+        )
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Only declared successful-completion dependency targets may be adopted after exit. */
@@ -1077,7 +1130,9 @@ export async function runAutostartSubprocess(
     reason ??= failure;
     stopping ??= terminateAutostartGroup({
       pid: proc.pid,
-      graceMs: opts.terminationGraceMs ?? 2000,
+      // Inner runtime phases get two seconds to kill their separately owned
+      // groups and unwind while the login CLI still holds the startup lock.
+      graceMs: opts.terminationGraceMs ?? 5000,
     });
   };
   const timer = setTimeout(() => stop("start_timeout"), opts.timeoutMs);

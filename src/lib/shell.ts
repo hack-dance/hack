@@ -7,6 +7,7 @@ import {
   nativeCpuCommandCategory,
 } from "./native-cpu-diagnostics.ts";
 import { boundedTimeoutMs } from "./process-deadline.ts";
+import { waitForOwnedProcessGroupSettlement } from "./process-group-settlement.ts";
 import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
 import { hasControllingTerminal } from "./tty-process-group.ts";
 
@@ -157,6 +158,9 @@ export interface RunOptions {
   readonly timeoutMs?: number;
   /** Forward cancellation to an owned command process group, preserving TTY input. */
   readonly forwardSignals?: boolean;
+  /** Refuse cancellation settlement until the captured group has no live members.
+   * Opt-in for startup phases whose owner must keep its project lock through cleanup. */
+  readonly settleProcessGroupOnCancel?: boolean;
   /**
    * Cancel the same owned process group as OS forwarding. Pre-aborted admission
    * returns 143 without spawning or invoking observations. The reason is private.
@@ -218,6 +222,28 @@ export async function run(
     return 143;
   }
   const beforeSpawn = options.beforeSpawn;
+  let capturedGroup: number | undefined;
+  const onSpawn: RunOptions["onSpawn"] = async (event) => {
+    if (event.ownsProcessGroup) {
+      capturedGroup = event.processGroupId ?? event.pid;
+    }
+    await options.onSpawn?.(event);
+  };
+  const onExit = async (event: RunExitEvent) => {
+    if (
+      options.settleProcessGroupOnCancel &&
+      (event.cancelled || event.timedOut) &&
+      (capturedGroup === undefined ||
+        !(await waitForOwnedProcessGroupSettlement({
+          processGroupId: capturedGroup,
+        })))
+    ) {
+      throw new Error(
+        "Cancelled subprocess group settlement could not be confirmed; no successful startup result was recorded. Values omitted."
+      );
+    }
+    await options.onExit?.(event);
+  };
   if (
     options.forwardSignals &&
     (process.stdin.isTTY || hasControllingTerminal())
@@ -234,8 +260,8 @@ export async function run(
       timeoutMs: options.timeoutMs,
       signal,
       beforeSpawn,
-      onSpawn: options.onSpawn,
-      onExit: options.onExit,
+      onSpawn,
+      onExit,
     });
   }
   const ownsProcessGroup =
@@ -321,9 +347,9 @@ export async function run(
   };
   const [result] = await Promise.all([
     completion,
-    options.onSpawn?.({ pid: proc.pid, ownsProcessGroup, resumeSuspended }),
+    onSpawn({ pid: proc.pid, ownsProcessGroup, resumeSuspended }),
   ]);
-  await options.onExit?.(result);
+  await onExit(result);
   return result.exitCode;
 }
 

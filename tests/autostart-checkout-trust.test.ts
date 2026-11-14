@@ -92,6 +92,36 @@ test("private owned checkout paths remain trusted across owner Git updates", asy
   ).not.toThrow();
 });
 
+test("writable startup inputs and symlink targets are refused despite protected directories", async () => {
+  for (const name of [
+    "hack.config.json",
+    "docker-compose.yml",
+    "hack.env.default.yaml",
+    ".env",
+  ]) {
+    const input = join(projectDir, name);
+    await writeFile(input, "untrusted input", { mode: 0o600 });
+    await chmod(input, 0o666);
+    expect(() =>
+      assertAutostartCheckoutTrusted({ repoRoot, projectDir })
+    ).toThrow();
+    await chmod(input, 0o600);
+  }
+  const config = join(projectDir, "hack.config.json");
+  const target = join(root, "shared-config.json");
+  await writeFile(target, "{}", { mode: 0o600 });
+  await chmod(target, 0o666);
+  await rm(config);
+  await symlink(target, config);
+  expect(() =>
+    assertAutostartCheckoutTrusted({ repoRoot, projectDir })
+  ).toThrow();
+  await chmod(target, 0o600);
+  expect(() =>
+    assertAutostartCheckoutTrusted({ repoRoot, projectDir })
+  ).not.toThrow();
+});
+
 test("a real checkout replacement beneath a writable parent is refused without changing permissions", async () => {
   const parent = join(root, "projects");
   await chmod(parent, 0o770);
@@ -202,7 +232,10 @@ test("a final pre-start recheck observes checkout trust changes after initial ad
   expect(startRan).toBe(false);
 });
 
-test("source login CLI never runs a checkout hook or engine command under a writable parent", async () => {
+test.each([
+  "directory",
+  "config",
+])("source login CLI refuses a writable %s before hooks or engine commands", async (kind) => {
   const hook = join(root, "hook-ran");
   const engine = join(root, "engine-ran");
   const bin = join(root, "bin");
@@ -219,7 +252,11 @@ test("source login CLI never runs a checkout hook or engine command under a writ
     `#!${process.execPath}\nawait Bun.write(${JSON.stringify(engine)}, "ran");\nprocess.exit(99);\n`,
     { mode: 0o700 }
   );
-  await chmod(join(root, "projects"), 0o770);
+  const unsafe =
+    kind === "directory"
+      ? join(root, "projects")
+      : join(projectDir, "hack.config.json");
+  await chmod(unsafe, 0o770);
   const child = Bun.spawn(
     [
       process.execPath,
@@ -256,5 +293,5 @@ test("source login CLI never runs a checkout hook or engine command under a writ
   expect(stdout + stderr).toContain("checkout_untrusted");
   expect(await Bun.file(hook).exists()).toBe(false);
   expect(await Bun.file(engine).exists()).toBe(false);
-  expect((await stat(join(root, "projects"))).mode & 0o777).toBe(0o770);
+  expect((await stat(unsafe)).mode & 0o777).toBe(0o770);
 });

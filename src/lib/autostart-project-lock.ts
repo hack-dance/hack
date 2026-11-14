@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertAutostartCheckoutTrusted } from "./autostart-checkout-trust.ts";
+import { assertAutostartDockerConfigTrusted } from "./autostart-docker-trust.ts";
 import { HackCliError } from "./cli-result.ts";
 import {
   readProjectsRegistry,
@@ -95,6 +97,9 @@ export async function assertAutostartProjectCurrent(opts: {
     });
   }
   if (opts.expectedRoot !== undefined && selected) {
+    if (process.env.HACK_AUTOSTART_LOGIN === "1") {
+      assertAutostartDockerConfigTrusted({ home: homedir() });
+    }
     assertAutostartCheckoutTrusted({
       repoRoot: selected.repoRoot,
       projectDir: selected.projectDir,

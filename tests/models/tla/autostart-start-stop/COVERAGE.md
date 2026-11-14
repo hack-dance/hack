@@ -41,6 +41,14 @@ PID identity or lock reclamation, real engine requests, descendant-process clean
 or any late runtime effect surviving termination of the lock-owning CLI child.
 In particular, `ChildCrashOrFailure` revokes all remaining child effects; that is a
 failure assumption, not proof that an orphaned engine request cannot finish later.
+`runtime-backend.ts` now forwards cancellation to each owned detached Compose
+phase, and `shell.ts` waits for an owned-group census before cancellation returns.
+`tests/runtime-backend-cancellation.test.ts` exercises real task-owned phase
+descendants that ignore TERM; it maps this process boundary to `ChildSettle`.
+The outer login deadline allows five seconds for the inner two-second escalation
+and bounded settlement. Killable processes and a functioning process census are
+assumptions; SIGKILL of the CLI, host failure, and an engine request already
+accepted outside its client group remain outside this finite model.
 Multiple projects, multiple login attempts, reboot, upgrades, global pause, retries,
 network prompts, native backends and real login-service behavior are outside this
 model. Component model success does not qualify installed binaries or real login.

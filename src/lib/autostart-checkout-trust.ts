@@ -1,6 +1,10 @@
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
-import { checkReplaceableChain } from "./path-trust.ts";
+import { checkReplaceableChain, walkReplaceableChain } from "./path-trust.ts";
+
+const STARTUP_INPUT =
+  /^(?:hack\.(?:config|env)(?:\..*)?\.(?:json|ya?ml)|docker-compose(?:\..*)?\.ya?ml|\.env(?:\..*)?)$/;
 
 /**
  * Automatic startup may execute checkout hooks only through paths another user
@@ -30,6 +34,27 @@ export function assertAutostartCheckoutTrusted(opts: {
           null ||
         !statSync(path).isDirectory()
       ) {
+        throw refusal();
+      }
+    }
+    // These declarative inputs can supply lifecycle commands, Compose graphs,
+    // and process environment. Check file modes and symlink targets as well as
+    // their directory chains, before any parser reads their contents.
+    const inputs = new Set([join(opts.repoRoot, ".env")]);
+    for (const name of readdirSync(opts.projectDir)) {
+      if (STARTUP_INPUT.test(name)) {
+        inputs.add(join(opts.projectDir, name));
+      }
+    }
+    for (const path of inputs) {
+      const result = walkReplaceableChain({
+        path,
+        uid,
+        hackHome: null,
+        checked,
+        allowMissing: true,
+      });
+      if ("error" in result || (result.complete && !statSync(path).isFile())) {
         throw refusal();
       }
     }

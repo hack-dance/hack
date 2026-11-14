@@ -1,4 +1,5 @@
 import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import { parseProjectSelectorOption } from "../cli/project-selector.ts";
@@ -7,6 +8,7 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { assertAutostartCheckoutTrusted } from "../lib/autostart-checkout-trust.ts";
+import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";
 import {
   assertAutostartProjectCurrent,
   withAutostartProjectLock,
@@ -343,6 +345,7 @@ function assertLoginCheckoutBeforeDiscovery(opts: {
     });
   }
   assertAutostartCheckoutTrusted(project);
+  assertAutostartDockerConfigTrusted({ home: homedir() });
 }
 
 function assertLoginProjectIdentity(opts: {

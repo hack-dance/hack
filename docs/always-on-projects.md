@@ -69,11 +69,15 @@ Children receive a fixed environment allow-list and an executable search
 path built from system directories and known Bun, Hack and Docker directories
 under the owned home (plus Linux `.local/bin`); launching-shell `DOCKER_*`, `COMPOSE_*` and `HACK_*` overrides are not copied.
 Hack adds only its explicit internal noninteractive and identity settings.
-Every login-service launch checks its effective executable lookup path before
-starting an engine watcher. Explicit passes check the derived path before helper
+Every login-service launch removes unsafe directories from its executable lookup
+path before starting an engine watcher; it keeps serving the local API when an
+optional tool directory is unsafe. Explicit passes check the derived path before helper
 lookup too. Directories, executable files and symlink targets must satisfy the
 same read-only ownership and permission checks used by the Linux service; unsafe
-paths are refused without automatic permission repair.
+paths are refused without automatic permission repair. This strict policy also
+applies to group-writable Homebrew directories, including group `admin`: install
+required helpers in a trusted lookup directory before retrying. A refused search
+path does not consume a project's attempt for this boot.
 Already-running instances are adopted without repeating startup hooks. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
 
@@ -81,7 +85,8 @@ Automatic routing accepts only the already-installed files produced by this
 CLI's current Caddy, CoreDNS, logging, Grafana and schema templates. It checks
 ownership, file type and every directory component, refuses symlinks and unsafe
 parent directories, and compares bounded reads with those templates. All files
-must pass before matching bytes are republished on fresh `0600` inodes. Routing
+must pass before matching non-secret bytes are republished on fresh `0644` inodes,
+so container users can read them while other host users cannot write them. Routing
 and logging containers are recreated to bind those new files; an old open writer
 or old file mount cannot modify the new assets. Compose `.env` imports and the
 unsupported remote-route bridge are disabled for this automatic path.
@@ -89,7 +94,9 @@ Customized, outdated, missing or unsafe assets cause `routing_failed` and no
 project starts. This path does not install or migrate assets. Review the paths,
 preserve suspect files outside the active installation, secure their parent
 directories, and regenerate the installed files with `hack global install`
-before another login pass. Ordinary manual routing commands keep their behavior.
+before another login pass. Unexpected files in the mounted `schemas` or Grafana
+`dashboards` directories must be reviewed and moved outside those directories;
+reinstallation alone does not remove extra files. Ordinary manual routing commands keep their behavior.
 Adoption requires a running container. An exited-zero container is treated as a
 completed job only when its service is a dependency target explicitly declared
 with `condition: service_completed_successfully`; other stopped services require
@@ -99,12 +106,24 @@ runs the normal `up` path. This slice reads the primary Compose file; branch
 overrides, declared `scale` or `deploy.replicas`, explicit Compose file/profile
 overrides and unsupported composition
 cannot prove adoption, so they run ordinary `up` and may repeat startup hooks.
+Managed environment metadata and dotenv inputs also require ordinary `up`;
+adoption never decrypts environment values to guess the selected graph.
 
 Before project input discovery and again under the instance start lock, login
 checks that the checkout and project-directory ancestor chains belong to the
 current user or root and cannot be replaced by other users. The check repeats
 before container startup. A shared writable parent is refused even when the
-saved registry pathname still matches. Normal owner Git updates remain allowed.
+saved registry pathname still matches. Startup configuration, Compose and environment
+input files and their symlink targets also require trusted ownership and modes;
+protected directories alone do not make a writable lifecycle configuration safe.
+Normal owner Git updates remain allowed. This is not a recursive audit of all
+repository code a hook or build may execute.
+
+Docker's `config.json` and context metadata/TLS paths must likewise be owned by
+the current user or root and not writable by other users. These checks inspect
+filesystem metadata without reading credentials, and repeat in login children
+before runtime startup. Unsafe engine selection refuses without consuming a boot
+attempt; owner-controlled context changes remain supported.
 
 No terminal or keychain prompt is allowed. Missing keys, required interaction,
 pending env migration, unavailable project paths and startup failures produce a
@@ -144,8 +163,10 @@ without replacing a prior claim, so recovering the probe cannot replay an
 already-attempted project. Resume permits the next login
 attempt; use `hack up` to start immediately.
 A routing failure consumes that boot's attempt; an engine timeout does not.
-A start has a 120-second bound, then receives TERM and a two-second grace before
-KILL. Partial startup remains possible; inspect and recover with `hack up`.
+A start has a 120-second bound, then receives TERM and a five-second grace before
+KILL. Detached Compose phases forward cancellation and settle their own process
+groups before releasing startup ownership. Partial startup remains possible;
+inspect and recover with `hack up`.
 
 `HACK_DAEMON_AUTOSTART_DISABLE=1` disables this pass as well as implicit daemon
 startup. Test harnesses and the isolated `hack-v5` launcher set it; those runs do
@@ -241,7 +262,7 @@ Current skip reasons are `engine_timeout`, `routing_failed`,
 `boot_identity_unavailable`, `native_unsupported`, `runtime_unknown`,
 `interactive_required`, `env_key_missing`, `keychain_unavailable`,
 `pending_env_migration`, `project_unavailable`, `checkout_untrusted`,
-`executable_path_untrusted`, `paused`, `target_changed`,
+`executable_path_untrusted`, `docker_config_untrusted`, `paused`, `target_changed`,
 `daemon_stopped`, `global_paused`, and `invalid_marker`. Failure reasons are `start_failed`,
 `start_timeout`, and `output_limit`.
 

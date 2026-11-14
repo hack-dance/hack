@@ -6,6 +6,15 @@ import { join, resolve } from "node:path";
 import { type RunExitEvent, type RunOptions, run } from "../src/lib/shell.ts";
 import { runWithTerminalGroup } from "../src/lib/tty-run.ts";
 
+import { privateCliRunEnv } from "./helpers/private-cli-env.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+
+const unknownSettlement = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/process-group-settlement.ts",
+  overrides: { waitForOwnedProcessGroupSettlement: async () => false },
+});
+
 const roots: string[] = [];
 const groups: number[] = [];
 afterEach(async () => {
@@ -287,3 +296,33 @@ function processAlive(pid: number): boolean {
     return false;
   }
 }
+
+test("required group settlement refuses an unknown census before recording a cancelled result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-shell-settlement-"));
+  roots.push(root);
+  const controller = new AbortController();
+  let exitObservations = 0;
+  unknownSettlement.activate();
+  try {
+    await expect(
+      run([process.execPath, "-e", "setInterval(()=>{},1000)"], {
+        cwd: root,
+        ...privateCliRunEnv({ root }),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        signal: controller.signal,
+        settleProcessGroupOnCancel: true,
+        onSpawn: async () => {
+          controller.abort();
+        },
+        onExit: async () => {
+          exitObservations += 1;
+        },
+      })
+    ).rejects.toThrow("group settlement could not be confirmed");
+    expect(exitObservations).toBe(0);
+  } finally {
+    unknownSettlement.deactivate();
+  }
+});

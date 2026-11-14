@@ -10,6 +10,7 @@ import {
   autostartServiceEnvironment,
   autostartServicePath,
   buildAutostartProjectInvocation,
+  canAdoptAutostartEnvironment,
   classifyAutostartContainers,
   classifyAutostartExit,
   completedDependencyServices,
@@ -1149,4 +1150,124 @@ test("a refused executable path never overwrites an earlier real-boot claim or p
   expect(
     (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
   ).toEqual(before);
+});
+
+test("repairing an executable path permits a first attempt in the same boot", async () => {
+  await seed(["alpha"]);
+  deps = {
+    ...deps,
+    startupRefusal: async () => "executable_path_untrusted" as const,
+  };
+  await run();
+  expect(starts).toEqual([]);
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+      ?.lastAttemptBootId
+  ).toBeNull();
+  deps = { ...deps, startupRefusal: async () => null };
+  await run();
+  expect(starts.map((start) => start.id)).toEqual(["alpha"]);
+});
+
+test("unsafe Docker context selection refuses before engine access without consuming a claim", async () => {
+  await seed(["alpha"]);
+  await mkdir(join(root, ".docker"), { mode: 0o700 });
+  const config = join(root, ".docker/config.json");
+  await writeFile(config, JSON.stringify({ currentContext: "untrusted" }), {
+    mode: 0o600,
+  });
+  await chmod(config, 0o666);
+  const production = createAutostartProductionDependencies(
+    { home: root, hackHome: join(root, "state") },
+    { executablePath: async () => {} }
+  );
+  deps = { ...deps, startupRefusal: production.startupRefusal };
+  await run();
+  expect(events).toEqual([]);
+  expect((await results())[0]?.result).toMatchObject({
+    reason: "docker_config_untrusted",
+  });
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+      ?.lastAttemptBootId
+  ).toBeNull();
+  await chmod(config, 0o600);
+  await run();
+  expect(starts.map((start) => start.id)).toEqual(["alpha"]);
+});
+
+test("managed global graph variables decline base-graph adoption without resolving their values", async () => {
+  await seed(["alpha"]);
+  const project = (await readProjectsRegistry({ registryPath })).projects[0];
+  if (!project) {
+    throw new Error("Missing fixture project");
+  }
+  await mkdir(project.projectDir, { recursive: true, mode: 0o700 });
+  const compose = { services: { web: {}, worker: { profiles: ["jobs"] } } };
+  const model = autostartComposeModel(compose);
+  expect(
+    classifyAutostartContainers(
+      "web|running|0",
+      model?.completedServices,
+      model?.requiredServices
+    )
+  ).toBe("running");
+  expect(
+    await canAdoptAutostartEnvironment({
+      projectRoot: project.repoRoot,
+      projectDir: project.projectDir,
+    })
+  ).toBe(true);
+  await writeFile(
+    join(project.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: {
+        global: { COMPOSE_PROFILES: "jobs", COMPOSE_FILE: "selected.yml" },
+      },
+    }),
+    { mode: 0o600 }
+  );
+  expect(
+    await canAdoptAutostartEnvironment({
+      projectRoot: project.repoRoot,
+      projectDir: project.projectDir,
+    })
+  ).toBe(false);
+  const production = createAutostartProductionDependencies({
+    home: root,
+    hackHome: join(root, "state"),
+  });
+  expect(await production.inspect(project)).toBe("stopped");
+});
+
+test("encrypted contracts, machine overlays and dotenv graph inputs conservatively disable adoption", async () => {
+  const projectRoot = join(root, "checkout");
+  const projectDir = join(projectRoot, ".hack");
+  await mkdir(projectDir, { recursive: true, mode: 0o700 });
+  for (const [directory, name] of [
+    [projectDir, "hack.env.json"],
+    [projectDir, "hack.env.local.yaml"],
+    [projectDir, ".env.preview"],
+    [projectRoot, ".env"],
+  ]) {
+    if (!(directory && name)) {
+      throw new Error("Missing fixture path");
+    }
+    const path = join(directory, name);
+    await writeFile(path, "synthetic encrypted reference, not decrypted");
+    expect(
+      await canAdoptAutostartEnvironment({ projectRoot, projectDir })
+    ).toBe(false);
+    await rm(path);
+  }
+  expect(await canAdoptAutostartEnvironment({ projectRoot, projectDir })).toBe(
+    true
+  );
+  await rm(projectDir, { recursive: true });
+  expect(await canAdoptAutostartEnvironment({ projectRoot, projectDir })).toBe(
+    false
+  );
 });

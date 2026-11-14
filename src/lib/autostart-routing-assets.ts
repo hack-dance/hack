@@ -53,12 +53,17 @@ export type AutostartRoutingAssetsOptions = {
   readonly root: string;
   readonly bindAddress: string | null;
   readonly defaultDomain: string;
+  /** Observe staging before final identity/device revalidation; this does not authorize publication. */
+  readonly beforePublish?: (opts: {
+    readonly stagingPath: string;
+    readonly targetPath: string;
+  }) => Promise<void>;
 };
 const MAX_ASSET_BYTES = 1024 * 1024;
 
 /**
  * Login executes only already-installed current templates. Authentication is
- * read-only; publication replaces matching bytes on private fresh inodes so an
+ * read-only; publication replaces matching nonsecret bytes on fresh 0644 inodes so an
  * older writable descriptor cannot change what the upcoming Compose run reads.
  * Missing/custom assets refuse; this is neither installation nor migration.
  */
@@ -95,14 +100,23 @@ export async function secureAutostartRoutingAssets(
     for (const asset of assets) {
       observed.push(await readCurrentAsset({ asset, uid }));
     }
+    const stagingRoot = await lstat(opts.root);
+    if (observed.some((asset) => asset.stat.dev !== stagingRoot.dev)) {
+      throw new Error("Assets require a common filesystem");
+    }
     for (const asset of observed) {
-      await publishFreshAsset({ asset, root: opts.root, uid });
+      await publishFreshAsset({
+        asset,
+        root: opts.root,
+        uid,
+        beforePublish: opts.beforePublish,
+      });
     }
   } catch {
     throw new HackCliError({
       code: "E_PERMISSION",
       message:
-        "Automatic routing startup refused untrusted or outdated installed assets. Run hack global install manually, then retry. Values omitted.",
+        "Automatic routing startup refused untrusted or outdated installed assets. Review and move unexpected schema/dashboard files aside before running hack global install manually, then retry. Values omitted.",
       detail: { reason: "routing_assets_untrusted" },
     });
   }
@@ -274,6 +288,7 @@ async function publishFreshAsset(opts: {
   readonly asset: ObservedAsset;
   readonly root: string;
   readonly uid: number;
+  readonly beforePublish?: AutostartRoutingAssetsOptions["beforePublish"];
 }): Promise<void> {
   const { asset } = opts;
   await assertSafeAssetParent({ ...opts, path: asset.path });
@@ -281,16 +296,33 @@ async function publishFreshAsset(opts: {
   if (!(current.isFile() && sameObservedFile(asset.stat, current))) {
     throw new Error("Asset changed");
   }
-  const staging = resolve(
-    dirname(asset.path),
-    `.autostart-routing-${randomUUID()}`
-  );
+  // A killed publisher may leave this file behind. Keep it outside every
+  // mounted directory so a later login's exact-list check can still succeed.
+  const staging = resolve(opts.root, `.autostart-routing-${randomUUID()}`);
+  await assertSafeAssetParent({ ...opts, path: staging });
   const file = await open(staging, "wx", 0o600);
   try {
     await file.writeFile(asset.text, "utf8");
-    await file.chmod(0o600);
+    // These exact canonical templates hold no secrets. Container service UIDs
+    // need other-read permission on their bind-mounted fresh inode.
+    await file.chmod(0o644);
     await file.sync();
+    await opts.beforePublish?.({
+      stagingPath: staging,
+      targetPath: asset.path,
+    });
     await assertSafeAssetParent({ ...opts, path: asset.path });
+    const staged = await file.stat();
+    const stagedPath = await lstat(staging);
+    if (
+      !staged.isFile() ||
+      staged.uid !== opts.uid ||
+      (staged.mode & 0o777) !== 0o644 ||
+      staged.dev !== current.dev ||
+      !sameObservedFile(staged, stagedPath)
+    ) {
+      throw new Error("Staging identity or filesystem changed");
+    }
     if (!sameObservedFile(current, await lstat(asset.path))) {
       throw new Error("Asset changed");
     }

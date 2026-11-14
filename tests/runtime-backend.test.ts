@@ -10,6 +10,7 @@ const runOpts: {
   stdout?: string;
   timeoutMs?: number;
   forwardSignals?: boolean;
+  settleProcessGroupOnCancel?: boolean;
 }[] = [];
 const execCalls: string[][] = [];
 
@@ -31,6 +32,7 @@ const shellMock = await registerScopedModuleMock({
         readonly stdout?: string;
         readonly timeoutMs?: number;
         readonly forwardSignals?: boolean;
+        readonly settleProcessGroupOnCancel?: boolean;
       } = {}
     ) => {
       runCalls.push([...cmd]);
@@ -38,6 +40,7 @@ const shellMock = await registerScopedModuleMock({
         stdout: opts.stdout,
         timeoutMs: opts.timeoutMs,
         forwardSignals: opts.forwardSignals,
+        settleProcessGroupOnCancel: opts.settleProcessGroupOnCancel,
       });
       return 0;
     },
@@ -106,6 +109,14 @@ test("composeRuntimeBackend.up builds compose args with profiles and detach", as
     "--profile",
     "ops",
   ];
+  expect(runOpts.map((options) => options.forwardSignals)).toEqual([
+    true,
+    true,
+  ]);
+  expect(runOpts.map((options) => options.settleProcessGroupOnCancel)).toEqual([
+    true,
+    true,
+  ]);
   // Image build/pull and container creation, then start and dependency wait.
   expect(runCalls).toEqual([
     [...base, "up", "--no-start"],
@@ -479,5 +490,6 @@ test("automatic bootstrap preserves output and forwards cancellation to its boun
     stdout: "stderr",
     timeoutMs: 600_000,
     forwardSignals: true,
+    settleProcessGroupOnCancel: undefined,
   });
 });

@@ -27,7 +27,7 @@ import {
   type ControlPlaneConfig,
   readControlPlaneConfig,
 } from "../control-plane/sdk/config.ts";
-import { assertAutostartExecutablePathTrusted } from "../lib/autostart-executable-trust.ts";
+import { trustedAutostartServicePath } from "../lib/autostart-executable-trust.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { resolveRegisteredProjectById } from "../lib/projects-registry.ts";
 import { runAutostartAtLogin } from "./autostart.ts";
@@ -98,7 +98,7 @@ export async function runDaemon({
   // Before any socket is bound: the local API is unauthenticated.
   await secureDaemonDirectory({ root: paths.root });
   if (process.env.HACK_DAEMON_LOGIN_SERVICE === "1") {
-    await assertAutostartExecutablePathTrusted({
+    process.env.PATH = await trustedAutostartServicePath({
       path: process.env.PATH ?? "",
     });
   }

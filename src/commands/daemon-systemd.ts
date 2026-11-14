@@ -436,12 +436,20 @@ export async function reconcileRunningSystemdDaemon(
     readSelfCgroup: hooks.readSelfCgroup,
   });
   // A restart runs what systemd has loaded, drop-ins included, not only
-  // the main file: both must be this CLI's executable.
-  const loaded = await loadedProgramIsExpected({ deps, expected });
+  // the main file: both must be this CLI's executable. While a reload is
+  // pending for a unit file that runs this CLI (an earlier repair wrote it
+  // but its daemon-reload failed), what is loaded is stale by definition:
+  // the restart path reloads first, and the check just before the restart
+  // (refuseUnexpectedLoadedProgram) judges the newly loaded program.
+  const fileIsOurs = await unitRunsExpected({ status, expected });
+  const reloadPending =
+    status.needsReload && !isSystemdReadOnly(deps.env) && fileIsOurs;
+  const loaded = reloadPending
+    ? ("ours" as const)
+    : await loadedProgramIsExpected({ deps, expected });
   const planned = planDaemonReconcile({
     unit: serviceUnitState(status.drift),
-    programIsOurs:
-      loaded === "ours" && (await unitRunsExpected({ status, expected })),
+    programIsOurs: loaded === "ours" && fileIsOurs,
     readOnly: isSystemdReadOnly(deps.env),
     running: { version: hooks.version },
     restartPending: await pathExists(marker),

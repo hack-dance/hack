@@ -5369,3 +5369,73 @@ linuxTest(
     expect(await Bun.file(restartMarker()).exists()).toBe(true);
   }
 );
+
+// Review round 15 (HACK-2216): a pending reload is retried before the
+// loaded-program gate judges what systemd runs.
+
+linuxTest(
+  "a retarget whose reload failed is finished on the next start: reload, check, restart",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    const old = await writeOldUnit(fake);
+    await rm(old);
+    // What systemd has loaded: the deleted program until a reload works,
+    // then whatever the unit file names.
+    let loadedPath = old;
+    let reloadFails = true;
+    withLoadedExec(fake, () => [execStart(loadedPath)]);
+    const run = fake.deps.run;
+    fake.deps = {
+      ...fake.deps,
+      run: async (command, args) => {
+        if (!args.includes("daemon-reload")) {
+          return await run(command, args);
+        }
+        fake.calls.push(`${command} ${args.join(" ")}`);
+        if (reloadFails) {
+          fake.needsReload = true;
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "Failed to reload daemon: Access denied",
+          };
+        }
+        fake.needsReload = false;
+        loadedPath =
+          extractSystemdExecProgram({
+            unitText: await readFile(unitPath, "utf8"),
+          }) ?? loadedPath;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    // Run 1: the daemon runs this version; the unit names a deleted
+    // program. The retarget is written, its reload fails: no restart.
+    fake.calls.length = 0;
+    expect(
+      await reconcileRunningSystemdDaemon(runningHooks(fake, "2.0.0"))
+    ).toBe(1);
+    expect(await readFile(unitPath, "utf8")).toContain(
+      `ExecStart="${program}" daemon start --foreground`
+    );
+    expect(fake.calls).toContain("systemctl --user daemon-reload");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(await Bun.file(restartMarker()).exists()).toBe(true);
+    expect(loadedPath).toBe(old);
+
+    // Run 2: the reload works now. It runs first, the loaded ExecStart is
+    // this CLI, and the restart completes and clears the marker.
+    reloadFails = false;
+    fake.calls.length = 0;
+    const second = runningHooks(fake, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(second)).toBe(0);
+    const reload = fake.calls.indexOf("systemctl --user daemon-reload");
+    expect(reload).toBeGreaterThanOrEqual(0);
+    expect(
+      fake.calls.indexOf("systemctl --user restart hackd.service")
+    ).toBeGreaterThan(reload);
+    expect(loadedPath).toBe(program);
+    expect(second.trace.action).toBe("restarted");
+    expect(await Bun.file(restartMarker()).exists()).toBe(false);
+  }
+);

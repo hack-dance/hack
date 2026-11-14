@@ -621,7 +621,12 @@ a pending-restart marker (which then stays), or a rewrite. Retargeting a
 missing program, or rewriting the unit, changes what systemd loads, so the
 loaded `ExecStart` is read again after the `daemon-reload` and before the
 restart. A retained drop-in that still selects another program stops the
-restart there.
+restart there. While a reload is pending (`NeedDaemonReload=yes`) for a unit
+file that runs this CLI, which happens after a repair whose `daemon-reload`
+failed, the loaded copy is stale by definition. `start` then retries the
+reload first (not in read-only mode, with the same home check) and judges the
+newly loaded `ExecStart` before restarting, so a later start finishes the
+repair.
 
 Before such a restart, and again just before it lands, `start` proves that the
 unit's live main process is this home's hackd. This is the same proof `stop`

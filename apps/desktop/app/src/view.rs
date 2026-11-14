@@ -912,6 +912,12 @@ impl Render for HackApp {
         let t = cx.theme().clone();
         let (bg, fg, font) = (t.background, t.foreground, t.font_family.clone());
         let main: AnyElement = match &list.phase {
+            // Machine checks matter most before any project exists, so the
+            // Doctor pane renders for an empty registry too.
+            // Diagnostics are most useful when the project list fails.
+            Phase::Ready | Phase::Empty | Phase::Error { .. } if self.pane == Pane::Doctor => {
+                crate::doctor_view::render(&self.doctor, cx)
+            }
             Phase::CliMissing => self.full_pane(
                 "Hack CLI not found",
                 "The app runs the hack command for everything. Install it, then reopen the app."
@@ -925,11 +931,6 @@ impl Render for HackApp {
                 Some("hack projects --json"),
                 cx,
             ),
-            // Machine checks matter most before any project exists, so the
-            // Doctor pane renders for an empty registry too.
-            Phase::Ready | Phase::Empty if self.pane == Pane::Doctor => {
-                crate::doctor_view::render(&self.doctor, cx)
-            }
             Phase::Empty => self.full_pane(
                 "No projects yet",
                 "Set up a repository with Hack and it appears here.".into(),

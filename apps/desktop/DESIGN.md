@@ -17,7 +17,7 @@ second implementation of them.
 | Reads observe only | A poll never starts Docker, hackd, a VM or anything else. A command that can start something (today: `hack global status`) is not polled until it has an observe-only mode (R13). |
 | No app state beyond window layout | Selected project, window size, sidebar width, theme override. Nothing else is stored. |
 | No credentials, no passwords | No password field, no `sudo` from the app. Admin steps go to the user's terminal ([Onboarding](#2-first-run-onboarding)). |
-| Hack's secret values never appear | Env shows names and layers only, never a reveal. Logs are service output, shown as the CLI emits them, with a warning, never written to disk and with no copy-all (owner decision: the Logs tab is in scope). |
+| No env-value reads or reveals | Env shows names and layers only, never a reveal. Exception: logs are unredacted service output (which can include values Hack injected), shown as the CLI emits them, with a warning, never written to disk and with no copy-all (owner decision: the Logs tab is in scope). |
 | Unknown is not absent | A failed or timed-out read shows "could not read" with the error, never "stopped" or "0 projects". |
 | Small | Target under 4,000 lines of Rust for v0.1. The old `apps/macos` grew to 13,800 lines through an embedded terminal, command palette, editor and agent integrations, tickets and remote features. None of those come back. |
 
@@ -44,7 +44,7 @@ detail pane, status bar. Light and dark follow the system
 | Empty | Registry has no projects | "No projects yet" + `cd your-repo && hack init` | Copy command, open docs |
 | Daemon not running | `/v1/status` unreachable | List loads through the CLI; banner "hackd is off: status refreshes slowly" | Start hackd |
 | Daemon other version | `/v1/status.version` ≠ CLI version | CLI fallback; banner "hackd vX, CLI vY" | Restart hackd |
-| Engine not running | `runtime_ok: false` | Rows keep names, dots "?"; banner with `runtime_error` | Open engine help |
+| Docker not reachable | `runtime_ok: false` (Docker observation only) | Compose rows keep names, dots "?"; native rows keep their own state from native `ps`; banner with `runtime_error` | Open Docker help |
 | CLI missing or too old | `hack` not on PATH, or outside the supported range | Full-pane card instead of the list; status bar shows no engine/hackd state | Copy install command |
 | Error | CLI exit ≠ 0 or bad JSON | Banner with `code` and `message`; last good list kept, marked stale with its age | Retry, copy error |
 
@@ -59,9 +59,9 @@ Project views read legacy inputs; a canonical native project comes back with
 `input_diagnostic`. The app recognises that code and asks `hack ps` instead
 rather than showing "Needs attention". Every command for a native project (`ps`, `up`,
 `down`, `restart`, `logs`) runs with `HACK_RUNTIME_BACKEND=native`, which is how the CLI
-selects that backend today. Native `data.status` maps as:
+selects that backend today. Docker's `runtime_ok` never changes a native row. Native `data.status` maps as:
 `not_started` → Stopped, `pending` → Starting, `observed` → Running or Degraded
-from `items[].state`, `runtime_degraded` → Degraded, `runtime_not_running` and
+from `items[].state`, `items[].health` and `items[].readiness`, `runtime_degraded` → Degraded, `runtime_not_running` and
 `runtime_busy` and `owner_unconfirmed` → Unknown (with the status as reason),
 `provider_pin_changed` → Needs attention.
 
@@ -77,7 +77,8 @@ Header: name, state pill (+ uptime when known), backend pill, URL, buttons,
 | Unknown | runtime unreadable, read failed, or an action timed out or was interrupted | grey "Status unknown" + reason | Start (disabled while engine down) |
 | Stopped | no running container and no failed one | grey "Stopped" | Start |
 | Starting | this app's `up` in flight, or native `pending` | blue "Starting…" | none (no cancel in v0) |
-| Running | every long-running service has a running container; one-shot services that exited 0 count as completed | green "Running · 2 hours" (from Docker status text) | Open, Restart, Stop |
+| Running | every defined service has a running container | green "Running · 2 hours" (from Docker status text) | Open, Restart, Stop |
+| Running, some exited (0) | the rest run; some exited 0 and their completion role is unknown | green "Running · migrate exited (0)" with tooltip "completion role unknown" | Open, Restart, Stop |
 | Degraded | some running; a long-running service down, exited ≠ 0, or `(unhealthy)` | amber "Degraded · worker down" | Open, Restart, Stop |
 | Stopping | this app's `down` in flight | grey "Stopping…" | none |
 | Failed start | last `up` reported `services.failed`, or nothing runs and a service exited ≠ 0 | red "Failed to start: api, worker" | Start (retry), Stop, logs filtered to those services |
@@ -92,9 +93,10 @@ Rules:
   failed: <code>: <message>" under the header.
 - An action that times out or loses its process → Unknown until the next read.
 - Exit codes and uptime come from Docker's status text (`Exited (1) …`, `Up 2 hours`);
-  structured fields are request R2. A one-shot service is one with `restart: "no"`
-  semantics as Hack's startup state reports it; until R2 exposes that, an exit 0
-  is treated as completed, never as down.
+  structured fields are request R2. Hack decides completion from a known role,
+  not exit 0 alone; until R2 exposes that role, an exit-0 service is shown as
+  "exited (0), completion role unknown": not down, and not claimed as fully running.
+- External changes (a `hack up` in a terminal) show up on the next read.
 
 ### Services tab
 
@@ -118,7 +120,9 @@ Source: `hack logs --json --path <root> --tail 500` (ndjson, follows by default)
 | Very long lines | Cut at 4 KB on screen with "… (+N KB)", click to expand; `entry.truncated` shown as "truncated by hack". |
 | Secrets warning | Fixed note: "Logs are shown as your services print them. Hack does not hide secrets in logs." No copy-all; buffer never written to disk; "Open in terminal" offered. |
 | Finished | `end` event on a `--no-follow` read: "End of log" (normal). |
-| Stream error | `error` event or exit ≠ 0: banner with reason and Reconnect. Engine down: "Engine not running". |
+| Follow ended | while following, an `end` event (`eof` from Compose, `closed` from Loki) and exit 0: "Log stream ended" + Reconnect. Not an error. |
+| Stream error | `error` event or exit ≠ 0: banner with reason and Reconnect. Docker down: "Docker not reachable". |
+| Closed by the app | tab change, project change or pause timeout: the app kills the stream; nothing is shown. |
 | Stopped project | Last 200 lines (`--no-follow`), marked "project stopped". |
 
 ### Env tab (names only, never values)
@@ -163,8 +167,10 @@ check, in order. Every check is read-only; every card offers **Check again**.
 | CLI | `hack --version` (text; R1 for JSON) | `brew install hack-dance/tap/hack` (copy) | no | Cannot skip |
 | Engine | `runtime_ok` from `/v1/projects` or `hack projects --json` | open Docker Desktop / engine docs; native setup command (HACK-2193) | no | "Engine not running" on every project |
 | hackd | `hack daemon status --json` | `hack daemon start` | no | Status bar "hackd off"; slower refresh |
-| Routing and DNS | macOS: doctor `dnsmasq:53` and `coredns forwarding`; native: `native host dns`. Linux: **unknown** until R13 (only `hack global status`, which can start Docker, reports it) | `hack global install` | **yes** | URLs greyed "DNS not set up"; "unknown" when no check reports |
-| Certificate trust | **Unknown** today for Compose: doctor `caddy local ca` checks the exported CA, not system or browser trust (R16). Native: `native root trust` | `hack global trust` | **yes** | Lock icon on URLs: "browser may warn" |
+| Routing and DNS (Compose) | macOS: doctor `resolver:<tld>`, `dnsmasq.conf:<tld>`, `dnsmasq:53` and `coredns forwarding` (all must pass). Linux: doctor `linux dns route`. Never `hack global status` (can start Docker) | `hack global install` | **yes** | URLs greyed "DNS not set up"; "unknown" when a check is missing |
+| Routing and DNS (native) | `hack doctor --browser-url <project URL>` → `native host dns` (absent without `--browser-url`) | none from the app: `hack global install` refuses native; link to the native setup doc (HACK-2193) | — | "unknown" |
+| Certificate trust (Compose) | **Unknown** today: doctor `caddy local ca` checks the exported CA, not system or browser trust (R16) | `hack global trust` | **yes** | Lock icon on URLs: "browser may warn" |
+| Certificate trust (native) | doctor `native root trust` | none from the app: `hack global trust` refuses native; doc link | — | "unknown" |
 | Login service | `daemon status` `service.installed` | `hack daemon install` | no | Always-on switch disabled |
 
 Skips are not stored: the next check finds the step still open and Doctor lists
@@ -210,12 +216,13 @@ with only Copy and Open doc. No Run button appears without a `fix.kind: safe`.
 |---|---|---|---|
 | Update available | R14 (read-only, any install kind). `hack update --check` rejects Homebrew installs and candidate launchers, so it is not used | Chip "Hack vX available" | Review |
 | Checking | `hack upgrade check --json` (#790) | Spinner, then plan | none |
-| Blocked | `ready: false`. `blockers[]` / `incomplete[]` are `{scope,id,summary}`; the command or action comes from the matching finding (`machine[]` or `projects[].findings[]` by scope + id) | One card per blocker | Copy / Open Terminal; Run only with R7a's `kind: safe`; Re-check |
+| Blocked | `ready: false`. `blockers[]` / `incomplete[]` are `{scope,id,summary}`; the command or action comes from the matching finding (`machine[]` or `projects[].findings[]` by scope + id) | One card per blocker | Copy / Open Terminal; Run only with R17's `kind: safe`; Re-check |
 | Ready | `ready: true`, `plan[]` (`command` / `args` / `action`, `blocker`) | Ordered plan | Upgrade |
 | Snapshotting | `hack upgrade snapshot --json` | Progress | none |
 | Snapshot incomplete | `complete: false` or `gaps[]` | Gaps listed; Upgrade stays disabled | Re-check |
-| Applying | Homebrew: `brew upgrade hack` **and** `brew upgrade --cask hack-desktop`, in a terminal, then plan steps | Steps with ✓/✗; partial success named ("CLI upgraded, app not") | none |
-| Restarting daemon | `hack daemon restart` (exists), then `/v1/status.version` == CLI version. Doing this automatically after upgrade is HACK-2216 (proposed) | "Restarting hackd…" | none |
+| Applying | Homebrew: `brew upgrade hack` **and** `brew upgrade --cask hack-desktop`, in a terminal, then plan steps | Each step ✓ only on fresh evidence: CLI = `hack --version` equals the target; app = the cask's installed version (`brew info --json=v2 --cask hack-desktop`) equals the target; a plan step = `hack upgrade check --json` no longer lists it. No evidence → that step stays Unknown (user confirmation or window focus is not evidence) | Check again |
+| Restarting daemon | `hack daemon restart` (exists), then `/v1/status.version` == CLI version. Doing this automatically after upgrade is HACK-2216 (proposed) | "Restarting hackd…"; a mismatch after restart → Failed | none |
+| Done | `ready: true` with an empty `plan[]`, CLI and app at the target, hackd version matches | "Hack vX is up to date" | none |
 | Failed | a step exit ≠ 0, or versions still differ | Which step and its error; "Files were saved" only when a complete snapshot exists | Roll back (only with a complete snapshot), Copy error |
 | Unknown | terminal step interrupted or not confirmed | "Could not confirm the upgrade" | Re-check |
 | Rolling back | `hack upgrade rollback --rollback-manifest <path> --json` | Restored / not restored (`kept_as`, reasons) | none |
@@ -271,6 +278,18 @@ Fields and commands needed from the CLI side:
 Polling stops while the window is hidden. Every CLI call has a timeout and is
 killed with its process group on expiry; a timeout makes the screen Unknown.
 
+Exit codes: a valid JSON payload is parsed even when the exit code is not 0,
+because the unhealthy states live there.
+
+| Read | Output | Non-zero exit means |
+|---|---|---|
+| `hack doctor --json` | envelope `{ok:true,data}` | exit 1 = some check is `error` (still a report) |
+| `hack env list --json` | bare object | exit 1 = a required key is missing (still a report) |
+| `hack upgrade check --json` (#790) | bare report | exit 1 = not `ready` (still a report) |
+| `hack up\|down\|restart\|open --json`, native `ps --json` | envelope; `{ok:false,error}` on failure | failure, with `error.code` |
+| `hack projects --json`, `daemon status --json`, `usage --json` | bare object | failure (no report) |
+| `hack logs --json` | ndjson events | see Logs |
+
 | Screen | Reads | How often | Timeout |
 |---|---|---|---|
 | Sidebar, header | `GET /v1/projects` if `/v1/status.version` matches the CLI, else `hack projects --json --no-daemon`; native rows add `HACK_RUNTIME_BACKEND=native hack ps --json --path` | 2 s with hackd, 10 s without; and after every action | 3 s / 15 s |
@@ -283,30 +302,8 @@ killed with its process group on expiry; a timeout makes the screen Unknown.
 | Upgrades | R14 daily; `hack upgrade check --json` on Review | daily / on demand | 30 s / 60 s |
 | Actions | `hack up -d --json`, `down --json`, `restart --json`, `open --json`, `daemon start\|restart\|install` (exit code), `autostart …` | on click | 10 min for `up`, 2 min others |
 
-### Requests to the CLI and daemon (each small enough for one PR)
-
-1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
-2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
-3. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
-4. **R4** Logs: document the `--json` ndjson as stable; `--services a,b` honoured by every backend; `--max-line-bytes <n>` setting `entry.truncated`.
-5. **R5a** Activity writer: append-only `activity.jsonl` in the Hack home, one line per `up`/`down`/`restart`/autostart (`ts, project, branch, action, origin, outcome, failed_services, duration_ms`), `O_APPEND` writes under one line size limit, rotation at a size cap, `origin` from `HACK_ORIGIN` (the app sets `app`).
-6. **R5b** Activity reader: `hack activity --json [--project] [--limit]`.
-7. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope.
-8. **R7a** Doctor metadata: per check `area`, `scope: machine | project`, `fix: {kind: safe | admin | manual, args[], doc_url}` (same shape as #790's findings plus `kind`).
-9. **R7b** One fix without prompts: `hack doctor --fix --only <id> --yes --json`, only for `kind: safe`.
-10. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
-11. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
-12. **R9** (optional) Push updates: `GET /v1/projects?wait=<generated_at>` long-poll.
-13. **R10** Env key state: `key_state: ok | missing | unreadable` in `hack env list --json` (no values).
-14. **R11** Admin argv plan: `hack global install|trust --plan --json` listing the root-only argv lines.
-15. **R12a** Always-on persistence and `hack autostart add|remove|list|pause|resume` ([section 6](#6-always-on-hack-2213-proposed-contract)).
-16. **R12b** Always-on fields in project payloads and `autostart_global`.
-17. **R12c** Login run: hackd starts always-on projects at service start, retries up to `max_failures`, and honours pause.
-18. **R13** Observe-only `hack global status --json --observe` that never starts Docker; reports `host_dns_ok` on both platforms.
-19. **R14** Read-only update check for any install kind: `hack update --check --json --observe` → `{current, latest, available, install_kind, upgrade_command}`.
-20. **R15** `--json` for `hack daemon start|stop|restart|install`.
-21. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
-22. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.
+The 22 numbered requests (R1–R17) this design needs from the CLI and daemon are in
+[Appendix C](#appendix-c-requests-to-the-cli-and-daemon).
 
 ## 8. Scope
 
@@ -355,6 +352,34 @@ A macOS system prompt could come later for single root-only lines from R11, neve
 
 1. Build a universal `.app` (`aarch64` + `x86_64`) with `Info.plist` (`dance.hack.desktop`, minimum 15.0).
 2. `codesign --options runtime --timestamp` with the Developer ID Application identity from CI secrets.
-3. Zip, `xcrun notarytool submit --wait` with the notary API key from CI secrets, `xcrun stapler staple`, `stapler validate`.
-4. Upload the zip to the release; update the cask's `version` and `sha256` in the tap (as the formula job does today).
-5. A separate, manual workflow does this until the lead folds it into the release.
+3. Zip a submission copy, `xcrun notarytool submit --wait` with the notary API key from CI secrets.
+4. `xcrun stapler staple` the `.app`, `stapler validate`, then create the **distribution** zip from the stapled app.
+5. Upload that zip; compute the cask `sha256` from it and update the cask in the tap (as the formula job does today).
+6. A separate, manual workflow does this until the lead folds it into the release.
+
+## Appendix C: requests to the CLI and daemon
+
+Each is small enough for one PR.
+
+1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
+2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
+3. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
+4. **R4** Logs: document the `--json` ndjson as stable; `--services a,b` honoured by every backend; `--max-line-bytes <n>` setting `entry.truncated`.
+5. **R5a** Activity writer: append-only `activity.jsonl` in the Hack home, one line per `up`/`down`/`restart`/autostart (`ts, project, branch, action, origin, outcome, failed_services, duration_ms`), `O_APPEND` writes under one line size limit, rotation at a size cap, `origin` from `HACK_ORIGIN` (the app sets `app`).
+6. **R5b** Activity reader: `hack activity --json [--project] [--limit]`.
+7. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope.
+8. **R7a** Doctor metadata (a new doctor schema): per check `area`, `scope: machine | project`, `fix: {kind: safe | admin | manual, args[], doc_url}`.
+9. **R7b** One fix without prompts: `hack doctor --fix --only <id> --yes --json`, only for `kind: safe`.
+10. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
+11. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
+12. **R9** (optional) Push updates: `GET /v1/projects?wait=<generated_at>` long-poll.
+13. **R10** Env key state: `key_state: ok | missing | unreadable` in `hack env list --json` (no values).
+14. **R11** Admin argv plan: `hack global install|trust --plan --json` listing the root-only argv lines.
+15. **R12a** Always-on persistence and `hack autostart add|remove|list|pause|resume` ([section 6](#6-always-on-hack-2213-proposed-contract)).
+16. **R12b** Always-on fields in project payloads and `autostart_global`.
+17. **R12c** Login run: hackd starts always-on projects at service start, retries up to `max_failures`, and honours pause.
+18. **R13** Observe-only `hack global status --json --observe` that never starts Docker; reports `host_dns_ok` on both platforms.
+19. **R14** Read-only update check for any install kind: `hack update --check --json --observe` → `{current, latest, available, install_kind, upgrade_command}`.
+20. **R15** `--json` for `hack daemon start|stop|restart|install`.
+21. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
+22. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.

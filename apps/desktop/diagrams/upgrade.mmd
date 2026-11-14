@@ -4,16 +4,18 @@ title: Upgrade · app view of the flow
 stateDiagram-v2
   direction TB
   [*] --> Checking
+  Checking --> Done : nothing remains
   Checking --> Blocked : blockers or incomplete
-  Checking --> Ready : ready
+  Checking --> Ready : work remains
   Blocked --> Checking : Re-check
   Ready --> Snapshotting : Upgrade
   Snapshotting --> Blocked : gaps or refused
   Snapshotting --> Applying : complete
-  Applying --> Unknown : interrupted
+  Applying --> Unknown : no evidence
   Applying --> Failed : step failed
-  Applying --> RestartingDaemon : steps done
-  RestartingDaemon --> Checking : verify
+  Applying --> RestartingDaemon : steps verified
+  RestartingDaemon --> Checking : versions match
+  RestartingDaemon --> Failed : mismatch
   Failed --> RollingBack : Roll back
   RollingBack --> Restored : files restored
   RollingBack --> Failed : partial restore
@@ -23,7 +25,9 @@ stateDiagram-v2
     INV rollback restores files only,
     never versions or containers
   end note
+  classDef ok stroke-width:1.6px
   classDef wait stroke-dasharray:2 2
   classDef fail stroke-width:2px
+  class Done ok
   class Snapshotting,Applying,RestartingDaemon,RollingBack wait
   class Blocked,Failed,Unknown fail

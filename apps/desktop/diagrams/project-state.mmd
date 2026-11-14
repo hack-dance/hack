@@ -8,15 +8,20 @@ stateDiagram-v2
   Observed --> Unknown : observation failed
   state Observed {
     Stopped --> Starting : Start
-    Starting --> Running : all ready
+    Stopped --> Running : started elsewhere
+    Starting --> Running : all running
     Starting --> FailedStart : a service failed
     Running --> Degraded : a service down
     Degraded --> Running : service back
     Running --> Stopping : Stop
     Degraded --> Stopping : Stop
+    FailedStart --> Stopping : Stop
+    Running --> Stopped : stopped elsewhere
     Stopping --> Stopped : observed stopped
     FailedStart --> Starting : Retry
     FailedStart --> NeedsAttention : always-on gave up
+    NeedsAttention --> Starting : Retry
+    NeedsAttention --> Stopped : cause fixed
   }
   note right of Unknown
     INV a failed or timed-out

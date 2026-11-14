@@ -6,7 +6,7 @@ flowchart LR
   App -->|"GET /v1/status, /v1/projects"| D["hackd socket"]
   CLI --> D
   CLI --> E["Engine (Docker or native VM)"]
-  D -->|"events + 30s inspect"| E
+  D -->|"Docker events + 30s inspect (Docker only)"| E
   App -.->|"opens"| T["Terminal (admin steps)"]
   App -.->|"opens"| B["Browser (project URL)"]
   classDef live stroke-width:1.6px

@@ -25,11 +25,13 @@ import {
   strictJsonRecords,
 } from "../src/commands/global-status-observe-host.ts";
 import { observeGlobalCaddyIp } from "../src/lib/caddy-hosts.ts";
+import { resolveDefaultDomainStrictly } from "../src/lib/default-domain.ts";
 import * as dnsQuery from "../src/lib/dns-query.ts";
 import { createLinuxDnsHost } from "../src/lib/linux-dns-host.ts";
 import type { LinuxDnsInspection } from "../src/lib/linux-dns-setup.ts";
 import * as shell from "../src/lib/shell.ts";
 import { isolatedDockerClientEnv } from "./helpers/docker-client.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 // `hack global status --json --observe` (HACK-2218, R13): never starts
 // anything, and never reports what it could not read as absent or failed.
@@ -93,6 +95,8 @@ function deps(overrides: Partial<ObserveDeps> = {}): {
       inspection: linuxInspection("configured"),
       unreadable: [],
     }),
+    macDomains: async () =>
+      await Promise.resolve(["hack.local", "hack", "hack.gy"]),
     observeMacDns: async (opts) => {
       calls.push("mac dns");
       await opts.caddyIp();
@@ -238,6 +242,83 @@ test("macOS host DNS: any missing check is no; otherwise any unknown is unknown;
   await observeGlobalStatus(up.deps);
   expect(up.calls).toContain("caddy ip");
   expect(seen).toEqual(["unknown", "172.30.0.2"]);
+});
+
+test("macOS host DNS covers the configured default domain, and is unknown when it cannot be read", async () => {
+  const seen: (readonly string[])[] = [];
+  const withDomains = (macDomains: ObserveDeps["macDomains"]) =>
+    deps({
+      platform: "darwin",
+      macDomains,
+      observeMacDns: async (opts) => {
+        seen.push(opts.domains);
+        // Built-ins are set up; only a custom suffix is missing.
+        return await Promise.resolve(
+          opts.domains.map((domain) =>
+            check(
+              `resolver:${domain}`,
+              domain === "custom.example" ? "missing" : "ok"
+            )
+          )
+        );
+      },
+    }).deps;
+  const custom = await observeGlobalStatus(
+    withDomains(
+      async () =>
+        await Promise.resolve([
+          "hack",
+          "hack.local",
+          "hack.gy",
+          "custom.example",
+        ])
+    )
+  );
+  expect(seen.at(-1)).toContain("custom.example");
+  expect(custom.summary.host_dns_ok).toBe(false);
+  // Built-in default only: the same built-ins pass.
+  const builtIn = await observeGlobalStatus(
+    withDomains(
+      async () => await Promise.resolve(["hack", "hack.local", "hack.gy"])
+    )
+  );
+  expect(builtIn.summary.host_dns_ok).toBe(true);
+  const unreadable = await observeGlobalStatus(
+    withDomains(async () => {
+      throw new Error("synthetic");
+    })
+  );
+  expect(unreadable.host_dns).toMatchObject({
+    state: "unknown",
+    ok: "unknown",
+  });
+});
+
+test("the configured default domain is read strictly for observation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hack-observe-domain-"));
+  const saved = process.env.HACK_GLOBAL_CONFIG_PATH;
+  try {
+    const config = join(dir, "hack.config.json");
+    process.env.HACK_GLOBAL_CONFIG_PATH = config;
+    expect(await resolveDefaultDomainStrictly()).toBe("hack.local");
+    await writeFile(
+      config,
+      JSON.stringify({ default_domain: "custom.example" })
+    );
+    expect(await resolveDefaultDomainStrictly()).toBe("custom.example");
+    await writeFile(config, "{}");
+    expect(await resolveDefaultDomainStrictly()).toBe("hack.local");
+    await writeFile(config, "{ not json");
+    await expect(resolveDefaultDomainStrictly()).rejects.toThrow();
+    await rm(config);
+    await mkdir(config);
+    await expect(resolveDefaultDomainStrictly()).rejects.toThrow(
+      "could not be read"
+    );
+  } finally {
+    restoreEnv("HACK_GLOBAL_CONFIG_PATH", saved);
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("other platforms report host DNS as unknown", async () => {

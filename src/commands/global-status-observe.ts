@@ -12,11 +12,6 @@
  * keeps "could not read" apart from "read and found", so unknown is never
  * reported as absent or as a failure of the thing.
  */
-import {
-  DEFAULT_NEW_PROJECT_TLD,
-  DEFAULT_OAUTH_ALIAS_ROOT,
-  DEFAULT_PROJECT_TLD,
-} from "../constants.ts";
 import type { LinuxDnsInspection } from "../lib/linux-dns-setup.ts";
 import type { ExecResult } from "../lib/shell.ts";
 import type { ObservedCheck } from "./global-mac-dns.ts";
@@ -52,6 +47,12 @@ export type ObserveDeps = {
     readonly inspection: LinuxDnsInspection;
     readonly unreadable: readonly string[];
   }>;
+  /**
+   * The suffixes Hack routes on macOS: the built-ins and the configured
+   * default domain (as `hack global install` sets them up). Throws when the
+   * configuration cannot be read.
+   */
+  readonly macDomains: () => Promise<readonly string[]>;
   readonly observeMacDns: (opts: {
     readonly domains: readonly string[];
     readonly caddyIp: () => Promise<string | null | "unknown">;
@@ -60,13 +61,6 @@ export type ObserveDeps = {
 };
 
 type DockerState = "running" | "not_running" | "not_installed" | "unknown";
-
-/** The macOS routed suffixes `hack doctor` checks. */
-const MAC_DOMAINS = [
-  DEFAULT_PROJECT_TLD,
-  DEFAULT_NEW_PROJECT_TLD,
-  DEFAULT_OAUTH_ALIAS_ROOT,
-] as const;
 
 /** A read that threw: its part is unknown, never a failure of the thing. */
 const READ_FAILED = "This part could not be read";
@@ -180,8 +174,9 @@ function unknownProxy(reason: string): ProxyObservation {
 /**
  * Host DNS for Hack's routed suffixes. Linux: the systemd-resolved route
  * (`configured` is yes; a resolver Hack does not manage, or an answer that
- * rests on a failed read, is unknown). macOS: the resolver files, dnsmasq
- * lines and an answer from 127.0.0.1:53. Elsewhere: unknown.
+ * rests on a failed read, is unknown). macOS: for each routed suffix (the
+ * built-ins and the configured default domain), the resolver file and the
+ * dnsmasq line, and an answer from 127.0.0.1:53. Elsewhere: unknown.
  */
 async function observeHostDns(opts: {
   readonly deps: ObserveDeps;
@@ -212,15 +207,22 @@ async function observeHostDns(opts: {
     } as const;
   }
   if (deps.platform === "darwin") {
-    const checks = await deps
-      .observeMacDns({ domains: MAC_DOMAINS, caddyIp: opts.caddyIp })
-      .catch(() => null);
+    const domains = await deps.macDomains().catch(() => null);
+    const checks =
+      domains === null
+        ? null
+        : await deps
+            .observeMacDns({ domains, caddyIp: opts.caddyIp })
+            .catch(() => null);
     if (checks === null) {
       return {
         platform: "darwin",
         state: "unknown",
         ok: "unknown" as Tri,
         checks: [] as readonly ObservedCheck[],
+        ...(domains === null
+          ? { message: "The configured default domain could not be read" }
+          : {}),
       } as const;
     }
     const ok = allOk(checks.map((check) => checkOk(check)));

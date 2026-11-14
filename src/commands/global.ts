@@ -70,6 +70,7 @@ import {
   managedLocalDomains,
   parseDefaultDomain,
   resolveDefaultDomain,
+  resolveDefaultDomainStrictly,
 } from "../lib/default-domain.ts";
 import {
   isSlimExecutionMode,
@@ -2578,6 +2579,8 @@ async function globalStatusObserve(): Promise<number> {
       });
       return { inspection, unreadable };
     },
+    macDomains: async () =>
+      managedLocalDomains(await resolveDefaultDomainStrictly()),
     observeMacDns: observeMacHostDns,
     now: () => new Date(),
   });

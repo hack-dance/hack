@@ -1073,7 +1073,9 @@ fn orphan_recovery_keeps_observed_child_after_term_ends_witness() {
     assert!(
         census()
             .into_iter()
-            .all(|p| p.session != pid(&state, "guardPid") || process_is_zombie(p.pid))
+            .all(|p| p.session != pid(&state, "guardPid")
+                || identity(p.pid).is_none()
+                || process_is_zombie(p.pid))
     );
 }
 
@@ -1083,7 +1085,7 @@ fn process_is_zombie(pid: i32) -> bool {
         fs::read_to_string(format!("/proc/{pid}/stat"))
             .ok()
             .and_then(|s| s.rsplit_once(") ").map(|(_, rest)| rest.starts_with('Z')))
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
     #[cfg(target_os = "macos")]
     {
@@ -1093,14 +1095,13 @@ fn process_is_zombie(pid: i32) -> bool {
             libc::proc_pidinfo(
                 pid,
                 libc::PROC_PIDTBSDINFO,
-                0,
+                1,
                 info.as_mut_ptr().cast(),
                 std::mem::size_of::<libc::proc_bsdinfo>() as i32,
             )
         };
-        size == 0
-            || (size as usize == std::mem::size_of::<libc::proc_bsdinfo>()
-                && unsafe { info.assume_init() }.pbi_status == libc::SZOMB)
+        size as usize == std::mem::size_of::<libc::proc_bsdinfo>()
+            && unsafe { info.assume_init() }.pbi_status == libc::SZOMB
     }
 }
 
@@ -1116,6 +1117,20 @@ fn unreaped_matching_guard_proves_legacy_session_ownership() {
         unsafe { libc::kill(caller.0.id() as i32, libc::SIGSTOP) },
         0
     );
+    // SIGSTOP delivery is asynchronous. Observe our own child's stopped
+    // wait status before killing its guard, so it cannot win the reap race.
+    eventually(|| {
+        let mut status = 0;
+        // SAFETY: this is our unreaped child; status is writable for waitpid.
+        let observed = unsafe {
+            libc::waitpid(
+                caller.0.id() as i32,
+                &mut status,
+                libc::WNOHANG | libc::WUNTRACED,
+            )
+        };
+        (observed == caller.0.id() as i32 && libc::WIFSTOPPED(status)).then_some(())
+    });
     assert_eq!(
         unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
         0

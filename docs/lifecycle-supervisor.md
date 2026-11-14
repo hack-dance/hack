@@ -260,10 +260,11 @@ the receipt has no command birth evidence, so an unanchored session is unknown.
    rotation is allowed only after all original callers/guards and authored work
    have been independently confirmed gone.
 
-Darwin may discard a zombie guard's session/group and credential metadata while
-retaining its PID and birth timestamp. A matching boot, PID and birth still prove
-the original guard has not been reused; this zombie never counts as live work
-and is never signalled. Live recovery members still require the recorded UID.
+Darwin libproc requires a nonzero PROC_PIDTBSDINFO argument to include unreaped
+zombies. The inspector requests it explicitly. A matching boot, PID, birth and
+UID prove the original zombie guard has not been reused even when getsid rejects
+it; this zombie never counts as live work and is never signalled. Live guards
+and recovery members still require the recorded session and UID.
 
 Darwin start timestamps come from the wall clock and can decrease between guard
 and command creation. Recovery therefore never orders those timestamps: it matches

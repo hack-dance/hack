@@ -172,7 +172,7 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
         libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,
-            0,
+            1, // XNU requires nonzero arg to search unreaped zombie records.
             info.as_mut_ptr().cast(),
             std::mem::size_of::<libc::proc_bsdinfo>() as i32,
         )
@@ -195,7 +195,7 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
         && info.pbi_status == libc::SZOMB
         && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     {
-        // A zombie can lose session/group/credential metadata during exit.
+        // Darwin getsid can reject zombies even when libproc returns birth/UID.
         // Preserve its immutable PID/birth, but never invent live membership.
         session = 0;
     }
@@ -342,12 +342,13 @@ fn incarnation_matches(expected: &Identity, current: &Identity) -> bool {
         && expected.session == current.session
 }
 
-/// PID plus immutable birth pins the original zombie guard even when Darwin
-/// has discarded its session/credentials. Live leaders still require UID/SID.
+/// PID/birth/UID pins the original zombie guard when Darwin getsid rejects it.
+/// Live leaders additionally require the recorded session.
 fn recorded_guard_matches(state: &crate::storage::State, p: &Identity) -> bool {
     p.pid == state.guard_pid
         && p.start == state.guard_start_time
-        && (p.zombie || (p.uid == state.uid && p.session == state.guard_pid))
+        && p.uid == state.uid
+        && (p.zombie || p.session == state.guard_pid)
 }
 
 /// Return one census with session identity proved across that census. A matching
@@ -883,13 +884,16 @@ mod tests {
             group: 0,
             session: 0,
             start: 100,
-            uid: 0,
+            uid: 501,
             zombie: true,
         };
         assert!(super::recorded_guard_matches(&state, &identity));
         identity.start += 1;
         assert!(!super::recorded_guard_matches(&state, &identity));
         identity.start = 100;
+        identity.uid = 0;
+        assert!(!super::recorded_guard_matches(&state, &identity));
+        identity.uid = state.uid;
         identity.zombie = false;
         assert!(!super::recorded_guard_matches(&state, &identity));
         identity.uid = state.uid;

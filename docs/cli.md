@@ -139,7 +139,8 @@ summary row adds `backend`, `state`, `state_reason`, `started_at` and `services`
 Each service has `name`, `state`, `ready`, `completed`, `health`, `exit_code` and
 `started_at`. Missing evidence is null or unknown: Docker activity is not a
 readiness/completion guarantee, and an exited container without an observed
-exit code is unknown. Registered native rows remain visible with
+exit code is unknown. Mixed running and non-running replicas make their service
+and project degraded. Registered native rows remain visible with
 `backend: native`, `state: unknown`, and `state_reason: native-observer-required`;
 use the native `ps` observer for their current state. R2 will complete the shared
 backend-aware projection. Always-on fields will be supplied when their owner

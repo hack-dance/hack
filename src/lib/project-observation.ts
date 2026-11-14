@@ -119,7 +119,11 @@ function projectState(
   if (services.some((service) => service.state === "unknown")) {
     return "unknown";
   }
-  if (services.some((service) => service.state === "running")) {
+  if (
+    services.some(
+      (service) => service.state === "running" || service.state === "degraded"
+    )
+  ) {
     return "degraded";
   }
   if (services.some((service) => service.state === "starting")) {

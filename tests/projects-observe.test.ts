@@ -71,7 +71,7 @@ beforeEach(async () => {
   const docker = join(bin, "docker");
   await writeFile(
     docker,
-    `#!${process.execPath}\nconst args=process.argv.slice(2);\nawait Bun.write(Bun.file(process.env.CALLS), (await Bun.file(process.env.CALLS).text().catch(()=>""))+JSON.stringify(args)+"\\n");\nif(args[0]==="ps") {\n if(process.env.OFFLINE==="1") process.exit(1);\n console.log(JSON.stringify({ID:"fixture-container",State:"running",Status:"Up",Names:"fixture-web",Labels:${JSON.stringify(`com.docker.compose.project=unregistered-app,com.docker.compose.service=web,com.docker.compose.project.working_dir=${unregistered.projectDir}`)}}));\n} else if(args[0]!=="inspect") process.exit(99);\n`
+    `#!${process.execPath}\nconst args=process.argv.slice(2);\nawait Bun.write(Bun.file(process.env.CALLS), (await Bun.file(process.env.CALLS).text().catch(()=>""))+JSON.stringify(args)+"\\n");\nif(args[0]==="ps") {\n if(process.env.OFFLINE==="1") process.exit(1);\n const row={ID:"fixture-container",State:"running",Status:"Up",Names:"fixture-web",Labels:${JSON.stringify(`com.docker.compose.project=unregistered-app,com.docker.compose.service=web,com.docker.compose.project.working_dir=${unregistered.projectDir}`)}};\n console.log(JSON.stringify(row));\n if(process.env.MIXED==="1") console.log(JSON.stringify({...row,ID:"fixture-replica",State:"exited"}));\n} else if(args[0]!=="inspect") process.exit(99);\n`
   );
   await chmod(docker, 0o755);
   for (const name of [
@@ -240,6 +240,21 @@ test("observe keeps native rows and unknown Compose services when Docker is unav
   expect(payload.projects).toHaveLength(2);
   expect(await readFile(registry)).toEqual(before);
   expect((await stat(registry)).mtimeMs).toBe(time);
+});
+
+test("mixed running and exited replicas keep service and project degraded", async () => {
+  for (const flags of [[], ["--summary"]]) {
+    const result = await run(
+      ["--json", "--observe", "--runtime", "--all", ...flags],
+      { MIXED: "1" }
+    );
+    expect(result.code).toBe(0);
+    const row = JSON.parse(result.stdout).projects.find(
+      (project: { name: string }) => project.name === "unregistered-app"
+    );
+    expect(row.services[0].state).toBe("degraded");
+    expect(row.state).toBe("degraded");
+  }
 });
 
 test("observe never creates a missing registry or registers the current checkout", async () => {

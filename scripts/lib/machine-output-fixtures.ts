@@ -19,6 +19,10 @@ export function machineOutputFixtures() {
     data: object
   ) => machineSuccess({ schema, data });
   return {
+    "activity.json": success(MACHINE_SCHEMAS.activity, {
+      version: 1,
+      entries: [],
+    }),
     "version.json": success(MACHINE_SCHEMAS.version, {
       version: "5.0.0",
       channel: "stable",

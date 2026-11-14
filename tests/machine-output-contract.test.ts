@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +24,15 @@ import { runCli } from "../src/cli/run.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import { MACHINE_SCHEMAS } from "../src/lib/machine-output.ts";
 import { machineError } from "./helpers/machine-output.ts";
+import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+
+const runtime = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/runtime-projects.ts",
+  overrides: { readRuntimeProjects: async () => ({ ok: true, runtime: [] }) },
+});
+beforeAll(() => runtime.activate());
+afterAll(() => runtime.deactivate());
 
 let root: string;
 let original: Record<string, string | undefined>;
@@ -49,6 +67,24 @@ test("every canonical JSON command has an explicit inventory shape decision", ()
   for (const variant of SCHEMA_JSON_VARIANTS) {
     expect(JSON_COMMAND_SHAPES).toHaveProperty(variant.command);
   }
+});
+
+test.each([
+  { flags: [] },
+  { flags: ["--dry-run"] },
+])("projects prune %j matches its envelope inventory", async ({ flags }) => {
+  let stdout = "";
+  spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    stdout += String(chunk);
+    return true;
+  });
+  const code = await runCli(["projects", "prune", "--json", ...flags]);
+  expect(code).toBe(0);
+  const result = JSON.parse(stdout);
+  expect(JSON_COMMAND_SHAPES["projects prune"]).toBe("envelope");
+  expect(Object.keys(result).sort()).toEqual(["data", "ok"]);
+  expect(result.ok).toBe(true);
+  expect(result.data).toBeObject();
 });
 
 test("machine-readable reference table is generated from the command inventory", async () => {

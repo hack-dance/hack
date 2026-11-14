@@ -6,6 +6,10 @@ use serde_json::Value;
 fn migrated_payloads_require_the_expected_envelope_and_schema() {
     let cases = [
         (
+            include_str!("fixtures/machine-output/activity.json"),
+            "hack.activity.v1",
+        ),
+        (
             include_str!("fixtures/machine-output/version.json"),
             "hack.version.v1",
         ),

@@ -7,7 +7,7 @@ export const JSON_COMMAND_SHAPES = {
   status: "backend-dependent",
   usage: "legacy-object",
   projects: "legacy-object",
-  "projects prune": "legacy-object",
+  "projects prune": "envelope",
   "project owner show": "legacy-object",
   "project target": "envelope",
   "project task list": "envelope",
@@ -24,7 +24,7 @@ export const JSON_COMMAND_SHAPES = {
   "commands cancel": "envelope",
   logs: "logs",
   open: "envelope",
-  activity: "envelope",
+  activity: "schema-envelope",
   doctor: "envelope",
   "daemon status": "legacy-object",
   "dispatch run": "legacy-object",
@@ -83,6 +83,7 @@ export const JSON_COMMAND_SHAPES = {
 } as const;
 
 export const SCHEMA_JSON_VARIANTS = [
+  { command: "activity", flags: [], schema: "hack.activity.v1" },
   { command: "version", flags: [], schema: "hack.version.v1" },
   {
     command: "projects",

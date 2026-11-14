@@ -264,6 +264,8 @@ try {
     ), "native detached service selection refuses before input or runtime work");
   // Whole-project detach is admitted. Invalid input keeps this relocated-bundle
   // check offline on supported hosts; unsupported hosts also fail before ready.
+  require((await readdir(home)).length ===
+    0, "validation and refused service selection write no home state");
   await Bun.write(join(checkout, ".hack/hack.project.json"), "{");
   const detached = await invoke(["up", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
@@ -276,7 +278,12 @@ try {
     detachedResult.ok === false &&
     record(detachedResult.error).code ===
       "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
-  require((await readdir(home)).length === 0 &&
+  // The admitted lifecycle action records its failed outcome. This is not
+  // registry or generated runtime state; permit only that named audit file.
+  const homeEntries = (await readdir(home, { recursive: true })).sort();
+  require((homeEntries.length === 0 ||
+    JSON.stringify(homeEntries) ===
+      JSON.stringify([".hack", ".hack/activity.jsonl"])) &&
     !(await readdir(join(checkout, ".hack"))).some(
       (name) => name === ".internal" || name === ".branch"
     ), "no registry or generated runtime state");

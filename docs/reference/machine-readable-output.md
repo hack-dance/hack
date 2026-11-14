@@ -9,6 +9,8 @@ New `--json` outputs added for HACK-2218 use one success envelope:
 The stable schema identifier belongs inside `data`. A payload schema changes
 when its incompatible contract changes. Consumers unwrap `data` and validate
 its schema before using it. Human diagnostics go to stderr.
+The envelope has exactly two top-level keys; additional metadata belongs inside
+the schema-tagged payload, not alongside `ok` and `data`.
 
 Failures use a stable error code and a nonzero exit status:
 
@@ -27,6 +29,7 @@ outputs now follow this rule. Plain `projects --json` and other published legacy
 outputs keep their shapes. A consumer must not use the new observe-only parser
 for a plain projects result. Streaming interfaces remain NDJSON and have their
 own event contracts. No published payload is silently wrapped by this change.
+The unpublished Activity output also carries `data.schema: "hack.activity.v1"`.
 
 ![JSON command boundary](./machine-readable-output.svg)
 
@@ -47,7 +50,7 @@ remains covered by its command-specific suites.
 <!-- json-inventory:start -->
 | Canonical command / variant | Success shape |
 |---|---|
-| `hack activity --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
+| `hack activity --json` | Envelope; versioned `data.schema`: `hack.activity.v1` |
 | `hack commands cancel --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack commands read --json` | NDJSON events / terminal event, not a single envelope |
 | `hack commands show --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
@@ -108,7 +111,7 @@ remains covered by its command-specific suites.
 | `hack project task inspect --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack project task list --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack projects --json` | Legacy bare object (no `data` envelope) |
-| `hack projects prune --json` | Legacy bare object (no `data` envelope) |
+| `hack projects prune --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack ps --json` | Backend-dependent: envelope or legacy bare object |
 | `hack restart --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack run --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |

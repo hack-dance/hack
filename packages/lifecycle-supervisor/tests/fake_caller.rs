@@ -1340,31 +1340,20 @@ fn fixture_process() {
                     libc::_exit(0);
                 }
             }
-            eventually(|| {
-                #[cfg(target_os = "linux")]
-                let zombie = fs::read_to_string(format!("/proc/{child}/stat"))
-                    .ok()
-                    .is_some_and(|s| {
-                        s.rsplit_once(") ")
-                            .is_some_and(|(_, tail)| tail.starts_with("Z "))
-                    });
-                #[cfg(target_os = "macos")]
-                let zombie = {
-                    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
-                    let size = unsafe {
-                        libc::proc_pidinfo(
-                            child,
-                            libc::PROC_PIDTBSDINFO,
-                            0,
-                            info.as_mut_ptr().cast(),
-                            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
-                        )
-                    };
-                    size as usize == std::mem::size_of::<libc::proc_bsdinfo>()
-                        && unsafe { info.assume_init().pbi_status == libc::SZOMB }
-                };
-                zombie.then_some(())
-            });
+            let mut event = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: observe only this fixture's direct child into a writable
+            // buffer. WNOWAIT confirms exit while deliberately retaining it.
+            assert_eq!(
+                unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        child as libc::id_t,
+                        event.as_mut_ptr(),
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                },
+                0
+            );
             println!("unreaped-zombie-confirmed {child}");
             std::io::stdout().flush().unwrap();
             std::process::exit(0);

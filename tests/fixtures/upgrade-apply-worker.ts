@@ -8,11 +8,16 @@ const report = JSON.parse(
   await readFile(process.argv[2] ?? "", "utf8")
 ) as UpgradeCheckReport;
 const boundary = Number(process.argv[3]);
+const resumeManifest = process.argv[5];
 let checkpoint = 0;
 await runUpgradeApply({
   report,
   home: process.env.HOME ?? "",
-  only: [process.argv[4] ?? "ignore-rules"],
+  only:
+    resumeManifest === undefined
+      ? [process.argv[4] ?? "ignore-rules"]
+      : undefined,
+  resumeManifest,
   dryRun: false,
   collect: collectUpgradeSnapshotTargets,
   checkpoint: async () => {

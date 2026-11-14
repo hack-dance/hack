@@ -1283,3 +1283,138 @@ test("CLI rollback refuses a snapshot held by apply's lock without touching file
     },
   });
 }, 60_000);
+
+test("a resume killed while republishing its journal never adopts a user's revert", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const ignore = join(a.projectDir, ".gitignore");
+  await writeFile(ignore, "original\n");
+  const applied = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    only: ["ignore-rules"],
+    collect: collectUpgradeSnapshotTargets,
+  });
+  if (applied.status !== "applied") {
+    throw new Error("Expected apply");
+  }
+  await writeFile(ignore, "original\n");
+  const reportPath = join(root, "resume-report.json");
+  await writeFile(reportPath, JSON.stringify(await check()));
+  for (const boundary of [1, 2]) {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "fixtures/upgrade-apply-worker.ts"),
+        reportPath,
+        String(boundary),
+        "ignore-rules",
+        applied.coverage.manifest_path,
+      ],
+      {
+        cwd: root,
+        env: privateCliEnv({
+          root,
+          home,
+          env: {
+            HACK_HOME: hackHome,
+            HACK_GLOBAL_CONFIG_PATH: join(hackHome, "hack.config.json"),
+            HACK_HOST_PROBES_DISABLE: "1",
+            HACK_SYSTEMD_DISABLE: "1",
+          },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const reader = child.stdout.getReader();
+    try {
+      const reached = await reader.read();
+      expect(new TextDecoder().decode(reached.value)).toContain("checkpoint");
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+      reader.releaseLock();
+    }
+    const journal = (await readUpgradeSnapshotJournal({
+      manifestPath: applied.coverage.manifest_path,
+    })) as { targets: { status: string }[] };
+    expect(journal.targets[0]?.status).toBe("applied");
+    expect(await readFile(ignore, "utf8")).toBe("original\n");
+  }
+  const resumed = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    resumeManifest: applied.coverage.manifest_path,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(resumed.status).toBe("partial");
+  expect(await readFile(ignore, "utf8")).toBe("original\n");
+  // Even another resume after the refusal must retain the after-state guard.
+  expect(
+    (
+      await runUpgradeApply({
+        report: await check(),
+        home,
+        dryRun: false,
+        resumeManifest: applied.coverage.manifest_path,
+        collect: collectUpgradeSnapshotTargets,
+      })
+    ).status
+  ).toBe("partial");
+  expect(await readFile(ignore, "utf8")).toBe("original\n");
+}, 60_000);
+
+test("an absent agent target cannot resume with a damaged original blob", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const agent = await staleHomeAgentFile();
+  await writeFile(agent, renderCodexSkill());
+  await writeFile(
+    join(home, ".codex/config.toml"),
+    `[plugins."${HACK_PLUGIN_ID}"]\nenabled = true\n`
+  );
+  await writeFile(
+    join(a.repoRoot, "AGENTS.md"),
+    "<!-- hack:agent-docs:start -->\nold\n<!-- hack:agent-docs:end -->\n"
+  );
+  const applied = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    only: ["agent-integrations"],
+    collect: collectUpgradeSnapshotTargets,
+  });
+  if (applied.status !== "applied") {
+    throw new Error("Expected agent apply");
+  }
+  const [snapshot] = await listUpgradeSnapshots();
+  const entry = snapshot?.manifest.entries.find((item) => item.path === agent);
+  if (snapshot === undefined || entry?.before.kind !== "file") {
+    throw new Error("Missing blob");
+  }
+  await writeFile(
+    join(snapshot.dir, "blobs", entry.before.sha256),
+    "damaged\n",
+    { mode: 0o600 }
+  );
+  expect(await lstat(agent).catch(() => null)).toBeNull();
+  const resumed = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    resumeManifest: applied.coverage.manifest_path,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(resumed.status).toBe("partial");
+  if (resumed.status !== "partial") {
+    throw new Error("Expected refusal");
+  }
+  expect(resumed.targets.find((target) => target.root === home)?.status).toBe(
+    "refused"
+  );
+  expect(await lstat(agent).catch(() => null)).toBeNull();
+}, 60_000);

@@ -928,3 +928,8 @@ The remaining record must fill these gaps, each **to be confirmed in the dogfood
 - Full application/data checks beyond the three-project start/restart/stop trials, and restored v4 data.
 - Linux DNS, host/browser trust and daemon service availability at the tested revision.
 - Explicit agent-client loading, native setup eligibility, and the actual rollback transcript.
+
+Keep the printed resume and rollback commands for a custom `--snapshot-root`:
+ordinary snapshot listings scan only the default root. Resume preserves completed
+outcomes across interruption and refuses a damaged original blob even when its
+agent file has already been removed.

@@ -122,13 +122,8 @@ export async function verifyApplyInput(opts: {
   }
   try {
     const current = await readApplyState(path);
-    if (
-      opts.previous?.status === "applied" ||
-      opts.previous?.status === "unchanged"
-    ) {
-      return sameApplyState(current.state, entry.after ?? entry.before)
-        ? "safe"
-        : "conflict";
+    if (entry.after !== null) {
+      return sameApplyState(current.state, entry.after) ? "safe" : "conflict";
     }
     if (sameApplyState(current.state, entry.before)) {
       return "safe";
@@ -175,17 +170,22 @@ export async function verifyAgentInput(opts: {
   previous?: UpgradeApplyTarget;
 }): Promise<"safe" | "conflict"> {
   try {
-    for (const path of agentPaths(opts.snapshot, opts.target)) {
+    const paths = agentPaths(opts.snapshot, opts.target);
+    if (
+      !(await verifyUpgradeSnapshotRecovery({
+        manifestPath: opts.snapshot.manifestPath,
+        paths,
+      }))
+    ) {
+      return "conflict";
+    }
+    for (const path of paths) {
       const entry = opts.snapshot.manifest.entries.find((e) => e.path === path);
       if (entry === undefined) {
         return "conflict";
       }
       const current = await readApplyState(path);
-      if (
-        (opts.previous?.status === "applied" ||
-          opts.previous?.status === "unchanged") &&
-        entry.after !== null
-      ) {
+      if (entry.after !== null) {
         if (!sameApplyState(current.state, entry.after)) {
           return "conflict";
         }

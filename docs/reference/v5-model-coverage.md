@@ -193,3 +193,9 @@ Uncovered: power-loss durability, arbitrary filesystem-call interruption,
 unsynchronized external writers, multiple independent snapshots writing the same
 checkout, service-manager changes and env migration's separate journal. No
 whole-machine upgrade or native runtime qualification follows from these tests.
+
+Resume publication retains saved target outcomes until verification, and any
+recorded snapshot after-state remains authoritative after a refused retry. Real
+SIGKILL regressions at both journal publication boundaries preserve a user's
+revert through a subsequent resume. Missing or damaged original agent blobs refuse
+resume even when the removed target is absent; absence alone is not recovery proof.

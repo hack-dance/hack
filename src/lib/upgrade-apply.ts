@@ -393,6 +393,10 @@ async function executeApplyRun(opts: {
   const now = () => (input.now?.() ?? new Date()).toISOString();
   const startedAt = recovery?.journal.started_at ?? now();
   const results: UpgradeApplyTarget[] = [...skipped];
+  const previousTarget = (target: Pick<UpgradeApplyTarget, "fix" | "root">) =>
+    recovery?.journal.targets.find(
+      (saved) => saved.fix === target.fix && saved.root === target.root
+    );
   const journal = (
     state: UpgradeApplyJournal["state"],
     current: UpgradeApplyTarget | null
@@ -400,7 +404,9 @@ async function executeApplyRun(opts: {
     const done = results.length - skipped.length;
     const pending = runnable
       .slice(done + (current === null ? 0 : 1))
-      .map((target) => outcome(target, "planned", null));
+      .map(
+        (target) => previousTarget(target) ?? outcome(target, "planned", null)
+      );
     return {
       version: UPGRADE_APPLY_JOURNAL_VERSION,
       kind: UPGRADE_APPLY_JOURNAL_KIND,
@@ -427,6 +433,7 @@ async function executeApplyRun(opts: {
   const backupDir =
     input.agentBackupDir ?? join(resolveGlobalHackDir(), "agent-migrations");
   for (const [index, target] of runnable.entries()) {
+    const previous = previousTarget(target);
     const backup =
       target.fix === "agent-integrations"
         ? {
@@ -437,15 +444,17 @@ async function executeApplyRun(opts: {
     // Before anything can change: this target started, with its backup.
     await writeUpgradeSnapshotJournal({
       snapshot,
-      journal: journal("applying", {
-        ...outcome(target, "started", null),
-        backup_manifest: backup?.path ?? null,
-      }),
+      journal: journal(
+        "applying",
+        previous?.status === "applied" || previous?.status === "unchanged"
+          ? previous
+          : {
+              ...outcome(target, "started", null),
+              backup_manifest: backup?.path ?? null,
+            }
+      ),
     });
     await input.checkpoint?.("target-started");
-    const previous = recovery?.journal.targets.find(
-      (t) => t.fix === target.fix && t.root === target.root
-    );
     const safe = await verifyApplyInput({ snapshot, target, previous });
     if (safe === "conflict") {
       results.push(

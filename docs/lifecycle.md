@@ -37,9 +37,13 @@ requires retirement or escalation. Kernel probe errors such as EPERM fail direct
 Explicit `hack down` uses the same command-before-wrapper order
 after interrupting its owned lifecycle panes.
 Commands that finish their TERM handler sooner do not wait out the grace period.
-A second Ctrl-C skips the remaining grace and requests the single SIGKILL;
+A second Ctrl-C skips the remaining command grace and requests the single SIGKILL;
 identity/ownership checks and post-KILL confirmation still run. An in-flight
 bounded `ps` or mux call finishes before that request can take effect.
+The foreground guard counts Ctrl-Cs from before Compose starts: two interrupts
+while Compose stops containers also skip the later lifecycle command grace.
+The wrapper/reader phase keeps its five-second reap window even after a forced
+command stop, so the wrapper can remove its private FIFO directory before exiting.
 
 | Lifecycle shutdown case | With prompt process reads (excluding Compose and mux shutdown) |
 | --- | --- |

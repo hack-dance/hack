@@ -12,8 +12,9 @@ for (const behavior of [
   "cooperative",
   "resistant",
   "separate-worker",
+  "forced",
 ] as const) {
-  const ignoresTerm = behavior === "resistant";
+  const ignoresTerm = behavior === "resistant" || behavior === "forced";
   test(`FIFO command retirement (${behavior}) preserves graceful shutdown and reaps the reader`, async () => {
     const root = await mkdtemp(join(tmpdir(), "hack-fifo-retirement-"));
     const logPath = join(root, "lifecycle.log");
@@ -33,25 +34,28 @@ for (const behavior of [
           })
         : `process.on("SIGTERM", () => { ${ignoresTerm ? "" : `setTimeout(async () => { await Bun.write(${JSON.stringify(cleanExit)}, "clean"); process.exit(0); }, 1000);`} }); await Bun.write(${JSON.stringify(ready)}, "yes"); setInterval(() => {}, 1000);`;
     const command = `${quoteShellWord(process.execPath)} --no-env-file -e ${quoteShellWord(code)}`;
-    const child = Bun.spawn(
-      [
-        "sh",
-        "-c",
-        wrapLifecyclePersistentCommand({
-          command,
-          commandPidPath,
-          logPath,
-          serviceName: "writer",
-        }),
-      ],
-      {
-        detached: true,
-        env: { PATH: "/usr/bin:/bin", TMPDIR: root },
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      }
-    );
+    const wrapped = wrapLifecyclePersistentCommand({
+      command,
+      commandPidPath,
+      logPath,
+      serviceName: "writer",
+    });
+    // Make the wrapper's private-directory cleanup observable after its child
+    // exits, so killing the wrapper with the command cannot pass by scheduling.
+    const delayedWrapper =
+      behavior === "forced"
+        ? wrapped.replace(
+            '  rmdir "$fifo_dir" 2>/dev/null || true',
+            '  sleep 0.3\n  rmdir "$fifo_dir" 2>/dev/null || true'
+          )
+        : wrapped;
+    const child = Bun.spawn(["sh", "-c", delayedWrapper], {
+      detached: true,
+      env: { PATH: "/usr/bin:/bin", TMPDIR: root },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     let group: number | undefined;
     let workerGroup: number | undefined;
     const watchdog = setTimeout(() => child.kill("SIGKILL"), 25_000);
@@ -87,15 +91,33 @@ for (const behavior of [
         (row) => row.pid === child.pid
       )?.birth;
       expect(paneBirth).toBeDefined();
+      const force = new AbortController();
+      if (behavior === "forced") {
+        expect(
+          (await readdir(root)).filter((name) =>
+            name.startsWith("hack-lifecycle.")
+          )
+        ).toHaveLength(1);
+        force.abort();
+      }
       expect(
         await retire({
           processes: [{ panePid: child.pid, paneBirth }],
+          force: force.signal,
           stopSession: () => {
             process.kill(-child.pid, "SIGHUP");
             return Promise.resolve(true);
           },
         })
       ).toBe(true);
+      if (behavior === "forced") {
+        expect(
+          (await readdir(root)).filter((name) =>
+            name.startsWith("hack-lifecycle.")
+          ),
+          "forced cleanup must let the wrapper remove its private FIFO directory"
+        ).toEqual([]);
+      }
       expect(await child.exited).toBe(130);
       expect(await Bun.file(cleanExit).exists()).toBe(!ignoresTerm);
       expect(() => process.kill(-(group ?? 0), 0)).toThrow();

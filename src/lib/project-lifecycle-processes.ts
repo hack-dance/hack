@@ -485,7 +485,8 @@ export function createLifecycleSessionRetirement(boundary?: {
       beforeSignal,
       readIdentities: os.readIdentities,
       assertFresh: opts.assertFresh,
-      force: opts.force,
+      // Even a forced command stop leaves the wrapper time to reap children
+      // and remove its private FIFO directory before wrapper escalation.
     });
     return true;
   };

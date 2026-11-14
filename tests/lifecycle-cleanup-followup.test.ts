@@ -165,9 +165,9 @@ setInterval(() => {}, 1000);`;
     stdout: "ignore",
     stderr: "inherit",
   });
-  const watchdog = setTimeout(() => child.kill("SIGKILL"), 5000);
+  const watchdog = setTimeout(() => child.kill("SIGKILL"), 15_000);
   const wait = async (name: string) => {
-    const deadline = performance.now() + 3000;
+    const deadline = performance.now() + 10_000;
     while (
       !(await Bun.file(join(root, name)).exists()) &&
       performance.now() < deadline
@@ -191,4 +191,4 @@ setInterval(() => {}, 1000);`;
     await child.exited;
     await rm(root, { recursive: true, force: true });
   }
-}, 10_000);
+}, 20_000);

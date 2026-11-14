@@ -15,7 +15,6 @@ stateDiagram-v2
   escalated --> retained : deadline or probe error
   commandsRetired --> wrappersRetired : no live wrapper members
   commandsRetired --> wrapperEscalated : 5 s grace expires
-  commandsRetired --> wrapperEscalated : second Ctrl-C / identity rechecked
   wrapperEscalated --> wrappersRetired : no live wrapper members
   wrapperEscalated --> retained : deadline or probe error
   wrappersRetired --> retired : remove owned record

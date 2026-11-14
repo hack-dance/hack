@@ -68,6 +68,7 @@ import { logger } from "../ui/logger.ts";
 import {
   checkRunningLaunchdDaemon,
   refuseForeignLaunchdProgram,
+  refuseLaunchdBeforeReplacing,
   startViaLaunchdIfLoaded,
 } from "./daemon-launchd.ts";
 import {
@@ -319,6 +320,11 @@ async function startDaemon(opts: {
    * running, even if it stopped after the caller looked.
    */
   readonly reconcileOnly?: boolean;
+  /**
+   * The caller (`restart`) already stopped a running hackd: start its
+   * replacement with the same fallback as a replacement here.
+   */
+  readonly alreadyReplaced?: boolean;
 }): Promise<number> {
   const { paths, trace } = opts;
   const status = await readDaemonStatus({ paths });
@@ -334,7 +340,7 @@ async function startDaemon(opts: {
     });
     return 0;
   }
-  let replaced = false;
+  let replaced = opts.alreadyReplaced === true;
   if (livePid !== null && pidIsDaemon) {
     const running = await handleRunningDaemonAtStart({
       pid: livePid,
@@ -1174,6 +1180,39 @@ async function handleDaemonRestart({
  * `hack daemon restart`: stop, then start, which also brings a stale login
  * service up to this CLI. `trace` reports the start half.
  */
+/**
+ * Before `restart` stops this home's running hackd: the replacement checks
+ * `start` uses (launchd: the loaded job must be this home's; systemd: the
+ * unit's start after the stop must not be refused). Exit code (reported)
+ * or null to go on.
+ */
+async function refuseRestartBeforeStop(opts: {
+  readonly paths: DaemonPaths;
+  readonly trace: DaemonCommandTrace;
+}): Promise<number | null> {
+  const { paths, trace } = opts;
+  if (process.platform === "darwin") {
+    return await refuseLaunchdBeforeReplacing({
+      paths,
+      trace,
+      waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+    });
+  }
+  if (process.platform !== "linux") {
+    return null;
+  }
+  const refusal = await refuseSystemdStartBeforeReplacing({ paths });
+  if (refusal === null) {
+    return null;
+  }
+  trace.manager = "systemd";
+  trace.blocked = refusal.blocked;
+  logger.warn({
+    message: `Not restarting hackd: hackd.service could not be started for this home afterwards, so nothing was stopped: ${refusal.message}`,
+  });
+  return 1;
+}
+
 async function restartDaemon(opts: {
   readonly paths: DaemonPaths;
   readonly trace: DaemonCommandTrace;
@@ -1214,6 +1253,13 @@ async function restartDaemon(opts: {
       logger.warn({ message: owner });
       return 1;
     }
+    // The same eligibility checks `start` runs before replacing a running
+    // daemon: refuse now, with nothing stopped, when the start after the
+    // stop would be refused.
+    const blocked = await refuseRestartBeforeStop({ paths, trace });
+    if (blocked !== null) {
+      return blocked;
+    }
   }
   // A refused stop (the pid could not be proven to be this HACK_HOME's
   // hackd) must not turn into "already running" success.
@@ -1223,7 +1269,14 @@ async function restartDaemon(opts: {
     trace.manager = stopTrace.manager;
     return stopped;
   }
-  const started = await startDaemon({ paths, foreground: false, trace });
+  // A daemon that ran before the stop gets the same idle-gated direct
+  // fallback as a replacement in `start`.
+  const started = await startDaemon({
+    paths,
+    foreground: false,
+    trace,
+    alreadyReplaced: status.running,
+  });
   if (started === 0 && trace.action === "started") {
     trace.action = "restarted";
   }

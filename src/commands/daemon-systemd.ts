@@ -49,6 +49,7 @@ import {
   RENDERED_SYSTEM_PATH_DIRECTORIES,
   readInvokerInSystemdUnit,
   readLingerStatus,
+  readSystemdLoadedProgram,
   readSystemdServiceStatus,
   readSystemdUnitHackHome,
   renderedServicePathDirectories,
@@ -434,9 +435,13 @@ export async function reconcileRunningSystemdDaemon(
     deps,
     readSelfCgroup: hooks.readSelfCgroup,
   });
-  const plan = planDaemonReconcile({
+  // A restart runs what systemd has loaded, drop-ins included, not only
+  // the main file: both must be this CLI's executable.
+  const loaded = await loadedProgramIsExpected({ deps, expected });
+  const planned = planDaemonReconcile({
     unit: serviceUnitState(status.drift),
-    programIsOurs: await unitRunsExpected({ status, expected }),
+    programIsOurs:
+      loaded === "ours" && (await unitRunsExpected({ status, expected })),
     readOnly: isSystemdReadOnly(deps.env),
     running: { version: hooks.version },
     restartPending: await pathExists(marker),
@@ -444,6 +449,10 @@ export async function reconcileRunningSystemdDaemon(
     invokerInsideService: invoker !== "outside",
     cliVersion: hooks.cliVersion ?? DAEMON_CLI_VERSION,
   });
+  const plan =
+    loaded === "unknown" && planned.blocked !== null
+      ? { ...planned, blocked: "unproven-owner" as const }
+      : planned;
   recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
   if (plan.service === "keep") {
     noteKeptStaleUnit({ plan });
@@ -945,6 +954,28 @@ async function unitRunsExpected(opts: {
     return false;
   }
   return await isSameExecutableFile(status.program, expected.hackBinPath);
+}
+
+/**
+ * Whether the program systemd has loaded for the unit (its single
+ * ExecStart, drop-ins included: {@link readSystemdLoadedProgram}) is this
+ * CLI's executable by file identity ({@link isSameExecutableFile}).
+ * `unknown` when it cannot be read; `other` for any other program.
+ */
+async function loadedProgramIsExpected(opts: {
+  readonly deps: SystemdDeps;
+  readonly expected: { readonly hackBinPath: string } | null;
+}): Promise<"ours" | "other" | "unknown"> {
+  const loaded = await readSystemdLoadedProgram({ deps: opts.deps });
+  if (loaded.kind === "unknown") {
+    return "unknown";
+  }
+  if (opts.expected === null) {
+    return "other";
+  }
+  return (await isSameExecutableFile(loaded.path, opts.expected.hackBinPath))
+    ? "ours"
+    : "other";
 }
 
 /**

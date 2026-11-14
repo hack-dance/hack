@@ -2362,6 +2362,33 @@ export async function readSystemdServiceExecEntries(opts: {
 }
 
 /**
+ * The program systemd will actually run for hackd.service: the `path=` of
+ * its single loaded `ExecStart` entry, drop-ins included (a drop-in can
+ * override the main file's ExecStart). `unknown` when systemd cannot say,
+ * an entry cannot be read, or there is not exactly one ExecStart.
+ */
+export async function readSystemdLoadedProgram(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<
+  | { readonly kind: "path"; readonly path: string }
+  | { readonly kind: "unknown"; readonly reason: string }
+> {
+  const read = await readSystemdServiceExecEntries(opts);
+  if ("error" in read) {
+    return { kind: "unknown", reason: read.error };
+  }
+  const starts = read.entries.filter((entry) => entry.key === "ExecStart");
+  const only = starts.length === 1 ? starts[0] : undefined;
+  if (only === undefined || !isAbsolute(only.path)) {
+    return {
+      kind: "unknown",
+      reason: `systemd reports ${starts.length} ExecStart entries for ${SYSTEMD_UNIT_NAME}`,
+    };
+  }
+  return { kind: "path", path: only.path };
+}
+
+/**
  * What systemd will run for hackd.service is an allowlist (HACK-2052):
  * exactly one `ExecStart` running `<program> daemon start --foreground`,
  * with that program trusted ({@link checkServiceExecutableTrusted}), and

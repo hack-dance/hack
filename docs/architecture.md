@@ -610,7 +610,12 @@ the unit's Hack home again after the `daemon-reload`, refuses if it no longer
 serves this home, and otherwise restarts it with `systemctl --user restart`,
 after the loaded-file, program and stop-hook checks that `stop` makes. A hackd of
 another version under this CLI's unit is restarted the same way, even when the
-unit was not rewritten, so the new executable runs.
+unit was not rewritten, so the new executable runs. "This CLI's unit" means
+both the main file and what systemd has loaded: the single loaded `ExecStart`
+(drop-ins included, read with `systemctl --user show`) must be this CLI's
+executable by file identity. A drop-in that runs another `hack` keeps the
+daemon as it is (`blocked: "other-program"`). A loaded `ExecStart` that cannot
+be read (none, or several) keeps it too (`blocked: "unproven-owner"`).
 
 Before such a restart, and again just before it lands, `start` proves that the
 unit's live main process is this home's hackd. This is the same proof `stop`
@@ -728,6 +733,9 @@ Such a plist is never replaced automatically; `start` reports it and
   If the start would be refused, `start` refuses first (exit 1,
   `E_DAEMON_SERVICE`, with `home-binding`, `unproven-owner`, `read-only` or
   `rewrite-refused` as `blocked`) and leaves the running daemon alone.
+  `hack daemon restart` runs the same checks before it stops a running hackd.
+  Its start after the stop then gets the same direct fallback as a replacement
+  in `start`.
 
   The check cannot foresee everything: a change between the check and the
   start, or a write, reload or start that fails at runtime. So when the service

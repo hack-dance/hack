@@ -5214,3 +5214,71 @@ linuxTest("systemd's manager state is read through the runner", async () => {
   answer = "LoadState=loaded\nActiveState=inactive\nSubState=dead\nJob=\n";
   expect(await readSystemdManagerState({ deps })).toBe("idle");
 });
+
+// Codex finding on PR #854: restart eligibility follows the loaded ExecStart.
+
+/** Makes the fake report `execLines` as everything systemd has loaded. */
+function withLoadedExec(fake: Fake, execLines: () => string[]): void {
+  const run = fake.deps.run;
+  fake.deps = {
+    ...fake.deps,
+    run: (command, args) => {
+      const query = args.find((arg) =>
+        arg.startsWith("--property=ExecCondition,")
+      );
+      if (query === undefined) {
+        return run(command, args);
+      }
+      fake.calls.push(`${command} ${args.join(" ")}`);
+      const wanted = new Set(query.slice("--property=".length).split(","));
+      const lines = execLines().filter((line) =>
+        wanted.has(line.slice(0, line.indexOf("=")))
+      );
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: `${lines.join("\n")}\n`,
+        stderr: "",
+      });
+    },
+  };
+}
+
+const execStart = (path: string) =>
+  `ExecStart={ path=${path} ; argv[]=${path} daemon start --foreground ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`;
+
+linuxTest(
+  "a drop-in ExecStart for another hack keeps a compatible daemon, even with stale main content",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    const stale = await writeStaleUnit(fake);
+    // A retained drop-in overrides ExecStart with another trusted hack.
+    const other = join(root, "bin", "hack-older");
+    await writeFile(other, "#!/bin/sh\n");
+    await chmod(other, 0o755);
+    withLoadedExec(fake, () => [execStart(other)]);
+    fake.calls.length = 0;
+
+    const hooks = runningHooks(fake, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBeNull();
+    expect(hooks.trace.blocked).toBe("other-program");
+    expect(hooks.trace.action).toBe("none");
+    expect(await readFile(unitPath, "utf8")).toBe(stale);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  }
+);
+
+linuxTest(
+  "an unreadable loaded ExecStart is not this hack: no automatic restart",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await writeStaleUnit(fake);
+    // Two ExecStart entries: which one runs cannot be told.
+    withLoadedExec(fake, () => [execStart(program), execStart(program)]);
+    fake.calls.length = 0;
+    const hooks = runningHooks(fake, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBeNull();
+    expect(hooks.trace.blocked).toBe("unproven-owner");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+  }
+);

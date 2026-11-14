@@ -472,6 +472,45 @@ installFlowTest(
 );
 
 installFlowTest(
+  "restart --json refuses before the stop when the unit's start would be refused (HACK-2216)",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    expect((await hack(f, ["daemon", "install"])).code).toBe(0);
+    const pid = await readOwnedPid(f);
+    expect(pid).not.toBeNull();
+    // A unit file others could write: start refuses it, so restart must
+    // not stop the running daemon first.
+    await chmod(f.unitPath, 0o666);
+    const before = (await calls(f)).length;
+
+    const restart = await hack(f, ["daemon", "restart", "--json"]);
+    expect(restart.code).toBe(1);
+    expect(JSON.parse(restart.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_DAEMON_SERVICE",
+        detail: {
+          schema: "hack.daemon-restart/v1",
+          manager: "systemd",
+          blocked: "unproven-owner",
+        },
+      },
+    });
+    expect(isAlive(pid as number)).toBe(true);
+    const after = (await calls(f)).slice(before);
+    expect(after.some((call) => call.includes(" stop "))).toBe(false);
+    expect(after.some((call) => call.endsWith("stop hackd.service"))).toBe(
+      false
+    );
+
+    await chmod(f.unitPath, 0o644);
+    expect((await hack(f, ["daemon", "uninstall"])).code).toBe(0);
+  },
+  90_000
+);
+
+installFlowTest(
   "start --json rewrites a stale unit, restarts the service and prints one envelope",
   async () => {
     fixture = await createFixture();

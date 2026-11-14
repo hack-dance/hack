@@ -190,7 +190,7 @@ export async function checkRunningLaunchdDaemon(
  * proven). Null when the replacement may go on.
  */
 async function launchdJobBlocksReplacement(opts: {
-  readonly hooks: LaunchdStartHooks & { readonly pid: number };
+  readonly hooks: LaunchdStartHooks;
   readonly status: LaunchdServiceStatus;
 }): Promise<"home-binding" | "unproven-owner" | null> {
   const { hooks, status } = opts;
@@ -205,6 +205,32 @@ async function launchdJobBlocksReplacement(opts: {
     (() => proveLaunchdJobOwnership({ paths: hooks.paths, status }))
   )();
   return proven ? null : "unproven-owner";
+}
+
+/**
+ * `restart` is about to stop this home's running hackd and start it again
+ * through the loaded launchd job (HACK-2216): refuses first, with nothing
+ * stopped, when that start would be refused (the job binds another home or
+ * is not proven this home's, {@link launchdJobBlocksReplacement}). Exit
+ * code (reported) or null to go on; null too when no job is loaded.
+ */
+export async function refuseLaunchdBeforeReplacing(
+  hooks: LaunchdStartHooks
+): Promise<number | null> {
+  const status = await readStatus(hooks);
+  if (!status?.loaded) {
+    return null;
+  }
+  const blocked = await launchdJobBlocksReplacement({ hooks, status });
+  if (blocked === null) {
+    return null;
+  }
+  hooks.trace.manager = "launchd";
+  hooks.trace.blocked = blocked;
+  logger.warn({
+    message: `Not restarting hackd: the loaded launchd job ${blocked === "home-binding" ? "binds another Hack home" : "is not proven to be this Hack home's"}, so it could not start hackd for this home again; nothing was stopped | Check: hack daemon status; to take the service over for this home, run: hack daemon install`,
+  });
+  return 1;
 }
 
 /**

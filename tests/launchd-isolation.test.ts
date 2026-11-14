@@ -674,6 +674,64 @@ test("a running job whose pid is not this home's hackd is not refreshed", async 
   expect(verbs).not.toContain("bootstrap");
 });
 
+// Codex finding on PR #854: restart checks the launchd job before it stops.
+
+test("macOS restart with a loaded job bound to another HACK_HOME stops nothing", async () => {
+  const fixture = await makeFixture();
+  const daemonDir = join(fixture.home, ".hack", GLOBAL_DAEMON_DIR_NAME);
+  await mkdir(daemonDir, { recursive: true });
+  // A live process in this home's pid file, with its socket file: restart
+  // sees a running hackd and would stop it first.
+  const holder = Bun.spawn(["sleep", "30"], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    await writeFile(join(daemonDir, "hackd.pid"), `${holder.pid}\n`);
+    await writeFile(join(daemonDir, GLOBAL_DAEMON_SOCKET_FILENAME), "");
+    const plist = legacyPlist(fixture).current.replace(
+      "    <key>HOME</key>",
+      `    <key>HACK_HOME</key>\n    <string>${join(fixture.root, "other-home", ".hack")}</string>\n    <key>HOME</key>`
+    );
+    await writeFile(fixture.plistPath, plist);
+    const run = await runAsDarwin({
+      argv: [CLI, "daemon", "restart", "--json"],
+      cwd: fixture.root,
+      env: fixture.env({
+        HACK_HOME: join(fixture.home, ".hack"),
+        HACK_TEST_LAUNCHCTL_JOB: "stopped",
+      }),
+    });
+    expect(run.code).toBe(1);
+    const envelope = JSON.parse(run.stdout) as {
+      ok: boolean;
+      error: { code: string; detail: Record<string, unknown> };
+    };
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("E_DAEMON_SERVICE");
+    expect(envelope.error.detail).toMatchObject({
+      schema: "hack.daemon-restart/v1",
+      manager: "launchd",
+      blocked: "home-binding",
+    });
+    // Nothing was stopped: the process lives and its pid file is kept.
+    expect(holder.exitCode).toBeNull();
+    expect(await readFile(join(daemonDir, "hackd.pid"), "utf8")).toBe(
+      `${holder.pid}\n`
+    );
+    // Only status reads reached launchctl.
+    const verbs = (await launchctlCalls(fixture)).map(
+      (line) => line.split(" ")[0] ?? ""
+    );
+    expect(verbs.every((verb) => verb === "print")).toBe(true);
+    expect(await readFile(fixture.plistPath, "utf8")).toBe(plist);
+  } finally {
+    holder.kill();
+    await holder.exited;
+  }
+});
+
 // Review round 12 (HACK-2216): the fallback's launchd gate queries launchd
 // itself, whether or not the plist file exists.
 

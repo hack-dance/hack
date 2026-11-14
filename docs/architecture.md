@@ -609,6 +609,19 @@ after the loaded-file, program and stop-hook checks that `stop` makes. A hackd o
 another version under this CLI's unit is restarted the same way, even when the
 unit was not rewritten, so the new executable runs.
 
+Before such a restart, and again just before it lands, `start` proves that the
+unit's live main process is this home's hackd. This is the same proof `stop`
+needs: a hackd holding a socket in this home's `daemon/` directory, or this
+home's hackd as the direct child of a launcher main process. That this home's
+pid runs in the unit's cgroup is not enough. This home's hackd may have been
+started by a job of another home's daemon, or a reload may have pointed the
+configuration at this home while the running daemon serves another. Without the
+proof, `start` exits 1 with `blocked: "unproven-owner"` and changes nothing.
+When an earlier repair wrote the unit but its `daemon-reload` failed, the next
+`start` finishes that reload (and checks the unit's home again) before it
+restarts. If the reload fails again, the restart is not attempted and the
+restart-pending marker stays for the next run.
+
 `start` never rewrites or restarts the service from inside it. On Linux it
 compares its own cgroup (`/proc/self/cgroup`) with the unit's `ControlGroup`. On
 macOS it checks whether the launchd job's process is one of its ancestors. A job
@@ -718,7 +731,7 @@ else on stdout (human lines go to stderr). Success is
 | `manager` | `systemd`, `launchd` or `none` (hackd runs directly) |
 | `action` | `none`, `started`, `restarted`, `reinstalled`, `stopped` or `installed` |
 | `stale`, `stale_reasons` | whether the service or daemon was stale, and why: `content`, `program-missing`, `version-mismatch` |
-| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service` |
+| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service`, `unproven-owner` |
 | `cli_version` | this CLI's version |
 | `daemon` | `running`, `pid`, `version` and `compatible` after the command |
 

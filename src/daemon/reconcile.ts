@@ -71,7 +71,10 @@ export type ServiceUnitState =
  * - `home-binding`: the unit's main file binds the service to a Hack home
  *   (`HACK_HOME`, `HOME` or an `EnvironmentFile=`) that a rewrite would drop;
  * - `inside-service`: this command runs inside the service (for example a
- *   job hackd started), so restarting or rewriting it would stop the caller.
+ *   job hackd started), so restarting or rewriting it would stop the caller;
+ * - `unproven-owner`: a restart was needed, but the service's main process
+ *   is not proven to be this home's hackd (the same proof `stop` needs), so
+ *   restarting it could stop another home's daemon.
  */
 export type DaemonReconcileBlock =
   | "read-only"
@@ -79,7 +82,8 @@ export type DaemonReconcileBlock =
   | "unknown-program"
   | "unmanaged"
   | "home-binding"
-  | "inside-service";
+  | "inside-service"
+  | "unproven-owner";
 
 export interface DaemonReconcileInput {
   readonly unit: ServiceUnitState;

@@ -78,6 +78,8 @@ import { logger } from "../ui/logger.ts";
 const RESTART_PENDING_FILE = "hackd.service.restart-pending";
 const JOURNAL_HINT = `journalctl --user -u ${SYSTEMD_UNIT_NAME} -n 50`;
 const READY_TIMEOUT_MS = 8000;
+/** The stop refusals' own lead-in, dropped when a restart reuses them. */
+const STOP_REFUSAL_PREFIX = /^Not stopping hackd\.service: /;
 
 export interface SystemdCommandHooks {
   readonly paths: DaemonPaths;
@@ -107,6 +109,19 @@ export interface SystemdCommandHooks {
    * directories so they do not depend on the host's.
    */
   readonly systemPathDirectories?: readonly string[];
+  /**
+   * Proves the unit's main process is a hackd holding a socket in
+   * `daemonRoot` before an automatic restart; defaults to
+   * {@link proveOwnedDaemonProcess}. Tests pin it.
+   */
+  readonly proveMainProcess?: (
+    pid: number,
+    daemonRoot: string
+  ) => Promise<DaemonProcessProof>;
+  /** Test seam for the default main-process proof's observations. */
+  readonly probe?: DaemonProcessProbe;
+  /** Test seam: a process's parent pid (defaults to /proc). */
+  readonly parentPid?: (pid: number) => Promise<number | null>;
   /** Defaults to reading `/proc/self/cgroup`; tests pin it. */
   readonly readSelfCgroup?: () => Promise<string | null>;
   /** Records what the command decided, for `--json` (HACK-2216). */
@@ -334,6 +349,12 @@ export async function reconcileRunningSystemdDaemon(
     });
     return 1;
   }
+  // A restart stops the unit's main process and everything in its cgroup:
+  // prove first, as `stop` does, that it is this home's hackd (HACK-2216).
+  const unproven = await refuseUnprovenRestart({ hooks, status, deps });
+  if (unproven !== null) {
+    return unproven;
+  }
   return await restartReconciledUnit({
     hooks,
     plan,
@@ -341,7 +362,98 @@ export async function reconcileRunningSystemdDaemon(
     unitPath,
     deps,
     marker,
+    homePid: hooks.pid,
   });
+}
+
+/**
+ * Finishes a daemon-reload that an earlier write left pending
+ * (`NeedDaemonReload=yes`) before an automatic restart, then checks again
+ * which home the reloaded unit serves. The restart-pending marker is
+ * written (or kept) so a failure here is retried as a restart. Under
+ * {@link isSystemdReadOnly} nothing is reloaded ("read-only"): the restart
+ * goes on with the loaded copy and the marker stays.
+ */
+async function completeReloadBeforeRestart(opts: {
+  readonly hooks: Omit<SystemdCommandHooks, "startDetached" | "stopDirect">;
+  readonly deps: SystemdDeps;
+}): Promise<"reloaded" | "read-only" | "failed"> {
+  const { hooks, deps } = opts;
+  await writeRestartMarker({ paths: hooks.paths });
+  if (isSystemdReadOnly(deps.env)) {
+    logger.warn({
+      message: `systemd has an older copy of ${SYSTEMD_UNIT_NAME} loaded; not reloading it here, so the restart uses that copy | Run: hack daemon install`,
+    });
+    return "read-only";
+  }
+  const reload = await systemdDaemonReload({ deps });
+  if (!reload.ok) {
+    logger.error({
+      message: `systemctl --user daemon-reload failed: ${reload.error}; ${SYSTEMD_UNIT_NAME} was not restarted (a later hack daemon start retries) | Check: ${JOURNAL_HINT}`,
+    });
+    return "failed";
+  }
+  const unitHome = await checkUnitServesHome({
+    hackHome: dirname(hooks.paths.root),
+    deps,
+    action: "starting",
+  });
+  if (unitHome.kind !== "ours") {
+    logger.error({
+      message: `${unitHome.message}; not restarting it after the reload | Run: hack daemon install`,
+    });
+    return "failed";
+  }
+  return "reloaded";
+}
+
+/**
+ * The automatic restart stops the unit's main process and its cgroup, so
+ * it needs the same proof as `stop` ({@link checkMainProcessServesHome},
+ * {@link decideUnitStop}): the live main process is this home's hackd (or
+ * none runs and the configuration names this home). Cgroup membership of
+ * this home's pid alone is not enough: this home's hackd may have been
+ * started by a job of another home's daemon, or a reload may have pointed
+ * the configuration at this home while the running daemon serves another.
+ * Returns 1 (reported, nothing changed, `blocked: "unproven-owner"`) or
+ * null to go on.
+ */
+async function refuseUnprovenRestart(opts: {
+  readonly hooks: Omit<SystemdCommandHooks, "startDetached" | "stopDirect"> & {
+    readonly pid: number;
+  };
+  readonly status: SystemdServiceStatus;
+  readonly deps: SystemdDeps;
+}): Promise<number | null> {
+  const { hooks, status, deps } = opts;
+  const decided = await decideUnitStop({
+    mainProcess: await checkMainProcessServesHome({
+      status,
+      daemonRoot: hooks.paths.root,
+      prove: hooks.proveMainProcess,
+      probe: hooks.probe,
+      homePid: hooks.pid,
+      isPidInUnit: hooks.isPidInUnit,
+      parentPid: hooks.parentPid,
+    }),
+    unitHome: () =>
+      checkUnitServesHome({
+        hackHome: dirname(hooks.paths.root),
+        deps,
+        action: "stopping",
+      }),
+  });
+  if (decided.kind === "stop") {
+    return null;
+  }
+  if (hooks.trace) {
+    hooks.trace.action = "none";
+    hooks.trace.blocked = "unproven-owner";
+  }
+  logger.warn({
+    message: `Not restarting ${SYSTEMD_UNIT_NAME} to update it: ${decided.message.replace(STOP_REFUSAL_PREFIX, "")}`,
+  });
+  return 1;
 }
 
 /** The refusal for a running hackd whose version a restart cannot fix. */
@@ -382,8 +494,22 @@ async function restartReconciledUnit(opts: {
   readonly unitPath: string;
   readonly deps: SystemdDeps;
   readonly marker: string;
+  /** This home's hackd per its pid file. */
+  readonly homePid: number;
 }): Promise<number> {
   const { hooks, plan, status, unitPath, deps } = opts;
+  let reloadStillPending = false;
+  if (plan.rewrite === "none" && status.needsReload) {
+    // An earlier repair wrote the unit but its daemon-reload failed: the
+    // file is current, systemd's loaded copy is not. Restarting now would
+    // run the old configuration and clear the marker, so finish the reload
+    // first (keeping the marker until the restart completes).
+    const reloaded = await completeReloadBeforeRestart({ hooks, deps });
+    if (reloaded === "failed") {
+      return 1;
+    }
+    reloadStillPending = reloaded === "read-only";
+  }
   if (plan.rewrite !== "none") {
     await writeRestartMarker({ paths: hooks.paths });
     const rewritten = await rewriteUnitForPlan({
@@ -420,6 +546,16 @@ async function restartReconciledUnit(opts: {
     logger.error({ message: blocked });
     return 1;
   }
+  // The reload may have changed what the unit is configured for: prove
+  // ownership again just before the restart lands.
+  const unproven = await refuseUnprovenRestart({
+    hooks: { ...hooks, pid: opts.homePid },
+    status: (await readSystemdServiceStatus({ unitPath, deps })) ?? status,
+    deps,
+  });
+  if (unproven !== null) {
+    return unproven;
+  }
   const why = plan.reasons.includes("version-mismatch")
     ? "it runs another hack version"
     : "its unit changed";
@@ -431,7 +567,9 @@ async function restartReconciledUnit(opts: {
     });
     return 1;
   }
-  await rm(opts.marker, { force: true });
+  if (!reloadStillPending) {
+    await rm(opts.marker, { force: true });
+  }
   if (await hooks.waitForReady(READY_TIMEOUT_MS)) {
     logger.success({ message: "hackd restarted (systemd)" });
     return 0;

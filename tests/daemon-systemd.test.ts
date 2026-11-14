@@ -4410,6 +4410,9 @@ function runningHooks(fake: Fake, version: string | null) {
     // This test process: a login session, not the unit's cgroup.
     readSelfCgroup: () =>
       Promise.resolve("0::/user.slice/user-1000.slice/session-2.scope\n"),
+    // The unit's main process is proven as the fake says (`mainProcess`).
+    proveMainProcess: proveFor(fake),
+    parentPid: () => Promise.resolve(null),
   };
 }
 
@@ -4720,5 +4723,120 @@ linuxTest(
     ).toBe(1);
     expect(fake.calls).toContain("systemctl --user daemon-reload");
     expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+  }
+);
+
+// Codex review findings on PR #854 (HACK-2216).
+
+linuxTest(
+  "a hackd of this home started by a job inside another home's service is not restarted with it",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    // The main process (4242) is another home's hackd; this home's hackd
+    // (777) only shares its cgroup because one of that daemon's jobs
+    // started it. The configuration names this home.
+    fake.mainProcess = "foreign";
+    fake.calls.length = 0;
+    const hooks = {
+      ...runningHooks(fake, "1.0.0"),
+      pid: 777,
+      isPidInUnit: () => Promise.resolve(true),
+      parentPid: () => Promise.resolve(1),
+    };
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(hooks.trace.blocked).toBe("unproven-owner");
+    expect(hooks.trace.action).toBe("none");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  }
+);
+
+linuxTest(
+  "after a reload pointed HACK_HOME at this home, a main process serving another home is not restarted",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await writeStaleUnit(fake);
+    const stale = await readFile(unitPath, "utf8");
+    // The loaded configuration now names this home, but the running main
+    // process still serves the home it was started for.
+    fake.unitEnvironment = `PATH=${sysBin} HACK_HOME=${join(root, ".hack")}`;
+    fake.mainProcess = "foreign";
+    fake.calls.length = 0;
+    const hooks = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(hooks.trace.blocked).toBe("unproven-owner");
+    // Refused before anything changed.
+    expect(await readFile(unitPath, "utf8")).toBe(stale);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  }
+);
+
+linuxTest(
+  "a reload left pending by a failed repair is finished before the retried restart",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await writeStaleUnit(fake);
+    let reloadFails = true;
+    const run = fake.deps.run;
+    fake.deps = {
+      ...fake.deps,
+      run: (command, args) => {
+        if (args.includes("daemon-reload") && reloadFails) {
+          fake.calls.push(`${command} ${args.join(" ")}`);
+          // As systemd: the file changed, but the loaded copy is old.
+          fake.needsReload = true;
+          return Promise.resolve({
+            exitCode: 1,
+            stdout: "",
+            stderr: "Failed to reload daemon: Access denied",
+          });
+        }
+        return run(command, args);
+      },
+    };
+    const marker = join(
+      root,
+      ".hack",
+      "daemon",
+      "hackd.service.restart-pending"
+    );
+
+    // First run: the rewrite lands on disk, its reload fails, no restart.
+    expect(
+      await reconcileRunningSystemdDaemon(runningHooks(fake, "2.0.0"))
+    ).toBe(1);
+    expect(await readFile(unitPath, "utf8")).toBe(unitText());
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(await Bun.file(marker).exists()).toBe(true);
+
+    // A rerun while the reload still fails: no restart, marker kept.
+    fake.calls.length = 0;
+    expect(
+      await reconcileRunningSystemdDaemon(runningHooks(fake, "2.0.0"))
+    ).toBe(1);
+    expect(fake.calls).toContain("systemctl --user daemon-reload");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(await Bun.file(marker).exists()).toBe(true);
+
+    // A rerun once reloads work: the on-disk unit is current, so only the
+    // marker asks for a restart; the reload runs first, then the restart.
+    reloadFails = false;
+    fake.calls.length = 0;
+    const hooks = runningHooks(fake, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(0);
+    const reload = fake.calls.indexOf("systemctl --user daemon-reload");
+    expect(reload).toBeGreaterThanOrEqual(0);
+    expect(
+      fake.calls.indexOf("systemctl --user restart hackd.service")
+    ).toBeGreaterThan(reload);
+    expect(fake.needsReload).toBe(false);
+    expect(hooks.trace.action).toBe("restarted");
+    expect(await Bun.file(marker).exists()).toBe(false);
   }
 );

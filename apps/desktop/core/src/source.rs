@@ -266,6 +266,7 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
 struct ProbeTools {
     dir: PathBuf,
     coverage: Option<&'static str>,
+    unchecked: std::collections::BTreeSet<&'static str>,
 }
 
 impl ProbeTools {
@@ -317,6 +318,7 @@ fn trusted_probe_path_with_limits(
     let mut tools = ProbeTools {
         dir,
         coverage: None,
+        unchecked: std::collections::BTreeSet::new(),
     };
     if trusted_tool_path(&tools.dir, uid, true).is_none() {
         return Err("Doctor tool scratch is not private".into());
@@ -337,10 +339,11 @@ fn trusted_probe_path_with_limits(
             break;
         }
         let Some(real) = trusted_tool_path(&p, uid, true) else {
-            if p.exists() {
-                tools.coverage = Some(
-                    "Doctor skipped an untrusted PATH install location (ownership, group/other write or ACL); tools there were not checked",
-                );
+            for tool in crate::doctor_tools::NAMES {
+                if !matches!(std::fs::symlink_metadata(p.join(tool)), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+                {
+                    tools.unchecked.insert(tool);
+                }
             }
             continue;
         };
@@ -367,14 +370,11 @@ fn trusted_probe_path_with_limits(
                 continue;
             }
             if trusted_tool_path(&entry.path(), uid, false).is_none() {
-                use std::os::unix::fs::PermissionsExt;
-                if std::fs::symlink_metadata(entry.path()).is_ok_and(|m| {
-                    m.file_type().is_symlink()
-                        || (m.is_file() && m.permissions().mode() & 0o111 != 0)
-                }) {
-                    tools.coverage = Some(
-                        "Doctor skipped an executable or link with untrusted ownership, group/other write, ACL or target; filtered tools were not checked",
-                    );
+                if let Some(tool) = crate::doctor_tools::NAMES
+                    .iter()
+                    .find(|tool| name == std::ffi::OsStr::new(**tool))
+                {
+                    tools.unchecked.insert(tool);
                 }
                 continue;
             }
@@ -397,7 +397,53 @@ fn trusted_probe_path_with_limits(
             names.insert(name);
         }
     }
+    if tools.coverage.is_some() {
+        for tool in crate::doctor_tools::NAMES {
+            if !names.contains(std::ffi::OsStr::new(tool)) {
+                tools.unchecked.insert(tool);
+            }
+        }
+    }
     Ok(tools)
+}
+
+fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
+    if tools.unchecked.is_empty() {
+        return;
+    }
+    let names = tools
+        .unchecked
+        .iter()
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let note = format!(
+        "Doctor did not check tools: {names}; install location/target permissions or bounded PATH scan prevented validation"
+    );
+    for run in runs.iter_mut() {
+        if let Ok(report) = &mut run.result {
+            for check in &mut report.checks {
+                if tools
+                    .unchecked
+                    .iter()
+                    .any(|tool| crate::doctor_tools::affected(tool, &check.id))
+                {
+                    check.status = "unknown".into();
+                    check.detail = "A required tool was filtered or not searched; this check could not be established".into();
+                }
+            }
+        }
+    }
+    let mut coverage = DoctorRun::machine(Ok(crate::models::DoctorReport {
+        checks: vec![crate::models::DoctorCheck {
+            id: "desktop tool coverage".into(),
+            status: "unknown".into(),
+            detail: note,
+        }],
+        summary: vec![],
+    }));
+    coverage.probe_started = false;
+    runs.push(coverage);
 }
 
 /// Live data from a matching hackd. CLI listing fallback needs R18:
@@ -579,19 +625,7 @@ impl LiveSource {
             });
             runs.extend(chunk_runs);
         }
-        if let Some(note) = tools.coverage {
-            for run in &mut runs {
-                if let Ok(report) = &mut run.result {
-                    for check in &mut report.checks {
-                        check.status = "unknown".into();
-                        check.detail = format!(
-                            "{note}; filtered or unsearched tools cannot establish this check"
-                        );
-                    }
-                }
-            }
-            runs.push(DoctorRun::machine(Err(note.into())));
-        }
+        apply_tool_coverage(&mut runs, &tools);
         runs
     }
 
@@ -1445,6 +1479,15 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             !crate::doctor_acl::controlled(&dir.join("missing")),
             "missing is not no-ACL"
         );
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o711, 0o111] {
+            std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                trusted_tool_path(&hack, uid, false).is_some(),
+                "owned execute-only tools must not need read access for ACL inspection"
+            );
+        }
+        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         for rule in ["everyone deny delete", "everyone allow read"] {
             assert!(
                 std::process::Command::new("/bin/chmod")
@@ -1523,6 +1566,81 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
     }
 
     #[test]
+    fn filtered_doctor_tools_only_downgrade_dependent_checks() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack("doctor-scoped-coverage", "echo '{}'");
+        let root = hack.parent().unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let unrelated = bin.join("unrelated-execute-only");
+        std::fs::write(&unrelated, "fixture").unwrap();
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let tools = trusted_probe_path(bin.as_os_str()).unwrap();
+        assert!(
+            tools.unchecked.is_empty(),
+            "unrelated unsafe tools do not affect Doctor coverage"
+        );
+        let docker = bin.join("docker");
+        std::fs::copy(&hack, &docker).unwrap();
+        for directory in [false, true] {
+            std::fs::set_permissions(
+                &bin,
+                std::fs::Permissions::from_mode(if directory { 0o775 } else { 0o755 }),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                &docker,
+                std::fs::Permissions::from_mode(if directory { 0o755 } else { 0o777 }),
+            )
+            .unwrap();
+            let tools = trusted_probe_path(bin.as_os_str()).unwrap();
+            assert_eq!(
+                tools.unchecked.iter().copied().collect::<Vec<_>>(),
+                vec!["docker"]
+            );
+            let checks = [
+                "docker",
+                "docker daemon",
+                "resolver:hack",
+                "host tls trust",
+                "env mode",
+                "project",
+            ]
+            .map(|id| crate::models::DoctorCheck {
+                id: id.into(),
+                status: "ok".into(),
+                detail: "independently observed".into(),
+            })
+            .to_vec();
+            let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
+                checks,
+                summary: vec![],
+            }))];
+            apply_tool_coverage(&mut runs, &tools);
+            let report = runs[0].result.as_ref().unwrap();
+            assert!(report.checks[..2].iter().all(|c| c.status == "unknown"));
+            assert!(
+                report.checks[2..]
+                    .iter()
+                    .all(|c| c.status == "ok" && c.detail == "independently observed")
+            );
+            let view = crate::doctor::aggregate(&runs);
+            assert!(!view.is_clean());
+            assert_eq!(
+                view.cards()
+                    .filter(|c| c.id == "desktop tool coverage")
+                    .count(),
+                1
+            );
+            assert!(
+                view.cards()
+                    .any(|c| c.id == "desktop tool coverage" && c.detail.contains("docker"))
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn path_caps_keep_checked_tools_and_report_unsearched_coverage() {
         let hack = fake_hack("doctor-path-bounds", "echo '{}'");
         let root = hack.parent().unwrap();
@@ -1577,9 +1695,8 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
         let view = crate::doctor::aggregate(&runs);
         assert!(!view.is_clean());
         assert!(
-            view.failed_runs
-                .iter()
-                .any(|(_, why)| why.contains("scan limit"))
+            view.cards()
+                .any(|card| card.detail.contains("bounded PATH scan"))
         );
         let _ = std::fs::remove_dir_all(root);
     }

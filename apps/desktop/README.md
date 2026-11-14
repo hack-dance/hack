@@ -118,9 +118,10 @@ refused for any principal; deny/read-only entries remain supported. Linux access
 ACLs are conservatively refused. Unreadable ACL metadata is untrusted. The same
 ACL policy covers Docker discovery/config paths and their link targets. This
 may refuse owner-only ACL grants; it never attempts to infer group membership
-or effective ACL ordering. Native ACL fixtures need hosted macOS qualification. Darwin no-ACL detection
-uses an opened descriptor: NULL with ENOENT means absent ACL metadata, while
-missing paths, other errors and unreadable descriptors remain untrusted.
+or effective ACL ordering. Native ACL fixtures need hosted macOS qualification. Darwin ACL inspection does not require executable read access. NULL/ENOENT
+counts as absent ACL only when pre/post link and target metadata show the path
+still exists unchanged; missing, changed or unreadable metadata remains
+untrusted. These observations cannot lock out same-user/root ABA changes.
 
 Each refresh creates one private temporary PATH of wrappers that exec the checked
 absolute tool paths, preserving normal shim script locations and nested lookup.
@@ -129,8 +130,12 @@ values, and their temporary files are removed afterward.
 Scans deduplicate absolute directories (including canonical aliases) before the
 64-directory bound and inspect at most 8,192 entries. Reaching either bound
 keeps already checked tools and runs Doctor with explicit incomplete coverage;
-its checks become Unknown so unsearched tools cannot look missing or healthy.
-Skipped/unreadable executable locations produce the same conservative coverage.
+only checks dependent on filtered or unsearched Doctor tools become Unknown,
+so those tools cannot look missing or healthy. One coverage card names the
+unchecked tools; independently established checks keep their result. The fixed
+Doctor tool/dependency table excludes unrelated executables. For a scan cutoff
+or unreadable directory, tools already checked remain available and only
+unsearched Doctor tools receive incomplete coverage.
 A root:admin group-writable `/Applications` or app-bundle target is refused too;
 this preview does not widen trust for Docker Desktop or OrbStack. The lead's
 Mac pass must qualify these layouts; a skip is not proof Docker is missing. This is an ownership/permission boundary,

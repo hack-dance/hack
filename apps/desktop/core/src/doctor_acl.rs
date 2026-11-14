@@ -3,37 +3,55 @@ use std::path::Path;
 
 #[cfg(target_os = "macos")]
 pub(crate) fn controlled(path: &Path) -> bool {
-    use libc::{c_int, c_void};
-    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+    use libc::{c_char, c_int, c_void};
+    use std::{
+        ffi::CString,
+        os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    };
     unsafe extern "C" {
-        fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+        fn acl_get_file(path: *const c_char, kind: c_int) -> *mut c_void;
         fn acl_get_entry(acl: *mut c_void, selector: c_int, entry: *mut *mut c_void) -> c_int;
         fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
         fn acl_get_permset(entry: *mut c_void, perms: *mut *mut c_void) -> c_int;
         fn acl_get_perm_np(perms: *mut c_void, permission: c_int) -> c_int;
         fn acl_free(acl: *mut c_void) -> c_int;
     }
-    let Ok(file) = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-    else {
+    fn witness(path: &Path) -> Option<([u64; 9], [u64; 9])> {
+        fn key(m: std::fs::Metadata) -> [u64; 9] {
+            [
+                m.dev(),
+                m.ino(),
+                u64::from(m.mode()),
+                u64::from(m.uid()),
+                u64::from(m.gid()),
+                m.mtime() as u64,
+                m.mtime_nsec() as u64,
+                m.ctime() as u64,
+                m.ctime_nsec() as u64,
+            ]
+        }
+        Some((
+            key(std::fs::symlink_metadata(path).ok()?),
+            key(std::fs::metadata(path).ok()?),
+        ))
+    }
+    let Some(before) = witness(path) else {
         return false;
     };
-    if !file.metadata().is_ok_and(|m| m.is_file() || m.is_dir()) {
+    let Ok(name) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
-    }
-    // Darwin sys/acl.h: extended ACL, allow entries, first/next selectors,
-    // and mutation rights (delete, write, append, child delete, attributes,
-    // extended attributes, security and owner). Deny/read-only entries are safe.
-    // Darwin Libc acl_file.c/filesec.c: on a valid descriptor, ENOENT
-    // means FILESEC_ACL is absent. Opening first distinguishes missing paths.
-    // SAFETY: descriptor and ACL handles remain owned by this call.
+    };
+    // Darwin Libc acl_file.c/filesec.c: NULL/ENOENT can mean no ACL.
+    // Observe existing link and target identity before/after to distinguish
+    // missing/changed paths. No read permission or descriptor open is required.
+    // Same-user/root ABA changes are outside this observational boundary.
+    // SAFETY: name is NUL-terminated; ACL handles stay owned by this call.
     unsafe {
         *libc::__error() = 0;
-        let acl = acl_get_fd_np(file.as_raw_fd(), 0x100);
+        let acl = acl_get_file(name.as_ptr(), 0x100);
         if acl.is_null() {
-            return std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT);
+            return std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
+                && witness(path) == Some(before);
         }
         let mut entry = std::ptr::null_mut();
         let mut selector = 0;
@@ -78,7 +96,7 @@ pub(crate) fn controlled(path: &Path) -> bool {
             }
         };
         acl_free(acl);
-        safe
+        safe && witness(path) == Some(before)
     }
 }
 

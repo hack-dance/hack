@@ -23,6 +23,7 @@ import {
 import type { UpgradeCheckProbes } from "../src/lib/upgrade-check-probes.ts";
 import { renderUpgradeCheck } from "../src/lib/upgrade-check-render.ts";
 import {
+  listUpgradeSnapshots,
   readUpgradeSnapshotJournal,
   restoreUpgradeSnapshot,
 } from "../src/lib/upgrade-snapshot.ts";
@@ -576,3 +577,223 @@ test("a .hack/.gitignore that is a link refuses only its own checkout", async ()
   expect(byScope.get("app-a")).toMatch(/^(refused|failed|skipped)$/);
   expect(await readFile(join(root, "elsewhere-ignore"), "utf8")).toBe("x\n");
 }, 60_000);
+
+// ---------------------------------------------------------------------------
+// Review regressions
+// ---------------------------------------------------------------------------
+
+test("checkouts with the same display name are applied by their own root", async () => {
+  const a = await project("app-a");
+  // Two linked worktrees with the same directory name: the same display name.
+  const first = join(root, "wt-one", "feature");
+  const second = join(root, "wt-two", "feature");
+  await checkout(first, "app-a");
+  await checkout(second, "app-a");
+  // The second one is blocked; the first must still get its own fix.
+  await symlink(
+    join(root, "nowhere.yaml"),
+    join(second, ".hack", "hack.env.default.yaml")
+  );
+  const lastSeenAt = "2026-01-01T00:00:00.000Z";
+  await writeRegistry([
+    {
+      ...a,
+      worktrees: [
+        { path: first, branch: "f1", lastSeenAt },
+        { path: second, branch: "f2", lastSeenAt },
+      ],
+    },
+  ]);
+  const report = await check();
+  const applied = await runUpgradeApply({
+    report,
+    dryRun: false,
+    only: ["ignore-rules"],
+    home,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  if (applied.status !== "partial") {
+    throw new Error(`unexpected status ${applied.status}`);
+  }
+  const byRoot = new Map(applied.targets.map((t) => [t.root, t.status]));
+  expect(byRoot.get(first)).toBe("applied");
+  expect(byRoot.get(second)).toBe("skipped");
+  expect(await readFile(join(first, ".hack", ".gitignore"), "utf8")).toContain(
+    ".env"
+  );
+  expect(
+    await lstat(join(second, ".hack", ".gitignore")).catch(() => null)
+  ).toBeNull();
+}, 60_000);
+
+test("--project naming two registered projects is refused as ambiguous", async () => {
+  const one = await project("dup");
+  const other = {
+    ...(await project("dup-2")),
+    id: "id-dup-other",
+    name: "dup",
+  };
+  await writeRegistry([one, other]);
+  const report = await check();
+  const before = await tree(root);
+  expect(
+    await runUpgradeApply({
+      report,
+      dryRun: false,
+      project: "dup",
+      home,
+      collect: collectUpgradeSnapshotTargets,
+    })
+  ).toMatchObject({ status: "refused", reason: "ambiguous-project" });
+  expect(await tree(root)).toEqual(before);
+}, 60_000);
+
+test("--project leaves HOME agent files out without counting them as unfinished", async () => {
+  const agentFile = await staleHomeAgentFile();
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const report = await check();
+  const scopes: string[] = [];
+  const applied = await runUpgradeApply({
+    report,
+    dryRun: false,
+    project: "app-a",
+    only: ["agent-integrations"],
+    home,
+    collect: collectUpgradeSnapshotTargets,
+    applyPluginMigration: async (input) => {
+      scopes.push(...input.scopes.map((s) => s.scope));
+      return {
+        status: "nothing-to-migrate",
+        plan: { checks: [], entries: [] },
+      };
+    },
+  });
+  expect(applied.status).toBe("applied");
+  expect(scopes).toEqual(["project"]);
+  if (applied.status !== "applied") {
+    throw new Error("unreachable");
+  }
+  expect(applied.targets.map((t) => t.scope)).toEqual(["app-a"]);
+  expect(applied.notes[0]).toContain("left out with --project");
+  expect(await readFile(agentFile, "utf8")).toContain("old standalone");
+}, 60_000);
+
+test("a write whose after state cannot be recorded is failed, not applied", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const report = await check();
+  for (const record of [
+    async () => ({ status: "refused" as const, paths: [] }),
+    async () => ({ status: "invalid-manifest" as const, message: "x" }),
+    async () => {
+      throw new Error("boom");
+    },
+  ]) {
+    await rm(join(a.projectDir, ".gitignore"), { force: true });
+    const applied = await runUpgradeApply({
+      report,
+      dryRun: false,
+      only: ["ignore-rules"],
+      home,
+      collect: collectUpgradeSnapshotTargets,
+      recordAfter: record,
+    });
+    if (applied.status !== "partial") {
+      throw new Error(`unexpected status ${applied.status}`);
+    }
+    expect(applied.targets[0]?.status).toBe("failed");
+    expect(applied.targets[0]?.message).toContain("needs --overwrite");
+    const journal = (await readUpgradeSnapshotJournal({
+      manifestPath: applied.coverage.manifest_path,
+    })) as { state: string };
+    expect(journal.state).toBe("failed");
+  }
+}, 60_000);
+
+test("the agent backup manifest is journaled before removal and kept when the migration fails after it", async () => {
+  await staleHomeAgentFile();
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const report = await check();
+  const backupDir = join(hackHome, "agent-migrations");
+  const snapshotRoot = join(hackHome, "upgrade", "snapshots");
+  const seenDuring: (string | null)[] = [];
+  const applied = await runUpgradeApply({
+    report,
+    dryRun: false,
+    only: ["agent-integrations"],
+    home,
+    collect: collectUpgradeSnapshotTargets,
+    agentBackupDir: backupDir,
+    snapshotRoot,
+    applyPluginMigration: async (input) => {
+      // Mid-migration (an interruption here): the journal already names
+      // this target as started, with the backup it is about to write.
+      const [snapshot] = await listUpgradeSnapshots({ root: snapshotRoot });
+      const journal = (await readUpgradeSnapshotJournal({
+        manifestPath: snapshot?.manifestPath ?? "",
+      })) as {
+        targets: { status: string; backup_manifest: string | null }[];
+      };
+      const current = journal.targets.find((t) => t.status === "started");
+      seenDuring.push(current?.backup_manifest ?? null);
+      expect(current?.backup_manifest).toBe(
+        join(input.backupDir, `${input.hooks?.id}.json`)
+      );
+      // The migration committed its backup and removed files, then failed.
+      await mkdir(input.backupDir, { recursive: true });
+      await writeFile(join(input.backupDir, `${input.hooks?.id}.json`), "{}\n");
+      throw Object.assign(new Error("rewrite failed"), { code: "EIO" });
+    },
+  });
+  // manifestPath is only known after the run; replay the check here.
+  if (applied.status !== "partial") {
+    throw new Error(`unexpected status ${applied.status}`);
+  }
+  const manifestPath = applied.coverage.manifest_path;
+  const failed = applied.targets.filter((t) => t.status === "failed");
+  expect(failed.length).toBeGreaterThan(0);
+  for (const target of failed) {
+    expect(target.backup_manifest).toStartWith(backupDir);
+    expect(target.message).toContain("Failed (EIO)");
+  }
+  expect(applied.agent_backups).toHaveLength(failed.length);
+  const journal = (await readUpgradeSnapshotJournal({ manifestPath })) as {
+    targets: { status: string; backup_manifest: string | null }[];
+  };
+  expect(
+    journal.targets
+      .filter((t) => t.status === "failed")
+      .every((t) => t.backup_manifest?.startsWith(backupDir))
+  ).toBe(true);
+  expect(seenDuring).toEqual(failed.map((t) => t.backup_manifest));
+}, 60_000);
+
+test("hack upgrade apply exits 1 when every selected checkout is blocked", async () => {
+  const blocked = await project("app-blocked");
+  await symlink(
+    join(root, "nowhere.yaml"),
+    join(blocked.projectDir, "hack.env.default.yaml")
+  );
+  await writeRegistry([blocked]);
+  // The CLI harness itself prepares the private home; compare what apply could touch.
+  const touched = async () => [
+    ...(await tree(join(root, "repos"))),
+    ...(await tree(hackHome)),
+  ];
+  const before = await touched();
+  const run = await cli(["upgrade", "apply", "--only", "ignore-rules"]);
+  expect(run.code).toBe(1);
+  expect(run.stdout).toContain("Nothing ran");
+  const json = await cli([
+    "upgrade",
+    "apply",
+    "--only",
+    "ignore-rules",
+    "--json",
+  ]);
+  expect(json.code).toBe(1);
+  expect(JSON.parse(json.stdout).data.status).toBe("blocked");
+  expect(await touched()).toEqual(before);
+}, 120_000);

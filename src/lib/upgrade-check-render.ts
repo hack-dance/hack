@@ -195,6 +195,9 @@ function verboseLines(report: UpgradeCheckReport): string[] {
       if (NEEDS_WORK.has(finding.status) && finding.command !== null) {
         lines.push(`        ${finding.command}`);
       }
+      if (NEEDS_WORK.has(finding.status) && finding.action !== null) {
+        lines.push(`        manual: ${finding.action}`);
+      }
     }
   }
   return lines;

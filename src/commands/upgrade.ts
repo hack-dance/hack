@@ -444,7 +444,13 @@ async function handleUpgradeApply({
   } else {
     process.stdout.write(renderApply({ result, after, rollback }));
   }
-  return result.status === "refused" || result.status === "partial" ? 1 : 0;
+  // Exit 1 when selected work did not all get done: refused, blocked
+  // (every selected checkout skipped) or partial.
+  return result.status === "refused" ||
+    result.status === "blocked" ||
+    result.status === "partial"
+    ? 1
+    : 0;
 }
 
 function applyJson(opts: {
@@ -502,8 +508,9 @@ export function renderApply(opts: {
 function outcomeLines(
   result: Exclude<UpgradeApplyResult, { status: "refused" }>
 ): string[] {
+  const notes = result.notes.map((note) => `Note: ${note}`);
   if (result.targets.length === 0) {
-    return ["Nothing for hack upgrade apply to do."];
+    return ["Nothing for hack upgrade apply to do.", ...notes];
   }
   const groups = new Map<string, (typeof result.targets)[number][]>();
   for (const target of result.targets) {
@@ -524,7 +531,12 @@ function outcomeLines(
       lines.push(`  ${first.message}`);
     }
   }
-  return lines;
+  if (result.status === "blocked") {
+    lines.push(
+      "Nothing ran: every selected checkout has a blocker or a check that could not be performed."
+    );
+  }
+  return [...lines, ...notes];
 }
 
 function recoveryLines(opts: {

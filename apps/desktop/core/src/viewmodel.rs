@@ -30,7 +30,7 @@ impl Banner {
             Self::DaemonMismatch { daemon, cli } => {
                 format!("hackd v{daemon} is running, CLI is v{cli}: restart hackd")
             }
-            Self::EngineDown { error } => format!("Engine not running: {error}"),
+            Self::EngineDown { error } => format!("Docker not reachable: {error}"),
             Self::Stale { error } => format!("Showing last known state: {error}"),
         }
     }

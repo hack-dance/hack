@@ -18,12 +18,25 @@ use crate::models::{NativePs, ProjectRow};
 pub enum ProjectState {
     Stopped,
     Starting,
-    Running { uptime: Option<String> },
-    Degraded { down: Vec<String> },
+    /// `exited_ok`: services that exited 0 while the rest run. Their
+    /// completion role is unknown until the CLI reports it (design R2).
+    Running {
+        uptime: Option<String>,
+        exited_ok: Vec<String>,
+    },
+    Degraded {
+        down: Vec<String>,
+    },
     Stopping,
-    FailedStart { services: Vec<String> },
-    NeedsAttention { reason: String },
-    Unknown { reason: String },
+    FailedStart {
+        services: Vec<String>,
+    },
+    NeedsAttention {
+        reason: String,
+    },
+    Unknown {
+        reason: String,
+    },
 }
 
 impl ProjectState {
@@ -33,8 +46,13 @@ impl ProjectState {
         match self {
             Self::Stopped => "Stopped".into(),
             Self::Starting => "Starting…".into(),
-            Self::Running { uptime: Some(u) } => format!("Running · {u}"),
-            Self::Running { uptime: None } => "Running".into(),
+            Self::Running { exited_ok, .. } if !exited_ok.is_empty() => {
+                format!("Running · {} exited (0)", exited_ok.join(", "))
+            }
+            Self::Running {
+                uptime: Some(u), ..
+            } => format!("Running · {u}"),
+            Self::Running { uptime: None, .. } => "Running".into(),
             Self::Degraded { down } => format!("Degraded · {} down", down.join(", ")),
             Self::Stopping => "Stopping…".into(),
             Self::FailedStart { services } => {
@@ -138,7 +156,8 @@ pub struct ServiceView {
     pub running: bool,
     pub status: String,
     pub exit_code: Option<i32>,
-    /// Exited 0 and not running: a finished one-shot service, never "down".
+    /// Exited 0 and not running: never "down", but its completion role is
+    /// unknown until the CLI reports it (shown as "exited (0)").
     pub completed: bool,
     pub route: Option<String>,
 }
@@ -248,7 +267,10 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         }
         // Summary rows carry counts, not services.
         if row.running_container_count.unwrap_or(0) > 0 || row.status == "running" {
-            return ProjectState::Running { uptime: None };
+            return ProjectState::Running {
+                uptime: None,
+                exited_ok: vec![],
+            };
         }
         return ProjectState::Stopped;
     }
@@ -273,7 +295,12 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
             .flat_map(|rt| rt.services.iter())
             .flat_map(|s| s.containers.iter())
             .find_map(|c| c.uptime().map(str::to_owned));
-        ProjectState::Running { uptime }
+        let exited_ok = svcs
+            .iter()
+            .filter(|s| s.completed)
+            .map(|s| s.name.clone())
+            .collect();
+        ProjectState::Running { uptime, exited_ok }
     } else {
         ProjectState::Degraded { down }
     }
@@ -301,7 +328,10 @@ pub fn native_state(ps: Option<&NativePs>) -> ProjectState {
             if ps.items.is_empty() {
                 ProjectState::Stopped
             } else if down.is_empty() {
-                ProjectState::Running { uptime: None }
+                ProjectState::Running {
+                    uptime: None,
+                    exited_ok: vec![],
+                }
             } else if down.len() == ps.items.len() {
                 ProjectState::FailedStart { services: down }
             } else {
@@ -353,7 +383,8 @@ mod tests {
         assert_eq!(
             s,
             ProjectState::Running {
-                uptime: Some("2 hours".into())
+                uptime: Some("2 hours".into()),
+                exited_ok: vec![],
             }
         );
         assert_eq!(s.actions(), &[Action::Open, Action::Restart, Action::Stop]);
@@ -417,10 +448,9 @@ mod tests {
         let rt = r.runtime.as_mut().unwrap();
         rt.services[1].containers[0].state = "exited".into();
         rt.services[1].containers[0].status = "Exited (0) 2 hours ago".into();
-        assert!(matches!(
-            derive(&r, &LocalContext::default()),
-            ProjectState::Running { .. }
-        ));
+        let st = derive(&r, &LocalContext::default());
+        assert_eq!(st.label(), "Running · db exited (0)");
+        assert!(matches!(st, ProjectState::Running { .. }));
     }
 
     #[test]

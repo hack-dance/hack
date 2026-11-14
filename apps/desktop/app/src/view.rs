@@ -548,9 +548,9 @@ impl HackApp {
             .iter()
             .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::EngineDown { .. }))
         {
-            ("Engine down", t.danger)
+            ("Docker down", t.danger)
         } else {
-            ("Engine ok", t.success)
+            ("Docker ok", t.success)
         };
         let daemon = if list
             .banners

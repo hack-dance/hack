@@ -11,6 +11,8 @@ pub(super) use exec::ExecSelection;
 pub(super) use exec::ServiceExec;
 #[cfg(target_os = "macos")]
 pub(super) use exec::execute as service_exec;
+#[cfg(target_os = "macos")]
+pub(super) use exec::interactive as interactive_exec;
 #[cfg(any(target_os = "macos", test))]
 mod run;
 #[cfg(target_os = "macos")]
@@ -1541,6 +1543,8 @@ fn cleanup_inner(
         finish(&observed)?;
         check_startup(guard)?;
     }
+    #[cfg(target_os = "macos")]
+    crate::provider::interactive_session::after_cleanup(candidate, receipt.review.scope().run);
     Ok(receipt)
 }
 #[cfg(test)]

@@ -6,6 +6,7 @@ import {
   beginNativeCpuChild,
   nativeCpuCommandCategory,
 } from "./native-cpu-diagnostics.ts";
+import { boundedTimeoutMs } from "./process-deadline.ts";
 import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
 import { hasControllingTerminal } from "./tty-process-group.ts";
 
@@ -65,18 +66,24 @@ export async function exec(
   cmd: readonly string[],
   opts: ExecOptions = {}
 ): Promise<ExecResult> {
+  // Within a process deadline (withProcessDeadline), never outlive it, and
+  // start nothing once it has passed.
+  const timeoutMs = boundedTimeoutMs(opts.timeoutMs);
+  if (timeoutMs !== undefined && timeoutMs <= 0) {
+    return { exitCode: 124, stdout: "", stderr: "" };
+  }
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
     env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
     stdin: opts.stdin ?? "inherit",
     stdout: "pipe",
     stderr: "pipe",
-    detached: opts.timeoutMs !== undefined,
+    detached: timeoutMs !== undefined,
   });
 
   const timeout = installSubprocessTimeout({
     pid: proc.pid,
-    timeoutMs: opts.timeoutMs,
+    timeoutMs,
   });
   const observeCpu = beginNativeCpuChild(proc, nativeCpuCommandCategory(cmd));
 

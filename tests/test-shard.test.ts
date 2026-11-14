@@ -831,11 +831,17 @@ describe("test shard runner", () => {
 
   test("deferred file summary names the selected macOS evidence gap", () => {
     const macos = "tests/native-authored-project-start.test.ts";
-    const summary = deferredMacosSummary([macos]);
+    const both = "tests/local-network-hint.test.ts";
+    const summary = deferredMacosSummary([macos, both]);
     expect(summary).toContain("deferred to the integration run");
     expect(summary).toContain(macos);
     expect(summary).toContain("1 selected");
     expect(summary).not.toContain("packages/db/tests/smoke.test.ts");
+    const [deferred, onLinux] = summary.split("### Files also run on Linux");
+    expect(deferred).toContain(macos);
+    expect(deferred).not.toContain(both);
+    expect(onLinux).toContain(both);
+    expect(onLinux).toContain("only their macOS coverage is deferred");
   });
 
   test("prints a start and a result line naming each file", async () => {
@@ -1167,9 +1173,10 @@ describe("hosted test CI fan-in", () => {
     owned.push(root);
     const linux = "packages/db/tests/smoke.test.ts";
     const macos = "tests/native-authored-project-start.test.ts";
+    const both = "tests/local-network-hint.test.ts";
     const env = {
       ...process.env,
-      HACK_TEST_SELECTION: JSON.stringify([linux, macos]),
+      HACK_TEST_SELECTION: JSON.stringify([linux, macos, both]),
       HACK_TEST_DRAFT: "true",
       HACK_TEST_DEFER_MACOS: "true",
       GITHUB_STEP_SUMMARY: join(root, "summary"),
@@ -1189,7 +1196,7 @@ describe("hosted test CI fan-in", () => {
       expect(child.exitCode, child.stderr.toString()).toBe(0);
       files.push(...child.stdout.toString().trim().split("\n").filter(Boolean));
     }
-    expect(files).toEqual([linux]);
+    expect(files.sort()).toEqual([linux, both].sort());
     const report = Bun.spawnSync(
       [process.execPath, "scripts/test-shard.ts", "report-deferred"],
       { cwd: repoRoot, env, stdout: "pipe", stderr: "pipe" }
@@ -1199,6 +1206,8 @@ describe("hosted test CI fan-in", () => {
     expect(summary).toContain(macos);
     expect(summary).not.toContain(linux);
     expect(summary).toContain("deferred to the integration run");
+    expect(summary.split("### Files also run on Linux")[0]).not.toContain(both);
+    expect(summary.split("### Files also run on Linux")[1]).toContain(both);
     const wrong = Bun.spawnSync(
       [
         process.execPath,

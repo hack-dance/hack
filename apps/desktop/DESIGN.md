@@ -209,9 +209,10 @@ minutes while visible. The versioned audit gives `{ok:true,data:{schema:1,checks
 | One action | Run safe fix (R7b) · Open Terminal (admin) · Copy command · Open doc |
 
 Machine findings are de-duplicated by check `id` and shown once; project
-findings link from that project's header. Until R7a adds `area`, `scope` and
-`fix`, `core` maps known `id`s to areas and shows unknown ones under "Other"
-with only Copy and Open doc. No Run button appears without a `fix.kind: safe`.
+findings link from that project's header. Schema 1 supplies `area`, `scope` and
+`fix`; older CLI versions still need `core`'s known-ID mapping. Unknown checks
+appear under "Other" with only Copy and Open doc. No Run button appears without
+a `fix.kind: safe`.
 
 ## 4. Upgrades
 

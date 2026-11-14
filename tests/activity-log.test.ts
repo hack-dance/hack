@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -352,4 +353,39 @@ test("the recorded project is the registered name: selector aliases and linked w
   } finally {
     restoreEnv("HACK_HOME", savedHome);
   }
+});
+
+test("a rotation between the reader's two opens never duplicates records", async () => {
+  for (const [project, ms] of [
+    ["old", 1],
+    ["old", 2],
+  ] as const) {
+    await appendActivityRecord({
+      path,
+      record: record({ project, durationMs: ms }),
+    });
+  }
+  await rename(path, `${path}.1`);
+  for (const ms of [3, 4, 5]) {
+    await appendActivityRecord({
+      path,
+      record: record({ project: "mid", durationMs: ms }),
+    });
+  }
+  const read = await readActivity({
+    path,
+    limit: 100,
+    // A writer rotates right after the reader opened the current file, then
+    // appends to the new one.
+    betweenOpens: async () => {
+      await rename(path, `${path}.1`);
+      await appendActivityRecord({
+        path,
+        record: record({ project: "new", durationMs: 6 }),
+      });
+    },
+  });
+  const durations = read.map((entry) => entry.duration_ms);
+  expect(new Set(durations).size).toBe(durations.length);
+  expect(durations).toEqual([6, 5, 4, 3]);
 });

@@ -328,11 +328,17 @@ export async function readActivity(opts: {
   readonly project?: string;
   readonly limit: number;
   readonly path?: string;
+  /** Tests only: runs after the current file is opened, before the kept one. */
+  readonly betweenOpens?: () => Promise<void>;
 }): Promise<readonly ActivityRecord[]> {
   const path = opts.path ?? resolveActivityPath();
+  const [current, kept] = await openGenerations({
+    path,
+    betweenOpens: opts.betweenOpens,
+  });
   const out: ActivityRecord[] = [];
-  for (const file of [path, `${path}.1`]) {
-    const records = parseActivityText(await readPrivateText(file));
+  for (const text of [current, kept]) {
+    const records = parseActivityText(text);
     for (let i = records.length - 1; i >= 0; i -= 1) {
       const record = records[i] as ActivityRecord;
       if (opts.project !== undefined && record.project !== opts.project) {
@@ -347,7 +353,55 @@ export async function readActivity(opts: {
   return out;
 }
 
-async function readPrivateText(path: string): Promise<string> {
+/** Attempts before reading only the current file. */
+const SNAPSHOT_ATTEMPTS = 3;
+
+/**
+ * The text of the current file and the kept generation, as one snapshot.
+ * Both are opened before either is read. A rotation between the two opens
+ * shows as the same file under both names; then the pair is opened again,
+ * so the same records are never read twice and the replaced generation is
+ * never mistaken for the kept one. If rotations keep racing, only the
+ * current file is read.
+ */
+async function openGenerations(opts: {
+  readonly path: string;
+  readonly betweenOpens?: () => Promise<void>;
+}): Promise<readonly [string, string]> {
+  for (let attempt = 1; attempt <= SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const current = await openPrivate(opts.path);
+    let kept: PrivateFile | null = null;
+    try {
+      if (attempt === 1) {
+        await opts.betweenOpens?.();
+      }
+      kept = await openPrivate(`${opts.path}.1`);
+      const same =
+        current !== null &&
+        kept !== null &&
+        current.info.dev === kept.info.dev &&
+        current.info.ino === kept.info.ino;
+      if (!same) {
+        return [await readAll(current), await readAll(kept)];
+      }
+      if (attempt === SNAPSHOT_ATTEMPTS) {
+        return ["", await readAll(kept)];
+      }
+    } finally {
+      await current?.file.close();
+      await kept?.file.close();
+    }
+  }
+  return ["", ""];
+}
+
+type PrivateFile = {
+  readonly file: Awaited<ReturnType<typeof open>>;
+  readonly info: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>;
+};
+
+/** A regular file opened without following a link; null when absent. */
+async function openPrivate(path: string): Promise<PrivateFile | null> {
   let file: Awaited<ReturnType<typeof open>>;
   try {
     file = await open(
@@ -356,18 +410,24 @@ async function readPrivateText(path: string): Promise<string> {
     );
   } catch (error: unknown) {
     if (isRecord(error) && error.code === "ENOENT") {
-      return "";
+      return null;
     }
     throw error;
   }
   try {
-    if (!(await file.stat()).isFile()) {
+    const info = await file.stat();
+    if (!info.isFile()) {
       throw new Error("Activity log is not a regular file");
     }
-    return await file.readFile({ encoding: "utf8" });
-  } finally {
+    return { file, info };
+  } catch (error: unknown) {
     await file.close();
+    throw error;
   }
+}
+
+async function readAll(opened: PrivateFile | null): Promise<string> {
+  return opened ? await opened.file.readFile({ encoding: "utf8" }) : "";
 }
 
 /** Complete, valid records in file order. */

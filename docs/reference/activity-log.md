@@ -75,6 +75,9 @@ rather than written.
   replacing the previous generation, under a short lock. One generation is
   kept, so the log holds roughly the last 1 to 2 MiB of actions. A writer that
   had the old file open finishes its line there; readers read both files.
+  A reader opens both files before reading either; if a rotation happens
+  between the two opens it sees the same file twice and opens the pair again,
+  so a read never returns the same records twice.
 - Readers skip any line that is not a complete, valid record, such as a torn
   last line.
 - Recording is best effort. A write that fails (full disk, unwritable Hack

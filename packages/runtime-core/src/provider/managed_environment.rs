@@ -492,6 +492,24 @@ fn receive_forwarded_scoped(
 pub fn receive(fd: OwnedFd, expected_plan: &str, run: &str) -> Result<Managed, CandidateError> {
     receive_scoped(fd, expected_plan, run, Scope::Application)
 }
+/// Interactive fd 3 has a length-delimited envelope followed by a lifetime
+/// leash, so it cannot use the finite EOF reader. Keep the same closed codec.
+#[cfg(target_os = "macos")]
+pub(crate) fn receive_interactive_bytes(
+    bytes: &[u8],
+    expected_plan: &str,
+    run: &str,
+    started: Instant,
+) -> Result<Managed, CandidateError> {
+    if !cfg!(feature = "environment-launcher") {
+        return Err(refused());
+    }
+    let managed = parse_scoped(bytes, expected_plan, run, started, Scope::Application)?;
+    if !managed.files().is_empty() {
+        return Err(refused());
+    }
+    Ok(managed)
+}
 
 /// Native private input has distinct provenance and cannot be forwarded as a Compose v1 envelope.
 #[cfg(feature = "native-config-plan")]

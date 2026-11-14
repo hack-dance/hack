@@ -144,6 +144,9 @@ pub struct RouteProbeDiagnostic {
 /// `process_refusals`, `plan_change` and `route_probe`.
 #[derive(Debug, Default, Serialize)]
 pub struct RefusalDiagnostics {
+    /// Value-free durable interactive-session UUID, never argv or environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// Every service whose selected process a private wrapper refused, found in
     /// one pass before any runtime state is reserved.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,6 +204,24 @@ pub struct CandidateError {
 }
 
 impl CandidateError {
+    pub fn with_session(mut self, session: &str) -> Self {
+        // This file is also compiled by the guest, which has no host provider.
+        if session.len() == 36
+            && session.bytes().enumerate().all(|(i, c)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    c == b'-'
+                } else {
+                    c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
+                }
+            })
+        {
+            self.refusals.get_or_insert_default().session = Some(session.into());
+        }
+        self
+    }
+    pub fn session(&self) -> Option<&str> {
+        self.refusals.as_ref()?.session.as_deref()
+    }
     pub fn new(code: &'static str, message: impl Into<ErrorMessage>) -> Self {
         let message = message.into();
         Self {

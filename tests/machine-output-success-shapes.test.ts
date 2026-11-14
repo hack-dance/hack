@@ -85,10 +85,14 @@ function schemaFor(item: Case): string | undefined {
   )?.schema;
 }
 
-/** A versioned flag variant overrides its base row (plain `projects` is legacy). */
+/**
+ * The inventory row decides a plain command's shape. Only a flag variant
+ * (`projects --observe`) may differ from its base row, and then only through
+ * its own SCHEMA_JSON_VARIANTS entry.
+ */
 function declaredShape(item: Case): string | undefined {
-  if (schemaFor(item)) {
-    return "schema-envelope";
+  if ((item.flags ?? []).length > 0) {
+    return schemaFor(item) ? "schema-envelope" : undefined;
   }
   return JSON_COMMAND_SHAPES[item.command as keyof typeof JSON_COMMAND_SHAPES];
 }

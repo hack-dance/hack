@@ -239,7 +239,7 @@ test("once the time budget is spent, project checks report not checked without r
   const project = await liveProject("app-late");
   let ran = false;
   const findings = await inspectUpgradeProject({
-    project,
+    project: { ...project, project: project.name },
     homeDir: home,
     deadline: Date.now() - 1,
     nativePreflight: async () => {
@@ -325,6 +325,7 @@ test("a host with nothing to do is ready, with no plan and no next command", asy
     version: "5.0.0-next.17",
     channel: "next",
     candidate_run: false,
+    build: "release",
     command: "hack",
   });
 });

@@ -83,10 +83,19 @@ Silicon, the native preflight. It changes nothing and prints no secret value.
 - **Dead registry entries** (the checkout or its config is gone) are counted
   apart from live projects that cannot be read. Dead entries only need
   `hack projects prune`; unreadable ones need repair.
-- It ends with an ordered plan and the next command. A step either has a
-  command or is marked manual, with the action to take; manual text is never
-  printed as a command. Commands run the CLI you ran the check with (the
-  `hack-next` launcher during the prerelease).
+- The text report fits one screen: the build that ran (a source build or the
+  candidate launcher is named on the first line), the machine, project counts,
+  the projects that have a finding (worktrees folded under their project),
+  then the plan. `--verbose` (or `--all`) adds every checkout's findings and
+  the dead entries; `--json` always has the full detail.
+- The plan has one step per kind of change, with the number of checkouts it
+  covers, then the next command. A step either has a command or is marked
+  manual, with the action to take; manual text is never printed as a command.
+  Commands run the CLI you ran the check with (the `hack-next` launcher during
+  the prerelease).
+- Steps marked `(apply)` are safe hygiene that `hack upgrade apply` runs for
+  every checkout they cover: refreshing outdated `.hack/.gitignore` files and
+  removing stale standalone agent files that the hack plugin replaces.
 - It exits 1 when something blocks the upgrade, naming the blockers. Examples
   are a global secret store whose key is gone or refused while a project
   reads it, a tracked secret key, an env layer conflict, or a live project
@@ -96,7 +105,23 @@ Silicon, the native preflight. It changes nothing and prints no secret value.
   may hold the key; the check never asks the keychain, because that can
   prompt.
 
-Before you follow the plan, keep a private copy of the files it changes:
+To run the apply steps:
+
+```sh
+hack upgrade apply --dry-run      # what would change; changes nothing
+hack upgrade apply                # every apply step, every checkout
+hack upgrade apply --only ignore-rules --project my-app
+```
+
+Apply checks first and skips any checkout with a blocker or a check that could
+not run. Before it changes anything it keeps an upgrade snapshot (below) and
+writes a journal beside the snapshot manifest: the snapshot's coverage (whether
+it is complete, and its gaps), and each checkout's outcome. Agent files are
+removed only when the hack plugin that replaces them is verified, and each
+removal is backed up by `hack setup migrate`'s manifest. Apply prints the
+rollback commands and then rechecks.
+
+Before you follow the rest of the plan, keep a private copy of the files it changes:
 
 ```sh
 hack upgrade snapshot

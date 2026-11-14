@@ -1868,7 +1868,7 @@ Notes:
 
 ## `hack upgrade`
 
-Guided upgrade: check, snapshot and roll back
+Guided upgrade: check, apply, snapshot and roll back
 
 ### Usage
 
@@ -1881,6 +1881,7 @@ hack upgrade <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack upgrade check` | Check this machine and every registered project for the upgrade (read-only) |
+| `hack upgrade apply` | Run the plan's apply steps for every checkout (snapshot and journal first) |
 | `hack upgrade snapshot` | Keep a private copy of the files the upgrade changes |
 | `hack upgrade rollback` | Put back the files kept by an upgrade snapshot |
 
@@ -1905,13 +1906,45 @@ hack upgrade check [options]
 Reads the installed versions, the daemon's service, the projects registry (dead entries apart
 from unreadable ones), Hack's global services, proxy ports and DNS, the global secret store, and
 for each live project its env format and key, tracked files, ignore rules, agent integrations
-and (Apple Silicon) native preflight. Ends with an ordered plan and the next command. Changes
-nothing and prints no value. Exits 1 when something blocks the upgrade, naming it.
+and (Apple Silicon) native preflight. Prints a one-screen summary, the projects with findings
+(worktrees folded under their project) and a plan with one step per kind of change, then the
+next command. Changes nothing and prints no value. Exits 1 when something blocks the upgrade.
 
 ### Options
 
 | Option | Description |
 | --- | --- |
+| `--verbose` | Also list every checkout's findings and the dead registry entries (--json always has everything) |
+| `--all` | Same as --verbose |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade apply`
+
+Run the plan's apply steps for every checkout (snapshot and journal first)
+
+### Usage
+
+```bash
+hack upgrade apply [options]
+```
+
+Checks first, then runs the plan steps marked (apply) for every checkout they cover: refreshing
+outdated .hack/.gitignore files and removing stale standalone agent files the hack plugin replaces
+(each removal backed up by the plugin migration). Before changing anything it keeps an upgrade
+snapshot and writes a journal beside it with the snapshot's coverage and gaps and each checkout's
+outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback
+command. --dry-run lists what would change. Exits 1 when anything selected was not done.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--only <fix>` | Run only this plan step: ignore-rules or agent-integrations (comma-separated for both) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--dry-run` | List what would change and change nothing |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

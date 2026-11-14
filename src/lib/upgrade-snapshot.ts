@@ -512,6 +512,58 @@ export async function listUpgradeSnapshots(
 }
 
 // ---------------------------------------------------------------------------
+// Journal
+// ---------------------------------------------------------------------------
+
+const JOURNAL_NAME = "journal.json";
+const MAX_JOURNAL_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Writes the step journal of the step that owns this snapshot (for example
+ * `hack upgrade apply`) beside its manifest, atomically and privately.
+ * The journal is caller data and, like labels, must hold no value: paths,
+ * ids, statuses, counts and closed messages only. Returns its path.
+ */
+export async function writeUpgradeSnapshotJournal(input: {
+  readonly snapshot: Pick<UpgradeSnapshot, "dir">;
+  readonly journal: unknown;
+}): Promise<string> {
+  if ((await privateDirectoryProblem(input.snapshot.dir)) !== null) {
+    throw new Error(
+      "The upgrade snapshot directory is not private to this user."
+    );
+  }
+  const path = join(input.snapshot.dir, JOURNAL_NAME);
+  await writePrivateJson({ path, value: input.journal });
+  return path;
+}
+
+/**
+ * The journal beside a snapshot manifest, parsed; null when there is none
+ * or it is not a private file of this user holding JSON.
+ */
+export async function readUpgradeSnapshotJournal(input: {
+  readonly manifestPath: string;
+}): Promise<unknown> {
+  const dir = dirname(resolve(input.manifestPath));
+  if ((await privateDirectoryProblem(dir)) !== null) {
+    return null;
+  }
+  const text = await readPrivateFile({
+    path: join(dir, JOURNAL_NAME),
+    maxBytes: MAX_JOURNAL_BYTES,
+  });
+  if (text === null) {
+    return null;
+  }
+  try {
+    return JSON.parse(text.toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Reading targets
 // ---------------------------------------------------------------------------
 
@@ -1108,6 +1160,14 @@ async function writeManifest(input: {
   readonly path: string;
   readonly manifest: UpgradeSnapshotManifest;
 }): Promise<void> {
+  await writePrivateJson({ path: input.path, value: input.manifest });
+}
+
+/** Atomic private JSON write: no-follow exclusive temporary file, fsync, rename. */
+async function writePrivateJson(input: {
+  readonly path: string;
+  readonly value: unknown;
+}): Promise<void> {
   const temporary = `${input.path}.${randomBytes(6).toString("hex")}.tmp`;
   const handle = await open(
     temporary,
@@ -1118,7 +1178,7 @@ async function writeManifest(input: {
     0o600
   );
   try {
-    await handle.writeFile(`${JSON.stringify(input.manifest, null, 2)}\n`);
+    await handle.writeFile(`${JSON.stringify(input.value, null, 2)}\n`);
     await handle.sync();
   } finally {
     await handle.close();

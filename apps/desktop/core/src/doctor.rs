@@ -122,7 +122,9 @@ fn prefixed(id: &str) -> Option<(Area, Scope)> {
 
 /// Checks the CLI runs both outside a project (auditing the global Hack
 /// home) and inside one: their scope follows the run that reported them.
-const RUN_SCOPED_IDS: &[&str] = &["secrets hygiene"];
+/// (`sessions mux` resolves the global `sessions.mux` setting outside a
+/// project, doctor.ts checkSessionsMuxConfig.)
+const RUN_SCOPED_IDS: &[&str] = &["secrets hygiene", "sessions mux"];
 
 /// The single action a card offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1397,6 +1399,25 @@ mod tests {
             c.action,
             CardAction::Copy("hack doctor --fix --path '/work/alpha'".into())
         );
+    }
+
+    #[test]
+    fn global_sessions_mux_from_the_machine_run_is_kept() {
+        let v = aggregate(&[machine(vec![check(
+            "sessions mux",
+            "warn",
+            "sessions.mux=tmux, but tmux is missing (run: install tmux with your package manager)",
+        )])]);
+        assert!(!v.is_clean());
+        let c = v.cards().next().unwrap();
+        assert_eq!(c.affected, Affected::Machine);
+        assert!(
+            matches!(c.action, CardAction::OpenDoc(_)),
+            "not a hack command"
+        );
+        // A project override keeps its attribution.
+        let p = aggregate(&[proj("alpha", vec![check("sessions mux", "warn", "x")])]);
+        assert!(p.cards().next().unwrap().affected.includes("alpha"));
     }
 
     #[test]

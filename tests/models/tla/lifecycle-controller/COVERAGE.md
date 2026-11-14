@@ -65,3 +65,9 @@ implementation boundaries, covered by these real-controller regressions:
 inference from an empty process array. Older entries without that field remain
 conservative. An absent PID alone cannot rule out a lost launch reply. Native
 root loss is outside the model's abstract successful-stop action.
+
+The native observation assumption includes serialization with in-flight stop
+admission and a `running` phase for adoption. Real regressions are
+`status_waits_for_inflight_stop_before_reporting_adoptable_liveness` and
+`a command already retiring cannot be adopted as healthy`. The finite model's
+atomic lock region does not simulate the phase-publication interval itself.

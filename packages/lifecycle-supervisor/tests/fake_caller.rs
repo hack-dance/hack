@@ -1446,3 +1446,24 @@ fn fixture_process() {
 }
 
 use std::os::unix::fs::DirBuilderExt;
+
+#[test]
+fn status_waits_for_inflight_stop_before_reporting_adoptable_liveness() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "ignore-term")]);
+    f.await_log("fixture-ready");
+    let mut stopping = command(&f.root, "stop").spawn().unwrap();
+    send(stopping.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    eventually(|| (f.state("worker")["phase"] == "stopping").then_some(()));
+    let (mut observer, receipt) = f.request("status", &f.control(TOKEN));
+    assert!(receipt["liveProcessNames"].as_array().unwrap().is_empty());
+    assert!(
+        receipt["unknownProcessNames"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(wait(&mut observer, TIMEOUT).success());
+    assert!(wait(&mut stopping, TIMEOUT).success());
+    assert!(wait(&mut caller, TIMEOUT).success());
+}

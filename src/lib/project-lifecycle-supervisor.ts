@@ -35,6 +35,18 @@ import { createLifecycleOwnershipToken } from "./project-lifecycle-sessions.ts";
 type Options = Parameters<typeof createLifecycleProcessController>[0];
 type Controller = ReturnType<typeof createLifecycleProcessController>;
 
+function hasRunningCommand(
+  receipt: LifecycleSupervisorReceipt,
+  name: string
+): boolean {
+  return (
+    receipt.liveProcessNames.includes(name) &&
+    receipt.processes.some(
+      (state) => state.name === name && state.phase === "running"
+    )
+  );
+}
+
 /** The native owner preserves the mux controller's adoption and rollback fences. */
 export function createSupervisorLifecycleController(
   opts: Options & { readonly stopExisting: () => Promise<void> }
@@ -169,7 +181,7 @@ export function createSupervisorLifecycleController(
       existing.definitionHash === opts.definitionHash &&
       existing.processes.length > 0 &&
       existing.processes.every((process) =>
-        status.liveProcessNames.includes(process.name)
+        hasRunningCommand(status, process.name)
       )
     );
   }
@@ -250,6 +262,11 @@ export function createSupervisorLifecycleController(
         ownershipToken: token,
       });
       if (observed.liveProcessNames.includes(process.name)) {
+        if (!hasRunningCommand(observed, process.name)) {
+          throw new Error(
+            "Lifecycle command is retiring; retry after shutdown completes."
+          );
+        }
         accept(observed);
         await publish();
         return;

@@ -87,7 +87,7 @@ fn dispatch() -> Result<()> {
             let _stop_lock = if args[0] == "stop" {
                 Some(root.lock_wait(".stop.lock")?)
             } else {
-                None
+                root.existing_lock_wait(".stop.lock")?
             };
             let mut states = Vec::new();
             for state in root.states()? {

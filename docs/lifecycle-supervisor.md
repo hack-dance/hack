@@ -260,3 +260,10 @@ preserve supervisor entries when rewriting shared project state and may start
 mux duplicates. After the project owner is killed, existing guards keep working
 and `down` can recover them; adding a new persistent hook may refuse until `down`
 retires the old owner. Stop and retry rather than removing its socket or state.
+
+Adoption requires a verified live command in the `running` phase. Commands in
+`stopping` or `kill-pending` finish retirement before replacement; they are never
+adopted as healthy. Native status waits for an existing launch/stop admission
+lock before reading receipts, so an in-flight stop cannot expose a pre-TERM
+snapshot as adoptable work. This observation creates no lock file in an unused
+root and times out conservatively if admission cannot settle.

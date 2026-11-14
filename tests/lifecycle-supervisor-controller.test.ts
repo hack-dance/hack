@@ -575,3 +575,49 @@ nativeTest(
     }),
   30_000
 );
+
+nativeTest(
+  "a command already retiring cannot be adopted as healthy",
+  () =>
+    fixture(async (project) => {
+      const owner = controller(project);
+      await owner.startMany({
+        processes: [
+          {
+            name: "worker",
+            command:
+              "trap '' TERM; printf 'retirement-ready\\n'; exec sleep 60",
+          },
+        ],
+      });
+      await owner.finalize();
+      const path = resolveLifecycleLogPath({
+        ...project,
+        composeProject: "fixture",
+      });
+      await eventually(async () =>
+        (await readFile(path, "utf8")).includes("retirement-ready")
+      );
+      const previous = (await readLifecycleState(project))[0];
+      const guard = previous?.processes[0]?.guardPid;
+      if (!(guard && previous?.ownershipToken)) {
+        throw new Error("missing owned guard identity");
+      }
+      process.kill(guard, "SIGTERM");
+      await eventually(async () => {
+        const status = await inspectLifecycleSupervisor({
+          ...project,
+          composeProject: "fixture",
+          ownershipToken: previous.ownershipToken ?? "",
+        });
+        return status.processes.some((process) => process.phase === "stopping");
+      });
+      const replacement = controller(project);
+      await replacement.startMany({ processes: [{ name: "worker", command }] });
+      await replacement.finalize();
+      expect((await readLifecycleState(project))[0]?.ownershipToken).not.toBe(
+        previous.ownershipToken
+      );
+    }),
+  30_000
+);

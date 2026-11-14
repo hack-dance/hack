@@ -474,7 +474,7 @@ test(
     const result = await cli(f, ["up"], BUILDS_ENV);
     expectOneClosedLine(
       result,
-      "E_NATIVE_PROJECT_UNSUPPORTED: Native foreground up cannot build service web: build arg GREETING equals a privately delivered environment value. Build args are not secrets (images record them); pass secrets with BuildKit build secrets instead, which native builds do not support yet. Values were omitted; no hook, VM or build was started."
+      "E_NATIVE_PROJECT_UNSUPPORTED: Native foreground up cannot build service web: build arg GREETING equals a hack env secret value. Build args are not secrets (images record them); pass secrets with BuildKit build secrets instead, which native builds do not support yet. Values were omitted; no hook, VM or build was started."
     );
     expect(result.output).not.toContain(secret);
     // The Compose backend would record the value in the image history too.

@@ -795,6 +795,12 @@ export async function applyEnvMigration(input: {
       }
       await input.hooks?.boundary?.({ phase: "prepared", index: -1 });
       await assertSources(journal);
+      // A retained journal is not proof that its original rollback bytes
+      // survived the interruption. Admit them before any further publication.
+      await input.snapshots.assertCoverage({
+        manifestPath: journal.manifestPath,
+        files: journal.sources,
+      });
       for (const [index, entry] of journal.writes.entries()) {
         if (entry.done) {
           continue;

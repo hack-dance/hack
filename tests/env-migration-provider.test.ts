@@ -11,7 +11,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { applyEnvMigration } from "../src/lib/env-migration.ts";
+import {
+  applyEnvMigration,
+  envMigrationJournalPath,
+} from "../src/lib/env-migration.ts";
 import { bindEnvMigrationSnapshots } from "../src/lib/env-migration-snapshot.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import { resolveProjectEnvConfig } from "../src/lib/project-env-config.ts";
@@ -166,6 +169,92 @@ function pathField(data: Record<string, unknown>, name: string): string {
     throw new Error("Expected migration metadata path");
   }
   return path;
+}
+
+for (const damage of ["manifest", "missing-blob", "changed-blob"] as const) {
+  test(`resumed production apply refuses ${damage} damage before another publication`, async () => {
+    const project = await fixture();
+    await expect(
+      applyEnvMigration({
+        project,
+        snapshots: bindEnvMigrationSnapshots(snapshotLibrary),
+        acceptTrackedChanges: true,
+        hooks: {
+          boundary: async ({ phase }) => {
+            if (phase === "prepared") {
+              throw new Error("synthetic prepared interruption");
+            }
+          },
+        },
+      })
+    ).rejects.toThrow("synthetic prepared interruption");
+    const journalPath = envMigrationJournalPath(project.projectRoot);
+    const journal: unknown = JSON.parse(await readFile(journalPath, "utf8"));
+    if (!isRecord(journal)) {
+      throw new Error("Expected interrupted migration journal");
+    }
+    const manifestPath = pathField(journal, "manifestPath");
+    const loaded = await snapshotLibrary.readUpgradeSnapshot({ manifestPath });
+    if (loaded.status !== "ok") {
+      throw new Error("Expected intact initial snapshot");
+    }
+    const original = loaded.snapshot.manifest.entries.find(
+      (entry) => entry.path === join(project.projectDir, "hack.config.json")
+    );
+    if (original?.before.kind !== "file") {
+      throw new Error("Expected config original in snapshot");
+    }
+    const damaged =
+      damage === "manifest"
+        ? manifestPath
+        : join(loaded.snapshot.dir, "blobs", original.before.sha256);
+    const bytes = await readFile(damaged);
+    if (damage === "changed-blob") {
+      await writeFile(damaged, "synthetic damaged snapshot payload", {
+        mode: 0o600,
+      });
+    } else {
+      await rm(damaged);
+    }
+    const paths = (
+      await readdir(project.projectRoot, { recursive: true })
+    ).sort();
+    const before = await Promise.all(
+      paths.map(async (name) => {
+        const path = join(project.projectRoot, name);
+        return (await lstat(path)).isFile() ? await readFile(path) : null;
+      })
+    );
+    const journalBefore = await readFile(journalPath);
+    const result = await cli(project.projectRoot, [
+      "--apply",
+      "--accept-tracked-env-changes",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(
+      (await readdir(project.projectRoot, { recursive: true })).sort()
+    ).toEqual(paths);
+    for (const [index, name] of paths.entries()) {
+      const expected = before[index];
+      if (expected) {
+        expect(
+          (await readFile(join(project.projectRoot, name))).equals(expected)
+        ).toBe(true);
+      }
+    }
+    expect((await readFile(journalPath)).equals(journalBefore)).toBe(true);
+    await writeFile(damaged, bytes, { mode: 0o600 });
+    const resumed = await cli(project.projectRoot, [
+      "--apply",
+      "--accept-tracked-env-changes",
+    ]);
+    expect(resumed.exitCode, resumed.stderr).toBe(0);
+    expect(resumed.envelope.data.status).toBe("applied");
+    expect(
+      (await resolveProjectEnvConfig({ ...project, envName: null }))?.serviceEnv
+        .api?.SECRET
+    ).toBe(sentinel);
+  });
 }
 
 test("production snapshot provider backs source CLI apply, no-op and guarded rollback", async () => {

@@ -82,7 +82,11 @@ remain private.
 
 Each publication has an original checksum, an intended checksum and a completion
 receipt. A retry skips completed steps and adopts a matching publication whose
-rename succeeded before its receipt. An unexpected input or destination change
+rename succeeded before its receipt. Before publishing another file, a retry
+revalidates the snapshot manifest and every original-file blob against the
+journal. Missing or damaged rollback coverage refuses before publishing another
+migration target; restore the intact snapshot bytes before retrying. An
+unexpected input or destination change
 refuses instead of guessing. Re-run the same apply command after interruption.
 After completion it returns `already_complete` without rewriting the project or
 journal. `doctor --migrate-env-config` uses the same apply/journal path and keeps

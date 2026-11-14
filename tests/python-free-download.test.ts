@@ -539,8 +539,9 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
     });
     let calls = 0;
     let cancellations = 0;
+    let archiveReadPending = false;
+    let archiveDelivered = false;
     const signals: unknown[] = [];
-    const archiveReadBlocked = Promise.withResolvers<void>();
     const mock = spyOn(globalThis, "fetch").mockImplementation(
       fetchMock((url, options) => {
         calls++;
@@ -563,14 +564,14 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
             new Response(
               new ReadableStream<Uint8Array>(
                 {
-                  start(controller) {
+                  pull(controller) {
                     if (scenario === "cleanup") {
-                      controller.enqueue(fixture.archive);
-                    }
-                  },
-                  pull() {
-                    if (scenario === "cleanup") {
-                      archiveReadBlocked.resolve();
+                      if (archiveDelivered) {
+                        archiveReadPending = true;
+                      } else {
+                        archiveDelivered = true;
+                        controller.enqueue(fixture.archive);
+                      }
                     }
                   },
                   cancel() {
@@ -594,19 +595,19 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
         (error) => ({ value: undefined, error })
       );
       if (scenario === "stall" || scenario === "cleanup") {
-        // Advance the fake clock once asynchronous disk writes/close reach the
-        // request whose timeout and cancellation this case models.
+        // With no stream prefetch, the next pull proves the archive write was
+        // awaited. Fetch starting alone does not prove even open() has finished.
         for (
           let spin = 0;
-          spin < 100 && calls < (scenario === "stall" ? 2 : 5);
+          spin < 100 &&
+          (scenario === "cleanup" ? !archiveReadPending : calls < 2);
           spin++
         ) {
           await drain();
         }
         expect(calls).toBe(scenario === "stall" ? 2 : 5);
         if (scenario === "cleanup") {
-          // With no prefetch, the next read follows the awaited archive write.
-          await archiveReadBlocked.promise;
+          expect(archiveReadPending).toBe(true);
           expect(readFileSync(join(root, fixture.name))).toEqual(
             fixture.archive
           );
@@ -614,6 +615,10 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
         clock.advance(31);
         await drain();
         if (scenario === "cleanup") {
+          for (let spin = 0; spin < 100 && cancellations === 0; spin++) {
+            await drain();
+          }
+          expect(cancellations).toBe(1);
           clock.advance(5);
         }
       }

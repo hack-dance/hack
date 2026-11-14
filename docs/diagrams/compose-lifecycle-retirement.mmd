@@ -7,8 +7,10 @@ stateDiagram-v2
   attached --> captured : Compose exits
   captured --> signalled : owned mux stop
   signalled --> commandsRetired : no live command members
-  signalled --> retained : observation unknown
+  signalled --> signalled : failed census / retry within budget
+  signalled --> retained : no census succeeds by deadline
   signalled --> escalated : 5 s grace expires
+  signalled --> escalated : second Ctrl-C / identity rechecked
   escalated --> commandsRetired : no live command members
   escalated --> retained : deadline or probe error
   commandsRetired --> wrappersRetired : no live wrapper members
@@ -27,6 +29,8 @@ stateDiagram-v2
     FIFO EOF is not group absence
     TERM separately grouped descendants
     Revalidate member identity before TERM or KILL
+    Probe EPERM needs census
+    Delivery EPERM plus live members refuses
     Zombie-only groups are retired
     After KILL allow 2 s to confirm retirement
   end note

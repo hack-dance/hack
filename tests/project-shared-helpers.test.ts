@@ -404,6 +404,15 @@ test(
   async () => {
     const root = await scratch();
     const first = helperConfig({ port: freePort() });
+    // Bind the first helper before selecting the second port: released port-0
+    // probes can return the same port, letting the foreign listener satisfy first.
+    await startProjectSharedHelpers({
+      ...context(root),
+      helpers: [first],
+      composeProject: BRANCH_A,
+    });
+    const owned = await ownedIdentity(root, first);
+
     const second = helperConfig({
       port: freePort(),
       name: "second-bridge",
@@ -414,14 +423,6 @@ test(
       mode: "identity",
       port: second.port,
     });
-
-    // Branch A already holds the first helper from an earlier successful up.
-    await startProjectSharedHelpers({
-      ...context(root),
-      helpers: [first],
-      composeProject: BRANCH_A,
-    });
-    const owned = await ownedIdentity(root, first);
 
     // Branch B's up acquires the first helper, then the second is refused:
     // B's new holder on the first helper is rolled back.

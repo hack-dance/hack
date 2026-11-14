@@ -32,6 +32,9 @@ verified stale agent files and permission-only key findings. Use
 `hack upgrade review` to walk the remaining env and tracked-file decisions in
 one command. See the [assistant and recovery details](guides/upgrade-from-v4.md).
 These file repairs do not replace the runtime trial below.
+JSON findings and plan steps label their supplied action `safe`, `admin` or
+`manual`; severity stays separate. Only explicitly safe commands should be
+offered as Run. Host changes and decisions still need review.
 
 1. **Back up before running v5 on the project.** Keep a private copy outside the
    checkout of `.hack/`, the root `.gitignore` and `.hack.secret.key`, and the

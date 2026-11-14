@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ClosedCliError } from "./cli-result.ts";
-import { resolveGlobalHackDir } from "./config-paths.ts";
 import { migrationRefusal, readMigrationFile } from "./env-migration-files.ts";
+import { resolveEnvMigrationDataHome } from "./env-migration-home.ts";
 import { isRecord } from "./guards.ts";
 
 const verification = new AsyncLocalStorage<string>();
@@ -12,7 +12,7 @@ const verification = new AsyncLocalStorage<string>();
 /** Read-only path calculation shared by the journal owner and every env reader. */
 export function migrationJournalPath(projectRoot: string): string {
   return join(
-    resolveGlobalHackDir(),
+    resolveEnvMigrationDataHome(),
     "env-migrations",
     createHash("sha256").update(projectRoot).digest("hex"),
     "journal.json"

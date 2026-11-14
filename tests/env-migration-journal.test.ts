@@ -8,6 +8,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -138,6 +139,92 @@ function expectRestored(
     }
   }
   expect(actual).toEqual(before);
+}
+
+test("implicit migration resumes and readers find its journal through an aliased data home", async () => {
+  const actualHome = join(root, "canonical-state");
+  const alias = join(root, "state-link");
+  await mkdir(actualHome, { mode: 0o700 });
+  await symlink(actualHome, alias);
+  process.env.HACK_HOME = join(alias, "not-created-yet");
+  const preview = await previewEnvMigration(project);
+  expect(await readdir(actualHome)).toEqual([]);
+  await expect(
+    applyEnvMigration({
+      project,
+      snapshots: envMigrationSnapshots(),
+      acceptTrackedChanges: true,
+      hooks: {
+        boundary: async ({ phase }) => {
+          if (phase === "prepared") {
+            throw new Error("synthetic journal interruption");
+          }
+        },
+      },
+    })
+  ).rejects.toThrow("synthetic journal interruption");
+  await expect(
+    resolveProjectEnvConfig({ ...project, envName: null })
+  ).rejects.toThrow("unfinished");
+  await migrateLegacyEnvForCommand({ ...project, materialize: false });
+  expect(
+    (await resolveProjectEnvConfig({ ...project, envName: null }))?.globalEnv
+      .TOKEN
+  ).toBe(SENTINEL);
+  expect((await previewEnvMigration(project)).journalPath).toBe(
+    preview.journalPath
+  );
+  const canonical = join(actualHome, "not-created-yet");
+  process.env.HACK_HOME = canonical;
+  expect((await previewEnvMigration(project)).journalPath).toBe(
+    preview.journalPath
+  );
+});
+
+for (const name of ["env-migrations", "upgrade"] as const) {
+  test(`data-home alias support still refuses a planted ${name} symlink below that root`, async () => {
+    const actualHome = join(root, "canonical-state");
+    const alias = join(root, "state-link");
+    const outside = join(root, "other-storage");
+    await mkdir(actualHome, { mode: 0o700 });
+    await mkdir(outside, { mode: 0o700 });
+    await symlink(actualHome, alias);
+    await symlink(outside, join(actualHome, name));
+    process.env.HACK_HOME = alias;
+    const before = await projectFiles();
+    await expect(
+      applyEnvMigration({
+        project,
+        snapshots: envMigrationSnapshots(),
+        acceptTrackedChanges: true,
+      })
+    ).rejects.toThrow();
+    expect(await projectFiles()).toEqual(before);
+    expect(await readdir(outside)).toEqual([]);
+  });
+}
+
+for (const kind of ["dangling", "file"] as const) {
+  test(`an unresolved ${kind} data home refuses without writes or private diagnostics`, async () => {
+    const path = join(root, "refused-home");
+    if (kind === "dangling") {
+      await symlink(join(root, "absent-target"), path);
+    } else {
+      await writeFile(path, SENTINEL);
+    }
+    process.env.HACK_HOME = path;
+    const before = await projectFiles();
+    const error = await previewEnvMigration(project).then(
+      () => null,
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(Error);
+    if (error instanceof Error) {
+      expect(error.message).toContain("cannot resolve its data home");
+      expect(error.message).not.toContain(SENTINEL);
+    }
+    expect(await projectFiles()).toEqual(before);
+  });
 }
 
 test("an already modern project without legacy inputs previews complete and applies without creating state", async () => {

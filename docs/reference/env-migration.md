@@ -79,9 +79,13 @@ without generating them or copying a keychain key to an absent key file.
 Apply takes a private snapshot of originals and absent destinations before
 publishing any migration target. The journal and staged payloads live outside working trees under
 Hack's private data directory. The snapshot manifest and journal hold only names,
-paths, statuses, modes, sizes and SHA-256 checksums. Original bytes and staged
-payloads are separate private files; they can contain values and keys and must
-remain private.
+paths, statuses, modes, sizes and SHA-256 checksums. Existing aliases in `HOME`
+or `HACK_HOME` are resolved to the data home's real path before locating
+journals, payloads and snapshots;
+missing child directories are appended without writes during preview. Symlinks
+introduced below that resolved root still refuse migration.
+Original bytes and staged payloads are separate private files; they can contain
+values and keys and must remain private.
 
 Each publication has an original checksum, an intended checksum and a completion
 receipt. A retry skips completed steps and adopts a matching publication whose

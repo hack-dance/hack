@@ -8,6 +8,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -123,7 +124,11 @@ async function runMigrationCli(
   ]);
 }
 
-async function runCliCommand(projectRoot: string, args: readonly string[]) {
+async function runCliCommand(
+  projectRoot: string,
+  args: readonly string[],
+  storage?: { readonly home: string; readonly hackHome?: string }
+) {
   if (compiled && !isAbsolute(compiled)) {
     throw new Error("Compiled test executable must be absolute");
   }
@@ -139,9 +144,9 @@ async function runCliCommand(projectRoot: string, args: readonly string[]) {
     cwd: projectRoot,
     env: privateCliEnv({
       root,
-      home: join(root, "home"),
+      home: storage?.home ?? join(root, "home"),
       env: {
-        HACK_HOME: join(root, "state"),
+        HACK_HOME: storage ? storage.hackHome : join(root, "state"),
         HACK_NO_INTERACTIVE: "1",
         HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
         PATH: "/nonexistent",
@@ -177,6 +182,60 @@ function pathField(data: Record<string, unknown>, name: string): string {
     throw new Error("Expected migration metadata path");
   }
   return path;
+}
+
+for (const location of ["HOME", "HACK_HOME", "missing-child"] as const) {
+  test(`production migration resolves an uncanonicalized ${location} alias for preview, apply, no-op and rollback`, async () => {
+    const project = await fixture();
+    const alias = join(root, "storage-alias");
+    const target = join(root, "actual-storage");
+    await mkdir(target, { mode: 0o700 });
+    await symlink(target, alias);
+    const storage =
+      location === "HOME"
+        ? { home: alias }
+        : {
+            home: join(root, "home"),
+            hackHome:
+              location === "missing-child" ? join(alias, "new-data") : alias,
+          };
+    const actualHome =
+      location === "HOME"
+        ? join(target, ".hack")
+        : location === "missing-child"
+          ? join(target, "new-data")
+          : target;
+    const command = async (flags: readonly string[]) => {
+      const result = await runCliCommand(
+        project.projectRoot,
+        ["env", "migrate", "--path", project.projectRoot, "--json", ...flags],
+        storage
+      );
+      expect(result.exitCode, result.stderr).toBe(0);
+      return JSON.parse(result.stdout).data;
+    };
+    const preview = await command([]);
+    expect(preview.status).toBe("ready");
+    expect(preview.journalPath).toStartWith(`${actualHome}/env-migrations/`);
+    expect(await readdir(target)).toEqual([]);
+    const applied = await command(["--apply"]);
+    expect(applied.status).toBe("applied");
+    expect(applied.manifestPath).toStartWith(
+      `${actualHome}/upgrade/snapshots/`
+    );
+    expect((await command(["--apply"])).status).toBe("already_complete");
+    const rollback = await command([
+      "--rollback-manifest",
+      applied.manifestPath,
+    ]);
+    expect(rollback.status).toBe("restored");
+    expect(
+      await (await resolveSecretStore(project)).get({ key: "SECRET" })
+    ).toBe(sentinel);
+    expect(await readFile(join(project.projectDir, ".env"), "utf8")).toContain(
+      sentinel
+    );
+  }, 45_000);
 }
 
 test("production CLI explicitly repairs Compose after implicit env exec, then rolls the whole migration back", async () => {

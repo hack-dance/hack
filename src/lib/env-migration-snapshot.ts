@@ -9,10 +9,11 @@ import {
   readMigrationFile,
   sameMigrationFile,
 } from "./env-migration-files.ts";
+import { resolveEnvMigrationDataHome } from "./env-migration-home.ts";
 import { isRecord } from "./guards.ts";
 import {
   createUpgradeSnapshot,
-  defaultUpgradeSnapshotRoot,
+  type defaultUpgradeSnapshotRoot,
   readUpgradeSnapshot,
   recordUpgradeSnapshotAfter,
   restoreUpgradeSnapshot,
@@ -69,7 +70,8 @@ type SnapshotLibrary = {
 export function envMigrationSnapshots(): EnvMigrationSnapshots {
   return bindEnvMigrationSnapshots({
     createUpgradeSnapshot,
-    defaultUpgradeSnapshotRoot,
+    defaultUpgradeSnapshotRoot: () =>
+      join(resolveEnvMigrationDataHome(), "upgrade", "snapshots"),
     readUpgradeSnapshot,
     recordUpgradeSnapshotAfter,
     restoreUpgradeSnapshot,
@@ -256,6 +258,9 @@ export function bindEnvMigrationSnapshots(
         await realpath(existing),
         relative(existing, root)
       );
+      if (canonical !== root) {
+        throw migrationRefusal();
+      }
       await assertMigrationStorageOutsideWorkingTrees(
         join(canonical, "manifest.json"),
         { projectRoot }

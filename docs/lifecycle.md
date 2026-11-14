@@ -33,7 +33,11 @@ exit, escalates surviving groups once with SIGKILL, then gives confirmation a
 a final call begun at the polling deadline: these budgets are not hard wall-clock
 limits. A failed census is retried within the current observation budget. If no
 read succeeds, cleanup stays unconfirmed; a successful live observation still
-requires retirement or escalation. Kernel probe errors such as EPERM fail directly.
+requires retirement or escalation. Probe EPERM means the group may still exist: on
+macOS, even a zombie-only group can return it. Hack uses the process census to
+distinguish live members from zombies. TERM or KILL denied with EPERM is benign
+only when the following observation proves retirement; live members still cause
+a refusal. Failed reads retry within the existing phase budget.
 Explicit `hack down` uses the same command-before-wrapper order
 after interrupting its owned lifecycle panes.
 Commands that finish their TERM handler sooner do not wait out the grace period.

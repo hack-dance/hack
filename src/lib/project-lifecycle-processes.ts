@@ -203,8 +203,12 @@ export async function readProcessSnapshot(
 /** Terminate ownership-proven lifecycle groups with a bounded TERM/KILL sequence. */
 export const LIFECYCLE_TERM_GRACE_MS = 5000;
 
-/** A failed census is unknown, unlike a kernel probe error such as EPERM. */
+/** A failed census is unknown and may be retried within the observation budget. */
 class LifecycleCensusUnavailable extends Error {}
+
+function hasProcessErrorCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
 
 /** A zombie holds a PID but runs no code; only live members keep a group active. */
 export function selectLiveLifecycleGroups(opts: {
@@ -232,10 +236,14 @@ export async function assertLifecycleProcessGroupRetired(opts: {
   try {
     process.kill(-opts.processGroupId, 0);
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+    if (hasProcessErrorCode(error, "ESRCH")) {
       return;
     }
-    throw error;
+    // macOS can report EPERM for an unreaped zombie-only group. Only the
+    // following census can distinguish that benign state from live members.
+    if (!hasProcessErrorCode(error, "EPERM")) {
+      throw error;
+    }
   }
   if (
     selectLiveLifecycleGroups({
@@ -291,18 +299,28 @@ export async function terminateLifecycleProcessGroups(opts: {
         identities: await (opts.readIdentities ?? readProcessIdentities)(),
       }),
   };
+  const deniedDeliveries = new Map<number, Error>();
   const signal = (group: number, name: NodeJS.Signals | 0): boolean => {
     try {
       runtime.signal(group, name);
       return true;
     } catch (error: unknown) {
-      if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+      if (hasProcessErrorCode(error, "ESRCH")) {
         return false;
       }
-      throw new Error(
+      const failure = new Error(
         `Could not confirm lifecycle process group ${group} stopped`,
         { cause: error }
       );
+      if (hasProcessErrorCode(error, "EPERM")) {
+        // A probe proves neither liveness nor absence. A denied delivery is
+        // benign only if the next successful observation proves retirement.
+        if (name !== 0) {
+          deniedDeliveries.set(group, failure);
+        }
+        return true;
+      }
+      throw failure;
     }
   };
   const living = async (pending: readonly number[]): Promise<number[]> => {
@@ -310,15 +328,23 @@ export async function terminateLifecycleProcessGroups(opts: {
     if (existing.length === 0) {
       return [];
     }
+    let live: Set<number>;
     try {
-      const live = new Set(await runtime.liveGroups(existing));
-      return existing.filter((group) => live.has(group));
+      live = new Set(await runtime.liveGroups(existing));
     } catch (cause) {
       throw new LifecycleCensusUnavailable(
         "Could not inspect live lifecycle process-group members",
         { cause }
       );
     }
+    const remaining = existing.filter((group) => live.has(group));
+    for (const group of remaining) {
+      const denied = deniedDeliveries.get(group);
+      if (denied) {
+        throw denied;
+      }
+    }
+    return remaining;
   };
   const observe = async (pending: readonly number[]) => {
     try {

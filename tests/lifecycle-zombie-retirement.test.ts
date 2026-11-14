@@ -5,19 +5,24 @@ import {
   terminateLifecycleProcessGroups,
 } from "../src/lib/project-lifecycle-processes.ts";
 
-const python = process.platform === "linux" ? Bun.which("python3") : null;
+const supported = process.platform === "linux" || process.platform === "darwin";
+const python = supported ? Bun.which("python3") : null;
 
-test.skipIf(process.platform !== "linux" || python === null)(
+test.skipIf(!supported || python === null)(
   "a real zombie-only process group retires before its parent reaps it",
   async () => {
-    // WNOWAIT deliberately keeps the exited child observable to kill(0). The
-    // parent stays alive to reap it in finally, without relying on PID 1.
+    // The pipe closes on child exit, without waitid/WNOWAIT (not portable to
+    // macOS). The parent holds the zombie until finally, then reaps it itself.
     const source = `import json, os, sys
+read_end, write_end = os.pipe()
 pid = os.fork()
 if pid == 0:
+    os.close(read_end)
     os.setpgid(0, 0)
     os._exit(0)
-os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+os.close(write_end)
+os.read(read_end, 1)
+os.close(read_end)
 print(json.dumps({"pid": pid}), flush=True)
 sys.stdin.readline()
 os.waitpid(pid, 0)
@@ -49,10 +54,22 @@ os.waitpid(pid, 0)
         throw new Error("Zombie fixture returned an invalid child identity");
       }
       const group = record.pid;
-      expect(process.kill(-group, 0)).toBe(true);
-      const row = (await readProcessIdentities()).find(
+      // macOS may report EPERM for this zombie-only group; Linux succeeds.
+      try {
+        expect(process.kill(-group, 0)).toBe(true);
+      } catch (error) {
+        expect(error).toHaveProperty("code", "EPERM");
+      }
+      let row = (await readProcessIdentities()).find(
         (item) => item.pid === group
       );
+      const deadline = performance.now() + 3000;
+      while (!row?.zombie && performance.now() < deadline) {
+        await Bun.sleep(25);
+        row = (await readProcessIdentities()).find(
+          (item) => item.pid === group
+        );
+      }
       expect(row?.zombie).toBe(true);
       expect(row?.processGroupId).toBe(group);
       const started = performance.now();
@@ -68,6 +85,14 @@ os.waitpid(pid, 0)
         (await readProcessIdentities()).find((item) => item.pid === group)
           ?.zombie
       ).toBe(true);
+      parent.stdin.end();
+      expect(await parent.exited).toBe(0);
+      expect(() => process.kill(-group, 0)).toThrow();
+      try {
+        process.kill(-group, 0);
+      } catch (error) {
+        expect(error).toHaveProperty("code", "ESRCH");
+      }
     } finally {
       clearTimeout(watchdog);
       parent.stdin.end();

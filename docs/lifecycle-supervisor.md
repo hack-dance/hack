@@ -42,7 +42,8 @@ spaces or separators cannot change the native directory layout. Optional
 pass the same owner, mode and no-alias checks as the native root.
 
 `stop` and `status` accept `{version: 1, root, ownerToken}`. Read-only `status`
-returns persisted receipts; a receipt is not a health check. It creates no files,
+returns saved phases plus kernel-verified `liveProcessNames` and
+`unknownProcessNames`; a saved phase alone is not a health check. It creates no files,
 processes or ownership. Stop
 requires matching ownership and a live identity before sending a signal. Unknown
 identity is a refusal, never proof that a process is absent. A different boot or a
@@ -105,7 +106,7 @@ not claims that a dead or paused guard rewrote its receipt.
 | Stopping/KillPending | Confirmation deadline expires with live members | Retain identity and command lock; report uncertainty | StopUnknown | `unresponsive_guard_stop_remains_unknown` |
 | Running | Project supervisor dies | Guard and durable identity remain | Running/recoverable | `supervisor_kill_then_recover_stop` |
 | Recoverable | Another start sees held command lock or live old identity | Refuse duplicate; preserve original | Recoverable | `supervisor_kill_then_recover_stop` |
-| Running/recoverable | Guard itself is separately killed with live session members | Retain recorded session, refuse duplicate and unsafe stop | Orphaned | `dead_guard_with_live_session_refuses_duplicate_and_stop` |
+| Running/recoverable | Guard itself is separately killed with live session members | Health unknown; refuse duplicate, permit verified session recovery stop | Orphaned | `dead_guard_with_live_session_recovers_term_then_kill` |
 | Any live recorded | Owner differs or identity is unknown | Refuse; signal nothing | Unchanged | `foreign_owner_cannot_stop` |
 | Any recorded | Boot differs or leader PID is reused | Treat old session as absent; signal no replacement | Unchanged | `stale_reused_session_leader_does_not_block_fresh_launch` |
 | Running | Command exits; only zombies remain | Reap direct child; zombies do not hold liveness | Exited | `zombies_do_not_hold_liveness` |
@@ -116,11 +117,13 @@ A resident guard closes the publication gap: command ownership is durable before
 spawn, and the group leader survives the project supervisor's death. The guard
 keeps the command lock until its session has no live members, so a restarted project
 supervisor cannot launch a second copy. If a guard itself is separately killed
-while its command survives, identity becomes unknown; recovery refuses unsafe
-signals and duplicate launch. This is a distinct failure from killing the project
-supervisor and remains visible to callers rather than being reported as a
-successful stop. Launch and stop share a bounded lock so stop cannot race past a
-partially launched plan.
+while its command survives, health becomes unknown and duplicate launch is
+refused. Stop can recover the recorded session after verifying the boot,
+leader identity and each remaining member's UID, birth and session. Recovery
+delivers TERM individually, grants a fresh five-second grace, then KILL and
+confirms absence. Unverified identity never authorizes signals or a successful
+stop. Launch and stop share a bounded lock; a startup descriptor lease keeps
+admission locked through guard publication even if the project owner dies.
 
 The table models process death and retry, not filesystem hardware failure, hostile
 same-user mutation, commands that deliberately create new sessions, or power-loss
@@ -239,3 +242,53 @@ leftover native roots are never treated as proof of absence.
 Doctor holds the same instance controller lock as `up` throughout final
 inspection, generation validation, native stop and conditional state removal.
 Adoption cannot interleave between validation and the stop effect.
+
+Before creating ownership or running hooks, Hack checks the sibling executable's
+permissions and exact version/capability handshake. Compiled installations ignore
+`HACK_LIFECYCLE_SUPERVISOR_BINARY`; that override is for source development and
+tests only. `hack doctor` reports the resolved executable and its version.
+A missing or incompatible executable fails before publication. An entry durably
+marked as never having attempted launch, with no recorded PID or process, can be
+retired by `down` or doctor without that executable. An interrupted launch with
+an uncertain result retains ownership.
+
+The native root is keyed on the checkout's real path and its absolute location
+is recorded with ownership. Changing HOME or HACK_HOME does not relocate a
+running instance. Losing that recorded directory after a launch attempt is an
+unconfirmed outcome, never proof of stopped processes; down and doctor retain
+ownership. Restore access to the recorded host state before retrying retirement.
+
+Run `hack down` before downgrading or switching CLI builds. Older CLIs cannot
+preserve supervisor entries when rewriting shared project state and may start
+mux duplicates. After the project owner is killed, existing guards keep working
+and `down` can recover them; adding a new persistent hook may refuse until `down`
+retires the old owner. Stop and retry rather than removing its socket or state.
+
+Adoption requires a verified live command in the `running` phase. Commands in
+`stopping` or `kill-pending` finish retirement before replacement; they are never
+adopted as healthy. Native status waits for an existing launch/stop admission
+lock before reading receipts, so an in-flight stop cannot expose a pre-TERM
+snapshot as adoptable work. This observation creates no lock file in an unused
+root and times out conservatively if admission cannot settle.
+## Resource and qualification boundaries
+
+A live direct child proves its guard is needed without a full-system census.
+Guards wait for output or SIGCHLD; once only descendants remain, a 500 ms
+fallback checks the session. Stop uses the short retirement tick. Startup closes
+actual open descriptors rather than iterating the open-file limit. A known
+restricted process view is refused before authored code; silently hidden
+same-user processes remain unsupported.
+
+Linux debug-build measurements with one quiet guard and owner recorded less than
+10 ms CPU accounting resolution per five-second sample and two voluntary context
+switches per second, across three samples. These are neither hardware wakeup
+counts nor macOS measurements. The host's hard descriptor limit was 524,288;
+the exact 1,048,576 test requires a host that permits that limit.
+Darwin compilation does not qualify execution, group-signal EPERM recovery or
+idle cost on a real Mac.
+
+The 129-state TLA+ artifact is an abstract phase/ownership exploration. It does
+not model kernel census observations, real flock behavior, orphan recovery,
+startup descriptor leases or signal errors. Some safety predicates hold by
+construction. Native regressions, rather than that model, are the evidence for
+those boundaries; see the model coverage document for the reduced claims.

@@ -159,8 +159,6 @@ test("atomic readers observe a complete old or new snapshot", async () => {
 });
 
 test.each([
-  "",
-  "{",
   "null",
   '{"entries":{}}',
   '{"entries":[{}]}',
@@ -251,5 +249,39 @@ test("oversized existing and proposed state are refused without replacement", as
       })
     ).rejects.toThrow();
     expect(await readFile(path, "utf8")).toBe(text);
+  });
+});
+
+test.each([
+  "",
+  "{",
+])("legacy non-atomic mux JSON is preserved and recovered (%p)", async (text) => {
+  await fixture(async ({ projectDir, path, root }) => {
+    const { readdir } = await import("node:fs/promises");
+    await writeFile(path, text, { mode: 0o600 });
+    expect(await readLifecycleState({ projectDir })).toEqual([]);
+    const archived = (await readdir(root)).find((name) =>
+      name.startsWith("state.json.legacy-")
+    );
+    expect(archived).toBeDefined();
+    expect(await readFile(join(root, archived ?? "missing"), "utf8")).toBe(
+      text
+    );
+    await upsertLifecycleStateEntry({
+      projectDir,
+      entry: { ...entry("mux"), backend: "tmux" },
+    });
+    expect((await readLifecycleState({ projectDir }))[0]?.backend).toBe("tmux");
+  });
+});
+
+test("supervisor ownership disables legacy JSON recovery", async () => {
+  await fixture(async ({ projectDir, path }) => {
+    await upsertLifecycleStateEntry({ projectDir, entry: entry("native") });
+    await writeFile(path, "{", { mode: 0o600 });
+    await expect(readLifecycleState({ projectDir })).rejects.toThrow(
+      "Lifecycle ownership state"
+    );
+    expect(await readFile(path, "utf8")).toBe("{");
   });
 });

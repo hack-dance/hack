@@ -14,6 +14,7 @@ import {
   inspectLifecycleSupervisor,
   type LifecycleSupervisorReceipt,
   launchLifecycleSupervisorProcess,
+  preflightLifecycleSupervisor,
   resolveLifecycleSupervisorRoot,
   stopLifecycleSupervisor,
   withLifecycleSupervisorControllerLock,
@@ -34,6 +35,18 @@ import { createLifecycleOwnershipToken } from "./project-lifecycle-sessions.ts";
 type Options = Parameters<typeof createLifecycleProcessController>[0];
 type Controller = ReturnType<typeof createLifecycleProcessController>;
 
+function hasRunningCommand(
+  receipt: LifecycleSupervisorReceipt,
+  name: string
+): boolean {
+  return (
+    receipt.liveProcessNames.includes(name) &&
+    receipt.processes.some(
+      (state) => state.name === name && state.phase === "running"
+    )
+  );
+}
+
 /** The native owner preserves the mux controller's adoption and rollback fences. */
 export function createSupervisorLifecycleController(
   opts: Options & { readonly stopExisting: () => Promise<void> }
@@ -51,6 +64,8 @@ export function createSupervisorLifecycleController(
   let created = false;
   let decided = false;
   let ownerPid: number | undefined;
+  let launchAttempted = false;
+  let nativeRoot: string | undefined;
   let cleanupEpoch: string | undefined;
   let processes: readonly LifecycleStateProcess[] = [];
   let signals: ReturnType<typeof installLifecycleSignalCleanup> | null = null;
@@ -104,6 +119,8 @@ export function createSupervisorLifecycleController(
       processes,
       updatedAt: new Date().toISOString(),
       ...(ownerPid ? { supervisorPid: ownerPid } : {}),
+      ...(nativeRoot ? { supervisorRoot: nativeRoot } : {}),
+      supervisorLaunchAttempted: launchAttempted,
       ...(cleanupEpoch ? { cleanupEpoch } : {}),
     };
   }
@@ -143,6 +160,9 @@ export function createSupervisorLifecycleController(
       token = existing.ownershipToken;
       processes = existing.processes;
       ownerPid = existing.supervisorPid;
+      nativeRoot =
+        existing.supervisorRoot ?? resolveLifecycleSupervisorRoot(instance);
+      launchAttempted = true;
       cleanupEpoch = createLifecycleOwnershipToken();
       await upsertLifecycleStateEntry({
         projectDir: instance.projectDir,
@@ -161,7 +181,7 @@ export function createSupervisorLifecycleController(
       existing.definitionHash === opts.definitionHash &&
       existing.processes.length > 0 &&
       existing.processes.every((process) =>
-        status.liveProcessNames.includes(process.name)
+        hasRunningCommand(status, process.name)
       )
     );
   }
@@ -175,7 +195,9 @@ export function createSupervisorLifecycleController(
       throw new LifecycleSessionDisplacedError(sessionName);
     }
     await ensurePrivateLifecycleLog({ root: dirname(logPath), logPath });
-    await ensurePrivateDirectory(resolveLifecycleSupervisorRoot(instance));
+    await preflightLifecycleSupervisor();
+    nativeRoot = resolveLifecycleSupervisorRoot(instance);
+    await ensurePrivateDirectory(nativeRoot);
     token = createLifecycleOwnershipToken();
     cleanupEpoch = createLifecycleOwnershipToken();
     created = true;
@@ -206,6 +228,7 @@ export function createSupervisorLifecycleController(
     }));
   }
   async function start(process: ProjectLifecycleProcess): Promise<void> {
+    await preflightLifecycleSupervisor();
     await decide();
     if (processes.some((started) => started.name === process.name)) {
       await underLock(assertOwned);
@@ -239,6 +262,11 @@ export function createSupervisorLifecycleController(
         ownershipToken: token,
       });
       if (observed.liveProcessNames.includes(process.name)) {
+        if (!hasRunningCommand(observed, process.name)) {
+          throw new Error(
+            "Lifecycle command is retiring; retry after shutdown completes."
+          );
+        }
         accept(observed);
         await publish();
         return;
@@ -261,14 +289,13 @@ export function createSupervisorLifecycleController(
           env: childEnvironment(undefined, opts.env),
         },
       };
+      launchAttempted = true;
+      await publish();
       // An owner can naturally retire between hooks. Retry serve only after
       // inspecting native receipts; never infer absence from a socket error.
       let receipt: LifecycleSupervisorReceipt;
       if (processes.length === 0) {
-        receipt = await launchLifecycleSupervisorProcess({
-          ...launch,
-          action: "serve",
-        });
+        receipt = await serveAfterAbsence(launch);
       } else {
         try {
           receipt = await launchLifecycleSupervisorProcess({

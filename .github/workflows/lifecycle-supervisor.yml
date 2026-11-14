@@ -9,6 +9,19 @@ on:
       - src/lib/project-lifecycle-controller.ts
       - src/lib/lifecycle-runtime.ts
       - tests/lifecycle-supervisor-controller.test.ts
+      - tests/lifecycle-supervisor-observers.test.ts
+      - tests/lifecycle-state-publication.test.ts
+      - tests/lifecycle-runner-config.test.ts
+      - tests/e2e/scenarios/lifecycle-*.ts
+      - src/lib/project-lifecycle-hygiene.ts
+      - src/lib/lifecycle-runner.ts
+      - src/lib/runtime-projects.ts
+      - src/lib/private-file.ts
+      - src/lib/projects-registry-lock.ts
+      - src/lib/child-environment.ts
+      - src/commands/host-ps.ts
+      - src/commands/project.ts
+      - src/commands/doctor.ts
       - .github/workflows/lifecycle-supervisor.yml
   push:
     branches: [next, main]
@@ -19,6 +32,19 @@ on:
       - src/lib/project-lifecycle-controller.ts
       - src/lib/lifecycle-runtime.ts
       - tests/lifecycle-supervisor-controller.test.ts
+      - tests/lifecycle-supervisor-observers.test.ts
+      - tests/lifecycle-state-publication.test.ts
+      - tests/lifecycle-runner-config.test.ts
+      - tests/e2e/scenarios/lifecycle-*.ts
+      - src/lib/project-lifecycle-hygiene.ts
+      - src/lib/lifecycle-runner.ts
+      - src/lib/runtime-projects.ts
+      - src/lib/private-file.ts
+      - src/lib/projects-registry-lock.ts
+      - src/lib/child-environment.ts
+      - src/commands/host-ps.ts
+      - src/commands/project.ts
+      - src/commands/doctor.ts
       - .github/workflows/lifecycle-supervisor.yml
   workflow_dispatch:
 
@@ -62,5 +88,5 @@ jobs:
       - name: Test current-source CLI controller against native supervisor
         env:
           HACK_TEST_REQUIRE_SUPERVISOR: '1'
-          HACK_TEST_SUPERVISOR_BINARY: ${{ env.CARGO_TARGET_DIR }}/debug/hack-lifecycle-supervisor
+          HACK_TEST_SUPERVISOR_BINARY: ${{ env.CARGO_TARGET_DIR }}/release/hack-lifecycle-supervisor
         run: bun test tests/lifecycle-supervisor-controller.test.ts tests/lifecycle-runner-config.test.ts tests/lifecycle-state-publication.test.ts tests/lifecycle-supervisor-observers.test.ts

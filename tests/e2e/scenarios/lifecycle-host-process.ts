@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
+import { resolveLifecycleSupervisorRoot } from "../../../src/lib/lifecycle-supervisor.ts";
 import { restoreEnv } from "../../helpers/env.ts";
 
 import { createMonorepoFixture } from "../fixture.ts";
@@ -483,11 +484,17 @@ async function runSupervisorHostProcess(opts: {
         message: "real Compose failure left native lifecycle ownership",
         result: failedUp,
       });
-      const nativeRoot = join(
-        failing.hackDir,
-        ".internal/lifecycle",
-        `${failing.name}.log.supervisor`
-      );
+      const priorHome = process.env.HACK_HOME;
+      let nativeRoot: string;
+      try {
+        process.env.HACK_HOME = opts.ctx.hackHome;
+        nativeRoot = resolveLifecycleSupervisorRoot({
+          projectDir: failing.hackDir,
+          composeProject: failing.name,
+        });
+      } finally {
+        restoreEnv("HACK_HOME", priorHome);
+      }
       const receipts = (await readdir(nativeRoot)).filter((name) =>
         name.endsWith(".json")
       );

@@ -352,7 +352,7 @@ test("one malformed project stays unknown without aborting global observers", as
     await mkdir(good, { recursive: true });
     await writeFile(
       join(bad, ".internal", "lifecycle", "state.json"),
-      "{truncated"
+      '{"entries":[{}]}'
     );
     const common = {
       projectDirName: ".hack" as const,
@@ -454,13 +454,18 @@ test("one malformed project stays unknown without aborting global observers", as
   }
 });
 
-test("supervisor control state is outside the checkout", () => {
-  const root = resolveLifecycleSupervisorRoot({
-    projectDir: "/synthetic-checkout/.hack",
-    composeProject: "sample",
-  });
-  expect(root.startsWith("/synthetic-checkout/")).toBe(false);
-  expect(root).toContain("/lifecycle-supervisors/");
+test("supervisor control state is outside the checkout", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "supervisor-root-"));
+  try {
+    const root = resolveLifecycleSupervisorRoot({
+      projectDir: directory,
+      composeProject: "sample",
+    });
+    expect(root.startsWith("/synthetic-checkout/")).toBe(false);
+    expect(root).toContain("/lifecycle-supervisors/");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("doctor holds the controller lock through native stop and state removal", async () => {

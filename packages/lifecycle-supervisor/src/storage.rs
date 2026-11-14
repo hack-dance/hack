@@ -107,6 +107,19 @@ impl Root {
 
     pub fn lock_wait(&self, name: &str) -> Result<File> {
         let file = self.file(name, libc::O_RDWR | libc::O_CREAT)?;
+        Self::wait_for_lock(file)
+    }
+
+    pub fn existing_lock_wait(&self, name: &str) -> Result<Option<File>> {
+        let file = match self.file(name, libc::O_RDWR) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Self::wait_for_lock(file).map(Some)
+    }
+
+    fn wait_for_lock(file: File) -> Result<File> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             // SAFETY: flock only borrows the live owned descriptor.

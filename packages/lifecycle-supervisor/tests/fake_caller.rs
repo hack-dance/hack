@@ -461,6 +461,7 @@ fn zombies_do_not_hold_liveness() {
         wait(&mut caller, TIMEOUT).success(),
         "zombie-only session remained alive"
     );
+    assert!(f.log().contains("unreaped-zombie-confirmed"));
 }
 
 #[test]
@@ -557,6 +558,161 @@ fn child_descriptor_allowlist() {
 }
 
 #[test]
+fn repeated_immediate_restart_waits_for_instance_lock_release() {
+    let f = Fixture::new();
+    let mut previous = None;
+    for _ in 0..8 {
+        let (caller, _) = f.start(vec![f.process("worker", "hold")]);
+        if let Some(mut old) = previous.take() {
+            assert!(wait(&mut old, TIMEOUT).success());
+        }
+        f.stop();
+        previous = Some(caller);
+    }
+    assert!(wait(previous.as_mut().unwrap(), TIMEOUT).success());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn raised_descriptor_limit_does_not_delay_startup() {
+    // Exercise the largest supported soft limit without changing this host's
+    // hard limit. The exact million-fd qualification remains separate below.
+    let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+        0
+    );
+    descriptor_limit_startup(limit.rlim_max.min(1_048_576));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "qualification requires a hard RLIMIT_NOFILE of at least 1048576"]
+fn million_descriptor_limit_qualification() {
+    descriptor_limit_startup(1_048_576);
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_limit_startup(descriptors: libc::rlim_t) {
+    use std::os::unix::process::CommandExt;
+    let f = Fixture::new();
+    let mut cmd = command(&f.root, "run");
+    // SAFETY: adjusts only this freshly forked fixture child's descriptor limit.
+    unsafe {
+        cmd.pre_exec(move || {
+            let limit = libc::rlimit {
+                rlim_cur: descriptors,
+                rlim_max: descriptors,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut caller = cmd.spawn().unwrap();
+    let start = Instant::now();
+    send(
+        caller.stdin.as_mut().unwrap(),
+        &f.launch(vec![f.process("worker", "descriptors")]),
+    );
+    let receipt = receive(caller.stdout.as_mut().unwrap());
+    f.remember(&receipt);
+    assert_eq!(receipt["outcome"], "ready");
+    assert!(wait(&mut caller, TIMEOUT).success());
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(f.log().contains("descriptor-allowlist-ok"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "bounded idle CPU/context-switch measurement; run alone with --nocapture"]
+fn idle_guard_cpu_and_wakeup_measurement() {
+    fn sample(pid: i32) -> (u64, u64) {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let fields: Vec<_> = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        let ticks = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let switches = status
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("voluntary_ctxt_switches:")
+                    .map(|v| v.trim().parse::<u64>().unwrap())
+            })
+            .unwrap();
+        (ticks, switches)
+    }
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    f.await_log("fixture-ready");
+    let guard = pid(&f.state("worker"), "guardPid");
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    for trial in 1..=3 {
+        let before = sample(guard);
+        let before_parent = sample(caller.id() as i32);
+        let start = Instant::now();
+        thread::sleep(Duration::from_secs(5));
+        let wall = start.elapsed().as_secs_f64();
+        let after = sample(guard);
+        let after_parent = sample(caller.id() as i32);
+        let cpu = (after.0 - before.0) as f64 / hz;
+        let switches = after.1 - before.1;
+        eprintln!(
+            "trial={trial} wall_seconds={wall:.3} guard_cpu_seconds={cpu:.3} guard_voluntary_switches={switches} supervisor_cpu_seconds={:.3} supervisor_voluntary_switches={}",
+            (after_parent.0 - before_parent.0) as f64 / hz,
+            after_parent.1 - before_parent.1
+        );
+        assert!(cpu / wall < 0.01, "idle guard exceeded 1% of one CPU");
+        assert!(
+            (switches as f64) / wall < 5.0,
+            "idle guard exceeded 5 voluntary switches/s"
+        );
+    }
+    f.stop();
+    assert!(wait(&mut caller, TIMEOUT).success());
+}
+
+#[test]
+fn natural_exit_during_stop_admission_is_successful_absence() {
+    let f = Fixture::new();
+    for _ in 0..8 {
+        let (mut caller, _) = f.start(vec![f.process("worker", "unicode")]);
+        let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+        assert!(wait(&mut stop, TIMEOUT).success());
+        assert_eq!(receipt["outcome"], "stopped");
+        assert!(wait(&mut caller, TIMEOUT).success());
+    }
+}
+
+#[test]
+fn status_reports_kernel_liveness_separately_from_persisted_phase() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    let (mut status, receipt) = f.request("status", &f.control(TOKEN));
+    assert!(wait(&mut status, TIMEOUT).success());
+    assert_eq!(receipt["liveProcessNames"], json!(["worker"]));
+    f.stop();
+    assert!(wait(&mut caller, TIMEOUT).success());
+    let mut state = f.state("worker");
+    state["phase"] = json!("running");
+    fs::write(
+        f.root.join("worker.json"),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    let (mut status, receipt) = f.request("status", &f.control(TOKEN));
+    assert!(wait(&mut status, TIMEOUT).success());
+    assert_eq!(receipt["processes"][0]["phase"], "running");
+    assert_eq!(receipt["liveProcessNames"], json!([]));
+    assert_eq!(receipt["unknownProcessNames"], json!([]));
+}
+
+#[test]
 fn concurrent_stop_requests_settle() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
@@ -612,6 +768,148 @@ fn inherited_ignored_signal_is_reset() {
     assert!(wait(&mut caller, TIMEOUT).success());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn supervisor_and_guard_prepublication_crashes_keep_stop_admission_leased() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(f.root.join("worker.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut caller = command(&f.root, "run").spawn().unwrap();
+    send(
+        caller.stdin.as_mut().unwrap(),
+        &f.launch(vec![
+            f.process("first", "hold"),
+            f.process("worker", "hold"),
+        ]),
+    );
+    f.await_log("fixture-ready");
+    let first = f.state("first");
+    f.remember(&json!({"processes":[first.clone()]}));
+    let guard = eventually(|| {
+        fs::read_to_string(format!(
+            "/proc/{}/task/{}/children",
+            caller.id(),
+            caller.id()
+        ))
+        .ok()
+        .and_then(|s| {
+            s.split_whitespace()
+                .filter_map(|v| v.parse::<i32>().ok())
+                .find(|p| *p != pid(&first, "guardPid"))
+        })
+    });
+    // Wait for the guard to exec and close all inherited descriptors except
+    // stdio; fd 2 must still carry the stop lease while command lock is held.
+    eventually(|| {
+        fs::read_link(format!("/proc/{guard}/exe"))
+            .ok()
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n == "hack-lifecycle-supervisor")
+            })
+    });
+    let lease_inode = fs::metadata(f.root.join(".stop.lock")).unwrap().ino();
+    eventually(|| {
+        fs::metadata(format!("/proc/{guard}/fd/2"))
+            .ok()
+            .filter(|metadata| metadata.ino() == lease_inode)
+    });
+    let guard_identity = identity(guard).unwrap();
+    f.owned.borrow_mut().push(guard_identity.clone());
+    caller.kill().unwrap();
+    caller.wait().unwrap();
+    let mut stop = command(&f.root, "stop").spawn().unwrap();
+    send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        stop.try_wait().unwrap().is_none(),
+        "stop passed an unpublished guard"
+    );
+    assert!(!f.root.join("worker.json").exists());
+    // SAFETY: captured direct guard is still blocked on our fixture lock.
+    assert!(identity(guard).as_ref() == Some(&guard_identity));
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
+    assert!(wait(&mut stop, TIMEOUT).success());
+    drop(lock);
+    let (mut next, _) = f.start(vec![f.process("worker", "hold")]);
+    f.stop();
+    assert!(wait(&mut next, TIMEOUT).success());
+}
+
+#[test]
+fn supervisor_killed_while_ready_receipt_is_blocked_recovers() {
+    use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+    let f = Fixture::new();
+    let (_reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+    writer.set_nonblocking(true).unwrap();
+    // Saturate the very descriptor used for the caller's receipt. Authored
+    // launch can finish, but the supervisor cannot commit a ready frame.
+    let buffer = [0u8; 8192];
+    loop {
+        match writer.write(&buffer) {
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) => panic!("fixture receipt saturation: {e}"),
+        }
+    }
+    // SAFETY: ownership moves from UnixStream into OwnedFd exactly once.
+    let fd = unsafe { OwnedFd::from_raw_fd(writer.into_raw_fd()) };
+    let mut caller = command(&f.root, "run")
+        .stdout(Stdio::from(fd))
+        .spawn()
+        .unwrap();
+    send(
+        caller.stdin.as_mut().unwrap(),
+        &f.launch(vec![f.process("worker", "hold")]),
+    );
+    f.await_log("fixture-ready");
+    let state = f.state("worker");
+    f.remember(&json!({"processes":[state]}));
+    assert!(caller.try_wait().unwrap().is_none());
+    caller.kill().unwrap();
+    caller.wait().unwrap();
+    f.stop();
+}
+
+#[test]
+fn guard_crash_before_complete_launch_frame_starts_nothing() {
+    use std::os::unix::process::CommandExt;
+    let f = Fixture::new();
+    let mut cmd = command(&f.root, "guard");
+    // SAFETY: changes only the fresh child into its own session.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut guard = cmd.spawn().unwrap();
+    // The frame header authorizes no launch; kill at the deterministic input
+    // admission boundary rather than relying on scheduler timing.
+    guard
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&100u32.to_be_bytes())
+        .unwrap();
+    guard.kill().unwrap();
+    guard.wait().unwrap();
+    assert!(!f.root.join("worker.json").exists());
+    assert!(!f.root.join("lifecycle.log").exists());
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    f.stop();
+    assert!(wait(&mut caller, TIMEOUT).success());
+}
+
 #[test]
 fn supervisor_killed_during_output_burst_is_recoverable() {
     let f = Fixture::new();
@@ -623,24 +921,49 @@ fn supervisor_killed_during_output_burst_is_recoverable() {
 }
 
 #[test]
-fn dead_guard_with_live_session_refuses_duplicate_and_stop() {
+fn dead_guard_with_live_session_recovers_term_then_kill() {
     let f = Fixture::new();
-    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    let (mut caller, _) = f.start(vec![f.process("worker", "ignore-term")]);
     f.await_log("fixture-ready");
     let state = f.state("worker");
-    // SAFETY: these PIDs came from this fixture's ready receipt only.
+    // SAFETY: this fixture owns the captured live guard incarnation.
     unsafe {
         libc::kill(pid(&state, "guardPid"), libc::SIGKILL);
     }
     assert!(wait(&mut caller, TIMEOUT).success());
     refused(&f, "run", f.launch(vec![f.process("worker", "hold")]));
-    let (mut stop, _) = f.request("stop", &f.control(TOKEN));
-    assert!(!wait(&mut stop, TIMEOUT).success());
-    // The guard cannot prove ownership after its own death. The test itself
-    // retains direct launch provenance and must clean up its authored child.
-    unsafe {
-        libc::kill(pid(&state, "commandPid"), libc::SIGKILL);
-    }
+    let (mut status, observed) = f.request("status", &f.control(TOKEN));
+    assert!(wait(&mut status, TIMEOUT).success());
+    assert_eq!(observed["liveProcessNames"], json!([]));
+    assert_eq!(observed["unknownProcessNames"], json!(["worker"]));
+    let start = Instant::now();
+    let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    assert!(wait(&mut stop, TIMEOUT).success());
+    assert_eq!(receipt["outcome"], "stopped");
+    assert!(start.elapsed() >= Duration::from_secs(5));
+    assert_eq!(receipt["liveProcessNames"], json!([]));
+}
+
+#[test]
+fn guard_dying_during_stop_gets_a_fresh_authored_term_grace() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "ignore-term")]);
+    f.await_log("fixture-ready");
+    let guard = pid(&f.state("worker"), "guardPid");
+    let birth = identity(guard).unwrap();
+    // Suspend this owned guard so its pending TERM cannot reach the command.
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
+    let mut stop = command(&f.root, "stop").spawn().unwrap();
+    send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    thread::sleep(Duration::from_millis(150));
+    assert!(identity(guard).as_ref() == Some(&birth));
+    let killed_at = Instant::now();
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
+    let receipt = receive(stop.stdout.as_mut().unwrap());
+    assert!(wait(&mut stop, TIMEOUT).success());
+    assert_eq!(receipt["outcome"], "stopped");
+    assert!(killed_at.elapsed() >= Duration::from_secs(5));
+    assert!(wait(&mut caller, TIMEOUT).success());
 }
 
 #[test]
@@ -995,7 +1318,33 @@ fn fixture_process() {
                     libc::_exit(0);
                 }
             }
-            thread::sleep(Duration::from_millis(100));
+            eventually(|| {
+                #[cfg(target_os = "linux")]
+                let zombie = fs::read_to_string(format!("/proc/{child}/stat"))
+                    .ok()
+                    .is_some_and(|s| {
+                        s.rsplit_once(") ")
+                            .is_some_and(|(_, tail)| tail.starts_with("Z "))
+                    });
+                #[cfg(target_os = "macos")]
+                let zombie = {
+                    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+                    let size = unsafe {
+                        libc::proc_pidinfo(
+                            child,
+                            libc::PROC_PIDTBSDINFO,
+                            0,
+                            info.as_mut_ptr().cast(),
+                            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+                        )
+                    };
+                    size as usize == std::mem::size_of::<libc::proc_bsdinfo>()
+                        && unsafe { info.assume_init().pbi_status == libc::SZOMB }
+                };
+                zombie.then_some(())
+            });
+            println!("unreaped-zombie-confirmed {child}");
+            std::io::stdout().flush().unwrap();
             std::process::exit(0);
         }
         #[cfg(target_os = "linux")]
@@ -1097,3 +1446,24 @@ fn fixture_process() {
 }
 
 use std::os::unix::fs::DirBuilderExt;
+
+#[test]
+fn status_waits_for_inflight_stop_before_reporting_adoptable_liveness() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "ignore-term")]);
+    f.await_log("fixture-ready");
+    let mut stopping = command(&f.root, "stop").spawn().unwrap();
+    send(stopping.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    eventually(|| (f.state("worker")["phase"] == "stopping").then_some(()));
+    let (mut observer, receipt) = f.request("status", &f.control(TOKEN));
+    assert!(receipt["liveProcessNames"].as_array().unwrap().is_empty());
+    assert!(
+        receipt["unknownProcessNames"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(wait(&mut observer, TIMEOUT).success());
+    assert!(wait(&mut stopping, TIMEOUT).success());
+    assert!(wait(&mut caller, TIMEOUT).success());
+}

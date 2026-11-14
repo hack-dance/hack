@@ -643,15 +643,22 @@ commands themselves keep their existing ownership contract in this unit.
 
 ### Refused ownership state
 
-Hack refuses malformed or unsafe `.hack/.internal/lifecycle/state.json` rather
-than treating it as an empty owner list. This also applies to the default mux
-runner. Global project listings continue and mark the affected project's
+For projects that have never published supervisor ownership, an empty or
+unparsable legacy `.hack/.internal/lifecycle/state.json` is moved to a private
+`state.json.legacy-<timestamp>-<id>` sibling, with one explanation, and treated as
+empty. This recovers interrupted non-atomic writes from older mux versions.
+After a project has used the supervisor, the durable `supervisor-state` marker
+disables that fallback: losing ownership may hide running native commands.
+Unsafe files (including symlinks, hard links and foreign ownership) and
+semantically invalid records still refuse under both runners. State mutations
+now serialize on `state.lock` and publish atomically with mode 0600.
+Global project listings continue and mark the affected project's
 lifecycle as `state_unreadable`; this is unknown, not stopped.
 
 To recover, inspect that project's state file and the processes or sessions it
 records. Confirm identity before stopping any leftover work; a PID alone may have
 been reused. Preserve the file for diagnosis. Once the recorded work is confirmed
-stopped, move the file aside within the private lifecycle directory and retry
-`hack up`. Do not discard ownership records while commands may still run. A
+stopped, seek an ownership-state repair; do not hand-edit or discard ownership
+records while commands may still run. A
 symlink, foreign owner, or unreadable directory needs its owner to repair the path
 before Hack can safely proceed. `hack doctor --fix` does not bypass these checks.

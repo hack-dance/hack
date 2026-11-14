@@ -86,26 +86,6 @@ impl Process {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn inherited_environment_uses_exec_constraints_not_shell_identifiers() {
-        let mut process: super::Process = serde_json::from_value(serde_json::json!({
-            "name": "worker", "argv": ["/usr/bin/true"], "cwd": "/",
-            "env": {"BASH_FUNC_fixture%%": "() { :; }", "1.name": "synthetic"}
-        }))
-        .unwrap();
-        assert!(process.validate().is_ok());
-        for key in ["", "bad=name", "bad\0name"] {
-            process.env.insert(key.into(), "synthetic".into());
-            assert!(process.validate().is_err());
-            process.env.remove(key);
-        }
-        process.env.insert("VALID".into(), "bad\0value".into());
-        assert!(process.validate().is_err());
-    }
-}
-
 /// Length and deadline, never descriptor closure, delimit a handoff. Polling
 /// handles Darwin's brief inheritable-descriptor window without waiting on EOF.
 pub fn read<T: DeserializeOwned>(input: &mut (impl Read + AsRawFd)) -> Result<T> {
@@ -247,4 +227,24 @@ fn send(fd: i32, bytes: &[u8], deadline: Instant) -> Result<()> {
         offset += count as usize;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn inherited_environment_uses_exec_constraints_not_shell_identifiers() {
+        let mut process: super::Process = serde_json::from_value(serde_json::json!({
+            "name": "worker", "argv": ["/usr/bin/true"], "cwd": "/",
+            "env": {"BASH_FUNC_fixture%%": "() { :; }", "1.name": "synthetic"}
+        }))
+        .unwrap();
+        assert!(process.validate().is_ok());
+        for key in ["", "bad=name", "bad\0name"] {
+            process.env.insert(key.into(), "synthetic".into());
+            assert!(process.validate().is_err());
+            process.env.remove(key);
+        }
+        process.env.insert("VALID".into(), "bad\0value".into());
+        assert!(process.validate().is_err());
+    }
 }

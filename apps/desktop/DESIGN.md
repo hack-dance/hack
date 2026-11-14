@@ -61,7 +61,7 @@ rather than showing "Needs attention". Every command for a native project (`ps`,
 `down`, `restart`, `logs`) runs with `HACK_RUNTIME_BACKEND=native`, which is how the CLI
 selects that backend today. Docker's `runtime_ok` never changes a native row. Native `data.status` maps as:
 `not_started` → Stopped, `pending` → Starting, `observed` → Running or Degraded
-from `items[].state`, `items[].health` and `items[].readiness`, `runtime_degraded` → Degraded, `runtime_not_running` and
+from `items[].state` and `items[].health` (`readiness` is not in ordinary `ps` output; until R2 an exited service with exit 0 is "exited (0), role unknown" and any other exit is down), `runtime_degraded` → Degraded, `runtime_not_running` and
 `runtime_busy` and `owner_unconfirmed` → Unknown (with the status as reason),
 `provider_pin_changed` → Needs attention.
 
@@ -165,7 +165,8 @@ check, in order. Every check is read-only; every card offers **Check again**.
 | Step | Read-only check | Fix | Admin | Skipped / unknown shows |
 |---|---|---|---|---|
 | CLI | `hack --version` (text; R1 for JSON) | `brew install hack-dance/tap/hack` (copy) | no | Cannot skip |
-| Engine | `runtime_ok` from `/v1/projects` or `hack projects --json` | open Docker Desktop / engine docs; native setup command (HACK-2193) | no | "Engine not running" on every project |
+| Docker (Compose projects) | `runtime_ok` from `/v1/projects` or `hack projects --json` (Docker only) | open Docker Desktop / Docker docs | no | "Docker not reachable" on Compose projects only |
+| Native runtime (native projects) | native `ps` `data.status` per native project (`runtime_not_running` etc.) | native setup doc (HACK-2193) | no | that native project shows Unknown; Compose projects unaffected |
 | hackd | `hack daemon status --json` | `hack daemon start` | no | Status bar "hackd off"; slower refresh |
 | Routing and DNS (Compose) | macOS: doctor `resolver:<tld>`, `dnsmasq.conf:<tld>`, `dnsmasq:53` and `coredns forwarding` (all must pass). Linux: doctor `linux dns route`. Never `hack global status` (can start Docker) | `hack global install` | **yes** | URLs greyed "DNS not set up"; "unknown" when a check is missing |
 | Routing and DNS (native) | `hack doctor --browser-url <project URL>` → `native host dns` (absent without `--browser-url`) | none from the app: `hack global install` refuses native; link to the native setup doc (HACK-2193) | — | "unknown" |
@@ -220,7 +221,7 @@ with only Copy and Open doc. No Run button appears without a `fix.kind: safe`.
 | Ready | `ready: true`, `plan[]` (`command` / `args` / `action`, `blocker`) | Ordered plan | Upgrade |
 | Snapshotting | `hack upgrade snapshot --json` | Progress | none |
 | Snapshot incomplete | `complete: false` or `gaps[]` | Gaps listed; Upgrade stays disabled | Re-check |
-| Applying | Homebrew: `brew upgrade hack` **and** `brew upgrade --cask hack-desktop`, in a terminal, then plan steps | Each step ✓ only on fresh evidence: CLI = `hack --version` equals the target; app = the cask's installed version (`brew info --json=v2 --cask hack-desktop`) equals the target; a plan step = `hack upgrade check --json` no longer lists it. No evidence → that step stays Unknown (user confirmation or window focus is not evidence) | Check again |
+| Applying | Homebrew: `brew upgrade hack` **and** `brew upgrade --cask hack-desktop`, in a terminal, then plan steps | Each step ✓ only on fresh evidence: CLI = `hack --version` equals the target; app = the cask's installed version (`brew info --json=v2 --cask hack-desktop`) equals the target; a plan step = the same scope was checked successfully (a `live` project, not `unreadable`, not in `incomplete[]`) and its finding is now `ok`. A step that merely disappears, or whose scope is missing, unreadable or unchecked, stays Unknown. No evidence → that step stays Unknown (user confirmation or window focus is not evidence) | Check again |
 | Restarting daemon | `hack daemon restart` (exists), then `/v1/status.version` == CLI version. Doing this automatically after upgrade is HACK-2216 (proposed) | "Restarting hackd…"; a mismatch after restart → Failed | none |
 | Done | `ready: true` with an empty `plan[]`, CLI and app at the target, hackd version matches | "Hack vX is up to date" | none |
 | Failed | a step exit ≠ 0, or versions still differ | Which step and its error; "Files were saved" only when a complete snapshot exists | Roll back (only with a complete snapshot), Copy error |
@@ -285,9 +286,10 @@ because the unhealthy states live there.
 |---|---|---|
 | `hack doctor --json` | envelope `{ok:true,data}` | exit 1 = some check is `error` (still a report) |
 | `hack env list --json` | bare object | exit 1 = a required key is missing (still a report) |
-| `hack upgrade check --json` (#790) | bare report | exit 1 = not `ready` (still a report) |
+| `hack upgrade check --json` (#790) | envelope `{ok:true,data:report}` | exit 1 = not `ready` (still a report) |
 | `hack up\|down\|restart\|open --json`, native `ps --json` | envelope; `{ok:false,error}` on failure | failure, with `error.code` |
-| `hack projects --json`, `daemon status --json`, `usage --json` | bare object | failure (no report) |
+| `hack daemon status --json`, `hack usage --json` | bare object | exit 1 = unhealthy (daemon not running, usage unavailable): still a report, rendered as that state |
+| `hack projects --json` | bare object | failure (no report) |
 | `hack logs --json` | ndjson events | see Logs |
 
 | Screen | Reads | How often | Timeout |

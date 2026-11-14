@@ -488,7 +488,7 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
         c(
             "daemon",
             "warn",
-            "hackd is not running; status refreshes slowly",
+            "hackd is running but incompatible with this CLI version",
         ),
         c(
             "caddy local ca",

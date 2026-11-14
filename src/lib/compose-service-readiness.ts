@@ -14,8 +14,13 @@ export function composeServiceReadiness(
       continue;
     }
     const health = service.healthcheck;
-    roles[name] =
-      isRecord(health) && health.disable !== true ? "healthy" : "started";
+    const disabled =
+      isRecord(health) &&
+      (health.disable === true ||
+        (Array.isArray(health.test) &&
+          health.test.length === 1 &&
+          health.test[0] === "NONE"));
+    roles[name] = isRecord(health) && !disabled ? "healthy" : "started";
   }
   applyDependencyRoles(document.services, roles);
   return roles;

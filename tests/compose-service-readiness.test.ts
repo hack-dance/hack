@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { composeServiceReadiness } from "../src/lib/compose-service-readiness.ts";
+import { observeService } from "../src/lib/project-state.ts";
 
 test("completion is declared by a dependency, never inferred from a stopped service", () => {
   expect(
@@ -27,4 +28,28 @@ test("completion is declared by a dependency, never inferred from a stopped serv
     disabled: "started",
   });
   expect(composeServiceReadiness(null)).toEqual({});
+});
+
+test("NONE disables the health requirement while explicit dependency roles still apply", () => {
+  const roles = composeServiceReadiness({
+    services: {
+      plain: { healthcheck: { test: ["NONE"] } },
+      dependency: { healthcheck: { test: ["NONE"] } },
+      consumer: {
+        depends_on: { dependency: { condition: "service_healthy" } },
+      },
+    },
+  });
+  expect(roles.plain).toBe("started");
+  expect(roles.dependency).toBe("healthy");
+  expect(
+    observeService({
+      name: "plain",
+      available: true,
+      readiness: roles.plain ?? null,
+      members: [
+        { state: "running", health: null, exitCode: null, startedAt: null },
+      ],
+    }).ready
+  ).toBe(true);
 });

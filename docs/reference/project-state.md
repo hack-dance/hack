@@ -29,7 +29,8 @@ claim. Successful declared jobs do not degrade other running services.
 
 `ready` and `completed` are nullable booleans. Unknown is not false:
 
-- Compose roles come from current service configuration: a health check or a
+- Compose roles come from current service configuration: `disable: true` and
+  `test: ["NONE"]` both disable a health check. An enabled health check or a
   `service_healthy` dependency requires health; a
   `service_completed_successfully` dependency declares a completion role;
   otherwise the role is started. A successful exit alone never declares a job.

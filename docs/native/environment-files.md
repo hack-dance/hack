@@ -51,8 +51,12 @@ it leaves earlier file assignments intact. A bare service environment key resolv
 from the interpolation context; when unresolved it removes that key, including an
 image default. Native removes the key from normalized `environment`, then carries its name in
 explicit normalized metadata and public engine unset entries, separate from private
-value delivery. The runtime must echo the exact unset names during review;
-ordinary missing private bindings must continue to refuse.
+value delivery. This changes projects without env files too: earlier native
+starts delivered an empty value for an unresolved bare service key. Write
+`KEY: ""` when that empty value is intentional. The runtime must echo the exact
+unset names during review; older runtimes that cannot do so refuse. Use a
+matching current CLI/runtime bundle. Ordinary missing private bindings must
+continue to refuse. Reserved runtime/adapter-owned names retain their behavior.
 
 Interpolation lookup order is Hack-managed global values, the caller's allowed
 shell variables, then `.env`. Service-scoped managed values win the final service
@@ -94,6 +98,12 @@ names are not read from the shell; explicit literal file entries remain availabl
 unless the selected credential adapter owns that service's name. Compose control
 names (`COMPOSE_*`) and protected `HACK_*` keys
 in `.env` refuse with names only rather than silently change the selected project.
+This deliberately reserves every `COMPOSE_*` key, broader than Compose's known
+control-variable set, so future controls cannot silently become ordinary
+interpolation inputs. Native keeps project, file and profile selection explicit.
+Rename application-specific variables without that prefix. This prefix-wide
+rule is for the adjacent interpolation `.env`; literal service `env_file` entries
+are not all subject to it.
 
 The approved first unit resolves file values only in service `environment` and
 env-file values. In a project that declares `env_file` or has an adjacent `.env`,
@@ -139,6 +149,10 @@ stay on the existing public path and retain their restart behavior and identity.
 Fresh `hack exec` resolves the selected service's file values again using the
 same allowed caller context and delivers them privately to that exec process.
 These fresh values may differ from the running container's startup values.
+Fresh exec now also delivers allowed caller-shell values rather than managed
+values alone, including in projects without env files. Run it from the intended
+shell and environment selection. Use restart when changed inputs should replace
+the running service's startup environment; exec alone does not update it.
 
 Native builds read raw host contexts. Start and preflight therefore refuse a
 native build whose context, Dockerfile or Dockerfile-specific ignore input
@@ -190,6 +204,12 @@ Actual guest delivery is qualified separately on a Mac.
 - Service defaults take allowed shell values as described above. Public-field
   interpolation gains the strict boundary only for file-enabled projects; use
   literal public fields or remove the ambient source.
+- Unresolved bare service keys now remove the key instead of delivering empty,
+  including without env files. Use `KEY: ""` for explicit empty and a matching
+  runtime that can confirm unset names; an older runtime refuses that review.
+- Fresh `hack exec` now delivers current allowed shell and selected-service file
+  values privately. Shell delivery also affects projects without env files; run
+  from the intended shell and restart if startup values must change too.
 - The former `dotenv_without_managed_env` refusal is removed. A project-root
   `.env` outside the Compose directory is ignored with one notice. Move needed
   variables beside Compose (normally `.hack/.env`) or into managed env.
@@ -200,6 +220,8 @@ Actual guest delivery is qualified separately on a Mac.
   replacement for existing ciphertext.
 
 Foreground notices go to stderr. Detached owners discard stderr rather than
-write it to a log file; only validated forwarded shell names and the fixed
-root-dotenv notice cross IPC to the caller. Tokens referenced only inside file
-values are excluded from the forwarded-names notice as well.
+write it to a log file, so detached starts do not show per-key "unresolved input"
+notices. Use a foreground start or preflight to inspect them. Only validated
+forwarded shell names and the fixed root-dotenv notice cross IPC to the caller.
+Tokens referenced only inside file values are excluded from the forwarded-names
+notice as well.

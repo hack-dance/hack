@@ -24,6 +24,8 @@ its original behavior.
 | --- | --- |
 | **Native reads `.hack/.env` on every start and preflight, even with managed env.** Symlinks, other-owner or group/other-writable files and project ancestors refuse, as do `COMPOSE_*`/`HACK_*` keys and dotted/dashed identifiers. | Use an owned regular file, deliberately correct permissions, remove control entries and rename unsupported identifiers, or move values into managed env. A sibling `.env.state.json` also refuses possible materialized output; deliberately retire that output after moving to managed env. |
 | **Native service-environment defaults take allowed shell values.** Shell presence can change normalized declarations and plan identity, without storing values in that identity. | Unset the exported name to retain the authored fallback. In projects with `env_file` or adjacent `.env`, public-field references to ambient values now refuse even with a default: unset the source or write a public literal. Without those file sources, public defaults keep their previous behavior. |
+| **An unresolved bare service-environment key is now unset instead of empty, including in projects without env files.** It removes an image default; an older runtime that cannot confirm the unset names refuses the review. Reserved runtime/adapter-owned names keep their existing behavior. | Use a matching current CLI/runtime bundle. Write `KEY: ""` when you intend an explicitly empty value instead of removing the key. |
+| **Fresh native `hack exec` now delivers allowed caller-shell and selected-service file values privately.** Shell delivery also changes projects without env files; exec values may differ from those used at service startup. | Run exec from the intended shell and environment selection. Restart the service when changed inputs should also replace its startup environment; exec alone does not do that. |
 | **Native removes `dotenv_without_managed_env`.** A project-root `.env` outside the Compose directory is now ignored with one names-only notice. | Move required inputs beside Compose (normally `.hack/.env`) or into managed env. Dotenv alone does not inject service variables. |
 | **Native preflight reads the caller's allowed environment and decrypts managed env.** A missing key becomes a structured blocker; the report remains usable. | Run from the intended shell and recover the existing project key when asked. Do not generate a replacement key for existing ciphertext. |
 | **Native env-file paths must stay separate from build inputs.** Contexts, Dockerfiles and Dockerfile-specific ignore inputs may not overlap declared env files, adjacent `.env` or a present project-root `.env`, including optional and inactive paths. A root `.env` triggers this refusal even when there is no `env_file` or adjacent `.env`; ignored for interpolation does not exclude it from `COPY .`. | Use disjoint build inputs or prebuilt images. The build-argument value guard stays limited to nonempty managed `secret: true` values, with no minimum length; plain file and shell values do not widen it. See [the full rules](../native/environment-files.md). |
@@ -36,6 +38,18 @@ its original behavior.
 | **Doctor checks the Compose proxy's loopback ports.** A reachable container address no longer hides a broken published loopback path. | Read the `proxy ports` warning, check competing listeners and DNS/bind settings, then retry. HTTP success on port 80 is not HTTPS success on 443; the check applies no automatic repair. |
 | **Native route readiness can be inferred.** A complete standard Caddy route with no authored healthcheck gets a reviewed HTTP probe and 240 seconds of initial grace. A complete HTTP 200–499 response establishes endpoint readiness, not application correctness. | Review the route port and startup logs. Explicit healthchecks are not replaced, and inferred readiness does not satisfy `depends_on: condition: service_healthy`. The grace does not extend the whole graph's deadline. |
 | **Native start waits for bridge sockets after a stopped pool resumes.** An immediate start no longer fails merely because provider readiness preceded the bridge listener. | Use normal native `up`; startup still requires a successful bridge connection within its deadline. Do not replace readiness checks with a fixed sleep. |
+
+Detached native starts do not show per-key "unresolved input" notices because
+the owner's stdio is ignored. Use a foreground start or native preflight to
+inspect those notices; only forwarded shell names and the fixed ignored-root
+dotenv notice reach the detached caller.
+
+Native `.env` admission refuses **every** `COMPOSE_*` key, broader than Compose's
+recognized control-variable set. Native reserves the whole prefix so new Compose
+controls cannot silently become ordinary interpolation inputs: project, file and
+profile selection stay explicit. Rename application-specific variables without
+that prefix. This rule applies to the adjacent interpolation `.env`, not every
+literal service `env_file` entry.
 
 ### Env scripts and migrated plaintext
 

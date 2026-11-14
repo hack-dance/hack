@@ -23,6 +23,8 @@ decrypts managed env and reads `.env` beside Compose (normally `.hack/.env`),
 using the same file checks as native start. A missing decryption key is a
 structured blocker with recovery guidance; the command still produces a report.
 A project-root `.env` outside the Compose directory is ignored with one notice.
+Detached starts omit per-key "unresolved input" notices because owner stdio is
+ignored; use this preflight or a foreground start to inspect missing inputs.
 See the [environment-file rules](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/native/environment-files.md) and
 [migration notes](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/guides/v5-release-notes.md#next17-what-changed-and-what-to-do)
 before upgrading an earlier prerelease.

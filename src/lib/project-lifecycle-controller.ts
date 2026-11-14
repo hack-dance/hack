@@ -24,14 +24,16 @@ import {
   resolveLifecycleLogPath,
   upsertLifecycleStateEntry,
 } from "./lifecycle-runtime.ts";
+import { readProcessIdentities } from "./process-tree.ts";
 import {
   type ProjectLifecycleCommand,
   type ProjectLifecycleProcess,
   sanitizeBranchSlug,
 } from "./project.ts";
 import {
+  collectDescendantProcessGroupIds,
+  createLifecycleSessionRetirement,
   readProcessSnapshot,
-  resolveLifecycleProcessGroupIdsForTmuxState,
   resolveLifecycleStopProcessGroupIds,
   terminateLifecycleProcessGroups,
 } from "./project-lifecycle-processes.ts";
@@ -58,7 +60,9 @@ type StartedLifecycleProcess = {
   readonly windowName: string;
   readonly logPath: string;
   readonly panePid?: number;
+  readonly paneBirth?: string;
   readonly processGroupId?: number;
+  readonly processGroupBirth?: string;
 };
 /**
  * Cleanup for what an operation started. Resolves
@@ -256,6 +260,8 @@ export function createLifecycleProcessController(opts: {
    * server may still apply the command later (see runMuxCommand).
    */
   readonly muxCommandTimeoutMs?: number;
+  /** Process retirement boundary; must confirm groups before state removal. */
+  readonly retireSession?: ReturnType<typeof createLifecycleSessionRetirement>;
 }): {
   readonly sessionName: string;
   startFromCommand: (opts: {
@@ -277,6 +283,8 @@ export function createLifecycleProcessController(opts: {
     branch: opts.branch,
   });
   const startedProcesses: StartedLifecycleProcess[] = [];
+  const retireSession =
+    opts.retireSession ?? createLifecycleSessionRetirement();
   let backendName: MuxBackendName | null = null;
   let sessionReady = false;
   let sessionDispositionResolved = false;
@@ -820,19 +828,30 @@ export function createLifecycleProcessController(opts: {
       return undefined;
     }
     const backend = (await opts.mux()).backends.get(backendName);
-    const stopped = backend?.available
-      ? await killLifecycleSessionWithOwnership({
-          backend,
-          sessionName,
-          ownershipToken: createdOwnershipToken,
-        }).catch(() => false)
-      : false;
+    let stopped = false;
+    let failure = "";
+    if (backend?.available) {
+      const ownershipToken = createdOwnershipToken;
+      try {
+        stopped = await retireSession({
+          processes: startedProcesses,
+          stopSession: () =>
+            killLifecycleSessionWithOwnership({
+              backend,
+              sessionName,
+              ownershipToken,
+            }),
+        });
+      } catch {
+        failure = "Lifecycle process-group retirement could not be confirmed.";
+      }
+    }
     if (!stopped) {
       // The session may still run: keep its ownership entry (and this
       // operation's token) so a later abort, up or hack down can still prove
       // ownership and reclaim it. Removing it would orphan the session.
       logger.warn({
-        message: `Could not confirm that lifecycle session ${sessionName} stopped; kept its ownership record. Run hack down to stop it.`,
+        message: `Could not confirm that lifecycle session ${sessionName} stopped; kept its ownership record. Run hack down to stop it.${failure ? ` ${failure}` : ""}`,
       });
       return LIFECYCLE_SESSION_RETAINED;
     }
@@ -936,7 +955,9 @@ async function startLifecycleProcess(opts: {
   readonly windowName: string;
   readonly logPath: string;
   readonly panePid?: number;
+  readonly paneBirth?: string;
   readonly processGroupId?: number;
+  readonly processGroupBirth?: string;
 }> {
   const windowNameRaw = sanitizeBranchSlug(opts.process.name);
   const windowName =
@@ -1001,6 +1022,11 @@ async function startLifecycleProcess(opts: {
     if (!processGroupId && panePid !== undefined) {
       processGroupId = await readProcessGroupIdForPid({ pid: panePid });
     }
+    const identities = await readProcessIdentities();
+    const paneBirth = identities.find((row) => row.pid === panePid)?.birth;
+    const processGroupBirth = identities.find(
+      (row) => row.pid === processGroupId
+    )?.birth;
     await appendLifecycleLogRecord({
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
@@ -1016,7 +1042,9 @@ async function startLifecycleProcess(opts: {
       windowName,
       logPath,
       ...(panePid !== undefined ? { panePid } : {}),
+      ...(paneBirth ? { paneBirth } : {}),
       ...(processGroupId ? { processGroupId } : {}),
+      ...(processGroupBirth ? { processGroupBirth } : {}),
     };
   }
 
@@ -1080,6 +1108,8 @@ export async function stopLifecycleProcessController(opts: {
   readonly assertFresh?: () => Promise<void>;
   /** Mux backends; defaults to the installed tmux/zellij backends. */
   readonly mux?: () => Promise<ResolvedMux>;
+  readonly retireSession?: ReturnType<typeof createLifecycleSessionRetirement>;
+  readonly readIdentities?: typeof readProcessIdentities;
 }): Promise<void> {
   await opts.assertFresh?.();
   const sessionName = resolveLifecycleSessionName({
@@ -1121,9 +1151,17 @@ export async function stopLifecycleProcessController(opts: {
   }
 
   const matchedLiveSession = inspection.classification !== "absent";
+  if (!matchedLiveSession) {
+    await assertAbsentSessionGroupsRetired({
+      entry: lifecycleEntry,
+      readIdentities: opts.readIdentities,
+    });
+  }
   await opts.assertFresh?.();
   if (matchedLiveSession && backend.name === "tmux") {
     await interruptLifecycleTmuxProcesses({
+      backend,
+      retireSession: opts.retireSession,
       sessionName,
       lifecycleEntry,
       assertFresh: opts.assertFresh,
@@ -1168,7 +1206,85 @@ export async function stopLifecycleProcessController(opts: {
   }
 }
 
+/** Missing mux state grants no authority to kill a possibly reused group ID. */
+async function assertAbsentSessionGroupsRetired(opts: {
+  readonly entry: LifecycleStateEntry;
+  readonly readIdentities?: typeof readProcessIdentities;
+}): Promise<void> {
+  const recordedGroups = new Set(
+    opts.entry.processes.flatMap((process) =>
+      process.processGroupId ? [process.processGroupId] : []
+    )
+  );
+  if (recordedGroups.size === 0) {
+    return;
+  }
+  const identified = opts.entry.processes.filter(
+    (process) => process.paneBirth || process.processGroupBirth
+  );
+  // Legacy records have no incarnation proof. A number alone may have been
+  // reused after reboot, so it cannot veto forgetting an absent session.
+  if (identified.length === 0) {
+    return;
+  }
+  const identities = await (opts.readIdentities ?? readProcessIdentities)();
+  if (identities.length === 0) {
+    throw new Error(
+      "Could not inspect retained lifecycle wrapper identities; kept ownership state"
+    );
+  }
+  if (
+    identified.some(
+      (process) =>
+        process.processGroupBirth !== undefined &&
+        identities.some(
+          (row) =>
+            !row.zombie &&
+            row.pid === process.processGroupId &&
+            row.birth === process.processGroupBirth
+        )
+    )
+  ) {
+    throw new Error(
+      "Lifecycle mux session is absent but recorded process-group retirement is unconfirmed; kept ownership state. A command group leader still matches its recorded start time."
+    );
+  }
+  const roots = identified.flatMap((process) =>
+    identities.some(
+      (row) =>
+        !row.zombie &&
+        row.pid === process.panePid &&
+        row.birth === process.paneBirth
+    ) && process.panePid
+      ? [process.panePid]
+      : []
+  );
+  if (roots.length === 0) {
+    return;
+  }
+  const snapshot = await readProcessSnapshot();
+  const zombies = new Set(
+    identities.filter((row) => row.zombie).map((row) => row.pid)
+  );
+  const descendants = new Set(
+    collectDescendantProcessGroupIds({
+      snapshot: snapshot.filter((row) => !zombies.has(row.pid)),
+      rootPids: roots,
+    })
+  );
+  if (
+    snapshot.length === 0 ||
+    [...recordedGroups].some((group) => descendants.has(group))
+  ) {
+    throw new Error(
+      "Lifecycle mux session is absent but recorded process-group retirement is unconfirmed; kept ownership state. Inspect the recorded groups before retrying cleanup."
+    );
+  }
+}
+
 async function interruptLifecycleTmuxProcesses(opts: {
+  readonly backend: MuxBackend;
+  readonly retireSession?: ReturnType<typeof createLifecycleSessionRetirement>;
   readonly sessionName: string;
   readonly lifecycleEntry: LifecycleStateEntry | null;
   readonly assertFresh?: () => Promise<void>;
@@ -1193,15 +1309,52 @@ async function interruptLifecycleTmuxProcesses(opts: {
   }
 
   await Bun.sleep(750);
-  const processGroupIds = await resolveLifecycleProcessGroupIds({
-    sessionName: opts.sessionName,
-    lifecycleEntry: opts.lifecycleEntry,
-  });
+  const panes = await Promise.all(
+    processWindows.map((processInfo) =>
+      readTmuxPanePids({
+        sessionName: opts.sessionName,
+        windowName: processInfo.windowName,
+      })
+    )
+  );
+  const identities = await readProcessIdentities();
+  const processes = panes.flatMap((pids) =>
+    pids.map((panePid) => ({
+      panePid,
+      paneBirth: identities.find((row) => row.pid === panePid)?.birth,
+    }))
+  );
   await opts.assertFresh?.();
-  await terminateLifecycleProcessGroups({
-    processGroupIds,
+  const retired = await (
+    opts.retireSession ?? createLifecycleSessionRetirement()
+  )({
+    processes,
+    stopSession: async () => {
+      const token = opts.lifecycleEntry?.ownershipToken;
+      if (!token) {
+        return true;
+      }
+      if (
+        (await opts.backend.readLifecycleOwnerToken?.({
+          name: opts.sessionName,
+        })) === token
+      ) {
+        return true;
+      }
+      return (
+        processes.length === 0 &&
+        (await opts.backend.readSessionPresence?.({
+          name: opts.sessionName,
+        })) === "absent"
+      );
+    },
     assertFresh: opts.assertFresh,
   });
+  if (!retired) {
+    throw new Error(
+      "Lifecycle ownership changed before process retirement; no groups signalled"
+    );
+  }
 }
 
 async function readTmuxPanePids(opts: {
@@ -1262,26 +1415,6 @@ async function waitForLifecycleCommandProcessGroupId(opts: {
     await Bun.sleep(LIFECYCLE_COMMAND_PID_WAIT_INTERVAL_MS);
   }
   return null;
-}
-
-async function resolveLifecycleProcessGroupIds(opts: {
-  readonly sessionName: string;
-  readonly lifecycleEntry: LifecycleStateEntry | null;
-}): Promise<number[]> {
-  const panePidsByWindow = new Map<string, readonly number[]>();
-  for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
-    const panePids = await readTmuxPanePids({
-      sessionName: opts.sessionName,
-      windowName: processInfo.windowName,
-    });
-    panePidsByWindow.set(processInfo.windowName, panePids);
-  }
-
-  return resolveLifecycleProcessGroupIdsForTmuxState({
-    lifecycleEntry: opts.lifecycleEntry,
-    panePidsByWindow,
-    snapshot: await readProcessSnapshot(),
-  });
 }
 
 async function resolveLifecycleStopProcessGroupIdsForEntry(opts: {

@@ -29,7 +29,7 @@ impl Banner {
     pub fn text(&self) -> String {
         match self {
             Self::DaemonOff => {
-                "hackd is off or unreachable: start hackd to read project status".into()
+                "hackd is off or unreachable: run `hack daemon start` to read project status".into()
             }
             Self::DaemonMismatch { daemon, cli } => {
                 format!("hackd v{daemon} is running, CLI is v{cli}: restart hackd")

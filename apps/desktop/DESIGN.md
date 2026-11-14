@@ -391,4 +391,4 @@ Each is small enough for one PR.
 21. **R15** `--json` for `hack daemon start|stop|restart|install`.
 22. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
 23. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.
-24. **R18** Observe-only project listing, including registered native projects: no auto-registration, `lastSeenAt` updates or registry writes. Until it exists, the desktop refuses CLI listing fallback and reports Unknown when a matching hackd snapshot is unavailable.
+24. **R18** Observe-only project listing, including registered native projects: no auto-registration, `lastSeenAt` updates or registry writes. Until it exists, the desktop refuses CLI listing fallback and reports Unknown when a matching hackd snapshot is unavailable. The daemon-off screen names `hack daemon start` and offers Start hackd as its first recovery action.

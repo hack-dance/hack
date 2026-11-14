@@ -1,9 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
-  copyFileSync,
   ftruncateSync,
   mkdirSync,
   mkdtempSync,
@@ -869,15 +867,32 @@ esac
     const { root, run, done } = fixture();
     const work = join(root, "prepared-bases", ".work", "fixture");
     mkdirSync(work, { recursive: true, mode: 0o700 });
-    // Multicall Coreutils dispatches by basename; detection uses the work path.
-    const binary = join(work, "sleep");
-    copyFileSync("/bin/sleep", binary);
-    chmodSync(binary, 0o700);
-    const verifier = Bun.spawn([binary, "20"]);
+    // Keep the .work argv identity without copying a signed system binary.
+    const helper = join(work, "verifier");
+    writeFileSync(helper, '#!/bin/bash\nexec -a "$0" /bin/sleep 20\n', {
+      mode: 0o700,
+    });
+    const verifier = Bun.spawn([helper], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     try {
-      expect(run.runningProviders()).toEqual([
-        `prepared-bases:${verifier.pid}`,
-      ]);
+      const expected = `prepared-bases:${verifier.pid}`;
+      const deadline = performance.now() + 2000;
+      let running: string[] = [];
+      // The shebang interpreter execs sleep. Wait for the same argv observation
+      // the product uses rather than racing that handoff or assuming spawn is ready.
+      while (performance.now() < deadline) {
+        running = run.runningProviders();
+        if (running.includes(expected)) {
+          break;
+        }
+        expect(verifier.exitCode).toBeNull();
+        expect(verifier.signalCode).toBeNull();
+        await Bun.sleep(10);
+      }
+      expect(running).toEqual([expected]);
       await run.settleProviders("2a prepared base");
       expect(run.blocked).toContain(`prepared-bases:${verifier.pid}`);
       verifier.kill("SIGKILL");

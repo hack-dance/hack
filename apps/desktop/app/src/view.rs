@@ -419,8 +419,12 @@ impl HackApp {
         snap: Result<Snapshot, SourceError>,
         cx: &mut Context<Self>,
     ) -> bool {
+        let previous = self.selected_root();
         if !self.model.finish_refresh(token, snap) {
             return false;
+        }
+        if previous != self.selected_root() {
+            self.tail = Ok(Vec::new());
         }
         let current = self.doctor_target_keys();
         self.doctor.targets_seen(current.as_deref());

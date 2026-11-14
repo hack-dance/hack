@@ -47,9 +47,10 @@ import {
  *   first `hack` on PATH), not its symlink target, so a stable symlink such as
  *   `~/.local/bin/hack` keeps working when an upgrade moves the real binary.
  *   When the recorded program no longer exists, `hack daemon start` rewrites
- *   the unit. When the unit runs this CLI's executable but differs from what
- *   it renders, or its hackd reports another version, start rewrites and
- *   restarts it (HACK-2216, `src/daemon/reconcile.ts`). A unit that runs
+ *   the unit. When the unit runs this CLI's executable, start restarts a
+ *   hackd of another version, and rewrites the unit when it differs from what
+ *   this CLI renders and still carries {@link SYSTEMD_MANAGED_HEADER}
+ *   (HACK-2216, `src/daemon/reconcile.ts`). A unit that runs
  *   another existing `hack` is reported and switched by `hack daemon install`.
  * - `Restart=on-failure`: a crash restarts hackd; `hack daemon stop` (a clean
  *   stop through systemctl) does not. Start limits stop a crash loop.
@@ -488,6 +489,94 @@ export const RENDERED_SYSTEM_PATH_DIRECTORIES = [
 ] as const;
 
 /**
+ * The first line of every unit Hack writes. Its second line tells the user
+ * that local changes are replaced on the next install, so only a unit that
+ * starts with it is rewritten automatically (HACK-2216).
+ */
+export const SYSTEMD_MANAGED_HEADER =
+  "# Managed by hack: written by `hack daemon install`, removed by `hack daemon uninstall`.";
+
+/** Whether the unit file's main text starts with {@link SYSTEMD_MANAGED_HEADER}. */
+export function isHackManagedUnit(opts: {
+  readonly unitText: string;
+}): boolean {
+  return opts.unitText.split("\n", 1)[0] === SYSTEMD_MANAGED_HEADER;
+}
+
+const ENVIRONMENT_SETTING =
+  /^\s*(Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment)\s*=(.*)$/;
+const HOME_BINDING_KEY = /(^|[\s"'])(HACK_HOME|HOME)(=|\s|"|'|$)/;
+
+/**
+ * An environment line of the unit's main file that binds the service to a
+ * Hack home (`HACK_HOME` or `HOME`, or any `EnvironmentFile=`, whose
+ * contents cannot be read here) and that `rendered` would drop. Rewriting
+ * such a unit would silently move the service to another home, so the
+ * automatic rewrite is refused; null when there is none (HACK-2216).
+ */
+export function findDroppedHomeBinding(opts: {
+  readonly unitText: string;
+  readonly rendered: string;
+}): string | null {
+  const kept = new Set(opts.rendered.split("\n").map((line) => line.trim()));
+  for (const line of opts.unitText.split("\n")) {
+    const match = ENVIRONMENT_SETTING.exec(line);
+    if (match === null || kept.has(line.trim())) {
+      continue;
+    }
+    if (
+      match[1] === "EnvironmentFile" ||
+      HOME_BINDING_KEY.test(match[2] ?? "")
+    ) {
+      return line.trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether this process runs inside hackd.service, compared by cgroup: its
+ * own `/proc/self/cgroup` path is the unit's `ControlGroup` or below it.
+ * Restarting the unit from inside it (a supervisor job running
+ * `hack daemon start`) would stop the caller itself (HACK-2216). `unknown`
+ * when either side cannot be read; callers then refuse.
+ */
+export async function readInvokerInSystemdUnit(opts: {
+  readonly deps: SystemdDeps;
+  /** Defaults to reading `/proc/self/cgroup`. */
+  readonly readSelfCgroup?: () => Promise<string | null>;
+}): Promise<"inside" | "outside" | "unknown"> {
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    "--property=ControlGroup",
+  ]);
+  if (show.exitCode !== 0) {
+    return "unknown";
+  }
+  const group = (parseSystemdProperties(show.stdout).ControlGroup ?? "").trim();
+  if (group.length === 0) {
+    // No cgroup: the unit runs nothing, so nothing can run inside it.
+    return "outside";
+  }
+  const self = await (
+    opts.readSelfCgroup ?? (() => readTextFile("/proc/self/cgroup"))
+  )();
+  if (self === null) {
+    return "unknown";
+  }
+  const inside = self.split("\n").some((line) => {
+    // `<id>:<controllers>:<path>`; the path is everything after the 2nd `:`.
+    const parts = line.trimEnd().split(":");
+    const path = parts.slice(2).join(":");
+    return path === group || path.startsWith(`${group}/`);
+  });
+  return inside ? "inside" : "outside";
+}
+
+/**
  * Renders the unit file. Returns null for a program path the unit cannot
  * represent safely (relative, a compiled Bun virtual path, or containing
  * control, quote, backslash or `$` characters).
@@ -511,7 +600,7 @@ export function renderSystemdUnit(opts: {
     "%h/.hack/bin",
   ].join(":");
   return [
-    "# Managed by hack: written by `hack daemon install`, removed by `hack daemon uninstall`.",
+    SYSTEMD_MANAGED_HEADER,
     "# Local changes are replaced on the next install; use `systemctl --user edit hackd` for overrides.",
     "[Unit]",
     "Description=hack local daemon (hackd)",

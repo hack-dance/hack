@@ -692,8 +692,9 @@ Source: [current env migration and cleanup guidance](https://github.com/hack-dan
 Installing another CLI does not replace an already running daemon. For an
 unmanaged daemon, `daemon start` replaces a reachable incompatible daemon;
 `daemon restart` is the explicit replacement path. With the newer Linux systemd
-service, `daemon start` rewrites and restarts a stale unit that runs the same
-executable (or a link to it). A unit pointing at a different existing
+service, `daemon start` restarts a stale service that runs the same executable
+(or a link to it), and rewrites its unit when Hack wrote it (managed header). A
+hand-written unit is reported, not rewritten. A unit pointing at a different existing
 executable needs explicit `daemon install`: restarting that unit would run its
 old executable again.
 Keep this separate from a side-by-side candidate

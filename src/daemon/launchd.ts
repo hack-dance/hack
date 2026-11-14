@@ -1,3 +1,4 @@
+import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { DAEMON_LAUNCHD_LABEL, GLOBAL_HACK_DIR_NAME } from "../constants.ts";
@@ -154,12 +155,28 @@ export interface LaunchdPlistOptions {
 }
 
 /**
+ * Marks a plist Hack wrote and may rewrite whole (HACK-2216). A plist
+ * without it, such as one written by an older Hack or edited by hand, is
+ * only repaired when its program is gone.
+ */
+export const LAUNCHD_MANAGED_MARKER =
+  "<!-- Managed by hack: written by hack daemon install; local changes are replaced on the next install. -->";
+
+/** Whether the plist carries {@link LAUNCHD_MANAGED_MARKER}. */
+export function isHackManagedPlist(opts: {
+  readonly plistText: string;
+}): boolean {
+  return opts.plistText.split("\n").includes(LAUNCHD_MANAGED_MARKER);
+}
+
+/**
  * Generates the launchd plist XML for hackd.
  */
 export function renderLaunchdPlist(opts: LaunchdPlistOptions): string {
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    LAUNCHD_MANAGED_MARKER,
     '<plist version="1.0">',
     "<dict>",
     "  <key>Label</key>",
@@ -230,9 +247,15 @@ export interface LaunchdInstallResult {
 export async function installLaunchdService({
   paths,
   config,
+  hackBinPath: keepProgram,
 }: {
   readonly paths: DaemonPaths;
   readonly config: DaemonLaunchdConfig;
+  /**
+   * The program to write, when a refresh keeps the plist's own path (a
+   * link to this CLI stays a link). Defaults to this CLI's resolution.
+   */
+  readonly hackBinPath?: string;
 }): Promise<LaunchdInstallResult> {
   const access = resolveLaunchdAccess();
   if (!access.allowed) {
@@ -242,8 +265,11 @@ export async function installLaunchdService({
     return { ok: false, error: "launchd is only available on macOS" };
   }
 
-  const invocation = await resolveHackInvocation();
-  const hackBinPath = await resolveLaunchdHackBinPath({ invocation });
+  const hackBinPath =
+    keepProgram ??
+    (await resolveLaunchdHackBinPath({
+      invocation: await resolveHackInvocation(),
+    }));
   if (!hackBinPath) {
     return {
       ok: false,
@@ -348,6 +374,32 @@ function normalizeHackExecutablePath(raw: string | null): string | null {
 }
 
 /**
+ * Whether two paths name the same executable file: the same path, the same
+ * resolved path, or the same device and inode (a hard link or a bind
+ * mount). False when either cannot be read. A service whose program is
+ * the same file as this CLI's runs this version; any other existing
+ * program may be one the user chose (HACK-2216).
+ */
+export async function isSameExecutableFile(
+  a: string,
+  b: string
+): Promise<boolean> {
+  if (a === b) {
+    return true;
+  }
+  try {
+    const [realA, realB] = await Promise.all([realpath(a), realpath(b)]);
+    if (realA === realB) {
+      return true;
+    }
+    const [statA, statB] = await Promise.all([stat(realA), stat(realB)]);
+    return statA.dev === statB.dev && statA.ino === statB.ino;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Paths inside a compiled Bun binary's virtual filesystem. They pass
  * pathExists from INSIDE the same process but no other process (launchd
  * included) can exec them.
@@ -387,12 +439,17 @@ export function hasBoundedLaunchdOutput(opts: {
  * `repaired`: the program path was invalid or stale and was replaced;
  * `refreshed`: the program was current but the rest of the plist (its
  * environment, output paths or other keys) differed from what this CLI
- * renders, and the plist was rewritten (HACK-2216).
+ * renders, and the plist was rewritten (HACK-2216);
+ * `other-program`: it runs another existing program, left as it is;
+ * `unmanaged`: it runs this CLI's executable and differs only in content,
+ * but has no {@link LAUNCHD_MANAGED_MARKER}, so it was left as it is.
  */
 export type LaunchdProgramRepairResult =
   | "ok"
   | "repaired"
   | "refreshed"
+  | "other-program"
+  | "unmanaged"
   | "not-installed"
   | "failed";
 
@@ -427,12 +484,61 @@ export function isLaunchdPlistCurrent(opts: {
 }
 
 /**
- * Repairs an installed launchd plist whose program path is invalid — a
- * compiled-binary virtual path (/$bunfs) or a binary that no longer exists
- * (e.g. an upgraded homebrew Cellar path). Broken plists leave launchd
- * flapping with exit status 78 and the daemon unable to stay up. A plist
- * whose program is current but whose other content differs from what this
- * CLI renders is rewritten too ("refreshed").
+ * What the installed plist's program is, relative to this CLI:
+ * `missing` (absent, unreadable or a compiled-binary virtual path: never
+ * runnable), `ours` (the same file as this CLI's resolution, see
+ * {@link isSameExecutableFile}), or `other` (another existing program, which
+ * the user may have chosen; only `hack daemon install` switches it).
+ * `resolved` is this CLI's program, null when none resolves.
+ */
+export type LaunchdProgramState =
+  | {
+      readonly kind: "missing" | "ours" | "other";
+      readonly program: string | null;
+      readonly resolved: string | null;
+    }
+  | { readonly kind: "not-installed" };
+
+export async function readLaunchdProgramState(opts: {
+  readonly paths: DaemonPaths;
+  readonly plistText?: string | null;
+}): Promise<LaunchdProgramState> {
+  if (!resolveLaunchdAccess().allowed) {
+    return { kind: "not-installed" };
+  }
+  const plistText =
+    opts.plistText ?? (await readTextFile(opts.paths.launchdPlistPath));
+  if (plistText === null) {
+    return { kind: "not-installed" };
+  }
+  const program = extractLaunchdProgramPath({ plistText });
+  const resolved = await resolveLaunchdHackBinPath({
+    invocation: await resolveHackInvocation(),
+  });
+  const exists =
+    program !== null &&
+    !isVirtualExecutablePath(program) &&
+    (await pathExists(program));
+  if (!exists) {
+    return { kind: "missing", program, resolved };
+  }
+  const ours =
+    resolved !== null && (await isSameExecutableFile(program, resolved));
+  return { kind: ours ? "ours" : "other", program, resolved };
+}
+
+/**
+ * Repairs an installed launchd plist (HACK-2216):
+ * - a program that is gone or a compiled-binary virtual path (/$bunfs) is
+ *   retargeted to this CLI ("repaired"): such a plist leaves launchd
+ *   flapping with exit status 78;
+ * - a plist that runs this CLI's executable but differs from what it
+ *   renders is rewritten for its own program path ("refreshed"), only when
+ *   it carries {@link LAUNCHD_MANAGED_MARKER}, or when its output paths are
+ *   unbounded (the older repair, kept);
+ * - another existing program is left alone ("other-program"), even a stale
+ *   versioned path; `hack daemon install` switches it. A plist without the
+ *   marker that only differs in content is left alone too ("unmanaged").
  *
  * Reports "not-installed" without reading the plist when
  * {@link resolveLaunchdAccess} denies access: this process does not own the
@@ -448,46 +554,50 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   if (plistText === null) {
     return "not-installed";
   }
-  const program = extractLaunchdProgramPath({ plistText });
-  const invocation = await resolveHackInvocation();
-  const resolved = await resolveLaunchdHackBinPath({ invocation });
-  const exists =
-    program !== null &&
-    !isVirtualExecutablePath(program) &&
-    (await pathExists(program));
-  // A program that still exists can still be stale: a versioned homebrew
-  // Cellar path survives until brew cleanup, so kickstart would relaunch
-  // the OLD binary forever (incompatible-daemon loop). Normalize to the
-  // current stable resolution whenever it differs.
-  const valid = exists && (resolved === null || program === resolved);
-  // Without a resolvable hack this CLI cannot render (or install) a new
-  // plist, so only the output paths are checked then.
-  const current =
-    resolved === null
-      ? hasBoundedLaunchdOutput({ plistText })
-      : isLaunchdPlistCurrent({
-          plistText,
-          hackBinPath: resolved,
-          home: resolveUserHomeDir(),
-        });
-  if (valid && current) {
-    return "ok";
+  const state = await readLaunchdProgramState({
+    paths: opts.paths,
+    plistText,
+  });
+  if (state.kind === "not-installed") {
+    return "not-installed";
   }
-  if (!exists && resolved === null) {
+  if (state.kind === "other") {
+    return "other-program";
+  }
+  if (state.kind === "missing" && state.resolved === null) {
     return "failed";
   }
-
+  const program =
+    state.kind === "ours" && state.program !== null ? state.program : null;
+  if (program !== null) {
+    const current = isLaunchdPlistCurrent({
+      plistText,
+      hackBinPath: program,
+      home: resolveUserHomeDir(),
+    });
+    if (current) {
+      return "ok";
+    }
+    if (
+      hasBoundedLaunchdOutput({ plistText }) &&
+      !isHackManagedPlist({ plistText })
+    ) {
+      return "unmanaged";
+    }
+  }
   const result = await installLaunchdService({
     paths: opts.paths,
     config: {
       installed: true,
       ...readLaunchdPlistOptions({ plistText }),
     },
+    // A refresh keeps the plist's own program path; a repair uses ours.
+    ...(program === null ? {} : { hackBinPath: program }),
   });
   if (!result.ok) {
     return "failed";
   }
-  return valid ? "refreshed" : "repaired";
+  return program === null ? "repaired" : "refreshed";
 }
 
 export interface LaunchdUninstallResult {

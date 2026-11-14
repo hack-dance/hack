@@ -15,7 +15,6 @@ import {
   installLaunchdService,
   kickstartLaunchdService,
   type LaunchdServiceStatus,
-  repairLaunchdProgramIfInvalid,
   resolveLaunchdAccess,
   uninstallLaunchdService,
 } from "../daemon/launchd.ts";
@@ -36,6 +35,7 @@ import {
 } from "../daemon/process.ts";
 import {
   createDaemonCommandTrace,
+  DAEMON_RECONCILE_ONLY_ENV,
   type DaemonCommandTrace,
 } from "../daemon/reconcile.ts";
 import { runDaemon } from "../daemon/server.ts";
@@ -60,6 +60,10 @@ import {
   detectDockerBackend,
 } from "../lib/runtime-guidance.ts";
 import { logger } from "../ui/logger.ts";
+import {
+  checkRunningLaunchdDaemon,
+  startViaLaunchdIfLoaded,
+} from "./daemon-launchd.ts";
 import { runDaemonCommand } from "./daemon-result.ts";
 import {
   describeSystemdIncompatibleOwner,
@@ -277,6 +281,8 @@ async function handleDaemonStart({
         paths,
         foreground: args.options.foreground === true,
         trace,
+        reconcileOnly:
+          (process.env[DAEMON_RECONCILE_ONLY_ENV] ?? "").trim() === "1",
       }),
   });
 }
@@ -291,6 +297,12 @@ async function startDaemon(opts: {
   readonly paths: DaemonPaths;
   readonly foreground: boolean;
   readonly trace: DaemonCommandTrace;
+  /**
+   * {@link DAEMON_RECONCILE_ONLY_ENV} (the post-update step): only bring a
+   * running hackd and its service up to date; never start one that is not
+   * running, even if it stopped after the caller looked.
+   */
+  readonly reconcileOnly?: boolean;
 }): Promise<number> {
   const { paths, trace } = opts;
   const status = await readDaemonStatus({ paths });
@@ -300,6 +312,12 @@ async function startDaemon(opts: {
   const livePid = status.running ? status.pid : null;
   const pidIsDaemon =
     livePid !== null && (await isHackDaemonProcess({ pid: livePid }));
+  if (opts.reconcileOnly && !(pidIsDaemon && status.socketExists)) {
+    logger.info({
+      message: "hackd is not running; nothing to bring up to date",
+    });
+    return 0;
+  }
   let replaced = false;
   if (livePid !== null && pidIsDaemon) {
     const running = await handleRunningDaemonAtStart({
@@ -376,7 +394,11 @@ async function startStoppedDaemon(opts: {
     return 0;
   }
 
-  const viaLaunchd = await startViaLaunchdIfLoaded({ paths, trace });
+  const viaLaunchd = await startViaLaunchdIfLoaded({
+    paths,
+    trace,
+    waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+  });
   if (viaLaunchd !== null) {
     return viaLaunchd;
   }
@@ -385,70 +407,6 @@ async function startStoppedDaemon(opts: {
   trace.manager = "none";
   trace.action = started === 0 ? "started" : trace.action;
   return started;
-}
-
-/**
- * When launchd manages the daemon, start through launchd. Returns null when
- * no launchd service is loaded, or with `onlyIfStale` when its plist is
- * current. A plist whose program is gone ("repaired") or whose content
- * differs from what this CLI renders ("refreshed", HACK-2216) is rewritten
- * first; `kickstart -k` then (re)starts hackd from it.
- */
-async function startViaLaunchdIfLoaded(opts: {
-  readonly paths: DaemonPaths;
-  readonly trace: DaemonCommandTrace;
-  readonly onlyIfStale?: boolean;
-}): Promise<number | null> {
-  const { paths, trace } = opts;
-  // When launchd manages the daemon, start through launchd — spawning a
-  // bare process next to a loaded agent means two process managers fight
-  // over one socket and pid file.
-  const launchdStatus = await resolveLaunchdStatus({ paths });
-  if (!launchdStatus?.loaded) {
-    return null;
-  }
-  trace.manager = "launchd";
-  const repair = await repairLaunchdProgramIfInvalid({ paths });
-  if (repair === "repaired") {
-    trace.stale.add("program-missing");
-    logger.warn({
-      message:
-        "Repaired launchd service: its program path was invalid (stale or compiled-binary virtual path)",
-    });
-  } else if (repair === "refreshed") {
-    trace.stale.add("content");
-    logger.warn({
-      message:
-        "Updated launchd service: its plist differed from what this hack writes",
-    });
-  } else if (opts.onlyIfStale) {
-    return null;
-  }
-  trace.action =
-    repair === "repaired" || repair === "refreshed" ? "reinstalled" : "started";
-  // launchd owns the daemon: never spawn a bare process next to it —
-  // two process managers for one socket is how machines end up with
-  // start-then-exit flapping and stale-pid contradictions.
-  const kick = await kickstartLaunchdService();
-  if (!kick.ok) {
-    logger.error({
-      message: `launchd kickstart failed: ${kick.error ?? "unknown error"} | Check: hack daemon logs --tail 200`,
-    });
-    return 1;
-  }
-  const startedViaLaunchd = await waitForDaemonStart({
-    paths,
-    timeoutMs: 8000,
-  });
-  if (startedViaLaunchd) {
-    logger.success({ message: "hackd started (launchd)" });
-    return 0;
-  }
-  logger.warn({
-    message:
-      "launchd kickstarted hackd but it did not report ready yet | Check: hack daemon logs --tail 200",
-  });
-  return 1;
 }
 
 /**
@@ -587,17 +545,20 @@ async function handleRunningDaemonAtStart(opts: {
       return reconciled;
     }
   }
-  if (!(api.reachable && !api.compatible)) {
-    if (process.platform === "darwin" && !opts.foreground) {
-      const refreshed = await startViaLaunchdIfLoaded({
-        paths,
-        trace,
-        onlyIfStale: true,
-      });
-      if (refreshed !== null) {
-        return refreshed;
-      }
+  const compatible = !(api.reachable && !api.compatible);
+  if (process.platform === "darwin" && !opts.foreground) {
+    const viaLaunchd = await checkRunningLaunchdDaemon({
+      paths,
+      trace,
+      pid: opts.pid,
+      compatible,
+      waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+    });
+    if (viaLaunchd !== null) {
+      return viaLaunchd;
     }
+  }
+  if (compatible) {
     logger.success({ message: `hackd already running (pid ${opts.pid})` });
     return 0;
   }

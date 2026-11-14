@@ -4570,3 +4570,146 @@ linuxTest(
     ).toBeNull();
   }
 );
+
+// Review round 1 (HACK-2216).
+
+const UNIT_CGROUP =
+  "/user.slice/user-1000.slice/user@1000.service/app.slice/hackd.service";
+
+/** Answers `--property=ControlGroup` for the fake; everything else as before. */
+function withControlGroup(fake: Fake): void {
+  const run = fake.deps.run;
+  fake.deps = {
+    ...fake.deps,
+    run: (command, args) =>
+      args.includes("--property=ControlGroup")
+        ? Promise.resolve({
+            exitCode: 0,
+            stdout: `ControlGroup=${UNIT_CGROUP}\n`,
+            stderr: "",
+          })
+        : run(command, args),
+  };
+}
+
+linuxTest(
+  "from inside hackd.service, a mismatched daemon is refused and nothing is restarted",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await writeStaleUnit(fake);
+    const stale = await readFile(unitPath, "utf8");
+    withControlGroup(fake);
+    const inside = () => Promise.resolve(`0::${UNIT_CGROUP}/job-7\n`);
+    const mismatch = {
+      ...runningHooks(fake, "1.0.0"),
+      readSelfCgroup: inside,
+    };
+    expect(await reconcileRunningSystemdDaemon(mismatch)).toBe(1);
+    expect(mismatch.trace.blocked).toBe("inside-service");
+    // Compatible but stale: kept, nothing rewritten, start goes on.
+    const compatible = {
+      ...runningHooks(fake, "2.0.0"),
+      readSelfCgroup: inside,
+    };
+    expect(await reconcileRunningSystemdDaemon(compatible)).toBeNull();
+    expect(compatible.trace.action).toBe("none");
+    expect(compatible.trace.blocked).toBe("inside-service");
+    expect(await readFile(unitPath, "utf8")).toBe(stale);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  }
+);
+
+linuxTest(
+  "outside hackd.service (another cgroup), the restart goes ahead",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.calls.length = 0;
+    withControlGroup(fake);
+    expect(
+      await reconcileRunningSystemdDaemon({
+        ...runningHooks(fake, "1.0.0"),
+        readSelfCgroup: () =>
+          Promise.resolve("0::/user.slice/user-1000.slice/session-2.scope\n"),
+      })
+    ).toBe(0);
+    expect(fake.calls).toContain("systemctl --user restart hackd.service");
+  }
+);
+
+linuxTest(
+  "a stale unit without hack's managed header is reported, not rewritten",
+  async () => {
+    const fake = fakeSystemd();
+    const handWritten = unitText()
+      .replace(/^# Managed by hack.*\n/, "# my unit\n")
+      .replace("RestartSec=2", "RestartSec=9");
+    await installSystemdUnit({
+      unitPath,
+      unitText: handWritten,
+      deps: fake.deps,
+    });
+    fake.calls.length = 0;
+    const trace = createDaemonCommandTrace();
+    expect(
+      await startViaSystemdIfInstalled({ ...startHooks(fake), trace })
+    ).toBe(0);
+    expect(await readFile(unitPath, "utf8")).toBe(handWritten);
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect(fake.calls).toContain("systemctl --user start hackd.service");
+    expect(trace.action).toBe("started");
+    expect(trace.blocked).toBe("unmanaged");
+    expect([...trace.stale]).toEqual(["content"]);
+  }
+);
+
+linuxTest(
+  "a custom-home unit is not rewritten into the default home, and a mismatch restarts it unchanged",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    const home = join(root, ".hack");
+    const custom = unitText()
+      .replace("[Service]\n", `[Service]\nEnvironment="HACK_HOME=${home}"\n`)
+      .replace("RestartSec=2", "RestartSec=9");
+    await installSystemdUnit({ unitPath, unitText: custom, deps: fake.deps });
+    fake.unitEnvironment = `PATH=${sysBin} HACK_HOME=${home}`;
+    fake.calls.length = 0;
+    const hooks = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(0);
+    expect(await readFile(unitPath, "utf8")).toBe(custom);
+    expect(fake.calls).toContain("systemctl --user restart hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect(hooks.trace.blocked).toBe("home-binding");
+    expect(hooks.trace.action).toBe("restarted");
+  }
+);
+
+linuxTest(
+  "after a rewrite, the unit's home is checked again before the restart",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await writeStaleUnit(fake);
+    // A drop-in that only takes effect at the reload points the service
+    // at another home.
+    const run = fake.deps.run;
+    fake.deps = {
+      ...fake.deps,
+      run: (command, args) => {
+        if (args.includes("daemon-reload")) {
+          fake.unitEnvironment = `PATH=${sysBin} HACK_HOME=${join(root, "other")}`;
+        }
+        return run(command, args);
+      },
+    };
+    expect(
+      await reconcileRunningSystemdDaemon(runningHooks(fake, "1.0.0"))
+    ).toBe(1);
+    expect(fake.calls).toContain("systemctl --user daemon-reload");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+  }
+);

@@ -546,10 +546,27 @@ test.skipIf(process.platform !== "linux")(
         action: "none",
         stale: false,
         stale_reasons: [],
+        blocked: null,
         cli_version: expect.any(String),
         daemon: { running: false, pid: null, version: null, compatible: false },
       },
     });
+    // The post-update child's reconcile-only mode never starts hackd.
+    const reconcileOnly = await hack(
+      {
+        ...isolated,
+        env: { ...isolated.env, HACK_DAEMON_RECONCILE_ONLY: "1" },
+      },
+      ["daemon", "start", "--json"]
+    );
+    expect(reconcileOnly.code).toBe(0);
+    expect(JSON.parse(reconcileOnly.stdout)).toMatchObject({
+      ok: true,
+      data: { action: "none", daemon: { running: false } },
+    });
+    expect(
+      await Bun.file(join(f.root, "isolated", "daemon", "hackd.pid")).exists()
+    ).toBe(false);
     const foreground = await hack(isolated, [
       "daemon",
       "start",

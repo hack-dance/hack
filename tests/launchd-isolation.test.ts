@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, mkdirSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -346,6 +347,88 @@ test("repairs legacy output paths even when the installed program is still curre
   const verbs = (await launchctlCalls(fixture)).map(
     (line) => line.split(" ")[0]
   );
+  expect(verbs).toEqual(["bootout", "bootstrap"]);
+});
+
+/** Runs the driver's two repairs against `plist`; returns results and calls. */
+async function repairPlist(plist: (fixture: Fixture) => string): Promise<{
+  readonly results: unknown;
+  readonly after: string;
+  readonly verbs: string[];
+}> {
+  const fixture = await makeFixture();
+  await writeFile(fixture.plistPath, plist(fixture));
+  const run = await runAsDarwin({
+    argv: [DRIVER, "repair-output"],
+    cwd: fixture.root,
+    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack") }),
+  });
+  expect(run.code).toBe(0);
+  return {
+    results: JSON.parse(run.stdout),
+    after: await readFile(fixture.plistPath, "utf8"),
+    verbs: (await launchctlCalls(fixture)).map(
+      (line) => line.split(" ")[0] ?? ""
+    ),
+  };
+}
+
+test("a plist that runs another existing hack is never retargeted (HACK-2216)", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    const other = join(fixture.root, "other-bin", "hack");
+    // Created before the driver runs: another installed hack the user chose.
+    mkdirSync(join(fixture.root, "other-bin"), { recursive: true });
+    copyFileSync(join(fixture.root, "tools", "hack"), other);
+    chmodSync(other, 0o755);
+    written = renderLaunchdPlist({
+      hackBinPath: other,
+      home: fixture.home,
+      runAtLoad: false,
+      guiSessionOnly: false,
+    });
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "other-program",
+    secondRepair: "other-program",
+  });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
+test("a plist for this hack without the managed marker is not refreshed (HACK-2216)", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    written = renderLaunchdPlist({
+      hackBinPath: join(fixture.root, "tools", "hack"),
+      home: fixture.home,
+      runAtLoad: false,
+      guiSessionOnly: false,
+    })
+      .split("\n")
+      .filter((line) => !line.startsWith("<!-- Managed by hack"))
+      .join("\n");
+    return written;
+  });
+  expect(results).toEqual({ repair: "unmanaged", secondRepair: "unmanaged" });
+  expect(after).toBe(written);
+  expect(verbs).toEqual([]);
+});
+
+test("a managed plist for this hack with an older environment is refreshed (HACK-2216)", async () => {
+  let current = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    current = renderLaunchdPlist({
+      hackBinPath: join(fixture.root, "tools", "hack"),
+      home: fixture.home,
+      runAtLoad: false,
+      guiSessionOnly: false,
+    });
+    return current.replace(":/opt/homebrew/bin", "");
+  });
+  expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
+  expect(after).toBe(current);
   expect(verbs).toEqual(["bootout", "bootstrap"]);
 });
 

@@ -6,6 +6,14 @@
  * {@link planDaemonReconcile} and carry the plan out.
  */
 
+/**
+ * Set to `1` by `hack update` for the new executable's
+ * `hack daemon start --json`: reconcile a running hackd only. When no hackd
+ * of this home is running, start does nothing (action `none`), so a daemon
+ * that stopped after the update looked is never started.
+ */
+export const DAEMON_RECONCILE_ONLY_ENV = "HACK_DAEMON_RECONCILE_ONLY";
+
 /** Who runs hackd: a systemd user unit, a launchd agent, or nobody. */
 export type DaemonServiceManager = "systemd" | "launchd" | "none";
 
@@ -56,12 +64,22 @@ export type ServiceUnitState =
  * - `other-program`: the unit runs another existing `hack`, which the user
  *   may have chosen; `hack daemon install` switches it;
  * - `unknown-program`: what the unit runs cannot be read, so a restart is
- *   not known to run this version.
+ *   not known to run this version;
+ * - `unmanaged`: the unit's main file does not start with Hack's managed
+ *   header (it was written or edited by hand), so it is never rewritten
+ *   automatically; `hack daemon install` replaces it;
+ * - `home-binding`: the unit's main file binds the service to a Hack home
+ *   (`HACK_HOME`, `HOME` or an `EnvironmentFile=`) that a rewrite would drop;
+ * - `inside-service`: this command runs inside the service (for example a
+ *   job hackd started), so restarting or rewriting it would stop the caller.
  */
 export type DaemonReconcileBlock =
   | "read-only"
   | "other-program"
-  | "unknown-program";
+  | "unknown-program"
+  | "unmanaged"
+  | "home-binding"
+  | "inside-service";
 
 export interface DaemonReconcileInput {
   readonly unit: ServiceUnitState;
@@ -82,6 +100,16 @@ export interface DaemonReconcileInput {
    * so the running service still has the old unit loaded.
    */
   readonly restartPending?: boolean;
+  /**
+   * Why the unit's content must not be rewritten automatically even though
+   * it runs this CLI's executable; null or absent when it may be.
+   */
+  readonly contentBlock?: "unmanaged" | "home-binding" | null;
+  /**
+   * This process runs inside the service, or that could not be ruled out.
+   * Only meaningful while the service runs hackd.
+   */
+  readonly invokerInsideService?: boolean;
   readonly cliVersion: string;
 }
 
@@ -110,9 +138,30 @@ export interface DaemonReconcilePlan {
  * - a running daemon is restarted only when the restart is known to run
  *   this CLI's executable, or the unit changed under it;
  * - a version mismatch that a restart cannot fix is refused, never
- *   reported as success.
+ *   reported as success;
+ * - nothing is rewritten or restarted from inside the running service: a
+ *   stale but compatible daemon is kept, a mismatched one refused.
  */
 export function planDaemonReconcile(
+  input: DaemonReconcileInput
+): DaemonReconcilePlan {
+  const plan = planWithoutCallerGuard(input);
+  if (
+    input.running === null ||
+    input.invokerInsideService !== true ||
+    (plan.service !== "restart" && plan.rewrite === "none")
+  ) {
+    return plan;
+  }
+  return {
+    rewrite: "none",
+    service: plan.reasons.includes("version-mismatch") ? "refuse" : "keep",
+    reasons: plan.reasons,
+    blocked: "inside-service",
+  };
+}
+
+function planWithoutCallerGuard(
   input: DaemonReconcileInput
 ): DaemonReconcilePlan {
   const mismatch =
@@ -185,9 +234,12 @@ function planContentRewrite(input: DaemonReconcileInput): {
   if (input.readOnly) {
     return { rewrite: "none", blocked: "read-only" };
   }
-  return input.programIsOurs
-    ? { rewrite: "content", blocked: null }
-    : { rewrite: "none", blocked: "other-program" };
+  if (!input.programIsOurs) {
+    return { rewrite: "none", blocked: "other-program" };
+  }
+  return input.contentBlock
+    ? { rewrite: "none", blocked: input.contentBlock }
+    : { rewrite: "content", blocked: null };
 }
 
 /** The `--json` action for a plan that was carried out. */
@@ -216,10 +268,12 @@ export interface DaemonCommandTrace {
   manager: DaemonServiceManager;
   action: DaemonCommandAction;
   readonly stale: Set<DaemonStaleReason>;
+  /** Why a stale service was left as it is, if it was. */
+  blocked: DaemonReconcileBlock | null;
 }
 
 export function createDaemonCommandTrace(): DaemonCommandTrace {
-  return { manager: "none", action: "none", stale: new Set() };
+  return { manager: "none", action: "none", stale: new Set(), blocked: null };
 }
 
 /** Records a carried-out plan on `trace`. */
@@ -234,6 +288,7 @@ export function recordReconcile(opts: {
   }
   trace.manager = opts.manager;
   trace.action = reconcileAction(opts.plan);
+  trace.blocked = opts.plan.blocked;
   for (const reason of opts.plan.reasons) {
     trace.stale.add(reason);
   }
@@ -273,6 +328,7 @@ export function buildDaemonCommandData(opts: {
   readonly action: DaemonCommandAction;
   readonly stale: boolean;
   readonly stale_reasons: readonly DaemonStaleReason[];
+  readonly blocked: DaemonReconcileBlock | null;
   readonly cli_version: string;
   readonly daemon: {
     readonly running: boolean;
@@ -288,6 +344,7 @@ export function buildDaemonCommandData(opts: {
     action: opts.trace.action,
     stale: reasons.length > 0,
     stale_reasons: reasons,
+    blocked: opts.trace.blocked,
     cli_version: opts.cliVersion,
     daemon: {
       running: opts.daemon.running,

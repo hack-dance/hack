@@ -527,8 +527,9 @@ program is never treated as a missing one.
 `hack` (not this CLI's executable or a link to it): they say so, and
 `hack daemon install` switches the service. If systemd runs an incompatible
 hackd from such a unit, `start` reports it instead of replacing it, because
-systemd would only start the same version again. A unit that runs this CLI's
-executable but is stale is rewritten and restarted; see
+systemd would only start the same version again. A stale unit that runs this
+CLI's executable and starts with Hack's managed header is rewritten and
+restarted; see
 [After an upgrade](#after-an-upgrade-a-stale-service-is-repaired-by-start). When the unit's program no
 longer exists, `start` retargets it, but only to a durable location: the path
 and the file it resolves to must both be outside temporary directories, package
@@ -537,9 +538,10 @@ program in `ExecStart` and keeps every other line, including your edits;
 otherwise it reports the problem and asks you to run `hack daemon install`. If an
 earlier `daemon-reload` failed (`NeedDaemonReload=yes`), `start` and `install`
 reload before they start. Other edits to the file show up as drift in
-`hack daemon status` and `hack doctor`; `hack daemon start` (for a unit that
-runs this CLI's executable) and `hack daemon install` replace them. Put local
-changes in a drop-in (`systemctl --user edit hackd`).
+`hack daemon status` and `hack doctor`. `hack daemon install` replaces them, and
+so does `hack daemon start` when the unit runs this CLI's executable and still
+starts with Hack's managed header. Put local changes in a drop-in
+(`systemctl --user edit hackd`).
 
 A systemd user manager runs only while you have a login session, unless linger is
 on. `hack daemon install` and `hack daemon status` report linger. When it is off,
@@ -578,17 +580,43 @@ to the running CLI. The service is stale when:
 - `program-missing`: the program it runs no longer exists;
 - `version-mismatch`: the hackd it runs reports another version than the CLI.
 
-On Linux, `start` rewrites a `content`-stale unit only when it runs this CLI's
-executable: the same path, or a path that resolves to the same file. The program
-path is kept as written, so a stable symlink stays a symlink, and an enabled
-unit stays enabled while a disabled one stays disabled. The rewrite makes the same checks as
-`install`: the program and every directory on the unit's `PATH` must be safe
-from other accounts, and the unit directories are checked and created the same
-way. A program at a location that may not last is reported, as `install` does.
-When hackd is running under the unit, `start` then restarts it with
-`systemctl --user restart`, after the loaded-file, program and stop-hook checks
-that `stop` makes. A hackd of another version under this CLI's unit is restarted
-the same way, so the new executable runs.
+On Linux, `start` rewrites a `content`-stale unit automatically only when both
+of these hold:
+
+- the unit runs this CLI's executable: the same path, or a path that resolves to
+  the same file (same resolved path, or same device and inode);
+- its main file starts with Hack's managed header
+  (`# Managed by hack: written by \`hack daemon install\`...`), whose next line
+  says local changes are replaced on the next install.
+
+A unit without that header was written or edited by hand. It keeps the earlier
+behaviour: `start` reports the drift with `hack daemon install` as the next step
+and does not rewrite it. A managed unit whose main file sets the service's Hack
+home (`HACK_HOME` or `HOME` in `Environment=`, or any `EnvironmentFile=`) is not
+rewritten either, because the unit Hack renders would drop that binding and move
+the service to the default home. Move the setting into a drop-in
+(`systemctl --user edit hackd`), then run `hack daemon install`.
+
+The rewrite keeps the program path as written, so a stable symlink stays a
+symlink, and an enabled unit stays enabled while a disabled one stays disabled.
+It makes the same checks as `install`: the program and every directory on the
+unit's `PATH` must be safe from other accounts, and the unit directories are
+checked and created the same way. A program at a location that may not last is
+reported, as `install` does. When hackd is running under the unit, `start` reads
+the unit's Hack home again after the `daemon-reload`, refuses if it no longer
+serves this home, and otherwise restarts it with `systemctl --user restart`,
+after the loaded-file, program and stop-hook checks that `stop` makes. A hackd of
+another version under this CLI's unit is restarted the same way, even when the
+unit was not rewritten, so the new executable runs.
+
+`start` never rewrites or restarts the service from inside it. On Linux it
+compares its own cgroup (`/proc/self/cgroup`) with the unit's `ControlGroup`. On
+macOS it checks whether the launchd job's process is one of its ancestors. A job
+that hackd started (for example a supervisor job running `hack daemon start`)
+would otherwise stop itself. From inside, a compatible daemon is kept: `start`
+exits 0 with action `none` and `blocked: "inside-service"`. A daemon of another
+version is refused with exit 1 and nothing is stopped. If the check cannot be
+made, `start` treats the caller as inside.
 
 `start` does not repair the service, and goes on as before, when it cannot
 prove the service is this CLI's:
@@ -605,9 +633,15 @@ prove the service is this CLI's:
   unit is never written or reloaded. A hackd of another version under this
   CLI's unit is still restarted, which does not change the unit.
 
-On macOS, a loaded launchd plist whose program is current but whose other
-content (for example its environment) differs is rewritten too, and launchd
-restarts hackd from it.
+On macOS the same rules apply to the launchd plist. A plist whose program is
+gone (or is a compiled-binary virtual path) is retargeted to this CLI. A plist
+that runs this CLI's executable is rewritten when it differs from what this CLI
+writes, but only if it carries Hack's managed marker (a
+`<!-- Managed by hack ... -->` comment that `hack daemon install` now writes) or
+its output paths are not `/dev/null` (the earlier output repair). launchd then
+restarts hackd from it. A plist that runs another existing `hack` is left as it
+is, even an older versioned install path. A running hackd of another version
+under it is refused with `hack daemon install`.
 
 ```mermaid
 stateDiagram-v2
@@ -615,13 +649,17 @@ stateDiagram-v2
   Observe --> Direct: no usable unit, another home, or isolated
   Observe --> Plan: unit serves this home
   Plan --> Refuse: program gone and read-only
-  Plan --> Rewrite: content stale and program is this CLI's, or program gone
+  Plan --> Rewrite: program gone
+  Plan --> Rewrite: content stale, this CLI's program, managed header, no home binding
   Plan --> Refuse: version mismatch and unit runs another or unreadable program
+  Plan --> Refuse: running mismatch and caller inside the service
   Plan --> Start: not running
   Plan --> Restart: running and version mismatch
-  Plan --> Keep: running, current (or stale but not ours, or read-only)
+  Plan --> Keep: running, current, or stale but not rewritable, or caller inside the service
   Rewrite --> Start: not running
-  Rewrite --> Restart: running
+  Rewrite --> Recheck: running
+  Recheck --> Restart: unit still serves this home
+  Recheck --> Refuse: unit now serves another home
   Direct --> [*]
   Start --> [*]
   Restart --> [*]
@@ -636,13 +674,16 @@ stateDiagram-v2
   class Refuse fail
 ```
 
-After `hack update` installs a release, it runs the new executable's
-`hack daemon start --json` when a login service is installed and hackd is
-running, so the service reaches the new version. It never starts a daemon
-that was not running and never fails the update: a failure is reported in the
-update result (`daemon.status: "failed"`) with `hack daemon install` as the
-next step. A stopped service picks up the new version at its next
-`hack daemon start`.
+After `hack update` installs a release, it checks for an installed login service
+and for this home's hackd. A live pid is not enough: hackd must answer on this
+home's socket. When both are found, it runs the new executable's
+`hack daemon start --json` in reconcile-only mode (`HACK_DAEMON_RECONCILE_ONLY=1`).
+In that mode `start` does nothing (action `none`) when no hackd of this home is
+running, so a daemon that stopped in the meantime is not started. The step never
+fails the update, including when it cannot read the service state. A failure is
+reported in the update result (`daemon.status: "failed"`) with
+`hack daemon install` as the next step. A stopped service picks up the new
+version at its next `hack daemon start`.
 
 `hack daemon start|stop|restart|install --json` print one envelope and nothing
 else on stdout (human lines go to stderr). Success is
@@ -654,6 +695,7 @@ else on stdout (human lines go to stderr). Success is
 | `manager` | `systemd`, `launchd` or `none` (hackd runs directly) |
 | `action` | `none`, `started`, `restarted`, `reinstalled`, `stopped` or `installed` |
 | `stale`, `stale_reasons` | whether the service or daemon was stale, and why: `content`, `program-missing`, `version-mismatch` |
+| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service` |
 | `cli_version` | this CLI's version |
 | `daemon` | `running`, `pid`, `version` and `compatible` after the command |
 

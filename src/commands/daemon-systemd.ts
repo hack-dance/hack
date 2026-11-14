@@ -1,8 +1,9 @@
-import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_DAEMON_DIR_NAME } from "../constants.ts";
 import { DAEMON_CLI_VERSION } from "../daemon/client.ts";
+import { isSameExecutableFile } from "../daemon/launchd.ts";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessProbe,
@@ -35,13 +36,16 @@ import {
   defaultSystemdDeps,
   describeSystemdUnavailable,
   extractSystemdExecProgram,
+  findDroppedHomeBinding,
   installSystemdUnit,
+  isHackManagedUnit,
   isPidInSystemdUnit,
   isSystemdReadOnly,
   LINGER_ENABLE_COMMAND,
   MANAGER_STOPPABLE_STATES,
   probeSystemdUserManager,
   RENDERED_SYSTEM_PATH_DIRECTORIES,
+  readInvokerInSystemdUnit,
   readLingerStatus,
   readSystemdServiceStatus,
   readSystemdUnitHackHome,
@@ -103,6 +107,8 @@ export interface SystemdCommandHooks {
    * directories so they do not depend on the host's.
    */
   readonly systemPathDirectories?: readonly string[];
+  /** Defaults to reading `/proc/self/cgroup`; tests pin it. */
+  readonly readSelfCgroup?: () => Promise<string | null>;
   /** Records what the command decided, for `--json` (HACK-2216). */
   readonly trace?: DaemonCommandTrace;
   /** Defaults to this CLI's version; tests pin it. */
@@ -295,21 +301,28 @@ export async function reconcileRunningSystemdDaemon(
     hooks.resolveExpected ?? resolveExpectedSystemdUnit
   )();
   const marker = resolve(hooks.paths.root, RESTART_PENDING_FILE);
+  // A job hackd started (a supervisor job running `hack daemon start`)
+  // runs in the unit's cgroup: restarting the unit would stop the caller.
+  // Unknown counts as inside.
+  const invoker = await readInvokerInSystemdUnit({
+    deps,
+    readSelfCgroup: hooks.readSelfCgroup,
+  });
   const plan = planDaemonReconcile({
     unit: serviceUnitState(status.drift),
     programIsOurs: await unitRunsExpected({ status, expected }),
     readOnly: isSystemdReadOnly(deps.env),
     running: { version: hooks.version },
     restartPending: await pathExists(marker),
+    contentBlock: await readContentBlock({ status, unitPath }),
+    invokerInsideService: invoker !== "outside",
     cliVersion: hooks.cliVersion ?? DAEMON_CLI_VERSION,
   });
+  recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
   if (plan.service === "keep") {
-    if (hooks.trace) {
-      hooks.trace.manager = "systemd";
-    }
+    noteKeptStaleUnit({ plan });
     return null;
   }
-  recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
   if (plan.service === "refuse") {
     logger.warn({
       message: describeRunningRefusal({
@@ -339,6 +352,9 @@ function describeRunningRefusal(opts: {
   readonly pid: number;
 }): string {
   const { plan, status, expected } = opts;
+  if (plan.blocked === "inside-service") {
+    return `hackd (pid ${opts.pid}) is incompatible with this CLI, but this command runs inside ${SYSTEMD_UNIT_NAME} (a job hackd started), so restarting it would stop this command too; nothing was changed | Run hack daemon start from a shell outside the service`;
+  }
   if (plan.blocked === "read-only") {
     return `${describeMissingProgram(status)}; not changing the service here | Run: hack daemon install`;
   }
@@ -380,6 +396,19 @@ async function restartReconciledUnit(opts: {
     });
     if (rewritten !== null) {
       return rewritten;
+    }
+    // The rewrite reloaded systemd: check again which home the unit now
+    // serves before restarting it, as start does after its own repair.
+    const unitHome = await checkUnitServesHome({
+      hackHome: dirname(hooks.paths.root),
+      deps,
+      action: "starting",
+    });
+    if (unitHome.kind !== "ours") {
+      logger.error({
+        message: `${unitHome.message}; not restarting it after the rewrite | Run: hack daemon install`,
+      });
+      return 1;
     }
   }
   const blocked =
@@ -489,8 +518,9 @@ async function checkUnitServesHome(opts: {
  *
  * The decision is {@link planDaemonReconcile} (HACK-2216):
  * - a unit that runs this CLI's executable (the same path, or one that
- *   resolves to the same file) but differs from what this CLI renders for
- *   that program is rewritten whole, as `hack daemon install` would, keeping
+ *   resolves to the same file), starts with {@link SYSTEMD_MANAGED_HEADER}
+ *   and sets no Hack home a rewrite would drop, but differs from what this
+ *   CLI renders for that program is rewritten whole, as install would, keeping
  *   its program path (a stable symlink stays a symlink) and whether it is
  *   enabled;
  * - a unit whose program is gone is retargeted to this CLI, only to a
@@ -533,6 +563,7 @@ async function prepareSystemdUnitForStart(opts: {
     programIsOurs: await unitRunsExpected({ status, expected }),
     readOnly,
     running: null,
+    contentBlock: await readContentBlock({ status, unitPath }),
     cliVersion: hooks.cliVersion ?? DAEMON_CLI_VERSION,
   });
   recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
@@ -578,21 +609,50 @@ async function unitRunsExpected(opts: {
   if (status.program === null || expected === null) {
     return false;
   }
-  if (status.program === expected.hackBinPath) {
-    return true;
+  return await isSameExecutableFile(status.program, expected.hackBinPath);
+}
+
+/**
+ * Why a content-stale unit must not be rewritten automatically (HACK-2216):
+ * `unmanaged` when its main file does not start with
+ * {@link SYSTEMD_MANAGED_HEADER} (owner decision: hand-written units keep the
+ * HACK-2052 behaviour), `home-binding` when it binds the service to a Hack
+ * home that the rendered unit would drop ({@link findDroppedHomeBinding}).
+ */
+async function readContentBlock(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly unitPath: string;
+}): Promise<"unmanaged" | "home-binding" | null> {
+  const { status } = opts;
+  if (status.drift !== "content" || status.program === null) {
+    return null;
   }
-  const real = async (path: string): Promise<string | null> => {
-    try {
-      return await realpath(path);
-    } catch {
-      return null;
-    }
-  };
-  const [unitReal, ourReal] = await Promise.all([
-    real(status.program),
-    real(expected.hackBinPath),
-  ]);
-  return unitReal !== null && unitReal === ourReal;
+  const unitText = await readTextFile(opts.unitPath);
+  if (unitText === null || !isHackManagedUnit({ unitText })) {
+    return "unmanaged";
+  }
+  const rendered = renderSystemdUnit({ hackBinPath: status.program });
+  return rendered === null || findDroppedHomeBinding({ unitText, rendered })
+    ? "home-binding"
+    : null;
+}
+
+/** Says why a stale unit was left as it is, when it was. */
+function noteKeptStaleUnit(opts: { readonly plan: DaemonReconcilePlan }): void {
+  const { blocked } = opts.plan;
+  if (blocked === "unmanaged") {
+    logger.info({
+      message: `${SYSTEMD_UNIT_NAME} differs from what this hack writes, but it was not written by hack (no managed header), so it is left as it is | To replace it, run: hack daemon install`,
+    });
+  } else if (blocked === "home-binding") {
+    logger.warn({
+      message: `${SYSTEMD_UNIT_NAME} differs from what this hack writes, but it sets the service's Hack home (HACK_HOME, HOME or an EnvironmentFile) in its main file, which a rewrite would drop; it is left as it is | Move that setting into a drop-in (systemctl --user edit hackd), then run: hack daemon install`,
+    });
+  } else if (blocked === "inside-service") {
+    logger.warn({
+      message: `${SYSTEMD_UNIT_NAME} is stale, but this command runs inside it (a job hackd started), so it was not rewritten or restarted | Run hack daemon start from a shell outside the service`,
+    });
+  }
 }
 
 function describeMissingProgram(status: SystemdServiceStatus): string {
@@ -760,6 +820,7 @@ async function completePendingReload(opts: {
       message: `${SYSTEMD_UNIT_NAME} differs from what this hack writes; not changing it here | Run: hack daemon install`,
     });
   }
+  noteKeptStaleUnit({ plan });
   if (!status.needsReload) {
     return null;
   }

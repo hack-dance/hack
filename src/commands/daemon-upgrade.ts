@@ -1,9 +1,11 @@
+import { probeDaemonApi } from "../daemon/client.ts";
 import { getLaunchdServiceStatus } from "../daemon/launchd.ts";
-import { resolveDaemonPaths } from "../daemon/paths.ts";
-import type {
-  DaemonCommandAction,
-  DaemonServiceManager,
-  DaemonStaleReason,
+import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
+import {
+  DAEMON_RECONCILE_ONLY_ENV,
+  type DaemonCommandAction,
+  type DaemonServiceManager,
+  type DaemonStaleReason,
 } from "../daemon/reconcile.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
 import { childEnvironment } from "../lib/child-environment.ts";
@@ -65,25 +67,28 @@ export async function reconcileDaemonAfterUpdate(opts: {
     argv: readonly string[]
   ) => Promise<{ readonly exitCode: number; readonly stdout: string }>;
 }): Promise<PostUpdateDaemonResult> {
-  const state = await (opts.observe ?? observePostUpdateDaemon)();
-  if (!state.serviceInstalled) {
-    return { status: "skipped", reason: "no-service" };
-  }
-  if (!state.daemonRunning) {
-    return { status: "skipped", reason: "not-running" };
-  }
-  let run: { readonly exitCode: number; readonly stdout: string };
+  // Everything here is best effort: the binary is already replaced, so no
+  // failure (observing included) may fail the update.
   try {
-    run = await (opts.runCli ?? runBounded)([
+    const state = await (opts.observe ?? (() => observePostUpdateDaemon()))();
+    if (!state.serviceInstalled) {
+      return { status: "skipped", reason: "no-service" };
+    }
+    if (!state.daemonRunning) {
+      return { status: "skipped", reason: "not-running" };
+    }
+    // Reconcile-only: if hackd stopped since it was observed, the child
+    // does nothing instead of starting it.
+    const run = await (opts.runCli ?? runBounded)([
       opts.binaryPath,
       "daemon",
       "start",
       "--json",
     ]);
+    return parseStartEnvelope({ exitCode: run.exitCode, stdout: run.stdout });
   } catch (error: unknown) {
     return failed(error instanceof Error ? error.message : String(error));
   }
-  return parseStartEnvelope({ exitCode: run.exitCode, stdout: run.stdout });
 }
 
 /**
@@ -148,17 +153,46 @@ function failed(message: string): PostUpdateDaemonResult {
   return { status: "failed", message, next_step: "hack daemon install" };
 }
 
-async function observePostUpdateDaemon(): Promise<PostUpdateDaemonState> {
-  const paths = resolveDaemonPaths({});
-  let serviceInstalled = false;
-  if (process.platform === "linux") {
-    serviceInstalled =
-      (await resolveSystemdStatus())?.status.installed === true;
-  } else if (process.platform === "darwin") {
-    serviceInstalled = (await getLaunchdServiceStatus({ paths })).installed;
+/**
+ * Whether a login service is installed and this home's hackd is running.
+ * A live pid alone is not enough (a stale pid file can name a reused pid):
+ * hackd must answer on this home's socket.
+ */
+export async function observePostUpdateDaemon(
+  opts: {
+    readonly paths?: DaemonPaths;
+    /** Defaults to reading the systemd unit or launchd plist. */
+    readonly serviceInstalled?: () => Promise<boolean>;
+  } = {}
+): Promise<PostUpdateDaemonState> {
+  const paths = opts.paths ?? resolveDaemonPaths({});
+  const serviceInstalled = await (
+    opts.serviceInstalled ?? (() => readServiceInstalled({ paths }))
+  )();
+  if (!serviceInstalled) {
+    return { serviceInstalled, daemonRunning: false };
   }
   const daemon = await readDaemonStatus({ paths });
-  return { serviceInstalled, daemonRunning: daemon.running };
+  if (!(daemon.running && daemon.socketExists)) {
+    return { serviceInstalled, daemonRunning: false };
+  }
+  const probe = await probeDaemonApi({
+    socketPath: paths.socketPath,
+    timeoutMs: 1000,
+  });
+  return { serviceInstalled, daemonRunning: probe.reachable };
+}
+
+async function readServiceInstalled(opts: {
+  readonly paths: DaemonPaths;
+}): Promise<boolean> {
+  if (process.platform === "linux") {
+    return (await resolveSystemdStatus())?.status.installed === true;
+  }
+  if (process.platform === "darwin") {
+    return (await getLaunchdServiceStatus({ paths: opts.paths })).installed;
+  }
+  return false;
 }
 
 async function runBounded(
@@ -168,7 +202,11 @@ async function runBounded(
     stdin: "ignore",
     stdout: "pipe",
     stderr: "ignore",
-    env: childEnvironment({ ...process.env, HACK_NO_INTERACTIVE: "1" }),
+    env: childEnvironment({
+      ...process.env,
+      HACK_NO_INTERACTIVE: "1",
+      [DAEMON_RECONCILE_ONLY_ENV]: "1",
+    }),
   });
   const timer = setTimeout(() => proc.kill("SIGKILL"), RECONCILE_TIMEOUT_MS);
   try {

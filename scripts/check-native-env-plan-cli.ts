@@ -268,8 +268,8 @@ try {
     (unsupported.stdout + unsupported.stderr).includes(
       "E_USAGE"
     ), "native detached service selection refuses before input or runtime work");
-  // Whole-project detach is admitted. Invalid input keeps this relocated-bundle
-  // check offline on supported hosts; unsupported hosts also fail before ready.
+  // A missing executor refuses at setup inspection, before detached admission
+  // or reading the deliberately invalid authored input.
   await Bun.write(join(checkout, ".hack/hack.project.json"), "{");
   const detached = await invoke(["up", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
@@ -277,11 +277,13 @@ try {
     HACK_NATIVE_HOME: join(home, "native"),
   });
   const detachedResult = record(JSON.parse(detached.stdout));
+  const setupError = record(detachedResult.error);
   require(detached.exit === 1 &&
     detached.stderr === "" &&
     detachedResult.ok === false &&
-    record(detachedResult.error).code ===
-      "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
+    setupError.code === "E_STARTUP_INCOMPLETE" &&
+    record(setupError.detail).runtime_setup ===
+      "unavailable", "missing executor returns one setup-unavailable JSON refusal before detached admission");
   require(!(await readdir(join(checkout, ".hack"))).some(
     (name) => name === ".internal" || name === ".branch"
   ), "no registry or generated runtime state");

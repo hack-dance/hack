@@ -397,20 +397,46 @@ test("a plist that runs another existing hack is never retargeted (HACK-2216)", 
   expect(verbs).toEqual([]);
 });
 
-test("a plist for this hack without the managed marker is not refreshed (HACK-2216)", async () => {
+/** What an earlier Hack wrote: no marker, and an older environment. */
+function legacyPlist(fixture: Fixture): { legacy: string; current: string } {
+  const current = renderLaunchdPlist({
+    hackBinPath: join(fixture.root, "tools", "hack"),
+    home: fixture.home,
+    runAtLoad: false,
+    guiSessionOnly: false,
+  });
+  const legacy = current
+    .split("\n")
+    .filter((line) => !line.startsWith("<!-- Managed by hack"))
+    .join("\n")
+    .replace(":/opt/homebrew/bin", "");
+  return { legacy, current };
+}
+
+test("an unmarked legacy plist with Hack's label and this hack's program is refreshed, with the marker (HACK-2216)", async () => {
+  let current = "";
+  let legacy = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    ({ legacy, current } = legacyPlist(fixture));
+    return legacy;
+  });
+  expect(legacy).not.toContain("<!-- Managed by hack");
+  expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
+  expect(after).toBe(current);
+  expect(after).toContain("<!-- Managed by hack");
+  expect(verbs).toEqual(["bootout", "bootstrap"]);
+});
+
+test("an unmarked plist with another label is not refreshed (HACK-2216)", async () => {
   let written = "";
   const { results, after, verbs } = await repairPlist((fixture) => {
-    written = renderLaunchdPlist({
-      hackBinPath: join(fixture.root, "tools", "hack"),
-      home: fixture.home,
-      runAtLoad: false,
-      guiSessionOnly: false,
-    })
-      .split("\n")
-      .filter((line) => !line.startsWith("<!-- Managed by hack"))
-      .join("\n");
+    written = legacyPlist(fixture).legacy.replace(
+      "<string>dance.hack.hackd</string>",
+      "<string>example.custom.hackd</string>"
+    );
     return written;
   });
+  expect(written).toContain("example.custom.hackd");
   expect(results).toEqual({ repair: "unmanaged", secondRepair: "unmanaged" });
   expect(after).toBe(written);
   expect(verbs).toEqual([]);

@@ -182,7 +182,7 @@ function noteRepair(opts: {
       trace.blocked = "unmanaged";
       logger.info({
         message:
-          "The launchd plist differs from what this hack writes, but it was not written by this hack (no managed marker), so it is left as it is | To replace it, run: hack daemon install",
+          "The launchd plist differs from what this hack writes, but it is not hack's (no managed marker and another Label), so it is left as it is | To replace it, run: hack daemon install",
       });
       return false;
     default:

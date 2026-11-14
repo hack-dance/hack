@@ -633,15 +633,23 @@ prove the service is this CLI's:
   unit is never written or reloaded. A hackd of another version under this
   CLI's unit is still restarted, which does not change the unit.
 
-On macOS the same rules apply to the launchd plist. A plist whose program is
-gone (or is a compiled-binary virtual path) is retargeted to this CLI. A plist
-that runs this CLI's executable is rewritten when it differs from what this CLI
-writes, but only if it carries Hack's managed marker (a
-`<!-- Managed by hack ... -->` comment that `hack daemon install` now writes) or
-its output paths are not `/dev/null` (the earlier output repair). launchd then
-restarts hackd from it. A plist that runs another existing `hack` is left as it
-is, even an older versioned install path. A running hackd of another version
-under it is refused with `hack daemon install`.
+On macOS, Hack reads the plist only at its own LaunchAgents path for its label
+(`dance.hack.hackd`). launchd has no drop-ins, so the systemd header rule does
+not apply there. A plist counts as Hack's when it carries Hack's managed marker
+(a `<!-- Managed by hack ... -->` comment that `hack daemon install` now writes)
+or its `Label` is Hack's. That covers plists written by earlier Hack versions,
+which have no marker.
+
+- A plist whose program is gone (or is a compiled-binary virtual path) is
+  retargeted to this CLI.
+- A plist that runs this CLI's executable (same file) is rewritten with the
+  marker when it differs from what this CLI writes, if it is Hack's or its
+  output paths are not `/dev/null` (the earlier output repair). launchd then
+  restarts hackd from it. One that is not Hack's (no marker and another
+  `Label`) is only reported.
+- A plist that runs another existing `hack` is left as it is, even an older
+  versioned install path. A running hackd of another version under it is
+  refused with `hack daemon install`.
 
 ```mermaid
 stateDiagram-v2

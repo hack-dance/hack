@@ -21,6 +21,7 @@ import {
   isHackManagedPlist,
   isLaunchdPlistCurrent,
   isSameExecutableFile,
+  LAUNCHD_MANAGED_MARKER,
   renderLaunchdPlist,
 } from "../src/daemon/launchd.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
@@ -551,8 +552,18 @@ test("the launchd plist carries the managed marker", () => {
     guiSessionOnly: false,
   });
   expect(isHackManagedPlist({ plistText: plist })).toBe(true);
+  expect(plist).toContain(LAUNCHD_MANAGED_MARKER);
   expect(
     isHackManagedPlist({ plistText: "<plist><dict></dict></plist>\n" })
+  ).toBe(false);
+  // An earlier Hack's plist (no marker) still counts by its Label.
+  const legacy = plist.replace(`${LAUNCHD_MANAGED_MARKER}\n`, "");
+  expect(legacy).not.toContain(LAUNCHD_MANAGED_MARKER);
+  expect(isHackManagedPlist({ plistText: legacy })).toBe(true);
+  expect(
+    isHackManagedPlist({
+      plistText: legacy.replace("dance.hack.hackd", "example.custom.hackd"),
+    })
   ).toBe(false);
 });
 

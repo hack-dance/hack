@@ -155,18 +155,38 @@ export interface LaunchdPlistOptions {
 }
 
 /**
- * Marks a plist Hack wrote and may rewrite whole (HACK-2216). A plist
- * without it, such as one written by an older Hack or edited by hand, is
- * only repaired when its program is gone.
+ * Marks a plist Hack wrote and may rewrite whole (HACK-2216). Plists from
+ * earlier Hack versions lack it; see {@link isHackManagedPlist}.
  */
 export const LAUNCHD_MANAGED_MARKER =
   "<!-- Managed by hack: written by hack daemon install; local changes are replaced on the next install. -->";
 
-/** Whether the plist carries {@link LAUNCHD_MANAGED_MARKER}. */
+const PLIST_LABEL_PATTERN = /<key>Label<\/key>\s*<string>([^<]*)<\/string>/;
+
+/** The plist's `Label` string, or null when it has none. */
+export function readLaunchdPlistLabel(opts: {
+  readonly plistText: string;
+}): string | null {
+  return PLIST_LABEL_PATTERN.exec(opts.plistText)?.[1] ?? null;
+}
+
+/**
+ * Whether Hack may rewrite the plist whole (owner decision, HACK-2216): it
+ * carries {@link LAUNCHD_MANAGED_MARKER}, or its `Label` is Hack's own
+ * ({@link DAEMON_LAUNCHD_LABEL}). Callers read it only from Hack's own
+ * LaunchAgents path and rewrite it only when its program is this CLI's
+ * executable or is gone, so a plist from an earlier Hack (no marker) is
+ * still refreshed on upgrade. launchd has no drop-ins, so the systemd
+ * header rule (HACK-2052) does not carry over; a plist that runs another
+ * existing program is still left alone.
+ */
 export function isHackManagedPlist(opts: {
   readonly plistText: string;
 }): boolean {
-  return opts.plistText.split("\n").includes(LAUNCHD_MANAGED_MARKER);
+  return (
+    opts.plistText.split("\n").includes(LAUNCHD_MANAGED_MARKER) ||
+    readLaunchdPlistLabel(opts) === DAEMON_LAUNCHD_LABEL
+  );
 }
 
 /**
@@ -442,7 +462,8 @@ export function hasBoundedLaunchdOutput(opts: {
  * renders, and the plist was rewritten (HACK-2216);
  * `other-program`: it runs another existing program, left as it is;
  * `unmanaged`: it runs this CLI's executable and differs only in content,
- * but has no {@link LAUNCHD_MANAGED_MARKER}, so it was left as it is.
+ * but is not Hack's ({@link isHackManagedPlist}: no marker and another
+ * `Label`), so it was left as it is.
  */
 export type LaunchdProgramRepairResult =
   | "ok"
@@ -533,12 +554,13 @@ export async function readLaunchdProgramState(opts: {
  *   retargeted to this CLI ("repaired"): such a plist leaves launchd
  *   flapping with exit status 78;
  * - a plist that runs this CLI's executable but differs from what it
- *   renders is rewritten for its own program path ("refreshed"), only when
- *   it carries {@link LAUNCHD_MANAGED_MARKER}, or when its output paths are
- *   unbounded (the older repair, kept);
+ *   renders is rewritten for its own program path, with the marker
+ *   ("refreshed"), when it is Hack's ({@link isHackManagedPlist}: the
+ *   marker, or Hack's `Label`, which covers plists from earlier Hack
+ *   versions) or its output paths are unbounded (the older repair, kept);
  * - another existing program is left alone ("other-program"), even a stale
- *   versioned path; `hack daemon install` switches it. A plist without the
- *   marker that only differs in content is left alone too ("unmanaged").
+ *   versioned path; `hack daemon install` switches it. A plist that is not
+ *   Hack's and only differs in content is left alone too ("unmanaged").
  *
  * Reports "not-installed" without reading the plist when
  * {@link resolveLaunchdAccess} denies access: this process does not own the

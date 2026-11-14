@@ -172,6 +172,18 @@ impl HackApp {
         if events.is_empty() && exit.is_none() {
             return;
         }
+        // While paused, remember which line is at the top so evictions at
+        // the front do not move the text being read.
+        let anchor = if self.logs.model.paused {
+            let top = self.logs.scroll.logical_scroll_top_index();
+            self.logs
+                .visible
+                .get(top)
+                .and_then(|&i| self.logs.model.line(i))
+                .map(|l| l.seq)
+        } else {
+            None
+        };
         for e in &events {
             self.logs.model.apply(e);
         }
@@ -184,6 +196,9 @@ impl HackApp {
             self.logs
                 .scroll
                 .scroll_to_item(self.logs.visible.len() - 1, ScrollStrategy::Bottom);
+        } else if let Some(seq) = anchor {
+            let pos = self.logs.model.position_of_seq(&self.logs.visible, seq);
+            self.logs.scroll.scroll_to_item(pos, ScrollStrategy::Top);
         }
         cx.notify();
     }

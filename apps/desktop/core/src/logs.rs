@@ -347,6 +347,14 @@ impl LogsModel {
             .collect()
     }
 
+    /// Position in `visible` (buffer indices) of the line with sequence
+    /// `seq`, or of the next surviving line if it was evicted. Used to keep
+    /// a paused viewport on the lines being read while old lines drop off.
+    #[must_use]
+    pub fn position_of_seq(&self, visible: &[usize], seq: u64) -> usize {
+        visible.partition_point(|&i| self.lines.get(i).is_some_and(|l| l.seq < seq))
+    }
+
     #[must_use]
     pub fn line(&self, index: usize) -> Option<&LogLine> {
         self.lines.get(index)
@@ -670,6 +678,30 @@ mod tests {
                 reason: "Loki query failed: 502".into()
             }
         );
+    }
+
+    #[test]
+    fn paused_anchor_survives_eviction() {
+        let mut m = LogsModel::with_limits(5, 1_000_000);
+        m.start(true);
+        for i in 0..5 {
+            m.apply(&line(&format!("l{i}")));
+        }
+        // Reading line seq 3 (index 3) while paused.
+        let anchor = m.line(3).unwrap().seq;
+        m.set_paused(true);
+        m.apply(&line("l5"));
+        m.apply(&line("l6")); // evicts seq 0 and 1
+        let v = m.visible_indices();
+        let pos = m.position_of_seq(&v, anchor);
+        assert_eq!(
+            m.line(v[pos]).unwrap().message,
+            "l3",
+            "same line, new index"
+        );
+        assert_eq!(pos, 1);
+        // An evicted anchor lands on the next surviving line.
+        assert_eq!(m.line(v[m.position_of_seq(&v, 0)]).unwrap().message, "l2");
     }
 
     #[test]

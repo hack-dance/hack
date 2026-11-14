@@ -12,6 +12,7 @@
 
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
+- [Activity log](./reference/activity-log.md) — the `up`/`down`/`restart` history `hack activity` reads: records, origins, concurrency, rotation and what is never recorded
 - [Shared host helper lifecycle](./reference/shared-host-lifecycle.md) — identity-verified adoption, exact process claims and release rules for helpers shared across branches
 - [Sessions](./sessions.md)
 - [Background commands](./guides/background-commands.md) — `hack exec|run --detach`, cursor reads, inspect and cancel; storage, retention and partial redaction

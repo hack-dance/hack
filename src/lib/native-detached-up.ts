@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.ts";
+import {
+  noteActivityFailedServices,
+  suppressActivityRecording,
+} from "./activity-log.ts";
 import { hackReexecEnvironment } from "./child-environment.ts";
 import {
   emitCliResult,
@@ -109,6 +113,10 @@ function startupFailureMessage(value: unknown): StartupFailure | undefined {
 }
 
 function startupFailureError(failure: StartupFailure): HackCliError {
+  noteActivityFailedServices([
+    ...(failure.failedServices ?? []),
+    failure.service,
+  ]);
   if (failure.code === "provider_pin_changed") {
     return new HackCliError({
       code: "E_STARTUP_INCOMPLETE",
@@ -184,6 +192,9 @@ export async function runNativeDetachedOwner(opts: {
   if (!(process.send && process.connected) || publishReady) {
     return 1;
   }
+  // This owner re-runs `up` and lives as long as the services; the launcher
+  // that started it records the action (HACK-2218).
+  suppressActivityRecording();
   let ready = false;
   let accepted = false;
   let stopping = false;

@@ -568,6 +568,28 @@ hack open [target] [options]
 | `--version, -v` | Show version |
 
 
+## `hack activity`
+
+Show recent up, down and restart actions (newest first)
+
+### Usage
+
+```bash
+hack activity [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--project <name>` | Only entries for this registered project name |
+| `--limit <n>` | Most entries to show, newest first (default 50, at most 10000) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack branch`
 
 Manage branch aliases for a project

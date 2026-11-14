@@ -1,0 +1,308 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import {
+  appendFile,
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { parseActivityLimit } from "../src/commands/activity.ts";
+import {
+  ACTIVITY_LINE_LIMIT,
+  type ActivityRecord,
+  appendActivityRecord,
+  buildActivityRecord,
+  encodeActivityRecord,
+  noteActivityFailedServices,
+  parseActivityText,
+  readActivity,
+  recordActivity,
+  resolveActivityOrigin,
+} from "../src/lib/activity-log.ts";
+import { restoreEnv } from "./helpers/env.ts";
+
+// ---------------------------------------------------------------------------
+// HACK-2218: the activity log's writer and reader, on real files in a temp
+// directory. No project, engine or Hack home of the contributor is touched.
+// ---------------------------------------------------------------------------
+
+const MODULE = resolve(import.meta.dir, "..", "src", "lib", "activity-log.ts");
+let root = "";
+let path = "";
+let savedOrigin: string | undefined;
+let savedHome: string | undefined;
+
+beforeEach(async () => {
+  root = await realpath(await mkdtemp(join(tmpdir(), "hack-activity-")));
+  path = join(root, "home", "activity.jsonl");
+  savedOrigin = process.env.HACK_ORIGIN;
+  savedHome = process.env.HACK_HOME;
+  restoreEnv("HACK_ORIGIN", undefined);
+});
+
+afterEach(async () => {
+  restoreEnv("HACK_ORIGIN", savedOrigin);
+  restoreEnv("HACK_HOME", savedHome);
+  await rm(root, { recursive: true, force: true });
+});
+
+function record(
+  overrides: Partial<Parameters<typeof buildActivityRecord>[0]> = {}
+): ActivityRecord {
+  return buildActivityRecord({
+    action: "up",
+    startedAt: Date.UTC(2026, 10, 14, 12, 0, 0),
+    durationMs: 1234,
+    project: "shop",
+    branch: null,
+    exitCode: 0,
+    failedServices: [],
+    ...overrides,
+  });
+}
+
+test("records are single lines with the documented fields, newest first on read", async () => {
+  await appendActivityRecord({ path, record: record({ project: "a" }) });
+  await appendActivityRecord({
+    path,
+    record: record({ project: "b", action: "down", exitCode: 1 }),
+  });
+  const text = await readFile(path, "utf8");
+  expect(text.split("\n")).toHaveLength(3);
+  const first = JSON.parse(text.split("\n")[0] as string);
+  expect(Object.keys(first).sort()).toEqual(
+    [
+      "action",
+      "branch",
+      "duration_ms",
+      "failed_services",
+      "origin",
+      "outcome",
+      "project",
+      "ts",
+      "v",
+    ].sort()
+  );
+  const read = await readActivity({ path, limit: 10 });
+  expect(read.map((entry) => entry.project)).toEqual(["b", "a"]);
+  expect(read[0]?.outcome).toBe("failed");
+  expect((await readActivity({ path, limit: 10, project: "a" })).length).toBe(
+    1
+  );
+  expect((await readActivity({ path, limit: 1 })).length).toBe(1);
+});
+
+test("the file is created 0600; a loose existing file is tightened; a symlink is refused", async () => {
+  await appendActivityRecord({ path, record: record() });
+  expect((await lstat(path)).mode & 0o777).toBe(0o600);
+  await chmod(path, 0o644);
+  await appendActivityRecord({ path, record: record() });
+  expect((await lstat(path)).mode & 0o777).toBe(0o600);
+
+  const target = join(root, "elsewhere.txt");
+  await writeFile(target, "untouched\n");
+  const linked = join(root, "linked.jsonl");
+  await symlink(target, linked);
+  await expect(
+    appendActivityRecord({ path: linked, record: record() })
+  ).rejects.toThrow();
+  expect(await readFile(target, "utf8")).toBe("untouched\n");
+});
+
+test("concurrent writers in separate processes never interleave lines", async () => {
+  const writers = 8;
+  const each = 40;
+  // Long lines (many failed services) make interleaving visible if it happens.
+  const services = Array.from(
+    { length: 32 },
+    (_, i) => `service-${i}-${"x".repeat(80)}`
+  );
+  const script = `
+    const m = await import(${JSON.stringify(MODULE)});
+    const id = Number(process.argv[1]);
+    for (let i = 0; i < ${each}; i += 1) {
+      await m.appendActivityRecord({
+        path: ${JSON.stringify(path)},
+        record: m.buildActivityRecord({
+          action: "restart", startedAt: Date.now(), durationMs: i,
+          project: "p" + id, branch: null, exitCode: 1,
+          failedServices: ${JSON.stringify(services)},
+        }),
+      });
+    }`;
+  await mkdir(join(root, "home"));
+  const children = Array.from({ length: writers }, (_, id) =>
+    Bun.spawn([process.execPath, "-e", script, String(id)], {
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+  );
+  const codes = await Promise.all(children.map((child) => child.exited));
+  expect(codes.every((code) => code === 0)).toBe(true);
+  const text = await readFile(path, "utf8");
+  const all = text.split("\n");
+  expect(all.pop()).toBe("");
+  // A writer that looks at the last byte while another append is still
+  // being copied may start a fresh line: a blank line, never a split record.
+  const lines = all.filter((line) => line.length > 0);
+  expect(lines).toHaveLength(writers * each);
+  for (const line of lines) {
+    expect(() => JSON.parse(line)).not.toThrow();
+  }
+  const parsed = parseActivityText(text);
+  expect(parsed).toHaveLength(writers * each);
+  for (let id = 0; id < writers; id += 1) {
+    expect(parsed.filter((entry) => entry.project === `p${id}`)).toHaveLength(
+      each
+    );
+  }
+  for (const line of lines) {
+    expect(Buffer.byteLength(line) + 1).toBeLessThanOrEqual(
+      ACTIVITY_LINE_LIMIT
+    );
+  }
+});
+
+test("rotation keeps exactly one generation and reads across it", async () => {
+  const one = encodeActivityRecord(record()).byteLength;
+  const rotateBytes = one * 5;
+  for (let i = 0; i < 12; i += 1) {
+    await appendActivityRecord({
+      path,
+      rotateBytes,
+      record: record({ durationMs: i }),
+    });
+  }
+  const current = await lstat(path);
+  expect(current.size).toBeLessThanOrEqual(rotateBytes);
+  expect((await lstat(`${path}.1`)).isFile()).toBe(true);
+  expect(await lstat(`${path}.2`).catch(() => null)).toBeNull();
+  const read = await readActivity({ path, limit: 100 });
+  const durations = read.map((entry) => entry.duration_ms);
+  // Newest first, continuous across the two files.
+  expect(durations[0]).toBe(11);
+  expect(durations).toEqual([...durations].sort((a, b) => b - a));
+  expect(durations.length).toBeGreaterThanOrEqual(5);
+  expect(durations.length).toBeLessThanOrEqual(10);
+});
+
+test("a torn last line is skipped on read, and the next record stays whole", async () => {
+  await appendActivityRecord({ path, record: record({ project: "first" }) });
+  await appendFile(path, '{"v":1,"ts":"2026-11-14T12:00:00.000Z","proj');
+  expect(
+    (await readActivity({ path, limit: 10 })).map((e) => e.project)
+  ).toEqual(["first"]);
+  await appendActivityRecord({ path, record: record({ project: "second" }) });
+  expect(
+    (await readActivity({ path, limit: 10 })).map((e) => e.project)
+  ).toEqual(["second", "first"]);
+  // Malformed or foreign lines in the middle are skipped too.
+  await appendFile(path, 'not json\n{"v":99}\n');
+  expect((await readActivity({ path, limit: 10 })).length).toBe(2);
+});
+
+test("missing files read as empty", async () => {
+  expect(await readActivity({ path, limit: 10 })).toEqual([]);
+});
+
+test("origin comes from HACK_ORIGIN within a closed set", () => {
+  expect(resolveActivityOrigin(undefined)).toBe("cli");
+  expect(resolveActivityOrigin("app")).toBe("app");
+  expect(resolveActivityOrigin(" agent ")).toBe("agent");
+  expect(resolveActivityOrigin("autostart")).toBe("autostart");
+  expect(resolveActivityOrigin("rm -rf /")).toBe("cli");
+  process.env.HACK_ORIGIN = "app";
+  expect(record().origin).toBe("app");
+});
+
+test("names that are not plain names are dropped, never written", () => {
+  const built = record({
+    project: "/home/user/secret-project",
+    branch: "feature/../x",
+    failedServices: ["web", "bad name", "a=b", "web"],
+  });
+  expect(built.project).toBeNull();
+  expect(built.branch).toBeNull();
+  expect(built.failed_services).toEqual(["web"]);
+});
+
+test("exit codes map to outcomes", () => {
+  expect(record({ exitCode: 0 }).outcome).toBe("ok");
+  expect(record({ exitCode: 1 }).outcome).toBe("failed");
+  expect(record({ exitCode: 130 }).outcome).toBe("interrupted");
+  expect(record({ exitCode: 143 }).outcome).toBe("interrupted");
+});
+
+test("recordActivity passes the result through and records noted failures", async () => {
+  process.env.HACK_HOME = join(root, "home");
+  try {
+    const code = await recordActivity({
+      action: "up",
+      project: async () => "shop",
+      run: async () => {
+        noteActivityFailedServices(["db", "web"]);
+        return 3;
+      },
+    });
+    expect(code).toBe(3);
+    const [entry] = await readActivity({ limit: 1 });
+    expect(entry?.failed_services).toEqual(["db", "web"]);
+    expect(entry?.outcome).toBe("failed");
+    // An error passes through, and is recorded as a failure.
+    await expect(
+      recordActivity({
+        action: "down",
+        project: async () => "shop",
+        run: async () => {
+          throw new Error("boom");
+        },
+      })
+    ).rejects.toThrow("boom");
+    expect((await readActivity({ limit: 1 }))[0]?.action).toBe("down");
+    // Outside an action, notes do nothing.
+    noteActivityFailedServices(["x"]);
+  } finally {
+    restoreEnv("HACK_HOME", savedHome);
+  }
+});
+
+test("a write failure never changes the result", async () => {
+  // The Hack home is a file: the log cannot be created under it.
+  await writeFile(join(root, "home"), "not a directory");
+  process.env.HACK_HOME = join(root, "home");
+  try {
+    expect(
+      await recordActivity({
+        action: "up",
+        project: async () => "shop",
+        run: async () => 0,
+      })
+    ).toBe(0);
+    expect(
+      await recordActivity({
+        action: "up",
+        project: async () => {
+          throw new Error("registry unreadable");
+        },
+        run: async () => 7,
+      })
+    ).toBe(7);
+  } finally {
+    restoreEnv("HACK_HOME", savedHome);
+  }
+});
+
+test("--limit is a whole number in range", () => {
+  expect(parseActivityLimit(undefined)).toBe(50);
+  expect(parseActivityLimit("100")).toBe(100);
+  for (const bad of ["0", "-1", "1.5", "abc", "10001", ""]) {
+    expect(() => parseActivityLimit(bad)).toThrow();
+  }
+});

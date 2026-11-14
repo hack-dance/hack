@@ -323,6 +323,8 @@ export async function downloadAndExtractRelease(opts: {
   readonly version: string;
   readonly sha256?: string;
   readonly request?: ReleaseFetch;
+  /** Parent for a fresh owned extraction directory; defaults to the OS temp directory. */
+  readonly tempParent?: string;
 }): Promise<DownloadExtractResult> {
   if (!RELEASE_VERSION.test(opts.version)) {
     return {
@@ -330,7 +332,9 @@ export async function downloadAndExtractRelease(opts: {
       error: "Invalid release version; installation unchanged.",
     };
   }
-  const tmpRoot = await mkTmpDir({ prefix: "hack-update-" });
+  const tmpRoot = await mkdtemp(
+    join(opts.tempParent ?? tmpdir(), "hack-update-")
+  );
   const tarballPath = resolve(tmpRoot, "release.tar.gz");
   try {
     await transferRelease({
@@ -466,10 +470,6 @@ async function safeReadText(res: Response): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-async function mkTmpDir(opts: { readonly prefix: string }): Promise<string> {
-  return await mkdtemp(join(tmpdir(), opts.prefix));
 }
 
 async function extractTarGz(opts: {

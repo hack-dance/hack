@@ -4112,9 +4112,11 @@ command exit code, and never falls back to Compose. With piped input/output or
 `HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
 a timeout may leave the command running and is not
 retried. `--env` and `--profile` changes are refused. A command name such as `bun`
-uses the selected container's PATH; no host PATH or implicit shell is used. Normal
-`hack exec` resolves the saved startup overlay and AWS profile again, and delivers
-fresh selected-service values through private stdin.
+uses the selected container's PATH; no host PATH or implicit shell is used. For
+adopted Compose services, `hack exec` resolves the saved startup overlay and AWS profile again, and delivers
+fresh selected-service managed, allowed caller-shell and env-file values through
+private stdin. These values can differ from startup; use `hack restart` when
+the running service must receive changed inputs too.
 Each request binds the reviewed plan, current container and generation, and has
 its own short ingress lifetime. Startup leases and files are not renewed or rewritten.
 The allocation is selected from the current container's exact read-only mounts and
@@ -4123,7 +4125,7 @@ by earlier restores do not compete with this selection; pending, mismatched or
 ambiguous mounted allocations are refused.
 Legacy mappings without explicit selectors and services with older launcher mounts
 refuse before execution; restart with the matching candidate to adopt this path.
-Services without managed values use ordinary exec. The native live qualification
+Services with no private values to deliver use ordinary exec. The native live qualification
 of this fresh-delivery path remains separate from its unit and transport tests.
 
 With terminal stdin and stdout in the foreground, `hack exec SERVICE -- /bin/sh` selects interactive

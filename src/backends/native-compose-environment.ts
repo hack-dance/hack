@@ -17,6 +17,12 @@ import {
   nativeEnvFileSourceLocation,
   readNativeEnvFileSource,
 } from "./native-env-file-source.ts";
+import {
+  NATIVE_ENV_SECRET_SOURCE_REASON,
+  NATIVE_ENV_SECRET_SOURCE_UNKNOWN_REASON,
+  type NativeEnvSecretDenylist,
+  nativeEnvSecretDenylist,
+} from "./native-env-source-denylist.ts";
 import { nativeGcloudCredentialMount } from "./native-gcloud-environment.ts";
 import { nativeServiceActive } from "./native-project-builds.ts";
 import { shellVariableReadable } from "./native-shell-environment.ts";
@@ -36,6 +42,8 @@ type FileSpec = {
 type Source = { readonly path: string; readonly text: string } | null;
 type Options = {
   readonly projectRoot: string;
+  /** The project root as the caller supplied it, before canonicalization. */
+  readonly callerProjectRoot?: string;
   readonly composeFile: string;
   readonly compose: Record<string, unknown>;
   readonly services: Readonly<Record<string, NativeComposeEnvironmentService>>;
@@ -272,7 +280,12 @@ async function canonicalSourceOptions(opts: Options): Promise<Options> {
     );
   }
   const root = await realpath(opts.projectRoot);
-  return { ...opts, projectRoot: root, composeFile: resolve(root, member) };
+  return {
+    ...opts,
+    projectRoot: root,
+    callerProjectRoot: opts.callerProjectRoot ?? opts.projectRoot,
+    composeFile: resolve(root, member),
+  };
 }
 
 async function readAutomaticDotenv(opts: {
@@ -343,6 +356,17 @@ async function environmentSources(
   const cached = new Map<string, Source>();
   const automatic = join(dirname(opts.composeFile), ".env");
   const env = opts.env ?? {};
+  let denylist: NativeEnvSecretDenylist | undefined;
+  // Built on first use from paths only; it touches no file.
+  const secretSource = (path: string): boolean => {
+    denylist ??= nativeEnvSecretDenylist({
+      projectRoots: [
+        opts.projectRoot,
+        opts.callerProjectRoot ?? opts.projectRoot,
+      ],
+    });
+    return denylist.denies(path);
+  };
   let bytes = 0;
   let references = 0;
   const shell = (name: string, reportName: boolean): string | undefined => {
@@ -372,6 +396,20 @@ async function environmentSources(
       path: spec.path,
       service,
     });
+    // Before any other inspection, cache reuse or read of the source.
+    let denied: boolean;
+    try {
+      denied = secretSource(path);
+    } catch {
+      throw refused(
+        spec.path,
+        NATIVE_ENV_SECRET_SOURCE_UNKNOWN_REASON,
+        service
+      );
+    }
+    if (denied) {
+      throw refused(spec.path, NATIVE_ENV_SECRET_SOURCE_REASON, service);
+    }
     if (
       (await present(`${automatic}.state.json`)) &&
       (await sameSource(path, automatic))

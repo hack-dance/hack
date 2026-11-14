@@ -279,6 +279,37 @@ test("preflight and start share env-file admission and never publish file values
   }
 }, 30_000);
 
+test("preflight and start refuse the project key as an env file before reading it", async () => {
+  const f = await fixture({
+    services: { web: { image: IMAGE, env_file: "../.hack.secret.key" } },
+  });
+  await chmod(f.project, 0o700);
+  const keyFile = join(f.project, ".hack.secret.key");
+  await writeFile(keyFile, `${PRIVATE}\n`, { mode: 0o600 });
+  await f.review([], { services: { web: { active: true } } });
+  const env = { ...f.native, ...GRANT };
+  const report = await preflight(f, env);
+  expect(codes(report.report, "cli")).toContain("environment_file_input:web");
+  expect(report.output).toContain(
+    "Hack key and secret-store files cannot be environment sources"
+  );
+  expect(report.output).not.toContain(PRIVATE);
+  const before = await f.calls();
+  // Foreground start: a detached owner discards the refusal text.
+  const up = await cli(f, ["up"], env);
+  expect(up.code).toBe(1);
+  expect(up.output).toContain(
+    "Hack key and secret-store files cannot be environment sources"
+  );
+  expect(up.output).not.toContain(PRIVATE);
+  expect((await f.argv()).join("\n")).not.toContain(PRIVATE);
+  expect(
+    (await f.calls())
+      .slice(before.length)
+      .every((call) => call === "project plan")
+  ).toBe(true);
+});
+
 test("preflight and static start refuse oversized file delivery before pool effects", async () => {
   const f = await fixture({
     services: { web: { image: IMAGE, env_file: "service.env" } },

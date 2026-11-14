@@ -81,8 +81,9 @@ function mountsAnonymousVolume(service: Record<string, unknown>): boolean {
       : isRecord(mount) &&
         (mount.type === undefined || mount.type === "volume") &&
         mount.source === undefined &&
-        (mount.volume === undefined ||
-          (isRecord(mount.volume) && mount.volume.subpath === undefined)) &&
+        // Native refuses any volume options on an anonymous volume: a subpath
+        // needs a named volume, and options without a subpath are invalid.
+        mount.volume === undefined &&
         typeof mount.target === "string"
   );
 }

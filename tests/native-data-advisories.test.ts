@@ -130,6 +130,7 @@ test("a refused anonymous-volume shape does not add a retained-data advisory", (
   for (const mount of [
     { type: "volume", target: "/data", volume: { subpath: "cache" } },
     { type: "volume", target: "/data", volume: null },
+    { type: "volume", target: "/data", volume: {} },
     { type: "volume", source: null, target: "/data" },
     { type: "volume", source: "", target: "/data" },
     { type: "bind", target: "/data" },

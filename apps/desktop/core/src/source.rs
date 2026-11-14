@@ -115,8 +115,34 @@ impl DaemonRecovery {
 
 /// Native finite logs are a single-service snapshot (not ndjson), so the
 /// combined tail is not available for native projects in v0.
-pub const NATIVE_LOGS_NOTE: &str =
-    "Native logs are read one service at a time; they arrive with the Logs tab.";
+pub const NATIVE_LOGS_NOTE: &str = "Native logs are read one service at a time and are not shown in this preview yet. In a terminal: HACK_RUNTIME_BACKEND=native hack logs <service> --no-follow --tail 200";
+
+/// A running log stream: live `hack logs --json`, or canned events.
+pub trait LogFeed: Send {
+    /// Up to `max` events without blocking, overflow count, and exit after
+    /// retained events are delivered (see [`crate::runner::LogStream::poll`]).
+    fn poll(&mut self, max: usize) -> crate::runner::StreamPoll;
+}
+
+impl LogFeed for crate::runner::LogStream {
+    fn poll(&mut self, max: usize) -> crate::runner::StreamPoll {
+        crate::runner::LogStream::poll(self, max)
+    }
+}
+
+/// Canned events delivered in batches; then it keeps "following" silently.
+pub struct FixtureFeed(pub Vec<crate::models::LogEvent>);
+
+impl LogFeed for FixtureFeed {
+    fn poll(&mut self, max: usize) -> crate::runner::StreamPoll {
+        let n = max.min(self.0.len());
+        crate::runner::StreamPoll {
+            events: self.0.drain(..n).collect(),
+            exit: None,
+            skipped: 0,
+        }
+    }
+}
 
 pub trait Source: Send + Sync {
     /// Explicit user recovery only; never called by a poll.
@@ -147,6 +173,18 @@ pub trait Source: Send + Sync {
     /// Why no tail could be read; shown in place of the tail.
     fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
     -> Result<Vec<LogEntry>, String>;
+
+    /// Start a log stream for the Logs tab (`args` from `LogsModel::cli_args`).
+    /// Dropping the feed stops the stream.
+    ///
+    /// # Errors
+    /// Why no stream can be opened (native projects in v0, spawn failure).
+    fn open_logs(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        args: &[String],
+    ) -> Result<Box<dyn LogFeed>, String>;
 }
 
 /// Live data from a matching hackd. CLI listing fallback needs R18:
@@ -194,6 +232,22 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn open_logs(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        args: &[String],
+    ) -> Result<Box<dyn LogFeed>, String> {
+        if native {
+            return Err(NATIVE_LOGS_NOTE.into());
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.runner
+            .stream_logs(&args, Some(repo_root))
+            .map(|s| Box::new(s) as Box<dyn LogFeed>)
+            .map_err(|e| e.to_string())
+    }
+
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
         let (_, stderr, code) = self
             .runner
@@ -466,6 +520,32 @@ fn cli_selects_exactly(root: &Path) -> bool {
 pub struct FixtureSource(pub Fixture);
 
 impl Source for FixtureSource {
+    fn open_logs(
+        &self,
+        _repo_root: &Path,
+        native: bool,
+        args: &[String],
+    ) -> Result<Box<dyn LogFeed>, String> {
+        if native {
+            return Err(NATIVE_LOGS_NOTE.into());
+        }
+        // Replay the "following" fixture, filtered to the chosen service.
+        // The service filter is the trailing positional, if any.
+        let service = args
+            .last()
+            .filter(|a| !a.starts_with("--") && a.parse::<u32>().is_err() && a.as_str() != "logs");
+        let events = crate::logs::fixtures::events()
+            .into_iter()
+            .filter(|e| {
+                service.is_none()
+                    || e.entry
+                        .as_ref()
+                        .is_none_or(|x| x.service.as_ref() == service)
+            })
+            .collect();
+        Ok(Box::new(FixtureFeed(events)))
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
     }
@@ -578,16 +658,21 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Complete macOS first-launch scanning before the fake daemon's
-        // bounded accept window starts. --version has no fixture effects.
+        // Finish macOS first-launch scanning before the daemon accept timer.
         CliRunner::new(&hack)
+            .with_env("HOME", &dir.to_string_lossy())
+            .with_env("HACK_HOME", &dir.to_string_lossy())
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
             .version(Duration::from_secs(60))
             .unwrap();
         let (daemon, server) = fake_daemon(
             r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","backend":"native"}]}"#,
         );
         let src = LiveSource {
-            runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
+            runner: CliRunner::new(&hack)
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("HOME", &dir.to_string_lossy())
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
             daemon: Some(daemon),
         };
         let snap = src.snapshot().unwrap();
@@ -634,11 +719,17 @@ esac
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         CliRunner::new(&hack)
+            .with_env("HOME", &dir.to_string_lossy())
+            .with_env("HACK_HOME", &dir.to_string_lossy())
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
             .version(Duration::from_secs(60))
             .unwrap();
         let (daemon, server) = fake_daemon("{}");
         let src = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: CliRunner::new(&hack)
+                .with_env("HOME", &dir.to_string_lossy())
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
             daemon: Some(daemon),
         };
         let r = src.snapshot();
@@ -816,6 +907,25 @@ esac
         assert!(untrusted(trusted_root(&proj)), "writable ancestor");
         set(&open, 0o700);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn fixture_logs_honour_the_service_filter_and_native_note() {
+        let src = FixtureSource(Fixture::Running);
+        let args: Vec<String> = ["logs", "--json", "--tail", "500", "worker"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let mut feed = src.open_logs(Path::new("/work/x"), false, &args).unwrap();
+        let events = feed.poll(1000).events;
+        assert!(
+            events
+                .iter()
+                .filter_map(|e| e.entry.as_ref())
+                .all(|e| e.service.as_deref() == Some("worker"))
+        );
+        assert!(feed.poll(1000).events.is_empty(), "delivered once");
+        assert!(src.open_logs(Path::new("/work/x"), true, &args).is_err());
     }
 
     #[test]

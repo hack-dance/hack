@@ -11,7 +11,11 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -295,59 +299,299 @@ impl CliRunner {
     /// `NotFound` or `Spawn`.
     pub fn stream_logs(&self, args: &[&str], path: Option<&Path>) -> Result<LogStream, RunError> {
         let mut child = self.spawn(args, path)?;
+        // Diagnostics must not fill the stderr pipe and block ndjson output.
+        // Drain concurrently with a bounded tail, as for finite CLI reads.
+        let stderr = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
         let stdout = child.stdout.take();
-        let (tx, rx) = mpsc::channel();
+        // Never block on the UI: the CLI ignores stdout backpressure and
+        // would otherwise buffer output in its own process without a bound.
+        let (tx, rx) = mpsc::sync_channel(STREAM_QUEUE);
+        let skipped = Arc::new(AtomicU64::new(0));
+        let reader_skipped = skipped.clone();
         let reader = thread::spawn(move || {
-            let Some(stdout) = stdout else { return };
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+            let mut diagnostics = String::new();
+            let Some(stdout) = stdout else {
+                return diagnostics;
+            };
+            let mut r = BufReader::new(stdout);
+            while let Some((line, cut)) = read_bounded_line(&mut r, MAX_RAW_LINE) {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let event = serde_json::from_str::<LogEvent>(&line).unwrap_or_else(|_| LogEvent {
-                    kind: "notice".into(),
-                    message: Some(line),
-                    ..LogEvent::default()
-                });
-                if tx.send(event).is_err() {
-                    break;
+                // A record cut at MAX_RAW_LINE is no longer valid JSON: show
+                // a visible marker instead of dropping it silently.
+                let mut event = if cut {
+                    oversized_record_event()
+                } else {
+                    match serde_json::from_str::<LogEvent>(&line) {
+                        Ok(event) if !event.kind.is_empty() => event,
+                        _ => {
+                            append_diagnostic(&mut diagnostics, &line);
+                            LogEvent {
+                                kind: "notice".into(),
+                                message: Some(line),
+                                ..LogEvent::default()
+                            }
+                        }
+                    }
+                };
+                // Cap before queueing, so the queue's memory is bounded too.
+                cap_event(&mut event);
+                match tx.try_send(event) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        reader_skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => break,
                 }
             }
+            diagnostics
         });
         Ok(LogStream {
             child,
-            rx,
+            rx: Some(rx),
             reader: Some(reader),
+            skipped,
+            stderr,
+            stdout_diagnostics: String::new(),
+            stderr_diagnostics: None,
         })
     }
+}
+
+/// Keep only a bounded UTF-8 diagnostic tail, including pretty JSON fragments.
+fn append_diagnostic(text: &mut String, line: &str) {
+    text.push_str(line);
+    text.push('\n');
+    if text.len() > STDERR_KEEP {
+        let mut cut = text.len() - STDERR_KEEP;
+        while !text.is_char_boundary(cut) {
+            cut += 1;
+        }
+        *text = text[cut..].to_owned();
+    }
+}
+
+/// Events queued between the reader thread and the UI.
+pub const STREAM_QUEUE: usize = 1024;
+/// Cap for the top-level `message` of an event (notices, errors).
+pub const MAX_NOTICE_BYTES: usize = 4 * 1024;
+/// Cap for every other short text field (kind, timestamps, service, ...).
+pub const MAX_FIELD_BYTES: usize = 256;
+/// Upper bound on the text one queued event retains after `cap_event`:
+/// the log message, the notice message and eight short fields.
+pub const MAX_EVENT_BYTES: usize =
+    crate::logs::MAX_LINE_BYTES + MAX_NOTICE_BYTES + 8 * MAX_FIELD_BYTES;
+/// Upper bound on queued text: `STREAM_QUEUE * MAX_EVENT_BYTES` (~70 MiB).
+pub const MAX_QUEUED_BYTES: usize = STREAM_QUEUE * MAX_EVENT_BYTES;
+
+/// Bound every text field an event retains, so one event never holds more
+/// than `MAX_EVENT_BYTES` (cut on a character boundary into a new, small
+/// string). A capped log message marks its entry truncated.
+fn cap_event(e: &mut LogEvent) {
+    fn cap(s: &mut String, max: usize) -> bool {
+        if s.len() <= max {
+            return false;
+        }
+        let mut keep = max;
+        while !s.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        *s = s[..keep].to_owned();
+        true
+    }
+    fn cap_opt(s: &mut Option<String>, max: usize) {
+        if let Some(v) = s.as_mut() {
+            cap(v, max);
+        }
+    }
+    cap(&mut e.kind, MAX_FIELD_BYTES);
+    cap_opt(&mut e.ts, MAX_FIELD_BYTES);
+    cap_opt(&mut e.backend, MAX_FIELD_BYTES);
+    cap_opt(&mut e.reason, MAX_FIELD_BYTES);
+    cap_opt(&mut e.message, MAX_NOTICE_BYTES);
+    if let Some(entry) = e.entry.as_mut() {
+        cap_opt(&mut entry.service, MAX_FIELD_BYTES);
+        cap_opt(&mut entry.stream, MAX_FIELD_BYTES);
+        cap_opt(&mut entry.timestamp, MAX_FIELD_BYTES);
+        cap_opt(&mut entry.level, MAX_FIELD_BYTES);
+        if cap(&mut entry.message, crate::logs::MAX_LINE_BYTES) {
+            entry.truncated = Some(true);
+        }
+    }
+}
+
+/// Text bytes an event retains (for the bound's test).
+#[cfg(test)]
+fn event_bytes(e: &LogEvent) -> usize {
+    let o = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+    e.kind.len()
+        + o(&e.ts)
+        + o(&e.backend)
+        + o(&e.reason)
+        + o(&e.message)
+        + e.entry.as_ref().map_or(0, |x| {
+            x.message.len() + o(&x.service) + o(&x.stream) + o(&x.timestamp) + o(&x.level)
+        })
+}
+
+/// Longest raw ndjson line read; the rest of a longer line is skipped.
+pub const MAX_RAW_LINE: usize = 1024 * 1024;
+
+/// Read one `\n`-terminated line, keeping at most `max` bytes of it.
+/// `None` at end of input (or on a read error).
+fn read_bounded_line<R: BufRead>(r: &mut R, max: usize) -> Option<(String, bool)> {
+    let mut buf = Vec::new();
+    let mut saw_any = false;
+    let mut cut = false;
+    loop {
+        let chunk = r.fill_buf().ok()?;
+        if chunk.is_empty() {
+            return saw_any.then(|| (String::from_utf8_lossy(&buf).into_owned(), cut));
+        }
+        saw_any = true;
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i, true),
+            None => (chunk.len(), false),
+        };
+        let room = max.saturating_sub(buf.len());
+        cut |= take > room;
+        buf.extend_from_slice(&chunk[..take.min(room)]);
+        r.consume(if done { take + 1 } else { take });
+        if done {
+            return Some((String::from_utf8_lossy(&buf).into_owned(), cut));
+        }
+    }
+}
+
+/// Shown in place of a record longer than `MAX_RAW_LINE`.
+fn oversized_record_event() -> LogEvent {
+    LogEvent {
+        kind: "log".into(),
+        entry: Some(crate::models::LogEntry {
+            service: None,
+            message: format!(
+                "[a log record over {} KB was dropped by the app; use Copy command to read it in a terminal]",
+                MAX_RAW_LINE / 1024
+            ),
+            stream: None,
+            timestamp: None,
+            level: Some("warn".into()),
+            truncated: Some(true),
+        }),
+        ..LogEvent::default()
+    }
+}
+
+/// One poll of a stream: up to `max` events, and the exit code once the
+/// process has exited **and** retained events have been delivered. Queue
+/// overflow is discarded and reported separately in `skipped`.
+#[derive(Debug, Default)]
+pub struct StreamPoll {
+    pub events: Vec<LogEvent>,
+    pub exit: Option<Option<i32>>,
+    /// Events discarded while the UI queue was full since the previous poll.
+    pub skipped: u64,
 }
 
 /// A running log stream. Dropping it kills the process group.
 pub struct LogStream {
     child: Child,
-    rx: mpsc::Receiver<LogEvent>,
-    reader: Option<thread::JoinHandle<()>>,
+    /// `None` only while dropping (see `Drop`).
+    rx: Option<mpsc::Receiver<LogEvent>>,
+    reader: Option<thread::JoinHandle<String>>,
+    skipped: Arc<AtomicU64>,
+    stderr: mpsc::Receiver<Drained>,
+    stdout_diagnostics: String,
+    stderr_diagnostics: Option<Drained>,
 }
 
 impl LogStream {
     /// Events received so far, without blocking.
     pub fn drain(&self) -> Vec<LogEvent> {
-        self.rx.try_iter().collect()
+        self.rx
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Wait up to `timeout` for the next event.
     pub fn next_timeout(&self, timeout: Duration) -> Option<LogEvent> {
-        self.rx.recv_timeout(timeout).ok()
+        self.rx.as_ref()?.recv_timeout(timeout).ok()
+    }
+
+    /// Up to `max` queued events. `exit` is set only when the reader has
+    /// reached end of output and the queue is empty; overflow is reported
+    /// separately. Its inner value is `None` when a signal ended the process.
+    pub fn poll(&mut self, max: usize) -> StreamPoll {
+        // Checked before draining: once the reader is done, nothing new
+        // arrives, so an under-full batch means the queue is exhausted.
+        let reader_done = self
+            .reader
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished);
+        let mut events: Vec<LogEvent> = self
+            .rx
+            .as_ref()
+            .map(|rx| rx.try_iter().take(max).collect())
+            .unwrap_or_default();
+        let mut exit = if reader_done && events.len() < max {
+            if let Some(reader) = self.reader.take() {
+                self.stdout_diagnostics = reader.join().unwrap_or_default();
+            }
+            self.child.try_wait().ok().flatten().map(|s| s.code())
+        } else {
+            None
+        };
+        if exit.is_some() && self.stderr_diagnostics.is_none() {
+            match self.stderr.try_recv() {
+                Ok(diagnostics) => self.stderr_diagnostics = Some(diagnostics),
+                Err(mpsc::TryRecvError::Empty) => exit = None,
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        if let Some(code) = exit.filter(|code| *code != Some(0)) {
+            let stderr = self
+                .stderr_diagnostics
+                .as_ref()
+                .map_or("", |d| d.text.as_str());
+            let reason = match parse_result(&self.stdout_diagnostics, stderr, code) {
+                Err(RunError::Cli(error)) => error.message,
+                _ if !stderr.trim().is_empty() => stderr.trim().to_owned(),
+                _ => self.stdout_diagnostics.trim().to_owned(),
+            };
+            if !reason.is_empty() {
+                let mut event = LogEvent {
+                    kind: "error".into(),
+                    message: Some(reason),
+                    ..LogEvent::default()
+                };
+                cap_event(&mut event);
+                events.push(event);
+            }
+        }
+        StreamPoll {
+            events,
+            exit,
+            skipped: self.skipped.swap(0, Ordering::Relaxed),
+        }
     }
 }
 
 impl Drop for LogStream {
     fn drop(&mut self) {
+        // Disconnect before killing the owned process group and joining.
+        drop(self.rx.take());
         kill_group(&mut self.child);
         if let Some(r) = self.reader.take() {
             let _ = r.join();
         }
     }
+}
+
+#[must_use]
+pub fn exit_description(code: Option<i32>) -> String {
+    code.map_or_else(|| "killed by signal".into(), |code| format!("exit {code}"))
 }
 
 /// Which part of a pipe to keep while draining it.
@@ -572,15 +816,17 @@ mod tests {
             .unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
             let fake = Self { dir };
-            // macOS may scan a newly written executable on first launch. Keep
-            // that delay outside every test's product-timeout measurement.
+            // Keep macOS first-launch scanning outside product timeouts.
             fake.runner()
                 .run_json::<Value>(&["__warmup"], None, Duration::from_secs(60))
                 .expect("fake CLI warmup");
             fake
         }
         fn runner(&self) -> CliRunner {
-            CliRunner::new(self.dir.join("hack")).with_env("HACK_HOME", &self.dir.to_string_lossy())
+            CliRunner::new(self.dir.join("hack"))
+                .with_env("HACK_HOME", &self.dir.to_string_lossy())
+                .with_env("HOME", &self.dir.to_string_lossy())
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
         }
     }
 
@@ -680,8 +926,9 @@ mod tests {
     #[test]
     fn timeout_kills_the_process_group() {
         // The child spawns a grandchild that would outlive a plain kill.
-        // FakeHack warms the script before this timed run; `ready` proves
-        // the body ran, rather than timing out before it exercised cleanup.
+        // The timeout leaves room for a slow first start of a new script
+        // (macOS scans freshly written executables); `ready` tells a slow
+        // start apart from a runner failure.
         let f = FakeHack::new(
             "echo ready > \"$HACK_HOME/ready\"\nsleep 300 &\necho $! > \"$HACK_HOME/grandchild\"\nwait",
         );
@@ -715,6 +962,203 @@ mod tests {
             .parse()
             .unwrap();
         assert_retired(pid);
+    }
+
+    #[test]
+    fn flood_finishes_without_ui_drain_and_reports_bounded_loss() {
+        let total = STREAM_QUEUE + 10_000;
+        let f = FakeHack::new(&format!(
+            "i=0; while [ $i -lt {total} ]; do echo '{{\"type\":\"log\",\"entry\":{{\"message\":\"flood\"}}}}'; i=$((i+1)); done"
+        ));
+        let mut stream = f.runner().stream_logs(&["logs"], None).unwrap();
+        let deadline = Instant::now() + T;
+        // No receiver calls: both the child and reader must finish even
+        // though the UI has consumed nothing and the queue is full.
+        while !stream.reader.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline, "reader blocked on UI queue");
+            thread::sleep(Duration::from_millis(5));
+        }
+        while stream.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "writer blocked on stdout");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let poll = stream.poll(STREAM_QUEUE + 1);
+        assert_eq!(poll.events.len(), STREAM_QUEUE);
+        assert_eq!(poll.skipped, 10_000);
+        assert!(poll.events.iter().map(event_bytes).sum::<usize>() <= MAX_QUEUED_BYTES);
+        assert_eq!(
+            stream.poll(STREAM_QUEUE + 1).skipped,
+            0,
+            "count delivered once"
+        );
+    }
+
+    fn failed_stream_banner(body: &str) -> String {
+        let f = FakeHack::new(body);
+        let mut stream = f.runner().stream_logs(&["logs"], None).unwrap();
+        let mut model = crate::logs::LogsModel::default();
+        model.start(true);
+        let deadline = Instant::now() + T;
+        loop {
+            let poll = stream.poll(100);
+            for event in poll.events {
+                model.apply(&event);
+            }
+            if let Some(code) = poll.exit {
+                model.exited(code);
+                return model.banner().unwrap();
+            }
+            assert!(Instant::now() < deadline, "stream did not exit");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn pretty_failure_envelope_reaches_the_banner_with_human_status() {
+        let banner = failed_stream_banner(
+            r#"cat <<'JSON'
+{
+  "ok": false,
+  "error": {
+    "code": "E_PROJECT_NOT_FOUND",
+    "message": "No project found at /work/missing"
+  }
+}
+JSON
+exit 1"#,
+        );
+        assert!(
+            banner.contains("No project found at /work/missing (exit 1)"),
+            "{banner}"
+        );
+        assert!(!banner.contains("Some("));
+    }
+
+    #[test]
+    fn stderr_failure_reason_reaches_the_banner_and_diagnostics_are_bounded() {
+        let banner = failed_stream_banner("echo 'docker executable unavailable' >&2; exit 127");
+        assert!(
+            banner.contains("docker executable unavailable (exit 127)"),
+            "{banner}"
+        );
+        let mut diagnostics = String::new();
+        for _ in 0..100 {
+            append_diagnostic(&mut diagnostics, &"é".repeat(STDERR_KEEP));
+            assert!(diagnostics.len() <= STDERR_KEEP);
+            assert!(diagnostics.capacity() <= STDERR_KEEP * 2);
+        }
+        assert_eq!(exit_description(None), "killed by signal");
+    }
+
+    #[test]
+    fn log_stream_drains_stderr_without_blocking_stdout() {
+        let f = FakeHack::new(
+            "head -c 2097152 /dev/zero >&2; echo '{\"type\":\"log\",\"entry\":{\"message\":\"after diagnostics\"}}'",
+        );
+        let s = f.runner().stream_logs(&["logs"], None).unwrap();
+        let event = s.next_timeout(T).expect("stderr must not block stdout");
+        assert_eq!(event.entry.unwrap().message, "after diagnostics");
+    }
+
+    #[test]
+    fn log_stream_reports_exit_only_after_every_line() {
+        // Many lines, then exit 3: the exit must not be reported while lines
+        // are still queued or unread, even with a small batch size.
+        let f = FakeHack::new(
+            "i=0; while [ $i -lt 300 ]; do echo \"{\\\"type\\\":\\\"log\\\",\\\"entry\\\":{\\\"message\\\":\\\"l$i\\\"}}\"; i=$((i+1)); done; echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 3",
+        );
+        let mut s = f.runner().stream_logs(&["logs"], None).unwrap();
+        let mut got = 0;
+        let mut exit = None;
+        for _ in 0..500 {
+            let p = s.poll(7);
+            got += p.events.len();
+            if let Some(code) = p.exit {
+                exit = Some(code);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(got, 301, "every line and the end event delivered first");
+        assert_eq!(exit, Some(Some(3)));
+    }
+
+    #[test]
+    fn dropping_a_stream_with_a_full_queue_does_not_hang() {
+        // Far more lines than STREAM_QUEUE, never polled: overflow is
+        // discarded. Drop must join the reader and retire its child.
+        let f = FakeHack::new(
+            "i=0; while [ $i -lt 20000 ]; do echo '{\"type\":\"heartbeat\"}'; i=$((i+1)); done; exec sleep 300",
+        );
+        let s = f.runner().stream_logs(&["logs"], None).unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let pid = i32::try_from(s.child.id()).unwrap();
+        assert!(
+            !process_gone(pid),
+            "positive control: stream child is alive"
+        );
+        completes(move || drop(s));
+        assert_retired(pid);
+    }
+
+    #[test]
+    fn oversized_records_leave_a_visible_marker() {
+        let f = FakeHack::new(&format!(
+            "printf '{{\"type\":\"log\",\"entry\":{{\"message\":\"'; head -c {} /dev/zero | tr '\\0' x; printf '\"}}}}\\n'; echo '{{\"type\":\"log\",\"entry\":{{\"message\":\"after\"}}}}'",
+            MAX_RAW_LINE + 1000
+        ));
+        let s = f.runner().stream_logs(&["logs"], None).unwrap();
+        let a = s.next_timeout(T).expect("marker");
+        let b = s.next_timeout(T).expect("next event");
+        let marker = a.entry.unwrap();
+        assert_eq!(marker.truncated, Some(true));
+        assert!(marker.message.contains("dropped by the app"));
+        assert_eq!(b.entry.unwrap().message, "after");
+    }
+
+    #[test]
+    fn queued_events_are_capped_before_send() {
+        let big = "x".repeat(crate::logs::MAX_LINE_BYTES * 3);
+        let mut e = LogEvent {
+            kind: big.clone(),
+            ts: Some(big.clone()),
+            backend: Some(big.clone()),
+            reason: Some(big.clone()),
+            message: Some(big.clone()),
+            entry: Some(crate::models::LogEntry {
+                service: Some(big.clone()),
+                message: big.clone(),
+                stream: Some(big.clone()),
+                timestamp: Some(big.clone()),
+                level: Some(big),
+                truncated: None,
+            }),
+        };
+        cap_event(&mut e);
+        assert!(event_bytes(&e) <= MAX_EVENT_BYTES, "{}", event_bytes(&e));
+        let entry = e.entry.as_ref().unwrap();
+        assert_eq!(entry.message.len(), crate::logs::MAX_LINE_BYTES);
+        assert!(entry.message.capacity() < crate::logs::MAX_LINE_BYTES + 1024);
+        assert_eq!(entry.truncated, Some(true));
+        assert_eq!(e.message.as_ref().unwrap().len(), MAX_NOTICE_BYTES);
+        assert_eq!(entry.timestamp.as_ref().unwrap().len(), MAX_FIELD_BYTES);
+        assert_eq!(e.reason.as_ref().unwrap().len(), MAX_FIELD_BYTES);
+        const { assert!(MAX_QUEUED_BYTES < 80 * 1024 * 1024) };
+    }
+
+    #[test]
+    fn bounded_line_reader_skips_the_tail_of_huge_lines() {
+        let data = format!("{}\nnext\n", "x".repeat(50));
+        let mut r = std::io::BufReader::with_capacity(8, data.as_bytes());
+        assert_eq!(
+            read_bounded_line(&mut r, 10).unwrap(),
+            ("x".repeat(10), true)
+        );
+        assert_eq!(
+            read_bounded_line(&mut r, 10).unwrap(),
+            ("next".into(), false)
+        );
+        assert!(read_bounded_line(&mut r, 10).is_none());
     }
 
     #[test]

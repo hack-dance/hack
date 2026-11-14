@@ -51,7 +51,7 @@ each project's detail as JSON. It runs no action, opens no window and writes
 nothing.
 
 An accepted refresh that changes the selected project root or backend clears the
-previous log tail, including when Follow is off.
+previous log tail, including when Follow is off, and replaces any open Logs stream.
 
 Live reads refresh every two seconds with a matching daemon and retry every ten
 seconds when unavailable. Every request has an order token: a read started before
@@ -76,12 +76,34 @@ engine-down, error / cli-missing, many-projects, stopped / starting, running,
 degraded / stopping, failed-start, needs-attention):
 [light](screenshots/fixtures-light.png), [dark](screenshots/fixtures-dark.png).
 
-## What v0 does not do yet
+## Logs tab
 
-Logs, Env and Activity tabs, CPU and memory, Doctor view, onboarding, always-on,
-daemon actions and upgrades come in later units. The design and the CLI/daemon
-requests they need are in `DESIGN.md` (PR #800).
+`hack logs --json` for the selected project, following by default:
+- Pause (reading continues, with an "N new" count), search, and a filter for one service (`hack logs <service>`).
+- Click any line to show it in full below the list (long or width-clipped lines); lines over 4 KB show how much is hidden.
+- "Log stream ended" and failures are shown distinctly, with Reconnect.
+- CLI stderr is drained concurrently with an 8 KB retained tail. A separate 8 KB tail retains non-event stdout, including pretty JSON failure envelopes. Failed exits show the CLI error message or diagnostic tail and a human-readable exit status.
+- The buffer holds at most 10,000 lines and 8 MB (service and timestamp included). Messages in valid records are capped at 64 KB; raw records over 1 MiB are replaced by a visible dropped-record marker instead. Memory only: nothing is written to disk and there is no copy-all.
+- Scrolling up pauses following; Resume returns to the newest line. Each event's text fields are capped before queueing (log message 64 KB, notice 4 KB, other fields 256 bytes). The 1,024-event queue retains at most about 70 MiB of text. When full, the reader discards incoming events and keeps consuming stdout; the tab shows a cumulative skipped-event count. The CLI does not honor pipe backpressure, so blocking the reader would allow its own output buffer to grow. This bounds app retention, not the CLI's memory under an arbitrarily fast producer.
+- Stderr output uses a muted style; only explicit error-level entries use the danger color. Services-tab tail polling stops while Logs is open.
+- The app's limits do not bound allocations before the CLI emits a record: the current Compose reader accumulates a complete line before JSON formatting. A single oversized or unterminated service line can therefore grow CLI memory. Bounding that upstream chunk reader is a separate CLI fix; this preview does not claim end-to-end memory safety against arbitrary service output.
+- "Copy command" copies the equivalent `hack logs --path … [service]` for a terminal.
+- Native projects show the terminal command instead, because native logs are a one-service snapshot.
 
+Fixtures: `--logs-fixture <state>` (`--list-fixtures` lists them). Boards:
+[light](screenshots/logs-light.png), [dark](screenshots/logs-dark.png). Row by row:
+following / paused with search, long lines / service filter, follow ended /
+failed, native / stopped.
+The paused-search fixture shows its active query in the search field. Finite
+reads for observed stopped projects include that state alongside the stream status.
+The paused fixture also demonstrates the overflow count. Pause has no timeout;
+following resumes through Resume, not automatically when scrolling to the bottom.
+
+## Not yet
+
+Env and Activity tabs, CPU and memory, onboarding, always-on, daemon actions
+and upgrades come in later units. The design and the CLI/daemon requests they
+need are in `DESIGN.md`.
 Process-cleanup regression tests use a generous 60-second scheduling deadline,
 then check process retirement rather than enforcing a short wall-clock latency.
 The stream-drop test also proves the reader was waiting before Drop and that

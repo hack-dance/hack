@@ -118,15 +118,16 @@ Source: `hack logs --json --path <root> --tail 500` (ndjson, follows by default)
 | State / control | Behaviour |
 |---|---|
 | Follow (default) | Newest at bottom; auto-scroll while at the bottom. |
-| Pause | Stops auto-scroll; keeps reading into a ring buffer bounded at 10,000 lines **and** 8 MB; "N new lines" chip. Scrolling up pauses. |
+| Pause | Stops auto-scroll; keeps reading into a ring buffer bounded at 10,000 lines **and** 8 MB; "N new lines" chip. Scrolling up pauses; Resume returns to the bottom. No pause timeout or automatic resume at the bottom in this preview. |
 | Search | Filters the buffer in place (plain text, case-insensitive), with match count. |
 | Service filter | One service at a time: restarts the stream as `hack logs <service>`. `--services` is Loki-only and native rejects it (and `--compose`), so the app never passes either. Multi-select needs R4. |
 | Very long lines | Cut at 4 KB on screen with "… (+N KB)", click to expand; `entry.truncated` shown as "truncated by hack". |
 | Secrets warning | Fixed note: "Logs are shown as your services print them. Hack does not hide secrets in logs." No copy-all; buffer never written to disk; "Open in terminal" offered. |
 | Finished | `end` event on a `--no-follow` read: "End of log" (normal). |
 | Follow ended | while following, an `end` event (`eof` from Compose, `closed` from Loki) and exit 0: "Log stream ended" + Reconnect. Not an error. |
-| Stream error | `error` event or exit ≠ 0: banner with reason and Reconnect. Docker down: "Docker not reachable". |
-| Closed by the app | tab change, project change or pause timeout: the app kills the stream; nothing is shown. |
+| Stream error | `error` event or exit ≠ 0: banner with reason and Reconnect. CLI failure envelopes and bounded diagnostic tails provide the reason. Docker failures retain the CLI's wording; a normalized "Docker not reachable" label is deferred. |
+| Closed by the app | tab change or project change: the app kills the stream; nothing is shown. |
+| Busy stream | The reader continuously consumes stdout. A full bounded event queue discards incoming events and reports a visible skipped-event count; it never waits for UI drain. This bounds app retention, not arbitrary producer-side CLI buffering. |
 | Stopped project | Last 200 lines (`--no-follow`), marked "project stopped". |
 
 ### Env tab (names only, never values)

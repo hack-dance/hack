@@ -81,9 +81,10 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
-    // Keep macOS first-launch scanning outside the fake daemon's accept
-    // deadline, using the same bounded runner as the application.
     hack_desktop_core::runner::CliRunner::new(&hack)
+        .with_env("HOME", &home.to_string_lossy())
+        .with_env("HACK_HOME", &home.to_string_lossy())
+        .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
         .version(std::time::Duration::from_secs(60))
         .unwrap();
     let server = serve_snapshot(&home);

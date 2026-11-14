@@ -9,6 +9,7 @@
 //!                                      fixture, light and dark, offscreen
 //! ```
 
+mod logs_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod view;
@@ -22,13 +23,14 @@ use hack_desktop_core::source::{FixtureSource, LiveSource, Source};
 
 pub(crate) struct Args {
     pub fixture: Option<Fixture>,
+    pub logs_fixture: Option<hack_desktop_core::logs::fixtures::LogsFixture>,
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
+        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
     );
     std::process::exit(2)
 }
@@ -36,6 +38,7 @@ fn usage() -> ! {
 fn parse_args() -> Args {
     let mut a = Args {
         fixture: None,
+        logs_fixture: None,
         theme: None,
         screenshots: None,
     };
@@ -49,9 +52,23 @@ fn parse_args() -> Args {
                     std::process::exit(2)
                 }));
             }
+            "--logs-fixture" => {
+                let name = it.next().unwrap_or_else(|| usage());
+                a.logs_fixture = Some(
+                    hack_desktop_core::logs::fixtures::LogsFixture::parse(&name).unwrap_or_else(
+                        || {
+                            eprintln!("unknown logs fixture {name:?}; see --list-fixtures");
+                            std::process::exit(2)
+                        },
+                    ),
+                );
+            }
             "--list-fixtures" => {
                 for f in Fixture::ALL {
                     println!("{}", f.name());
+                }
+                for f in hack_desktop_core::logs::fixtures::LogsFixture::ALL {
+                    println!("--logs-fixture {}", f.name());
                 }
                 std::process::exit(0)
             }
@@ -102,7 +119,14 @@ fn main() {
     }
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        let fixture = args.fixture;
+        let fixture = args.fixture.or(args.logs_fixture.map(|l| {
+            if l == hack_desktop_core::logs::fixtures::LogsFixture::Stopped {
+                Fixture::Stopped
+            } else {
+                Fixture::Running
+            }
+        }));
+        let logs_fixture = args.logs_fixture;
         let theme = args.theme;
         let source = source_for(fixture);
         gpui_kit::open_window(window_options(), cx, move |window, cx| {
@@ -111,7 +135,7 @@ fn main() {
                 None => Theme::sync_system_appearance(Some(window), cx),
             }
             cx.new(|cx| {
-                let mut app = view::HackApp::new(source, fixture.is_none(), cx);
+                let mut app = view::HackApp::new(source, fixture.is_none(), window, cx);
                 if let Some(f) = fixture {
                     app.select(fixtures::selected(f));
                     if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
@@ -120,6 +144,9 @@ fn main() {
                 }
                 if let Some(a) = fixture.and_then(|f| fixtures::local(f).in_flight) {
                     app.simulate_in_flight(a);
+                }
+                if let Some(l) = logs_fixture {
+                    app.show_logs_fixture(l, window, cx);
                 }
                 app
             })

@@ -24,13 +24,16 @@ use gpui_kit::{
 use hack_desktop_core::models::LogEntry;
 use hack_desktop_core::source::{ActionOutcome, DaemonRecovery, Source};
 use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
-use hack_desktop_core::viewmodel::{AppModel, DetailView, Event, ListView, Phase, Row};
+use hack_desktop_core::viewmodel::{
+    AppModel, DetailView, Event, ListView, Phase, RefreshToken, Row,
+};
 
 const TAIL_LINES: u32 = 20;
 
 pub struct HackApp {
-    model: AppModel,
-    source: Arc<dyn Source>,
+    pub(crate) model: AppModel,
+    pub(crate) source: Arc<dyn Source>,
+    pub(crate) logs: crate::logs_view::LogsPane,
     tab: usize,
     tail: Result<Vec<LogEntry>, String>,
     follow: bool,
@@ -44,10 +47,17 @@ pub struct HackApp {
 
 impl HackApp {
     /// `live`: poll the source. Fixtures load once and never poll.
-    pub fn new(source: Arc<dyn Source>, live: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        source: Arc<dyn Source>,
+        live: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let logs = crate::logs_view::LogsPane::new(window, cx);
         let mut this = Self {
             model: AppModel::new(),
             source,
+            logs,
             tab: 0,
             tail: Ok(Vec::new()),
             follow: true,
@@ -61,7 +71,23 @@ impl HackApp {
         } else {
             this.refresh_now();
         }
+        this.start_log_drain(cx);
         this
+    }
+
+    /// Fixtures: show the Logs tab in a designed state.
+    pub fn show_logs_fixture(
+        &mut self,
+        f: hack_desktop_core::logs::fixtures::LogsFixture,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use hack_desktop_core::logs::fixtures::{LogsFixture, model};
+        if f == LogsFixture::Native {
+            self.select("docs-site");
+        }
+        self.tab = 1;
+        self.logs.set_model(model(f), window, cx);
     }
 
     /// Synchronous refresh, for fixtures and screenshots.
@@ -72,6 +98,41 @@ impl HackApp {
             || Ok(Vec::new()),
             |(root, native)| self.source.log_tail(&root, native, TAIL_LINES),
         );
+    }
+
+    /// Apply a fresh snapshot. If it changed the selected project (the old
+    /// one disappeared), the Logs tab's stream follows the new selection.
+    fn apply_refresh(
+        &mut self,
+        token: RefreshToken,
+        snap: Result<hack_desktop_core::source::Snapshot, hack_desktop_core::source::SourceError>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let before = self.model.selected_row().map(|r| r.name.clone());
+        let previous_root = self.selected_root();
+        if !self.model.finish_refresh(token, snap) {
+            return false;
+        }
+        let after = self.model.selected_row().map(|r| r.name.clone());
+        let selection_changed = before != after || previous_root != self.selected_root();
+        if selection_changed {
+            // Only accepted snapshots may invalidate a tail or replace a
+            // stream. Root/backend changes also change stream ownership.
+            self.tail = Ok(Vec::new());
+            self.logs.model.set_service(None);
+        }
+        if self.tab == 1 && selection_changed {
+            self.open_logs(cx);
+        } else if self.tab == 1 {
+            // A stopped project's finite read becomes a followed stream once
+            // the project runs (started here or elsewhere).
+            let running = self.model.detail().is_some_and(|d| d.state.is_active());
+            if self.logs.model.should_follow_now(running) {
+                self.open_logs(cx);
+            }
+        }
+        cx.notify();
+        true
     }
 
     /// Fixtures: select a project by name.
@@ -107,7 +168,7 @@ impl HackApp {
         self.tail = Err("Project status could not be read".into());
     }
 
-    fn selected_root(&self) -> Option<(PathBuf, bool)> {
+    pub(crate) fn selected_root(&self) -> Option<(PathBuf, bool)> {
         let r = self.model.selected_row()?;
         Some((PathBuf::from(r.repo_root.as_ref()?), r.is_native()))
     }
@@ -129,27 +190,24 @@ impl HackApp {
                     .await;
                 let root = this
                     .update(cx, |this, cx| {
-                        let previous = this.selected_root();
-                        if !this.model.finish_refresh(token, snap) {
+                        if !this.apply_refresh(token, snap, cx) {
                             return None;
                         }
-                        if previous != this.selected_root() {
-                            this.tail = Ok(Vec::new());
-                        }
-                        cx.notify();
-                        this.follow.then(|| this.selected_root()).flatten()
+                        (this.follow && this.tab == 0)
+                            .then(|| this.selected_root())
+                            .flatten()
                     })
                     .ok()
                     .flatten();
                 if let Some((root, native)) = root {
-                    let requested = root.clone();
+                    let requested = (root.clone(), native);
                     let tail = cx
                         .background_executor()
                         .spawn(async move { source.log_tail(&root, native, TAIL_LINES) })
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        // Drop a tail fetched for a project no longer selected.
-                        if this.selected_root().is_some_and(|(r, _)| r == requested) {
+                        // Root and backend both identify the requested tail.
+                        if this.selected_root().as_ref() == Some(&requested) {
                             this.tail = tail;
                             cx.notify();
                         }
@@ -221,13 +279,7 @@ impl HackApp {
                 .background_executor()
                 .spawn(async move { source.snapshot() })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                let previous = this.selected_root();
-                if this.model.finish_refresh(token, snap) && previous != this.selected_root() {
-                    this.tail = Ok(Vec::new());
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.apply_refresh(token, snap, cx));
         })
         .detach();
     }
@@ -414,6 +466,12 @@ impl HackApp {
                 if !this.live {
                     this.refresh_now();
                 }
+                // A service filter belongs to one project: reset it on every
+                // project change, whichever tab is open.
+                this.logs.model.set_service(None);
+                if this.tab == 1 {
+                    this.open_logs(cx);
+                }
                 cx.notify();
             }))
             .into_any_element()
@@ -538,11 +596,17 @@ impl HackApp {
             .small()
             .selected_index(self.tab)
             .child(Tab::new().label("Services"))
-            .child(Tab::new().label("Logs").disabled(true))
+            .child(Tab::new().label("Logs"))
             .child(Tab::new().label("Env").disabled(true))
             .child(Tab::new().label("Activity").disabled(true))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                this.tab = *ix;
+                let (from, to) = (this.tab, *ix);
+                this.tab = to;
+                if to == 1 && from != 1 {
+                    this.open_logs(cx);
+                } else if from == 1 && to != 1 {
+                    this.logs.close();
+                }
                 cx.notify();
             }));
         // The header and tabs stay fixed; the tab content scrolls within the
@@ -553,15 +617,23 @@ impl HackApp {
             .min_h_0()
             .child(header)
             .child(div().px_5().pt_2().child(tabs))
-            .child(
-                v_flex()
-                    .id("detail-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(services_table(&d.services, cx))
-                    .child(self.log_tail(cx)),
-            )
+            .map(|col| {
+                if self.tab == 1 {
+                    // The Logs tab scrolls inside its own virtualized list.
+                    let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
+                    col.child(self.render_logs(&names, cx))
+                } else {
+                    col.child(
+                        v_flex()
+                            .id("detail-body")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(services_table(&d.services, cx))
+                            .child(self.log_tail(cx)),
+                    )
+                }
+            })
     }
 
     /// Shown, never acted on, once an action has run past

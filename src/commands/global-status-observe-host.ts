@@ -6,8 +6,11 @@
  */
 import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { getString } from "../lib/guards.ts";
-import { parseJsonLines } from "../lib/json-lines.ts";
+import {
+  type ProxyContainerState,
+  parseProxyContainerInspect,
+} from "../lib/global-proxy-network.ts";
+import { getString, isRecord } from "../lib/guards.ts";
 import { exec } from "../lib/shell.ts";
 import {
   inspectProxyNetwork,
@@ -21,6 +24,48 @@ export const DOCKER_READ_TIMEOUT_MS = 5000;
 export function isServiceRunning(status: string): boolean {
   const normalized = status.toLowerCase();
   return normalized.includes("running") || normalized.includes("up");
+}
+
+/**
+ * Docker `--format json` output, strictly: empty output is no records; one
+ * JSON array or object, or one object per line; anything else (a line that
+ * does not parse, a value that is not an object) is null, so a partly
+ * readable answer is never taken as a complete one.
+ */
+export function strictJsonRecords(
+  text: string
+): readonly Record<string, unknown>[] | null {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return [];
+  }
+  const whole = tryParse(trimmed);
+  if (Array.isArray(whole)) {
+    return whole.every(isRecord) ? whole : null;
+  }
+  if (isRecord(whole)) {
+    return [whole];
+  }
+  const records: Record<string, unknown>[] = [];
+  for (const line of trimmed.split("\n")) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    const value = tryParse(line.trim());
+    if (!isRecord(value)) {
+      return null;
+    }
+    records.push(value);
+  }
+  return records;
+}
+
+function tryParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
 }
 
 /** A file's text, or whether it is confirmed missing or could not be read. */
@@ -87,7 +132,20 @@ export async function observeComposeStack(opts: {
       services: [],
     };
   }
-  const services = parseJsonLines(res.stdout).map((entry) => ({
+  const rows = strictJsonRecords(res.stdout);
+  if (
+    rows === null ||
+    rows.some(
+      (row) => typeof row.Service !== "string" || typeof row.Status !== "string"
+    )
+  ) {
+    return {
+      ok: "unknown",
+      error: `docker compose ps gave output that could not be read for ${opts.composeFile}`,
+      services: [],
+    };
+  }
+  const services = rows.map((entry) => ({
     service: getString(entry, "Service") ?? "",
     name: getString(entry, "Name") ?? "",
     status: getString(entry, "Status") ?? "",
@@ -130,7 +188,16 @@ export async function observeNetworks(opts: {
       networks: [],
     };
   }
-  const networks = parseJsonLines(res.stdout)
+  const rows = strictJsonRecords(res.stdout);
+  if (rows === null || rows.some((row) => typeof row.Name !== "string")) {
+    return {
+      ok: "unknown",
+      error: "docker network ls gave output that could not be read",
+      missing: [],
+      networks: [],
+    };
+  }
+  const networks = rows
     .map((entry) => ({
       name: getString(entry, "Name") ?? "",
       id: getString(entry, "ID") ?? "",
@@ -178,9 +245,63 @@ export async function observeProxyNetwork(opts: {
     };
   }
   const payload = proxyNetworkStatusPayload(
-    await inspectProxyNetwork({ composeFile: opts.composeFile }).catch(
-      () => null
-    )
+    await inspectProxyNetwork({
+      composeFile: opts.composeFile,
+      readContainers: async () => {
+        const containers = await readProxyContainersStrictly(opts.composeFile);
+        return containers === "unknown" ? null : containers;
+      },
+    }).catch(() => null)
   );
   return { ...payload, ok: payload.ok === null ? "unknown" : payload.ok };
+}
+
+/**
+ * The proxy stack's containers for an observe-only read: the same bounded
+ * `compose ps` and `docker inspect` as the proxy repair path, but any output
+ * that cannot be fully read (a malformed line, a row without an id, an
+ * inspect answer that is not one object per id) is "unknown" rather than an
+ * empty, healthy stack.
+ */
+async function readProxyContainersStrictly(
+  composeFile: string
+): Promise<readonly ProxyContainerState[] | "unknown"> {
+  const ps = await exec(
+    ["docker", "compose", "-f", composeFile, "ps", "--format", "json"],
+    {
+      cwd: dirname(composeFile),
+      stdin: "ignore",
+      timeoutMs: DOCKER_READ_TIMEOUT_MS,
+    }
+  ).catch(() => null);
+  if (ps === null || ps.exitCode !== 0) {
+    return "unknown";
+  }
+  const rows = strictJsonRecords(ps.stdout);
+  if (rows === null) {
+    return "unknown";
+  }
+  const ids = rows.map((row) => getString(row, "ID"));
+  if (ids.some((id) => typeof id !== "string" || id.length === 0)) {
+    return "unknown";
+  }
+  if (ids.length === 0) {
+    return [];
+  }
+  const inspect = await exec(["docker", "inspect", ...(ids as string[])], {
+    stdin: "ignore",
+    timeoutMs: DOCKER_READ_TIMEOUT_MS,
+  }).catch(() => null);
+  if (inspect === null || inspect.exitCode !== 0) {
+    return "unknown";
+  }
+  const parsed = tryParse(inspect.stdout.trim());
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length !== ids.length ||
+    !parsed.every(isRecord)
+  ) {
+    return "unknown";
+  }
+  return parseProxyContainerInspect(inspect.stdout);
 }

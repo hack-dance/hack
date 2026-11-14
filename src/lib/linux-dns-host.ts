@@ -113,9 +113,11 @@ export function createLinuxDnsHost(opts?: {
         : null;
     },
     readLinkRoute: async (link) => {
-      const route = await readResolvectlLinkRoute(link);
-      if (unreadable && route === null) {
-        unreadable(`resolvectl -- ${link}`);
+      const { route, failed } = await readResolvectlLinkRoute(link);
+      if (unreadable) {
+        for (const verb of failed) {
+          unreadable(`resolvectl ${verb} -- ${link}`);
+        }
       }
       return route;
     },
@@ -152,25 +154,44 @@ const LINK_VERBS = [
   "dnsovertls",
 ] as const;
 
-async function readResolvectlLinkRoute(
-  link: string
-): Promise<LinuxLinkRoute | null> {
-  const [dns, domain, defaultRoute, dnssec, dnsOverTls] = await Promise.all(
+/**
+ * The link's resolved state from the five per-link queries, and the verbs
+ * whose query failed (errored, timed out or answered nothing for a
+ * single-value setting). `route` is null when dns or domain failed, as
+ * before; a partial route carries null for a failed single value.
+ */
+async function readResolvectlLinkRoute(link: string): Promise<{
+  readonly route: LinuxLinkRoute | null;
+  readonly failed: readonly string[];
+}> {
+  const results = await Promise.all(
     LINK_VERBS.map((verb) => probe(["resolvectl", verb, "--", link]))
   );
-  if (!(dns && domain) || dns.exitCode !== 0 || domain.exitCode !== 0) {
-    return null;
-  }
+  const [dns, domain, defaultRoute, dnssec, dnsOverTls] = results;
   const single = (res: ExecResult | undefined): string | null =>
     res?.exitCode === 0
       ? (parseResolvectlLinkValues(res.stdout)[0] ?? null)
       : null;
+  const failed = LINK_VERBS.filter((_verb, index) => {
+    const res = results[index];
+    if (res === undefined || res.exitCode !== 0) {
+      return true;
+    }
+    // dns and domain may legitimately be empty; the others always answer.
+    return index >= 2 && single(res) === null;
+  });
+  if (!(dns && domain) || dns.exitCode !== 0 || domain.exitCode !== 0) {
+    return { route: null, failed };
+  }
   const routeValue = single(defaultRoute);
   return {
-    dns: parseResolvectlLinkValues(dns.stdout),
-    domains: parseResolvectlLinkValues(domain.stdout),
-    defaultRoute: routeValue === null ? null : routeValue === "yes",
-    dnssec: single(dnssec),
-    dnsOverTls: single(dnsOverTls),
+    route: {
+      dns: parseResolvectlLinkValues(dns.stdout),
+      domains: parseResolvectlLinkValues(domain.stdout),
+      defaultRoute: routeValue === null ? null : routeValue === "yes",
+      dnssec: single(dnssec),
+      dnsOverTls: single(dnsOverTls),
+    },
+    failed,
   };
 }

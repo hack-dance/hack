@@ -22,6 +22,7 @@ import {
   observeComposeStack,
   observeNetworks,
   observeProxyNetwork,
+  strictJsonRecords,
 } from "../src/commands/global-status-observe-host.ts";
 import { observeGlobalCaddyIp } from "../src/lib/caddy-hosts.ts";
 import * as dnsQuery from "../src/lib/dns-query.ts";
@@ -406,7 +407,11 @@ test("Linux host adapter names every read that failed, and only those", async ()
     await rm(dir, { recursive: true, force: true });
   }
   expect(unreadable).toEqual([
-    "resolvectl -- br-fixture",
+    "resolvectl dns -- br-fixture",
+    "resolvectl domain -- br-fixture",
+    "resolvectl default-route -- br-fixture",
+    "resolvectl dnssec -- br-fixture",
+    "resolvectl dnsovertls -- br-fixture",
     "systemctl show -p NeedDaemonReload -- hack-dns@br-fixture.service",
     "ip -j -4 addr show",
     `read ${join(dir, "a-directory")}`,
@@ -414,6 +419,163 @@ test("Linux host adapter names every read that failed, and only those", async ()
   // Without the hook nothing changes for hack doctor.
   const plain = createLinuxDnsHost();
   expect(await plain.readFile(join(dir, "absent"))).toBeNull();
+});
+
+test("Linux host adapter flags each per-link query that fails, alone, and not a confirmed mismatch", async () => {
+  const answers: Record<string, string> = {
+    dns: "Link 7 (br-fixture): 172.30.0.2\n",
+    domain: "Link 7 (br-fixture): ~hack\n",
+    "default-route": "Link 7 (br-fixture): no\n",
+    dnssec: "Link 7 (br-fixture): no\n",
+    dnsovertls: "Link 7 (br-fixture): no\n",
+  };
+  const read = async (fail: string | null, empty: string | null = null) => {
+    const unreadable: string[] = [];
+    const host = createLinuxDnsHost({
+      onUnreadable: (what) => unreadable.push(what),
+    });
+    const spy = fakeExec((cmd) => {
+      const verb = cmd[1] ?? "";
+      if (verb === fail) {
+        return { exitCode: 124, stdout: "" };
+      }
+      if (verb === empty) {
+        return { exitCode: 0, stdout: "Link 7 (br-fixture):\n" };
+      }
+      return { exitCode: 0, stdout: answers[verb] ?? "" };
+    });
+    try {
+      const route = await host.readLinkRoute("br-fixture");
+      return { route, unreadable };
+    } finally {
+      spy.mockRestore();
+    }
+  };
+  const control = await read(null);
+  expect(control.unreadable).toEqual([]);
+  expect(control.route).toMatchObject({
+    dns: ["172.30.0.2"],
+    defaultRoute: false,
+  });
+  for (const verb of [
+    "dns",
+    "domain",
+    "default-route",
+    "dnssec",
+    "dnsovertls",
+  ]) {
+    expect((await read(verb)).unreadable).toEqual([
+      `resolvectl ${verb} -- br-fixture`,
+    ]);
+  }
+  // A single-value setting that answers nothing could not be read either.
+  expect((await read(null, "dnssec")).unreadable).toEqual([
+    "resolvectl dnssec -- br-fixture",
+  ]);
+  // Empty dns or domain lists are answers, not failures.
+  expect((await read(null, "domain")).unreadable).toEqual([]);
+  // Every query answered, with values that differ from Hack's route: a
+  // confirmed mismatch, nothing unreadable.
+  answers.dns = "Link 7 (br-fixture): 9.9.9.9\n";
+  expect((await read(null)).unreadable).toEqual([]);
+});
+
+test("Docker output is read strictly: empty is empty, anything malformed is unreadable", () => {
+  expect(strictJsonRecords("")).toEqual([]);
+  expect(strictJsonRecords('{"a":1}\n{"b":2}\n')).toEqual([{ a: 1 }, { b: 2 }]);
+  expect(strictJsonRecords('[{"a":1},{"b":2}]')).toEqual([{ a: 1 }, { b: 2 }]);
+  for (const text of [
+    "not JSON",
+    "null",
+    "[1,2]",
+    '{"a":1}\nnot JSON',
+    '{"a":1}\n[]',
+  ]) {
+    expect({ text, records: strictJsonRecords(text) }).toEqual({
+      text,
+      records: null,
+    });
+  }
+});
+
+test("compose, networks and proxy adapters never take malformed or partial output as an answer", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hack-observe-malformed-"));
+  try {
+    const file = join(dir, "docker-compose.yml");
+    await writeFile(file, "services: {}\n");
+    const running = '{"Service":"caddy","Name":"c","Status":"Up 2 hours"}';
+    for (const stdout of [
+      "not JSON",
+      "null",
+      `${running}\nnot JSON`,
+      '{"Name":"c","Status":"Up"}',
+    ]) {
+      const spy = fakeExec(() => ({ exitCode: 0, stdout }));
+      try {
+        expect({
+          stdout,
+          ok: (await observeComposeStack({ composeFile: file })).ok,
+        }).toEqual({ stdout, ok: "unknown" });
+      } finally {
+        spy.mockRestore();
+      }
+    }
+    for (const stdout of [
+      "not JSON",
+      '{"Name":"hack-dev"}\nnot JSON',
+      '{"ID":"x"}',
+    ]) {
+      const spy = fakeExec(() => ({ exitCode: 0, stdout }));
+      try {
+        const observed = await observeNetworks({ names: ["hack-dev"] });
+        expect({ stdout, ok: observed.ok, missing: observed.missing }).toEqual({
+          stdout,
+          ok: "unknown",
+          missing: [],
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    }
+    // Proxy: malformed ps, a row without an id, or an inspect answer that is
+    // not one object per id.
+    for (const answers of [
+      [{ exitCode: 0, stdout: "not JSON" }],
+      [{ exitCode: 0, stdout: '{"Service":"caddy"}' }],
+      [
+        { exitCode: 0, stdout: '{"ID":"abc123"}' },
+        { exitCode: 0, stdout: "not JSON" },
+      ],
+      [
+        { exitCode: 0, stdout: '{"ID":"abc123"}\n{"ID":"def456"}' },
+        { exitCode: 0, stdout: "[{}]" },
+      ],
+    ]) {
+      let index = 0;
+      const spy = fakeExec(
+        () => answers[index++] ?? { exitCode: 1, stdout: "" }
+      );
+      try {
+        expect((await observeProxyNetwork({ composeFile: file })).ok).toBe(
+          "unknown"
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    }
+    // A stack with no containers is a confirmed, readable answer.
+    const empty = fakeExec(() => ({ exitCode: 0, stdout: "" }));
+    try {
+      expect(await observeProxyNetwork({ composeFile: file })).toMatchObject({
+        ok: true,
+        readable: true,
+      });
+    } finally {
+      empty.mockRestore();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("macOS DNS adapter: missing files are missing; unreadable files, no Homebrew prefix or no Caddy answer are unknown", async () => {

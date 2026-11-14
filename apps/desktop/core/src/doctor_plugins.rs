@@ -56,7 +56,7 @@ struct PluginConfig {
 // Unlike private PATH wrappers, Docker later resolves the original names.
 // Check original prefixes AND every lexical link target, not only realpath:
 // an attacker must not be able to replace an intermediate alias afterward.
-fn guarded_names(path: &Path, uid: u32, links_left: &mut usize) -> bool {
+fn guarded_names(path: &Path, uid: u32, links_left: &mut usize, as_ancestor: bool) -> bool {
     if !path.is_absolute() {
         return false;
     }
@@ -83,12 +83,14 @@ fn guarded_names(path: &Path, uid: u32, links_left: &mut usize) -> bool {
                 };
                 parent.join(target)
             };
-            if !guarded_names(&target, uid, links_left) {
+            if !guarded_names(&target, uid, links_left, as_ancestor || index > 0) {
                 return false;
             }
         } else {
-            let sticky_root =
-                index > 0 && meta.is_dir() && meta.uid() == 0 && meta.mode() & 0o1000 != 0;
+            let sticky_root = (index > 0 || as_ancestor)
+                && meta.is_dir()
+                && meta.uid() == 0
+                && meta.mode() & 0o1000 != 0;
             if (index > 0 && !meta.is_dir()) || (meta.mode() & 0o022 != 0 && !sticky_root) {
                 return false;
             }
@@ -98,7 +100,7 @@ fn guarded_names(path: &Path, uid: u32, links_left: &mut usize) -> bool {
 }
 
 fn guarded_dir(path: &Path, uid: u32) -> Option<PathBuf> {
-    if !guarded_names(path, uid, &mut 64) {
+    if !guarded_names(path, uid, &mut 64, false) {
         return None;
     }
     trusted_tool_path(path, uid, true)
@@ -136,7 +138,7 @@ fn config_file(path: &Path, uid: u32) -> Result<PluginConfig, &'static str> {
     let real = std::fs::canonicalize(path).map_err(|_| "Docker plugin config target is unknown")?;
     let meta =
         std::fs::metadata(&real).map_err(|_| "Docker plugin config metadata is unreadable")?;
-    if !guarded_names(path, uid, &mut 64)
+    if !guarded_names(path, uid, &mut 64, false)
         || !meta.is_file()
         || (meta.uid() != uid && meta.uid() != 0)
         || meta.mode() & 0o022 != 0
@@ -202,7 +204,7 @@ pub(crate) fn validate(discovery: &Discovery) -> Result<(), &'static str> {
             if !entry.file_name().as_bytes().starts_with(b"docker-") {
                 continue;
             }
-            if !guarded_names(&entry.path(), uid, &mut 64)
+            if !guarded_names(&entry.path(), uid, &mut 64, false)
                 || trusted_tool_path(&entry.path(), uid, false).is_none()
             {
                 return Err(

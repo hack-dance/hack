@@ -2308,11 +2308,11 @@ export function signalCleanupKeepingStartedHelpers(opts: {
   if (!cleanup) {
     return null;
   }
-  return async () => {
+  return async (cleanupOpts) => {
     if (opts.containerStartBegun()) {
       opts.keepSharedHelpers()?.();
     }
-    return await cleanup();
+    return await cleanup(cleanupOpts);
   };
 }
 
@@ -2659,7 +2659,7 @@ export function withSharedHelperCleanup(opts: {
     keepSharedHelpers: () => {
       containersRunning = true;
     },
-    cleanup: async () => {
+    cleanup: async (cleanupOpts) => {
       const processCleanup = opts.cleanup;
       let outcome: ProcessCleanupOutcome | null = null;
       // The session could not be confirmed stopped and was kept: its shared
@@ -2671,7 +2671,9 @@ export function withSharedHelperCleanup(opts: {
         // only clean up while the session is still this start's own.
         if (processCleanup) {
           outcome = await runProcessCleanup(async () => {
-            if ((await processCleanup()) === LIFECYCLE_SESSION_RETAINED) {
+            if (
+              (await processCleanup(cleanupOpts)) === LIFECYCLE_SESSION_RETAINED
+            ) {
               sessionRetained = true;
             }
           });
@@ -6906,7 +6908,7 @@ async function runUpCommand({
       // Compose may have started some services before it failed or timed
       // out: their helpers stay unless no container may run.
       await retainHelpersIfContainersMayRun();
-      await lifecycleCleanup?.();
+      await lifecycleCleanup?.({ force: foregroundTermination.guard?.force });
       await removeProjectRuntimeStateEntry({
         projectDir: project.projectDir,
         composeProject: lifecycleComposeProject,

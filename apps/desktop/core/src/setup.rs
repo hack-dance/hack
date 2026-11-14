@@ -63,6 +63,7 @@ pub struct Pane {
     pub report: Report,
     pub loading: bool,
     pub action_busy: bool,
+    pub refresh_again: bool,
     pub result: Option<String>,
     pub skipped: std::collections::BTreeSet<String>,
     generation: u64,
@@ -204,7 +205,7 @@ pub fn derive(
     if projects.is_none()
         && let Some(docker) = cards.iter_mut().find(|c| c.id == "docker")
     {
-        docker.detail = "Project and Docker status unknown: needs a matching hackd snapshot. CLI listing writes the registry until R18.".into();
+        docker.detail = "Could not read project or Docker status. Start a matching version of hackd, then check again.".into();
     }
     for p in &native {
         let state = p
@@ -290,7 +291,7 @@ pub fn derive(
         let mut trust = check(runs, None, "local ca trust");
         if trust.0 != Status::Passed {
             trust.1 = format!(
-                "{}; browser may warn. Exported CA is not proof of trust (R16 on older CLIs).",
+                "{}; browser may warn. An exported CA alone does not prove browser trust. Older CLIs may not be able to check trust.",
                 trust.1
             );
         }

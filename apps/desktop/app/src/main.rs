@@ -129,6 +129,9 @@ fn main() {
                 app.watch_window(window, cx);
                 if let Some(f) = fixture {
                     app.select(fixtures::selected(f));
+                    if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
+                        app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
+                    }
                     if fixtures::loads_doctor(f) {
                         app.show_doctor_now();
                         if !fixtures::opens_doctor(f) {

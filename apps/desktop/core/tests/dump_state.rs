@@ -27,13 +27,26 @@ fn serve_snapshot(home: &std::path::Path) -> std::thread::JoinHandle<()> {
     let dir = home.join("daemon");
     std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
     let listener = UnixListener::bind(dir.join("hackd.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
     std::thread::spawn(move || {
         let bodies = [
             r#"{"status":"ok","version":"5.0.0"}"#,
             r#"{"runtime_ok":true,"projects":[{"name":"alpha","status":"running","repo_root":"/work/alpha","defined_services":["api"],"runtime":{"services":[{"service":"api","containers":[{"state":"running","status":"Up 5 minutes"}]}]}},{"name":"beta","status":"stopped","repo_root":"/work/beta","defined_services":["web"]}]}"#,
         ];
         for body in bodies {
-            let (mut stream, _) = listener.accept().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(pair) => break pair,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("fake daemon accept failed or timed out: {e}"),
+                }
+            };
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                 .unwrap();
@@ -143,8 +156,43 @@ fn missing_daemon_never_runs_the_registry_writing_cli_listing() {
     assert!(!home.join("unexpected").exists());
     let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(body["source"]["ok"], false);
-    assert!(body["source"]["error"].as_str().unwrap().contains("R18"));
+    assert!(
+        body["source"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("hackd is off")
+    );
     assert_eq!(body["list"]["phase"]["phase"], "error");
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
+    use hack_desktop_core::runner::CliRunner;
+    use hack_desktop_core::source::{DaemonRecovery, LiveSource, Source};
+    let home = temp_dir("recover");
+    let hack = home.join("hack");
+    std::fs::write(&hack, "#!/bin/sh\nprintf '%s' \"$*\" > \"$HACK_HOME/called\"\nif [ \"$2\" = restart ]; then echo 'daemon could not restart' >&2; exit 1; fi\n").unwrap();
+    std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source = LiveSource {
+        runner: CliRunner::new(hack)
+            .with_env("HOME", home.to_str().unwrap())
+            .with_env("HACK_HOME", home.to_str().unwrap())
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
+        daemon: None,
+    };
+    assert!(!home.join("called").exists());
+    source.recover_daemon(DaemonRecovery::Start).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(home.join("called")).unwrap(),
+        "daemon start"
+    );
+    let error = source.recover_daemon(DaemonRecovery::Restart).unwrap_err();
+    assert!(error.contains("daemon could not restart"));
+    assert_eq!(
+        std::fs::read_to_string(home.join("called")).unwrap(),
+        "daemon restart"
+    );
     std::fs::remove_dir_all(home).unwrap();
 }
 
@@ -157,6 +205,7 @@ fn setup_fixture_cli_never_resolves_hack() {
         .env("HOME", &home)
         .env("HACK_HOME", &home)
         .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .env_remove("HACK_DESKTOP_CLI")
         .env_remove("HACK_DESKTOP_CLI")
         .output()
         .unwrap();

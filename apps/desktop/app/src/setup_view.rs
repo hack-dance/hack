@@ -11,8 +11,9 @@ use gpui_kit::{
 };
 use hack_desktop_core::setup::{Pane, Remedy, Status};
 
-pub fn render(pane: &Pane, cx: &mut Context<HackApp>) -> AnyElement {
+pub fn render(pane: &Pane, recovery_busy: bool, cx: &mut Context<HackApp>) -> AnyElement {
     let t = cx.theme().clone();
+    let busy = pane.action_busy || recovery_busy;
     let mut body = v_flex()
         .id("setup-cards")
         .flex_1()
@@ -55,7 +56,7 @@ pub fn render(pane: &Pane, cx: &mut Context<HackApp>) -> AnyElement {
                 .label("Check again")
                 .small()
                 .outline()
-                .disabled(pane.loading || pane.action_busy)
+                .disabled(pane.loading || busy)
                 .on_click(cx.listener(|this, _, _, cx| this.load_setup(cx))),
         );
         // Passed cards need no fix. CLI cannot be skipped and gates departure.
@@ -86,18 +87,17 @@ pub fn render(pane: &Pane, cx: &mut Context<HackApp>) -> AnyElement {
                 }
                 Remedy::Run(action) => {
                     let action = *action;
-                    actions = actions.child(
-                        Button::new(("setup-run", i))
-                            .label("Run")
-                            .small()
-                            .outline()
-                            .disabled(pane.loading || pane.action_busy || !pane.report.cli_ready())
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| {
+                    actions =
+                        actions.child(
+                            Button::new(("setup-run", i))
+                                .label("Run")
+                                .small()
+                                .outline()
+                                .disabled(pane.loading || busy || !pane.report.cli_ready())
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     this.run_setup_action(action, cx)
-                                }),
-                            ),
-                    );
+                                })),
+                        );
                 }
                 Remedy::Admin(args) => {
                     let args = args.clone();
@@ -126,7 +126,7 @@ pub fn render(pane: &Pane, cx: &mut Context<HackApp>) -> AnyElement {
                             .label("Open Terminal")
                             .small()
                             .outline()
-                            .disabled(pane.action_busy || pane.loading || !pane.report.cli_ready())
+                            .disabled(busy || pane.loading || !pane.report.cli_ready())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_setup_terminal(args.clone(), cx)
                             })),
@@ -140,7 +140,7 @@ pub fn render(pane: &Pane, cx: &mut Context<HackApp>) -> AnyElement {
                         .label("Skip for now")
                         .small()
                         .ghost()
-                        .disabled(pane.loading || pane.action_busy)
+                        .disabled(pane.loading || busy)
                         .on_click(cx.listener(move |this, _, _, cx| this.skip_setup(&id, cx))),
                 );
             }
@@ -172,5 +172,5 @@ pub fn render(pane: &Pane, cx: &mut Context<HackApp>) -> AnyElement {
                 .child(actions),
         );
     }
-    v_flex().flex_1().h_full().min_w_0().child(h_flex().px_5().py_3().gap_3().border_b_1().border_color(t.border).child(div().text_xl().font_weight(FontWeight::BOLD).child("Set up Hack")).child(div().flex_1()).child(Button::new("setup-continue").label("Continue").small().outline().disabled(!pane.report.cli_ready() || pane.loading || pane.action_busy).on_click(cx.listener(|this,_,_,cx|this.finish_setup(cx))))).child(div().px_5().pt_2().text_sm().text_color(t.muted_foreground).child("Checks observe only. Skipped and unknown steps stay unresolved; admin commands run in your terminal after Enter.")).child(body).into_any_element()
+    v_flex().flex_1().h_full().min_w_0().child(h_flex().px_5().py_3().gap_3().border_b_1().border_color(t.border).child(div().text_xl().font_weight(FontWeight::BOLD).child("Set up Hack")).child(div().flex_1()).child(Button::new("setup-continue").label("Continue").small().outline().disabled(!pane.report.cli_ready() || pane.loading || busy).on_click(cx.listener(|this,_,_,cx|this.finish_setup(cx))))).child(div().px_5().pt_2().text_sm().text_color(t.muted_foreground).child("Checks observe only. Skipped and unknown steps stay unresolved; admin commands run in your terminal after Enter.")).child(body).into_any_element()
 }

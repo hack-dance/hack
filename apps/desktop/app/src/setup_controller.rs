@@ -12,7 +12,11 @@ impl HackApp {
         self.load_setup(cx);
     }
     pub fn load_setup(&mut self, cx: &mut Context<Self>) {
-        if self.setup.loading || self.setup.action_busy {
+        if self.setup.loading {
+            self.setup.refresh_again = true;
+            return;
+        }
+        if self.setup.action_busy || self.recovery_busy {
             return;
         }
         let generation = self.setup.begin();
@@ -30,6 +34,10 @@ impl HackApp {
             let _ = this.update(cx, |this, cx| {
                 let needed = report.needed();
                 this.setup.finish(generation, report);
+                if this.setup.refresh_again {
+                    this.setup.refresh_again = false;
+                    this.load_setup(cx);
+                }
                 if this.setup_initial {
                     this.setup_initial = false;
                     this.pane = if needed { Pane::Setup } else { Pane::Project };
@@ -49,7 +57,11 @@ impl HackApp {
         cx.notify();
     }
     pub fn finish_setup(&mut self, cx: &mut Context<Self>) {
-        if self.setup.report.cli_ready() && !self.setup.loading && !self.setup.action_busy {
+        if self.setup.report.cli_ready()
+            && !self.setup.loading
+            && !self.setup.action_busy
+            && !self.recovery_busy
+        {
             self.pane = Pane::Project;
             cx.notify();
         }
@@ -60,7 +72,8 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         use hack_desktop_core::setup::{Remedy, Status};
-        if self.setup.loading
+        if self.recovery_busy
+            || self.setup.loading
             || self.setup.action_busy
             || !self.setup.report.cli_ready()
             || !self
@@ -87,6 +100,7 @@ impl HackApp {
             let _ = this.update(cx, |this, cx| {
                 this.setup.action_busy = false;
                 this.setup.result = Some(result);
+                this.refresh_now_async(cx);
                 this.load_setup(cx);
             });
         })
@@ -102,7 +116,8 @@ impl HackApp {
             cx.notify();
             return;
         }
-        if self.setup.loading
+        if self.recovery_busy
+            || self.setup.loading
             || self.setup.action_busy
             || !self.setup.report.cli_ready()
             || !self

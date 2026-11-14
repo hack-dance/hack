@@ -53,6 +53,12 @@ pub enum SourceError {
     /// No answer yet (fixtures use it for the loading state).
     Pending,
     CliMissing,
+    /// Project reads require a matching daemon until observe-only CLI listing exists.
+    DaemonUnavailable {
+        cli: String,
+        daemon: Option<String>,
+        message: String,
+    },
     Cli {
         code: String,
         message: String,
@@ -85,12 +91,41 @@ pub enum ActionOutcome {
     Opened(OpenResult),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonRecovery {
+    Start,
+    Restart,
+}
+
+impl DaemonRecovery {
+    #[must_use]
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Restart => "restart",
+        }
+    }
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start hackd",
+            Self::Restart => "Restart hackd",
+        }
+    }
+}
+
 /// Native finite logs are a single-service snapshot (not ndjson), so the
 /// combined tail is not available for native projects in v0.
 pub const NATIVE_LOGS_NOTE: &str =
     "Native logs are read one service at a time; they arrive with the Logs tab.";
 
 pub trait Source: Send + Sync {
+    /// Explicit user recovery only; never called by a poll.
+    /// # Errors
+    /// Failed or unavailable daemon command.
+    fn recover_daemon(&self, _action: DaemonRecovery) -> Result<(), String> {
+        Err("Daemon actions are unavailable for this source".into())
+    }
     /// # Errors
     /// A [`SourceError`] when no usable snapshot could be read.
     fn snapshot(&self) -> Result<Snapshot, SourceError>;
@@ -350,6 +385,29 @@ impl Source for LiveSource {
         crate::setup_io::run_safe(&self.runner, action)
     }
 
+    fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
+        let (_, stderr, code) = self
+            .runner
+            .run_raw(
+                &["daemon", action.command()],
+                None,
+                Duration::from_secs(120),
+            )
+            .map_err(|e| e.to_string())?;
+        if code == Some(0) {
+            Ok(())
+        } else {
+            let exit = code.map_or_else(
+                || "was killed by a signal".into(),
+                |n| format!("exited with code {n}"),
+            );
+            Err(format!(
+                "Could not {} hackd: command {exit}. {}",
+                action.command(),
+                stderr.trim()
+            ))
+        }
+    }
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         let cli_version = self.runner.version(Duration::from_secs(5))?;
         let daemon = self.daemon.as_ref().and_then(|d| d.status().ok());
@@ -358,10 +416,19 @@ impl Source for LiveSource {
             .filter(|d| d.version == cli_version)
             .and(self.daemon.as_ref())
             .and_then(|d| d.projects().ok());
-        let mut projects = from_daemon.ok_or_else(|| SourceError::Cli {
-            code: "E_APP_OBSERVE_UNAVAILABLE".into(),
-            message: "Could not read a matching hackd snapshot. CLI fallback needs R18 (observe-only projects); today's listing writes the registry.".into(),
-            failed: vec![],
+        let mut projects = from_daemon.ok_or_else(|| SourceError::DaemonUnavailable {
+            cli: cli_version.clone(),
+            daemon: daemon.as_ref().map(|d| d.version.clone()),
+            message: match &daemon {
+                None => "hackd is off or unreachable. Start hackd to read project status.".into(),
+                Some(d) if d.version != cli_version => format!(
+                    "hackd v{}, CLI v{cli_version}. Restart hackd to read project status.",
+                    d.version
+                ),
+                Some(_) => {
+                    "hackd could not provide project status. Check again or restart hackd.".into()
+                }
+            },
         })?;
         // Project views do not read native projects; ask native ps for each.
         let native = self.runner_for(true);
@@ -648,10 +715,23 @@ mod tests {
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
         let socket = dir.join("s");
         let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let projects = projects.to_owned();
         let handle = std::thread::spawn(move || {
             for body in [r#"{"status":"ok","version":"5.0.0"}"#.to_owned(), projects] {
-                let (mut stream, _) = listener.accept().unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(pair) => break pair,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(e) => panic!("fake daemon accept failed or timed out: {e}"),
+                    }
+                };
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -756,7 +836,7 @@ esac
         server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
-            matches!(&r, Err(SourceError::Cli { code, .. }) if code == "E_APP_OBSERVE_UNAVAILABLE"),
+            matches!(&r, Err(SourceError::DaemonUnavailable { .. })),
             "{r:?}"
         );
     }

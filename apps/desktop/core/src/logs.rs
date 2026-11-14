@@ -172,6 +172,7 @@ impl LogsModel {
     pub fn unavailable(&mut self, reason: &str) {
         self.lines.clear();
         self.bytes = 0;
+        self.skipped = 0;
         self.state = StreamState::Unavailable {
             reason: reason.to_owned(),
         };
@@ -864,7 +865,9 @@ mod tests {
         let mut m = LogsModel::default();
         m.start(true);
         m.apply(&line("old project"));
+        m.skipped = 7;
         m.unavailable("no folder");
+        assert_eq!(m.skipped, 0, "previous project's overflow count is cleared");
         assert!(m.is_empty());
         assert!(m.visible().is_empty());
         assert_eq!(m.banner().as_deref(), Some("no folder"));

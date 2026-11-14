@@ -118,18 +118,18 @@ test("the automatic .env is refused when the Hack home is the project's .hack di
 
 test("files under a Hack home inside the project root are refused; other sources still load", async () => {
   const f = await fixture({
-    env_file: ["service.env", "../state/home/any.env"],
+    env_file: ["service.env", "../state/hack-state/any.env"],
   });
-  process.env.HACK_HOME = join(f.projectRoot, "state", "home");
+  process.env.HACK_HOME = join(f.projectRoot, "state", "hack-state");
   await writeFile(join(f.projectDir, "service.env"), `FILE=${FILE}\n`, {
     mode: 0o600,
   });
   const message = await refusal(prepareNativeProjectInput(f));
   expect(message).toContain(NATIVE_ENV_SECRET_SOURCE_REASON);
-  expect(message).toContain("../state/home/any.env");
+  expect(message).toContain("../state/hack-state/any.env");
 
   const control = await fixture({ env_file: "service.env" });
-  process.env.HACK_HOME = join(control.projectRoot, "state", "home");
+  process.env.HACK_HOME = join(control.projectRoot, "state", "hack-state");
   await writeFile(join(control.projectDir, "service.env"), `FILE=${FILE}\n`, {
     mode: 0o600,
   });
@@ -185,13 +185,13 @@ test("the decision is lexical, case-folded and Unicode-normalized", () => {
   expect(
     nativeEnvSecretDenylist({
       projectRoots: ["/p"],
-      hackHome: "/home/.hack",
+      hackHome: "/fixture/other/.hack",
     }).denies("/p/nested/.H\u00c4CK.secret.key")
   ).toBe(false);
   // A Hack home outside the project root denies nothing by location.
   const outside = nativeEnvSecretDenylist({
     projectRoots: ["/fixture/project"],
-    hackHome: "/fixture/home/.hack",
+    hackHome: "/fixture/outside/.hack",
   });
   expect(outside.denies("/fixture/project/.hack/.env")).toBe(false);
 });

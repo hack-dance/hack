@@ -88,6 +88,9 @@ stream. With `--json` it is one standard envelope on stdout and a nonzero exit:
 { "ok": false, "error": { "code": "E_USAGE", "message": "--max-line-bytes requires a whole number from 1 to 1048576." } }
 ```
 
+On the native backend (`HACK_RUNTIME_BACKEND=native`), a refused follow keeps
+stdout for stream lines only: the same envelope, as one line, goes to stderr.
+
 ## Native exceptions
 
 Native `hack logs --json --no-follow` still prints one snapshot object, not

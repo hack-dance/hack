@@ -217,6 +217,9 @@ Historical remote guides are excluded from the supported documentation.
   such a flag decline or refuse; they never proceed on their own.
   Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
+- `HACK_ORIGIN` (`cli`, `app`, `autostart` or `agent`) names who started an `up`, `down` or
+  `restart` in the [activity log](./reference/activity-log.md) that `hack activity` reads; unset or
+  any other value records `cli`.
 
 Automatic agent instruction management is retired in v5. `hack setup sync`, the standalone
 `hack setup cursor|claude|agents` exports and `hack agent prime` refuse with a retirement notice,

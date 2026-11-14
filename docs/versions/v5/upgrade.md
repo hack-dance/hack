@@ -22,6 +22,13 @@ flowchart TD
 
 ## Upgrade one project
 
+On current source builds, start with `hack upgrade check`, then
+`hack upgrade apply --dry-run`. Apply can snapshot and repair ignore rules,
+verified stale agent files and permission-only key findings. Use
+`hack upgrade review` to walk the remaining env and tracked-file decisions in
+one command. See the [assistant and recovery details](guides/upgrade-from-v4.md).
+These file repairs do not replace the runtime trial below.
+
 1. **Back up before running v5 on the project.** Keep a private copy outside the
    checkout of `.hack/`, the root `.gitignore` and `.hack.secret.key`, and the
    global Hack configuration and project registry. Record files that were absent.

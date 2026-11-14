@@ -61,6 +61,7 @@ import {
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
+import { observeGlobalCaddyIp } from "../lib/caddy-hosts.ts";
 import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
@@ -69,6 +70,7 @@ import {
   managedLocalDomains,
   parseDefaultDomain,
   resolveDefaultDomain,
+  resolveDefaultDomainStrictly,
 } from "../lib/default-domain.ts";
 import {
   isSlimExecutionMode,
@@ -89,6 +91,7 @@ import {
   isExplicitlyNonInteractive,
 } from "../lib/interactivity.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
+import { createLinuxDnsHost } from "../lib/linux-dns-host.ts";
 import {
   buildHackHostTrustEnvironment,
   renderHackHostTrustShellExports,
@@ -174,11 +177,23 @@ import {
   configureLinuxTrustFromRuntime,
   type LinuxTrustResult,
 } from "./global-linux-trust.ts";
+import { observeMacHostDns } from "./global-mac-dns.ts";
 import {
   inspectProxyNetwork,
   proxyNetworkStatusPayload,
   repairProxyNetworkBeforeUp,
 } from "./global-proxy-network.ts";
+import {
+  DOCKER_PROBE_TIMEOUT_MS,
+  observeGlobalStatus,
+} from "./global-status-observe.ts";
+import {
+  DOCKER_READ_TIMEOUT_MS,
+  isServiceRunning,
+  observeComposeStack,
+  observeNetworks,
+  observeProxyNetwork,
+} from "./global-status-observe-host.ts";
 
 /** Regex to split strings on whitespace. */
 const WHITESPACE_PATTERN = /\s+/;
@@ -344,11 +359,22 @@ const globalDownSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const globalStatusOptions = [
+  optJson,
+  defineOption({
+    name: "observe",
+    type: "boolean",
+    long: "--observe",
+    description:
+      "Read only: never start Docker, a container or hackd; unknown parts say unknown (needs --json)",
+  } as const),
+] as const;
+
 const globalStatusSpec = defineCommand({
   name: "status",
   summary: "Show status for global infra (containers + networks)",
   group: "Global",
-  options: [optJson] as const,
+  options: globalStatusOptions,
   positionals: [],
   subcommands: [],
 } as const);
@@ -2505,7 +2531,64 @@ async function handleGlobalStatus({
   readonly ctx: CliContext;
   readonly args: GlobalStatusArgs;
 }): Promise<number> {
+  if (args.options.observe === true) {
+    if (args.options.json !== true) {
+      logger.error({
+        message:
+          "--observe prints JSON only: run hack global status --json --observe",
+      });
+      return 2;
+    }
+    return await globalStatusObserve();
+  }
   return await globalStatus({ json: args.options.json ?? false });
+}
+
+/**
+ * `hack global status --json --observe`: never starts anything (see
+ * global-status-observe.ts). Not gated by slim mode: it starts nothing.
+ */
+async function globalStatusObserve(): Promise<number> {
+  const paths = getGlobalPaths();
+  const payload = await observeGlobalStatus({
+    platform: process.platform,
+    dockerInstalled: () => findExecutableInPath("docker") !== null,
+    probeDocker: async () =>
+      await exec(["docker", "info", "--format", "{{.ServerVersion}}"], {
+        stdin: "ignore",
+        timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+      }),
+    readCaddy: async () =>
+      await observeComposeStack({ composeFile: paths.caddyCompose }),
+    readLogging: async () =>
+      await observeComposeStack({ composeFile: paths.loggingCompose }),
+    readNetworks: async () =>
+      await observeNetworks({
+        names: [DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK],
+      }),
+    readProxyNetwork: async () =>
+      await observeProxyNetwork({ composeFile: paths.caddyCompose }),
+    caddyIp: async () =>
+      await observeGlobalCaddyIp({ timeoutMs: DOCKER_READ_TIMEOUT_MS }),
+    inspectLinuxDns: async () => {
+      // A config that cannot be read throws here: host DNS is then unknown.
+      const domains = managedLocalDomains(await resolveDefaultDomainStrictly());
+      const unreadable: string[] = [];
+      const inspection = await inspectLinuxGlobalDns({
+        domains,
+        host: createLinuxDnsHost({
+          onUnreadable: (what) => unreadable.push(what),
+        }),
+      });
+      return { inspection, unreadable };
+    },
+    macDomains: async () =>
+      managedLocalDomains(await resolveDefaultDomainStrictly()),
+    observeMacDns: observeMacHostDns,
+    now: () => new Date(),
+  });
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  return 0;
 }
 
 async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
@@ -3194,11 +3277,6 @@ function isLoopbackAddress(bind: string): boolean {
     return true;
   }
   return normalized.startsWith("127.");
-}
-
-function isServiceRunning(status: string): boolean {
-  const normalized = status.toLowerCase();
-  return normalized.includes("running") || normalized.includes("up");
 }
 
 async function renderComposeStatusTable(composeFile: string): Promise<void> {

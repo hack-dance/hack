@@ -23,7 +23,7 @@ first-launch warmups remain outside timed observations.
 | --- | --- |
 | Fake CLI `NotFound` | The runner received a spawn ENOENT, not proof that the fixture pathname was absent. An unavailable script interpreter or a transient executable-launch failure can also produce ENOENT. The precise origin in the reported Mac runs was not captured; do not label it proven descriptor leakage. Separate test processes and closed-before-publish scripts remove cross-test writer inheritance. |
 | Fake CLI never started | No ready marker was written before a product timeout. This can reflect startup scheduling or failed launch. Warmups, process isolation and the ready marker distinguish startup from tested cleanup; the timeout contract is unchanged. |
-| Fake daemon `WouldBlock` (Darwin error 35) | The socket read deadline expired before the request arrived. This is a socket scheduling symptom, not a spawn ENOENT. Version warmups precede a single 60-second fixture conversation deadline, shared by acceptance, complete header reads and response writes; no separate two/three-second fake-server read timer remains. Per-test processes remove cross-test descriptor interference. |
+| Fake daemon `WouldBlock` (Darwin error 35) | Darwin/BSD can return this immediately when accept inherits a listener's nonblocking mode; it can also mean a timed read expired. Error 35 alone does not prove elapsed time or a spawn ENOENT. Fixtures explicitly restore blocking mode before reads. Version warmups precede a single 60-second fixture conversation deadline, shared by acceptance, complete header reads and response writes; no separate two/three-second fake-server read timer remains. Per-test processes remove cross-test descriptor interference. |
 | Slow stream Drop / late pipe EOF | An inherited pipe writer can keep a reader alive after the intended writer exits. The Apple product boundary below closes unlisted descriptors. #843 separately replaces the tight elapsed-time oracle with reader completion and process retirement under a generous deadline. |
 
 These are evidence boundaries, not a claim that every observed failure has one
@@ -68,3 +68,11 @@ fixture-specific failure at the deadline. Response writes use the remaining
 budget too. A regression deliberately waits beyond the old two-second deadline
 before sending a split header. Product socket/CLI timeouts and nextest retries
 are unchanged.
+
+The shared request reader restores blocking mode immediately on entry after
+accept, because Darwin/BSD accepted sockets can inherit O_NONBLOCK from a
+nonblocking listener (Linux does not). WouldBlock is handled only while the
+overall deadline remains; nextest still performs zero retries. The regression
+now uses a nonblocking listener, forces the accepted nonblocking mode on Linux
+too, sends a delayed split request, and checks that the accepted stream was
+normalized back to blocking mode.

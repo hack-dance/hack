@@ -556,22 +556,62 @@ mod tests {
     #[test]
     fn fake_daemon_waits_for_delayed_and_partial_request_headers() {
         use std::io::Write;
-        let (mut server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        use std::os::fd::AsRawFd;
+        use std::os::unix::{
+            fs::DirBuilderExt,
+            net::{UnixListener, UnixStream},
+        };
+        let dir = PathBuf::from(format!(
+            "/tmp/hdr-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let socket = dir.join("s");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let (ready, waiting) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + crate::test_support::DAEMON_BUDGET;
+            let mut server = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("regression fixture accept: {error}"),
+                }
+            };
+            // Force Darwin's inherited-mode case on Linux as well.
+            server.set_nonblocking(true).unwrap();
             ready.send(()).unwrap();
             crate::test_support::read_request(&mut server, deadline);
+            // SAFETY: the accepted stream remains live; inspect its flags.
+            let flags = unsafe { libc::fcntl(server.as_raw_fd(), libc::F_GETFL) };
+            assert!(flags >= 0);
+            assert_eq!(
+                flags & libc::O_NONBLOCK,
+                0,
+                "accepted stream must be blocking"
+            );
         });
+        let mut client = UnixStream::connect(&socket).unwrap();
         waiting
             .recv_timeout(crate::test_support::DAEMON_BUDGET)
             .unwrap();
-        // Exceed the former two-second socket read timeout deliberately.
+        // Exceed the former two-second timeout, then split the header.
         std::thread::sleep(Duration::from_millis(2500));
         client.write_all(b"GET /v1/status HTTP/1.1\r\n").unwrap();
         std::thread::sleep(Duration::from_millis(10));
         client.write_all(b"Host: fixture\r\n\r\n").unwrap();
         worker.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A trusted fake daemon provides rows; only native ps uses the fake CLI.

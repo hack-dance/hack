@@ -33,6 +33,9 @@ pub fn remaining(deadline: std::time::Instant) -> std::time::Duration {
 /// Socket waits consume the same overall budget as listener acceptance.
 pub fn read_request(stream: &mut std::os::unix::net::UnixStream, deadline: std::time::Instant) {
     use std::io::Read;
+    // Darwin/BSD accept inherits O_NONBLOCK from the listener. Linux does
+    // not, so normalize explicitly before installing a read timeout.
+    stream.set_nonblocking(false).unwrap();
     let mut request = Vec::new();
     while !request.ends_with(b"\r\n\r\n") {
         stream.set_read_timeout(Some(remaining(deadline))).unwrap();
@@ -40,6 +43,13 @@ pub fn read_request(stream: &mut std::os::unix::net::UnixStream, deadline: std::
         let n = match stream.read(&mut chunk) {
             Ok(n) => n,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
             Err(error) => {
                 panic!("fake daemon request did not arrive within fixture deadline: {error}")
             }

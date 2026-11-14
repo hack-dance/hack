@@ -249,6 +249,8 @@ try {
   await Bun.write(join(checkout, ".hack/hack.config.json"), "{}");
   await refused([], "E_NATIVE_PROJECT_CONFLICT", checkout);
   await rm(join(checkout, ".hack/hack.config.json"));
+  require((await readdir(home)).length ===
+    0, "validation and planning leave HOME untouched");
   const unsupported = await invoke(
     ["up", "web", "--detach", "--json"],
     checkout,
@@ -276,7 +278,10 @@ try {
     detachedResult.ok === false &&
     record(detachedResult.error).code ===
       "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
-  require((await readdir(home)).length === 0 &&
+  // Lifecycle refusals record activity even when no runtime work is admitted.
+  require(JSON.stringify(await readdir(home)) === '[".hack"]' &&
+    JSON.stringify(await readdir(join(home, ".hack"))) ===
+      '["activity.jsonl"]' &&
     !(await readdir(join(checkout, ".hack"))).some(
       (name) => name === ".internal" || name === ".branch"
     ), "no registry or generated runtime state");

@@ -378,6 +378,11 @@ try {
     "local route injection refused"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
+  assert(
+    (await readdir(join(home, ".hack"))).join() === "hack.config.json",
+    "planning leaves global policy unchanged"
+  );
+  // Lifecycle refusals still append activity; planning itself must stay read-only.
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -393,7 +398,9 @@ try {
       (await readdir(join(checkout, ".hack"))).some(
         (name) => name === ".internal" || name === ".branch"
       )
-    ) && (await readdir(join(home, ".hack"))).join() === "hack.config.json",
+    ) &&
+      (await readdir(join(home, ".hack"))).sort().join() ===
+        "activity.jsonl,hack.config.json",
     "no hook, registry, route publication or generated-state effects"
   );
   process.stdout.write(

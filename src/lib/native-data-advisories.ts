@@ -81,6 +81,8 @@ function mountsAnonymousVolume(service: Record<string, unknown>): boolean {
       : isRecord(mount) &&
         (mount.type === undefined || mount.type === "volume") &&
         mount.source === undefined &&
+        (mount.volume === undefined ||
+          (isRecord(mount.volume) && mount.volume.subpath === undefined)) &&
         typeof mount.target === "string"
   );
 }

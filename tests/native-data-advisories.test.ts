@@ -126,6 +126,22 @@ test("an anonymous volume is retained on native, so it counts as data", () => {
   }
 });
 
+test("a refused anonymous-volume shape does not add a retained-data advisory", () => {
+  for (const mount of [
+    { type: "volume", target: "/data", volume: { subpath: "cache" } },
+    { type: "volume", target: "/data", volume: null },
+    { type: "volume", source: null, target: "/data" },
+    { type: "volume", source: "", target: "/data" },
+    { type: "bind", target: "/data" },
+  ]) {
+    expect(
+      findNativeDataAdvisories(
+        project({ db: { image: "example/database", volumes: [mount] } }, {})
+      )
+    ).toEqual([]);
+  }
+});
+
 test("a data service without user and on a mutable tag gets both advisories", () => {
   for (const image of [
     "example/database",

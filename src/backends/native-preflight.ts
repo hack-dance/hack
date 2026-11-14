@@ -464,7 +464,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   anonymous_volume_named: {
     message:
       "An anonymous volume is stored as a named volume this project owns. Unlike Compose, it is kept across hack down and is not refilled from a rebuilt image.",
-    fix: "Nothing to do. Run hack down --remove-data to start it empty again, or declare a named volume to choose its name.",
+    fix: "Nothing to do. Run hack down --remove-data to recreate it from the image on the next start, or declare a named volume to choose its name.",
   },
   mount_host_hint_ignored: {
     message:

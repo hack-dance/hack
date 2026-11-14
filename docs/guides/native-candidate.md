@@ -1835,6 +1835,15 @@ warning `mount_host_hint_ignored`; they tune host file sharing and change nothin
 inside the container. Other mount options, such as `nocopy` or a propagation mode,
 still refuse with `unsupported_mount_option`.
 
+Because virtiofs preserves host ownership, those services keep `DAC_OVERRIDE`
+(part of the default capability set) even when `cap_drop` removes it. This allows
+root processes to access the explicitly shared tree; it does not bypass a read-only
+mount.
+An installer that needs to modify source files is not supported in this mode yet.
+Restart after dependency-input changes with a new review and publication.
+Moving or deleting a project prevents further activation, but does not prevent
+owned runtime teardown. Teardown never removes the shared host tree.
+
 An anonymous volume, written as one absolute container path (`- /app/node_modules`)
 or as a long-form `type: volume` entry with no `source`, is accepted. Use the long
 form with `read_only: true` for a read-only one; `/data:ro` is a bind of `/data`, as
@@ -1845,8 +1854,12 @@ derived from the service name and the container path, and reports the warning
 
 - The volume is kept across `hack down` and reused by the next `hack up`. Compose
   starts a new, empty anonymous volume after `down`. A rebuilt image therefore does
-  not refill it; run `hack down --remove-data` to start it empty again.
-- It counts toward the limit of 16 volumes per project.
+  not refill it; run `hack down --remove-data` to delete the retained volume.
+  The next start fills the new volume from the image again.
+- It counts toward the limit of 16 volumes in the running graph's selected profiles.
+
+![Anonymous volume planning](../diagrams/native-anonymous-volumes.svg)
+([diagram source](../diagrams/native-anonymous-volumes.mmd))
 
 Two services that name the same path get separate volumes, as on Compose. A
 volume name, mount source or cache-volume label that starts with `hack-anonymous-`
@@ -1855,14 +1868,6 @@ still needs a named volume. A read-only anonymous volume does not cover an
 image-declared `VOLUME` path; that cover must be writable. `hack doctor` gives the
 same retained-data advisories for a service with an anonymous volume as for one
 with a named data volume.
-Because virtiofs preserves host ownership, those services keep `DAC_OVERRIDE`
-(part of the default capability set) even when `cap_drop` removes it. This allows
-root processes to access the explicitly shared tree; it does not bypass a read-only
-mount.
-An installer that needs to modify source files is not supported in this mode yet.
-Restart after dependency-input changes with a new review and publication.
-Moving or deleting a project prevents further activation, but does not prevent
-owned runtime teardown. Teardown never removes the shared host tree.
 
 Service CPU and memory limits are optional. Services without an explicit Compose
 limit share the admitted VM pool (Docker `NanoCpus: 0` and `Memory: 0`); the VM's

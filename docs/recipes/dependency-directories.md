@@ -111,10 +111,11 @@ for this page.
   volume at each workspace's `node_modules`.
 - Native stores an anonymous volume (`- /app/node_modules`) as a named volume
   the project owns. Unlike Compose it is kept across `hack down`, so a rebuilt
-  image does not refill it; `hack down --remove-data` empties it. A named
+  image does not refill it; `hack down --remove-data` deletes it, and the next
+  start fills a new volume from the image. A named
   volume filled by a `deps` service remains the better choice.
-- Native allows at most 16 volumes, dependency caches and anonymous volumes
-  included.
+- Native allows at most 16 volumes in the running graph's selected profiles,
+  dependency caches and anonymous volumes included.
 - `hack down --remove-data` deletes the data volumes a stopped native project
   created. Shared dependency caches are released, not deleted.
   `--prune-caches` is refused on native.

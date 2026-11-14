@@ -161,7 +161,7 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
             .and_then(|v| v.checked_add(info.pbi_start_tvusec))
             .ok_or_else(refused)?,
         uid: info.pbi_uid,
-        zombie: info.pbi_status == libc::SZOMB as u32,
+        zombie: info.pbi_status == libc::SZOMB,
     }))
 }
 

@@ -112,6 +112,12 @@ impl CliRunner {
         if let Some(p) = path {
             cmd.arg("--path").arg(p);
         }
+        // Children (and their own children, such as `docker` run by
+        // `hack doctor`) get a PATH with only absolute entries: an empty or
+        // relative entry would resolve against the working directory.
+        if let Some(path) = std::env::var_os("PATH") {
+            cmd.env("PATH", sanitize_path(&path));
+        }
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
@@ -296,6 +302,13 @@ fn read_all<R: Read + Send + 'static>(r: Option<R>) -> mpsc::Receiver<String> {
         let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
     rx
+}
+
+/// `PATH` with empty and relative entries removed.
+#[must_use]
+pub fn sanitize_path(path: &std::ffi::OsStr) -> std::ffi::OsString {
+    std::env::join_paths(std::env::split_paths(path).filter(|d| d.is_absolute()))
+        .unwrap_or_default()
 }
 
 /// Search absolute `PATH` entries for an executable regular file `name`.
@@ -535,6 +548,20 @@ mod tests {
             resolve_on_path("./hack", Some(&rel)),
             None,
             "relative names refused"
+        );
+    }
+
+    #[test]
+    fn child_path_drops_empty_and_relative_entries() {
+        let p = std::ffi::OsString::from(".::bin:/usr/bin:./x:/bin");
+        assert_eq!(sanitize_path(&p), std::ffi::OsString::from("/usr/bin:/bin"));
+        // And the child really receives an all-absolute PATH.
+        let f = FakeHack::new(r#"printf '{"p":"%s"}' "$PATH""#);
+        let v: Value = f.runner().run_json(&["x"], None, T).unwrap();
+        let got = v["p"].as_str().unwrap();
+        assert!(
+            got.split(':').all(|e| e.starts_with('/')),
+            "child PATH {got:?}"
         );
     }
 

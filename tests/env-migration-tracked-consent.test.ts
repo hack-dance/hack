@@ -171,6 +171,54 @@ function runDoctor(opts: {
 
 for (const backend of ["compose", "native"] as const) {
   test(
+    `${backend} doctor repairs tracked Compose after implicit migration only with fresh consent`,
+    async () => {
+      const project = await createProject({ compose: COMPOSE_WITH_ENV_FILE });
+      const implicit = await runImplicit(project);
+      expect(implicit.exitCode, implicit.output).toBe(0);
+      expect(implicit.output).not.toContain(VALUE);
+      const before = await status(project);
+      const localPath = join(project.projectDir, "hack.env.local.yaml");
+      const local = await readFile(localPath, "utf8");
+      const refused = await runDoctor({ project, backend, accept: false });
+      expect(refused.exitCode).toBe(1);
+      expect(refused.output).toContain("--accept-tracked-env-changes");
+      expect(refused.output).not.toContain(VALUE);
+      expect(await status(project)).toEqual(before);
+      expect(await readFile(localPath, "utf8")).toBe(local);
+      const repaired = await runDoctor({ project, backend, accept: true });
+      // Compose's intentionally unreachable Docker remains an independent doctor error.
+      expect(repaired.exitCode, repaired.output).toBe(
+        backend === "compose" ? 1 : 0
+      );
+      expect(repaired.output).toContain("Env migration completed.");
+      if (backend === "compose") {
+        expect(repaired.output).toContain("repair retained Compose");
+      }
+      expect(repaired.output).not.toContain(VALUE);
+      expect(
+        await readFile(join(project.projectDir, "docker-compose.yml"), "utf8")
+      ).not.toContain("env_file");
+      expect(await readFile(localPath, "utf8")).toBe(local);
+      expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+        `${KEY}=${VALUE}\n`
+      );
+      expect(await status(project)).toEqual([
+        " M .hack/docker-compose.yml",
+        "?? .hack/.gitignore",
+        "?? .hack/hack.env.default.yaml",
+      ]);
+      const repeated = await runDoctor({ project, backend, accept: false });
+      expect(repeated.exitCode, repeated.output).toBe(
+        backend === "compose" ? 1 : 0
+      );
+      expect(repeated.output).toContain("already completed");
+      expect(repeated.output).not.toContain(VALUE);
+    },
+    CLI_TEST_TIMEOUT_MS
+  );
+
+  test(
     `${backend} doctor without a prompt refuses to change tracked files and changes nothing`,
     async () => {
       const project = await createProject({ compose: COMPOSE_WITH_ENV_FILE });

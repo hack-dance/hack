@@ -8,6 +8,7 @@ stateDiagram-v2
     apply --> apply : Publish / Record
     apply --> idle : Crash / Finish
     idle --> apply : Resume [unfinished]
+    idle --> apply : RequestRepair [complete, deferred, snapshot, legacy]
     idle --> idle : SuccessfulRun / DamageBackup
     idle --> cleanup : RequestCleanup [proof]
     cleanup --> idle : RemoveLegacy [safe]
@@ -22,6 +23,10 @@ stateDiagram-v2
         INV intact snapshot
         INV no live targets
         Fresh delivery required
+    end note
+    note right of idle
+        RequestRepair clears run proof
+        Completed layers stay published
     end note
     classDef live stroke-width:1.6px
     classDef wait stroke-width:1.6px

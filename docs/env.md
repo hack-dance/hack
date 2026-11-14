@@ -1382,6 +1382,11 @@ project that has `hack.env.json` and no env layers. These implicit migrations
 report moved key names, retain every legacy copy and keep Compose `env_file`
 references. They never delete a tracked file or silently edit tracked config.
 Use the explicit preview/apply command when a shared config repair needs consent.
+After an implicit migration, explicit preview and Doctor can still offer the
+deferred Compose repair. That later phase keeps existing layers and legacy
+files, rechecks delivery and snapshot coverage, and requires consent for tracked
+edits. It invalidates an earlier project run, so start the complete project
+again before cleanup.
 
 A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
 `.hack/.env` and `.hack/.env.<overlay>`, which are gitignored and may hold passwords or

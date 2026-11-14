@@ -488,6 +488,10 @@ mode still cannot be combined with `--json`.
   legacy files and does not edit Compose, but can rewrite legacy config keys.
   It is still a write. An unfinished apply or rollback blocks env readers until
   the explicit migration command completes recovery.
+  After implicit completion, explicit preview and Doctor can still offer the
+  deferred Compose repair, with fresh delivery/snapshot checks and tracked-file
+  consent. They keep existing layers and legacy files. Start the full project
+  again after that repair before requesting cleanup.
 - Migration has refusal paths for collisions, symlinks, unreadable files and
   changed delivery semantics. A journal can record partial publication after an
   interruption; resume it rather than editing its files. Secret-backend/keychain

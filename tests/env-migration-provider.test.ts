@@ -108,6 +108,17 @@ async function runMigrationCli(
   args: readonly string[],
   { json = true }: { readonly json?: boolean } = {}
 ) {
+  return await runCliCommand(projectRoot, [
+    "env",
+    "migrate",
+    "--path",
+    projectRoot,
+    ...(json ? ["--json"] : []),
+    ...args,
+  ]);
+}
+
+async function runCliCommand(projectRoot: string, args: readonly string[]) {
   if (compiled && !isAbsolute(compiled)) {
     throw new Error("Compiled test executable must be absolute");
   }
@@ -119,15 +130,7 @@ async function runMigrationCli(
         resolve(import.meta.dir, "..", "index.ts"),
       ];
   const result = await children.run({
-    cmd: [
-      ...command,
-      "env",
-      "migrate",
-      "--path",
-      projectRoot,
-      ...(json ? ["--json"] : []),
-      ...args,
-    ],
+    cmd: [...command, ...args],
     cwd: projectRoot,
     env: privateCliEnv({
       root,
@@ -170,6 +173,51 @@ function pathField(data: Record<string, unknown>, name: string): string {
   }
   return path;
 }
+
+test("production CLI explicitly repairs Compose after implicit env exec, then rolls the whole migration back", async () => {
+  const project = await fixture();
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  const compose =
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n";
+  await writeFile(composePath, compose);
+  const implicit = await runCliCommand(project.projectRoot, [
+    "env",
+    "exec",
+    "--path",
+    project.projectRoot,
+    "--",
+    "/usr/bin/true",
+  ]);
+  expect(implicit.exitCode, implicit.stderr).toBe(0);
+  expect(await readFile(composePath, "utf8")).toBe(compose);
+  const preview = await cli(project.projectRoot, []);
+  expect(preview.exitCode, preview.stderr).toBe(0);
+  expect(preview.envelope.data.status).toBe("ready");
+  expect(preview.envelope.data.files).toContainEqual({
+    path: composePath,
+    action: "change",
+    keys: [],
+    tracked: false,
+  });
+  const applied = await cli(project.projectRoot, ["--apply"]);
+  expect(applied.exitCode, applied.stderr).toBe(0);
+  expect(applied.envelope.data.status).toBe("applied");
+  expect(await readFile(composePath, "utf8")).not.toContain("env_file");
+  const repeated = await cli(project.projectRoot, ["--apply"]);
+  expect(repeated.envelope.data.status).toBe("already_complete");
+  const rollback = await cli(project.projectRoot, [
+    "--rollback-manifest",
+    pathField(applied.envelope.data, "manifestPath"),
+  ]);
+  expect(rollback.exitCode, rollback.stderr).toBe(0);
+  expect(await readFile(composePath, "utf8")).toBe(compose);
+  expect(await readFile(join(project.projectDir, ".env"), "utf8")).toContain(
+    sentinel
+  );
+  expect(await (await resolveSecretStore(project)).get({ key: "SECRET" })).toBe(
+    sentinel
+  );
+});
 
 for (const damage of ["manifest", "missing-blob", "changed-blob"] as const) {
   test(`resumed production apply refuses ${damage} damage before another publication`, async () => {

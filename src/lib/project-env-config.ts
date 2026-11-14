@@ -6339,6 +6339,7 @@ export type PreparedLegacyEnvMigration = {
   readonly removable: readonly string[];
   readonly overlayNames: readonly string[];
   readonly hasContract: boolean;
+  readonly composeRepairDeferred: boolean;
   readonly retainedEnvFiles: readonly RetainedLegacyEnvFile[];
   readonly blockedCleanupCandidates: readonly string[];
   readonly store?: { readonly path: string; readonly keyPath: string };
@@ -6875,16 +6876,17 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
   if (opts.repairCompose !== false) {
     await prepareMigrationCompose(opts, add);
   }
+  const composeEnvFileReferences =
+    opts.repairCompose === false
+      ? await inspectLegacyComposeEnvFileReferences({ ...opts, composeFile })
+      : [];
   const candidates = await collectLegacyProjectEnvCleanupCandidates({
     ...opts,
     overlayNames,
     materialize: false,
     deliveredValues,
     configCleanupCandidates: configCandidates,
-    composeEnvFileReferences:
-      opts.repairCompose === false
-        ? await inspectLegacyComposeEnvFileReferences({ ...opts, composeFile })
-        : [],
+    composeEnvFileReferences,
     composeInterpolatedKeys: new Map([
       [
         resolve(opts.projectDir, PROJECT_ENV_FILENAME),
@@ -6957,6 +6959,7 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
     removable,
     overlayNames,
     hasContract: contract.exists,
+    composeRepairDeferred: composeEnvFileReferences.length > 0,
     retainedEnvFiles: candidates.retainedEnvFiles,
     blockedCleanupCandidates: candidates.blocked,
     ...(store ? { store } : {}),
@@ -6994,6 +6997,22 @@ export async function acquireLegacyEnvCleanupContext(opts: {
     }
   }
   return { ...opts, contract: contract.contract, receipts };
+}
+
+/** A later Compose repair must not rely on layers merely existing after implicit migration. */
+export async function assertLegacyEnvMigrationDelivery(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+}): Promise<void> {
+  const context = await acquireLegacyEnvCleanupContext({ ...opts, paths: [] });
+  await assertLegacyCleanupDelivery({
+    projectRoot: opts.projectRoot,
+    context,
+    paths: [resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME)],
+  });
 }
 
 /**

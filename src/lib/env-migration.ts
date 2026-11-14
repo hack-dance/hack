@@ -34,6 +34,7 @@ import {
 } from "./private-staging.ts";
 import {
   acquireLegacyEnvCleanupContext,
+  assertLegacyEnvMigrationDelivery,
   assertMachineLocalFileGitPrivate,
   assertProjectEnvKeyUntracked,
   assertProjectEnvLayerPaths,
@@ -102,6 +103,10 @@ type Journal = {
   readonly overlayNames: readonly string[];
   readonly store?: { readonly path: string; readonly keyPath: string };
   readonly removed: readonly string[];
+  /** Implicit publication leaves Compose repair for a later, consented phase. */
+  readonly composeRepair?: "deferred" | "applying" | "complete";
+  /** Read revision for the later phase; original sources remain the snapshot's before images. */
+  readonly composeRepairSources?: readonly EnvMigrationFileState[];
   /** Layer revision observed after a complete project startup succeeded. */
   readonly validated?: readonly EnvMigrationFileState[];
   readonly cleanupConfig?: Publication;
@@ -285,6 +290,15 @@ async function readJournal(
       ].includes(String(raw.state)) &&
       Array.isArray(raw.sources) &&
       raw.sources.every(validState) &&
+      (raw.composeRepair === undefined ||
+        ["deferred", "applying", "complete"].includes(
+          String(raw.composeRepair)
+        )) &&
+      (raw.composeRepairSources === undefined ||
+        (Array.isArray(raw.composeRepairSources) &&
+          raw.composeRepairSources.every(validState))) &&
+      (raw.composeRepair !== "applying" ||
+        Array.isArray(raw.composeRepairSources)) &&
       Array.isArray(raw.writes) &&
       raw.writes.every((entry) => validPublication(entry, path)) &&
       Array.isArray(raw.removable) &&
@@ -381,11 +395,18 @@ async function prepareConsistent(
 }
 
 export async function previewEnvMigration(
-  input: EnvMigrationProject
+  input: EnvMigrationProject & { readonly repairCompose?: boolean }
 ): Promise<EnvMigrationPreview> {
   const project = await canonicalProject(input);
   const path = envMigrationJournalPath(project.projectRoot);
   const journal = await readJournal(path, project);
+  if (needsComposeRepair(journal, input.repairCompose)) {
+    const prepared = await prepareDeferredComposeRepair(project, journal);
+    return {
+      ...(await previewPrepared(project, prepared.prepared, path)),
+      manifestPath: journal.manifestPath,
+    };
+  }
   if (journal && journal.state !== "rolled_back") {
     const files: EnvMigrationPreview["files"][number][] = [];
     for (const file of journal.writes) {
@@ -431,7 +452,12 @@ export async function previewEnvMigration(
   }
   return await previewPrepared(
     project,
-    (await prepareConsistent(project)).prepared,
+    (
+      await prepareConsistent({
+        ...project,
+        repairCompose: input.repairCompose,
+      })
+    ).prepared,
     path
   );
 }
@@ -448,7 +474,10 @@ export async function previewEnvCleanup(
   input: EnvMigrationProject
 ): Promise<EnvMigrationPreview> {
   const project = await canonicalProject(input);
-  const preview = await previewEnvMigration(project);
+  const preview = await previewEnvMigration({
+    ...project,
+    repairCompose: false,
+  });
   const journal = await readJournal(preview.journalPath, project);
   const files = preview.files.filter((file) => file.action === "removable");
   if (
@@ -491,30 +520,66 @@ async function assertConsent(
 
 async function assertSources(
   journal: Journal,
-  allowLayerChanges = false
+  {
+    allowLayerChanges = false,
+    allowTighterModes = false,
+  }: {
+    readonly allowLayerChanges?: boolean;
+    readonly allowTighterModes?: boolean;
+  } = {}
 ): Promise<void> {
-  for (const source of journal.sources) {
+  const revised = journal.composeRepairSources !== undefined;
+  for (const source of journal.composeRepairSources ?? journal.sources) {
     if (journal.removed.includes(source.path)) {
       continue;
     }
     const current = (await readState(source.path)).state;
-    const write = journal.writes.find((entry) => entry.path === source.path);
+    const publication = journal.writes.find(
+      (entry) => entry.path === source.path
+    );
+    const write =
+      revised && publication?.kind !== "compose" ? undefined : publication;
     if (
       allowLayerChanges &&
-      (write?.kind === "layer" || write?.kind === "local_layer")
+      (publication?.kind === "layer" || publication?.kind === "local_layer")
     ) {
       continue;
     }
     if (
-      write?.done
-        ? !same(current, write)
-        : !(same(current, source) || (write && same(current, write)))
+      !matchesMigrationSource({ current, source, write, allowTighterModes })
     ) {
       throw new ClosedCliError(
         `Env migration input changed: ${JSON.stringify(source.path)}. Keep the legacy files and snapshot. To restore originals while retaining later edits privately, use hack env migrate --rollback-manifest ${JSON.stringify(journal.manifestPath)} --preserve-changes (values omitted).`
       );
     }
   }
+}
+
+function matchesMigrationSource({
+  current,
+  source,
+  write,
+  allowTighterModes,
+}: {
+  readonly current: EnvMigrationFileState;
+  readonly source: EnvMigrationFileState;
+  readonly write: Publication | undefined;
+  readonly allowTighterModes: boolean;
+}): boolean {
+  const expected = write?.done ? write : source;
+  if (
+    allowTighterModes &&
+    expected.mode !== null &&
+    current.mode === (expected.mode & 0o600) &&
+    current.sha256 === expected.sha256 &&
+    current.size === expected.size
+  ) {
+    return true;
+  }
+  return (
+    same(current, expected) ||
+    (!write?.done && write !== undefined && same(current, write))
+  );
 }
 
 async function prepareJournal(
@@ -530,6 +595,32 @@ async function prepareJournal(
   await assertOutsideWorkingTrees(snapshot.manifestPath, project);
   await snapshots.assertCoverage({ ...snapshot, files: sources });
   await snapshots.recordAfter({ ...snapshot, files: sources });
+  const writes = await stagePublications(project, path, prepared, sources);
+  const journal: Journal = {
+    version: 1,
+    kind: "hack-env-migration",
+    project,
+    manifestPath: snapshot.manifestPath,
+    state: "applying",
+    sources,
+    writes,
+    removable: prepared.removable,
+    overlayNames: prepared.overlayNames,
+    ...(prepared.store ? { store: prepared.store } : {}),
+    removed: [],
+    composeRepair: prepared.composeRepairDeferred ? "deferred" : "complete",
+  };
+  await assertSources(journal);
+  await writeMetadata(path, journal);
+  return journal;
+}
+
+async function stagePublications(
+  project: EnvMigrationProject,
+  path: string,
+  prepared: PreparedLegacyEnvMigration,
+  sources: readonly EnvMigrationFileState[]
+): Promise<readonly Publication[]> {
   const payloads = prepared.files.map((file) => {
     const text = prepared.payload(file.path);
     return { text, sha256: digest(Buffer.from(text)) };
@@ -539,7 +630,7 @@ async function prepareJournal(
     projectRoot: project.projectRoot,
     files: payloads,
   });
-  const writes: Publication[] = prepared.files.map((file, index) => {
+  return prepared.files.map((file, index) => {
     const before = sources.find((entry) => entry.path === file.path);
     const payload = staged[index];
     const bytes = payloads[index];
@@ -555,22 +646,88 @@ async function prepareJournal(
       done: false,
     };
   });
-  const journal: Journal = {
-    version: 1,
-    kind: "hack-env-migration",
+}
+
+function needsComposeRepair(
+  journal: Journal | null,
+  repairCompose: boolean | undefined
+): journal is Journal & {
+  readonly state: "complete";
+  readonly composeRepair: "deferred";
+} {
+  return (
+    journal?.state === "complete" &&
+    journal.composeRepair === "deferred" &&
+    repairCompose !== false
+  );
+}
+
+/** Only an unchanged, already snapshotted Compose file may extend a completed implicit migration. */
+async function prepareDeferredComposeRepair(
+  project: EnvMigrationProject,
+  journal: Journal
+): Promise<Preparation> {
+  await assertSources(journal, {
+    allowLayerChanges: true,
+    allowTighterModes: true,
+  });
+  const preparation = await prepareConsistent(project);
+  if (
+    preparation.prepared.files.some(
+      (file) =>
+        file.kind !== "compose" ||
+        journal.writes.some((write) => write.path === file.path)
+    ) ||
+    preparation.sources.some(
+      (source) =>
+        !journal.sources.some((original) => original.path === source.path)
+    )
+  ) {
+    throw refuse();
+  }
+  await assertLegacyEnvMigrationDelivery({
+    ...project,
+    overlayNames: preparation.prepared.overlayNames,
+  });
+  return preparation;
+}
+
+async function extendComposeRepair(
+  project: EnvMigrationProject,
+  path: string,
+  journal: Journal,
+  snapshots: EnvMigrationSnapshots,
+  accept: boolean
+): Promise<Journal> {
+  const { prepared, sources } = await prepareDeferredComposeRepair(
     project,
-    manifestPath: snapshot.manifestPath,
+    journal
+  );
+  await assertConsent(
+    project,
+    prepared.files.map((file) => file.path),
+    accept
+  );
+  if (prepared.files.length === 0) {
+    return journal;
+  }
+  await snapshots.assertCoverage({
+    manifestPath: journal.manifestPath,
+    files: journal.sources,
+  });
+  const writes = await stagePublications(project, path, prepared, sources);
+  const extended: Journal = {
+    ...journal,
     state: "applying",
-    sources,
-    writes,
+    writes: [...journal.writes, ...writes],
     removable: prepared.removable,
-    overlayNames: prepared.overlayNames,
-    ...(prepared.store ? { store: prepared.store } : {}),
-    removed: [],
+    composeRepair: "applying",
+    composeRepairSources: sources,
+    validated: undefined,
   };
-  await assertSources(journal);
-  await writeMetadata(path, journal);
-  return journal;
+  await assertSources(extended);
+  await writeMetadata(path, extended);
+  return extended;
 }
 
 async function publishStagingGuard(
@@ -704,14 +861,21 @@ export async function applyEnvMigration(input: {
   const existing = await readJournal(path, project);
   assertApplyJournalState(existing);
   await input.hooks?.beforeLock?.();
-  if (existing && ["complete", "cleaned"].includes(existing.state)) {
+  if (
+    existing &&
+    ["complete", "cleaned"].includes(existing.state) &&
+    !needsComposeRepair(existing, input.repairCompose)
+  ) {
     return await withProjectsRegistryLock({
       lockPath: `${path}.lock`,
       label: "env migration",
       run: async () => {
         const current = await readJournal(path, project);
         assertApplyJournalState(current);
-        if (!(current && ["complete", "cleaned"].includes(current.state))) {
+        if (
+          !(current && ["complete", "cleaned"].includes(current.state)) ||
+          needsComposeRepair(current, input.repairCompose)
+        ) {
           throw new ClosedCliError(
             "Env migration state changed while waiting. Repeat the preview and apply command; no project files were changed."
           );
@@ -731,17 +895,20 @@ export async function applyEnvMigration(input: {
       },
     });
   }
-  const preparation =
-    existing && existing.state !== "rolled_back"
-      ? null
-      : await prepareConsistent({
-          ...project,
-          repairCompose: input.repairCompose,
-        });
-  const changed =
-    existing && existing.state !== "rolled_back"
-      ? existing.writes.map((entry) => entry.path)
-      : (preparation?.prepared.files.map((entry) => entry.path) ?? []);
+  let preparation: Preparation | null = null;
+  if (needsComposeRepair(existing, input.repairCompose)) {
+    preparation = await prepareDeferredComposeRepair(project, existing);
+  } else if (!existing || existing.state === "rolled_back") {
+    preparation = await prepareConsistent({
+      ...project,
+      repairCompose: input.repairCompose,
+    });
+  }
+  const changed = preparation
+    ? preparation.prepared.files.map((entry) => entry.path)
+    : (existing?.writes
+        .filter((entry) => !entry.done)
+        .map((entry) => entry.path) ?? []);
   await assertConsent(project, changed, input.acceptTrackedChanges);
   if (
     preparation &&
@@ -781,9 +948,20 @@ export async function applyEnvMigration(input: {
                   repairCompose: input.repairCompose,
                 }))
             );
+      if (needsComposeRepair(journal, input.repairCompose)) {
+        journal = await extendComposeRepair(
+          project,
+          path,
+          journal,
+          input.snapshots,
+          input.acceptTrackedChanges
+        );
+      }
       await assertConsent(
         project,
-        journal.writes.map((entry) => entry.path),
+        journal.writes
+          .filter((entry) => !entry.done)
+          .map((entry) => entry.path),
         input.acceptTrackedChanges
       );
       if (journal.state !== "applying") {
@@ -801,11 +979,24 @@ export async function applyEnvMigration(input: {
         manifestPath: journal.manifestPath,
         files: journal.sources,
       });
+      if (journal.composeRepair === "applying") {
+        await withEnvMigrationVerification({
+          projectRoot: project.projectRoot,
+          run: () =>
+            assertLegacyEnvMigrationDelivery({
+              ...project,
+              overlayNames: journal.overlayNames,
+            }),
+        });
+      }
       for (const [index, entry] of journal.writes.entries()) {
         if (entry.done) {
           continue;
         }
         await input.hooks?.boundary?.({ phase: "before_publish", index });
+        if (journal.composeRepairSources) {
+          await assertSources(journal);
+        }
         await publishEntry(project, entry);
         await input.hooks?.boundary?.({ phase: "published", index });
         await input.snapshots.recordAfter({
@@ -821,34 +1012,58 @@ export async function applyEnvMigration(input: {
         await writeMetadata(path, journal);
         await input.hooks?.boundary?.({ phase: "recorded", index });
       }
-      await assertSources(journal);
-      await withEnvMigrationVerification({
-        projectRoot: project.projectRoot,
-        run: async () => {
-          for (const envName of [null, ...journal.overlayNames]) {
-            if (!(await resolveProjectEnvConfig({ ...project, envName }))) {
-              throw refuse();
-            }
-          }
-        },
+      return await finishApplyPhase({
+        project,
+        path,
+        journal,
+        hooks: input.hooks,
       });
-      await input.hooks?.boundary?.({ phase: "verified", index: -1 });
-      journal = { ...journal, state: "complete" };
-      await writeMetadata(path, journal);
-      await input.hooks?.boundary?.({ phase: "complete", index: -1 });
-      const payloadCleanup = await purgeMigrationPayloads({
-        journalPath: path,
-        projectRoot: project.projectRoot,
-        retain: [],
-      });
-      return {
-        payloadCleanup: payloadCleanup ? "complete" : "kept",
-        status: "applied" as const,
-        journalPath: path,
-        manifestPath: journal.manifestPath,
-      };
     },
   });
+}
+
+/** Both initial migration and later repair verify resolution before recording completion. */
+async function finishApplyPhase({
+  project,
+  path,
+  journal,
+  hooks,
+}: {
+  readonly project: EnvMigrationProject;
+  readonly path: string;
+  readonly journal: Journal;
+  readonly hooks?: EnvMigrationHooks;
+}) {
+  await assertSources(journal);
+  await withEnvMigrationVerification({
+    projectRoot: project.projectRoot,
+    run: async () => {
+      for (const envName of [null, ...journal.overlayNames]) {
+        if (!(await resolveProjectEnvConfig({ ...project, envName }))) {
+          throw refuse();
+        }
+      }
+    },
+  });
+  await hooks?.boundary?.({ phase: "verified", index: -1 });
+  await writeMetadata(path, {
+    ...journal,
+    state: "complete",
+    composeRepair:
+      journal.composeRepair === "applying" ? "complete" : journal.composeRepair,
+  });
+  await hooks?.boundary?.({ phase: "complete", index: -1 });
+  const payloadCleanup = await purgeMigrationPayloads({
+    journalPath: path,
+    projectRoot: project.projectRoot,
+    retain: [],
+  });
+  return {
+    payloadCleanup: payloadCleanup ? "complete" : "kept",
+    status: "applied" as const,
+    journalPath: path,
+    manifestPath: journal.manifestPath,
+  };
 }
 
 /** Explicit later action: a snapshot and fresh legacy-to-current delivery proof are both required. */
@@ -1046,7 +1261,7 @@ async function cleanupLocked(
     manifestPath: journal.manifestPath,
     files: journal.sources,
   });
-  await assertSources(journal, true);
+  await assertSources(journal, { allowLayerChanges: true });
   const context = await acquireLegacyEnvCleanupContext({
     ...project,
     overlayNames: journal.overlayNames,
@@ -1085,7 +1300,7 @@ async function cleanupLocked(
       },
     };
   }
-  await assertSources(journal, true);
+  await assertSources(journal, { allowLayerChanges: true });
   journal = { ...journal, state: "cleaning" };
   await writeMetadata(path, journal);
   let removed: readonly string[] = [];
@@ -1250,7 +1465,11 @@ async function rollbackLocked(
         journal.removable.includes(source.path) &&
         current.sha256 === null);
     let expected =
-      journal.writes.find((write) => write.path === source.path) ?? source;
+      journal.writes.find((write) => write.path === source.path) ??
+      journal.composeRepairSources?.find(
+        (entry) => entry.path === source.path
+      ) ??
+      source;
     if (removed) {
       expected = { ...source, sha256: null, mode: null, size: 0 };
     } else if (
@@ -1307,7 +1526,7 @@ export async function migrateLegacyEnvForCommand(
       : await prepareConsistent({ ...canonical, repairCompose: false });
   const preview =
     retained && retained.state !== "rolled_back"
-      ? await previewEnvMigration(canonical)
+      ? await previewEnvMigration({ ...canonical, repairCompose: false })
       : await previewPrepared(
           canonical,
           preparation?.prepared ??

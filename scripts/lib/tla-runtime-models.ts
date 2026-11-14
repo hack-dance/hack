@@ -144,7 +144,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "env-migration",
     module: "Migration",
-    states: 37,
+    states: 74,
     invariant: "NoSameRunCleanup",
     action: "UnsafeRemoveDuringApply",
     fields: [
@@ -156,6 +156,22 @@ const contracts: readonly ModelContract[] = [
       "recorded = 0",
       "complete = FALSE",
       "runProof = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "stale-repair-proof",
+        negative: true,
+        invariant: "FreshRunProof",
+        action: "RequestRepair",
+        fields: [
+          'phase = "apply"',
+          "complete = FALSE",
+          "runProof = TRUE",
+          "snapshot = TRUE",
+          "legacy = TRUE",
+          "deferred = FALSE",
+        ],
+      },
     ],
   },
   {

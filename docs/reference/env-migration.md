@@ -100,6 +100,19 @@ Compose `env_file` references.
 Implicit commands refuse an unfinished apply or rollback journal before using
 partially published layers. Resume the explicit apply or rollback command first.
 
+When implicit migration retained legacy Compose `env_file` references, a later
+explicit preview or `doctor --migrate-env-config` can offer their repair. This is
+a new journalled phase: completed env layers are not published again, tracked
+Compose edits require fresh consent, and migrated values must still resolve.
+The Compose before image must be unchanged and covered by the original intact
+snapshot; the same manifest rolls back the whole migration, including this
+later repair. A fresh read revision permits unrelated additions in existing
+layers and permission tightening by Doctor, while refusing changed legacy bytes
+or lost migrated values. Its pending journal freezes that revision for resume.
+The phase retains all legacy files and clears an earlier startup proof, so
+cleanup still needs a later successful full-project run. Once the repair is
+complete, another explicit apply is a no-op.
+
 Migration refuses a Git-tracked project key path even when its file is absent
 from the worktree, including case-folded aliases such as `.Hack.Secret.Key`.
 Tracked-change consent does not allow publishing key bytes at that path.

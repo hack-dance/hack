@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -24,6 +25,7 @@ import {
 } from "../src/lib/env-migration.ts";
 import { migrationDigest } from "../src/lib/env-migration-files.ts";
 import { stageMigrationPayloads } from "../src/lib/env-migration-payloads.ts";
+import { envMigrationSnapshots } from "../src/lib/env-migration-snapshot.ts";
 import {
   LegacyEnvCleanupError,
   resolveProjectEnvConfig,
@@ -263,6 +265,183 @@ test("journalled implicit migration keeps undeclared Compose overlay inputs; exp
       await readFile(envMigrationJournalPath(project.projectRoot), "utf8")
     ).state
   ).toBe("complete");
+  await expect(previewEnvMigration(project)).rejects.toThrow(".env.staging");
+  await expect(
+    applyEnvMigration({
+      project,
+      snapshots: envMigrationSnapshots(),
+      acceptTrackedChanges: true,
+    })
+  ).rejects.toThrow(".env.staging");
+  expect(await readFile(composePath, "utf8")).toBe(compose);
+});
+
+test("explicit migration after implicit completion previews only Compose repair and keeps one reversible journal", async () => {
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  const compose =
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n";
+  await writeFile(composePath, compose);
+  const before = await projectFiles();
+  await migrateLegacyEnvForCommand({ ...project, materialize: false });
+  const journalPath = envMigrationJournalPath(project.projectRoot);
+  const implicit = JSON.parse(await readFile(journalPath, "utf8"));
+  const migrated = await projectFiles();
+  const preview = await previewEnvMigration(project);
+  expect(await projectFiles()).toEqual(migrated);
+  expect(preview.status).toBe("ready");
+  expect(preview.manifestPath).toBe(implicit.manifestPath);
+  expect(preview.files.filter((file) => file.action !== "removable")).toEqual([
+    { path: composePath, action: "change", keys: [], tracked: false },
+  ]);
+  expect(preview.files).toContainEqual({
+    path: join(project.projectDir, ".env"),
+    action: "removable",
+    keys: [],
+    tracked: false,
+  });
+  const snapshots = envMigrationSnapshots();
+  const repaired = await apply({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+  });
+  expect(repaired.status).toBe("applied");
+  expect(repaired.manifestPath).toBe(implicit.manifestPath);
+  const after = await projectFiles();
+  expect(
+    [...after]
+      .filter(([path, text]) => migrated.get(path) !== text)
+      .map(([path]) => path)
+  ).toEqual([composePath]);
+  expect(await readFile(composePath, "utf8")).not.toContain("env_file");
+  expect(await readFile(join(project.projectDir, ".env"), "utf8")).toContain(
+    SENTINEL
+  );
+  expect(JSON.stringify(preview)).not.toContain(SENTINEL);
+  expect(await readFile(journalPath, "utf8")).not.toContain(SENTINEL);
+  expect(
+    (await apply({ project, snapshots, acceptTrackedChanges: true })).status
+  ).toBe("already_complete");
+  await recordEnvMigrationProjectRun(project);
+  await cleanupEnvMigration({ project, snapshots, acceptTrackedChanges: true });
+  expect(await Bun.file(join(project.projectDir, ".env")).exists()).toBe(false);
+  await rollbackEnvMigration({
+    project,
+    snapshots,
+    manifestPath: repaired.manifestPath,
+  });
+  expectRestored(await projectFiles(), before);
+});
+
+test("later Compose repair accepts layer additions and tighter modes, invalidates old run proof and refuses lost values", async () => {
+  await writeFile(
+    join(project.projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n"
+  );
+  await migrateLegacyEnvForCommand({ ...project, materialize: false });
+  await recordEnvMigrationProjectRun(project);
+  const layer = join(project.projectDir, "hack.env.local.yaml");
+  const original = await readFile(layer, "utf8");
+  await writeFile(layer, original.replace(SENTINEL, "changed-synthetic-value"));
+  await expect(previewEnvMigration(project)).rejects.toThrow();
+  const changedLayer = original.replace(
+    "  global:\n",
+    "  global:\n    EXTRA: additional-synthetic-value\n"
+  );
+  expect(changedLayer).not.toBe(original);
+  await writeFile(layer, changedLayer);
+  await chmod(join(project.projectDir, ".env"), 0o600);
+  await apply({
+    project,
+    snapshots: envMigrationSnapshots(),
+    acceptTrackedChanges: true,
+  });
+  expect(await readFile(layer, "utf8")).toBe(changedLayer);
+  await expect(
+    cleanupEnvMigration({
+      project,
+      snapshots: envMigrationSnapshots(),
+      acceptTrackedChanges: true,
+    })
+  ).rejects.toThrow("hack up");
+  await recordEnvMigrationProjectRun(project);
+  await cleanupEnvMigration({
+    project,
+    snapshots: envMigrationSnapshots(),
+    acceptTrackedChanges: true,
+  });
+  expect(await Bun.file(join(project.projectDir, ".env")).exists()).toBe(false);
+});
+
+test("later Compose repair refuses damaged originals before changing the completed journal", async () => {
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  await writeFile(
+    composePath,
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n"
+  );
+  const snapshots = fixtureEnvSnapshots(root);
+  const implicit = await apply({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+    repairCompose: false,
+  });
+  const manifest = JSON.parse(await readFile(implicit.manifestPath, "utf8"));
+  const entry = manifest.files.find(
+    (file: { path: string }) => file.path === composePath
+  );
+  const original = await readFile(entry.payload);
+  await writeFile(entry.payload, "damaged synthetic original");
+  const before = await projectFiles();
+  const journal = await readFile(implicit.journalPath, "utf8");
+  await expect(
+    apply({ project, snapshots, acceptTrackedChanges: true })
+  ).rejects.toThrow("coverage");
+  expect(await projectFiles()).toEqual(before);
+  expect(await readFile(implicit.journalPath, "utf8")).toBe(journal);
+  await writeFile(entry.payload, original);
+  expect(
+    (await apply({ project, snapshots, acceptTrackedChanges: true })).status
+  ).toBe("applied");
+});
+
+test("later Compose repair rechecks its read revision before publication and on resume", async () => {
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  const compose =
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n";
+  await writeFile(composePath, compose);
+  const snapshots = fixtureEnvSnapshots(root);
+  await apply({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+    repairCompose: false,
+  });
+  const envPath = join(project.projectDir, ".env");
+  const original = await readFile(envPath, "utf8");
+  await expect(
+    apply({
+      project,
+      snapshots,
+      acceptTrackedChanges: true,
+      hooks: {
+        boundary: async ({ phase }) => {
+          if (phase === "before_publish") {
+            await writeFile(envPath, "TOKEN=changed-synthetic-value\n");
+          }
+        },
+      },
+    })
+  ).rejects.toThrow("input changed");
+  expect(await readFile(composePath, "utf8")).toBe(compose);
+  await expect(
+    apply({ project, snapshots, acceptTrackedChanges: true })
+  ).rejects.toThrow("input changed");
+  expect(await readFile(composePath, "utf8")).toBe(compose);
+  await writeFile(envPath, original);
+  expect(
+    (await apply({ project, snapshots, acceptTrackedChanges: true })).status
+  ).toBe("applied");
 });
 
 test("retry sweeps only receipted staging artifacts and retains unknown contents", async () => {
@@ -1074,22 +1253,39 @@ test("rollback retains a new shared key used by another checkout", async () => {
 });
 
 test("SIGKILL at every journal/publication boundary resumes without losing an overlay value", async () => {
-  for (const scenario of ["plain", "encrypted"] as const) {
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  const originalCompose = await readFile(composePath, "utf8");
+  for (const scenario of ["plain", "repair", "encrypted"] as const) {
+    await writeFile(
+      composePath,
+      scenario === "repair"
+        ? `${originalCompose}    env_file: .env\n`
+        : originalCompose
+    );
     if (scenario === "encrypted") {
       await addLegacySecret();
     }
     const sources = await projectFiles();
-    const preview = await previewEnvMigration(project);
+    const preview = await previewEnvMigration({
+      ...project,
+      repairCompose: scenario !== "repair",
+    });
     const count = preview.files.filter(
       (file) => file.action !== "removable"
     ).length;
     const boundaries = [
       "prepared:-1",
-      ...Array.from({ length: count }, (_, index) => [
-        `before_publish:${index}`,
-        `published:${index}`,
-        `recorded:${index}`,
-      ]).flat(),
+      ...Array.from(
+        { length: scenario === "repair" ? 1 : count },
+        (_, localIndex) => {
+          const index = scenario === "repair" ? count : localIndex;
+          return [
+            `before_publish:${index}`,
+            `published:${index}`,
+            `recorded:${index}`,
+          ];
+        }
+      ).flat(),
       "verified:-1",
       "complete:-1",
     ];
@@ -1116,6 +1312,20 @@ test("SIGKILL at every journal/publication boundary resumes without losing an ov
         });
       }
       const dataHome = join(selected, "hack-home");
+      if (scenario === "repair") {
+        const previousHome = process.env.HACK_HOME;
+        process.env.HACK_HOME = dataHome;
+        try {
+          await apply({
+            project: selectedProject,
+            snapshots: fixtureEnvSnapshots(selected),
+            acceptTrackedChanges: true,
+            repairCompose: false,
+          });
+        } finally {
+          restoreEnv("HACK_HOME", previousHome);
+        }
+      }
       const child = Bun.spawn(
         [
           process.execPath,
@@ -1188,6 +1398,14 @@ test("SIGKILL at every journal/publication boundary resumes without losing an ov
           expect(
             await readFile(join(selectedProject.projectDir, ".env"), "utf8")
           ).toContain(SENTINEL);
+          if (scenario === "repair") {
+            expect(
+              await readFile(
+                join(selectedProject.projectDir, "docker-compose.yml"),
+                "utf8"
+              )
+            ).not.toContain("env_file");
+          }
         } finally {
           restoreEnv("HACK_HOME", previousHome);
         }

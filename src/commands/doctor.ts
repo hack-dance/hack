@@ -4315,6 +4315,23 @@ async function buildEnvMigrationPlanStep(opts: {
     throw error;
   }
   if (modernExists) {
+    const config = await readProjectConfig(opts.project);
+    const composeFile = opts.project.composeFile;
+    const preview = await previewEnvMigration({
+      projectRoot: opts.project.projectRoot,
+      projectDir: opts.project.projectDir,
+      projectName: config.name ?? "project",
+      serviceNames: await discoverComposeServiceNames({
+        composeFile,
+      }),
+    });
+    if (
+      preview.files.some(
+        (file) => file.action === "change" && file.path === composeFile
+      )
+    ) {
+      return "Prompt to repair retained Compose env_file references; keep completed env layers and legacy files.";
+    }
     return "Skip env migration because this project already uses hack.env.*.yaml.";
   }
 

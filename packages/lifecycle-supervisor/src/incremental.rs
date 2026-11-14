@@ -23,6 +23,54 @@ use std::{
 
 const SOCKET: &str = "control.sock";
 
+/// Socket permissions alone do not distinguish a same-UID container peer.
+#[cfg(target_os = "linux")]
+fn verify_peer(stream: &UnixStream) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getsockopt writes at most the supplied live ucred buffer.
+    let credentials = unsafe {
+        let mut credentials: libc::ucred = std::mem::zeroed();
+        let mut length = std::mem::size_of_val(&credentials) as libc::socklen_t;
+        if libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        ) != 0
+            || length as usize != std::mem::size_of_val(&credentials)
+        {
+            return Err(refused());
+        }
+        credentials
+    };
+    // SAFETY: geteuid has no preconditions.
+    if credentials.uid != unsafe { libc::geteuid() } || credentials.pid <= 1 {
+        return Err(refused());
+    }
+    for namespace in ["pid", "user", "mnt"] {
+        let own = fs::metadata(format!("/proc/self/ns/{namespace}"))?;
+        let peer = fs::metadata(format!("/proc/{}/ns/{namespace}", credentials.pid))?;
+        if own.dev() != peer.dev() || own.ino() != peer.ino() {
+            return Err(refused());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_peer(stream: &UnixStream) -> Result<()> {
+    let mut uid = 0;
+    let mut gid = 0;
+    // SAFETY: getpeereid writes two live scalar buffers; the descriptor is live.
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0
+        || uid != unsafe { libc::geteuid() }
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 struct SocketOwner {
     device: u64,
     inode: u64,
@@ -261,6 +309,7 @@ fn handle_add(
     children: &mut Vec<Child>,
     response_started: &mut bool,
 ) -> Result<()> {
+    verify_peer(stream)?;
     let request: Launch = protocol::read(stream)?;
     supervisor::validate_launch(&request)?;
     if request.root != root.path

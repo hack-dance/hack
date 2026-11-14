@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { resolveGlobalHackDir } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
 import { resolveLifecycleLogPath } from "./lifecycle-runtime.ts";
 import { ensurePrivateDirectory } from "./private-file.ts";
@@ -46,12 +47,22 @@ type Instance = {
 const LIMIT = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 35_000;
 
-/** The common log stays where existing lifecycle readers expect it. */
+/** Control capabilities must never be published through checkout bind mounts. */
 export function resolveLifecycleSupervisorRoot(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
 }): string {
-  return `${resolveLifecycleLogPath(opts)}.supervisor`;
+  const hostRoot = resolve(resolveGlobalHackDir(), "lifecycle-supervisors");
+  const inside = relative(dirname(resolve(opts.projectDir)), hostRoot);
+  if (inside === "" || !(inside.startsWith("../") || isAbsolute(inside))) {
+    throw new Error(
+      "Lifecycle supervisor state must be outside the project checkout."
+    );
+  }
+  const key = createHash("sha256")
+    .update(JSON.stringify([resolve(opts.projectDir), opts.composeProject]))
+    .digest("hex");
+  return resolve(hostRoot, key);
 }
 
 /** Resolve only the current installation or an explicit test executable. */
@@ -113,7 +124,18 @@ async function lifecycleSupervisorRootAbsent(opts: Instance): Promise<boolean> {
     return false;
   } catch (error) {
     if (isRecord(error) && error.code === "ENOENT") {
-      return true;
+      // Never turn an earlier experimental checkout-local owner into absence.
+      try {
+        await lstat(`${resolveLifecycleLogPath(opts)}.supervisor`);
+      } catch (legacyError) {
+        if (isRecord(legacyError) && legacyError.code === "ENOENT") {
+          return true;
+        }
+        throw failure();
+      }
+      throw new Error(
+        "Stop the earlier experimental supervisor with its original CLI before upgrading."
+      );
     }
     throw failure();
   }

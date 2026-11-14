@@ -14,6 +14,7 @@ import {
   inspectLifecycleSupervisor,
   type LifecycleSupervisorReceipt,
   stopLifecycleSupervisor,
+  withLifecycleSupervisorControllerLock,
 } from "./lifecycle-supervisor.ts";
 import { readProcessIdentities } from "./process-tree.ts";
 import {
@@ -429,6 +430,21 @@ export async function repairProjectLifecycleSessions(opts: {
 }
 
 async function repairSupervisorSession(opts: {
+  readonly projectDir: string;
+  readonly projectRoot: string;
+  readonly entry: LifecycleStateEntry;
+  readonly inspect: typeof inspectProjectLifecycleHygiene;
+  readonly inspectSupervisor: typeof inspectLifecycleSupervisor;
+  readonly stopSupervisor: typeof stopLifecycleSupervisor;
+}): Promise<LifecycleHygieneRepairResult> {
+  return await withLifecycleSupervisorControllerLock({
+    projectDir: opts.projectDir,
+    composeProject: opts.entry.composeProject,
+    run: () => repairSupervisorSessionLocked(opts),
+  });
+}
+
+async function repairSupervisorSessionLocked(opts: {
   readonly projectDir: string;
   readonly projectRoot: string;
   readonly entry: LifecycleStateEntry;

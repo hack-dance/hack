@@ -872,3 +872,92 @@ test("daemon full and summary preserve the shared backend/service observation", 
     expect(payload.projects[0]).toMatchObject(observation);
   }
 });
+
+test("an event refresh retains known job completion and publishes a subsequent crash", async () => {
+  function runtime(code: number): RuntimeProject {
+    const member = (service: string, state: string) => ({
+      id: service,
+      project: "event-fixture",
+      service,
+      state,
+      status: state,
+      name: service,
+      ports: "",
+      workingDir: "/fixture/.hack",
+      image: null,
+      labels: null,
+      mounts: [],
+      networks: [],
+      observation: {
+        state,
+        health: null,
+        exitCode: state === "exited" ? code : null,
+        startedAt: null,
+      },
+    });
+    return {
+      project: "event-fixture",
+      workingDir: "/fixture/.hack",
+      isGlobal: false,
+      services: new Map([
+        ["api", { service: "api", containers: [member("api", "running")] }],
+        ["task", { service: "task", containers: [member("task", "exited")] }],
+      ]),
+    };
+  }
+  const cache = createRuntimeCache({
+    deps: {
+      readProjectsRegistry: async () => ({ version: 1, projects: [] }),
+      buildProjectViews: async (opts) => [
+        {
+          name: "event-fixture",
+          devHost: null,
+          repoRoot: "/fixture",
+          projectDir: "/fixture/.hack",
+          definedServices: ["api", "task"],
+          serviceReadiness: { api: "started", task: "completed" },
+          extensionsEnabled: null,
+          features: null,
+          serviceHosts: null,
+          runtimeConfigured: true,
+          runtimeStatus: opts.runtimeOk ? "running" : "unknown",
+          runtime: opts.runtime[0] ?? null,
+          branchRuntime: [],
+          sessions: [],
+          lifecycle: null,
+          ownership: null,
+          worktrees: null,
+          kind: "registered",
+          status: "running",
+        },
+      ],
+    },
+  });
+  for (const [index, code] of [0, 0, 2].entries()) {
+    runtimeQueue.push({
+      ok: true,
+      runtime: [runtime(code)],
+      error: null,
+      checkedAtMs: Date.now(),
+    });
+    await cache.refresh({ reason: "docker-event", forceInspect: index === 0 });
+    const payload = await cache.getProjectsPayload({
+      filter: null,
+      includeGlobal: false,
+      includeUnregistered: false,
+      includeMeta: false,
+    });
+    expect(payload.projects[0]?.state).toBe(
+      code === 0 ? "running" : "degraded"
+    );
+    expect(payload.projects[0]?.services).toMatchObject([
+      { name: "api" },
+      { name: "task", completed: code === 0, exit_code: code },
+    ]);
+  }
+  expect(runtimeReadCalls.map((call) => call.forceInspect)).toEqual([
+    true,
+    false,
+    false,
+  ]);
+});

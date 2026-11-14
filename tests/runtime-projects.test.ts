@@ -18,6 +18,8 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 let dockerAvailable = false;
 let currentIds: string[] = [];
 let inspectExitCode = 0;
+const memberStates = new Map<string, string>();
+const memberExitCodes = new Map<string, number>();
 const inspectCalls: string[][] = [];
 let tempDir: string | null = null;
 let originalHackHome: string | undefined;
@@ -105,6 +107,8 @@ beforeEach(async () => {
   dockerAvailable = false;
   currentIds = [];
   inspectExitCode = 0;
+  memberStates.clear();
+  memberExitCodes.clear();
   inspectCalls.length = 0;
 });
 
@@ -257,7 +261,7 @@ test("runtime auto-registration skips an input family that changes before regist
 function makePsRow(opts: { readonly id: string }): Record<string, string> {
   return {
     ID: opts.id,
-    State: "running",
+    State: memberStates.get(opts.id) ?? "running",
     Status: "Up 10 seconds",
     Names: `container-${opts.id}`,
     Ports: "3000/tcp",
@@ -275,8 +279,8 @@ function makeInspectRow(opts: {
   return {
     Id: `${opts.id}${"0".repeat(52)}`,
     State: {
-      Status: "running",
-      ExitCode: 0,
+      Status: memberStates.get(opts.id) ?? "running",
+      ExitCode: memberExitCodes.get(opts.id) ?? 0,
       StartedAt: "2026-01-01T00:00:00Z",
       Health: { Status: "healthy" },
     },
@@ -345,4 +349,41 @@ test("failed reinspection keeps static identity but clears old current-state evi
   const second = services?.get("service-bbbbbbbbbbbb")?.containers[0];
   expect(second?.image).toBe("image:bbbbbbbbbbbb");
   expect(second?.observation).toBeNull();
+});
+
+test("event refresh reinspects changed and terminated IDs without polling unchanged running peers", async () => {
+  dockerAvailable = true;
+  const job = "aaaaaaaaaaaa";
+  const api = "bbbbbbbbbbbb";
+  currentIds = [job, api];
+  const cache = createRuntimeInspectCache();
+  await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: true,
+  });
+  memberStates.set(job, "exited");
+  const finished = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: false,
+  });
+  const completed = finished.runtime[0]?.services.get(`service-${job}`)
+    ?.containers[0];
+  expect(completed?.observation?.exitCode).toBe(0);
+  expect(
+    finished.runtime[0]?.services.get(`service-${api}`)?.containers[0]
+      ?.observation
+  ).toBeNull();
+  memberExitCodes.set(job, 2);
+  const failed = await readRuntimeProjects({
+    includeGlobal: true,
+    inspectCache: cache,
+    forceInspect: false,
+  });
+  expect(
+    failed.runtime[0]?.services.get(`service-${job}`)?.containers[0]
+      ?.observation?.exitCode
+  ).toBe(2);
+  expect(inspectCalls).toEqual([[job, api], [job], [job]]);
 });

@@ -1,3 +1,4 @@
+import { requiredObservedServices } from "./compose-service-activation.ts";
 import {
   earliestStart,
   observedProjectState,
@@ -71,9 +72,21 @@ export function projectObservation(input: {
       ),
     });
   });
+  const required = requiredObservedServices({
+    names: [...names],
+    observed: observable ? [...(view.runtime?.services.keys() ?? [])] : [],
+    activation: view.serviceActivation,
+  });
+  const requiredServices = services.filter((service) =>
+    required.has(service.name)
+  );
+  const state =
+    requiredServices.length === 0 && services.length > 0
+      ? "stopped"
+      : observedProjectState(requiredServices);
   return {
     backend,
-    state: observable ? observedProjectState(services) : "unknown",
+    state: observable ? state : "unknown",
     state_reason: reason,
     started_at: earliestStart(services.map((service) => service.started_at)),
     services,

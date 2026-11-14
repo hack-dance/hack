@@ -216,6 +216,12 @@ export async function readRuntimeProjects(opts: {
       ? await readCachedContainerInspectData({
           cache: opts.inspectCache,
           forceInspect: opts.forceInspect ?? true,
+          states: new Map(
+            baseRows.map((row) => [
+              getString(row, "ID") ?? getString(row, "Id") ?? "",
+              getString(row, "State") ?? "",
+            ])
+          ),
           ids,
         })
       : await readContainerInspectData({ ids })
@@ -688,6 +694,7 @@ async function readContainerInspectData(opts: {
 async function readCachedContainerInspectData(opts: {
   readonly cache: RuntimeInspectCache;
   readonly forceInspect: boolean;
+  readonly states: ReadonlyMap<string, string>;
   readonly ids: readonly string[];
 }): Promise<Map<string, ContainerInspectData>> {
   const currentIds = new Set(opts.ids);
@@ -701,10 +708,16 @@ async function readCachedContainerInspectData(opts: {
     opts.cache.diagnostics.fullRefreshes += 1;
   }
   const missingIds = opts.ids.filter((id) => !opts.cache.entries.has(id));
-  const idsToInspect = opts.forceInspect ? opts.ids : missingIds;
+  const idsToInspect = opts.forceInspect
+    ? opts.ids
+    : opts.ids.filter((id) => {
+        const previous = opts.cache.entries.get(id)?.observation;
+        const state = opts.states.get(id);
+        return !previous || state !== "running" || previous.state !== state;
+      });
   opts.cache.diagnostics.cacheHits += opts.forceInspect
     ? 0
-    : opts.ids.length - missingIds.length;
+    : opts.ids.length - idsToInspect.length;
   opts.cache.diagnostics.cacheMisses += missingIds.length;
 
   if (idsToInspect.length > 0) {

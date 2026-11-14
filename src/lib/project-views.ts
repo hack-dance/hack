@@ -9,6 +9,10 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
+import {
+  type ComposeServiceActivation,
+  composeServiceActivation,
+} from "./compose-service-activation.ts";
 import { composeServiceReadiness } from "./compose-service-readiness.ts";
 import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
@@ -93,6 +97,7 @@ export type ProjectLifecycleView = {
 
 export type ProjectView = {
   readonly observation?: ProjectObservation;
+  readonly serviceActivation?: ComposeServiceActivation;
   readonly serviceReadiness?: Readonly<Record<string, ServiceReadiness>>;
   readonly projectId?: string;
   readonly name: string;
@@ -359,6 +364,7 @@ async function buildRegisteredProjectView(opts: {
     ownership: config && !config.parseError ? config.ownership : null,
     definedServices,
     serviceReadiness: composeDefinition?.readiness,
+    serviceActivation: composeDefinition?.activation,
     extensionsEnabled: extensions?.enabled ?? null,
     features: extensions?.features ?? null,
     serviceHosts,
@@ -942,6 +948,7 @@ async function readComposeServices(opts: {
 }): Promise<{
   names: readonly string[];
   readiness: Readonly<Record<string, ServiceReadiness>>;
+  activation: ComposeServiceActivation;
 } | null> {
   const text = await readTextFile(opts.composeFile);
   if (!text) {
@@ -964,6 +971,7 @@ async function readComposeServices(opts: {
       ? Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b))
       : [],
     readiness: composeServiceReadiness(parsed),
+    activation: composeServiceActivation(parsed),
   };
 }
 

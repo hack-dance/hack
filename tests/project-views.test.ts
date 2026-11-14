@@ -931,3 +931,79 @@ test("native listing bounds status subprocess fan-out regardless of registry siz
   expect(nativePeak).toBe(4);
   expect(nativeActive).toBe(0);
 });
+
+test.each([
+  { dependency: "", member: "absent", expected: "running" },
+  {
+    dependency: "    depends_on: [tool]\n",
+    member: "absent",
+    expected: "degraded",
+  },
+  {
+    dependency: "    depends_on:\n      tool: {required: false}\n",
+    member: "absent",
+    expected: "running",
+  },
+  { dependency: "", member: "exited", expected: "degraded" },
+])("profile activation keeps required aggregation honest: %j", async ({
+  dependency,
+  member,
+  expected,
+}) => {
+  const registration = await createProject({
+    name: "profiles-fixture",
+    services: ["api", "tool"],
+  });
+  await writeFile(
+    join(registration.projectDir, PROJECT_COMPOSE_FILENAME),
+    `services:\n  api:\n    image: example\n${dependency}  tool:\n    image: example\n    profiles: [tools]\n`
+  );
+  const api = makeContainer({
+    project: registration.name,
+    service: "api",
+    name: "api",
+    state: "running",
+  });
+  const tools =
+    member === "absent"
+      ? []
+      : [
+          {
+            ...makeContainer({
+              project: registration.name,
+              service: "tool",
+              name: "tool",
+              state: member,
+            }),
+            observation: {
+              state: member,
+              health: null,
+              exitCode: 0,
+              startedAt: null,
+            },
+          },
+        ];
+  const [view] = await buildProjectViews({
+    registryProjects: [registration],
+    runtime: [
+      makeRuntimeProject({
+        name: registration.name,
+        workingDir: registration.projectDir,
+        containersByService: {
+          api: [api],
+          ...(tools.length ? { tool: tools } : {}),
+        },
+      }),
+    ],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+  if (!view) {
+    throw new Error("missing fixture view");
+  }
+  expect(serializeProjectView(view).state).toBe(expected);
+  expect(serializeProjectSummary(view).state).toBe(expected);
+  expect(view.observation?.services).toHaveLength(2);
+});

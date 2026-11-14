@@ -1,0 +1,46 @@
+name: Lifecycle supervisor
+
+on:
+  pull_request:
+    paths:
+      - packages/lifecycle-supervisor/**
+      - .github/workflows/lifecycle-supervisor.yml
+  push:
+    branches: [next, main]
+    paths:
+      - packages/lifecycle-supervisor/**
+      - .github/workflows/lifecycle-supervisor.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lifecycle-supervisor-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  contract:
+    name: Supervisor (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      HACK_DAEMON_AUTOSTART_DISABLE: '1'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.hack-local/target/lifecycle-supervisor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --manifest-path packages/lifecycle-supervisor/Cargo.toml --check
+      - name: Lint standalone supervisor
+        run: cargo clippy --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml --all-targets -- -D warnings
+      - name: Test standalone supervisor with private fake callers
+        run: cargo test --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml -- --test-threads=4
+      - name: Build standalone release executable
+        run: cargo build --locked --release --manifest-path packages/lifecycle-supervisor/Cargo.toml

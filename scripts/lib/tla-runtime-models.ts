@@ -142,6 +142,14 @@ const restartPolicyStaleUses = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "lifecycle-supervisor",
+    module: "LifecycleSupervisor",
+    states: 129,
+    invariant: "NoDuplicate",
+    action: "Retry",
+    fields: ["duplicate = TRUE", "live = TRUE", "durable = TRUE"],
+  },
+  {
     name: "shutdown-rebase",
     module: "ShutdownRebase",
     states: 43,

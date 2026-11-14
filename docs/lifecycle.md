@@ -4,6 +4,10 @@ Many projects need host-side setup around `hack up` (auth, local proxies, tunnel
 
 Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 
+The [standalone Rust supervisor contract](./lifecycle-supervisor.md) describes
+the separately tested supervisor work. It does not change the current mux runner
+or expose a new configuration setting in this slice.
+
 With the Compose backend, the first Ctrl-C during foreground `hack up` asks
 Compose to stop the project containers. Hack waits for Compose to finish stopping
 them and drains its logs before exiting with code 130. A second Ctrl-C is forwarded

@@ -16,9 +16,12 @@ does not touch `packages/runtime-core`.
 
 ## Build and run
 
-Rust 1.92+ (the repo pins 1.97.1). macOS 15+, or Linux with Wayland or X11 and
-Vulkan. Linux build packages: `clang libfontconfig-dev libwayland-dev
-libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libvulkan-dev`.
+Rust **1.98.1**, pinned for this workspace only by `rust-toolchain.toml` (rustup)
+and `mise.toml` (mise); the repo root keeps its own pin. macOS needs at least
+1.98 (`gpui-pre-macos` uses `Option::map_or_default`). macOS 15+, or Linux with
+Wayland or X11 and Vulkan. Linux build packages: `clang libfontconfig-dev
+libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev
+libvulkan-dev`.
 
 ```sh
 cd apps/desktop
@@ -27,6 +30,19 @@ cargo run -p hack-desktop                # live: hackd, else `hack projects --js
 cargo run -p hack-desktop -- --list-fixtures
 cargo run -p hack-desktop -- --fixtures failed-start --theme dark
 ```
+
+## Check the live data path without a window
+
+```sh
+cargo run -p hack-desktop-core --bin hack-desktop-state            # all projects
+cargo run -p hack-desktop-core --bin hack-desktop-state -- --project <name>
+```
+
+`hack-desktop-state` reads exactly what the window reads: hackd when its version
+matches the CLI, otherwise `hack projects --json`, plus native `hack ps` for
+native projects. It applies that to the same view model and prints the list and
+each project's detail as JSON. It runs no action, opens no window and writes
+nothing.
 
 Every designed state has a fixture (`loading`, `empty`, `daemon-down`, `many-projects`,
 `daemon-mismatch`, `engine-down`, `error`, `cli-missing`, `stopped`, `starting`,

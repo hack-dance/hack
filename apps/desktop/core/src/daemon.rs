@@ -95,6 +95,7 @@ impl DaemonClient {
         // directory is this user's own and nobody else can replace entries
         // in it, and the peer process runs as this user. Otherwise the app
         // falls back to the CLI (which applies its own checks).
+        check_socket_path_len(&self.socket)?;
         let uid = current_uid();
         check_private_dir(&self.socket, uid)?;
         let mut s = UnixStream::connect(&self.socket)
@@ -121,6 +122,26 @@ impl DaemonClient {
             .map_err(io_err)?;
         parse_http(&raw)
     }
+}
+
+/// Longest Unix socket path, in bytes, this platform accepts
+/// (`sockaddr_un.sun_path` minus the terminating NUL).
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+pub const MAX_SOCKET_PATH: usize = 103;
+#[cfg(not(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd")))]
+pub const MAX_SOCKET_PATH: usize = 107;
+
+/// A socket path the OS cannot address (for example under a long home
+/// directory on macOS) is reported clearly; the app then uses the CLI.
+fn check_socket_path_len(socket: &Path) -> Result<(), DaemonError> {
+    use std::os::unix::ffi::OsStrExt;
+    let n = socket.as_os_str().as_bytes().len();
+    if n > MAX_SOCKET_PATH {
+        return Err(DaemonError::Unreachable(format!(
+            "the hackd socket path is {n} bytes, longer than the {MAX_SOCKET_PATH} this system allows"
+        )));
+    }
+    Ok(())
 }
 
 fn current_uid() -> u32 {
@@ -278,16 +299,22 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
-    fn serve_once(response: Vec<u8>) -> (PathBuf, thread::JoinHandle<String>) {
-        let dir = std::env::temp_dir().join(format!(
-            "hack-desktop-daemon-{}-{}",
+    /// A short private directory for test sockets: the system temp dir can
+    /// be too long for a Unix socket path (macOS allows 103 bytes).
+    fn short_socket_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = PathBuf::from(format!(
+            "/tmp/hd{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            N.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn serve_once(response: Vec<u8>) -> (PathBuf, thread::JoinHandle<String>) {
+        let dir = short_socket_dir();
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -295,11 +322,16 @@ mod tests {
         let sock = dir.join("hackd.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let h = thread::spawn(move || {
-            let (mut c, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let n = c.read(&mut buf).unwrap();
-            c.write_all(&response).unwrap();
+            let accepted = listener.accept();
+            // Clean up first: the client may already be gone (refused or
+            // dropped), and a failed write must not leave the directory.
             let _ = std::fs::remove_dir_all(&dir);
+            let Ok((mut c, _)) = accepted else {
+                return String::new();
+            };
+            let mut buf = [0u8; 4096];
+            let n = c.read(&mut buf).unwrap_or(0);
+            let _ = c.write_all(&response);
             String::from_utf8_lossy(&buf[..n]).into_owned()
         });
         (sock, h)
@@ -386,6 +418,16 @@ mod tests {
     fn own_peer_passes_the_peer_check() {
         let (a, _b) = UnixStream::pair().unwrap();
         assert_eq!(peer_uid(&a), Some(current_uid()));
+    }
+
+    #[test]
+    fn an_over_long_socket_path_is_a_clear_error_not_a_panic() {
+        let long = PathBuf::from(format!("/tmp/{}/hackd.sock", "x".repeat(200)));
+        let r = DaemonClient::new(&long, Duration::from_millis(100)).status();
+        match r {
+            Err(DaemonError::Unreachable(m)) => assert!(m.contains("socket path"), "{m}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

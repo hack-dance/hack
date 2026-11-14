@@ -19,8 +19,10 @@ async function readGitPath(opts: {
 }): Promise<string | null> {
   let result: Awaited<ReturnType<typeof exec>>;
   try {
+    // A hung git reads as unknown (null), never a wait without end.
     result = await exec(["git", "-C", opts.repoRoot, ...opts.args], {
       stdin: "ignore",
+      timeoutMs: 10_000,
     });
   } catch {
     return null;

@@ -260,6 +260,21 @@ impl LiveSource {
         runs
     }
 
+    /// The live source exactly as the app builds it: `hack` resolved on
+    /// absolute PATH entries, and the hackd socket under `HACK_HOME`
+    /// (else `~/.hack`). Used by the window and by `hack-desktop-state`.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let socket = crate::daemon::default_socket_path(
+            std::env::var("HACK_HOME").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
+        );
+        Self {
+            runner: CliRunner::on_path("hack"),
+            daemon: socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
+        }
+    }
+
     fn runner_for(&self, native: bool) -> CliRunner {
         if native {
             self.runner

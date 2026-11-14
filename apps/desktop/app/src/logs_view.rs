@@ -350,19 +350,23 @@ impl HackApp {
                                     .child(text.to_owned()),
                             );
                         if hidden > 0 {
-                            row = row
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(t.muted_foreground)
-                                        .child(format!("… (+{} KB)", hidden.div_ceil(1024))),
-                                )
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.logs.model.toggle_expanded(seq);
-                                    cx.notify();
-                                }));
+                            row = row.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(t.muted_foreground)
+                                    .child(format!("… (+{} KB)", hidden.div_ceil(1024))),
+                            );
                         }
+                        // Any row expands on click: a line can be clipped by
+                        // the row width long before the 4 KB cut applies.
+                        let expanded = this.logs.model.is_expanded(seq);
+                        row = row
+                            .cursor_pointer()
+                            .when(expanded, |r| r.bg(t.muted))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.logs.model.toggle_expanded(seq);
+                                cx.notify();
+                            }));
                         if line.truncated_by_hack {
                             row = row.child(
                                 div()

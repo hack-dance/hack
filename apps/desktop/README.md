@@ -49,7 +49,7 @@ degraded / stopping, failed-start, needs-attention):
 
 `hack logs --json` for the selected project, following by default:
 - Pause (reading continues, with an "N new" count), search, and a filter for one service (`hack logs <service>`).
-- Long lines are cut on screen and expand below the list.
+- Click any line to show it in full below the list (long or width-clipped lines); lines over 4 KB show how much is hidden.
 - "Log stream ended" and failures are shown distinctly, with Reconnect.
 - The buffer holds at most 10,000 lines and 8 MB (service and timestamp included); a single line is capped at 64 KB on intake. Memory only: nothing is written to disk and there is no copy-all.
 - Scrolling up pauses following. Events reach the UI in bounded batches through a bounded queue, so a very busy stream slows `hack logs` down instead of the window.

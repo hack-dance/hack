@@ -23,7 +23,7 @@ first-launch warmups remain outside timed observations.
 | --- | --- |
 | Fake CLI `NotFound` | The runner received a spawn ENOENT, not proof that the fixture pathname was absent. An unavailable script interpreter or a transient executable-launch failure can also produce ENOENT. The precise origin in the reported Mac runs was not captured; do not label it proven descriptor leakage. Separate test processes and closed-before-publish scripts remove cross-test writer inheritance. |
 | Fake CLI never started | No ready marker was written before a product timeout. This can reflect startup scheduling or failed launch. Warmups, process isolation and the ready marker distinguish startup from tested cleanup; the timeout contract is unchanged. |
-| Fake daemon `WouldBlock` (Darwin error 35) | The socket read deadline expired before the request arrived. This is a socket scheduling symptom, not a spawn ENOENT. Version warmups precede the server's accept deadline; per-test processes remove cross-test descriptor interference. |
+| Fake daemon `WouldBlock` (Darwin error 35) | The socket read deadline expired before the request arrived. This is a socket scheduling symptom, not a spawn ENOENT. Version warmups precede a single 60-second fixture conversation deadline, shared by acceptance, complete header reads and response writes; no separate two/three-second fake-server read timer remains. Per-test processes remove cross-test descriptor interference. |
 | Slow stream Drop / late pipe EOF | An inherited pipe writer can keep a reader alive after the intended writer exits. The Apple product boundary below closes unlisted descriptors. #843 separately replaces the tight elapsed-time oracle with reader completion and process retirement under a generous deadline. |
 
 These are evidence boundaries, not a claim that every observed failure has one
@@ -59,3 +59,12 @@ use CLOEXEC_DEFAULT; the application boundary cannot change those libraries.
 All CLI spawns through this boundary close unlisted descriptors regardless of
 that window. Executable resolution uses the captured child PATH and absolute
 `posix_spawn`, avoiding libc's process-global PATH lookup.
+
+Fake-daemon timing is fixture scheduling, not an assertion about production
+latency. Both source fixtures and the headless-state fixture use the same
+60-second conversation budget. Reads accept delayed and partial HTTP headers
+(up to 4096 bytes), recalculate remaining time after each read, and report a
+fixture-specific failure at the deadline. Response writes use the remaining
+budget too. A regression deliberately waits beyond the old two-second deadline
+before sending a split header. Product socket/CLI timeouts and nextest retries
+are unchanged.

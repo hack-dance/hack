@@ -503,7 +503,7 @@ mod tests {
     use super::*;
 
     fn fake_daemon(projects: &str) -> (DaemonClient, std::thread::JoinHandle<()>) {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::os::unix::{fs::DirBuilderExt, net::UnixListener};
         let dir = PathBuf::from(format!(
             "/tmp/hds-{}-{}",
@@ -519,8 +519,8 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let projects = projects.to_owned();
         let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + crate::test_support::DAEMON_BUDGET;
             for body in [r#"{"status":"ok","version":"5.0.0"}"#.to_owned(), projects] {
-                let deadline = std::time::Instant::now() + Duration::from_secs(3);
                 let (mut stream, _) = loop {
                     match listener.accept() {
                         Ok(pair) => break pair,
@@ -533,12 +533,10 @@ mod tests {
                         Err(e) => panic!("fake daemon accept failed or timed out: {e}"),
                     }
                 };
+                crate::test_support::read_request(&mut stream, deadline);
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .set_write_timeout(Some(crate::test_support::remaining(deadline)))
                     .unwrap();
-                let mut buf = [0; 4096];
-                let n = stream.read(&mut buf).unwrap();
-                assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET /v1/"));
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
@@ -549,7 +547,31 @@ mod tests {
             }
             std::fs::remove_dir_all(dir).unwrap();
         });
-        (DaemonClient::new(socket, Duration::from_secs(2)), handle)
+        (
+            DaemonClient::new(socket, crate::test_support::DAEMON_BUDGET),
+            handle,
+        )
+    }
+
+    #[test]
+    fn fake_daemon_waits_for_delayed_and_partial_request_headers() {
+        use std::io::Write;
+        let (mut server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + crate::test_support::DAEMON_BUDGET;
+            ready.send(()).unwrap();
+            crate::test_support::read_request(&mut server, deadline);
+        });
+        waiting
+            .recv_timeout(crate::test_support::DAEMON_BUDGET)
+            .unwrap();
+        // Exceed the former two-second socket read timeout deliberately.
+        std::thread::sleep(Duration::from_millis(2500));
+        client.write_all(b"GET /v1/status HTTP/1.1\r\n").unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        client.write_all(b"Host: fixture\r\n\r\n").unwrap();
+        worker.join().unwrap();
     }
 
     /// A trusted fake daemon provides rows; only native ps uses the fake CLI.

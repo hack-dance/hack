@@ -23,7 +23,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn serve_snapshot(home: &std::path::Path) -> std::thread::JoinHandle<()> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::unix::{fs::DirBuilderExt, net::UnixListener};
     let dir = home.join("daemon");
     std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
@@ -34,8 +34,8 @@ fn serve_snapshot(home: &std::path::Path) -> std::thread::JoinHandle<()> {
             r#"{"status":"ok","version":"5.0.0"}"#,
             r#"{"runtime_ok":true,"projects":[{"name":"alpha","status":"running","repo_root":"/work/alpha","defined_services":["api"],"runtime":{"services":[{"service":"api","containers":[{"state":"running","status":"Up 5 minutes"}]}]}},{"name":"beta","status":"stopped","repo_root":"/work/beta","defined_services":["web"]}]}"#,
         ];
+        let deadline = std::time::Instant::now() + test_support::DAEMON_BUDGET;
         for body in bodies {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
             let (mut stream, _) = loop {
                 match listener.accept() {
                     Ok(pair) => break pair,
@@ -48,12 +48,10 @@ fn serve_snapshot(home: &std::path::Path) -> std::thread::JoinHandle<()> {
                     Err(e) => panic!("fake daemon accept failed or timed out: {e}"),
                 }
             };
+            test_support::read_request(&mut stream, deadline);
             stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .set_write_timeout(Some(test_support::remaining(deadline)))
                 .unwrap();
-            let mut request = [0; 4096];
-            let n = stream.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /v1/"));
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",

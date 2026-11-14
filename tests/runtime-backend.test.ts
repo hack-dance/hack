@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
+const runResults: number[] = [];
 const runOpts: {
   stdout?: string;
   timeoutMs?: number;
@@ -13,6 +14,7 @@ const runOpts: {
   settleProcessGroupOnCancel?: boolean;
 }[] = [];
 const execCalls: string[][] = [];
+const execResults: { exitCode: number; stdout: string; stderr: string }[] = [];
 
 const shellMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -20,7 +22,7 @@ const shellMock = await registerScopedModuleMock({
   overrides: {
     exec: async (cmd: readonly string[]) => {
       execCalls.push([...cmd]);
-      return { exitCode: 0, stdout: "", stderr: "" };
+      return execResults.shift() ?? { exitCode: 0, stdout: "", stderr: "" };
     },
     execOrThrow: async (cmd: readonly string[]) => {
       execCalls.push([...cmd]);
@@ -42,7 +44,7 @@ const shellMock = await registerScopedModuleMock({
         forwardSignals: opts.forwardSignals,
         settleProcessGroupOnCancel: opts.settleProcessGroupOnCancel,
       });
-      return 0;
+      return runResults.shift() ?? 0;
     },
     findExecutableInPath: () => "/usr/bin/docker",
     CommandError: class CommandError extends Error {},
@@ -79,8 +81,10 @@ beforeAll(() => {
 
 beforeEach(() => {
   runCalls.length = 0;
+  runResults.length = 0;
   runOpts.length = 0;
   execCalls.length = 0;
+  execResults.length = 0;
 });
 
 afterAll(() => {
@@ -492,4 +496,172 @@ test("automatic bootstrap preserves output and forwards cancellation to its boun
     forwardSignals: true,
     settleProcessGroupOnCancel: undefined,
   });
+});
+
+test("unattended detached startup rechecks intent before preparation and disables builds, pulls and implicit dotenv", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  const observations: number[] = [];
+  const code = await backend.up({
+    composeFiles: ["compose.yml"],
+    cwd: "/fixture",
+    detach: true,
+    unattended: true,
+    beforeStart: async () => {
+      observations.push(runCalls.length);
+    },
+  });
+  expect(code).toBe(0);
+  expect(observations).toEqual([0, 0, 1]);
+  expect(runCalls).toEqual([
+    [
+      "docker",
+      "compose",
+      "-f",
+      "compose.yml",
+      "--env-file",
+      "/dev/null",
+      "up",
+      "--no-start",
+      "--no-build",
+      "--pull",
+      "never",
+    ],
+    [
+      "docker",
+      "compose",
+      "-f",
+      "compose.yml",
+      "--env-file",
+      "/dev/null",
+      "up",
+      "-d",
+      "--no-build",
+      "--pull",
+      "never",
+    ],
+  ]);
+});
+
+test("withdrawn unattended intent refuses before create, pull or build phases", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  await expect(
+    backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+      beforeStart: async () => {
+        throw new Error("paused before preparation");
+      },
+    })
+  ).rejects.toThrow("paused before preparation");
+  expect(runCalls).toEqual([]);
+});
+
+test("only an exact missing image diagnostic authorizes an unattended manual-start refusal", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  execResults.push(
+    { exitCode: 0, stdout: "example.invalid/app\n", stderr: "" },
+    {
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "Error response from daemon: No such image: example.invalid/app:latest\n",
+    }
+  );
+  await expect(
+    backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+    })
+  ).rejects.toMatchObject({
+    code: "E_PERMISSION",
+    detail: { reason: "image_requires_manual_start" },
+  });
+  expect(runCalls).toEqual([]);
+  expect(execCalls[1]).toEqual([
+    "docker",
+    "image",
+    "inspect",
+    "--format",
+    "{{.Id}}",
+    "example.invalid/app:latest",
+  ]);
+});
+
+test("images present plus a failed prepare phase remains an ordinary claimed failure", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  execResults.push(
+    { exitCode: 0, stdout: "example.invalid/app\n", stderr: "" },
+    { exitCode: 0, stdout: `sha256:${"a".repeat(64)}\n`, stderr: "" }
+  );
+  runResults.push(17);
+  expect(
+    await backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: true,
+      unattended: true,
+    })
+  ).toBe(17);
+  expect(runCalls).toHaveLength(1);
+});
+
+for (const diagnostic of [
+  "Cannot connect to the Docker daemon",
+  "Error response from daemon: unauthorized",
+  "Error response from daemon: No such image: another.invalid/image:latest",
+  "Error response from daemon: No such image: example.invalid/app:latest\nextra diagnostic",
+]) {
+  test(`image inspection refuses unknown errors without a neutral missing-image result: ${diagnostic.split("\n")[0]}`, async () => {
+    const backend = await loadComposeRuntimeBackend();
+    execResults.push(
+      { exitCode: 0, stdout: "example.invalid/app\n", stderr: "" },
+      { exitCode: 1, stdout: "", stderr: diagnostic }
+    );
+    expect(
+      await backend.up({
+        composeFiles: ["compose.yml"],
+        cwd: "/fixture",
+        detach: true,
+        unattended: true,
+      })
+    ).toBe(1);
+    expect(runCalls).toEqual([]);
+  });
+}
+
+for (const cancellation of [124, 130, 143]) {
+  test(`unattended preparation preserves cancellation exit ${cancellation} without a start phase`, async () => {
+    const backend = await loadComposeRuntimeBackend();
+    runResults.push(cancellation);
+    expect(
+      await backend.up({
+        composeFiles: ["compose.yml"],
+        cwd: "/fixture",
+        detach: true,
+        unattended: true,
+      })
+    ).toBe(cancellation);
+    expect(runCalls).toHaveLength(1);
+    expect(runOpts[0]?.settleProcessGroupOnCancel).toBe(true);
+  });
+}
+
+test("attached unattended startup refuses before invoking Compose", async () => {
+  const backend = await loadComposeRuntimeBackend();
+  await expect(
+    backend.up({
+      composeFiles: ["compose.yml"],
+      cwd: "/fixture",
+      detach: false,
+      unattended: true,
+    })
+  ).rejects.toMatchObject({
+    code: "E_PERMISSION",
+    detail: { reason: "unattended_requires_detached" },
+  });
+  expect(runCalls).toEqual([]);
 });

@@ -39,6 +39,24 @@ export function childEnvironment(
   for (const key of HACK_KEY_MATERIAL_VARIABLES) {
     delete env[key];
   }
+  if (base.HACK_AUTOSTART_LOGIN === "1") {
+    // Login's Git calls observe identity, tracking and ignore state only. Do
+    // not load global/system config or execute repository monitor/hook code.
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("GIT_CONFIG_")) {
+        delete env[key];
+      }
+    }
+    Object.assign(env, {
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "core.fsmonitor",
+      GIT_CONFIG_VALUE_0: "false",
+      GIT_CONFIG_KEY_1: "core.hooksPath",
+      GIT_CONFIG_VALUE_1: "/dev/null",
+    });
+  }
   return env;
 }
 

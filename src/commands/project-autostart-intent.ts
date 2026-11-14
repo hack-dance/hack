@@ -13,6 +13,7 @@ import {
   assertAutostartProjectCurrent,
   withAutostartProjectLock,
 } from "../lib/autostart-project-lock.ts";
+import { assertAutostartStartPolicy } from "../lib/autostart-start-policy.ts";
 import { resolveEffectiveBranch } from "../lib/branches.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
@@ -281,7 +282,7 @@ export async function withAutostartCommandLock<T>(opts: {
     login ? { requireAutostartTrust: true } : undefined
   );
   if (login) {
-    assertLoginCheckoutBeforeDiscovery({
+    await assertLoginCheckoutBeforeDiscovery({
       projectId: process.env.HACK_AUTOSTART_PROJECT_ID,
       projects: registry.projects,
     });
@@ -329,10 +330,10 @@ export async function withAutostartCommandLock<T>(opts: {
 }
 
 /** Check the trusted registry target before even reading repository-controlled inputs. */
-function assertLoginCheckoutBeforeDiscovery(opts: {
+async function assertLoginCheckoutBeforeDiscovery(opts: {
   readonly projectId?: string;
   readonly projects: readonly RegisteredProject[];
-}): void {
+}): Promise<void> {
   const matches = opts.projects.filter(
     (project) => project.id === opts.projectId
   );
@@ -346,6 +347,7 @@ function assertLoginCheckoutBeforeDiscovery(opts: {
   }
   assertAutostartCheckoutTrusted(project);
   assertAutostartDockerConfigTrusted({ home: homedir() });
+  await assertAutostartStartPolicy(project);
 }
 
 function assertLoginProjectIdentity(opts: {

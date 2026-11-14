@@ -32,6 +32,10 @@ export interface ExecOptions {
    * held in memory.
    */
   readonly maxStdoutBytes?: number;
+  /** Opt-in bounded stderr capture; both streams are drained concurrently. */
+  readonly maxStderrBytes?: number;
+  /** Forward OS cancellation to the owned capture group and await settlement. */
+  readonly forwardSignals?: boolean;
 }
 
 /** Exit code `exec` reports when `maxStdoutBytes` was exceeded. */
@@ -72,6 +76,9 @@ export async function exec(
   const timeoutMs = boundedTimeoutMs(opts.timeoutMs);
   if (timeoutMs !== undefined && timeoutMs <= 0) {
     return { exitCode: 124, stdout: "", stderr: "" };
+  }
+  if (opts.maxStderrBytes !== undefined || opts.forwardSignals) {
+    return await execBoundedOwned(cmd, opts, timeoutMs);
   }
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
@@ -130,6 +137,108 @@ export async function exec(
     stdout: stdoutText,
     stderr: stderrText,
   };
+}
+
+/** New bounded-capture callers own the child group and never infer absence from a failed probe. */
+async function execBoundedOwned(
+  cmd: readonly string[],
+  opts: ExecOptions,
+  timeoutMs: number | undefined
+): Promise<ExecResult> {
+  const abort = new AbortController();
+  const proc = Bun.spawn([...cmd], {
+    cwd: opts.cwd,
+    env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
+    stdin: opts.stdin ?? "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: true,
+  });
+  let exited = false;
+  let failedCapture = false;
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = installSubprocessTimeout({ pid: proc.pid, timeoutMs });
+  const cancellation = installSubprocessSignalForwarding({
+    pid: proc.pid,
+    forwardSignals: opts.forwardSignals === true,
+  });
+  const observeCpu = beginNativeCpuChild(proc, nativeCpuCommandCategory(cmd));
+  const failCapture = () => {
+    failedCapture = true;
+    if (!exited && proc.exitCode === null) {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        proc.kill("SIGKILL");
+      }
+    }
+    abort.abort();
+  };
+  const capture = async (
+    stream: ReadableStream<Uint8Array>,
+    limit: number
+  ): Promise<string> => {
+    try {
+      const bytes = await readBoundedStream(stream, limit, abort.signal, () => {
+        failCapture();
+        throw new StdoutOverflow();
+      });
+      return Buffer.from(bytes).toString("latin1");
+    } catch {
+      failCapture();
+      return "";
+    }
+  };
+  const stdout = capture(proc.stdout, opts.maxStdoutBytes ?? 65_536);
+  const stderr = capture(proc.stderr, opts.maxStderrBytes ?? 4096);
+  const completion = (async () => {
+    try {
+      const code = await proc.exited;
+      observeCpu(code);
+      return code;
+    } finally {
+      exited = true;
+      timeout.dispose();
+      cancellation.dispose();
+      drainTimer = setTimeout(failCapture, 200);
+    }
+  })();
+  try {
+    const [code, stdoutText, stderrText] = await Promise.all([
+      completion,
+      stdout,
+      stderr,
+    ]);
+    if (
+      (failedCapture ||
+        timeout.didTimeout() ||
+        cancellation.exitCode() !== null) &&
+      !(await waitForOwnedProcessGroupSettlement({ processGroupId: proc.pid }))
+    ) {
+      throw new Error(
+        "Captured subprocess group settlement could not be confirmed. Values omitted."
+      );
+    }
+    let exitCode = failedCapture ? EXEC_STDOUT_OVERFLOW_EXIT : code;
+    if (timeout.didTimeout()) {
+      exitCode = 124;
+    }
+    exitCode = cancellation.exitCode() ?? exitCode;
+    return {
+      exitCode,
+      stdout: failedCapture ? "" : stdoutText,
+      stderr: failedCapture ? "" : stderrText,
+    };
+  } finally {
+    clearTimeout(drainTimer);
+    timeout.dispose();
+    cancellation.dispose();
+    abort.abort();
+    if (!exited && proc.exitCode === null) {
+      failCapture();
+    }
+    await Promise.allSettled([completion, stdout, stderr]);
+  }
 }
 
 export interface RunOptions {
@@ -403,6 +512,9 @@ function installSubprocessSignalForwarding(opts: {
   return {
     exitCode: () => exitCode,
     dispose: () => {
+      if (!active) {
+        return;
+      }
       active = false;
       process.off("SIGINT", onInterrupt);
       process.off("SIGTERM", onTerminate);
@@ -437,6 +549,7 @@ function installSubprocessTimeout(opts: {
       }
     }
   };
+  let disposed = false;
   const timer = setTimeout(() => {
     timedOut = true;
     signalProcessGroup("SIGTERM");
@@ -444,6 +557,10 @@ function installSubprocessTimeout(opts: {
   }, opts.timeoutMs);
   return {
     dispose: () => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
       clearTimeout(timer);
       if (forceKillTimer) {
         clearTimeout(forceKillTimer);

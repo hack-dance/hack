@@ -2,6 +2,7 @@ import { autostartServicePath } from "../daemon/autostart.ts";
 import { assertAutostartCheckoutTrusted } from "./autostart-checkout-trust.ts";
 import { assertAutostartDockerConfigTrusted } from "./autostart-docker-trust.ts";
 import { assertAutostartExecutablePathTrusted } from "./autostart-executable-trust.ts";
+import { autostartStartPolicyRefusal } from "./autostart-start-policy.ts";
 import type { RegisteredProject } from "./projects-registry.ts";
 
 /** File-only doctor observation; never executes helpers or repairs permissions. */
@@ -17,6 +18,10 @@ export async function autostartTrustWarnings(opts: {
     }
     try {
       assertAutostartCheckoutTrusted(project);
+      const reason = await autostartStartPolicyRefusal(project);
+      if (reason) {
+        warnings.add(reason);
+      }
     } catch {
       warnings.add("checkout_untrusted");
     }

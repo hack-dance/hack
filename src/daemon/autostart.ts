@@ -8,6 +8,7 @@ import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client
 import {
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
+  GLOBAL_CONFIG_FILENAME,
   GLOBAL_PROJECTS_REGISTRY_FILENAME,
   PROJECT_ENV_CONFIG_FILENAME_PREFIX,
   PROJECT_ENV_CONFIG_FILENAME_SUFFIX,
@@ -17,6 +18,8 @@ import {
 import { assertAutostartCheckoutTrusted } from "../lib/autostart-checkout-trust.ts";
 import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";
 import { assertAutostartExecutablePathTrusted } from "../lib/autostart-executable-trust.ts";
+import { isAutostartManualStartReason } from "../lib/autostart-refusal.ts";
+import { autostartStartPolicyRefusal } from "../lib/autostart-start-policy.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -53,6 +56,9 @@ export type AutostartDependencies = {
   readonly startupRefusal?: () =>
     | AutostartStartupRefusal
     | Promise<AutostartStartupRefusal>;
+  readonly projectRefusal?: (
+    project: RegisteredProject
+  ) => Promise<string | null>;
   readonly now: () => number;
   readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly engineReady: (opts?: {
@@ -180,6 +186,25 @@ async function runAutostartLoginPass(opts: {
       });
       return { waitingForEngine: false };
     }
+    const eligible: RegisteredProject[] = [];
+    for (const project of pending) {
+      const reason = await deps.projectRefusal?.(project);
+      if (reason) {
+        await recordUnclaimedAutostartRefusal({
+          pending: [project],
+          runId: loginRun.runId,
+          registryPath: opts.registryPath,
+          deps,
+          reason,
+          signal: opts.signal,
+        });
+      } else {
+        eligible.push(project);
+      }
+    }
+    if (eligible.length === 0) {
+      return { waitingForEngine: false };
+    }
     const refusal = await prepareAutostartRuntime({
       deps,
       machineBootId,
@@ -200,7 +225,7 @@ async function runAutostartLoginPass(opts: {
     });
     await dispatchAutostartProjects({
       ...opts,
-      pending,
+      pending: eligible,
       deps,
       bootId,
       runId: loginRun.runId,
@@ -249,7 +274,7 @@ async function recordUnclaimedAutostartRefusal(opts: {
       runId: opts.runId,
       id: project.id,
       succeeded: false,
-      cancelled: !recorded,
+      cancelled: !recorded || isAutostartManualStartReason(opts.reason),
       registryPath: opts.registryPath,
     });
   }
@@ -392,7 +417,7 @@ async function prepareAutostartRuntime(opts: {
   return null;
 }
 
-async function startClaimedProject(opts: {
+type ClaimedAutostartOptions = {
   readonly project: RegisteredProject;
   readonly bootId: string;
   readonly runId: string;
@@ -401,7 +426,11 @@ async function startClaimedProject(opts: {
   readonly deps: AutostartDependencies;
   readonly signal?: AbortSignal;
   readonly registryPath?: string;
-}): Promise<void> {
+};
+
+async function startClaimedProject(
+  opts: ClaimedAutostartOptions
+): Promise<void> {
   let result: StartResult = { status: "skipped", reason: opts.refusal };
   try {
     const registry = await readProjectsRegistry({
@@ -422,16 +451,7 @@ async function startClaimedProject(opts: {
         reason: opts.signal?.aborted ? "daemon_stopped" : "paused",
       };
     } else if (!opts.refusal) {
-      const state = await opts.deps.inspect(current, opts.signal);
-      if (state === "running") {
-        result = { status: "already_running", reason: null };
-      } else if (state === "untrusted") {
-        result = { status: "skipped", reason: "checkout_untrusted" };
-      } else if (state === "unknown") {
-        result = { status: "skipped", reason: "runtime_unknown" };
-      } else {
-        result = await dispatchIfStillWanted({ ...opts, project: current });
-      }
+      result = await inspectAndDispatchAutostart({ ...opts, project: current });
     }
   } catch {
     result = { status: "failed", reason: "start_failed" };
@@ -442,6 +462,10 @@ async function startClaimedProject(opts: {
     id: opts.project.id,
     bootId: opts.bootId,
     result: { ...result, at: new Date(opts.deps.now()).toISOString() },
+    releaseUnstartedClaim:
+      result.status === "skipped" &&
+      isAutostartManualStartReason(result.reason),
+    expectedBranch: opts.project.autostart?.branch,
     registryPath: opts.registryPath,
   });
   await recordAutostartLoginOutcome({
@@ -451,11 +475,35 @@ async function startClaimedProject(opts: {
       result.status === "started" || result.status === "already_running",
     cancelled:
       result.reason !== null &&
-      ["paused", "global_paused", "daemon_stopped", "target_changed"].includes(
-        result.reason
-      ),
+      (isAutostartManualStartReason(result.reason) ||
+        [
+          "paused",
+          "global_paused",
+          "daemon_stopped",
+          "target_changed",
+        ].includes(result.reason)),
     registryPath: opts.registryPath,
   });
+}
+
+async function inspectAndDispatchAutostart(
+  opts: ClaimedAutostartOptions
+): Promise<StartResult> {
+  const refusal = await opts.deps.projectRefusal?.(opts.project);
+  if (refusal) {
+    return { status: "skipped", reason: refusal };
+  }
+  const state = await opts.deps.inspect(opts.project, opts.signal);
+  if (state === "running") {
+    return { status: "already_running", reason: null };
+  }
+  if (state === "untrusted") {
+    return { status: "skipped", reason: "checkout_untrusted" };
+  }
+  if (state === "unknown") {
+    return { status: "skipped", reason: "runtime_unknown" };
+  }
+  return await dispatchIfStillWanted(opts);
 }
 
 async function dispatchIfStillWanted(opts: {
@@ -535,7 +583,8 @@ export function classifyAutostartExit(opts: {
   if (
     code === "E_PERMISSION" &&
     isRecord(detail) &&
-    (detail.reason === "checkout_untrusted" ||
+    (isAutostartManualStartReason(detail.reason) ||
+      detail.reason === "checkout_untrusted" ||
       detail.reason === "executable_path_untrusted" ||
       detail.reason === "docker_config_untrusted")
   ) {
@@ -594,6 +643,11 @@ export function createAutostartProductionDependencies(
         ]),
   ];
   return {
+    projectRefusal: (project) =>
+      autostartStartPolicyRefusal({
+        ...project,
+        globalConfigPath: resolve(runtime.hackHome, GLOBAL_CONFIG_FILENAME),
+      }),
     startupRefusal: async () => {
       try {
         await (checks?.executablePath ?? assertAutostartExecutablePathTrusted)({

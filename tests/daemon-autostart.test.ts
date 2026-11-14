@@ -1169,6 +1169,59 @@ test("repairing an executable path permits a first attempt in the same boot", as
   expect(starts.map((start) => start.id)).toEqual(["alpha"]);
 });
 
+test("manual-start policy refuses before engine access without claims or failed progress", async () => {
+  await seed(["alpha"]);
+  deps = {
+    ...deps,
+    projectRefusal: async () => "host_commands_require_manual_start",
+  };
+  await run();
+  expect(events).toEqual([]);
+  expect(starts).toEqual([]);
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+      ?.lastAttemptBootId
+  ).toBeNull();
+  expect((await readAutostartGlobal({ registryPath })).loginRun.failed).toEqual(
+    []
+  );
+  expect((await results())[0]?.result).toMatchObject({
+    status: "skipped",
+    reason: "host_commands_require_manual_start",
+  });
+  deps = { ...deps, projectRefusal: async () => null };
+  await run();
+  expect(starts.map((start) => start.id)).toEqual(["alpha"]);
+});
+
+test("late child manual-start refusal releases only its unstarted claim and remains neutral", async () => {
+  await seed(["alpha"]);
+  deps = {
+    ...deps,
+    start: async () => ({
+      status: "skipped",
+      reason: "image_requires_manual_start",
+    }),
+  };
+  await run();
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+      ?.lastAttemptBootId
+  ).toBeNull();
+  expect((await readAutostartGlobal({ registryPath })).loginRun.failed).toEqual(
+    []
+  );
+  deps = {
+    ...deps,
+    start: async () => {
+      starts.push({ id: "alpha", at: clock });
+      return { status: "started", reason: null };
+    },
+  };
+  await run();
+  expect(starts.map((start) => start.id)).toEqual(["alpha"]);
+});
+
 test("unsafe Docker context selection refuses before engine access without consuming a claim", async () => {
   await seed(["alpha"]);
   await mkdir(join(root, ".docker"), { mode: 0o700 });

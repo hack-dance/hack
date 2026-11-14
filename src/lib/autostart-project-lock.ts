@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertAutostartCheckoutTrusted } from "./autostart-checkout-trust.ts";
 import { assertAutostartDockerConfigTrusted } from "./autostart-docker-trust.ts";
+import { assertAutostartStartPolicy } from "./autostart-start-policy.ts";
 import { HackCliError } from "./cli-result.ts";
 import {
   readProjectsRegistry,
@@ -104,5 +105,8 @@ export async function assertAutostartProjectCurrent(opts: {
       repoRoot: selected.repoRoot,
       projectDir: selected.projectDir,
     });
+    if (process.env.HACK_AUTOSTART_LOGIN === "1") {
+      await assertAutostartStartPolicy(selected);
+    }
   }
 }

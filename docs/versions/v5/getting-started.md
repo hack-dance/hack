@@ -69,6 +69,9 @@ the per-user daemon with `hack daemon install`. `hack down` pauses its marker;
 the startup bounds, no-prompt behavior and JSON contract. Automatic startup requires
 trusted, non-writable-by-others tool and project paths; `hack doctor` reports
 permission refusals, including app-bundle and Homebrew paths on macOS.
+This slice starts only eligible Compose projects with images already available
+locally. Hooks, host helpers, command providers and image builds require manual
+`hack up`; doctor explains those manual-start requirements.
 
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may

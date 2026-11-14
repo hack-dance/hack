@@ -1128,6 +1128,191 @@ test("a refusal without a boot claim preserves admission and cannot bypass a pau
   expect((await read())?.autostart).toBeUndefined();
 });
 
+test("closed manual-start refusals atomically record a skip and release an unstarted claim", async () => {
+  const reasons = [
+    "host_commands_require_manual_start",
+    "image_build_requires_manual_start",
+    "image_requires_manual_start",
+    "command_provider_requires_manual_start",
+    "compose_inputs_require_manual_start",
+    "env_file_requires_manual_start",
+  ];
+  await setProjectAutostart({ id: "alpha", registryPath });
+  for (const reason of reasons) {
+    await claimProjectAutostart({
+      id: "alpha",
+      bootId: "boot-a",
+      registryPath,
+    });
+    const result = {
+      status: "skipped" as const,
+      reason,
+      at: "2026-01-01T00:00:00.000Z",
+    };
+    expect(
+      await recordProjectAutostartResult({
+        id: "alpha",
+        bootId: "boot-a",
+        expectedBranch: null,
+        releaseUnstartedClaim: true,
+        result,
+        registryPath,
+      })
+    ).toBe(true);
+    expect((await read())?.autostart).toMatchObject({
+      lastAttemptBootId: null,
+      lastResult: result,
+      paused: false,
+    });
+  }
+  expect(
+    await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).not.toBeNull();
+});
+
+test("failure, unknown reason and missing release intent or branch never release boot admission", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath });
+  const cases = [
+    {
+      status: "failed" as const,
+      reason: "host_commands_require_manual_start",
+      releaseUnstartedClaim: true,
+      expectedBranch: null,
+    },
+    {
+      status: "started" as const,
+      reason: "host_commands_require_manual_start",
+      releaseUnstartedClaim: true,
+      expectedBranch: null,
+    },
+    {
+      status: "skipped" as const,
+      reason: "unknown_manual_reason",
+      releaseUnstartedClaim: true,
+      expectedBranch: null,
+    },
+    {
+      status: "skipped" as const,
+      reason: "checkout_untrusted",
+      releaseUnstartedClaim: true,
+      expectedBranch: null,
+    },
+    {
+      status: "skipped" as const,
+      reason: "host_commands_require_manual_start",
+      releaseUnstartedClaim: false,
+      expectedBranch: null,
+    },
+    {
+      status: "skipped" as const,
+      reason: "host_commands_require_manual_start",
+      releaseUnstartedClaim: true,
+      expectedBranch: undefined,
+    },
+  ];
+  for (const item of cases) {
+    expect(
+      await recordProjectAutostartResult({
+        id: "alpha",
+        bootId: "boot-a",
+        releaseUnstartedClaim: item.releaseUnstartedClaim,
+        expectedBranch: item.expectedBranch,
+        result: {
+          status: item.status,
+          reason: item.reason,
+          at: "2026-01-01T00:00:00.000Z",
+        },
+        registryPath,
+      })
+    ).toBe(true);
+    expect((await read())?.autostart?.lastAttemptBootId).toBe("boot-a");
+  }
+  expect(
+    await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).toBeNull();
+});
+
+test("manual refusal release cannot alter a new boot, changed branch or removed intent", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath });
+  const refusal = {
+    id: "alpha",
+    bootId: "boot-a",
+    expectedBranch: null,
+    releaseUnstartedClaim: true,
+    result: {
+      status: "skipped" as const,
+      reason: "image_requires_manual_start",
+      at: "2026-01-01T00:00:00.000Z",
+    },
+    registryPath,
+  };
+  await claimProjectAutostart({ id: "alpha", bootId: "boot-b", registryPath });
+  expect(await recordProjectAutostartResult(refusal)).toBe(false);
+  expect((await read())?.autostart?.lastAttemptBootId).toBe("boot-b");
+  await setProjectAutostart({ id: "alpha", branch: "preview", registryPath });
+  expect(
+    await recordProjectAutostartResult({ ...refusal, bootId: "boot-b" })
+  ).toBe(false);
+  expect((await read())?.autostart).toMatchObject({
+    branch: "preview",
+    lastAttemptBootId: "boot-b",
+    lastResult: null,
+  });
+  await removeProjectAutostart({ id: "alpha", registryPath });
+  expect(
+    await recordProjectAutostartResult({
+      ...refusal,
+      bootId: "boot-b",
+      expectedBranch: "preview",
+    })
+  ).toBe(false);
+  expect((await read())?.autostart).toBeUndefined();
+});
+
+test("manual refusal release preserves pauses and respects wanted-only CAS", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath });
+  const refusal = {
+    id: "alpha",
+    bootId: "boot-a",
+    expectedBranch: null,
+    releaseUnstartedClaim: true,
+    result: {
+      status: "skipped" as const,
+      reason: "compose_inputs_require_manual_start",
+      at: "2026-01-01T00:00:00.000Z",
+    },
+    registryPath,
+  };
+  await setProjectAutostartPaused({ id: "alpha", paused: true, registryPath });
+  expect(
+    await recordProjectAutostartResult({ ...refusal, onlyIfWanted: true })
+  ).toBe(false);
+  expect((await read())?.autostart).toMatchObject({
+    paused: true,
+    lastAttemptBootId: "boot-a",
+    lastResult: null,
+  });
+  expect(await recordProjectAutostartResult(refusal)).toBe(true);
+  expect((await read())?.autostart).toMatchObject({
+    paused: true,
+    lastAttemptBootId: null,
+    lastResult: refusal.result,
+  });
+  expect(
+    await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).toBeNull();
+  await setProjectAutostartPaused({ id: "alpha", paused: false, registryPath });
+  await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath });
+  await setAutostartGlobalPaused({ paused: true, registryPath });
+  expect(
+    await recordProjectAutostartResult({ ...refusal, onlyIfWanted: true })
+  ).toBe(false);
+  expect((await read())?.autostart?.lastAttemptBootId).toBe("boot-a");
+});
+
 test("ordinary registration replaces an unmarked registry symlink without changing its target", async () => {
   const project = await createTrustProject();
   const target = join(root, "linked-legacy-registry.json");

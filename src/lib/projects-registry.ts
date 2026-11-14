@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { type FileHandle, open, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_PROJECTS_REGISTRY_FILENAME } from "../constants.ts";
+import { isAutostartManualStartReason } from "./autostart-refusal.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, pathExists } from "./fs.ts";
@@ -1184,7 +1185,11 @@ export async function claimProjectAutostart(
   return claimed;
 }
 
-/** A late result cannot recreate removed intent or overwrite a newer boot claim. */
+/**
+ * A late result cannot recreate removed intent or overwrite a newer boot/branch
+ * claim. Closed manual-only refusals may release an unstarted claim atomically;
+ * failures, unknown reasons and results lacking the expected target never do.
+ */
 export async function recordProjectAutostartResult(
   opts: AutostartRegistryOptions & {
     readonly id: string;
@@ -1193,6 +1198,7 @@ export async function recordProjectAutostartResult(
     readonly result: ProjectAutostartResult;
     readonly onlyIfWanted?: boolean;
     readonly expectedBranch?: string | null;
+    readonly releaseUnstartedClaim?: boolean;
   }
 ): Promise<boolean> {
   let recorded = false;
@@ -1210,9 +1216,19 @@ export async function recordProjectAutostartResult(
         return project;
       }
       recorded = true;
+      const release =
+        opts.releaseUnstartedClaim === true &&
+        opts.bootId !== null &&
+        opts.expectedBranch !== undefined &&
+        opts.result.status === "skipped" &&
+        isAutostartManualStartReason(opts.result.reason);
       return {
         ...project,
-        autostart: { ...project.autostart, lastResult: opts.result },
+        autostart: {
+          ...project.autostart,
+          lastResult: opts.result,
+          ...(release ? { lastAttemptBootId: null } : {}),
+        },
       };
     },
   });

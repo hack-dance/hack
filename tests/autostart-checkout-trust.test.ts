@@ -252,16 +252,21 @@ test("a final pre-start recheck observes checkout trust changes after initial ad
 test.each([
   "directory",
   "config",
+  "hook",
 ])("source login CLI refuses a writable %s before hooks or engine commands", async (kind) => {
   const hook = join(root, "hook-ran");
   const engine = join(root, "engine-ran");
   const bin = join(root, "bin");
   await mkdir(bin, { mode: 0o700 });
+  const script = join(repoRoot, "start-hook.sh");
+  await writeFile(script, `printf ran > ${quoteShellWord(hook)}\n`, {
+    mode: 0o600,
+  });
   await writeFile(
     join(projectDir, "hack.config.json"),
     JSON.stringify({
       name: "example",
-      lifecycle: { up: { before: [`printf ran > ${quoteShellWord(hook)}`] } },
+      lifecycle: { up: { before: [`sh ${quoteShellWord(script)}`] } },
     })
   );
   await writeFile(
@@ -270,10 +275,13 @@ test.each([
     { mode: 0o700 }
   );
   const unsafe =
-    kind === "directory"
-      ? join(root, "projects")
-      : join(projectDir, "hack.config.json");
-  await chmod(unsafe, 0o770);
+    kind === "hook"
+      ? script
+      : kind === "directory"
+        ? join(root, "projects")
+        : join(projectDir, "hack.config.json");
+  const mode = kind === "hook" ? 0o666 : 0o770;
+  await chmod(unsafe, mode);
   const child = Bun.spawn(
     [
       process.execPath,
@@ -307,8 +315,12 @@ test.each([
     child.exited,
   ]);
   expect(code, stdout + stderr).not.toBe(0);
-  expect(stdout + stderr).toContain("checkout_untrusted");
+  expect(stdout + stderr).toContain(
+    kind === "hook"
+      ? "host_commands_require_manual_start"
+      : "checkout_untrusted"
+  );
   expect(await Bun.file(hook).exists()).toBe(false);
   expect(await Bun.file(engine).exists()).toBe(false);
-  expect((await stat(unsafe)).mode & 0o777).toBe(0o770);
+  expect((await stat(unsafe)).mode & 0o777).toBe(mode);
 });

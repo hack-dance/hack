@@ -49,6 +49,14 @@ The outer login deadline allows five seconds for the inner two-second escalation
 and bounded settlement. Killable processes and a functioning process census are
 assumptions; SIGKILL of the CLI, host failure, and an engine request already
 accepted outside its client group remain outside this finite model.
+Unattended Compose now checks intent before preparation and before starting
+containers, and never builds, pulls or executes configured host commands.
+`runtime-backend-unattended.test.ts` maps a pause before preparation to zero
+subprocess calls; `autostart-host-boundary.test.ts` checks the actual host runners.
+Closed manual-start refusals can release a boot claim through a boot/branch
+compare-and-set before any start. This model does not cover that registry ledger;
+`project-autostart.test.ts` covers stale, changed-target and real-failure refusal
+cases, and daemon tests cover neutral progress and same-boot recovery.
 Multiple projects, multiple login attempts, reboot, upgrades, global pause, retries,
 network prompts, native backends and real login-service behavior are outside this
 model. Component model success does not qualify installed binaries or real login.

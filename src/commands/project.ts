@@ -1,3 +1,4 @@
+import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   createLifecycleProcessController,
@@ -1962,6 +1963,7 @@ export async function runLifecycleCommands(opts: {
   readonly signal?: AbortSignal;
 }): Promise<number> {
   const commands = opts.commands ?? [];
+  assertAutostartHostCommandsAllowed({ hasCommands: commands.length > 0 });
   for (const [index, cmd] of commands.entries()) {
     const label = cmd.name ? `${cmd.name}: ${cmd.command}` : cmd.command;
     logger.step({ message: `${opts.title}: ${label}` });
@@ -2130,6 +2132,13 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   // Captured before any preparation hook runs: a down that completes while
   // the hooks run supersedes this operation (see startProjectSharedHelpers).
   const sharedHelperConfigs = opts.cfg.lifecycle?.sharedHelpers ?? [];
+  assertAutostartHostCommandsAllowed({
+    hasCommands:
+      sharedHelperConfigs.length > 0 ||
+      (opts.cfg.lifecycle?.up?.before?.length ?? 0) > 0 ||
+      (opts.cfg.lifecycle?.up?.after?.length ?? 0) > 0 ||
+      (opts.cfg.lifecycle?.processes?.length ?? 0) > 0,
+  });
   await assertSharedHelperSessionMuxSupported({
     sharedHelpersConfigured: sharedHelperConfigs.length > 0,
     needsSession:
@@ -5908,6 +5917,10 @@ async function runRemoteLifecycleCommand(opts: {
   readonly detach?: boolean;
   readonly services?: readonly string[];
 }): Promise<number | null> {
+  if (process.env.HACK_AUTOSTART_LOGIN === "1") {
+    // Machine-local unattended intent never dispatches a host command remotely.
+    return null;
+  }
   const target = await resolveProjectLifecycleTarget({
     project: opts.project,
     requestedTarget: opts.requestedTarget,
@@ -6973,6 +6986,8 @@ async function runUpCommand({
       assertCurrent: assertHelpersCurrent,
       up: (beforeStart) =>
         composeRuntimeBackend.up({
+          unattended:
+            process.env.HACK_AUTOSTART_LOGIN === "1" ? true : undefined,
           beforeStart: async () => {
             await assertLoginAutostartCurrent(branch, project.projectRoot);
             await beforeStart?.();

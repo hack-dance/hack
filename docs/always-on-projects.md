@@ -92,7 +92,23 @@ Compose plugin links can point into app bundles beneath group-writable
 `/Applications`. Such installations are refused by the automatic path even when
 manual Docker works. Do not change `/Applications` permissions as an automatic
 repair; use reviewed private tools or keep starting projects manually.
-Already-running instances are adopted without repeating startup hooks. An unknown
+This unit supports Compose-only unattended starts. Projects declaring startup or
+lifecycle hooks, host processes, shared helpers or dependency bootstrap require
+manual `hack up`. The login child never executes those commands, even if the
+configuration changes after the daemon's first observation. Command/cloud env
+providers also require a manual start; built-in local encrypted env layers remain
+supported without keychain fallback. Managed values that change Compose selection,
+Docker lookup or host process execution are refused without resolving secrets.
+Compose `build`, `include`, `extends`, `env_file` and external service-provider
+declarations require manual startup in this slice. Images must already be present
+locally: both Compose phases use `--no-build --pull never` and disable implicit
+dotenv imports. Missing images never trigger a build or pull. The intent/trust
+guard runs before preparation as well as before container start.
+These manual-start requirements produce a closed skip and consume no boot claim
+or failure entry. Doctor reports the reason. Fix the unsupported prerequisite or
+start manually; ordinary manual starts retain their behavior.
+
+Already-running eligible instances are adopted. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
 
 Automatic routing accepts only the already-installed files produced by this
@@ -119,9 +135,10 @@ to have a container, including required dependency targets. A missing service
 runs the normal `up` path. This slice reads the primary Compose file; branch
 overrides, declared `scale` or `deploy.replicas`, explicit Compose file/profile
 overrides and unsupported composition
-cannot prove adoption, so they run ordinary `up` and may repeat startup hooks.
-Managed environment metadata and dotenv inputs also require ordinary `up`;
-adoption never decrypts environment values to guess the selected graph.
+cannot prove adoption. Supported ambiguous observations take restricted Compose
+`up`; unsupported input composition requires manual startup. Managed environment
+metadata also disables adoption; observation never decrypts environment values to
+guess the selected graph. Legacy dotenv inputs require manual migration/startup.
 
 Before project input discovery and again under the instance start lock, login
 checks that the checkout and project-directory ancestor chains belong to the
@@ -131,8 +148,12 @@ saved registry pathname still matches. Startup configuration, Compose and enviro
 input files and their symlink targets also require trusted ownership and modes;
 generated JSON/YAML/env inputs under `.hack/.internal` and `.hack/.branch` are included.
 protected directories alone do not make a writable lifecycle configuration safe.
-Normal owner Git updates remain allowed. This is not a recursive audit of all
-repository code a hook or build may execute.
+Normal owner Git updates remain allowed. This is not a recursive audit of app
+source mounted into containers. Unattended host hooks and image builds are refused
+rather than relying on filename parsing to authenticate arbitrary shell code.
+Login's Git identity, tracking and ignore probes disable system/global Git
+configuration, filesystem-monitor callbacks and hooks. Managed env layers cannot
+override those Git settings. Manual Git and manual starts retain their settings.
 
 Docker's `config.json` and context metadata/TLS paths must likewise be owned by
 the current user or root and not writable by other users. These checks inspect
@@ -191,10 +212,10 @@ startup. Test harnesses and the isolated `hack-v5` launcher set it; those runs d
 not start marked projects. Use the installed CLI/service for login startup.
 
 This first slice starts projects once. It does not restart a project after failure
-or replace terminal-based lifecycle supervision. Persistent host helpers retain
-the existing [lifecycle](lifecycle.md) behavior. On Linux, service-origin starts
-run in independent transient user scopes, so their host helpers survive daemon
-stop/restart while the daemon retains `KillMode=control-group`. Failure to create
+or replace terminal-based lifecycle supervision. Host helpers require manual
+starts and retain the existing [lifecycle](lifecycle.md) behavior. On Linux,
+service-origin starts run in independent transient user scopes, separate from the
+daemon's `KillMode=control-group`. Failure to create
 a scope refuses the start rather than falling back into the daemon cgroup.
 Linux's systemd user service starts
 at login; startup before login requires separately opting into user lingering.
@@ -280,7 +301,10 @@ Current skip reasons are `engine_timeout`, `routing_failed`,
 `boot_identity_unavailable`, `native_unsupported`, `runtime_unknown`,
 `interactive_required`, `env_key_missing`, `keychain_unavailable`,
 `pending_env_migration`, `project_unavailable`, `checkout_untrusted`,
-`executable_path_untrusted`, `docker_config_untrusted`, `paused`, `target_changed`,
+`executable_path_untrusted`, `docker_config_untrusted`,
+`host_commands_require_manual_start`, `image_build_requires_manual_start`,
+`image_requires_manual_start`, `command_provider_requires_manual_start`,
+`compose_inputs_require_manual_start`, `paused`, `target_changed`,
 `daemon_stopped`, `global_paused`, and `invalid_marker`. Failure reasons are `start_failed`,
 `start_timeout`, and `output_limit`.
 

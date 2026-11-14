@@ -264,8 +264,16 @@ test("login replay authority stops at tool boundaries and survives only delibera
     HACK_DAEMON_LOGIN_SERVICE: "1",
     KEEP: "yes",
   };
-  expect(childEnvironment(input)).toEqual({ KEEP: "yes" });
-  expect(hackReexecEnvironment(input)).toEqual({
+  const child = childEnvironment(input);
+  expect(child).toMatchObject({ KEEP: "yes" });
+  for (const key of [
+    "HACK_AUTOSTART_LOGIN",
+    "HACK_AUTOSTART_PROJECT_ID",
+    "HACK_DAEMON_LOGIN_SERVICE",
+  ]) {
+    expect(child[key]).toBeUndefined();
+  }
+  expect(hackReexecEnvironment(input)).toMatchObject({
     HACK_AUTOSTART_LOGIN: "1",
     HACK_AUTOSTART_PROJECT_ID: "fixture-project",
     KEEP: "yes",
@@ -277,4 +285,40 @@ test("login replay authority stops at tool boundaries and survives only delibera
     })
   ).toEqual({});
   expect(input.HACK_DAEMON_LOGIN_SERVICE).toBe("1");
+});
+
+test("login Git observations disable monitor hooks despite local config and inherited overrides", async () => {
+  const root = await fixture();
+  const receipt = join(root, "git-monitor-ran");
+  const monitor = join(root, "monitor.sh");
+  await writeFile(monitor, `#!/bin/sh\nprintf ran > '${receipt}'\n`, {
+    mode: 0o700,
+  });
+  const env = privateCliEnv({ root });
+  const git = async (args: readonly string[], childEnv = env) => {
+    const child = Bun.spawn(["git", "-C", root, ...args], {
+      env: childEnv,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return await child.exited;
+  };
+  expect(await git(["init"])).toBe(0);
+  expect(await git(["config", "core.fsmonitor", monitor])).toBe(0);
+  const unattended = childEnvironment(
+    { ...env, HACK_AUTOSTART_LOGIN: "1" },
+    {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.fsmonitor",
+      GIT_CONFIG_VALUE_0: monitor,
+    }
+  );
+  expect(await git(["status", "--porcelain"], unattended)).toBe(0);
+  expect(await Bun.file(receipt).exists()).toBe(false);
+  expect(unattended.GIT_CONFIG_NOSYSTEM).toBe("1");
+  expect(unattended.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+  expect(unattended.GIT_CONFIG_VALUE_1).toBe("/dev/null");
+  expect(await git(["status", "--porcelain"])).toBe(0);
+  expect(await Bun.file(receipt).exists()).toBe(true);
 });

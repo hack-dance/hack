@@ -62,12 +62,12 @@ pub struct Identity {
 pub fn inspect(pid: i32) -> Result<Option<Identity>> {
     use std::os::unix::fs::MetadataExt;
     let path = format!("/proc/{pid}/stat");
-    let text = match fs::read_to_string(&path) {
+    let bytes = match fs::read(&path) {
         Ok(value) => value,
         Err(error) if absent_error(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let tail = text.rsplit_once(") ").ok_or_else(refused)?.1;
+    let tail = proc_stat_tail(&bytes)?;
     let fields: Vec<_> = tail.split_whitespace().collect();
     let group = fields
         .get(2)
@@ -94,6 +94,17 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
         uid: metadata.uid(),
         zombie: fields.first() == Some(&"Z") || fields.first() == Some(&"X"),
     }))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_tail(bytes: &[u8]) -> Result<&str> {
+    // comm is arbitrary bytes and may itself contain parentheses. Only the
+    // fields following its final delimiter have an ASCII/UTF-8 contract.
+    let end = bytes
+        .windows(2)
+        .rposition(|v| v == b") ")
+        .ok_or_else(refused)?;
+    std::str::from_utf8(&bytes[end + 2..]).map_err(|_| refused())
 }
 
 #[cfg(target_os = "linux")]
@@ -543,6 +554,15 @@ pub fn timestamp() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_process_name_does_not_invalidate_identity_fields() {
+        assert_eq!(
+            super::proc_stat_tail(b"42 (name\xff) nested) S 1 2 3").unwrap(),
+            "S 1 2 3"
+        );
+        assert!(super::proc_stat_tail(b"42 (name) S \xff").is_err());
+    }
     #[test]
     fn proc_exit_during_open_or_read_is_absent_not_census_failure() {
         for errno in [libc::ENOENT, libc::ESRCH] {

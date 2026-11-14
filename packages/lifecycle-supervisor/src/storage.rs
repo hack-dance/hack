@@ -184,7 +184,9 @@ impl Root {
         Read::by_ref(&mut file).take(8193).read_to_end(&mut bytes)?;
         let state: State = serde_json::from_slice(&bytes).map_err(|_| refused())?;
         if state.version != 1
-            || state.name != name
+            // Case-insensitive filesystems may return a retained receipt under
+            // its previous spelling after a case-only command rename.
+            || !state.name.eq_ignore_ascii_case(name)
             || state.guard_pid <= 1
             || state.process_group_id != state.guard_pid
             || state.guard_start_time == 0

@@ -1615,33 +1615,30 @@ async function verifyMacRootControlledPaths(
   }
 ): Promise<boolean> {
   const allowMissingPaths = new Set(options?.allowMissingPaths ?? []);
+  const report = (message: string) => {
+    if (!options?.quiet) {
+      logger.error({ message });
+    }
+  };
   for (const path of paths) {
     const metadata = await readMacOwnershipAndMode(path, options);
     if (metadata === null) {
       if (allowMissingPaths.has(path)) {
         continue;
       }
-      if (!options?.quiet) {
-        logger.error({
-          message: `Unable to inspect ownership for ${path}.`,
-        });
-      }
+      report(`Unable to inspect ownership for ${path}.`);
       return false;
     }
     if (metadata.uid !== ROOT_UID || metadata.gid !== WHEEL_GID) {
-      if (!options?.quiet) {
-        logger.error({
-          message: `${path} must be owned by root:wheel before enabling passwordless sudo.`,
-        });
-      }
+      report(
+        `${path} must be owned by root:wheel before enabling passwordless sudo.`
+      );
       return false;
     }
     if ((metadata.mode & 0o022) !== 0) {
-      if (!options?.quiet) {
-        logger.error({
-          message: `${path} must not be writable by group or others before enabling passwordless sudo.`,
-        });
-      }
+      report(
+        `${path} must not be writable by group or others before enabling passwordless sudo.`
+      );
       return false;
     }
   }

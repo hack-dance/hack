@@ -199,7 +199,7 @@ is removed after use. The app never types into an existing terminal or pane.
 
 Source: `hack doctor --json --path <root>` per registered project, plus one run
 outside any project for machine checks (until R7c), on open and every 10
-minutes while visible. Today it gives `checks[{id,status,detail}]`.
+minutes while visible. The versioned audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a).
 
 | Card part | Content |
 |---|---|
@@ -375,7 +375,7 @@ Each is small enough for one PR.
 6. **R5a** Activity writer: append-only `activity.jsonl` in the Hack home, one line per `up`/`down`/`restart`/autostart (`ts, project, branch, action, origin, outcome, failed_services, duration_ms`), `O_APPEND` writes under one line size limit, rotation at a size cap, `origin` from `HACK_ORIGIN` (the app sets `app`).
 7. **R5b** Activity reader: `hack activity --json [--project] [--limit]`.
 8. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope.
-9. **R7a** Doctor metadata (a new doctor schema): per check `area`, `scope: machine | project`, `fix: {kind: safe | admin | manual, args[], doc_url}`.
+9. **R7a — exists.** Doctor audit schema 1 adds per-check `area`, `scope: machine | project` and `fix: {kind: safe | admin | manual, args[], doc_url}` inside the existing `{ok,data}` envelope. Unknown checks default to Other/manual with no executable args. A category is guidance, not permission to run it.
 10. **R7b** One fix without prompts: `hack doctor --fix --only <id> --yes --json`, only for `kind: safe`.
 11. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
 12. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.

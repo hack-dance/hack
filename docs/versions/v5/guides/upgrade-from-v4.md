@@ -64,6 +64,78 @@ Sources: [candidate channel contract](https://github.com/hack-dance/hack/blob/26
 
 ## 2. Before you start
 
+### Check first
+
+v5 builds that include the upgrade assistant can check the machine before you
+change anything. Run the v5 CLI (on macOS, `"$HOME/.hack-next/bin/hack-next"`
+with `HACK_RUNTIME_BACKEND=compose`):
+
+```sh
+hack upgrade check          # add --json for a machine-readable report
+```
+
+It reads the installed versions, the daemon's login service, the projects
+registry, Hack's global services, proxy ports and DNS, and the global secret
+store. For each live project it reads the env format and key, tracked
+machine-local files, ignore rules, agent integration files and, on Apple
+Silicon, the native preflight. It changes nothing and prints no secret value.
+
+- **Dead registry entries** (the checkout or its config is gone) are counted
+  apart from live projects that cannot be read. Dead entries only need
+  `hack projects prune`; unreadable ones need repair.
+- It ends with an ordered plan and the next command. A step either has a
+  command or is marked manual, with the action to take; manual text is never
+  printed as a command. Commands run the CLI you ran the check with (the
+  `hack-next` launcher during the prerelease).
+- It exits 1 when something blocks the upgrade, naming the blockers. Examples
+  are a global secret store whose key is gone or refused while a project
+  reads it, a tracked secret key, an env layer conflict, or a live project
+  whose config cannot be read. It also exits 1 when a check the upgrade
+  depends on could not run, listed under "Not fully checked". Examples are a
+  check that timed out, or a key file that is missing while the OS keychain
+  may hold the key; the check never asks the keychain, because that can
+  prompt.
+
+Before you follow the plan, keep a private copy of the files it changes:
+
+```sh
+hack upgrade snapshot
+```
+
+This copies the global Hack config, the projects registry, the encrypted
+secret store and its key (when used), and each live project's `.hack/`
+config, env files, env layers, `.hack/.gitignore` and env key files into
+`~/.hack/upgrade/snapshots/<id>/` (directories 0700, files 0600). The
+manifest records paths, sizes, modes and SHA-256 digests, never values. It
+prints the command that puts the files back:
+
+```sh
+hack upgrade rollback --rollback-manifest <manifest>
+```
+
+Rollback restores each file's exact bytes and mode. A file that changed since
+the snapshot is left as it is unless you add `--overwrite`. Whatever rollback
+replaces or removes is kept as itself (not as a copy) in the snapshot directory
+and named in the output; nothing is deleted. A file that appears at a path while
+rollback runs is left alone and reported as a conflict. Rollback keeps every
+temporary and replaced file inside the snapshot directory, never beside the
+file in your checkout, so Git cannot pick up their contents. It therefore
+needs the file and the snapshot on the same filesystem; a project on another
+disk than `~/.hack` is reported for you to restore by hand.
+`hack upgrade rollback` without a manifest lists the snapshots and changes
+nothing.
+
+The snapshot also records, as absent, the env layers the migration would
+create, so a rollback moves them aside. This includes layers for overlays held
+only in the secret store. When the snapshot cannot cover everything, it says
+so and lists what it misses (`complete: false` in `--json`). Examples are a
+projects registry it could not read, a live project it could not read, a file
+it skipped because it is a link, and overlays it could not list without asking
+the OS keychain. A rollback cannot put back what a snapshot does not hold. The snapshot does not cover the Git index, the daemon's login
+service or Docker state; the steps below still apply.
+
+### Record the current state
+
 Keep the records and backups private: registry and doctor output can identify
 local projects, and ignored env files can contain plaintext secrets. Do not paste
 them into an issue. Use a new backup directory and record its location yourself:

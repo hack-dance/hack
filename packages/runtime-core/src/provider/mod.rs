@@ -42,6 +42,12 @@ mod image_load;
 pub mod image_platform;
 pub mod image_policy;
 pub mod image_reference;
+#[cfg(any(all(target_os = "macos", feature = "native-config-plan"), test))]
+mod interactive_handoff;
+#[cfg(any(target_os = "macos", test))]
+pub mod interactive_session;
+#[cfg(any(target_os = "macos", test))]
+pub mod interactive_terminal;
 pub mod managed_environment;
 #[cfg(feature = "native-config-plan")]
 mod native_environment;

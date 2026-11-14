@@ -29,6 +29,7 @@ import {
   lettingOthersCreate,
   walkReplaceableChain,
 } from "../lib/path-trust.ts";
+import { boundedTimeoutMs } from "../lib/process-deadline.ts";
 import {
   isVirtualExecutablePath,
   resolveLaunchdHackBinPath,
@@ -75,6 +76,15 @@ export const SYSTEMD_DISABLE_ENV = "HACK_SYSTEMD_DISABLE";
 export const SYSTEMD_ALLOW_ISOLATED_ENV = "HACK_SYSTEMD_ALLOW_ISOLATED_HOME";
 
 const COMMAND_TIMEOUT_MS = 10_000;
+
+/**
+ * A command's time limit: 10 s, capped by any process deadline
+ * (withProcessDeadline) so no child outlives it; null once it has passed.
+ */
+function commandLimitMs(): number | null {
+  const limit = boundedTimeoutMs(COMMAND_TIMEOUT_MS) ?? COMMAND_TIMEOUT_MS;
+  return limit > 0 ? limit : null;
+}
 const MAX_OUTPUT_CHARS = 64 * 1024;
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -187,6 +197,14 @@ function createDefaultRunner(opts: {
         stderr: `refusing to run ${bin}: ${untrusted}`,
       };
     }
+    const limitMs = commandLimitMs();
+    if (limitMs === null) {
+      return {
+        exitCode: 124,
+        stdout: "",
+        stderr: `${command} not run: deadline passed`,
+      };
+    }
     let proc: ReturnType<typeof Bun.spawn>;
     try {
       proc = Bun.spawn([bin, ...args], {
@@ -207,7 +225,7 @@ function createDefaultRunner(opts: {
     const timer = setTimeout(() => {
       timedOut = true;
       proc.kill("SIGKILL");
-    }, COMMAND_TIMEOUT_MS);
+    }, limitMs);
     try {
       const [exitCode, stdout, stderr] = await Promise.all([
         proc.exited,
@@ -218,7 +236,7 @@ function createDefaultRunner(opts: {
         exitCode: timedOut ? 124 : exitCode,
         stdout: stdout.slice(0, MAX_OUTPUT_CHARS),
         stderr: timedOut
-          ? `${command} timed out after ${COMMAND_TIMEOUT_MS}ms`
+          ? `${command} timed out after ${limitMs}ms`
           : stderr.slice(0, MAX_OUTPUT_CHARS),
       };
     } finally {

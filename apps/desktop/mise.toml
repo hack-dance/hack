@@ -1,0 +1,4 @@
+# The desktop workspace needs Rust 1.98.1 (see rust-toolchain.toml); the repo
+# root keeps its own pin.
+[tools]
+rust = "1.98.1"

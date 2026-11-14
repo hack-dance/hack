@@ -538,6 +538,10 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
+  /** Private same-filesystem staging for snapshot-owned upgrade writes. */
+  readonly stagingDirectory?: string;
+  /** Last snapshot identity check before atomic publication. */
+  readonly beforePublish?: () => Promise<void>;
   /** Test seam; see {@link HackDirGitignoreWriteAccess}. */
   readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
 }): Promise<HackDirGitignoreEnsureResult> {
@@ -562,8 +566,13 @@ export async function ensureHackDirGitignore(opts: {
   }
   await replacePrivateFileAtomic({
     ...options,
+    staging:
+      opts.stagingDirectory === undefined
+        ? undefined
+        : { directory: opts.stagingDirectory },
     text: next,
     mode: current ? current.mode & 0o777 : 0o644,
+    beforeRename: opts.beforePublish,
   });
   return { changed: true, readOnly: false };
 }
@@ -693,7 +702,7 @@ function hackDirGitignoreFileOptions(opts: {
   };
 }
 
-function mergeHackDirGitignore(opts: {
+export function mergeHackDirGitignore(opts: {
   readonly existing: string | null;
 }): string {
   return mergeManagedGitignoreBlock({

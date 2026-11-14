@@ -225,3 +225,17 @@ missing tools and unknown identities cannot authorize repair or state removal.
 Sending TERM to the project owner invokes its owned rollback path; this is not a
 finite protocol request and has no response frame. Use the finite `stop` operation
 when a confirmation receipt is needed. Logs currently have no automatic rotation.
+
+The CLI keeps native receipts, owner capabilities and `control.sock` in the
+host's Hack home under `lifecycle-supervisors/<instance-hash>`, outside the
+checkout. The shared log stays in the existing project log location. Do not bind
+mount the host Hack home into containers. A Hack home inside the checkout is
+refused for this runner. Linux incremental launch peers must have the same UID
+and PID, user and mount namespaces; macOS peers must have the same UID (Compose
+runs in a separate VM). Same-user host code is trusted. Earlier experimental
+checkout-local owners must be stopped with their original CLI before upgrading;
+leftover native roots are never treated as proof of absence.
+
+Doctor holds the same instance controller lock as `up` throughout final
+inspection, generation validation, native stop and conditional state removal.
+Adoption cannot interleave between validation and the stop effect.

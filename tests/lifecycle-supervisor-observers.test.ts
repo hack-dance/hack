@@ -8,7 +8,11 @@ import {
   readLifecycleState,
   upsertLifecycleStateEntry,
 } from "../src/lib/lifecycle-runtime.ts";
-import type { LifecycleSupervisorReceipt } from "../src/lib/lifecycle-supervisor.ts";
+import {
+  type LifecycleSupervisorReceipt,
+  resolveLifecycleSupervisorRoot,
+  withLifecycleSupervisorControllerLock,
+} from "../src/lib/lifecycle-supervisor.ts";
 import {
   classifySupervisorLifecycleHygiene,
   inspectLifecycleStateEntries,
@@ -446,6 +450,54 @@ test("one malformed project stays unknown without aborting global observers", as
       "state.json"
     );
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("supervisor control state is outside the checkout", () => {
+  const root = resolveLifecycleSupervisorRoot({
+    projectDir: "/synthetic-checkout/.hack",
+    composeProject: "sample",
+  });
+  expect(root.startsWith("/synthetic-checkout/")).toBe(false);
+  expect(root).toContain("/lifecycle-supervisors/");
+});
+
+test("doctor holds the controller lock through native stop and state removal", async () => {
+  const root = await mkdtemp(join(tmpdir(), "supervisor-observer-"));
+  const state = entry();
+  let acquired = false;
+  let competitor: Promise<void> | undefined;
+  try {
+    await upsertLifecycleStateEntry({ projectDir: root, entry: state });
+    const result = await repairProjectLifecycleSessions({
+      projectDir: root,
+      projectRoot: root,
+      boundary: {
+        inspect: () => Promise.resolve(repairInspection(state)),
+        inspectSupervisor: () => Promise.resolve(receipt()),
+        stopSupervisor: async () => {
+          competitor = withLifecycleSupervisorControllerLock({
+            projectDir: root,
+            composeProject: state.composeProject,
+            run: async () => {
+              acquired = true;
+              expect(
+                await readLifecycleState({ projectDir: root })
+              ).toHaveLength(0);
+            },
+          });
+          await Bun.sleep(50);
+          expect(acquired).toBe(false);
+          return receipt({ outcome: "stopped", liveProcessNames: [] });
+        },
+      },
+    });
+    expect(result.failures).toHaveLength(0);
+    await competitor;
+    expect(acquired).toBe(true);
+  } finally {
+    await competitor;
     await rm(root, { recursive: true, force: true });
   }
 });

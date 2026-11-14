@@ -48,6 +48,7 @@ export type LifecycleFixtureOptions = {
   readonly persistentProcess?: boolean;
   /** Adds a persistent lifecycle.up.before step (a long-running tunnel-style helper). */
   readonly persistentUpBefore?: boolean;
+  readonly persistentUpBeforeCommand?: string;
   /** Makes docker compose reject the fixture after lifecycle startup. */
   readonly composeFailure?: boolean;
   /** Runs fixture containers without a host bind mount. */
@@ -417,7 +418,9 @@ function buildLifecycleConfig(opts: {
   if (opts.lifecycle.persistentUpBefore === true) {
     upBefore.push({
       name: "e2e-tunnel",
-      command: "bun -e 'setInterval(() => {}, 60000)'",
+      command:
+        opts.lifecycle.persistentUpBeforeCommand ??
+        "bun -e 'setInterval(() => {}, 60000)'",
       cwd: ".",
       persistent: true,
     });

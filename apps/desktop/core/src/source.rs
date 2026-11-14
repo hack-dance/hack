@@ -213,7 +213,16 @@ fn read_doctor(
     root: Option<&Path>,
     timeout: Duration,
 ) -> Result<crate::models::DoctorReport, String> {
+    // Doctor invokes Git read commands. Repository config must never turn
+    // those observations into fsmonitor or hook execution.
     let v: serde_json::Value = runner
+        .clone()
+        .with_env("GIT_CONFIG_PARAMETERS", "")
+        .with_env("GIT_CONFIG_COUNT", "2")
+        .with_env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+        .with_env("GIT_CONFIG_VALUE_0", "false")
+        .with_env("GIT_CONFIG_KEY_1", "core.hooksPath")
+        .with_env("GIT_CONFIG_VALUE_1", "/dev/null")
         .run_json(&["doctor", "--json"], root, timeout)
         .map_err(|e| e.to_string())?;
     if !v
@@ -297,7 +306,34 @@ impl LiveSource {
                             } else {
                                 read(&runner, Some(&t.repo_root), timeout)
                             };
-                            t.run(result)
+                            let run = t.run(result);
+                            // Adoption is reported as unsupported native input
+                            // by legacy project views, but Doctor selects it
+                            // through Compose. Accept only exact adopted-root
+                            // evidence from this bounded read-only retry.
+                            if t.native
+                                && run
+                                    .result
+                                    .as_ref()
+                                    .is_ok_and(|r| !crate::doctor::project_evidence(&run, r))
+                            {
+                                let timeout = per_call.min(left());
+                                if !timeout.is_zero() {
+                                    let compose =
+                                        self.runner_for(false).with_term_grace(DOCTOR_TERM_GRACE);
+                                    if let Ok(report) = read(&compose, Some(&t.repo_root), timeout)
+                                        && crate::doctor::adopted_project_evidence(
+                                            &t.repo_root,
+                                            &report,
+                                        )
+                                    {
+                                        let mut adopted = t.run(Ok(report));
+                                        adopted.native = false;
+                                        return adopted;
+                                    }
+                                }
+                            }
+                            run
                         })
                     })
                     .collect();
@@ -888,6 +924,83 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
             .map(|run| run.result.as_ref().unwrap().checks[0].detail.as_str())
             .collect();
         assert_eq!(details, ["machine", "native", "compose"]);
+    }
+
+    #[test]
+    fn adopted_target_inferred_native_is_checked_with_compose() {
+        let hack = fake_hack(
+            "doctor-adopted",
+            r#"if [ "$HACK_RUNTIME_BACKEND" = compose ]; then
+echo "{\"ok\":true,\"data\":{\"checks\":[{\"id\":\"project\",\"status\":\"warn\",\"detail\":\"Adopted Compose project at /work/p0/.hack has a pending or interrupted adoption operation. Use explicit adoption recovery before other project commands; values omitted.\"}]}}"
+else
+echo '{"ok":true,"data":{"checks":[{"id":"native root trust","status":"ok","detail":"trusted"}]}}'
+fi"#,
+        );
+        let source = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let mut targets = targets(1);
+        targets[0].native = true;
+        let runs = source.doctor_runs(&targets);
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert!(!runs[1].native);
+        let view = crate::doctor::aggregate(&runs);
+        assert_eq!(view.projects_checked, 1);
+        assert!(!view.is_clean());
+    }
+
+    #[test]
+    fn doctor_git_reads_disable_repository_fsmonitor() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack(
+            "doctor-git",
+            r#"git -C "$HACK_HOME/repo" ls-files >/dev/null || exit 2
+echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'"#,
+        );
+        let dir = hack.parent().unwrap();
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HACK_HOME", dir)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::write(repo.join("tracked"), "fixture").unwrap();
+        assert!(git(&["add", "tracked"]).status.success());
+        let hook = dir.join("fsmonitor");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf called > \"$HACK_HOME/executed\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            git(&["config", "core.fsmonitor", hook.to_str().unwrap()])
+                .status
+                .success()
+        );
+        assert!(git(&["ls-files"]).status.success());
+        assert!(
+            dir.join("executed").exists(),
+            "negative control must run the harmless hook"
+        );
+        std::fs::remove_file(dir.join("executed")).unwrap();
+        let source = LiveSource {
+            runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
+            daemon: None,
+        };
+        let runs = source.doctor_runs(&[]);
+        assert!(runs[0].result.is_ok());
+        assert!(!dir.join("executed").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

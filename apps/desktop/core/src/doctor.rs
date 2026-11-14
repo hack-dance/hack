@@ -486,8 +486,11 @@ type ProjectKey = (String, Severity, String);
 
 /// Legacy Compose output identifies the selected Hack directory. Native
 /// output has no project row, so require a known project-scoped check.
-fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
+pub(crate) fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
     let Some(root) = &run.root else { return false };
+    if adopted_project_evidence(root, report) {
+        return true;
+    }
     if run.native {
         return report.checks.iter().any(|c| {
             matches!(
@@ -510,6 +513,18 @@ fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
                     let path = Path::new(p);
                     path == root.join(".hack") || path == root.join(".dev")
                 })
+    })
+}
+
+pub(crate) fn adopted_project_evidence(root: &Path, report: &DoctorReport) -> bool {
+    let prefix = format!(
+        "Adopted Compose project at {}",
+        root.join(".hack").display()
+    );
+    report.checks.iter().any(|c| c.id == "project" && match c.detail.strip_prefix(&prefix) {
+        Some(" ('hack config adopt'). Its Compose inputs belong to the adoption; adopted commands support retained-container start, restart, stop, ps, logs and exec.") => c.status == "ok",
+        Some(" has a pending or interrupted adoption operation. Use explicit adoption recovery before other project commands; values omitted.") => c.status == "warn",
+        _ => false,
     })
 }
 
@@ -1272,6 +1287,34 @@ mod tests {
         native.native = true;
         assert_eq!(aggregate(&[machine.clone(), native]).projects_checked, 1);
         assert!(!aggregate(&[DoctorRun::machine(report(vec![]))]).is_clean());
+    }
+
+    #[test]
+    fn adopted_reports_require_exact_root_and_keep_pending_findings() {
+        for (status, suffix) in [
+            (
+                "ok",
+                " ('hack config adopt'). Its Compose inputs belong to the adoption; adopted commands support retained-container start, restart, stop, ps, logs and exec.",
+            ),
+            (
+                "warn",
+                " has a pending or interrupted adoption operation. Use explicit adoption recovery before other project commands; values omitted.",
+            ),
+        ] {
+            let report = report(vec![
+                check(
+                    "project",
+                    status,
+                    &format!("Adopted Compose project at /work/alpha/.hack{suffix}"),
+                ),
+                check("env key", "error", "missing"),
+            ]);
+            let v = aggregate(&[DoctorRun::project("alpha", "/work/alpha", report.clone())]);
+            assert_eq!(v.projects_checked, 1);
+            assert!(v.has_errors());
+            let wrong = aggregate(&[DoctorRun::project("nested", "/work/alpha/nested", report)]);
+            assert_eq!(wrong.projects_checked, 0);
+        }
     }
 
     #[test]

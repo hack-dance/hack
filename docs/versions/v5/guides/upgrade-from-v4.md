@@ -109,8 +109,10 @@ To run the apply steps:
 
 ```sh
 hack upgrade apply --dry-run      # what would change; changes nothing
+hack upgrade apply --dry-run --verbose  # include every candidate file path
 hack upgrade apply                # every apply step, every checkout
 hack upgrade apply --only ignore-rules --project my-app
+hack upgrade apply --only env-key-permissions --project my-app
 hack upgrade apply --only ignore-rules --project my-app --snapshot-root /path/on/project-volume/private-snapshots
 ```
 
@@ -123,6 +125,38 @@ removal is covered by the same upgrade snapshot. File bytes live only in private
 snapshot blobs; the manifest and journal contain metadata. Apply prints the
 rollback command and then rechecks. Ignore-rule writes stage inside the snapshot,
 so they leave no staging files in the checkout.
+
+Permission-only key findings can also be applied. This tightens an existing,
+owner-held regular key by removing group/other access and preserving owner bits
+(0640 becomes 0600; 0444 becomes 0400). Keys without group/other access are not
+selected for repair. It never creates, rotates, moves, changes
+ownership of or untracks a key. The journal freezes the selected paths, and the
+snapshot keeps their original bytes and modes. Resume verifies those bytes and
+the recorded mode before continuing; rollback restores the original mode too.
+Snapshot blobs also hold bytes of selected weak keys outside the checkout,
+including keys in the shared Git common directory. Treat the default snapshot
+root and any explicit `--snapshot-root` as key backups. Snapshots are retained
+until you remove them; apply and rollback do not expire them automatically.
+
+For findings that need a decision, run one traversal instead of copying a
+Doctor command for every checkout:
+
+```sh
+hack upgrade review
+hack upgrade review --only env-key,tracked-files --project my-app
+```
+
+Review checks each affected checkout and prints its diagnostics and the reason
+for manual handling. It executes no fixes or suggested commands. Key identity
+and rotation require a person to choose; untracking requires reviewing staged
+work because a file snapshot does not protect the Git index.
+
+Dry-run text begins with step, checkout/scope and candidate-file counts, including
+counts for each fix. It keeps the per-file list behind `--verbose`; JSON retains
+all file paths. Check summaries list blocking or unchecked projects first and
+count projects with only ignore-rule or agent-file hygiene findings. Failed
+checks include a closed error class, such as `permission-denied` or `parse-error`,
+without exposing exception messages or process output.
 
 After an interruption, choose the run explicitly:
 
@@ -157,8 +191,8 @@ snapshot set; choose its storage and backup policy accordingly.
 The apply JSON field `agent_backups` lists recovery manifests and can equal
 `coverage.manifest_path`: it no longer implies a separate plugin backup. A grouped
 plan target keeps its own `status` and `apply_eligible`; the text plan counts
-blocked or unchecked checkouts that apply will skip. `--dry-run` lists candidate
-paths and can be longer than the one-screen check summary. Rollback returns
+blocked or unchecked checkouts that apply will skip. `--dry-run --verbose` lists
+candidate paths and can be longer than the one-screen check summary. Rollback returns
 `busy` without restoring anything while apply or resume holds that snapshot's lock.
 
 Env migration remains a separate grouped command until its journal owner is

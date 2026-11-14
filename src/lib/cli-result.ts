@@ -98,12 +98,15 @@ export function errorResult(opts: {
 }
 
 /**
- * Serialize an envelope for stdout (pretty-printed, trailing newline).
+ * Serialize an envelope for stdout with a trailing newline: pretty-printed
+ * by default, or as one line with `compact` (the closing line of an ndjson
+ * stream such as `--progress`).
  */
 export function renderCliResult(opts: {
   readonly result: CliResult<unknown>;
+  readonly compact?: boolean;
 }): string {
-  return `${JSON.stringify(opts.result, null, 2)}\n`;
+  return `${JSON.stringify(opts.result, null, opts.compact ? undefined : 2)}\n`;
 }
 
 /**

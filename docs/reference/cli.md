@@ -187,6 +187,7 @@ hack up [services...] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -216,6 +217,7 @@ hack down [options]
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--recover` | Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -249,6 +251,7 @@ hack restart [services...] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--recover-frontend` | Recover an interrupted native frontend after proving its owner and effects are gone |
 | `--expect-finalization-attempt <32-hex>` | Require this exact interrupted native frontend attempt |
 | `--expect-frontend-pid <pid>` | Previously observed frontend PID (required only for legacy v1 state) |

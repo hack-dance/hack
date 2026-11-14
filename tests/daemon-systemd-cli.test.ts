@@ -15,6 +15,7 @@ import {
   RENDERED_SYSTEM_PATH_DIRECTORIES,
   UNSET_PATH_LOOKUP_DIRS,
 } from "../src/daemon/systemd.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
  * `hack daemon install|status|uninstall` on Linux through the source CLI,
@@ -146,8 +147,12 @@ async function writeExecutable(path: string, text: string): Promise<void> {
   await chmod(path, 0o755);
 }
 
-/** Replaces the fixture's source shim with a compiled hack binary. */
-async function compileHack(outfile: string): Promise<void> {
+/**
+ * Replaces the fixture's source shim with a compiled hack binary. The build
+ * runs with the fixture's private env, so it never sees the runner's HOME.
+ */
+async function compileHack(f: Fixture): Promise<void> {
+  const outfile = f.hackBin;
   const build = Bun.spawn(
     [
       process.execPath,
@@ -161,7 +166,13 @@ async function compileHack(outfile: string): Promise<void> {
       "--outfile",
       outfile,
     ],
-    { cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "pipe" }
+    {
+      cwd: REPO_ROOT,
+      env: privateCliEnv({ root: f.root }),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    }
   );
   const [code, stderr] = await Promise.all([
     build.exited,
@@ -545,7 +556,7 @@ installFlowTest(
     // Automatic repairs compare the service with the executing binary
     // (HACK-2216): a source invocation has none, so this flow runs a
     // compiled hack, as an installed one is.
-    await compileHack(f.hackBin);
+    await compileHack(f);
     expect((await hack(f, ["daemon", "install"])).code).toBe(0);
     const before = await readOwnedPid(f);
     expect(before).not.toBeNull();

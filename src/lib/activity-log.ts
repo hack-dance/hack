@@ -4,7 +4,11 @@ import { lstat, mkdir, open, realpath, rename } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
-import { readProjectsRegistry } from "./projects-registry.ts";
+import { normalizeProjectName } from "./project-name.ts";
+import {
+  readProjectsRegistry,
+  selectRegisteredProjectByName,
+} from "./projects-registry.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
 /**
@@ -416,8 +420,10 @@ function isActivityRecord(value: unknown): value is ActivityRecord {
 
 /**
  * The registered name of the project a lifecycle command targeted: the
- * `--project` name when registered, otherwise the registered project whose
- * checkout contains `--path` (or the working directory). Null when none is.
+ * project `--project` selects (canonical-name rules), otherwise the
+ * registered project whose checkout, `.hack` directory or linked worktree
+ * contains `--path` (or the working directory), the deepest match winning.
+ * Null when none is, or when the selector is ambiguous.
  */
 export async function resolveRegisteredProjectName(opts: {
   readonly cwd: string;
@@ -426,10 +432,13 @@ export async function resolveRegisteredProjectName(opts: {
 }): Promise<string | null> {
   const registry = await readProjectsRegistry();
   if (opts.project !== undefined) {
-    return (
-      registry.projects.find((entry) => entry.name === opts.project)?.name ??
-      null
-    );
+    // The same canonical-name rules `--project` selection uses (case and
+    // `_`/space/slash aliases); the recorded name is the registry's own.
+    const name = normalizeProjectName(opts.project.trim());
+    return name
+      ? (selectRegisteredProjectByName({ projects: registry.projects, name })
+          ?.name ?? null)
+      : null;
   }
   const target = resolve(opts.cwd, opts.path ?? ".");
   const spellings = new Set([target]);
@@ -439,7 +448,13 @@ export async function resolveRegisteredProjectName(opts: {
   }
   let best: { readonly name: string; readonly depth: number } | null = null;
   for (const entry of registry.projects) {
-    for (const root of [entry.repoRoot, entry.projectDir]) {
+    const roots = [
+      entry.repoRoot,
+      entry.projectDir,
+      // Linked worktrees are kept beside the primary checkout.
+      ...(entry.worktrees ?? []).map((worktree) => worktree.path),
+    ];
+    for (const root of roots) {
       const base = resolve(root);
       const inside = [...spellings].some(
         (spelling) => spelling === base || spelling.startsWith(`${base}${sep}`)

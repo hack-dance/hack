@@ -25,6 +25,7 @@ import {
   readActivity,
   recordActivity,
   resolveActivityOrigin,
+  resolveRegisteredProjectName,
 } from "../src/lib/activity-log.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -304,5 +305,51 @@ test("--limit is a whole number in range", () => {
   expect(parseActivityLimit("100")).toBe(100);
   for (const bad of ["0", "-1", "1.5", "abc", "10001", ""]) {
     expect(() => parseActivityLimit(bad)).toThrow();
+  }
+});
+
+test("the recorded project is the registered name: selector aliases and linked worktrees resolve", async () => {
+  const home = join(root, "home");
+  const repo = join(root, "repo");
+  const worktree = join(root, "elsewhere", "feature-wt");
+  await mkdir(join(worktree, "src"), { recursive: true });
+  await mkdir(join(repo, ".hack"), { recursive: true });
+  await mkdir(home, { recursive: true });
+  const seen = "2026-11-14T00:00:00.000Z";
+  await writeFile(
+    join(home, "projects.json"),
+    JSON.stringify({
+      version: 1,
+      projects: [
+        {
+          id: "p1",
+          name: "my-app",
+          repoRoot: repo,
+          projectDirName: ".hack",
+          projectDir: join(repo, ".hack"),
+          createdAt: seen,
+          worktrees: [{ path: worktree, branch: "feature", lastSeenAt: seen }],
+        },
+      ],
+    })
+  );
+  process.env.HACK_HOME = home;
+  try {
+    const name = (opts: {
+      readonly path?: string;
+      readonly project?: string;
+      readonly cwd?: string;
+    }) => resolveRegisteredProjectName({ ...opts, cwd: opts.cwd ?? root });
+    expect(await name({ project: "my-app" })).toBe("my-app");
+    // Alias spellings the --project selector accepts record the canonical name.
+    expect(await name({ project: "My_App" })).toBe("my-app");
+    expect(await name({ project: "other" })).toBeNull();
+    expect(await name({ cwd: join(repo, ".hack") })).toBe("my-app");
+    // A linked worktree outside the primary checkout.
+    expect(await name({ cwd: join(worktree, "src") })).toBe("my-app");
+    expect(await name({ path: worktree })).toBe("my-app");
+    expect(await name({ cwd: join(root, "elsewhere") })).toBeNull();
+  } finally {
+    restoreEnv("HACK_HOME", savedHome);
   }
 });

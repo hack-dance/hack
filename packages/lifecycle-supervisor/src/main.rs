@@ -13,14 +13,14 @@
 //! | starting/running | project owner dies | same | resident guard retains lock and identity |
 //! | any live | duplicate command / lock busy | refused | no second execution |
 //! | any | token or identity mismatch | refused | no signal |
-//! | any | guard dead and authored session live | orphaned | duplicate and stop refused |
+//! | any | guard dead and authored session live | orphaned | duplicate refused; verified session stop permitted |
 //!
 //! A resident guard is the session leader in its own process group. Authored
 //! commands receive a different group in that session. It publishes its kernel
 //! identity before starting authored code, and remains present while any live
 //! session member remains. A project-owner crash therefore leaves a verifiable
-//! leader. Killing that guard separately is an unknown-ownership outcome and
-//! fails closed when a live group remains.
+//! leader. Killing that guard separately makes health unknown; stop can recover
+//! the recorded session only after boot, identity and member-incarnation checks.
 
 mod incremental;
 mod os;

@@ -194,6 +194,9 @@ impl HackApp {
     }
 
     fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
+        if self.daemon.busy.is_some() {
+            return;
+        }
         let Some(row) = self.model.selected_row() else {
             return;
         };
@@ -591,7 +594,7 @@ impl HackApp {
             let mut b = Button::new(a.label())
                 .label(a.label())
                 .small()
-                .disabled(d.busy || self.daemon.observed.cli_missing);
+                .disabled(d.busy || self.daemon.busy.is_some() || self.daemon.observed.cli_missing);
             b = match a {
                 Action::Start => b.primary(),
                 Action::Stop => b.outline(),

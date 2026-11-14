@@ -106,9 +106,14 @@ directory and stops its server in `afterAll`, including assertion failures.
 `Bun.spawn`/`spawnSync` tmux calls require a private 0700 directory registered
 by the fixture with `registerPrivateTmuxRoot`; a separate socket fixture must
 stop its own server before removing its root. The E2E scenario runner owns a
-separate tmux scope and closes it in `finally`. This guard covers direct Bun
-spawns, not arbitrary shell scripts or independently launched children: those
-must receive the private socket environment explicitly.
+separate tmux scope and closes it in `finally`. All Bun and Node child-process
+calls receive an explicit live environment with inherited `TMUX` removed and
+a registered private `TMUX_TMPDIR`, even when a caller supplies a minimal env.
+Scripts therefore inherit isolation too; a script that deliberately resets its
+environment or names an explicit socket must maintain that isolation itself.
+The fixed `/usr/bin/env -0` native-state probe remains unwrapped so the global
+state guard can still detect Bun's stale native environment. Tmux cleanup is
+registered last, after the checkout guard has finished spawning Git children.
 
 `bunfig.toml` also preloads
 [the global-state guard](../../../tests/helpers/global-state-guard-preload.ts) for

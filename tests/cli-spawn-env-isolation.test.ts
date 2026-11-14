@@ -26,7 +26,7 @@ const ALLOWED: Readonly<
 > = {
   "tests/helpers/tmux-socket-guard.ts": {
     reason:
-      "tmux-only spawn forwarding pins the validated environment, not a source CLI invocation",
+      "child spawn forwarding pins the private tmux environment, not a source CLI invocation",
     count: 1,
   },
   // `runCommand` runs git and docker for the real-engine E2E suite, not the

@@ -1,8 +1,32 @@
+import childProcess from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { basename, dirname, isAbsolute } from "node:path";
 
 const privateRoots = new Set<string>();
 let installed = false;
+const nativeSpawnSync = Bun.spawnSync.bind(Bun);
+
+/** Fixed read-only probe: the state guard must still see Bun's native env. */
+export function probeNativeTestEnvironment() {
+  return nativeSpawnSync(["/usr/bin/env", "-0"], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+}
+
+/** Every child inherits a private socket, even with an otherwise minimal env. */
+function isolatedChildEnv(
+  input?: Record<string, string | undefined>
+): Record<string, string | undefined> {
+  const env = { ...(input ?? process.env) };
+  const root = env.TMUX_TMPDIR ?? process.env.TMUX_TMPDIR;
+  assertPrivateTmuxSocket(["tmux", "list-sessions"], { TMUX_TMPDIR: root });
+  env.TMUX_TMPDIR = root;
+  Reflect.deleteProperty(env, "TMUX");
+  return env;
+}
 
 /** Parse only client options, never session names or keys after the command. */
 function explicitSocket(command: readonly string[]): string | undefined {
@@ -86,11 +110,11 @@ export function installTmuxSocketGuard(): void {
         | { cmd?: string[]; env?: Record<string, string | undefined> }
         | undefined;
       const command = Array.isArray(first) ? first : record?.cmd;
-      if (command && basename(command[0] ?? "") === "tmux") {
+      if (command) {
         // Without explicit env Bun can use its startup snapshot. Validate
         // exactly what the child will receive, including after a preload
         // replaced inherited TMUX/TMUX_TMPDIR.
-        const env = record?.env ?? { ...process.env };
+        const env = isolatedChildEnv(record?.env);
         assertPrivateTmuxSocket(command, env);
         const optionsWithEnv = { ...record, env };
         const forwarded = Array.isArray(first)
@@ -102,5 +126,52 @@ export function installTmuxSocketGuard(): void {
     };
     // Bun's overloaded generic spawn signatures cannot express this forwarding wrapper.
     Object.assign(Bun, { [key]: guarded });
+  }
+  installNodeChildIsolation();
+}
+
+/** Node runners with literal envs need the same containment as Bun runners. */
+function installNodeChildIsolation(): void {
+  for (const key of [
+    "spawn",
+    "spawnSync",
+    "execFile",
+    "execFileSync",
+    "exec",
+    "execSync",
+    "fork",
+  ] as const) {
+    const original = childProcess[key];
+    const guarded = function (this: unknown, ...args: unknown[]) {
+      const shell = key === "exec" || key === "execSync";
+      const index = !shell && Array.isArray(args[1]) ? 2 : 1;
+      const value = args[index];
+      const options =
+        typeof value === "object" && value !== null
+          ? (value as { env?: Record<string, string | undefined> })
+          : undefined;
+      const env = isolatedChildEnv(options?.env);
+      validateNodeCommand({ shell, args, env });
+      const forwarded = [...args];
+      if (typeof value === "function") {
+        forwarded.splice(index, 0, { env });
+      } else {
+        forwarded[index] = { ...options, env };
+      }
+      return Reflect.apply(original, this, forwarded);
+    };
+    Object.assign(childProcess, { [key]: guarded });
+  }
+  syncBuiltinESMExports();
+}
+
+function validateNodeCommand(opts: {
+  shell: boolean;
+  args: unknown[];
+  env: Record<string, string | undefined>;
+}): void {
+  if (!opts.shell && typeof opts.args[0] === "string") {
+    const argv = Array.isArray(opts.args[1]) ? opts.args[1] : [];
+    assertPrivateTmuxSocket([opts.args[0], ...argv], opts.env);
   }
 }

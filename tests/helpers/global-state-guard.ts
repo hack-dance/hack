@@ -19,6 +19,7 @@ import {
   addProcessListener,
   isProcessOnceListener,
 } from "./process-once-listeners.ts";
+import { probeNativeTestEnvironment } from "./tmux-socket-guard.ts";
 
 /**
  * Process events whose listener lists are compared. A change is reported per
@@ -384,9 +385,6 @@ export function restoreProcessListeners(
  */
 export type NativeEnv = ReadonlyMap<string, string>;
 
-// Bound at load so a leaked `Bun.spawnSync` fake can never answer for Bun.
-const realSpawnSync = Bun.spawnSync.bind(Bun);
-
 let nativeEnvSourceForGuardTest: NativeEnv | undefined;
 
 /**
@@ -421,11 +419,9 @@ export function captureNativeEnv(): NativeEnv | undefined {
     return presented;
   }
   try {
-    const child = realSpawnSync(["/usr/bin/env", "-0"], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-    });
+    // Bound before child isolation: the probe must observe Bun's native
+    // snapshot rather than the live environment injected into test children.
+    const child = probeNativeTestEnvironment();
     if (child.exitCode !== 0 || !child.stdout) {
       return;
     }

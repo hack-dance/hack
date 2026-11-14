@@ -1,5 +1,15 @@
 import { expect, test } from "bun:test";
 import {
+  exec,
+  execFile,
+  execFileSync,
+  execSync,
+  fork,
+  spawn,
+  spawnSync,
+} from "node:child_process";
+import { once } from "node:events";
+import {
   chmodSync,
   existsSync,
   mkdtempSync,
@@ -8,22 +18,191 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { privateTmux } from "./helpers/private-tmux.ts";
 import {
   assertPrivateTmuxSocket,
   registerPrivateTmuxRoot,
 } from "./helpers/tmux-socket-guard.ts";
 
-test("both spawn forms refuse tmux without a private socket before executing", () => {
+const childEnvironmentScript =
+  "process.stdout.write(JSON.stringify({root:process.env.TMUX_TMPDIR,tmux:process.env.TMUX??null}))";
+
+test("Bun and Node children receive private sockets with omitted or minimal envs", async () => {
+  const mux = privateTmux();
+  const root = process.env.TMUX_TMPDIR ?? "";
+  try {
+    expect(root).not.toBe("");
+    // A synthetic inherited value must never reach a child or be dereferenced.
+    process.env.TMUX = "/not-a-real-socket/default,1,0";
+    const minimal = { PATH: process.env.PATH };
+    for (const env of [undefined, minimal]) {
+      const synchronous = Bun.spawnSync(
+        [process.execPath, "-e", childEnvironmentScript],
+        { env, stdout: "pipe", stderr: "pipe" }
+      );
+      expect(synchronous.exitCode, synchronous.stderr.toString()).toBe(0);
+      expect(JSON.parse(synchronous.stdout.toString())).toEqual({
+        root,
+        tmux: null,
+      });
+      const asynchronous = Bun.spawn({
+        cmd: [process.execPath, "-e", childEnvironmentScript],
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const output = await new Response(asynchronous.stdout).text();
+      expect(await asynchronous.exited).toBe(0);
+      expect(JSON.parse(output)).toEqual({ root, tmux: null });
+    }
+    expect(
+      JSON.parse(
+        execFileSync(process.execPath, ["-e", childEnvironmentScript], {
+          env: minimal,
+          encoding: "utf8",
+        })
+      )
+    ).toEqual({ root, tmux: null });
+    const nodeChild = spawnSync(
+      process.execPath,
+      ["-e", childEnvironmentScript],
+      { env: minimal, encoding: "utf8" }
+    );
+    expect(nodeChild.status).toBe(0);
+    expect(JSON.parse(nodeChild.stdout)).toEqual({ root, tmux: null });
+    expect(
+      execSync('printf "%s" "$TMUX_TMPDIR"', { env: minimal, encoding: "utf8" })
+    ).toBe(root);
+  } finally {
+    mux.close();
+  }
+});
+
+test("Node callback, shell, spawn and fork overloads preserve private child envs", async () => {
+  const root = process.env.TMUX_TMPDIR ?? "";
+  expect(root).not.toBe("");
+  const env = {
+    PATH: process.env.PATH,
+    TMUX: "/not-a-real-socket/default,1,0",
+  };
+  const fileOutput = await new Promise<string>((resolveOutput, reject) => {
+    execFile(
+      process.execPath,
+      ["-e", childEnvironmentScript],
+      { env, encoding: "utf8" },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolveOutput(stdout);
+        }
+      }
+    );
+  });
+  expect(JSON.parse(fileOutput)).toEqual({ root, tmux: null });
+  const shellOutput = await new Promise<string>((resolveOutput, reject) => {
+    exec('printf "%s" "$TMUX_TMPDIR"', { env }, (error, stdout) => {
+      if (error) {
+        reject(error);
+      } else {
+        resolveOutput(stdout);
+      }
+    });
+  });
+  expect(shellOutput).toBe(root);
+  const spawned = spawn(process.execPath, ["-e", childEnvironmentScript], {
+    env,
+  });
+  let spawnedOutput = "";
+  spawned.stdout.on("data", (chunk) => {
+    spawnedOutput += chunk.toString();
+  });
+  const [code] = await once(spawned, "close");
+  expect(code).toBe(0);
+  expect(JSON.parse(spawnedOutput)).toEqual({ root, tmux: null });
+  const fixtureRoot = mkdtempSync("/tmp/hack-fork-env-");
+  try {
+    const script = join(fixtureRoot, "child.js");
+    writeFileSync(script, childEnvironmentScript);
+    const forked = fork(script, { env, silent: true });
+    if (!forked.stdout) {
+      throw new Error("Expected piped fork output");
+    }
+    let output = "";
+    forked.stdout.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    const [status] = await once(forked, "close");
+    expect(status).toBe(0);
+    expect(JSON.parse(output)).toEqual({ root, tmux: null });
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(!Bun.which("tmux"))(
+  "indirect real tmux calls from both child env forms land on the owned server",
+  () => {
+    const mux = privateTmux();
+    try {
+      const pids: number[] = [];
+      for (const [index, env] of [
+        undefined,
+        { PATH: process.env.PATH },
+      ].entries()) {
+        const name = `indirect-${index}`;
+        const script = `
+        const made=Bun.spawnSync(["tmux","new-session","-d","-s",${JSON.stringify(name)},"sleep 60"],{stdout:"pipe",stderr:"pipe"});
+        if(made.exitCode!==0)process.exit(2);
+        const pid=Bun.spawnSync(["tmux","display-message","-p","#{pid}"],{stdout:"pipe",stderr:"pipe"});
+        process.stdout.write(pid.stdout);
+      `;
+        const child = Bun.spawnSync([process.execPath, "-e", script], {
+          env,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(child.exitCode, child.stderr.toString()).toBe(0);
+        pids.push(Number(child.stdout.toString().trim()));
+      }
+      const pid = Bun.spawnSync(["tmux", "display-message", "-p", "#{pid}"], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(pid.exitCode).toBe(0);
+      expect(pids).toEqual([
+        Number(pid.stdout.toString().trim()),
+        Number(pid.stdout.toString().trim()),
+      ]);
+      const sessions = Bun.spawnSync(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      expect(sessions.exitCode).toBe(0);
+      expect(sessions.stdout.toString().trim().split("\n").sort()).toEqual([
+        "indirect-0",
+        "indirect-1",
+      ]);
+    } finally {
+      mux.close();
+    }
+  }
+);
+
+test("both spawn forms refuse an unsafe explicit tmux socket before executing", () => {
   const root = mkdtempSync("/tmp/hack-mux-refused-");
   try {
     // If the guard regresses, this harmless stand-in runs, never real tmux.
     const tmux = join(root, "tmux");
     writeFileSync(tmux, "#!/bin/sh\nexit 91\n", { mode: 0o755 });
-    expect(() => Bun.spawn([tmux, "list-sessions"], { env: {} })).toThrow(
-      "tmux-socket-guard"
-    );
     expect(() =>
-      Bun.spawnSync({ cmd: [tmux, "list-sessions"], env: {} })
+      Bun.spawn([tmux, "list-sessions"], { env: { TMUX_TMPDIR: "/tmp" } })
+    ).toThrow("tmux-socket-guard");
+    expect(() =>
+      Bun.spawnSync({
+        cmd: [tmux, "list-sessions"],
+        env: { TMUX_TMPDIR: "/tmp" },
+      })
     ).toThrow("tmux-socket-guard");
   } finally {
     rmSync(root, { recursive: true, force: true });

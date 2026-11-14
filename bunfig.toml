@@ -13,4 +13,5 @@ preload = [
   "./tests/helpers/tmux-isolation-preload.ts",
   "./tests/helpers/global-state-guard-preload.ts",
   "./tests/helpers/checkout-write-guard-preload.ts",
+  "./tests/helpers/tmux-isolation-cleanup-preload.ts",
 ]

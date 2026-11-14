@@ -1251,7 +1251,12 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             "doctor-homebrew",
             "docker --version >/dev/null || exit 2\ngit --version >/dev/null || exit 3\ntmux -V >/dev/null || exit 4\nmise --version >/dev/null || exit 5\necho '{}'",
         );
-        let dir = hack.parent().unwrap();
+        // macOS temp paths can be aliases (/var -> /private/var). Reproduce
+        // that using only an owned fixture symlink, on every platform.
+        let fixture_root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let alias = fixture_root.join("fixture-root-alias");
+        symlink(&fixture_root, &alias).unwrap();
+        let dir = alias.as_path();
         let brew = dir.join("opt/homebrew");
         let bin = brew.join("bin");
         let cellar = brew.join("Cellar/tools/1.0/bin");
@@ -1294,16 +1299,25 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         for name in ["docker", "git", "tmux", "mise"] {
             assert!(Path::new(tools.path()).join(name).is_file());
         }
-        CliRunner::new(&hack)
+        let runner = CliRunner::new(&hack).with_env("PATH", &tools.path().to_string_lossy());
+        // Reproduce the reported Mac Exit(2) without depending on /var or
+        // any runner Homebrew path: spelling an aliased root as $0 fails.
+        let aliased = runner
+            .clone()
             .with_env("HACK_HOME", &dir.to_string_lossy())
-            .with_env("PATH", &tools.path().to_string_lossy())
+            .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60));
+        assert!(matches!(aliased, Err(RunError::Exit { code: Some(2), .. })));
+        runner
+            // Tool wrappers use canonical directory paths; compare $0 with
+            // this fixture's canonical root, never an actual Homebrew prefix.
+            .with_env("HACK_HOME", &fixture_root.to_string_lossy())
             .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
             .unwrap();
         assert!(!dir.join("executed").exists());
         let private = PathBuf::from(tools.path());
         drop(tools);
         assert!(!private.exists());
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&fixture_root);
     }
 
     #[test]

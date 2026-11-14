@@ -121,6 +121,9 @@ unknown outcomes remain unchecked. This is an ownership/permission boundary,
 not a sandbox or content/signature check: trusted tools, their plugins and
 same-user/root updates remain trusted. Real macOS/Homebrew behavior still needs
 the combined Mac pass; the layout and nested shims are tested with owned fixtures.
+Those fixtures use only a temporary Homebrew-style tree and an owned symlink
+alias; expected shim paths come from the fixture's canonical root, never from
+the runner's real Homebrew installation or filesystem modes.
 
 ## What v0 does not do yet
 

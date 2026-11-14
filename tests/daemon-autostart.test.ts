@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type AutostartDependencies,
   autostartComposeModel,
+  autostartRoutingInstalled,
   autostartRuntimeRefusal,
   autostartServiceEnvironment,
   buildAutostartProjectInvocation,
@@ -32,6 +33,13 @@ let clock = 0;
 let events: string[];
 let starts: { id: string; at: number }[];
 let deps: AutostartDependencies;
+
+test("routing installation probe uses the installed Caddy Compose path", async () => {
+  expect(await autostartRoutingInstalled(root)).toBe(false);
+  await mkdir(join(root, "caddy"));
+  await Bun.write(join(root, "caddy", "docker-compose.yml"), "services: {}\n");
+  expect(await autostartRoutingInstalled(root)).toBe(true);
+});
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "hack-autostart-sequence-"));

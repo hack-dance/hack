@@ -488,6 +488,15 @@ export function autostartRuntimeRefusal(
   }
 }
 
+/** The same installed Caddy Compose location used by global up/install. */
+export async function autostartRoutingInstalled(
+  hackHome: string
+): Promise<boolean> {
+  return await Bun.file(
+    resolve(hackHome, GLOBAL_CADDY_DIR_NAME, GLOBAL_CADDY_COMPOSE_FILENAME)
+  ).exists();
+}
+
 function productionDependencies(
   runtime: AutostartRuntimeOptions
 ): AutostartDependencies {
@@ -531,15 +540,7 @@ function productionDependencies(
           }
         )
       ).exitCode === 0,
-    routingInstalled: async () =>
-      Bun.file(
-        resolve(
-          runtime.hackHome,
-          GLOBAL_CADDY_DIR_NAME,
-          GLOBAL_PROJECTS_REGISTRY_FILENAME,
-          GLOBAL_CADDY_COMPOSE_FILENAME
-        )
-      ).exists(),
+    routingInstalled: () => autostartRoutingInstalled(runtime.hackHome),
     startRouting: async (signal) =>
       (
         await runAutostartSubprocess(

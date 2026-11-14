@@ -56,7 +56,8 @@ thirty seconds between probes. Configure the service bound with
 run also accepts `--engine-wait-ms`. While waiting, JSON reports
 `login_run.waiting_for_engine: true`. An engine timeout consumes no project
 claims. The service daemon retries when its regular engine observation detects
-Docker later in the same boot. Global routing starts only if already installed,
+Docker later in the same boot. Global routing starts only if its installed
+`caddy/docker-compose.yml` exists in the machine's Hack home,
 then unpaused projects are considered in name/ID order. Starts are at least
 500 milliseconds apart, with at most two in progress. Each uses the running
 daemon's CLI executable and the ordinary `up -d --no-interactive` path.

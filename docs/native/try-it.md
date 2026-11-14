@@ -143,10 +143,12 @@ Native `up` runs in the foreground and holds the project until you stop it. Add
 "$HOME/.hack-next/bin/hack-next" down --path /absolute/project
 ```
 
-Stop the project with `hack down` from another terminal, as above. In this
-prerelease, Ctrl-C may not stop a foreground project cleanly when it publishes
+Stop the project with `hack down` from another terminal, as above. In
+next.16, Ctrl-C may not stop a foreground project cleanly when it publishes
 ports. If you already pressed Ctrl-C, run `hack down`, and `hack down --recover` if
-it reports that the owner is gone. A fix is in progress.
+it reports that the owner is gone. Next.17 source retries transient retirement
+reads and waits for proved cleanup; a second Ctrl-C can request the forced stop.
+Unknown cleanup still needs the printed recovery procedure.
 
 Then check the application itself: sign in, load a page that reads data, restart,
 and confirm the data is still there. A green status alone does not prove the

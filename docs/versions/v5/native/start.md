@@ -88,6 +88,14 @@ If writable source sharing asks for consent, review the exact source roots and
 [sharing limits](full-reference.md#explicit-writable-development-source) before
 opting in. Check the app and saved data yourself; a running VM is not acceptance.
 
+In a build containing next.17's interactive exec, use
+`"$CANDIDATE" exec api -- /bin/sh` from a foreground terminal for a live shell.
+Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`
+select finite exec. Use the matching runtime, and restart old managed-env
+launchers if requested. After an uncertain outcome, inspect
+`"$CANDIDATE" exec-sessions` and follow the
+[recovery instructions](full-reference.md#normal-native-exec).
+
 Stop with the **same version and native home**:
 
 ```sh

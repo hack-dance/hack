@@ -91,6 +91,7 @@ function deps(overrides: Partial<InstallPlanDeps> = {}): InstallPlanDeps {
     refusal: () => null,
     preflight: () => Promise.resolve(null),
     domains: DOMAINS,
+    dockerStartup: () => Promise.resolve({ reachable: true, backend: null }),
     useStaticIps: () => Promise.resolve(true),
     linuxHost: dnsHost([]),
     sudoPath: () => Promise.resolve(SUDO),
@@ -207,6 +208,15 @@ test("install refuses before probing, and unknown network, bridge, resolver or s
   );
   expect(refused).toMatchObject({ refused: "unavailable", steps: [] });
   const unknowns: Partial<InstallPlanDeps>[] = [
+    {
+      dockerStartup: () =>
+        Promise.resolve({ reachable: "unknown", backend: null }),
+      useStaticIps: () => Promise.resolve("unknown"),
+    },
+    {
+      dockerStartup: () => Promise.resolve({ reachable: false, backend: null }),
+      useStaticIps: () => Promise.resolve("unknown"),
+    },
     { useStaticIps: () => Promise.resolve("unknown") },
     { linuxHost: dnsHost([], { link: null }) },
     { unreadableLinux: () => true },

@@ -3435,6 +3435,17 @@ async function buildGlobalInstallPlan(): Promise<AdminPlan> {
       }
     },
     domains,
+    dockerStartup: async () => {
+      const result = await exec(["docker", "info"], {
+        stdin: "ignore",
+        timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+      }).catch(() => null);
+      const reachable = classifyDockerInfo(result);
+      return {
+        reachable,
+        backend: reachable === false ? await detectDockerBackend() : null,
+      };
+    },
     useStaticIps: async () => {
       const inspected = await exec(
         ["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK],

@@ -109,8 +109,12 @@ macOS:
 
 ## What `hack global install` plans
 
-The initial user steps prepare optional tools, ensure Docker and shared networks,
-and materialize the Compose files and schemas. Compose startup and the optional
+The initial user steps prepare optional tools, ensure shared networks and
+materialize the Compose files and schemas. When Docker is stopped, the plan uses
+the same detected startup backend as the command. Linux system-service startup
+is a conditional root step (`sudo systemctl start docker`); desktop-backend
+startup is a user step. Unknown status or backend leaves startup incomplete.
+Compose startup and the optional
 user daemon need no administrator rights. Homebrew formula installation is a
 user step; any separate Homebrew authentication is outside Hack's root argv.
 

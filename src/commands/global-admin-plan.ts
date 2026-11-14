@@ -35,6 +35,7 @@ import type {
   PreparedLinuxSystemTrust,
 } from "../lib/linux-trust-setup.ts";
 import { trustedSudoInvocation } from "../lib/privileged-sudo.ts";
+import type { DockerBackend } from "../lib/runtime-guidance.ts";
 import {
   macAuthorizationArgv,
   macDnsmasqNeedsStart,
@@ -180,6 +181,10 @@ export type InstallPlanDeps = {
     string | { readonly unresolved: string } | null
   >;
   readonly domains: readonly string[];
+  readonly dockerStartup: () => Promise<{
+    readonly reachable: boolean | "unknown";
+    readonly backend: DockerBackend | null;
+  }>;
   readonly useStaticIps: () => Promise<boolean | "unknown">;
   readonly linuxHost?: LinuxDnsHost;
   readonly sudoPath: () => Promise<string | null>;
@@ -215,18 +220,50 @@ export async function planGlobalInstall(
       "Ensure bundled optional tools; on macOS offer Homebrew chafa and mkcert",
       "after custom-domain ownership preflight"
     ),
+  ];
+  const blocked: AdminPlan["blocked"][number][] = [];
+  const docker = await deps.dockerStartup();
+  if (
+    docker.reachable === "unknown" ||
+    (!docker.reachable && docker.backend === null)
+  ) {
+    blocked.push({
+      phase: "Docker startup",
+      reason:
+        "Docker reachability or its startup backend could not be determined",
+      prerequisite:
+        "A readable Docker status and detected startup backend, then plan again",
+    });
+  } else if (!docker.reachable && docker.backend !== null) {
+    const when =
+      "after optional dependencies and confirmation to start Docker; non-interactive runs accept the default";
+    steps.push(
+      docker.backend.id === "docker-systemd"
+        ? rootStep({
+            id: "docker-start",
+            description: "Start the Docker system service",
+            argv: docker.backend.startCommand,
+            when,
+          })
+        : userStep(
+            "docker-start",
+            "Start the detected desktop Docker backend",
+            when
+          )
+    );
+  }
+  steps.push(
     userStep(
       "networks",
-      "Start Docker if needed and ensure shared ingress and logging networks",
-      "after optional dependencies"
+      "Ensure shared ingress and logging networks",
+      "after Docker is ready"
     ),
     userStep(
       "global-files",
       "Materialize global Compose files and schemas, prompting before overwriting different files",
       "after network setup"
-    ),
-  ];
-  const blocked: AdminPlan["blocked"][number][] = [];
+    )
+  );
   const mac = deps.platform === "darwin" ? await deps.macSnapshot() : null;
   if (mac) {
     appendMacStartup(mac, steps, blocked);

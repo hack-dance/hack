@@ -925,6 +925,61 @@ async function writeInstallStubs(): Promise<void> {
   await writeFile(bundle, "stub");
 }
 
+test.skipIf(process.platform !== "linux")(
+  "install plans the same privileged Docker startup the real command runs",
+  async () => {
+    await writeInstallStubs();
+    process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+    let dockerStarted = false;
+    execMockResponder = (argv) => {
+      if (
+        argv[0] === "docker" &&
+        (argv[1] === "info" || argv[1] === "network")
+      ) {
+        return { exitCode: dockerStarted ? 0 : 1, stdout: "", stderr: "" };
+      }
+      return null;
+    };
+    runExitResponder = (argv) => {
+      if (argv[0] === "sudo") {
+        expect(argv).toEqual(["sudo", "systemctl", "start", "docker"]);
+        dockerStarted = true;
+      }
+      return 0;
+    };
+    const chunks: string[] = [];
+    const stdout = spyOn(process.stdout, "write").mockImplementation(
+      (chunk) => {
+        chunks.push(String(chunk));
+        return true;
+      }
+    );
+    const { runCli } = await import("../src/cli/run.ts");
+    try {
+      expect(await runCli(["global", "install", "--plan", "--json"])).toBe(3);
+    } finally {
+      stdout.mockRestore();
+    }
+    expect(dockerStarted).toBe(false);
+    expect(runCalls).toEqual([]);
+    const planned: unknown = JSON.parse(chunks.join(""));
+    expect(planned).toMatchObject({
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          id: "docker-start",
+          privilege: "root",
+          argv: ["sudo", "systemctl", "start", "docker"],
+          shell: "sudo systemctl start docker",
+        }),
+      ]),
+    });
+    expect(await runCli(["global", "install"])).toBe(0);
+    expect(runCalls.filter((argv) => argv[0] === "sudo")).toEqual([
+      ["sudo", "systemctl", "start", "docker"],
+    ]);
+  }
+);
+
 test(
   "global install renders the proxy ports from proxy.bind_address (HACK-2055)",
   async () => {

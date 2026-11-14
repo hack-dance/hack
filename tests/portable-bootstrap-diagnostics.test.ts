@@ -128,3 +128,26 @@ if (Bun.argv.at(-1) === "app.ts") {
   );
   expect(await readdir(join(f.root, "tmp"))).toEqual([]);
 }, 50_000);
+
+test("a cleanup deadline preserves the first failure and retains the fixture", async () => {
+  const f = await fixture(
+    `for last in "$@"; do :; done
+if [ "$last" = app.ts ]; then exec ${quote(process.execPath)} "${"${0%/*}"}/uncooperative.ts"; fi
+exec ${quote(process.execPath)} ${quote(entrypoint)} "$@"`
+  );
+  await writeFile(
+    join(f.root, "uncooperative.ts"),
+    `
+process.on("SIGTERM", () => {});
+await Bun.write("ready.json", "private-readiness-canary");
+setInterval(() => {}, 1000);
+`
+  );
+  const result = await run(f);
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe(
+    "Portable bootstrap failed: step=http reason=invalid_json cleanup=owned_cleanup_failed\n"
+  );
+  expect(await readdir(join(f.root, "tmp"))).toHaveLength(1);
+}, 50_000);

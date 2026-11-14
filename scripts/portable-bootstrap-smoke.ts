@@ -113,7 +113,8 @@ export async function runPortableBootstrap(opts: {
       failureReason(error),
       error instanceof BootstrapFailure
         ? (error.step ?? context.step)
-        : context.step
+        : context.step,
+      error instanceof BootstrapFailure ? error.cleanupReason : undefined
     );
   }
 }
@@ -134,6 +135,7 @@ async function runWorkflow(
   const checks: string[] = [];
   let version = "";
   let completed = false;
+  let failure: BootstrapFailure | undefined;
   try {
     context.step = "identity";
     const identity = await command({ fixture, hackBin, args: ["--version"] });
@@ -255,8 +257,20 @@ async function runWorkflow(
     await assertNoSecretFiles(fixture);
     checks.push("no key/plaintext files or output");
     completed = true;
-  } finally {
+  } catch (error: unknown) {
+    failure = new BootstrapFailure(failureReason(error), context.step);
+  }
+  try {
     await cleanup(fixture);
+  } catch (error: unknown) {
+    throw new BootstrapFailure(
+      failure?.reason ?? failureReason(error),
+      failure?.step ?? "cleanup",
+      failure === undefined ? undefined : failureReason(error)
+    );
+  }
+  if (failure !== undefined) {
+    throw failure;
   }
   requireThat(completed, "workflow_completion");
   return { version, checks, cleanup: true };
@@ -266,13 +280,19 @@ async function runWorkflow(
 class BootstrapFailure extends Error {
   readonly reason: BootstrapReason;
   readonly step?: BootstrapStep;
+  readonly cleanupReason?: BootstrapReason;
 
-  constructor(reason: BootstrapReason, step?: BootstrapStep) {
+  constructor(
+    reason: BootstrapReason,
+    step?: BootstrapStep,
+    cleanupReason?: BootstrapReason
+  ) {
     super(
-      `Portable bootstrap failed: step=${step ?? "setup"} reason=${reason}`
+      `Portable bootstrap failed: step=${step ?? "setup"} reason=${reason}${cleanupReason === undefined ? "" : ` cleanup=${cleanupReason}`}`
     );
     this.reason = reason;
     this.step = step;
+    this.cleanupReason = cleanupReason;
   }
 }
 

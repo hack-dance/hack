@@ -82,8 +82,12 @@ Failures exit nonzero and emit only fixed labels, for example
 `setup`, `identity`, `env`, `http`, `dev-write`, `restart`, and `cleanup`.
 Reasons distinguish failed assertions, deadlines, invalid JSON, selected transport
 and filesystem errors, and `unexpected_error`. Raw child output, exception text,
-paths, keys, and application values are never included. A cleanup failure reports
-`step=cleanup`; `owned_cleanup_failed` means the fixture was retained for diagnosis.
+paths, keys, and application values are never included. If a workflow step and cleanup both fail, the first step/reason stays primary and
+a separate closed field reports cleanup, for example
+`step=http reason=invalid_json cleanup=owned_cleanup_failed`. Cleanup as the first
+failure reports `step=cleanup`. That step includes the final application stop,
+input/secret checks, and fixture removal. `owned_cleanup_failed` means the fixture
+was retained for diagnosis.
 
 The fixture publishes its readiness document by writing a sibling temporary file
 and renaming it after the write completes. The polling reader sees either no

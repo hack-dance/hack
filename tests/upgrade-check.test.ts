@@ -239,7 +239,7 @@ test("once the time budget is spent, project checks report not checked without r
   const project = await liveProject("app-late");
   let ran = false;
   const findings = await inspectUpgradeProject({
-    project,
+    project: { ...project, project: project.name },
     homeDir: home,
     deadline: Date.now() - 1,
     nativePreflight: async () => {
@@ -287,19 +287,36 @@ test("the plan starts with the snapshot, then blockers, then machine and project
     report.plan.map((step) => [step.id, step.scope, step.blocker])
   ).toEqual([
     ["snapshot", "machine", false],
-    ["env-format", "app-blocked", true],
+    ["env-format", "projects", true],
     // Its dangling layer link cannot be inspected for secrets either.
     ["env-secrets", "app-blocked", false],
     ["registry-dead", "machine", false],
     ["global-infra", "machine", false],
-    ["env-format", "app-legacy", false],
   ]);
   expect(report.next_command).toBe("hack upgrade snapshot");
-  const legacyStep = report.plan.find((step) => step.scope === "app-legacy");
-  expect(legacyStep?.command).toBe(
+  const grouped = report.plan.filter((step) => step.id === "env-format");
+  expect(grouped).toHaveLength(1);
+  expect(
+    grouped[0]?.targets.find((target) => target.scope === "app-blocked")?.status
+  ).toBe("blocker");
+  expect(
+    grouped[0]?.targets.find((target) => target.scope === "app-legacy")?.status
+  ).toBe("warn");
+  expect(grouped[0]?.targets.map((target) => target.scope).sort()).toEqual([
+    "app-blocked",
+    "app-legacy",
+  ]);
+  const legacyTarget = grouped[0]?.targets.find(
+    (target) => target.scope === "app-legacy"
+  );
+  expect(legacyTarget?.command).toBe(
     `hack doctor --migrate-env-config --path ${legacy.repoRoot}`
   );
-  expect(legacyStep?.why).toContain("legacy-json, dotenv");
+  expect(
+    report.projects
+      .find((project) => project.name === "app-legacy")
+      ?.findings.find((finding) => finding.id === "env-format")?.summary
+  ).toContain("legacy-json, dotenv");
 });
 
 test("a host with nothing to do is ready, with no plan and no next command", async () => {
@@ -325,6 +342,7 @@ test("a host with nothing to do is ready, with no plan and no next command", asy
     version: "5.0.0-next.17",
     channel: "next",
     candidate_run: false,
+    build: "release",
     command: "hack",
   });
 });

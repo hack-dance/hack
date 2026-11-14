@@ -15,6 +15,7 @@ import {
 } from "../src/lib/native-env-plan-protocol.ts";
 import { planNativeProject } from "../src/lib/native-project-validation.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { withCompilerFixtureEnvironment } from "./helpers/tmux-socket-guard.ts";
 
 const PROTOCOL = {
   transport_version: 1,
@@ -297,13 +298,17 @@ test("keeps host and workload names separate across hooks and processes with raw
     const binary = await fixture({
       body: `const received=JSON.parse(await Bun.stdin.text()); const result=${JSON.stringify(SUCCESS)}; result.plan.received=received; result.plan.arguments=process.argv.slice(2); result.plan.environment=process.env; process.stdout.write(JSON.stringify(result));`,
     });
-    const result = await planNativeConfig({
-      input,
-      checkoutLocal,
-      explicitOverlay: null,
-      envMetadata: metadata,
+    const result = await withCompilerFixtureEnvironment({
       binary,
-      profiles: ["with spaces", "--unsafe"],
+      run: () =>
+        planNativeConfig({
+          input,
+          checkoutLocal,
+          explicitOverlay: null,
+          envMetadata: metadata,
+          binary,
+          profiles: ["with spaces", "--unsafe"],
+        }),
     });
     expect(result.ok).toBe(true);
     if (!result.ok) {

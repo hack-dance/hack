@@ -12,6 +12,7 @@ import {
 import type { NativeEnvMetadata } from "../src/lib/native-env-plan-protocol.ts";
 import type { NativeRoutingResolution } from "../src/lib/native-routing-plan-protocol.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { withCompilerFixtureEnvironment } from "./helpers/tmux-socket-guard.ts";
 
 const PROTOCOL = {
   transport_version: 1,
@@ -501,15 +502,19 @@ test("preserves routing request text, document bytes, and PATH-only compiler env
     const binary = await fixture({
       body: `const received=JSON.parse(await Bun.stdin.text()); const result=${JSON.stringify(BRANCHED_SUCCESS)}; result.plan.received=received; result.plan.arguments=process.argv.slice(2); result.plan.environment=process.env; process.stdout.write(JSON.stringify(result));`,
     });
-    const result = await planNativeConfig({
-      input,
-      checkoutLocal,
-      explicitDomain: "dev.test",
-      globalDomain: "global.test",
-      branch: "feature-routing",
-      envMetadata: METADATA,
-      profiles: ["with spaces", "--unsafe"],
+    const result = await withCompilerFixtureEnvironment({
       binary,
+      run: () =>
+        planNativeConfig({
+          input,
+          checkoutLocal,
+          explicitDomain: "dev.test",
+          globalDomain: "global.test",
+          branch: "feature-routing",
+          envMetadata: METADATA,
+          profiles: ["with spaces", "--unsafe"],
+          binary,
+        }),
     });
     expect(result.ok).toBe(true);
     if (!result.ok) {

@@ -25,6 +25,7 @@ import { startRequestTargetProxy } from "../src/daemon/request-target-proxy.ts";
 import { handleSessionRoutes } from "../src/daemon/routes/sessions.ts";
 import { exec } from "../src/lib/shell.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { registerPrivateTmuxRoot } from "./helpers/tmux-socket-guard.ts";
 
 /** Real session-route tests require tmux, always on a task-owned socket. */
 const tmuxPath = Bun.which("tmux");
@@ -33,6 +34,7 @@ let sessionRoot = "";
 let sessionSocket = "";
 let savedPath: string | undefined;
 let pathSaved = false;
+let unregisterSocketRoot = () => {};
 
 /** Never address the default server, even when a route case fails after create. */
 function privateTmux(args: readonly string[]) {
@@ -530,6 +532,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
   beforeAll(async () => {
     // Short path for Darwin's Unix socket limit; each process owns a new server.
     sessionRoot = await mkdtemp("/tmp/hack-session-routes-");
+    unregisterSocketRoot = registerPrivateTmuxRoot(sessionRoot);
     sessionSocket = join(sessionRoot, "tmux.sock");
     await mkdir(join(sessionRoot, "bin"));
     // The route executes real tmux through this shim. Never inherit a caller's
@@ -563,6 +566,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       await privateTmux(["kill-server"]);
     } finally {
       await rm(sessionRoot, { recursive: true, force: true });
+      unregisterSocketRoot();
       sessionRoot = "";
       sessionSocket = "";
     }

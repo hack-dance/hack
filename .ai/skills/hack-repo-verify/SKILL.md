@@ -103,6 +103,29 @@ source provenance. Raw `bun test <paths>` remains available for focused tests;
 it bypasses the suite preflight and does not prepare compiler-dependent fixtures.
 
 All test files share one Bun process. `bunfig.toml` preloads
+private tmux isolation before the state guard: every run owns a short socket
+directory and stops its server in `afterAll`, including assertion failures.
+`privateCliEnv` forwards that socket root, never inherited `TMUX`. Direct
+`Bun.spawn`/`spawnSync` tmux calls require a private 0700 directory registered
+by the fixture with `registerPrivateTmuxRoot`; a separate socket fixture must
+stop its own server before removing its root. The E2E scenario runner owns a
+separate tmux scope and closes it in `finally`. All Bun and Node child-process
+calls receive an explicit live environment with inherited `TMUX` removed and
+a registered private `TMUX_TMPDIR`, even when a caller supplies a minimal env.
+Scripts therefore inherit isolation too; a script that deliberately resets its
+environment or names an explicit socket must maintain that isolation itself.
+`Bun.$` uses the live environment by default, but an explicit `.env(...)` is
+not wrapped: supply the private `TMUX_TMPDIR` in that object too.
+The exact-environment compiler transport tests use
+`withCompilerFixtureEnvironment` only around a freshly-created pure compiler
+fixture that reports its input/env and never invokes tmux. Only that exact
+executable keeps the explicit compiler env; other children in the callback
+and every child outside it remain isolated. Keep the PATH-only assertions.
+The fixed `/usr/bin/env -0` native-state probe remains unwrapped so the global
+state guard can still detect Bun's stale native environment. Tmux cleanup is
+registered last, after the checkout guard has finished spawning Git children.
+
+`bunfig.toml` also preloads
 [the global-state guard](../../../tests/helpers/global-state-guard-preload.ts) for
 every `bun test` run: a test or file that leaves the environment, cwd, umask,
 exit code, a guarded global function or a process listener changed fails with a

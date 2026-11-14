@@ -7,6 +7,7 @@ import {
   resolveTestConfigCompilerBinary,
 } from "../scripts/check-test-config-compiler.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import { withCompilerFixtureEnvironment } from "./helpers/tmux-socket-guard.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const PROTOCOL = {
@@ -70,7 +71,10 @@ async function compiler(
 test("uses caller selection and sends only fixed input with no caller environment", async () => {
   const binary = await compiler();
   expect(resolveTestConfigCompilerBinary({ override: binary })).toBe(binary);
-  await assertTestConfigCompiler({ binary });
+  await withCompilerFixtureEnvironment({
+    binary,
+    run: () => assertTestConfigCompiler({ binary }),
+  });
   const receipt: unknown = await Bun.file(join(directory, "received")).json();
   expect(receipt).toEqual({
     input: '{"schema_version":1,"name":"hack-test-preflight"}',

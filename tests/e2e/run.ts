@@ -1,3 +1,5 @@
+import { privateTmux } from "../helpers/private-tmux.ts";
+import { installTmuxSocketGuard } from "../helpers/tmux-socket-guard.ts";
 import {
   describeResources,
   listFixtureNetworks,
@@ -271,7 +273,13 @@ async function main(): Promise<void> {
     path: launchAgentPath,
   });
   try {
-    await runSuite({ args, shardNames });
+    installTmuxSocketGuard();
+    const mux = privateTmux();
+    try {
+      await runSuite({ args, shardNames });
+    } finally {
+      mux.close();
+    }
   } finally {
     const change = describeLaunchAgentChange({
       before: launchAgentBefore,

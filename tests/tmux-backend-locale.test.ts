@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { resolve } from "node:path";
+import { registerPrivateTmuxRoot } from "./helpers/tmux-socket-guard.ts";
 
 /**
  * HACK-1797: without a UTF-8 locale, tmux replaces the tab separators in
@@ -13,6 +14,7 @@ const tmuxPath = Bun.which("tmux");
 const backendModule = resolve(import.meta.dir, "../src/mux/tmux-backend.ts");
 const sessionName = "hack-locale-probe--lifecycle";
 let socketDir = "";
+let unregister = () => {};
 
 function isolatedEnv(): Record<string, string> {
   return {
@@ -27,6 +29,7 @@ function isolatedEnv(): Record<string, string> {
 beforeAll(async () => {
   // Unix socket paths are length-limited, so keep the directory short.
   socketDir = await mkdtemp("/tmp/hack-tmux-");
+  unregister = registerPrivateTmuxRoot(socketDir);
 });
 
 afterAll(async () => {
@@ -40,6 +43,7 @@ afterAll(async () => {
   if (socketDir) {
     await rm(socketDir, { recursive: true, force: true });
   }
+  unregister();
 });
 
 test.skipIf(!tmuxPath)(

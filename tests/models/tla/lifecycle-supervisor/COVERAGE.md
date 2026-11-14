@@ -92,3 +92,11 @@ Stop now captures members while a live guard proves ownership as well. GuardDeat
 retains the stopping phase, and WitnessExit may happen before or after guard loss.
 The native guard_lost_mid_stop_keeps_admission_snapshot regression kills the guard
 after TERM ended its wrapper and checks KILL and confirmed absence for its child.
+
+Recovery deadlines are not modeled: each recovered target receives a fresh five-second
+TERM grace plus two seconds for confirmation, independently of the original guard
+wait. guard_lost_late_in_stop_gets_full_recovery_deadline kills the guard three
+seconds after wrapper death and checks the full recovery grace and successful
+KILL confirmation; the early-loss variant checks the same boundary without delay.
+Live-guard admission snapshots are best-effort; a denied census does not prevent
+the guard-owned shutdown path. Orphan capture stays strict (unit-tested admission seam).

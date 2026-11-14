@@ -462,6 +462,19 @@ fn guard_command(
     }
 }
 
+// A live guard owns shutdown even when a complete recovery census is unavailable
+// (for example, a different-UID descendant). Orphans require strict capture.
+fn stop_capture<T>(
+    guard_live: bool,
+    capture: impl FnOnce() -> Result<T>,
+) -> Result<(Option<T>, Option<T>)> {
+    if guard_live {
+        Ok((None, capture().ok()))
+    } else {
+        Ok((Some(capture()?), None))
+    }
+}
+
 fn stop(states: &[State]) -> Result<()> {
     struct Target {
         state: State,
@@ -494,12 +507,7 @@ fn stop(states: &[State]) -> Result<()> {
             }
             _ => false,
         };
-        let captured = os::Recovery::capture(state)?;
-        let (recovery, admission) = if guard_live {
-            (None, Some(captured))
-        } else {
-            (Some(captured), None)
-        };
+        let (recovery, admission) = stop_capture(guard_live, || os::Recovery::capture(state))?;
         active.push(Target {
             state: state.clone(),
             recovery,
@@ -520,7 +528,7 @@ fn stop(states: &[State]) -> Result<()> {
         }
     }
     let start = Instant::now();
-    while start.elapsed() < GRACE + Duration::from_secs(2) {
+    loop {
         let mut live = false;
         for target in &mut active {
             if target.recovery.is_none() {
@@ -529,6 +537,9 @@ fn stop(states: &[State]) -> Result<()> {
                     target.recover()?;
                 } else {
                     if os::recorded_live(&target.state, false)? {
+                        if start.elapsed() >= GRACE + Duration::from_secs(2) {
+                            return Err(refused());
+                        }
                         live = true;
                     }
                     continue;
@@ -537,6 +548,12 @@ fn stop(states: &[State]) -> Result<()> {
             if let Some(recovery) = &target.recovery {
                 if !recovery.live()? {
                     continue;
+                }
+                if target
+                    .orphan_term
+                    .is_some_and(|since| since.elapsed() >= GRACE + Duration::from_secs(2))
+                {
+                    return Err(refused());
                 }
                 live = true;
                 if target
@@ -552,7 +569,6 @@ fn stop(states: &[State]) -> Result<()> {
         }
         thread::sleep(TICK);
     }
-    Err(refused())
 }
 
 fn detach_stdio() -> Result<()> {
@@ -651,6 +667,17 @@ fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::incomplete_utf8_tail;
+
+    #[test]
+    fn live_guard_admission_tolerates_unavailable_recovery_census() {
+        let denied = || Err::<(), _>(std::io::Error::from_raw_os_error(libc::EPERM));
+        let (recovery, admission) = super::stop_capture(true, denied).unwrap();
+        assert!(recovery.is_none() && admission.is_none());
+        assert!(super::stop_capture(false, denied).is_err());
+        let (recovery, admission) = super::stop_capture(true, || Ok(42)).unwrap();
+        assert!(recovery.is_none());
+        assert_eq!(admission, Some(42));
+    }
 
     #[test]
     fn chunk_boundary_retains_only_incomplete_codepoints() {

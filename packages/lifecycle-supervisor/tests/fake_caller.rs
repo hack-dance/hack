@@ -1039,6 +1039,15 @@ fn dead_guard_with_live_session_recovers_term_then_kill() {
 
 #[test]
 fn guard_lost_mid_stop_keeps_admission_snapshot() {
+    guard_lost_during_stop(Duration::ZERO);
+}
+
+#[test]
+fn guard_lost_late_in_stop_gets_full_recovery_deadline() {
+    guard_lost_during_stop(Duration::from_secs(3));
+}
+
+fn guard_lost_during_stop(delay: Duration) {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![f.process("worker", "wrapper-term-child")]);
     eventually(|| f.root.join("wrapper-child-ready").exists().then_some(()));
@@ -1061,6 +1070,8 @@ fn guard_lost_mid_stop_keeps_admission_snapshot() {
             .is_none_or(|_| process_is_zombie(pid(&state, "commandPid")))
             .then_some(())
     });
+    thread::sleep(delay);
+    let recovery_started = Instant::now();
     assert_eq!(
         unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
         0
@@ -1069,6 +1080,8 @@ fn guard_lost_mid_stop_keeps_admission_snapshot() {
     let receipt = receive(stop.stdout.as_mut().unwrap());
     assert!(wait(&mut stop, TIMEOUT).success(), "{receipt}");
     assert_eq!(receipt["outcome"], "stopped");
+    assert!(recovery_started.elapsed() >= Duration::from_secs(5));
+    assert!(recovery_started.elapsed() < Duration::from_secs(7));
 }
 
 #[test]

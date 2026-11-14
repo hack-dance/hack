@@ -7,6 +7,7 @@ import {
   autostartRuntimeRefusal,
   classifyAutostartContainers,
   classifyAutostartExit,
+  completedDependencyServices,
   runAutostartAtLogin,
   runAutostartSubprocess,
 } from "../src/daemon/autostart.ts";
@@ -380,14 +381,58 @@ test("native selection is explicitly refused before any Docker or routing probe"
   });
 });
 
-test("successful one-shot containers are adopted without replaying hooks", () => {
-  expect(classifyAutostartContainers("running|0\nexited|0\n")).toBe("running");
-  expect(classifyAutostartContainers("exited|0\n")).toBe("stopped");
-  expect(classifyAutostartContainers("exited|0\nexited|0\n")).toBe("stopped");
-  expect(classifyAutostartContainers("running|0\nexited|1\n")).toBe("stopped");
-  expect(classifyAutostartContainers("created|0\n")).toBe("stopped");
-  expect(classifyAutostartContainers("invalid response")).toBe("unknown");
-  expect(classifyAutostartContainers("")).toBe("unknown");
+test("only declared completed dependency services are adopted alongside running services", () => {
+  const completed = completedDependencyServices({
+    services: {
+      init: { restart: "no" },
+      web: {
+        depends_on: { init: { condition: "service_completed_successfully" } },
+        restart: "no",
+      },
+      db: {},
+    },
+  });
+  expect([...completed]).toEqual(["init"]);
+  expect(
+    classifyAutostartContainers("db|running|0\nweb|exited|0\n", completed)
+  ).toBe("stopped");
+  expect(
+    classifyAutostartContainers("web|running|0\ninit|exited|0\n", completed)
+  ).toBe("running");
+  expect(classifyAutostartContainers("web|running|0\ninit|exited|0\n")).toBe(
+    "stopped"
+  );
+  expect(classifyAutostartContainers("init|exited|0\n", completed)).toBe(
+    "stopped"
+  );
+  expect(
+    classifyAutostartContainers("web|running|0\ninit|exited|1\n", completed)
+  ).toBe("stopped");
+  expect(classifyAutostartContainers("web|created|0\n", completed)).toBe(
+    "stopped"
+  );
+  expect(classifyAutostartContainers("invalid response", completed)).toBe(
+    "unknown"
+  );
+  expect(classifyAutostartContainers("", completed)).toBe("unknown");
+});
+
+test("completion targets require a declared service and the exact dependency condition", () => {
+  expect([
+    ...completedDependencyServices({
+      services: {
+        init: {},
+        web: {
+          depends_on: {
+            init: { condition: "service_started" },
+            missing: { condition: "service_completed_successfully" },
+          },
+        },
+        worker: { depends_on: ["init"] },
+      },
+    }),
+  ]).toEqual([]);
+  expect([...completedDependencyServices(null)]).toEqual([]);
 });
 
 test("keychain preflight and subprocess termination have distinct closed reasons", async () => {

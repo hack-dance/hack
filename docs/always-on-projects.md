@@ -44,6 +44,10 @@ at least 500 milliseconds apart, with at most two in progress. Each uses the
 running daemon's CLI executable and the ordinary `up -d --no-interactive` path.
 Already-running instances are adopted without repeating startup hooks. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
+Adoption requires a running container. An exited-zero container is treated as a
+completed job only when its service is a dependency target explicitly declared
+with `condition: service_completed_successfully`; other stopped services require
+`up`. This slice reads that declaration from the primary Compose file.
 
 No terminal or keychain prompt is allowed. Missing keys, required interaction,
 pending env migration, unavailable project paths and startup failures produce a

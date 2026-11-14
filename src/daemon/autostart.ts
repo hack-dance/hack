@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { YAML } from "bun";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import {
   GLOBAL_CADDY_COMPOSE_FILENAME,
@@ -8,6 +9,7 @@ import {
 import { childEnvironment } from "../lib/child-environment.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
+import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { findProjectContextAtRoot, readProjectConfig } from "../lib/project.ts";
 import {
@@ -290,6 +292,7 @@ export function classifyAutostartExit(opts: {
     code === "E_CONFIG_INVALID" &&
     isRecord(detail) &&
     (detail.reason === "pending_env_migration" ||
+      detail.reason === "native_unsupported" ||
       detail.reason === "keychain_unavailable")
   ) {
     return { status: "skipped", reason: detail.reason };
@@ -439,7 +442,7 @@ async function inspectComposeProject(
       "docker",
       "inspect",
       "--format",
-      "{{.State.Status}}|{{.State.ExitCode}}",
+      '{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.ExitCode}}',
       ...ids,
     ],
     { timeoutMs: 5000, signal }
@@ -447,12 +450,16 @@ async function inspectComposeProject(
   if (inspected.exitCode !== 0) {
     return "unknown";
   }
-  return classifyAutostartContainers(inspected.stdout);
+  const completedServices = await readCompletedDependencyServices(
+    context.composeFile
+  );
+  return classifyAutostartContainers(inspected.stdout, completedServices);
 }
 
-/** Completed successful one-shot services are adopted alongside running services. */
+/** Only declared successful-completion dependency targets may be adopted after exit. */
 export function classifyAutostartContainers(
-  text: string
+  text: string,
+  completedServices: ReadonlySet<string> = new Set()
 ): "running" | "stopped" | "unknown" {
   const states = text.trim().split("\n").filter(Boolean);
   if (states.length === 0) {
@@ -460,16 +467,62 @@ export function classifyAutostartContainers(
   }
   let running = false;
   for (const state of states) {
-    const [status, exitCode, extra] = state.split("|");
-    if (extra !== undefined || !status || !exitCode) {
+    const [service, status, exitCode, extra] = state.split("|");
+    if (extra !== undefined || !service || !status || !exitCode) {
       return "unknown";
     }
-    if (status !== "running" && !(status === "exited" && exitCode === "0")) {
+    if (
+      status !== "running" &&
+      !(
+        status === "exited" &&
+        exitCode === "0" &&
+        completedServices.has(service)
+      )
+    ) {
       return "stopped";
     }
     running ||= status === "running";
   }
   return running ? "running" : "stopped";
+}
+
+async function readCompletedDependencyServices(
+  composeFile: string
+): Promise<ReadonlySet<string>> {
+  const text = await readTextFile(composeFile);
+  if (text === null) {
+    return new Set();
+  }
+  try {
+    return completedDependencyServices(YAML.parse(text));
+  } catch {
+    return new Set();
+  }
+}
+
+/** A zero exit or restart policy alone does not establish a one-shot service. */
+export function completedDependencyServices(
+  compose: unknown
+): ReadonlySet<string> {
+  const completed = new Set<string>();
+  if (!(isRecord(compose) && isRecord(compose.services))) {
+    return completed;
+  }
+  for (const service of Object.values(compose.services)) {
+    if (!(isRecord(service) && isRecord(service.depends_on))) {
+      continue;
+    }
+    for (const [target, dependency] of Object.entries(service.depends_on)) {
+      if (
+        isRecord(dependency) &&
+        dependency.condition === "service_completed_successfully" &&
+        isRecord(compose.services[target])
+      ) {
+        completed.add(target);
+      }
+    }
+  }
+  return completed;
 }
 
 async function readMachineBootId(): Promise<string | null> {

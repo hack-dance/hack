@@ -55,7 +55,12 @@ async function marker() {
   ).json();
   return registry.projects[0].autostart;
 }
-async function run(args: string[], login = false, cwd = join(root, "project")) {
+async function run(
+  args: string[],
+  login = false,
+  cwd = join(root, "project"),
+  overrides: Readonly<Record<string, string>> = {}
+) {
   const child = Bun.spawn(
     [process.execPath, cli, "--no-interactive", ...args],
     {
@@ -66,6 +71,7 @@ async function run(args: string[], login = false, cwd = join(root, "project")) {
         env: {
           PATH: join(root, "bin"),
           HACK_AUTOSTART_LOGIN: login ? "1" : "0",
+          ...overrides,
         },
       }),
       stdin: "ignore",
@@ -173,4 +179,32 @@ test("linked worktree opt-in refuses without marking the primary checkout", asyn
   expect(add.exitCode).not.toBe(0);
   expect(add.stdout + add.stderr).toContain("primary checkout");
   expect(await marker()).toEqual(before);
+});
+
+test("native selection with an existing marker reaches the same dispatch as an unmarked project", async () => {
+  await writeFile(
+    join(root, "project", ".hack", "hack.project.json"),
+    JSON.stringify({ schema_version: 1, name: "sample", services: {} })
+  );
+  const registryPath = join(root, "home", ".hack", "projects.json");
+  for (const action of ["down", "up"]) {
+    await writeRegistry(false);
+    const registry = await Bun.file(registryPath).json();
+    Reflect.deleteProperty(registry.projects[0], "autostart");
+    await writeFile(registryPath, JSON.stringify(registry));
+    const baseline = await run(
+      [action, "--json"],
+      false,
+      join(root, "project"),
+      { HACK_RUNTIME_BACKEND: "native" }
+    );
+    await writeRegistry(action === "up");
+    const marked = await run([action, "--json"], false, join(root, "project"), {
+      HACK_RUNTIME_BACKEND: "native",
+    });
+    expect(marked.exitCode).toBe(baseline.exitCode);
+    expect(marked.stdout).toBe(baseline.stdout);
+    expect(marked.stderr).toBe(baseline.stderr);
+    expect((await marker()).paused).toBe(action === "down");
+  }
 });

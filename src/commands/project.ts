@@ -341,7 +341,6 @@ import {
   assertLegacyProjectDiscovery,
   assertLegacyProjectInputFamily,
 } from "../lib/project-input-selection.ts";
-import { normalizeProjectName } from "../lib/project-name.ts";
 import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
@@ -425,6 +424,11 @@ import {
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
+import {
+  assertAutostartEnvironment,
+  findAutostartRegistration,
+  updateNativeAutostartIntent,
+} from "./project-autostart-intent.ts";
 import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
@@ -6418,17 +6422,25 @@ async function updateAutostartIntent(opts: {
   const startDir = await realpath(requestedStartDir).catch(
     () => requestedStartDir
   );
-  const marked = registry.projects
-    .filter((entry) => entry.autostart)
-    .find((entry) =>
-      selector
-        ? normalizeProjectName(entry.name) === selector.name
-        : [
-            entry.repoRoot,
-            ...(entry.worktrees?.map((worktree) => worktree.path) ?? []),
-          ].some((path) => startDir === path || startDir.startsWith(`${path}/`))
-    );
+  const marked = findAutostartRegistration({
+    projects: registry.projects,
+    selectorName: selector?.name,
+    startDir,
+  });
   if (!(login || opts.args.options.always || marked)) {
+    return;
+  }
+  if (
+    marked &&
+    (await updateNativeAutostartIntent({
+      project: marked,
+      selectedRoot: selector ? marked.repoRoot : startDir,
+      action: opts.action,
+      branch: opts.args.options.branch,
+      always: opts.args.options.always,
+      login,
+    }))
+  ) {
     return;
   }
   const project = await resolveProjectForArgs({
@@ -6438,34 +6450,7 @@ async function updateAutostartIntent(opts: {
     touchRegistration: false,
   });
   if (login) {
-    // Login must never continue with a legacy environment that needs migration.
-    const contract = await pathExists(
-      resolve(project.projectDir, PROJECT_ENV_CONTRACT_FILENAME)
-    );
-    const modern = await projectEnvConfigExists({
-      projectDir: project.projectDir,
-    });
-    const legacy = await findUnmigratedLegacyDotenv({
-      projectRoot: project.projectRoot,
-      projectDir: project.projectDir,
-      serviceNames: await discoverComposeServiceNames({
-        composeFile: project.composeFile,
-      }),
-    });
-    const dotenv = Bun.file(resolve(project.projectDir, PROJECT_ENV_FILENAME));
-    const legacyDotenv = !modern && (await dotenv.exists()) && dotenv.size > 0;
-    if (
-      (!modern && contract) ||
-      legacyDotenv ||
-      hasUnmigratedLegacyDotenv(legacy)
-    ) {
-      throw new HackCliError({
-        code: "E_CONFIG_INVALID",
-        message:
-          "Autostart skipped: pending env migration. Run hack doctor --migrate-env-config.",
-        detail: { reason: "pending_env_migration" },
-      });
-    }
+    await assertAutostartEnvironment({ project });
     return;
   }
   // Inspect selection without printing the normal up/down worktree notice twice.

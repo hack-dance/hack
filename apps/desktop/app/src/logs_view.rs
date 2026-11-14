@@ -175,7 +175,15 @@ impl HackApp {
         // While paused, remember which line is at the top so evictions at
         // the front do not move the text being read.
         let anchor = if self.logs.model.paused {
-            let top = self.logs.scroll.logical_scroll_top_index();
+            // Same logic as gpui's test-only `logical_scroll_top_index`,
+            // through the public production API.
+            let top = {
+                let state = self.logs.scroll.0.borrow();
+                state.deferred_scroll_to_item.as_ref().map_or_else(
+                    || state.base_handle.logical_scroll_top().0,
+                    |d| d.item_index,
+                )
+            };
             self.logs
                 .visible
                 .get(top)

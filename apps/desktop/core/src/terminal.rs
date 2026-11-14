@@ -40,11 +40,7 @@ pub trait Launcher {
 pub struct SystemLauncher;
 impl Launcher for SystemLauncher {
     fn launch(&self, program: &Path, args: &[OsString]) -> Result<(), String> {
-        let mut child = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+        let mut child = launch_command(program, args, |key| std::env::var_os(key))
             .spawn()
             .map_err(|e| e.to_string())?;
         // Terminal launchers can wait for the new terminal to close. Reap our
@@ -55,6 +51,44 @@ impl Launcher for SystemLauncher {
         Ok(())
     }
 }
+/// UI routing metadata only, separate from the checked CLI context embedded in
+/// the script. Never pass the app's credential/wrapper environment to a terminal.
+const LAUNCH_ENV: &[&str] = &[
+    "HOME",
+    "PATH",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "XDG_CURRENT_DESKTOP",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+fn launch_command(
+    program: &Path,
+    args: &[OsString],
+    environment: impl Fn(&str) -> Option<OsString>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command
+        .env_clear()
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for key in LAUNCH_ENV {
+        if let Some(value) = environment(key) {
+            command.env(
+                key,
+                if *key == "PATH" {
+                    crate::runner::sanitize_path(&value)
+                } else {
+                    value
+                },
+            );
+        }
+    }
+    command
+}
+
 /// A private, one-use script. Drop cleans failed/unlaunched handoffs. After a
 /// successful launch the script owns cleanup via EXIT/HUP/INT/TERM traps. If the
 /// terminal never executes it, the private OS temp directory can remain.
@@ -149,4 +183,41 @@ impl Drop for Script {
 /// Discover only the Linux adapter; never fall back to typing into a pane.
 pub fn linux_adapter() -> Option<PathBuf> {
     crate::runner::resolve_on_path("xdg-terminal-exec", std::env::var_os("PATH").as_deref())
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    #[test]
+    fn launcher_reads_only_authored_ui_metadata_without_forwarding_app_environment() {
+        let queried = std::cell::RefCell::new(Vec::new());
+        let command = launch_command(
+            Path::new("/fake/terminal"),
+            &["/private/setup.command".into()],
+            |key| {
+                queried.borrow_mut().push(key.to_owned());
+                Some("fixture".into())
+            },
+        );
+        assert_eq!(queried.borrow().len(), LAUNCH_ENV.len());
+        assert!(
+            queried
+                .borrow()
+                .iter()
+                .all(|key| LAUNCH_ENV.contains(&key.as_str()))
+        );
+        assert!(command.get_envs().all(|(key, _)| {
+            LAUNCH_ENV
+                .iter()
+                .any(|allowed| key == std::ffi::OsStr::new(allowed))
+        }));
+        assert_eq!(
+            command.get_program(),
+            std::ffi::OsStr::new("/fake/terminal")
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("/private/setup.command")]
+        );
+    }
 }

@@ -155,7 +155,7 @@ cargo run -p hack-desktop -- --setup-fixture partial --theme dark
 cargo run -p hack-desktop-core --bin hack-desktop-state -- --setup-fixture native-unknown
 ```
 
-Other setup fixtures: `missing-cli`, `ready`. `--screenshots` renders all four
+Other setup fixtures: `missing-cli`, `ready`, `service-unavailable`. `--screenshots` renders all five
 in light and dark offscreen. Evidence: [light](screenshots/setup-light.png),
 [dark](screenshots/setup-dark.png).
 
@@ -199,7 +199,8 @@ control characters and unsupported backends are refused. Wrapper-specific or
 credential environment is never forwarded; such integrations need an explicitly
 supported context or a manual documented workflow. `CommandSpec` and the
 single-command `Script::create` API remain compatible; a sequence consumer can
-bind each authored spec before composing it. Both the script and private directory
+bind each authored spec before composing it. The launcher also clears its inherited environment, carrying only fixed non-secret
+desktop routing metadata needed to open a terminal. Both the script and private directory
 are 0700 because the launch adapter executes the script.
 
 Machine effects share `HackApp::action_busy()` (including
@@ -219,3 +220,7 @@ focus, trust and service effects still require host qualification.
 
 The offscreen generator writes every `setup-<fixture>-<theme>.png` and also writes
 `setup-light.png`/`setup-dark.png` aliases for the partial fixture used above.
+
+Unavailable login-manager fixture (no Run offered):
+[light](screenshots/setup-service-unavailable-light.png),
+[dark](screenshots/setup-service-unavailable-dark.png).

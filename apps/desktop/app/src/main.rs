@@ -31,7 +31,7 @@ pub(crate) struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--setup-fixture missing-cli|partial|ready|native-unknown] [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
+        "usage: hack-desktop [--setup-fixture missing-cli|partial|ready|native-unknown|service-unavailable] [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
     );
     std::process::exit(2)
 }

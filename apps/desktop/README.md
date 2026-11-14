@@ -36,6 +36,11 @@ The core reads version identity through `hack version --json` and validates its
 use the strict parser; daemon and published legacy payloads keep their existing
 parsers. Shared boundary fixtures are checked against the CLI producers.
 
+Dropping a log stream retries killing its owned process group for up to two
+seconds before detaching a reader still waiting for EOF. A descendant that
+leaves that group cannot be retired by group signals; it no longer blocks the
+dropping thread, and its reader exits when the descendant closes stdout.
+
 ## Check the live data path without a window
 
 ```sh

@@ -344,7 +344,8 @@ impl CliRunner {
     }
 }
 
-/// A running log stream. Dropping it kills the process group.
+/// A running log stream. Drop retries group cleanup for at most two seconds,
+/// then detaches a reader still held open by a descendant outside that group.
 pub struct LogStream {
     child: Child,
     rx: mpsc::Receiver<LogEvent>,
@@ -365,10 +366,23 @@ impl LogStream {
 
 impl Drop for LogStream {
     fn drop(&mut self) {
-        kill_group(&mut self.child);
+        signal_kill_group(&mut self.child);
         if let Some(r) = self.reader.take() {
-            let _ = r.join();
+            // A group signal can race a descendant fork on macOS. Keep the
+            // leader unreaped while retrying, preserving ownership of its PID
+            // and catching late members of the same process group.
+            let until = Instant::now() + Duration::from_secs(2);
+            while !r.is_finished() && Instant::now() < until {
+                thread::sleep(Duration::from_millis(20));
+                signal_kill_group(&mut self.child);
+            }
+            // A descendant may have left our group while keeping stdout open.
+            // Detach that reader rather than block the dropping UI thread.
+            if r.is_finished() {
+                let _ = r.join();
+            }
         }
+        let _ = self.child.wait();
     }
 }
 
@@ -496,6 +510,18 @@ fn kill_group(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Only for the log-drop path, which has not reaped its child. Avoid
+/// Child::kill here: its status check may reap and release the PID reservation.
+fn signal_kill_group(child: &mut Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: plain syscall on the group we created with process_group(0).
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
 }
 
 fn head(s: &str) -> String {
@@ -982,5 +1008,53 @@ wait $!"#,
         let t = Instant::now();
         drop(s);
         assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for log_stream_drop_is_bounded_with_an_escaped_writer"]
+    fn escaped_log_pipe_helper() {
+        // SAFETY: this fixture subprocess leaves its parent's group so the
+        // parent can test a writer that its owned-group signal cannot reach.
+        assert_eq!(unsafe { libc::setpgid(0, 0) }, 0);
+        let path = std::env::var("HACK_TEST_ESCAPED_LOG_PID").unwrap();
+        std::fs::write(path, std::process::id().to_string()).unwrap();
+        println!("escaped-ready");
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn log_stream_drop_is_bounded_with_an_escaped_writer() {
+        struct EscapedWriter(i32);
+        impl Drop for EscapedWriter {
+            fn drop(&mut self) {
+                // SAFETY: PID supplied only by our fixture subprocess, which
+                // remains alive until this guard retires it.
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+            }
+        }
+        let executable = std::env::current_exe().unwrap();
+        let quoted = executable.to_string_lossy().replace('\'', "'\\''");
+        let f = FakeHack::new(&format!(
+            "'{quoted}' --exact runner::tests::escaped_log_pipe_helper --ignored --nocapture &\nwait $!"
+        ));
+        let pid_file = f.dir.join("escaped.pid");
+        let runner = f
+            .runner()
+            .with_env("HACK_TEST_ESCAPED_LOG_PID", &pid_file.to_string_lossy());
+        let s = runner.stream_logs(&["logs", "--json"], None).unwrap();
+        loop {
+            let event = s.next_timeout(T).expect("escaped writer ready");
+            if event.message.as_deref() == Some("escaped-ready") {
+                break;
+            }
+        }
+        let escaped = EscapedWriter(std::fs::read_to_string(pid_file).unwrap().parse().unwrap());
+        let t = Instant::now();
+        drop(s);
+        assert!(t.elapsed() < Duration::from_secs(5));
+        // The fixture still holds stdout: bounded return did not require EOF.
+        // SAFETY: signal zero only checks our still-owned fixture process.
+        assert_eq!(unsafe { libc::kill(escaped.0, 0) }, 0);
+        drop(escaped);
     }
 }

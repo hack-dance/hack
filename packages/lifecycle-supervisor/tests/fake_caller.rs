@@ -1272,7 +1272,7 @@ fn stopped(pid: i32) -> bool {
 #[cfg(feature = "test-hooks")]
 fn kill_guard_at_launch_checkpoint(checkpoint: &str) {
     let f = Fixture::new();
-    let mut process = f.process("worker", "hold");
+    let mut process = f.process("worker", "hold-checkpoint");
     process["env"]["SUPERVISOR_TEST_CHECKPOINT"] = json!(checkpoint);
     let mut caller = command(&f.root, "run").spawn().unwrap();
     send(caller.stdin.as_mut().unwrap(), &f.launch(vec![process]));
@@ -1288,6 +1288,17 @@ fn kill_guard_at_launch_checkpoint(checkpoint: &str) {
     assert_eq!(children.len(), usize::from(checkpoint == "after-spawn"));
     for child in &children {
         f.owned.borrow_mut().push(child.clone());
+    }
+    if checkpoint == "after-spawn" {
+        // The paused guard cannot drain output. Wait until the command has
+        // finished its initial writes so killing the reader cannot race SIGPIPE.
+        eventually(|| {
+            f.root
+                .join("checkpoint-command-ready")
+                .exists()
+                .then_some(())
+        });
+        assert!(identity(children[0].pid).as_ref() == Some(&children[0]));
     }
     // SAFETY: exact stopped guard and session belong to this fixture.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
@@ -1718,11 +1729,14 @@ fn fixture_process() {
             std::io::stdout().flush().unwrap();
             std::process::exit(0);
         }
-        "hold" => (),
+        "hold" | "hold-checkpoint" => (),
         _ => std::process::exit(99),
     }
     println!("fixture-ready");
     std::io::stdout().flush().unwrap();
+    if mode == "hold-checkpoint" {
+        fs::write("checkpoint-command-ready", b"ready").unwrap();
+    }
     loop {
         thread::sleep(Duration::from_secs(1));
     }

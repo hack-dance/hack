@@ -212,7 +212,7 @@ export async function acquireLegacyComposeBranch(opts: {
   const branch = selected.branch;
   // An adopted project's lifecycle commands select their instance here, not
   // through the ordinary branch resolver: name it in the activity record.
-  noteActivityBranch(branch ?? null);
+  noteActivityBranch(branch);
   if (!branch) {
     if (opts.saved || opts.requestedBranch !== undefined) {
       refuse();

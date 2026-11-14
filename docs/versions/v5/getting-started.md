@@ -134,3 +134,7 @@ log history and restarts. When this Compose run works, try native only on a
 Always-on login restores Caddy/CoreDNS routing only. Logging (Grafana, Loki and
 Alloy) starts through manual `hack global up`; login leaves existing logging
 containers running. Change default Grafana credentials before network exposure.
+
+Login requires a non-SSH Docker transport and already-prepared DNS. It skips
+macOS dnsmasq startup and passwordless DNS recovery; use manual `hack global up`
+when DNS needs starting or recovery.

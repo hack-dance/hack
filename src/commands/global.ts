@@ -180,6 +180,8 @@ import {
   type TrustPlanDeps,
 } from "./global-admin-plan.ts";
 import {
+  assertGlobalBackendStartAllowed,
+  globalDnsRecoveryAllowed,
   globalLoggingUpArguments,
   globalRoutingUpArguments,
   reconcileGlobalRoutingBridge,
@@ -867,11 +869,15 @@ function getGlobalPaths() {
   };
 }
 
-async function ensureDockerRunning(): Promise<void> {
+async function ensureDockerRunning(opts?: {
+  readonly login: boolean;
+}): Promise<void> {
   const res = await exec(["docker", "info"], { stdin: "ignore" });
   if (res.exitCode === 0) {
     return;
   }
+
+  assertGlobalBackendStartAllowed({ login: opts?.login === true });
 
   const backend = await detectDockerBackend();
   if (!backend) {
@@ -1847,8 +1853,8 @@ export async function globalUp(): Promise<number> {
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
   await secureGlobalLoginRouting({ root: paths.root, login });
 
-  await ensureDockerRunning();
-  if (isMac()) {
+  await ensureDockerRunning({ login });
+  if (isMac() && globalDnsRecoveryAllowed({ login })) {
     await ensureMacDnsmasqRunning();
   }
   if (!(await pathExists(paths.caddyCompose))) {

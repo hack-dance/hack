@@ -657,7 +657,7 @@ export function createAutostartProductionDependencies(
         return "executable_path_untrusted";
       }
       try {
-        assertAutostartDockerConfigTrusted({ home: runtime.home });
+        assertAutostartDockerConfigTrusted({ home: runtime.home, env });
       } catch {
         return "docker_config_untrusted";
       }

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1250,6 +1251,29 @@ test("unsafe Docker context selection refuses before engine access without consu
       ?.lastAttemptBootId
   ).toBeNull();
   await chmod(config, 0o600);
+  const context = join(
+    root,
+    ".docker/contexts/meta",
+    createHash("sha256").update("untrusted").digest("hex")
+  );
+  await mkdir(context, { recursive: true, mode: 0o700 });
+  const metadata = join(context, "meta.json");
+  await writeFile(
+    metadata,
+    JSON.stringify({ Endpoints: { docker: { Host: "ssh://fixture" } } }),
+    { mode: 0o600 }
+  );
+  await run();
+  expect(events).toEqual([]);
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+      ?.lastAttemptBootId
+  ).toBeNull();
+  await writeFile(
+    metadata,
+    JSON.stringify({ Endpoints: { docker: { Host: "unix:///fixture.sock" } } }),
+    { mode: 0o600 }
+  );
   await run();
   expect(starts.map((start) => start.id)).toEqual(["alpha"]);
 });

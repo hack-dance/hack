@@ -76,3 +76,21 @@ export function globalLoggingUpArguments(opts: {
 }): readonly string[] | null {
   return opts.login ? null : globalRoutingUpArguments(opts);
 }
+
+/** Login must not invoke the absolute passwordless DNS recovery helper. */
+export function globalDnsRecoveryAllowed(opts: {
+  readonly login: boolean;
+}): boolean {
+  return !opts.login;
+}
+
+/** A lost engine at login must fail before backend discovery or VM/app startup. */
+export function assertGlobalBackendStartAllowed(opts: {
+  readonly login: boolean;
+}): void {
+  if (opts.login) {
+    throw new Error(
+      "Docker became unavailable during login; start the engine manually and retry."
+    );
+  }
+}

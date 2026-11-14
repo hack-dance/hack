@@ -391,3 +391,11 @@ With `--overwrite` that can also restore old pauses and boot claims; it does not
 merge newer machine intent. An overwrite rollback can undo a global pause as well. Review and reapply the
 restored machine intent before allowing another login pass. Upgrade-aware state reconciliation
 is part of HACK-2216.
+
+Login refuses SSH Docker contexts and direct SSH Docker hosts: SSH configuration
+and its includes can execute host commands outside the Docker trust audit. Use a
+local engine or start manually. Login also skips macOS dnsmasq startup and recovery,
+including the passwordless DNS helper. Prepare DNS manually before relying on
+login routing; manual `hack global up` retains its existing DNS behavior.
+If Docker stops between readiness and routing startup, login fails without
+launching a backend VM or app. Start the engine manually before retrying.

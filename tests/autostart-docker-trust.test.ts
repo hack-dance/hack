@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -63,4 +64,77 @@ test("writable Docker config or context inputs refuse before contacting an engin
   await chmod(target, 0o666);
   await symlink(target, join(home, ".docker/config.json"));
   expect(() => assertAutostartDockerConfigTrusted({ home })).toThrow();
+});
+
+test("selected SSH contexts and direct SSH hosts refuse before contacting an engine", async () => {
+  const name = "remote-fixture";
+  const context = join(
+    home,
+    ".docker/contexts/meta",
+    createHash("sha256").update(name).digest("hex")
+  );
+  await mkdir(context, { recursive: true, mode: 0o700 });
+  const metadata = join(context, "meta.json");
+  await writeFile(
+    join(home, ".docker/config.json"),
+    JSON.stringify({ currentContext: name }),
+    { mode: 0o600 }
+  );
+  expect(() =>
+    assertAutostartDockerConfigTrusted({
+      home,
+      env: {},
+      systemPluginDirectories: [],
+    })
+  ).toThrow();
+  await writeFile(metadata, "{}", { mode: 0o600 });
+  expect(() =>
+    assertAutostartDockerConfigTrusted({
+      home,
+      env: {},
+      systemPluginDirectories: [],
+    })
+  ).toThrow();
+  for (const host of [
+    "ssh://fixture",
+    "unknown://fixture",
+    "unix:///fixture/docker.sock",
+    "tcp://127.0.0.1:2376",
+  ]) {
+    await writeFile(
+      metadata,
+      JSON.stringify({ Name: name, Endpoints: { docker: { Host: host } } }),
+      { mode: 0o600 }
+    );
+    const check = () =>
+      assertAutostartDockerConfigTrusted({
+        home,
+        env: {},
+        systemPluginDirectories: [],
+      });
+    if (host.startsWith("ssh:") || host.startsWith("unknown:")) {
+      expect(check).toThrow();
+    } else {
+      expect(check).not.toThrow();
+    }
+  }
+  expect(() =>
+    assertAutostartDockerConfigTrusted({
+      home,
+      env: { DOCKER_CONTEXT: "default", DOCKER_HOST: "ssh://fixture" },
+      systemPluginDirectories: [],
+    })
+  ).toThrow();
+  await writeFile(
+    metadata,
+    JSON.stringify({ Endpoints: { docker: { Host: "ssh://fixture" } } }),
+    { mode: 0o600 }
+  );
+  expect(() =>
+    assertAutostartDockerConfigTrusted({
+      home,
+      env: { DOCKER_CONTEXT: name },
+      systemPluginDirectories: [],
+    })
+  ).toThrow();
 });

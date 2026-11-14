@@ -14,6 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
+  assertGlobalBackendStartAllowed,
+  globalDnsRecoveryAllowed,
   globalLoggingUpArguments,
   globalRoutingUpArguments,
 } from "../src/commands/global-autostart.ts";
@@ -433,4 +435,16 @@ test("login plans routing without starting default-credential logging services",
     "-d",
     "--remove-orphans",
   ]);
+});
+
+test("login refuses passwordless DNS recovery while manual starts retain it", () => {
+  expect(globalDnsRecoveryAllowed({ login: true })).toBe(false);
+  expect(globalDnsRecoveryAllowed({ login: false })).toBe(true);
+});
+
+test("an unavailable engine at login refuses backend startup while manual startup remains allowed", () => {
+  expect(() => assertGlobalBackendStartAllowed({ login: true })).toThrow(
+    "start the engine manually"
+  );
+  expect(() => assertGlobalBackendStartAllowed({ login: false })).not.toThrow();
 });

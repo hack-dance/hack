@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { assertAutostartPathAclsTrustedSync } from "./autostart-path-acl.ts";
@@ -5,9 +6,12 @@ import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { walkReplaceableChain } from "./path-trust.ts";
 
+const LOGIN_DOCKER_TRANSPORT = /^(unix|tcp|npipe):\/\//;
+
 /** Authenticate Docker's engine-selection inputs without exposing credentials. */
 export function assertAutostartDockerConfigTrusted(opts: {
   readonly home: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
   readonly systemPluginDirectories?: readonly string[];
 }): void {
   try {
@@ -66,6 +70,8 @@ export function assertAutostartDockerConfigTrusted(opts: {
     ]) {
       visit(directory, 0);
     }
+    const env = opts.env ?? process.env;
+    let currentContext = "default";
     const configPath = join(root, "config.json");
     assertAutostartPathAclsTrustedSync(checked);
     const configTrust = walkReplaceableChain({
@@ -83,10 +89,40 @@ export function assertAutostartDockerConfigTrusted(opts: {
       if (!isRecord(config)) {
         throw new Error("Invalid Docker configuration");
       }
+      if (config.currentContext !== undefined) {
+        if (typeof config.currentContext !== "string") {
+          throw new Error("Invalid context selection");
+        }
+        currentContext = config.currentContext || "default";
+      }
       if (config.cliPluginsExtraDirs !== undefined) {
         // Custom plugin discovery is not part of the fixed login toolchain.
         throw new Error("Custom plugin search path requires manual startup");
       }
+    }
+    const context = env.DOCKER_CONTEXT?.trim() || currentContext;
+    const host = env.DOCKER_HOST?.trim();
+    if (context !== "default") {
+      const digest = createHash("sha256").update(context).digest("hex");
+      const metadataPath = join(root, "contexts/meta", digest, "meta.json");
+      if (statSync(metadataPath).size > 1024 * 1024) {
+        throw new Error("Context metadata exceeds bound");
+      }
+      const metadata: unknown = JSON.parse(readFileSync(metadataPath, "utf8"));
+      if (
+        !(
+          isRecord(metadata) &&
+          isRecord(metadata.Endpoints) &&
+          isRecord(metadata.Endpoints.docker)
+        )
+      ) {
+        throw new Error("Invalid Docker endpoint");
+      }
+      assertLoginDockerTransport(metadata.Endpoints.docker.Host);
+    }
+    // A direct host may select the transport when the default context is used.
+    if (host) {
+      assertLoginDockerTransport(host);
     }
   } catch {
     throw new HackCliError({
@@ -95,5 +131,12 @@ export function assertAutostartDockerConfigTrusted(opts: {
         "Automatic startup refused unsafe Docker engine-selection files. Review Docker configuration ownership and permissions before retrying. Values omitted.",
       detail: { reason: "docker_config_untrusted" },
     });
+  }
+}
+
+/** SSH loads executable user configuration outside the authenticated Docker tree. */
+function assertLoginDockerTransport(host: unknown): void {
+  if (typeof host !== "string" || !LOGIN_DOCKER_TRANSPORT.test(host)) {
+    throw new Error("Docker transport requires manual startup");
   }
 }

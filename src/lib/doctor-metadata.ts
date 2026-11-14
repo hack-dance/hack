@@ -70,6 +70,7 @@ const MACHINE_AREAS: Readonly<Record<string, DoctorArea>> = {
   "global files": "routing_dns",
   daemon: "daemon",
   "daemon service": "daemon",
+  "autostart login service": "daemon",
   "gateway config": "other",
   "gateway tokens": "other",
   "linux dns route": "routing_dns",

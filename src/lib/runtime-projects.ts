@@ -406,9 +406,11 @@ export async function addLifecycleProcessServices(opts: {
     if (unreadable.has(workingDir)) {
       const services = new Map(runtime.services);
       const service = "lifecycle-state";
+      const existing = services.get(service);
       services.set(service, {
         service,
         containers: [
+          ...(existing?.containers ?? []),
           {
             id: `lifecycle-state-${runtime.project}`,
             project: runtime.project,
@@ -419,7 +421,10 @@ export async function addLifecycleProcessServices(opts: {
             ports: "",
             workingDir,
             image: null,
-            labels: { "hack.lifecycle.error": "state_unreadable" },
+            labels: {
+              "hack.lifecycle.process": "true",
+              "hack.lifecycle.error": "state_unreadable",
+            },
             mounts: [],
             networks: [],
           },

@@ -402,6 +402,46 @@ test("one malformed project stays unknown without aborting global observers", as
       runtime[0]?.services.get("lifecycle-state")?.containers[0]?.state
     ).toBe("unknown");
     expect(runtime[1]?.services.size).toBe(0);
+    const { findOrphanRuntimeProjects } = await import(
+      "../src/lib/project-runtime-hygiene.ts"
+    );
+    expect(await findOrphanRuntimeProjects({ runtime })).toEqual([]);
+    const real = {
+      id: "synthetic-real-container",
+      project: "bad",
+      service: "lifecycle-state",
+      state: "running",
+      status: "Up",
+      name: "synthetic-real-container",
+      ports: "",
+      workingDir: bad,
+      image: null,
+      labels: {},
+      mounts: [],
+      networks: [],
+    };
+    const withExisting = await addLifecycleProcessServices({
+      runtime: [
+        {
+          project: "bad",
+          workingDir: bad,
+          services: new Map([
+            [
+              "lifecycle-state",
+              { service: "lifecycle-state", containers: [real] },
+            ],
+          ]),
+          isGlobal: false,
+        },
+      ],
+    });
+    expect(
+      withExisting[0]?.services.get("lifecycle-state")?.containers
+    ).toHaveLength(2);
+    expect(
+      (await findOrphanRuntimeProjects({ runtime: withExisting }))[0]
+        ?.containerIds
+    ).toEqual([real.id]);
     await expect(readLifecycleState({ projectDir: bad })).rejects.toThrow(
       "state.json"
     );

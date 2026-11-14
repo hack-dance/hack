@@ -98,30 +98,38 @@ export async function readLifecycleObservations({
   readonly snapshot: readonly ObservedProcess[] | null;
 }): Promise<Record<string, unknown>[]> {
   const lifecycle: Record<string, unknown>[] = [];
-  const directories = new Map<string, string>();
+  const directories = new Map<
+    string,
+    { readonly root: string; readonly name: string }
+  >();
   for (const project of registry.projects.filter(
     (project) => !filter || project.name === filter
   )) {
-    directories.set(project.projectDir, project.repoRoot);
+    directories.set(project.projectDir, {
+      root: project.repoRoot,
+      name: project.name,
+    });
     for (const worktree of project.worktrees ?? []) {
-      directories.set(
-        resolve(worktree.path, project.projectDirName),
-        worktree.path
-      );
+      directories.set(resolve(worktree.path, project.projectDirName), {
+        root: worktree.path,
+        name: project.name,
+      });
     }
   }
-  for (const [projectDir, projectRoot] of directories) {
+  for (const [projectDir, project] of directories) {
+    const projectRoot = project.root;
     let entries: readonly LifecycleStateEntry[];
     try {
       entries = await readLifecycleState({ projectDir });
     } catch {
       lifecycle.push({
-        project: projectDir,
+        project: project.name,
         projectRoot,
         session: null,
         ownership: "unknown",
         status: "unknown",
         reason: "state_unreadable",
+        attention: "state_unreadable",
       });
       continue;
     }

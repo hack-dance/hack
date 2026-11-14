@@ -199,7 +199,10 @@ values. Structural parse errors can still stop review early; fix them and rerun.
 Missing shared-source consent appears under **Consent needed**, separately from
 configuration blockers. Review still runs without consent, including in a
 non-interactive terminal, and `--json` retains the full discovered blocker list.
-Reporting consent does not grant it or start the VM.
+Reporting consent does not grant it or start the VM. The file-only native check in
+`hack upgrade check` also reports outstanding consent separately and does not call
+the project native-ready until it is granted; native readiness remains informational
+for a Compose upgrade.
 
 The Compose input must be a nonempty regular file of at most 256 KiB, not a
 symbolic link. Unreadable, changing or oversized input is reported as

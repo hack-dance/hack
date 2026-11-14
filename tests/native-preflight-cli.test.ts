@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { NativePreflightReport } from "../src/backends/native-preflight.ts";
+import { nativePreflightProbeFromReport } from "../src/lib/upgrade-check-probes.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -1759,6 +1760,29 @@ test(
         });
       }
     }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "file-only upgrade readiness retains outstanding native consent",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    await f.review([]);
+    const ungranted = await preflight(f, f.native);
+    expect(ungranted.code).toBe(1);
+    expect(nativePreflightProbeFromReport(ungranted.report)).toMatchObject({
+      ready: false,
+      blockers: 0,
+      consentNeeded: 1,
+    });
+    const granted = await preflight(f, { ...f.native, ...GRANT });
+    expect(granted.code).toBe(0);
+    expect(nativePreflightProbeFromReport(granted.report)).toMatchObject({
+      ready: true,
+      blockers: 0,
+      consentNeeded: 0,
+    });
   },
   SPAWN_TIMEOUT_MS
 );

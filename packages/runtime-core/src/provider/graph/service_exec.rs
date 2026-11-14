@@ -67,6 +67,128 @@ fn validate(options: &ServiceExecOptions<'_>) -> Result<(), CandidateError> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn interactive(
+    candidate: &Candidate,
+    options: &ServiceExecOptions<'_>,
+    console_size: [u16; 2],
+    session: &str,
+    managed: Option<&crate::provider::managed_environment::Managed>,
+    live: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<crate::provider::engine::interactive_exec::Attached, CandidateError> {
+    use crate::provider::interactive_session::{Backend, Binding};
+    use std::time::Instant;
+    validate(options)?;
+    live()?;
+    let deadline = Instant::now() + options.timeout;
+    let engine = Engine::connect_command_until(candidate, deadline)?;
+    let (receipt, root) = load(candidate, &engine, options.run)?;
+    super::startup::require_dependency_rebind_complete(&root, &receipt)?;
+    let pending = root
+        .join("state.pending")
+        .try_exists()
+        .map_err(|_| refused())?;
+    let resource = binding(&receipt, engine.guest().boot_id(), pending, options)?;
+    let container = inspect_resource(&engine, &receipt, resource)?.ok_or_else(refused)?;
+    let generation = container["State"]["StartedAt"]
+        .as_str()
+        .filter(|s| crate::provider::engine::log_follow::valid_timestamp(s))
+        .ok_or_else(refused)?
+        .to_owned();
+    let mounted_slot = interactive_environment_slot(&container, managed.is_some())?;
+    let slot = if receipt.environment_attached {
+        crate::provider::environment_recovery::active_exec_slot(
+            candidate,
+            engine.guest(),
+            &receipt.run,
+            options.service,
+            &resource.name,
+            mounted_slot.as_deref(),
+        )?
+    } else {
+        None
+    };
+    let argv = if let Some(managed) = managed {
+        #[cfg(feature = "environment-launcher")]
+        {
+            managed.validate_binding(&receipt.plan_id, &receipt.run)?;
+            if !receipt.environment_attached
+                || managed.values().len() != 1
+                || managed
+                    .values()
+                    .get(options.service)
+                    .is_none_or(|v| v.is_empty())
+            {
+                return Err(refused());
+            }
+            require_current_launcher(&container, &super::launcher::current_source()).map_err(|_| error(
+                "graph_service_exec_launcher",
+                "Interactive exec needs the current verified launcher. Use HACK_NO_INTERACTIVE=1 hack exec for finite exec, or restart the service with the matching candidate.",
+            ))?;
+            let mut argv = vec![
+                "/run/hack-environment-launcher".into(),
+                "--exec-environment-tty-v2".into(),
+            ];
+            argv.extend_from_slice(options.argv);
+            argv
+        }
+        #[cfg(not(feature = "environment-launcher"))]
+        {
+            let _ = managed;
+            return Err(refused());
+        }
+    } else {
+        managed_exec_argv(&container, slot.as_deref(), options.argv)?
+    };
+    let fresh = || {
+        live()?;
+        crate::provider::managed_environment::remaining_until(deadline)?;
+        let (current, root) = load(candidate, &engine, options.run)?;
+        super::startup::require_dependency_rebind_complete(&root, &current)?;
+        binding(
+            &current,
+            engine.guest().boot_id(),
+            root.join("state.pending")
+                .try_exists()
+                .map_err(|_| refused())?,
+            options,
+        )?;
+        let value = inspect_resource(&engine, &receipt, resource)?.ok_or_else(refused)?;
+        if value["State"]["Running"] != true
+            || value["State"]["Paused"] != false
+            || value["State"]["Restarting"] != false
+            || value["State"]["StartedAt"] != generation
+        {
+            return Err(refused());
+        }
+        Ok(())
+    };
+    fresh()?;
+    let attached = engine.interactive_start(
+        candidate,
+        Binding {
+            backend: Backend::Adopted,
+            namespace: receipt.namespace.clone(),
+            run: receipt.run.clone(),
+            owner: receipt.owner.clone(),
+            boot: engine.guest().boot_id().to_owned(),
+            container: options.expected_container.to_owned(),
+            generation: generation.clone(),
+            service: options.service.to_owned(),
+        },
+        crate::provider::engine::interactive_exec::Command {
+            argv: &argv,
+            workdir: options.workdir,
+            console_size,
+            session,
+        },
+        deadline,
+        &fresh,
+    )?;
+    // No provider mutation lease crosses the return into the terminal loop.
+    Ok(attached)
+}
+
 /// Execute argv once with stdin closed and TTY disabled, retaining the VM mutation
 /// lease throughout. A timeout or interrupted response is uncertain: the command
 /// may still run and must not be replayed automatically. Inherits container user,
@@ -223,6 +345,24 @@ fn require_current_launcher(container: &Value, source: &str) -> Result<(), Candi
         ));
     }
     Ok(())
+}
+
+/// A peer service's allocation cannot require fresh delivery for this container.
+/// Attached values still require a fresh envelope; partial mounts never count as absence.
+#[cfg(any(target_os = "macos", test))]
+fn interactive_environment_slot(
+    container: &Value,
+    fresh: bool,
+) -> Result<Option<String>, CandidateError> {
+    let slot = mounted_environment_slot(container)?;
+    managed_exec_argv(container, slot.as_deref(), &["/bin/true".into()])?;
+    if slot.is_some() && !fresh {
+        return Err(error(
+            "interactive_exec_environment_required",
+            "Interactive exec requires fresh selected-service environment delivery. Use HACK_NO_INTERACTIVE=1 hack exec for finite exec, or restart the service with the current candidate.",
+        ));
+    }
+    Ok(slot)
 }
 
 /// Infer only from the exact inspected container, never historical run inventory.
@@ -383,6 +523,42 @@ mod tests {
         let plain = json!({"HostConfig":{"Mounts":[]}});
         assert_eq!(managed_exec_argv(&plain, None, &args).unwrap(), args);
         assert!(managed_exec_argv(&plain, Some(slot), &args).is_err());
+    }
+    #[test]
+    fn interactive_fresh_delivery_depends_on_selected_container_mounts() {
+        let slot = format!(
+            "hack-env-lease-dddddddd-dddd-4ddd-8ddd-dddddddddddd-{}",
+            "a".repeat(32)
+        );
+        let managed = json!({"HostConfig":{"Mounts":[
+            {"Type":"bind","Source":format!("/storage/hack-environment-launcher/{}", "a".repeat(64)),"Target":"/run/hack-environment-launcher","ReadOnly":true},
+            {"Type":"bind","Source":format!("/run/{slot}/values.json"),"Target":"/run/hack-environment.json","ReadOnly":true},
+            {"Type":"bind","Source":format!("/run/{slot}/expires"),"Target":"/run/hack-environment.expires","ReadOnly":true}
+        ]}});
+        let plain = json!({"HostConfig":{"Mounts":[]}});
+        // Both services may share a graph whose environment_attached bit is true.
+        assert_eq!(interactive_environment_slot(&plain, false).unwrap(), None);
+        assert_eq!(
+            interactive_environment_slot(&managed, false)
+                .unwrap_err()
+                .code,
+            "interactive_exec_environment_required"
+        );
+        assert_eq!(
+            interactive_environment_slot(&managed, true).unwrap(),
+            Some(slot)
+        );
+        for fresh in [false, true] {
+            let mut partial = managed.clone();
+            partial["HostConfig"]["Mounts"]
+                .as_array_mut()
+                .unwrap()
+                .remove(1);
+            assert!(interactive_environment_slot(&partial, fresh).is_err());
+            let mut writable = managed.clone();
+            writable["HostConfig"]["Mounts"][1]["ReadOnly"] = json!(false);
+            assert!(interactive_environment_slot(&writable, fresh).is_err());
+        }
     }
     #[test]
     fn mounted_allocation_selection_rejects_ambiguous_partial_or_escaping_mounts() {

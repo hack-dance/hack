@@ -33,11 +33,12 @@ COMPILER_PAYLOAD = LEGACY_COMPILER_PAYLOAD | {"hack.local.schema.json"}
 # manifest. The CLI resolves both as siblings of hack-native; older bundles omit both.
 STORAGE_TOOL = "hack-storage-root-witness"
 STORAGE_TOOL_MANIFEST = "native-storage-tool.json"
+SUPERVISOR_PAYLOAD = frozenset(("hack-lifecycle-supervisor",))
 STORAGE_TOOL_PAYLOAD = frozenset((STORAGE_TOOL, STORAGE_TOOL_MANIFEST))
 STORAGE_TOOL_KEYS = {"version", "kind", "platform", "architecture", "file", "sha256", "bytes",
                      "sourceRevision"}
 EXECUTABLES = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5",
-                         "hack-config-compiler"))
+                         "hack-config-compiler", "hack-lifecycle-supervisor"))
 BUNDLE_FILES = PAYLOAD | {"SHA256SUMS"}
 MCP_FILES = {"adapter": "hack-mcp-adapter", "owner": "hack-mcp-owner",
              "backend": "hack-mcp-backend"}
@@ -210,7 +211,7 @@ def payload_inventory(names):
             "Incomplete config compiler payload.")
     storage = names & STORAGE_TOOL_PAYLOAD
     require(not storage or storage == STORAGE_TOOL_PAYLOAD, "Incomplete storage tool payload.")
-    extra = names - BUNDLE_FILES - COMPILER_PAYLOAD - STORAGE_TOOL_PAYLOAD
+    extra = names - BUNDLE_FILES - COMPILER_PAYLOAD - STORAGE_TOOL_PAYLOAD - SUPERVISOR_PAYLOAD
     if extra:
         matches = [MCP_MEMBER.fullmatch(name) for name in extra]
         require(all(matches), "Foreign candidate MCP payload.")
@@ -335,6 +336,8 @@ def verify_signatures(bundle):
     payload = bundle_inventory(bundle)
     if "hack-config-compiler" in payload:
         names.append("hack-config-compiler")
+    if "hack-lifecycle-supervisor" in payload:
+        names.append("hack-lifecycle-supervisor")
     names.extend(sorted(name for name in payload
                         if MCP_MEMBER.fullmatch(name) and not name.endswith("/manifest.json")))
     # codesign verifies every supplied path and fails if any is invalid. Keep all
@@ -363,7 +366,7 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
             total = 0
             for entry in source:
                 require(len(entries) < MAX_ARCHIVE_MEMBERS, "Too many archive entries.")
-                require((entry.name in BUNDLE_FILES | COMPILER_PAYLOAD | STORAGE_TOOL_PAYLOAD
+                require((entry.name in BUNDLE_FILES | COMPILER_PAYLOAD | STORAGE_TOOL_PAYLOAD | SUPERVISOR_PAYLOAD
                          or MCP_MEMBER.fullmatch(entry.name)) and entry.name not in seen,
                         "Foreign, duplicate or traversing archive entry.")
                 require(entry.isfile() and not entry.issparse() and entry.size > 0

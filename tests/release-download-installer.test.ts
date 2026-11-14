@@ -156,11 +156,12 @@ for (const [kind, render] of [
 // Linux, after the compiler was already replaced, leaving a mixed install.
 for (const [kind, render, running] of [
   ["standard", renderInstallScript, "hack"],
+  ["standard", renderInstallScript, "hack-lifecycle-supervisor"],
   ["slim", renderCodexSlimInstallScript, "hack-real"],
   // A slim install over a standard one replaces the running `hack` with the wrapper.
   ["slim over standard", renderCodexSlimInstallScript, "hack"],
 ] as const) {
-  test(`bundled ${kind} installer replaces an executable that is still running`, async () => {
+  test(`bundled ${kind} installer replaces running ${running}`, async () => {
     const root = await mkdtemp(join(tmpdir(), "hack-bundled-installer-"));
     // bash keeps working under another file name. A system `sleep` may be a
     // multi-call binary that picks its applet from argv[0] and exits at once.
@@ -201,6 +202,10 @@ for (const [kind, render, running] of [
         join(bundle, "hack-config-compiler"),
         "#!/bin/sh\necho new compiler\n"
       );
+      await Bun.write(
+        join(bundle, "hack-lifecycle-supervisor"),
+        "synthetic supervisor\n"
+      );
       const installer = join(bundle, "install.sh");
       await Bun.write(installer, render());
       const child = Bun.spawn(["bash", installer], {
@@ -236,6 +241,12 @@ for (const [kind, render, running] of [
       expect(await Bun.file(join(bin, "hack-config-compiler")).text()).toBe(
         "#!/bin/sh\necho new compiler\n"
       );
+      expect(
+        await Bun.file(join(bin, "hack-lifecycle-supervisor")).text()
+      ).toBe("synthetic supervisor\n");
+      expect(
+        (await stat(join(bin, "hack-lifecycle-supervisor"))).mode & 0o777
+      ).toBe(0o755);
       // Replaced by rename, not rewritten in place.
       expect((await stat(previous)).ino).not.toBe(before.ino);
       for (const name of await readdir(bin)) {
@@ -244,8 +255,13 @@ for (const [kind, render, running] of [
       // Nothing staged is left behind.
       expect((await readdir(bin)).sort()).toEqual(
         kind === "standard"
-          ? ["hack", "hack-config-compiler"]
-          : ["hack", "hack-config-compiler", "hack-real"]
+          ? ["hack", "hack-config-compiler", "hack-lifecycle-supervisor"]
+          : [
+              "hack",
+              "hack-config-compiler",
+              "hack-lifecycle-supervisor",
+              "hack-real",
+            ]
       );
       if (kind !== "standard") {
         expect(await Bun.file(join(bin, "hack")).text()).toContain(

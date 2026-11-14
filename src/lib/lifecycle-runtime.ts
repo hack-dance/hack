@@ -1,15 +1,18 @@
+import { lstat, rename } from "node:fs/promises";
 import { resolve } from "node:path";
 import { readLinesFromStream } from "../ui/lines.ts";
-import { pathExists, readTextFile, writeTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import {
   appendPrivateFile,
   ensurePrivateDirectory,
   openPrivateAppend,
   PrivatePathRefusedError,
+  readReplaceablePrivateFile,
+  replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
-export type LifecycleBackend = "tmux" | "zellij";
+export type LifecycleBackend = "tmux" | "zellij" | "supervisor";
 
 export type LifecycleStateProcess = {
   readonly name: string;
@@ -18,6 +21,10 @@ export type LifecycleStateProcess = {
   readonly panePid?: number;
   readonly paneBirth?: string;
   readonly processGroupId?: number;
+  readonly guardPid?: number;
+  readonly guardStartTime?: number;
+  readonly commandPid?: number;
+  readonly bootId?: string;
   readonly processGroupBirth?: string;
 };
 
@@ -31,6 +38,10 @@ export type LifecycleStateEntry = {
   readonly definitionHash?: string;
   readonly processes: readonly LifecycleStateProcess[];
   readonly updatedAt: string;
+  readonly supervisorPid?: number;
+  readonly supervisorRoot?: string;
+  readonly supervisorLaunchAttempted?: boolean;
+  readonly cleanupEpoch?: string;
 };
 
 type LifecycleStateFile = {
@@ -151,34 +162,79 @@ export async function ensurePrivateLifecycleLog(opts: {
 
 export async function readLifecycleState(opts: {
   readonly projectDir: string;
+  readonly stateLocked?: boolean;
 }): Promise<readonly LifecycleStateEntry[]> {
-  const path = resolveLifecycleStatePath({ projectDir: opts.projectDir });
-  if (!(await pathExists(path))) {
+  const root = resolveLifecycleRootDir(opts);
+  const path = resolveLifecycleStatePath(opts);
+  const rootInfo = await lstat(root).catch((error: unknown) => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  if (!rootInfo) {
     return [];
   }
-  const text = await readTextFile(path);
-  if (!text) {
+  if (!rootInfo.isDirectory() || rootInfo.uid !== process.getuid?.()) {
+    throw lifecycleStateRefused();
+  }
+  await verifyLifecycleStateTarget(path);
+  const file = await readReplaceablePrivateFile({
+    path,
+    directories: [root],
+    maxBytes: 1024 * 1024,
+    refusal: lifecycleStateRefused,
+  });
+  if (file === null) {
     return [];
   }
+  await verifyLifecycleStateTarget(path);
+  const text = file.text;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
+    if (
+      await lstat(resolve(root, "supervisor-state")).catch((error: unknown) => {
+        if (isRecord(error) && error.code === "ENOENT") {
+          return null;
+        }
+        throw error;
+      })
+    ) {
+      throw lifecycleStateRefused();
+    }
+    if (!opts.stateLocked) {
+      return await mutateLifecycleState(opts.projectDir, () =>
+        readLifecycleState({ ...opts, stateLocked: true })
+      );
+    }
+    await verifyLifecycleStateTarget(path);
+    await rename(path, `${path}.legacy-${Date.now()}-${crypto.randomUUID()}`);
+    console.error(
+      "Moved unreadable legacy lifecycle JSON aside; continuing without lifecycle state."
+    );
     return [];
   }
   if (!isRecord(parsed)) {
-    return [];
+    throw lifecycleStateRefused();
   }
   const entriesRaw = parsed.entries;
   if (!Array.isArray(entriesRaw)) {
-    return [];
+    throw lifecycleStateRefused();
   }
   const entries: LifecycleStateEntry[] = [];
   for (const entry of entriesRaw) {
     const parsedEntry = parseLifecycleStateEntry(entry);
-    if (parsedEntry) {
-      entries.push(parsedEntry);
+    if (
+      !parsedEntry ||
+      entries.some(
+        (current) => current.composeProject === parsedEntry.composeProject
+      )
+    ) {
+      throw lifecycleStateRefused();
     }
+    entries.push(parsedEntry);
   }
   return entries;
 }
@@ -187,18 +243,29 @@ export async function upsertLifecycleStateEntry(opts: {
   readonly projectDir: string;
   readonly entry: LifecycleStateEntry;
 }): Promise<void> {
-  const state = await readLifecycleState({ projectDir: opts.projectDir });
-  const withoutCurrent = state.filter(
-    (entry) => entry.composeProject !== opts.entry.composeProject
-  );
-  const next: LifecycleStateFile = {
-    entries: [...withoutCurrent, opts.entry].sort((a, b) =>
-      a.composeProject.localeCompare(b.composeProject)
-    ),
-  };
-  await writeLifecycleStateFile({
-    projectDir: opts.projectDir,
-    state: next,
+  return await mutateLifecycleState(opts.projectDir, async () => {
+    if (opts.entry.backend === "supervisor") {
+      await appendPrivateFile({
+        path: resolve(resolveLifecycleRootDir(opts), "supervisor-state"),
+        data: "",
+      });
+    }
+    const state = await readLifecycleState({
+      projectDir: opts.projectDir,
+      stateLocked: true,
+    });
+    const withoutCurrent = state.filter(
+      (entry) => entry.composeProject !== opts.entry.composeProject
+    );
+    const next: LifecycleStateFile = {
+      entries: [...withoutCurrent, opts.entry].sort((a, b) =>
+        a.composeProject.localeCompare(b.composeProject)
+      ),
+    };
+    await writeLifecycleStateFile({
+      projectDir: opts.projectDir,
+      state: next,
+    });
   });
 }
 
@@ -206,16 +273,21 @@ export async function removeLifecycleStateEntry(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
 }): Promise<void> {
-  const state = await readLifecycleState({ projectDir: opts.projectDir });
-  const nextEntries = state.filter(
-    (entry) => entry.composeProject !== opts.composeProject
-  );
-  if (nextEntries.length === state.length) {
-    return;
-  }
-  await writeLifecycleStateFile({
-    projectDir: opts.projectDir,
-    state: { entries: nextEntries },
+  return await mutateLifecycleState(opts.projectDir, async () => {
+    const state = await readLifecycleState({
+      projectDir: opts.projectDir,
+      stateLocked: true,
+    });
+    const nextEntries = state.filter(
+      (entry) => entry.composeProject !== opts.composeProject
+    );
+    if (nextEntries.length === state.length) {
+      return;
+    }
+    await writeLifecycleStateFile({
+      projectDir: opts.projectDir,
+      state: { entries: nextEntries },
+    });
   });
 }
 
@@ -224,50 +296,61 @@ export async function removeLifecycleStateEntryIfOwned(opts: {
   readonly composeProject: string;
   readonly ownershipToken: string;
 }): Promise<boolean> {
-  const state = await readLifecycleState({ projectDir: opts.projectDir });
-  const current = state.find(
-    (entry) => entry.composeProject === opts.composeProject
-  );
-  if (current?.ownershipToken !== opts.ownershipToken) {
-    return false;
-  }
-  await writeLifecycleStateFile({
-    projectDir: opts.projectDir,
-    state: {
-      entries: state.filter(
-        (entry) => entry.composeProject !== opts.composeProject
-      ),
-    },
+  return await mutateLifecycleState(opts.projectDir, async () => {
+    const state = await readLifecycleState({
+      projectDir: opts.projectDir,
+      stateLocked: true,
+    });
+    const current = state.find(
+      (entry) => entry.composeProject === opts.composeProject
+    );
+    if (current?.ownershipToken !== opts.ownershipToken) {
+      return false;
+    }
+    await writeLifecycleStateFile({
+      projectDir: opts.projectDir,
+      state: {
+        entries: state.filter(
+          (entry) => entry.composeProject !== opts.composeProject
+        ),
+      },
+    });
+    return true;
   });
-  return true;
 }
 
 export async function removeLifecycleStateEntryIfMatching(opts: {
   readonly projectDir: string;
   readonly expectedEntry: LifecycleStateEntry;
 }): Promise<boolean> {
-  const state = await readLifecycleState({ projectDir: opts.projectDir });
-  const current = state.find(
-    (entry) => entry.composeProject === opts.expectedEntry.composeProject
-  );
-  if (
-    !current ||
-    current.sessionName !== opts.expectedEntry.sessionName ||
-    current.backend !== opts.expectedEntry.backend ||
-    current.updatedAt !== opts.expectedEntry.updatedAt ||
-    current.ownershipToken !== opts.expectedEntry.ownershipToken
-  ) {
-    return false;
-  }
-  await writeLifecycleStateFile({
-    projectDir: opts.projectDir,
-    state: {
-      entries: state.filter(
-        (entry) => entry.composeProject !== opts.expectedEntry.composeProject
-      ),
-    },
+  return await mutateLifecycleState(opts.projectDir, async () => {
+    const state = await readLifecycleState({
+      projectDir: opts.projectDir,
+      stateLocked: true,
+    });
+    const current = state.find(
+      (entry) => entry.composeProject === opts.expectedEntry.composeProject
+    );
+    if (
+      !current ||
+      current.sessionName !== opts.expectedEntry.sessionName ||
+      current.backend !== opts.expectedEntry.backend ||
+      current.updatedAt !== opts.expectedEntry.updatedAt ||
+      current.cleanupEpoch !== opts.expectedEntry.cleanupEpoch ||
+      current.ownershipToken !== opts.expectedEntry.ownershipToken
+    ) {
+      return false;
+    }
+    await writeLifecycleStateFile({
+      projectDir: opts.projectDir,
+      state: {
+        entries: state.filter(
+          (entry) => entry.composeProject !== opts.expectedEntry.composeProject
+        ),
+      },
+    });
+    return true;
   });
-  return true;
 }
 
 function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
@@ -286,7 +369,13 @@ function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
   ) {
     return null;
   }
-  if (!(backendRaw === "tmux" || backendRaw === "zellij")) {
+  if (
+    !(
+      backendRaw === "tmux" ||
+      backendRaw === "zellij" ||
+      backendRaw === "supervisor"
+    )
+  ) {
     return null;
   }
   const branchRaw = value.branch;
@@ -301,10 +390,15 @@ function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
   const processes: LifecycleStateProcess[] = [];
   for (const item of processesRaw) {
     const parsed = parseLifecycleStateProcess(item);
-    if (parsed) {
-      processes.push(parsed);
+    if (!parsed) {
+      return null;
     }
+    processes.push(parsed);
   }
+  const supervisorPid = parseLifecycleOptionalPositiveInteger(
+    value.supervisorPid
+  );
+  const cleanupEpoch = getString(value, "cleanupEpoch")?.trim();
   return {
     composeProject,
     projectName,
@@ -315,6 +409,15 @@ function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
     ...(definitionHash ? { definitionHash } : {}),
     processes,
     updatedAt,
+    ...(supervisorPid ? { supervisorPid } : {}),
+    ...(typeof value.supervisorRoot === "string" &&
+    value.supervisorRoot.startsWith("/")
+      ? { supervisorRoot: value.supervisorRoot }
+      : {}),
+    ...(typeof value.supervisorLaunchAttempted === "boolean"
+      ? { supervisorLaunchAttempted: value.supervisorLaunchAttempted }
+      : {}),
+    ...(cleanupEpoch ? { cleanupEpoch } : {}),
   };
 }
 
@@ -335,6 +438,12 @@ function parseLifecycleStateProcess(
   const processGroupId = parseLifecycleOptionalPositiveInteger(
     value.processGroupId
   );
+  const guardPid = parseLifecycleOptionalPositiveInteger(value.guardPid);
+  const guardStartTime = parseLifecycleOptionalPositiveInteger(
+    value.guardStartTime
+  );
+  const commandPid = parseLifecycleOptionalPositiveInteger(value.commandPid);
+  const bootId = getString(value, "bootId");
   const processGroupBirth = getString(value, "processGroupBirth")?.trim();
   return {
     name,
@@ -343,6 +452,10 @@ function parseLifecycleStateProcess(
     ...(panePid ? { panePid } : {}),
     ...(paneBirth ? { paneBirth } : {}),
     ...(processGroupId ? { processGroupId } : {}),
+    ...(guardPid ? { guardPid } : {}),
+    ...(guardStartTime ? { guardStartTime } : {}),
+    ...(commandPid ? { commandPid } : {}),
+    ...(bootId ? { bootId } : {}),
     ...(processGroupBirth ? { processGroupBirth } : {}),
   };
 }
@@ -366,8 +479,20 @@ async function writeLifecycleStateFile(opts: {
 }): Promise<void> {
   const root = resolveLifecycleRootDir({ projectDir: opts.projectDir });
   const path = resolveLifecycleStatePath({ projectDir: opts.projectDir });
+  const text = `${JSON.stringify(opts.state, null, 2)}\n`;
+  if (Buffer.byteLength(text) > 1024 * 1024) {
+    throw lifecycleStateRefused();
+  }
   await ensurePrivateDirectory(root);
-  await writeTextFile(path, `${JSON.stringify(opts.state, null, 2)}\n`);
+  await verifyLifecycleStateTarget(path);
+  await replacePrivateFileAtomic({
+    path,
+    directories: [root],
+    staging: "sibling",
+    text,
+    refusal: lifecycleStateRefused,
+    beforeRename: () => verifyLifecycleStateTarget(path),
+  });
 }
 
 function sanitizeLifecycleToken(value: string): string {
@@ -472,4 +597,41 @@ export async function drainLifecycleOutput(opts: {
       message: line,
     });
   }
+}
+
+function lifecycleStateRefused(): Error {
+  return new Error(
+    "Lifecycle ownership state at .hack/.internal/lifecycle/state.json is invalid or unsafe; kept existing state. Inspect the file and stop verified leftover processes before moving it aside; see docs/lifecycle.md. Values omitted."
+  );
+}
+
+async function verifyLifecycleStateTarget(path: string): Promise<void> {
+  const info = await lstat(path).catch((error: unknown) => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  // A concurrent atomic replacement can unlink the observed inode before
+  // the asynchronous stat result is delivered (nlink=0). That is not an
+  // alias; the replaceable reader separately binds its actual opened file.
+  if (
+    info &&
+    (!info.isFile() || info.uid !== process.getuid?.() || info.nlink > 1)
+  ) {
+    throw lifecycleStateRefused();
+  }
+}
+
+async function mutateLifecycleState<T>(
+  projectDir: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const root = resolveLifecycleRootDir({ projectDir });
+  await ensurePrivateDirectory(root);
+  return await withProjectsRegistryLock({
+    lockPath: resolve(root, "state.lock"),
+    label: "Lifecycle state",
+    run,
+  });
 }

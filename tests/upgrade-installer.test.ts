@@ -7,6 +7,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -67,6 +68,7 @@ async function releaseFixture(
   const files: Record<string, string> = {
     hack: `#!/bin/sh\ncase "$0" in */.hack-update-stage-*/hack) ;; *) exit 93 ;; esac\nprintf '%s\\n' 'hack v${fault === "version" ? "4.3.0" : version}'\n`,
     "hack-config-compiler": "#!/bin/sh\nexit 0\n",
+    "hack-lifecycle-supervisor": "#!/bin/sh\nexit 0\n",
     "assets/schema.json": "new schema\n",
     "binaries/tool": "bundled executable\n",
   };
@@ -328,6 +330,7 @@ for (const phase of [
   "staged",
   "assets-published",
   "compiler-published",
+  "supervisor-published",
   "binary-published",
 ]) {
   test(`stable publication rolls back at ${phase}; a rerun installs matching binary/compiler/assets`, async () => {
@@ -341,6 +344,8 @@ for (const phase of [
     const compiler = join(bin, "hack-config-compiler");
     await writeFile(binary, "old CLI");
     await writeFile(compiler, "old compiler");
+    const supervisor = join(bin, "hack-lifecycle-supervisor");
+    await writeFile(supervisor, "old supervisor", { mode: 0o700 });
     await writeFile(join(assets, "schema.json"), "old schema");
     await writeFile(join(assets, "mutagen"), "user managed extension");
     const opts = {
@@ -361,6 +366,8 @@ for (const phase of [
     ).rejects.toThrow("fixture publication fault");
     expect(await readFile(binary, "utf8")).toBe("old CLI");
     expect(await readFile(compiler, "utf8")).toBe("old compiler");
+    expect(await readFile(supervisor, "utf8")).toBe("old supervisor");
+    expect((await stat(supervisor)).mode & 0o777).toBe(0o700);
     expect(await readFile(join(assets, "schema.json"), "utf8")).toBe(
       "old schema"
     );
@@ -381,7 +388,15 @@ for (const phase of [
     expect(await readFile(join(result.backupManifest, "../hack"), "utf8")).toBe(
       "old CLI"
     );
+    expect(await readFile(supervisor, "utf8")).toBe("#!/bin/sh\nexit 0\n");
+    expect((await stat(supervisor)).mode & 0o777).toBe(0o755);
     const manifest = await readFile(result.backupManifest, "utf8");
+    expect(JSON.parse(manifest).previousSupervisorSha256).toBe(
+      sha("old supervisor")
+    );
+    expect(JSON.parse(manifest).installedSupervisorSha256).toBe(
+      sha("#!/bin/sh\nexit 0\n")
+    );
     for (const value of ["old CLI", "old schema", "user managed extension"]) {
       expect(manifest.includes(value)).toBe(false);
     }
@@ -396,6 +411,26 @@ for (const phase of [
     ).toBe(false);
   });
 }
+test("failed first supervisor publication removes the new sibling", async () => {
+  const root = await scratch();
+  const f = await releaseFixture(root);
+  const binary = join(root, "bin/hack");
+  await expect(
+    publishRelease({
+      version: "4.3.1",
+      extractedReleaseDir: f.release,
+      binaryPath: binary,
+      assetsDir: join(root, "assets"),
+      checkpoint: (phase) => {
+        if (phase === "supervisor-published") {
+          throw new Error("fixture fault");
+        }
+      },
+    })
+  ).rejects.toThrow("fixture fault");
+  expect(await readdir(join(root, "bin"))).toEqual([]);
+});
+
 test("stable uninstall can be repeated and preserves all user state", async () => {
   const root = await scratch();
   const home = join(root, "home");

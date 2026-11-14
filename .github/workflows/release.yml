@@ -121,6 +121,8 @@ jobs:
         run: bun run build:release "--version=$RELEASE_VERSION" --skip-tests
       - name: Qualify installed release compiler without host runtimes or network
         run: bun scripts/check-release-config-compiler.ts dist/release
+      - name: Qualify installed lifecycle supervisor
+        run: bun scripts/check-release-lifecycle-supervisor.ts dist/release
       - name: Upload tarball
         env:
           GH_TOKEN: ${{ github.token }}

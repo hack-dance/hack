@@ -2479,21 +2479,34 @@ async function checkProjectLifecycleHygiene({
     };
   }
 
+  const native = await describeLifecycleExecutable(
+    await readProjectConfig(ctx)
+  );
+  if (native.failure) {
+    return native.failure;
+  }
+  const executable = native.description;
   const inspection = await inspectProjectLifecycleHygiene({
     projectDir: ctx.projectDir,
     projectRoot: ctx.projectRoot,
   });
   if (
-    inspection.staleEntries.length === 0 &&
-    inspection.orphanedProcessGroups.length === 0 &&
-    inspection.orphanedSessions.length === 0 &&
-    inspection.unverifiedSessions.length === 0
+    [
+      inspection.staleEntries,
+      inspection.orphanedProcessGroups,
+      inspection.orphanedSessions,
+      inspection.unverifiedSessions,
+    ].every((entries) => entries.length === 0)
   ) {
     return {
       name: "lifecycle hygiene",
       status: "ok",
-      message:
+      message: [
         "No stale lifecycle state entries or orphaned lifecycle processes",
+        executable,
+      ]
+        .filter(Boolean)
+        .join("; "),
     };
   }
 
@@ -2537,8 +2550,34 @@ async function checkProjectLifecycleHygiene({
   return {
     name: "lifecycle hygiene",
     status: "warn",
-    message: `${details.join("; ")} (${nextStep})`,
+    message: [`${details.join("; ")} (${nextStep})`, executable]
+      .filter(Boolean)
+      .join("; "),
   };
+}
+
+async function describeLifecycleExecutable(
+  config: Awaited<ReturnType<typeof readProjectConfig>>
+): Promise<{ description: string; failure?: CheckResult }> {
+  if (
+    resolveLifecycleRunner({ runner: config.lifecycle?.runner }) !==
+    "supervisor"
+  ) {
+    return { description: "" };
+  }
+  try {
+    const identity = await preflightLifecycleSupervisor();
+    return { description: `${identity.path} (${identity.version})` };
+  } catch {
+    return {
+      description: "",
+      failure: {
+        name: "lifecycle supervisor",
+        status: "warn",
+        message: `${resolveLifecycleSupervisorBinary()}: missing or incompatible executable`,
+      },
+    };
+  }
 }
 
 async function checkProjectEnvMode({
@@ -6053,3 +6092,9 @@ async function checkProxyNetwork(): Promise<CheckResult> {
     ].join("\n"),
   };
 }
+
+import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
+import {
+  preflightLifecycleSupervisor,
+  resolveLifecycleSupervisorBinary,
+} from "../lib/lifecycle-supervisor.ts";

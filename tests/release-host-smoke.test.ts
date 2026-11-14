@@ -87,6 +87,9 @@ test("CI and the release build use the same pins, build and installed-archive ac
   expect(runs(release.steps)).toContain(
     'bun run build:release "--version=$RELEASE_VERSION" --skip-tests'
   );
+  expect(runs(ci.steps)).toContain(
+    "bun scripts/check-release-lifecycle-supervisor.ts dist/config-compiler-release\n"
+  );
   // The release accepts the installed archive before it uploads anything.
   const names = release.steps.map((step) => step.run ?? step.name ?? "");
   const accepted = names.indexOf(
@@ -97,6 +100,11 @@ test("CI and the release build use the same pins, build and installed-archive ac
   );
   expect(accepted).toBeGreaterThan(-1);
   expect(uploaded).toBeGreaterThan(accepted);
+  const supervisorAccepted = names.indexOf(
+    "bun scripts/check-release-lifecycle-supervisor.ts dist/release"
+  );
+  expect(supervisorAccepted).toBeGreaterThan(-1);
+  expect(uploaded).toBeGreaterThan(supervisorAccepted);
   // The CI smoke cannot publish: its token is read-only.
   expect(ci.permissions).toEqual({ contents: "read" });
 });

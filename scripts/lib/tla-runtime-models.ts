@@ -142,6 +142,62 @@ const restartPolicyStaleUses = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "lifecycle-controller",
+    module: "LifecycleController",
+    states: 21,
+    invariant: "NoAdoptedStop",
+    action: "Abort",
+    fields: [
+      "unsafeStop = TRUE",
+      "epoch = 2",
+      "creatorEpoch = 1",
+      "adopted = TRUE",
+      'stage = "Aborted"',
+    ],
+    additionalControls: [
+      {
+        name: "pending",
+        negative: true,
+        invariant: "DurableBeforeLaunch",
+        action: "Launch",
+        fields: [
+          "unsafeLaunch = TRUE",
+          "pending = FALSE",
+          "live = TRUE",
+          'stage = "AwaitReply"',
+        ],
+      },
+    ],
+  },
+  {
+    name: "lifecycle-supervisor",
+    module: "LifecycleSupervisor",
+    states: 426,
+    invariant: "NoDuplicate",
+    action: "Retry",
+    fields: ["duplicate = TRUE", "live = TRUE", "durable = TRUE"],
+    additionalControls: [
+      {
+        name: "sid-reuse",
+        negative: true,
+        invariant: "NoForeignSignal",
+        action: "RecoverOrphan",
+        fields: [
+          'identity = "sid-reused"',
+          "unsafeSignal = TRUE",
+          "guard = FALSE",
+        ],
+      },
+      {
+        name: "witness-loss",
+        negative: true,
+        invariant: "RecoveryAuthorityRetained",
+        action: "WitnessExit",
+        fields: ["snapshot = FALSE", "witness = FALSE", "live = TRUE"],
+      },
+    ],
+  },
+  {
     name: "interactive-session",
     module: "Session",
     states: 459,

@@ -107,3 +107,20 @@ Stop its projects with `hack down` first. For a login daemon, use that install's
 Removing an executable does not undo host DNS/trust, project files or volumes.
 For a candidate rollback or return to stable, use
 [the full procedure](../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).
+
+### Lifecycle supervisor packaging
+
+New release archives include `hack-lifecycle-supervisor` beside the CLI. The
+standard and slim installers install it with executable mode 0755; Homebrew keeps
+it beside `libexec/hack`. Source installs prepare it with
+`bun run build:lifecycle-supervisor` (Rust 1.97.1, locked dependencies).
+The slim runtime image includes the same sibling executable.
+
+Stable archives build it for macOS arm64/x86_64 and Linux arm64/x86_64. Existing
+prerelease bundles remain macOS arm64 only: their supervisor is ad-hoc signed and
+covered by the bundle checksums. Retained managers accept older bundles without
+this helper. Packaging does not change the lifecycle runner default.
+
+Self-upgrades stage the helper before publishing the CLI, retain its previous
+bytes and SHA-256 in the backup, and restore it if publication fails. Keep the
+helper with its matching CLI when moving an installation.

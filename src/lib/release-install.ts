@@ -93,9 +93,20 @@ export async function publishRelease(opts: {
         "hack-config-compiler"
       );
       const hasCompiler = Boolean(await present(compilerSource));
+      const supervisorPath = join(
+        dirname(opts.binaryPath),
+        "hack-lifecycle-supervisor"
+      );
+      const oldSupervisor = await present(supervisorPath);
+      const supervisorSource = join(
+        opts.extractedReleaseDir,
+        "hack-lifecycle-supervisor"
+      );
+      const hasSupervisor = Boolean(await present(supervisorSource));
       if (
         (oldBinary && !oldBinary.isFile()) ||
         (oldCompiler && !oldCompiler.isFile()) ||
+        (oldSupervisor && !oldSupervisor.isFile()) ||
         (oldAssets && !oldAssets.isDirectory())
       ) {
         throw new Error(
@@ -121,10 +132,12 @@ export async function publishRelease(opts: {
       let assetsPublished = false;
       let binaryPublished = false;
       let compilerPublished = false;
+      let supervisorPublished = false;
       let complete = false;
       let assetsIdentity: Stats | null = null;
       let binaryIdentity: Stats | null = null;
       let compilerIdentity: Stats | null = null;
+      let supervisorIdentity: Stats | null = null;
       try {
         await markReleaseStage(binaryStage, opts.binaryPath);
         await mkdir(assetsStage, { mode: 0o700 });
@@ -154,6 +167,19 @@ export async function publishRelease(opts: {
           );
           await chmod(join(binaryStage, "hack-config-compiler"), 0o755);
         }
+        if (oldSupervisor) {
+          await copyFile(
+            supervisorPath,
+            join(backup, "hack-lifecycle-supervisor")
+          );
+        }
+        if (hasSupervisor) {
+          await copyFile(
+            supervisorSource,
+            join(binaryStage, "hack-lifecycle-supervisor")
+          );
+          await chmod(join(binaryStage, "hack-lifecycle-supervisor"), 0o755);
+        }
         const next = join(binaryStage, "hack");
         await copyFile(join(opts.extractedReleaseDir, "hack"), next);
         await chmod(next, 0o755);
@@ -182,6 +208,18 @@ export async function publishRelease(opts: {
           previousCompilerSha256: oldCompiler
             ? hash(await readFile(join(backup, "hack-config-compiler")))
             : null,
+          supervisor: hasSupervisor ? supervisorPath : null,
+          installedSupervisorSha256: hasSupervisor
+            ? hash(
+                await readFile(join(binaryStage, "hack-lifecycle-supervisor"))
+              )
+            : null,
+          previousSupervisor: oldSupervisor
+            ? join(backup, "hack-lifecycle-supervisor")
+            : null,
+          previousSupervisorSha256: oldSupervisor
+            ? hash(await readFile(join(backup, "hack-lifecycle-supervisor")))
+            : null,
         };
         await writeFile(
           join(backup, "manifest.json"),
@@ -199,6 +237,11 @@ export async function publishRelease(opts: {
             join(binaryStage, "hack-config-compiler")
           );
         }
+        if (hasSupervisor) {
+          supervisorIdentity = await lstat(
+            join(binaryStage, "hack-lifecycle-supervisor")
+          );
+        }
         await assertIdentity(opts.assetsDir, oldAssets);
         if (oldAssets) {
           await rename(opts.assetsDir, oldAssetsPath);
@@ -212,7 +255,16 @@ export async function publishRelease(opts: {
           await rename(join(binaryStage, "hack-config-compiler"), compilerPath);
           compilerPublished = true;
         }
+        if (hasSupervisor) {
+          await assertIdentity(supervisorPath, oldSupervisor);
+          await rename(
+            join(binaryStage, "hack-lifecycle-supervisor"),
+            supervisorPath
+          );
+          supervisorPublished = true;
+        }
         opts.checkpoint?.("compiler-published");
+        opts.checkpoint?.("supervisor-published");
         await assertIdentity(opts.binaryPath, oldBinary);
         await rename(next, opts.binaryPath);
         binaryPublished = true;
@@ -243,6 +295,20 @@ export async function publishRelease(opts: {
               await rename(rollback, compilerPath);
             } else {
               await rm(compilerPath);
+            }
+          }
+          if (supervisorPublished) {
+            await assertIdentity(supervisorPath, supervisorIdentity);
+            if (oldSupervisor) {
+              const rollback = join(binaryStage, "rollback-supervisor");
+              await copyFile(
+                join(backup, "hack-lifecycle-supervisor"),
+                rollback
+              );
+              await chmod(rollback, oldSupervisor.mode & 0o777);
+              await rename(rollback, supervisorPath);
+            } else {
+              await rm(supervisorPath);
             }
           }
           if (assetsPublished) {

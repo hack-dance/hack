@@ -2,14 +2,17 @@
  * Whether the system trust store (and, on Linux, the user's NSS databases)
  * trusts Hack's Caddy Local CA (HACK-2218, R16). Read-only and bounded: it
  * reads the exported CA, the OS trust store and NSS listings, runs only the
- * read-only `security` (macOS) and `certutil -L` (Linux) queries below with
- * a deadline each, never prompts and never changes anything.
+ * read-only `security` (macOS) and `certutil -L` (Linux) queries below, never
+ * prompts and never changes anything. The whole inspection has one budget
+ * ({@link TRUST_INSPECTION_BUDGET_MS}): no read or query starts after it,
+ * each query's deadline is cut to what is left, and whatever was not reached
+ * is reported unknown, so the report is always complete.
  *
  * Every part is `trusted`, `not_trusted` or `unknown`; a read that fails or
  * times out is unknown, never "not trusted".
  */
 import type { X509Certificate } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   bundleContainsCertificate,
@@ -28,8 +31,20 @@ import type { ExecResult } from "./shell.ts";
 
 export type TrustState = "trusted" | "not_trusted" | "unknown";
 
-/** Deadline for each trust-store query. */
+/** Deadline for each trust-store query (cut to the remaining budget). */
 export const TRUST_QUERY_TIMEOUT_MS = 5000;
+
+/** The whole inspection's budget; doctor's own check timeout is longer. */
+export const TRUST_INSPECTION_BUDGET_MS = 20_000;
+
+/** NSS databases inspected at most; any beyond are reported unknown. */
+export const MAX_NSS_DATABASES = 16;
+
+/** Largest file read (a system CA bundle is well below this). */
+export const MAX_TRUST_FILE_BYTES = 32 * 1024 * 1024;
+
+/** Exit code the budget gives a query it refused to start (as a timeout). */
+const NOT_STARTED = 124;
 
 export const MAC_SYSTEM_KEYCHAIN = "/Library/Keychains/System.keychain";
 
@@ -63,18 +78,29 @@ export type CaTrustDeps = {
   readonly readText: (
     path: string
   ) => Promise<{ readonly text: string } | "missing" | "unreadable">;
-  /** A read-only query, bounded by {@link TRUST_QUERY_TIMEOUT_MS}. */
-  readonly query: (argv: readonly string[]) => Promise<ExecResult>;
+  /**
+   * A read-only query, stopped after `timeoutMs` (exit 124 on timeout, 127
+   * when it cannot be started).
+   */
+  readonly query: (
+    argv: readonly string[],
+    opts: { readonly timeoutMs: number }
+  ) => Promise<ExecResult>;
   /** Linux: the trust host (database discovery and the vetted certutil). */
   readonly linuxHost?: LinuxTrustHost;
   /** Whether a path exists: true, false, or "unknown" on any other error. */
   readonly exists: (path: string) => Promise<boolean | "unknown">;
+  /** Directory entries; [] only when absent, "unknown" on any other error. */
+  readonly listDir: (path: string) => Promise<readonly string[] | "unknown">;
   readonly now: () => number;
+  /** Default {@link TRUST_INSPECTION_BUDGET_MS}. */
+  readonly budgetMs?: number;
 };
 
 export async function inspectCaTrust(
-  deps: CaTrustDeps
+  input: CaTrustDeps
 ): Promise<CaTrustReport> {
+  const deps = withBudget(input);
   const ca = await readCa(deps);
   const unknownSystem = (detail: string) => ({
     store: null,
@@ -192,13 +218,10 @@ async function macSystemTrust(opts: {
   readonly certificate: X509Certificate;
 }): Promise<CaTrustReport["system"]> {
   const store = MAC_SYSTEM_KEYCHAIN;
-  const listed = await opts.deps.query([
-    "security",
-    "find-certificate",
-    "-a",
-    "-p",
-    store,
-  ]);
+  const listed = await opts.deps.query(
+    ["security", "find-certificate", "-a", "-p", store],
+    { timeoutMs: TRUST_QUERY_TIMEOUT_MS }
+  );
   if (listed.exitCode !== 0) {
     return {
       store,
@@ -215,38 +238,44 @@ async function macSystemTrust(opts: {
         "The System keychain does not hold the current Caddy Local CA (run: hack global trust)",
     };
   }
-  const verified = await opts.deps.query([
-    "security",
-    "verify-cert",
-    "-c",
-    opts.deps.caPath,
-    "-p",
-    "ssl",
-    "-l",
-    "-k",
-    store,
-    "-L",
-    "-q",
-  ]);
-  if (verified.exitCode === 124) {
+  const verified = await opts.deps.query(
+    [
+      "security",
+      "verify-cert",
+      "-c",
+      opts.deps.caPath,
+      "-p",
+      "ssl",
+      "-l",
+      "-k",
+      store,
+      "-L",
+      "-q",
+    ],
+    { timeoutMs: TRUST_QUERY_TIMEOUT_MS }
+  );
+  if (verified.exitCode === 0) {
     return {
       store,
-      state: "unknown",
-      detail: "security verify-cert did not answer in time",
+      state: "trusted",
+      detail: "Trusted for TLS by the System keychain",
     };
   }
-  return verified.exitCode === 0
-    ? {
-        store,
-        state: "trusted",
-        detail: "Trusted for TLS by the System keychain",
-      }
-    : {
-        store,
-        state: "not_trusted",
-        detail:
-          "The System keychain holds the CA but does not trust it for TLS (run: hack global trust)",
-      };
+  // Exit 1 is a completed evaluation that failed; anything else (a timeout,
+  // a launch failure, a signal) is not an answer.
+  if (verified.exitCode === 1) {
+    return {
+      store,
+      state: "not_trusted",
+      detail:
+        "The System keychain holds the CA but does not trust it for TLS (run: hack global trust)",
+    };
+  }
+  return {
+    store,
+    state: "unknown",
+    detail: `security verify-cert gave no answer (exit ${verified.exitCode})`,
+  };
 }
 
 /** Linux: the distribution's system bundle must contain the exact CA. */
@@ -305,9 +334,31 @@ async function linuxNssTrust(opts: {
   if (!host) {
     return [];
   }
-  const candidates = await findNssDatabases(host).catch(() => null);
+  // The same discovery walk as hack global trust, but a directory that
+  // exists and cannot be listed is reported, not taken as empty.
+  const unlisted: string[] = [];
+  const strictHost: LinuxTrustHost = {
+    ...host,
+    listDir: async (path) => {
+      const entries = await opts.deps.listDir(path);
+      if (entries === "unknown") {
+        unlisted.push(path);
+        return [];
+      }
+      return entries;
+    },
+  };
+  const candidates = await findNssDatabases(strictHost).catch(() => null);
+  const results: CaTrustReport["nss"][number][] = [...new Set(unlisted)].map(
+    (dir) => ({
+      db: dir,
+      state: "unknown" as const,
+      detail: "Could not be listed, so NSS databases in it are unknown",
+    })
+  );
   if (candidates === null) {
     return [
+      ...results,
       {
         db: host.homeDir,
         state: "unknown",
@@ -316,7 +367,6 @@ async function linuxNssTrust(opts: {
     ];
   }
   const dbs: string[] = [];
-  const results: CaTrustReport["nss"][number][] = [];
   for (const dir of candidates) {
     const present = await opts.deps.exists(join(dir, "cert9.db"));
     if (present === "unknown") {
@@ -332,8 +382,15 @@ async function linuxNssTrust(opts: {
   if (dbs.length === 0) {
     return results;
   }
+  for (const dbDir of dbs.slice(MAX_NSS_DATABASES)) {
+    results.push({
+      db: dbDir,
+      state: "unknown",
+      detail: `Not inspected: more than ${MAX_NSS_DATABASES} NSS databases`,
+    });
+  }
   const certutil = await host.resolveCommand("certutil").catch(() => null);
-  for (const dbDir of dbs) {
+  for (const dbDir of dbs.slice(0, MAX_NSS_DATABASES)) {
     if (certutil === null) {
       results.push({
         db: dbDir,
@@ -359,7 +416,9 @@ async function nssDbTrust(opts: {
   readonly certificate: X509Certificate;
 }): Promise<CaTrustReport["nss"][number]> {
   const { dbDir } = opts.db;
-  const listed = await opts.deps.query(nssListTrustArgv(opts.db));
+  const listed = await opts.deps.query(nssListTrustArgv(opts.db), {
+    timeoutMs: TRUST_QUERY_TIMEOUT_MS,
+  });
   if (listed.exitCode !== 0) {
     return {
       db: dbDir,
@@ -374,7 +433,9 @@ async function nssDbTrust(opts: {
       detail: "No Hack CA entry with TLS issuer trust (run: hack global trust)",
     };
   }
-  const exported = await opts.deps.query(nssExportArgv(opts.db));
+  const exported = await opts.deps.query(nssExportArgv(opts.db), {
+    timeoutMs: TRUST_QUERY_TIMEOUT_MS,
+  });
   if (exported.exitCode !== 0) {
     return {
       db: dbDir,
@@ -392,14 +453,56 @@ async function nssDbTrust(opts: {
       };
 }
 
+/**
+ * Every boundary under one budget: once it is spent, reads answer
+ * "unreadable"/"unknown" and queries are not started (exit 124), so the
+ * inspection finishes with those parts unknown instead of running on after a
+ * caller's timeout.
+ */
+function withBudget(deps: CaTrustDeps): CaTrustDeps {
+  const deadline = deps.now() + (deps.budgetMs ?? TRUST_INSPECTION_BUDGET_MS);
+  const left = () => deadline - deps.now();
+  return {
+    ...deps,
+    readText: async (path) =>
+      left() > 0 ? await deps.readText(path) : "unreadable",
+    exists: async (path) => (left() > 0 ? await deps.exists(path) : "unknown"),
+    listDir: async (path) =>
+      left() > 0 ? await deps.listDir(path) : "unknown",
+    query: async (argv, opts) => {
+      const remaining = left();
+      if (remaining <= 0) {
+        return { exitCode: NOT_STARTED, stdout: "", stderr: "" };
+      }
+      return await deps.query(argv, {
+        timeoutMs: Math.min(opts.timeoutMs, remaining),
+      });
+    },
+  };
+}
+
 /** Strict reads for the real boundary: only a missing path is "missing". */
 export async function readTextOutcome(
   path: string
 ): Promise<{ readonly text: string } | "missing" | "unreadable"> {
   try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > MAX_TRUST_FILE_BYTES) {
+      return "unreadable";
+    }
     return { text: await readFile(path, "utf8") };
   } catch (error: unknown) {
     return isMissing(error) ? "missing" : "unreadable";
+  }
+}
+
+export async function listDirOutcome(
+  path: string
+): Promise<readonly string[] | "unknown"> {
+  try {
+    return await readdir(path);
+  } catch (error: unknown) {
+    return isMissing(error) ? [] : "unknown";
   }
 }
 

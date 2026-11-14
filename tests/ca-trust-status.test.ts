@@ -17,7 +17,7 @@ import {
 // trusts the local CA, or "unknown". Read-only and bounded: only the
 // queries below are issued, and a failed read is never "not trusted".
 
-const CA_PATH = "/home/u/.hack/caddy/pki/caddy-local-authority.crt";
+const CA_PATH = "/fixture-home/.hack/caddy/pki/caddy-local-authority.crt";
 const NOW = Date.parse("2027-01-01T00:00:00Z");
 const DEBIAN = "ID=ubuntu\nID_LIKE=debian\n";
 const BUNDLE = "/etc/ssl/certs/ca-certificates.crt";
@@ -32,8 +32,13 @@ function deps(opts: {
   readonly answer?: (argv: readonly string[]) => Answer;
   readonly linuxHost?: LinuxTrustHost;
   readonly exists?: Record<string, boolean | "unknown">;
+  /** Directory listings; a path not listed here is absent ([]). */
+  readonly dirs?: Record<string, readonly string[] | "unknown">;
+  /** Simulated time each query takes. */
+  readonly queryMs?: number;
 }): { readonly deps: CaTrustDeps; readonly queries: (readonly string[])[] } {
   const queries: (readonly string[])[] = [];
+  let clock = NOW;
   return {
     queries,
     deps: {
@@ -47,8 +52,10 @@ function deps(opts: {
             : { text: value }
         );
       },
-      query: async (argv) => {
+      query: async (argv, queryOpts) => {
         queries.push(argv);
+        expect(queryOpts.timeoutMs).toBeGreaterThan(0);
+        clock += opts.queryMs ?? 0;
         return await Promise.resolve({
           ...(opts.answer?.(argv) ?? { exitCode: 1, stdout: "" }),
           stderr: "",
@@ -57,7 +64,8 @@ function deps(opts: {
       ...(opts.linuxHost ? { linuxHost: opts.linuxHost } : {}),
       exists: async (path) =>
         await Promise.resolve(opts.exists?.[path] ?? false),
-      now: () => NOW,
+      listDir: async (path) => await Promise.resolve(opts.dirs?.[path] ?? []),
+      now: () => clock,
     },
   };
 }
@@ -131,6 +139,12 @@ test("macOS: the keychain must hold and trust the exact CA; a failed query is un
   expect((await run(listed, { exitCode: 124, stdout: "" })).report.state).toBe(
     "unknown"
   );
+  // A verification that never ran (127) or was killed is not an answer.
+  for (const exitCode of [127, 126, 137]) {
+    expect((await run(listed, { exitCode, stdout: "" })).report.state).toBe(
+      "unknown"
+    );
+  }
 });
 
 test("Linux system store: the distribution's bundle must contain the exact CA", async () => {
@@ -172,15 +186,27 @@ test("Linux system store: the distribution's bundle must contain the exact CA", 
   });
 });
 
+const FIREFOX = "/fixture-home/.mozilla/firefox";
+
+/** Discovery listings for Firefox profiles that each hold cert9.db. */
+function profileDirs(
+  profiles: readonly string[]
+): Record<string, readonly string[]> {
+  return Object.fromEntries([
+    [FIREFOX, [...profiles]],
+    ...profiles.map((p) => [`${FIREFOX}/${p}`, ["cert9.db"]]),
+  ]);
+}
+
 function fakeHost(opts: {
   readonly profiles: readonly string[];
   readonly certutil: string | null;
 }): LinuxTrustHost {
-  const firefox = "/home/u/.mozilla/firefox";
+  const firefox = FIREFOX;
   return {
-    homeDir: "/home/u",
-    configHome: "/home/u/.config",
-    dataHome: "/home/u/.local/share",
+    homeDir: "/fixture-home",
+    configHome: "/fixture-home/.config",
+    dataHome: "/fixture-home/.local/share",
     uid: 1000,
     readFile: async () => await Promise.resolve(null),
     listDir: async (path) =>
@@ -210,7 +236,7 @@ function fakeHost(opts: {
 }
 
 test("Linux NSS: each existing database is listed read-only; trust needs TLS issuer flags and the exact CA", async () => {
-  const profile = "/home/u/.mozilla/firefox/abc.default";
+  const profile = "/fixture-home/.mozilla/firefox/abc.default";
   const listing = (flags: string) => ({
     exitCode: 0,
     stdout: `Certificate Nickname   Trust Attributes\n\nHack Caddy Local CA    ${flags}\n`,
@@ -228,6 +254,7 @@ test("Linux NSS: each existing database is listed read-only; trust needs TLS iss
         "/etc/os-release": DEBIAN,
         [BUNDLE]: CURRENT_CA_PEM,
       },
+      dirs: profileDirs(["abc.default"]),
       linuxHost: fakeHost({
         profiles: ["abc.default"],
         certutil:
@@ -283,6 +310,59 @@ test("Linux NSS: each existing database is listed read-only; trust needs TLS iss
   const none = await run({ list: listing("C,,"), exists: false });
   expect(none.db).toBeUndefined();
   expect(none.queries).toEqual([]);
+});
+
+test("Linux NSS: a directory that cannot be listed is unknown, not an empty discovery", async () => {
+  const { deps: d } = deps({
+    platform: "linux",
+    files: {
+      [CA_PATH]: CURRENT_CA_PEM,
+      "/etc/os-release": DEBIAN,
+      [BUNDLE]: CURRENT_CA_PEM,
+    },
+    dirs: { [FIREFOX]: "unknown" },
+    linuxHost: fakeHost({ profiles: [], certutil: "/usr/bin/certutil" }),
+  });
+  const report = await inspectCaTrust(d);
+  expect(report.system.state).toBe("trusted");
+  expect(report.nss).toContainEqual(
+    expect.objectContaining({ db: FIREFOX, state: "unknown" })
+  );
+  expect(report.state).toBe("unknown");
+});
+
+test("the whole inspection has one budget: no query starts after it, and the report stays complete", async () => {
+  const profiles = Array.from({ length: 20 }, (_v, i) => `p${i}.default`);
+  const { deps: d, queries } = deps({
+    platform: "linux",
+    files: {
+      [CA_PATH]: CURRENT_CA_PEM,
+      "/etc/os-release": DEBIAN,
+      [BUNDLE]: CURRENT_CA_PEM,
+    },
+    dirs: profileDirs(profiles),
+    linuxHost: fakeHost({ profiles, certutil: "/usr/bin/certutil" }),
+    exists: Object.fromEntries(
+      profiles.map((p) => [`${FIREFOX}/${p}/cert9.db`, true])
+    ),
+    // Each query takes 3 s; the budget is 20 s.
+    queryMs: 3000,
+    answer: (argv) =>
+      argv.includes("-a")
+        ? { exitCode: 0, stdout: CURRENT_CA_PEM }
+        : { exitCode: 0, stdout: "Hack Caddy Local CA    C,,\n" },
+  });
+  const report = await inspectCaTrust({ ...d, budgetMs: 20_000 });
+  // 7 queries fit (the 7th starts at 18 s, before the deadline); no more.
+  expect(queries).toHaveLength(7);
+  // Every database is in the report: the first three trusted, the rest
+  // unknown (not reached, or over the 16-database cap).
+  expect(report.nss).toHaveLength(20);
+  expect(report.nss.filter((db) => db.state === "trusted")).toHaveLength(3);
+  expect(
+    report.nss.filter((db) => db.detail.startsWith("Not inspected: more than"))
+  ).toHaveLength(4);
+  expect(report.state).toBe("unknown");
 });
 
 test("other platforms are unknown", async () => {

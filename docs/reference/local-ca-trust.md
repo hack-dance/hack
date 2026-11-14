@@ -18,13 +18,21 @@ administrator password, and never changes a trust store or NSS database.
 | Linux | each NSS database that exists (the shared user database and Chromium/Firefox profiles, as `hack global trust` finds them) | `certutil -d sql:<db> -L`, then `certutil -d sql:<db> -L -n "Hack Caddy Local CA" -a` | 5 s each |
 
 `certutil` is the vetted absolute path `hack global trust` uses; queries run with
-Hack's fixed helper environment.
+Hack's fixed helper environment. `certutil -L` opens databases read-only.
+
+The whole check has a 20 s budget (doctor's own timeout for it is 30 s): no read or
+query starts after it, each query's 5 s deadline is cut to what is left, at most 16
+NSS databases are queried, and files over 32 MiB are not read. Whatever was not
+reached is reported `unknown`, so the report is always complete.
 
 ## Result
 
 Each store is `trusted`, `not_trusted` or `unknown`. Unknown means Hack could not
-tell (a read that failed or timed out, an unrecognised distribution, no
-`certutil`, no exported CA); it is never reported as "not trusted".
+tell (a read that failed or timed out, a directory that could not be listed while
+looking for NSS databases, an unrecognised distribution, no `certutil`, no
+exported CA, a query that could not start, or the budget ran out); it is never
+reported as "not trusted". On macOS only `verify-cert`'s exit 1 (a completed
+evaluation that failed) means not trusted.
 
 - macOS: trusted when the keychain holds the exact exported CA and `verify-cert`
   accepts it for TLS.

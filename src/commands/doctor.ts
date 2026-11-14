@@ -69,9 +69,9 @@ import {
 import {
   type CaTrustReport,
   inspectCaTrust,
+  listDirOutcome,
   pathExistsOutcome,
   readTextOutcome,
-  TRUST_QUERY_TIMEOUT_MS,
 } from "../lib/ca-trust-status.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
@@ -2077,15 +2077,16 @@ export async function checkLocalCaTrust(): Promise<CheckResult> {
     platform: process.platform,
     caPath: getGlobalPaths().caddyCaCert,
     readText: readTextOutcome,
-    query: async (argv) =>
+    query: async (argv, queryOpts) =>
       await exec(argv, {
         stdin: "ignore",
-        timeoutMs: TRUST_QUERY_TIMEOUT_MS,
+        timeoutMs: queryOpts.timeoutMs,
         env: { ...helperEnv.env },
         unsetEnvKeys: helperEnv.unsetEnvKeys,
       }).catch(() => ({ exitCode: 127, stdout: "", stderr: "" })),
     ...(isLinux() ? { linuxHost: createLinuxTrustHost() } : {}),
     exists: pathExistsOutcome,
+    listDir: listDirOutcome,
     now: () => Date.now(),
   });
   return {

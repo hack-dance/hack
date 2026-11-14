@@ -190,30 +190,66 @@ impl CliRunner {
         path: Option<&Path>,
         timeout: Duration,
     ) -> Result<(String, String, Option<i32>), RunError> {
+        self.run_inner(args, path, Some(timeout))
+    }
+
+    /// Run with no deadline from the app: wait until the command exits and
+    /// its output pipes close. For lifecycle commands, whose timeouts the
+    /// CLI owns; terminating them from outside can orphan the detached
+    /// build subprocesses the CLI starts.
+    ///
+    /// # Errors
+    /// Any [`RunError`] except `Timeout`.
+    pub fn run_json_to_completion<T: DeserializeOwned>(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+    ) -> Result<T, RunError> {
+        let (stdout, stderr, code) = self.run_inner(args, path, None)?;
+        let value = parse_result(&stdout, &stderr, code)?;
+        serde_json::from_value(value).map_err(|e| RunError::BadJson {
+            error: e.to_string(),
+            stdout_head: head(&stdout),
+        })
+    }
+
+    fn run_inner(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        timeout: Option<Duration>,
+    ) -> Result<(String, String, Option<i32>), RunError> {
         let mut child = self.spawn(args, path)?;
         let out = read_all(child.stdout.take());
         let err = read_all(child.stderr.take());
-        let deadline = Instant::now() + timeout;
+        let deadline = timeout.map(|t| (Instant::now() + t, t));
         let status = loop {
             match child.try_wait() {
                 Ok(Some(s)) => break s,
-                Ok(None) if Instant::now() >= deadline => {
+                Ok(None) if deadline.is_some_and(|(d, _)| Instant::now() >= d) => {
                     terminate_group(&mut child, self.term_grace);
-                    return Err(RunError::Timeout { after: timeout });
+                    let after = deadline.map_or(Duration::ZERO, |(_, t)| t);
+                    return Err(RunError::Timeout { after });
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(10)),
                 Err(e) => return Err(RunError::Spawn(e.to_string())),
             }
         };
-        // The deadline also covers draining: a descendant that keeps a pipe
+        // A deadline also covers draining: a descendant that keeps a pipe
         // open after `hack` exits must not hold the caller past the timeout.
+        // Without a deadline, wait for the pipes to close.
         let grace = self.term_grace;
-        let drain = |rx: &mpsc::Receiver<String>, child: &mut Child| {
-            let left = deadline.saturating_duration_since(Instant::now());
-            rx.recv_timeout(left).map_err(|_| {
-                terminate_group(child, grace);
-                RunError::Timeout { after: timeout }
-            })
+        let drain = |rx: &mpsc::Receiver<String>, child: &mut Child| match deadline {
+            Some((d, t)) => {
+                let left = d.saturating_duration_since(Instant::now());
+                rx.recv_timeout(left).map_err(|_| {
+                    terminate_group(child, grace);
+                    RunError::Timeout { after: t }
+                })
+            }
+            None => rx
+                .recv()
+                .map_err(|_| RunError::Spawn("output reader stopped".into())),
         };
         let stdout = drain(&out, &mut child)?;
         let mut stderr = drain(&err, &mut child)?;
@@ -672,6 +708,16 @@ while :; do sleep 0.05; done"#,
             .run_json::<Value>(&["up"], None, Duration::from_millis(200));
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn run_to_completion_waits_past_any_short_deadline() {
+        // Takes longer than a short timeout would allow, and still succeeds.
+        let f = FakeHack::new("sleep 1; echo '{\"ok\":true,\"data\":{\"action\":\"up\"}}'");
+        let started = Instant::now();
+        let r: Value = f.runner().run_json_to_completion(&["up"], None).unwrap();
+        assert_eq!(r["action"], "up");
+        assert!(started.elapsed() >= Duration::from_millis(900));
     }
 
     #[test]

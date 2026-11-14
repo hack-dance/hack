@@ -1488,30 +1488,31 @@ test("unclassified upgrade errors keep a fixed failing step and never echo the e
   expect(JSON.stringify(report)).not.toContain(SENTINEL);
 });
 
-test.skipIf(process.getuid?.() === 0)(
-  "an unreadable regular env layer has the same named refusal",
-  async () => {
-    const project = await liveProject("unreadable-layer");
-    const layer = "hack.env.dev.local.yaml";
-    const path = join(project.projectDir, layer);
-    await writeFile(path, SENTINEL, { mode: 0o000 });
-    await writeRegistry([project]);
-    try {
-      const report = await check(healthyProbes());
-      const finding = report.projects[0]?.findings.find(
-        (item) => item.id === "env-format"
-      );
-      expect(finding?.diagnostic).toEqual({
-        code: "env-layer-refused",
-        step: "env-format",
-        layer,
-      });
-      expect(JSON.stringify(report)).not.toContain(SENTINEL);
-    } finally {
-      await chmod(path, 0o600);
+for (const layer of ["hack.env.dev.local.yaml", "HACK.ENV.DEV.LOCAL.YAML"]) {
+  test.skipIf(process.getuid?.() === 0)(
+    `an unreadable regular env layer ${layer} has the same named refusal`,
+    async () => {
+      const project = await liveProject("unreadable-layer");
+      const path = join(project.projectDir, layer);
+      await writeFile(path, SENTINEL, { mode: 0o000 });
+      await writeRegistry([project]);
+      try {
+        const report = await check(healthyProbes());
+        const finding = report.projects[0]?.findings.find(
+          (item) => item.id === "env-format"
+        );
+        expect(finding?.diagnostic).toEqual({
+          code: "env-layer-refused",
+          step: "env-format",
+          layer,
+        });
+        expect(JSON.stringify(report)).not.toContain(SENTINEL);
+      } finally {
+        await chmod(path, 0o600);
+      }
     }
-  }
-);
+  );
+}
 
 async function cli(args: readonly string[]) {
   const child = Bun.spawn([process.execPath, ENTRYPOINT, ...args], {

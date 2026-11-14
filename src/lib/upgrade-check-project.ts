@@ -296,10 +296,11 @@ export async function detectEnvFormats(opts: {
 /** Readability-only preflight after the env owner admits paths; never read layer bytes. */
 async function assertReadableEnvLayers(projectDir: string): Promise<void> {
   for (const name of await readdir(projectDir)) {
+    const canonicalName = name.toLowerCase();
     if (
       !(
-        name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
-        name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+        canonicalName.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        canonicalName.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
       )
     ) {
       continue;

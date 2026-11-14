@@ -615,7 +615,13 @@ both the main file and what systemd has loaded: the single loaded `ExecStart`
 (drop-ins included, read with `systemctl --user show`) must be this CLI's
 executable by file identity. A drop-in that runs another `hack` keeps the
 daemon as it is (`blocked: "other-program"`). A loaded `ExecStart` that cannot
-be read (none, or several) keeps it too (`blocked: "unproven-owner"`).
+be read (none, or several) keeps it too (`blocked: "unproven-owner"`). This
+check gates every automatic restart, whatever asked for it: a version mismatch,
+a pending-restart marker (which then stays), or a rewrite. Retargeting a
+missing program, or rewriting the unit, changes what systemd loads, so the
+loaded `ExecStart` is read again after the `daemon-reload` and before the
+restart. A retained drop-in that still selects another program stops the
+restart there.
 
 Before such a restart, and again just before it lands, `start` proves that the
 unit's live main process is this home's hackd. This is the same proof `stop`

@@ -5282,3 +5282,90 @@ linuxTest(
     expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
   }
 );
+
+// Review round 14 (HACK-2216): the loaded-executable gate is in front of
+// every automatic restart.
+
+const restartMarker = () =>
+  join(root, ".hack", "daemon", "hackd.service.restart-pending");
+
+async function writeRestartMarkerFile(): Promise<void> {
+  await mkdir(join(root, ".hack", "daemon"), { recursive: true });
+  await writeFile(
+    restartMarker(),
+    "restart hackd.service to load its new unit\n"
+  );
+}
+
+linuxTest(
+  "a pending restart marker does not restart a daemon whose loaded ExecStart is another hack",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    await writeRestartMarkerFile();
+    const other = join(root, "bin", "hack-older");
+    await writeFile(other, "#!/bin/sh\n");
+    await chmod(other, 0o755);
+    withLoadedExec(fake, () => [execStart(other)]);
+    fake.calls.length = 0;
+
+    const hooks = runningHooks(fake, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBeNull();
+    expect(hooks.trace.blocked).toBe("other-program");
+    expect(hooks.trace.action).toBe("none");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(await Bun.file(restartMarker()).exists()).toBe(true);
+  }
+);
+
+linuxTest(
+  "a pending restart marker does not restart a daemon whose loaded ExecStart is unreadable",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    await writeRestartMarkerFile();
+    withLoadedExec(fake, () => [execStart(program), execStart(program)]);
+    fake.calls.length = 0;
+
+    const hooks = runningHooks(fake, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBeNull();
+    expect(hooks.trace.blocked).toBe("unproven-owner");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(await Bun.file(restartMarker()).exists()).toBe(true);
+  }
+);
+
+linuxTest(
+  "a missing main program with a retained ExecStart drop-in is not restarted after the reload",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    const old = await writeOldUnit(fake);
+    await rm(old);
+    // A retained drop-in overrides ExecStart with another existing hack:
+    // retargeting the main file leaves systemd running that one.
+    const other = join(root, "bin", "hack-older");
+    await writeFile(other, "#!/bin/sh\n");
+    await chmod(other, 0o755);
+    withLoadedExec(fake, () => [execStart(other)]);
+    fake.calls.length = 0;
+
+    const hooks = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    // The retarget and its reload ran; the restart did not.
+    expect(await readFile(unitPath, "utf8")).toContain(
+      `ExecStart="${program}" daemon start --foreground`
+    );
+    expect(fake.calls).toContain("systemctl --user daemon-reload");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(hooks.trace.blocked).toBe("other-program");
+    expect(await Bun.file(restartMarker()).exists()).toBe(true);
+  }
+);

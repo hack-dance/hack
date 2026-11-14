@@ -449,10 +449,13 @@ export async function reconcileRunningSystemdDaemon(
     invokerInsideService: invoker !== "outside",
     cliVersion: hooks.cliVersion ?? DAEMON_CLI_VERSION,
   });
-  const plan =
-    loaded === "unknown" && planned.blocked !== null
-      ? { ...planned, blocked: "unproven-owner" as const }
-      : planned;
+  const plan = gateRestartOnLoadedProgram({
+    plan:
+      loaded === "unknown" && planned.blocked !== null
+        ? { ...planned, blocked: "unproven-owner" as const }
+        : planned,
+    loaded,
+  });
   recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
   if (plan.service === "keep") {
     noteKeptStaleUnit({ plan });
@@ -653,6 +656,9 @@ function describeRunningRefusal(opts: {
   if (plan.blocked === "read-only") {
     return `${describeMissingProgram(status)}; not changing the service here | Run: hack daemon install`;
   }
+  if (plan.blocked === "unproven-owner") {
+    return `hackd (pid ${opts.pid}) is incompatible with this CLI, but the program systemd has loaded for ${SYSTEMD_UNIT_NAME} cannot be read, so a restart is not known to run this version | Check: systemctl --user cat ${SYSTEMD_UNIT_NAME}; then run: hack daemon install`;
+  }
   if (plan.blocked === "unknown-program" || status.program === null) {
     return `hackd (pid ${opts.pid}) is incompatible with this CLI, and ${SYSTEMD_UNIT_NAME} has an ExecStart hack does not read, so a restart is not known to run this version | Check: systemctl --user cat ${SYSTEMD_UNIT_NAME}; to switch it to this hack, run: hack daemon install`;
   }
@@ -728,6 +734,11 @@ async function restartReconciledUnit(opts: {
   if (blocked !== null) {
     logger.error({ message: blocked });
     return 1;
+  }
+  // After any rewrite and reload: what systemd will run must be this CLI.
+  const unexpected = await refuseUnexpectedLoadedProgram({ hooks, deps });
+  if (unexpected !== null) {
+    return unexpected;
   }
   const unproven = await proveOwnershipBeforeRestart({
     hooks,
@@ -954,6 +965,66 @@ async function unitRunsExpected(opts: {
     return false;
   }
   return await isSameExecutableFile(status.program, expected.hackBinPath);
+}
+
+/**
+ * The loaded-executable gate in front of every automatic restart
+ * (HACK-2216), whatever led to it (a version mismatch, a pending-restart
+ * marker, a rewrite): the program systemd has loaded must be this CLI's.
+ * `other` keeps the daemon (`other-program`), `unknown` too
+ * (`unproven-owner`); a version mismatch is then refused instead. The
+ * restart-pending marker is left in place. A program retarget is the one
+ * exception here, since the loaded copy still names the missing program;
+ * its result is checked after the reload instead
+ * ({@link refuseUnexpectedLoadedProgram}), as every restart is.
+ */
+function gateRestartOnLoadedProgram(opts: {
+  readonly plan: DaemonReconcilePlan;
+  readonly loaded: "ours" | "other" | "unknown";
+}): DaemonReconcilePlan {
+  const { plan, loaded } = opts;
+  if (
+    plan.service !== "restart" ||
+    plan.rewrite === "program" ||
+    loaded === "ours"
+  ) {
+    return plan;
+  }
+  return {
+    rewrite: "none",
+    service: plan.reasons.includes("version-mismatch") ? "refuse" : "keep",
+    reasons: plan.reasons,
+    blocked: loaded === "unknown" ? "unproven-owner" : "other-program",
+  };
+}
+
+/**
+ * Just before an automatic restart, after any rewrite and reload: the
+ * program systemd has loaded now must be this CLI's executable, or the
+ * restart would run another one (a retained drop-in can override the
+ * rewritten ExecStart). Returns 1 (reported, marker kept, nothing
+ * restarted) or null to go on.
+ */
+async function refuseUnexpectedLoadedProgram(opts: {
+  readonly hooks: Pick<SystemdCommandHooks, "trace" | "resolveExpected">;
+  readonly deps: SystemdDeps;
+}): Promise<number | null> {
+  const expected = await (
+    opts.hooks.resolveExpected ?? resolveExpectedSystemdUnit
+  )();
+  const loaded = await loadedProgramIsExpected({ deps: opts.deps, expected });
+  if (loaded === "ours") {
+    return null;
+  }
+  const blocked = loaded === "unknown" ? "unproven-owner" : "other-program";
+  if (opts.hooks.trace) {
+    opts.hooks.trace.action = "none";
+    opts.hooks.trace.blocked = blocked;
+  }
+  logger.warn({
+    message: `Not restarting ${SYSTEMD_UNIT_NAME}: the program systemd has loaded for it ${loaded === "unknown" ? "cannot be read" : "is not this hack (a drop-in overrides ExecStart)"}, so a restart would not run this version | Check: systemctl --user cat ${SYSTEMD_UNIT_NAME}; then run: hack daemon install`,
+  });
+  return 1;
 }
 
 /**

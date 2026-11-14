@@ -111,6 +111,8 @@ calls receive an explicit live environment with inherited `TMUX` removed and
 a registered private `TMUX_TMPDIR`, even when a caller supplies a minimal env.
 Scripts therefore inherit isolation too; a script that deliberately resets its
 environment or names an explicit socket must maintain that isolation itself.
+`Bun.$` uses the live environment by default, but an explicit `.env(...)` is
+not wrapped: supply the private `TMUX_TMPDIR` in that object too.
 The fixed `/usr/bin/env -0` native-state probe remains unwrapped so the global
 state guard can still detect Bun's stale native environment. Tmux cleanup is
 registered last, after the checkout guard has finished spawning Git children.

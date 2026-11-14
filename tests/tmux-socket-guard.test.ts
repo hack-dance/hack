@@ -27,6 +27,44 @@ import {
 const childEnvironmentScript =
   "process.stdout.write(JSON.stringify({root:process.env.TMUX_TMPDIR,tmux:process.env.TMUX??null}))";
 
+test("Node spawn overloads keep third-argument options with null or undefined argv", async () => {
+  for (const argv of [undefined, null]) {
+    // Node supports these runtime overloads even though the type declarations
+    // do not include null argv. Reflect calls the actual exported API.
+    const result: ReturnType<typeof spawnSync> = Reflect.apply(
+      spawnSync,
+      undefined,
+      [
+        "pwd",
+        argv,
+        {
+          cwd: "/",
+          encoding: "utf8",
+          env: { PATH: process.env.PATH },
+          timeout: 1000,
+        },
+      ]
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout.toString()).toBe("/\n");
+    const child: ReturnType<typeof spawn> = Reflect.apply(spawn, undefined, [
+      "pwd",
+      argv,
+      { cwd: "/", env: { PATH: process.env.PATH }, stdio: "pipe" },
+    ]);
+    if (!child.stdout) {
+      throw new Error("Expected piped spawn output");
+    }
+    let output = "";
+    child.stdout.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    const [status] = await once(child, "close");
+    expect(status).toBe(0);
+    expect(output).toBe("/\n");
+  }
+});
+
 test("Bun and Node children receive private sockets with omitted or minimal envs", async () => {
   const mux = privateTmux();
   const root = process.env.TMUX_TMPDIR ?? "";

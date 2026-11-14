@@ -144,7 +144,7 @@ function installNodeChildIsolation(): void {
     const original = childProcess[key];
     const guarded = function (this: unknown, ...args: unknown[]) {
       const shell = key === "exec" || key === "execSync";
-      const index = !shell && Array.isArray(args[1]) ? 2 : 1;
+      const index = nodeOptionsIndex({ shell, args });
       const value = args[index];
       const options =
         typeof value === "object" && value !== null
@@ -163,6 +163,13 @@ function installNodeChildIsolation(): void {
     Object.assign(childProcess, { [key]: guarded });
   }
   syncBuiltinESMExports();
+}
+
+function nodeOptionsIndex(opts: { shell: boolean; args: unknown[] }): number {
+  const hasArgvSlot =
+    Array.isArray(opts.args[1]) ||
+    (opts.args[1] == null && opts.args.length > 2);
+  return !opts.shell && hasArgvSlot ? 2 : 1;
 }
 
 function validateNodeCommand(opts: {

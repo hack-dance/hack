@@ -24,7 +24,8 @@ const optActivityProject = defineOption({
   type: "string",
   long: "--project",
   valueHint: "<name>",
-  description: "Only entries for this registered project name",
+  description:
+    "Only entries for this project name (canonical-name aliases accepted)",
 } as const);
 
 const optLimit = defineOption({

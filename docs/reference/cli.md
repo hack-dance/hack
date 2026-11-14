@@ -583,7 +583,7 @@ hack activity [options]
 | Option | Description |
 | --- | --- |
 | `--json` | Output JSON (machine-readable) |
-| `--project <name>` | Only entries for this registered project name |
+| `--project <name>` | Only entries for this project name (canonical-name aliases accepted) |
 | `--limit <n>` | Most entries to show, newest first (default 50, at most 10000) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

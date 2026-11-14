@@ -391,6 +391,27 @@ test("the recorded project is the registered name: selector aliases and linked w
     expect(await name({ cwd: join(worktree, "src") })).toBe("my-app");
     expect(await name({ path: worktree })).toBe("my-app");
     expect(await name({ cwd: join(root, "elsewhere") })).toBeNull();
+    await recordActivity({
+      action: "up",
+      project: () => name({ project: "My_App" }),
+      run: () => Promise.resolve(0),
+    });
+    expect(
+      (await readActivity({ project: "My_App", limit: 10 })).map(
+        (entry) => entry.project
+      )
+    ).toEqual(["my-app"]);
+    // History remains selectable after the project leaves the registry.
+    await writeFile(
+      join(home, "projects.json"),
+      JSON.stringify({ version: 1, projects: [] })
+    );
+    expect(
+      (await readActivity({ project: "My_App", limit: 10 })).map(
+        (entry) => entry.project
+      )
+    ).toEqual(["my-app"]);
+    expect(await readActivity({ project: "", limit: 10 })).toEqual([]);
   } finally {
     restoreEnv("HACK_HOME", savedHome);
   }

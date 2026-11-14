@@ -432,6 +432,10 @@ export async function readActivity(opts: {
   /** Tests only: runs after the current file is opened, before the kept one. */
   readonly betweenOpens?: () => Promise<void>;
 }): Promise<readonly ActivityRecord[]> {
+  const project =
+    opts.project === undefined
+      ? undefined
+      : normalizeProjectName(opts.project.trim());
   const path = opts.path ?? resolveActivityPath();
   const [current, kept] = await openGenerations({
     path,
@@ -442,7 +446,12 @@ export async function readActivity(opts: {
     const records = parseActivityText(text);
     for (let i = records.length - 1; i >= 0; i -= 1) {
       const record = records[i] as ActivityRecord;
-      if (opts.project !== undefined && record.project !== opts.project) {
+      if (
+        project !== undefined &&
+        (project === null ||
+          record.project === null ||
+          normalizeProjectName(record.project) !== project)
+      ) {
         continue;
       }
       out.push(record);

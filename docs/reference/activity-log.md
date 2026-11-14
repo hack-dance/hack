@@ -13,7 +13,9 @@ hack activity                                   # newest first, 50 entries
 hack activity --json --project shop --limit 100
 ```
 
-- `--project <name>`: only entries for this registered project name.
+- `--project <name>`: only entries for this project name, accepting the same
+  canonical-name aliases as lifecycle commands (`My_App` matches `my-app`).
+  Historical entries remain selectable after a project leaves the registry.
 - `--limit <n>`: at most `n` entries, newest first (default 50, at most
   10,000).
 - `--json`: the standard envelope, `{"ok": true, "data": {"version": 1,

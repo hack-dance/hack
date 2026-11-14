@@ -1601,11 +1601,6 @@ function getRegistryPath(): string {
   );
 }
 
-/** Resolve the machine registry shared by intent, login admission and foreground command locks. */
-export function resolveProjectsRegistryPath(): string {
-  return getRegistryPath();
-}
-
 function getRegistryLockPath(): string {
   return resolve(resolveGlobalRegistryRoot(), REGISTRY_LOCK_FILENAME);
 }

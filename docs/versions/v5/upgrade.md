@@ -43,7 +43,9 @@ offered as Run. Host changes and decisions still need review.
    and copies the files.
 2. **Stop saved zellij lifecycle sessions before switching to v5.** Keep zellij
    installed and use retained v4 `command hack down` for each affected project.
-   Confirm the lifecycle processes stopped. Next.17 requires tmux; remove
+   Confirm the lifecycle processes stopped, then take a **fresh backup** with the
+   step 1 procedure. Keep the earlier copy too; use the stopped-state backup for
+   rollback so it does not restore live zellij state. Next.17 requires tmux; remove
    `sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij`, or select `tmux`.
    Changing the setting alone does not clear saved state. See the
    [stop procedure](guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed).

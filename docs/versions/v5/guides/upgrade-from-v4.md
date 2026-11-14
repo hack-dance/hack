@@ -78,7 +78,9 @@ Install tmux, then remove the setting and override or set the mode to `tmux`;
 After backing up, **before switching a project that used zellij lifecycle
 processes**, keep zellij installed and use the retained v4 CLI to run `hack down`
 for that project. Confirm its lifecycle processes stopped. If already upgraded,
-use the retained v4 CLI for that stop first. Saved zellij lifecycle state blocks
+use the retained v4 CLI for that stop first. Then take a fresh private backup
+using the procedure below, keeping the earlier copy. Use the stopped-state copy
+for rollback so it does not restore live zellij state. Saved zellij lifecycle state blocks
 v5 start, restart and down: v5 cannot verify or stop it. Changing the setting
 alone does not clear saved state. Do not delete or edit managed state files.
 A leftover zellij setting also makes `hack global install` fail; fix it before

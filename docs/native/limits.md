@@ -88,11 +88,12 @@ Details and the exact checks:
   mount a named volume at that path, for example `redis-data:/data`. Without one
   the project refuses with `graph_image_volume_uncovered`. A bind mount or a
   read-only mount there does not count.
-- **Stopping with Ctrl-C.** Next.16 can leave a foreground project with published
-  ports behind. Next.17 retries transient retirement reads and waits for proved
-  command retirement; a second Ctrl-C can request its forced command-group stop.
-  Unknown cleanup still retains evidence. Use `hack down` from another terminal
-  and follow the named recovery instructions rather than deleting state.
+- **Stopping with Ctrl-C.** The native publisher-shutdown fix (HACK-2087, #719)
+  already shipped in next.16. Next.17 adds lifecycle-command retirement fixes
+  (HACK-2184): transient reads retry, cleanup waits for proved command retirement,
+  and a second Ctrl-C can request the forced command-group stop. Unknown cleanup
+  still retains evidence. Use `hack down` from another terminal, then
+  `hack down --recover` if it reports the owner is gone; do not delete state.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

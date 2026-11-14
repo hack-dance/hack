@@ -94,7 +94,7 @@ Terminal stdin and stdout are required; redirects or `HACK_NO_INTERACTIVE=1`
 select finite exec. Use the matching runtime, and restart old managed-env
 launchers if requested. After an uncertain outcome, inspect
 `"$CANDIDATE" exec-sessions` and follow the
-[recovery instructions](full-reference.md#normal-native-exec).
+[next.17 source recovery instructions](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/native-candidate.md#normal-native-exec).
 
 Stop with the **same version and native home**:
 

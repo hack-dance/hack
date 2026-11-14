@@ -392,6 +392,18 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** Values after "Link N (name):" in `resolvectl dns|domain|default-route LINK`. */
+/**
+ * Whether `resolvectl <verb> -- <link>` output is a recognizable per-link
+ * answer (a `Link N (name):` line), even with no values. Observe-only reads
+ * use it to tell a valid empty list from output they cannot read.
+ */
+export function isResolvectlLinkAnswer(output: string): boolean {
+  return output
+    .split("\n")
+    .map((entry) => entry.trim())
+    .some((entry) => entry.startsWith("Link ") && entry.includes("):"));
+}
+
 export function parseResolvectlLinkValues(output: string): readonly string[] {
   const line = output
     .split("\n")

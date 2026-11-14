@@ -298,6 +298,7 @@ async function invoke(
       PATH: "/usr/bin:/bin",
       HOME: home,
       HACK_LOGGER: "console",
+      HACK_DAEMON_AUTOSTART_DISABLE: "1",
       AWS_SECRET_ACCESS_KEY: sentinel,
       ...extraEnv,
     },

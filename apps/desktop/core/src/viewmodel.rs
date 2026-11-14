@@ -60,6 +60,9 @@ pub struct ListView {
     pub running: Vec<Row>,
     pub stopped: Vec<Row>,
     pub doctor_count: usize,
+    /// Doctor results exist in this snapshot. Until then the Doctor row is
+    /// unknown (grey), never "no findings" (green).
+    pub doctor_known: bool,
     pub cli_version: Option<String>,
     /// Counts by state for the status bar; unknown is never "stopped".
     pub counts: Counts,
@@ -296,6 +299,7 @@ impl AppModel {
             banners,
             running,
             stopped,
+            doctor_known: self.snapshot.as_ref().is_some_and(|s| s.doctor.is_some()),
             doctor_count: self
                 .snapshot
                 .as_ref()
@@ -403,6 +407,18 @@ mod tests {
         assert!(v.running[0].selected, "first running project selected");
         assert!(v.running[0].always_on);
         assert_eq!(v.doctor_count, 1);
+        assert!(v.doctor_known);
+    }
+
+    #[test]
+    fn doctor_is_unknown_until_it_has_run() {
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        snap.doctor = None; // live snapshots carry no doctor results
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap)));
+        let v = m.list();
+        assert!(!v.doctor_known);
+        assert_eq!(v.doctor_count, 0);
     }
 
     #[test]

@@ -291,10 +291,11 @@ impl HackApp {
                 .child(machine_row(
                     "Doctor",
                     (list.doctor_count > 0).then_some(list.doctor_count),
-                    match (&list.cli_version, list.doctor_count) {
-                        (None, _) => t.muted_foreground,
-                        (Some(_), 0) => t.success,
-                        (Some(_), _) => t.warning,
+                    // Unknown until Doctor has actually reported.
+                    match (list.doctor_known, list.doctor_count) {
+                        (false, _) => t.muted_foreground,
+                        (true, 0) => t.success,
+                        (true, _) => t.warning,
                     },
                 )),
         )

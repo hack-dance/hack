@@ -98,6 +98,7 @@ function trustDeps(overrides: Partial<TrustPlanDeps>): TrustPlanDeps {
     linuxHost: linuxHost({ bundle: OLD_CA_PEM }),
     prepareLinux: prepareLinuxSystemTrust,
     dockerAnswers: async () => await Promise.resolve(false),
+    readExportSource: async () => await Promise.resolve("none" as const),
     prepareMac: prepareMacTrust,
     explicitlyNonInteractive: () => false,
     ...overrides,
@@ -306,4 +307,94 @@ test("macOS: the plan lists the keychain step (and the sudo probe when non-inter
     macDeps({ trusted: true, nonInteractive: false, recorded: none })
   );
   expect(none).toEqual({ probe: [], root: [] });
+});
+
+test("macOS: the keychain phase is decided only for a CA known now; otherwise it is blocked, and an ineligible CA refuses", async () => {
+  const untrusted = async (opts: { readonly certPath: string }) =>
+    await prepareMacTrust({
+      ...opts,
+      checkTrust: async () =>
+        await Promise.resolve({ trusted: false, installable: true }),
+    });
+  const mac = (overrides: Partial<TrustPlanDeps>) =>
+    trustDeps({ platform: "darwin", prepareMac: untrusted, ...overrides });
+
+  // Docker answers and the Compose-selected Caddy holds a different CA than
+  // the export: the run trusts that one, so the phase is blocked (no root
+  // argv), not decided from the old file.
+  const differs = await planGlobalTrust(
+    mac({
+      dockerAnswers: async () => await Promise.resolve(true),
+      readExportSource: async () => await Promise.resolve({ pem: OLD_CA_PEM }),
+    })
+  );
+  expect(differs).toMatchObject({ complete: false, refused: null });
+  expect(rootSteps(differs)).toEqual([]);
+  expect(differs.steps[0]).toMatchObject({
+    id: "export-ca",
+    privilege: "user",
+  });
+
+  // The same CA: the export does not change it, and the phase is decided.
+  const same = await planGlobalTrust(
+    mac({
+      dockerAnswers: async () => await Promise.resolve(true),
+      readExportSource: async () =>
+        await Promise.resolve({ pem: CURRENT_CA_PEM }),
+    })
+  );
+  expect(same.complete).toBe(true);
+  expect(rootSteps(same).map((step) => step.argv)).toEqual([
+    [...macTrustAddArgv(CERT)],
+  ]);
+
+  // The Caddy's CA could not be read: blocked.
+  const unreadable = await planGlobalTrust(
+    mac({
+      dockerAnswers: async () => await Promise.resolve(true),
+      readExportSource: async () => await Promise.resolve("unknown" as const),
+    })
+  );
+  expect(unreadable.complete).toBe(false);
+  expect(rootSteps(unreadable)).toEqual([]);
+
+  // Cold host: no export and Docker down. The run starts Docker and exports
+  // first; the keychain phase is blocked.
+  const cold = await planGlobalTrust(
+    mac({ readExport: async () => await Promise.resolve(null) })
+  );
+  expect(cold.complete).toBe(false);
+  expect(cold.steps[0]).toMatchObject({ id: "start-docker" });
+  expect(rootSteps(cold)).toEqual([]);
+
+  // Docker answers, no single Caddy container and no export: the run has
+  // no CA and fails.
+  const none = await planGlobalTrust(
+    mac({
+      dockerAnswers: async () => await Promise.resolve(true),
+      readExport: async () => await Promise.resolve(null),
+    })
+  );
+  expect(none.refused).not.toBeNull();
+
+  // An ineligible CA (expired, malformed) is refused, as the run exits 1.
+  const ineligible = await planGlobalTrust(
+    mac({
+      prepareMac: async (opts) =>
+        await prepareMacTrust({
+          ...opts,
+          checkTrust: async () =>
+            await Promise.resolve({
+              trusted: false,
+              installable: false,
+              issue: "Current Caddy Local CA has expired at the current time",
+            }),
+        }),
+    })
+  );
+  expect(ineligible).toMatchObject({
+    refused: "Current Caddy Local CA has expired at the current time",
+    complete: false,
+    steps: [],
+  });
 });

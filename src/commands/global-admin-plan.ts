@@ -33,7 +33,6 @@ import { trustedSudoInvocation } from "../lib/privileged-sudo.ts";
 import {
   MAC_SUDO_PROBE_ARGV,
   type MacTrustCheck,
-  macTrustAddArgv,
   type PreparedMacTrust,
 } from "./global-mac-trust.ts";
 
@@ -155,6 +154,16 @@ export type TrustPlanDeps = {
   }) => Promise<PreparedLinuxSystemTrust>;
   /** macOS: whether `docker info` answers (bounded). */
   readonly dockerAnswers: () => Promise<boolean>;
+  /**
+   * macOS, Docker answering: the CA the run's export would copy, selected
+   * the way the export selects Caddy (the installed Compose file's `caddy`
+   * service) and read without writing: its PEM; "none" when the export
+   * would keep the current file (no single Caddy container); "unknown" when
+   * it could not be read.
+   */
+  readonly readExportSource: () => Promise<
+    { readonly pem: string } | "none" | "unknown"
+  >;
   readonly prepareMac: (opts: {
     readonly certPath: string;
     readonly checkTrust?: (input: {
@@ -332,37 +341,97 @@ async function planLinuxTrust(deps: TrustPlanDeps): Promise<AdminPlan> {
 const MAC_TRUST_CONFIRM =
   "after the keychain trust prompt; a non-interactive run accepts it";
 
+/**
+ * Which CA file the macOS run will trust, as the run decides it: Docker
+ * answering means it first copies the CA from the Compose-selected Caddy
+ * (keeping the current file when there is no single container); otherwise
+ * it uses the current export, or starts Docker when there is none. Only a
+ * CA known now (the current file, unchanged by the copy) decides the
+ * keychain phase; anything else leaves it blocked.
+ */
+async function macTrustCa(deps: TrustPlanDeps): Promise<{
+  readonly steps: readonly StepInput[];
+  readonly unresolved: string | null;
+  readonly exported: string | null;
+}> {
+  const exported = await deps.readExport();
+  if (await deps.dockerAnswers()) {
+    const copy = userStep(
+      "export-ca",
+      `Copy the CA of the Caddy in the installed Compose stack to ${deps.certPath} (docker cp)`,
+      "always (Docker is running)"
+    );
+    const source = await deps.readExportSource();
+    if (source === "unknown") {
+      return {
+        steps: [copy],
+        exported,
+        unresolved: "The running Caddy's CA could not be read",
+      };
+    }
+    if (source !== "none" && source.pem !== exported) {
+      return {
+        steps: [copy],
+        exported,
+        unresolved:
+          "The run first replaces the export with a different CA from the running Caddy; the keychain step is decided for that CA during the run",
+      };
+    }
+    return { steps: [copy], exported, unresolved: null };
+  }
+  if (exported === null) {
+    return {
+      steps: [
+        userStep(
+          "start-docker",
+          "Start the Docker backend, then copy the running Caddy's CA",
+          "always (no exported CA and Docker is not running)"
+        ),
+      ],
+      exported,
+      unresolved:
+        "There is no exported CA yet; the run starts Docker and exports it first",
+    };
+  }
+  return { steps: [], exported, unresolved: null };
+}
+
 async function planMacTrust(deps: TrustPlanDeps): Promise<AdminPlan> {
   const base = { command: "trust", platform: "darwin" } as const;
-  const steps: StepInput[] = [];
-  const exported = await deps.readExport();
-  const docker = await deps.dockerAnswers();
-  let decided: PreparedMacTrust | null = null;
-  if (docker) {
-    steps.push(
-      userStep(
-        "export-ca",
-        `Copy the running Caddy's CA to ${deps.certPath} (docker cp)`,
-        "always (Docker is running)"
-      )
-    );
-    const identity = await deps.inspectIdentity();
-    // Unchanged by the export: the current file decides.
-    if (identity.state === "current" && exported !== null) {
-      decided = await deps.prepareMac({ certPath: deps.certPath });
-    }
-  } else if (exported !== null) {
-    decided = await deps.prepareMac({ certPath: deps.certPath });
-  } else {
-    steps.push(
-      userStep(
-        "start-docker",
-        "Start the Docker backend, then copy the running Caddy's CA",
-        "always (no exported CA and Docker is not running)"
-      )
-    );
+  const resolved = await macTrustCa(deps);
+  const steps: StepInput[] = [...resolved.steps];
+  const hostEnv = userStep(
+    "host-tls-env",
+    "Write Hack's host trust bundle and env script, and set them for launchd (launchctl setenv)",
+    "when the CA is eligible"
+  );
+  if (resolved.unresolved !== null) {
+    return plan({
+      ...base,
+      blocked: [
+        {
+          phase: "keychain trust",
+          reason: resolved.unresolved,
+          prerequisite:
+            "hack global up (so the running Caddy's CA is exported), then plan again",
+        },
+      ],
+      steps: [...steps, hostEnv],
+    });
   }
-  if (decided?.status === "trusted") {
+  if (resolved.exported === null) {
+    // Docker answered but the export would keep a missing file.
+    return plan({
+      ...base,
+      refused:
+        "No exported Caddy Local CA and no Caddy container to copy it from",
+    });
+  }
+  const decided = await deps.prepareMac({ certPath: deps.certPath });
+  if (decided.status === "ineligible") {
+    return plan({ ...base, refused: decided.issue });
+  }
+  if (decided.status === "trusted") {
     steps.push(
       userStep(
         "keychain-trust",
@@ -370,19 +439,7 @@ async function planMacTrust(deps: TrustPlanDeps): Promise<AdminPlan> {
         "always"
       )
     );
-  } else if (decided?.status === "ineligible") {
-    steps.push(
-      userStep(
-        "keychain-trust",
-        `${decided.issue}; no root step runs`,
-        "always"
-      )
-    );
   } else {
-    const conditional = decided === null;
-    const when = conditional
-      ? `${MAC_TRUST_CONFIRM}, if the CA it then reads is not already trusted`
-      : MAC_TRUST_CONFIRM;
     if (deps.explicitlyNonInteractive()) {
       steps.push(
         rootStep({
@@ -390,7 +447,7 @@ async function planMacTrust(deps: TrustPlanDeps): Promise<AdminPlan> {
           description:
             "Check that sudo needs no password (stdin ignored); otherwise the keychain step is skipped",
           argv: MAC_SUDO_PROBE_ARGV,
-          when,
+          when: MAC_TRUST_CONFIRM,
           gates: "keychain-trust",
         })
       );
@@ -400,21 +457,11 @@ async function planMacTrust(deps: TrustPlanDeps): Promise<AdminPlan> {
         id: "keychain-trust",
         description:
           "Trust the exported CA for TLS in the macOS System keychain",
-        // The same builder prepareMacTrust uses for the step it prepares.
-        argv:
-          decided?.status === "ready"
-            ? decided.argv
-            : macTrustAddArgv(deps.certPath),
-        when,
+        argv: decided.argv,
+        when: MAC_TRUST_CONFIRM,
       })
     );
   }
-  steps.push(
-    userStep(
-      "host-tls-env",
-      "Write Hack's host trust bundle and env script, and set them for launchd (launchctl setenv)",
-      "when the CA is eligible"
-    )
-  );
+  steps.push(hostEnv);
   return plan({ ...base, steps });
 }

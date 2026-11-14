@@ -143,7 +143,7 @@ function matchesRunningCaddy(
  * copy and the read, because there is no file. Docker cp is time-bounded, and
  * output past the archive budget kills the copy.
  */
-async function copyRuntimeRoot(opts: {
+export async function copyRuntimeRoot(opts: {
   readonly id: string;
   readonly execute: typeof exec;
   readonly timeoutMs: number;

@@ -80,10 +80,15 @@ Linux:
 - Then user steps: NSS databases, and the host trust bundle and env script.
 
 macOS:
-- When Docker answers, a user step copies the running Caddy's CA to the export
-  first. When Docker is down and there is no export, the real command starts
-  Docker first. Then the keychain step depends on the CA it reads, so it is listed
-  as conditional.
+- When Docker answers, the run first copies the CA of the Caddy in the installed
+  Compose stack to the export (a user step). The plan reads that CA the same way,
+  without writing. Only when it equals the current export byte for byte is the
+  keychain step decided now. Otherwise, or when it cannot be read, the keychain
+  phase is blocked (`complete: false`, no root argv).
+- When Docker is down and there is no export, the run starts Docker and exports
+  first: blocked. With an export and Docker down, the current file decides.
+- An export the keychain step would reject (expired, malformed) makes the plan
+  `refused`, as the run exits 1.
 - If the keychain already trusts the CA: no root step. Otherwise
   `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <export>`,
   after the prompt, which non-interactive runs accept. With `--no-interactive` (or

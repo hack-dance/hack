@@ -61,7 +61,10 @@ import {
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
-import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
+import {
+  copyRuntimeRoot,
+  inspectCaddyCaIdentity,
+} from "../lib/caddy-ca-identity.ts";
 import { observeGlobalCaddyIp } from "../lib/caddy-hosts.ts";
 import {
   resolveGlobalConfigPath,
@@ -3460,6 +3463,32 @@ function trustPlanDeps(): TrustPlanDeps {
           timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
         }).catch(() => ({ exitCode: 127 }))
       ).exitCode === 0,
+    // The export's own selector (exportCaddyLocalCaCert), read without
+    // writing: no single container means the export keeps the current file.
+    readExportSource: async () => {
+      const composeFile = getGlobalPaths().caddyCompose;
+      const ps = await exec(
+        ["docker", "compose", "-f", composeFile, "ps", "-q", "caddy"],
+        {
+          cwd: dirname(composeFile),
+          stdin: "ignore",
+          timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+        }
+      ).catch(() => null);
+      if (ps === null || ps.exitCode === 124) {
+        return "unknown";
+      }
+      const id = ps.exitCode === 0 ? ps.stdout.trim() : "";
+      if (id.length === 0 || id.includes("\n")) {
+        return "none";
+      }
+      const root = await copyRuntimeRoot({
+        id,
+        execute: exec,
+        timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+      }).catch(() => null);
+      return root !== null && "pem" in root ? { pem: root.pem } : "unknown";
+    },
     prepareMac: prepareMacTrust,
     explicitlyNonInteractive: isExplicitlyNonInteractive,
   };

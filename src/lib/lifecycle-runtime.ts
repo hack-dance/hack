@@ -553,7 +553,7 @@ export async function drainLifecycleOutput(opts: {
 
 function lifecycleStateRefused(): Error {
   return new Error(
-    "Lifecycle ownership state is invalid or unsafe; kept existing state. Values omitted."
+    "Lifecycle ownership state at .hack/.internal/lifecycle/state.json is invalid or unsafe; kept existing state. Inspect the file and stop verified leftover processes before moving it aside; see docs/lifecycle.md. Values omitted."
   );
 }
 

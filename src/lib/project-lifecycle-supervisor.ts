@@ -234,6 +234,20 @@ export function createSupervisorLifecycleController(
       if (!token) {
         throw new Error("Lifecycle supervisor ownership was not established.");
       }
+      const observed = await inspectLifecycleSupervisor({
+        ...instance,
+        ownershipToken: token,
+      });
+      if (observed.liveProcessNames.includes(process.name)) {
+        accept(observed);
+        await publish();
+        return;
+      }
+      if (observed.unknownProcessNames.includes(process.name)) {
+        throw new Error(
+          "Lifecycle command identity is unknown; ownership was retained."
+        );
+      }
       const launch = {
         ...instance,
         ownershipToken: token,

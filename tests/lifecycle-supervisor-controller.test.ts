@@ -311,3 +311,48 @@ if (action !== "serve") process.exit(await child.exited);
       }
     })
 );
+
+nativeTest(
+  "a native command published after adoption is refreshed before another add",
+  () =>
+    fixture(async (project) => {
+      const { launchLifecycleSupervisorProcess } = await import(
+        "../src/lib/lifecycle-supervisor.ts"
+      );
+      const creator = controller(project);
+      await creator.startMany({ processes: [{ name: "first", command }] });
+      await creator.finalize();
+      const adopter = controller(project);
+      await adopter.startMany({ processes: [{ name: "first", command }] });
+      const entry = (await readLifecycleState(project))[0];
+      if (!entry?.ownershipToken) {
+        throw new Error("fixture missing token");
+      }
+      // Schedule the protected native effect after the adopter's initial snapshot.
+      await launchLifecycleSupervisorProcess({
+        ...project,
+        composeProject: "fixture",
+        ownershipToken: entry.ownershipToken,
+        action: "add",
+        process: {
+          name: "second",
+          argv: ["/bin/sh", "-c", command],
+          cwd: project.projectRoot,
+          env: {
+            HOME: project.projectRoot,
+            PATH: "/usr/bin:/bin",
+            HACK_DAEMON_AUTOSTART_DISABLE: "1",
+          },
+        },
+      });
+      await adopter.startMany({
+        processes: [{ name: "second", command: "exit 99" }],
+      });
+      await adopter.finalize();
+      expect(
+        (await readLifecycleState(project))[0]?.processes
+          .map((p) => p.name)
+          .sort()
+      ).toEqual(["first", "second"]);
+    })
+);

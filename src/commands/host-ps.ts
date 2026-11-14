@@ -88,7 +88,7 @@ export const hostPsCommand = withHandler(spec, async ({ args }) => {
   return 0;
 });
 
-async function readLifecycleObservations({
+export async function readLifecycleObservations({
   registry,
   filter,
   snapshot,
@@ -111,7 +111,21 @@ async function readLifecycleObservations({
     }
   }
   for (const [projectDir, projectRoot] of directories) {
-    for (const entry of await readLifecycleState({ projectDir })) {
+    let entries: readonly LifecycleStateEntry[];
+    try {
+      entries = await readLifecycleState({ projectDir });
+    } catch {
+      lifecycle.push({
+        project: projectDir,
+        projectRoot,
+        session: null,
+        ownership: "unknown",
+        status: "unknown",
+        reason: "state_unreadable",
+      });
+      continue;
+    }
+    for (const entry of entries) {
       lifecycle.push(
         await observeLifecycleEntry({
           entry,

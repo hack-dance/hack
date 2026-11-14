@@ -331,3 +331,81 @@ test("doctor rechecks exact persisted owner after native inspection and before s
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("one malformed project stays unknown without aborting global observers", async () => {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { readLifecycleObservations } = await import(
+    "../src/commands/host-ps.ts"
+  );
+  const { addLifecycleProcessServices } = await import(
+    "../src/lib/runtime-projects.ts"
+  );
+  const root = await mkdtemp(join(tmpdir(), "lifecycle-global-unreadable-"));
+  const bad = join(root, "bad", ".hack");
+  const good = join(root, "good", ".hack");
+  try {
+    await mkdir(join(bad, ".internal", "lifecycle"), { recursive: true });
+    await mkdir(good, { recursive: true });
+    await writeFile(
+      join(bad, ".internal", "lifecycle", "state.json"),
+      "{truncated"
+    );
+    const common = {
+      projectDirName: ".hack" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+    };
+    const registry = {
+      version: 1 as const,
+      projects: [
+        {
+          ...common,
+          id: "bad",
+          name: "bad",
+          projectDir: bad,
+          repoRoot: join(root, "bad"),
+        },
+        {
+          ...common,
+          id: "good",
+          name: "good",
+          projectDir: good,
+          repoRoot: join(root, "good"),
+        },
+      ],
+    };
+    const host = await readLifecycleObservations({
+      registry,
+      filter: undefined,
+      snapshot: [],
+    });
+    expect(host).toHaveLength(1);
+    expect(host[0]?.reason).toBe("state_unreadable");
+    expect(host[0]?.ownership).toBe("unknown");
+    const runtime = await addLifecycleProcessServices({
+      runtime: [
+        {
+          project: "bad",
+          workingDir: bad,
+          services: new Map(),
+          isGlobal: false,
+        },
+        {
+          project: "good",
+          workingDir: good,
+          services: new Map(),
+          isGlobal: false,
+        },
+      ],
+    });
+    expect(runtime).toHaveLength(2);
+    expect(
+      runtime[0]?.services.get("lifecycle-state")?.containers[0]?.state
+    ).toBe("unknown");
+    expect(runtime[1]?.services.size).toBe(0);
+    await expect(readLifecycleState({ projectDir: bad })).rejects.toThrow(
+      "state.json"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

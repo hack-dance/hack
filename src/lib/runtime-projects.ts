@@ -368,7 +368,7 @@ type LifecycleActivity = {
 };
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Lifecycle pseudo-services are derived from several runtime sources in one normalization step.
-async function addLifecycleProcessServices(opts: {
+export async function addLifecycleProcessServices(opts: {
   readonly runtime: readonly RuntimeProject[];
 }): Promise<RuntimeProject[]> {
   if (opts.runtime.length === 0) {
@@ -379,13 +379,18 @@ async function addLifecycleProcessServices(opts: {
     string,
     Awaited<ReturnType<typeof readLifecycleState>>
   >();
+  const unreadable = new Set<string>();
   for (const runtime of opts.runtime) {
     const workingDir = runtime.workingDir;
     if (!workingDir || stateByWorkingDir.has(workingDir)) {
       continue;
     }
-    const state = await readLifecycleState({ projectDir: workingDir });
-    stateByWorkingDir.set(workingDir, state);
+    try {
+      const state = await readLifecycleState({ projectDir: workingDir });
+      stateByWorkingDir.set(workingDir, state);
+    } catch {
+      unreadable.add(workingDir);
+    }
   }
 
   const tmuxWindowsBySession = new Map<string, ReadonlySet<string> | null>();
@@ -396,6 +401,31 @@ async function addLifecycleProcessServices(opts: {
     const workingDir = runtime.workingDir;
     if (!workingDir) {
       out.push(runtime);
+      continue;
+    }
+    if (unreadable.has(workingDir)) {
+      const services = new Map(runtime.services);
+      const service = "lifecycle-state";
+      services.set(service, {
+        service,
+        containers: [
+          {
+            id: `lifecycle-state-${runtime.project}`,
+            project: runtime.project,
+            service,
+            state: "unknown",
+            status: "Unknown (lifecycle: state_unreadable)",
+            name: `${runtime.project}-lifecycle-state`,
+            ports: "",
+            workingDir,
+            image: null,
+            labels: { "hack.lifecycle.error": "state_unreadable" },
+            mounts: [],
+            networks: [],
+          },
+        ],
+      });
+      out.push({ ...runtime, services });
       continue;
     }
     const state = stateByWorkingDir.get(workingDir) ?? [];

@@ -640,3 +640,18 @@ with `hack logs -f <name>`. Stop and restart use the recorded owner even after t
 runner setting changes. Unknown shutdown retains the ownership record and any
 shared helper holders, and fails so `hack down` can be retried. Shared helper
 commands themselves keep their existing ownership contract in this unit.
+
+### Refused ownership state
+
+Hack refuses malformed or unsafe `.hack/.internal/lifecycle/state.json` rather
+than treating it as an empty owner list. This also applies to the default mux
+runner. Global project listings continue and mark the affected project's
+lifecycle as `state_unreadable`; this is unknown, not stopped.
+
+To recover, inspect that project's state file and the processes or sessions it
+records. Confirm identity before stopping any leftover work; a PID alone may have
+been reused. Preserve the file for diagnosis. Once the recorded work is confirmed
+stopped, move the file aside within the private lifecycle directory and retry
+`hack up`. Do not discard ownership records while commands may still run. A
+symlink, foreign owner, or unreadable directory needs its owner to repair the path
+before Hack can safely proceed. `hack doctor --fix` does not bypass these checks.

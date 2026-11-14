@@ -2812,9 +2812,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         runtime: currentRuntime,
         selectedService,
       });
-      if (!target) {
+      if (!target || target.backend !== "tmux") {
         setToast({
-          message: t`${fg("#e0af68")("Interact is currently available for lifecycle host processes")}`,
+          message: t`${fg("#e0af68")("Interact requires a tmux lifecycle session")}`,
           durationMs: 2400,
         });
         return;
@@ -2832,14 +2832,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       );
 
       try {
-        let command: readonly string[];
-        if (target.backend === "tmux") {
-          command = process.env.TMUX
-            ? ["tmux", "switch-client", "-t", muxTarget]
-            : ["tmux", "attach", "-d", "-t", muxTarget];
-        } else {
-          command = ["zellij", "attach", target.sessionName];
-        }
+        const command = process.env.TMUX
+          ? ["tmux", "switch-client", "-t", muxTarget]
+          : ["tmux", "attach", "-d", "-t", muxTarget];
 
         const exitCode = await runInteractiveCommand({
           command,

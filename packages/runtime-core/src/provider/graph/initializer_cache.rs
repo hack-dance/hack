@@ -316,7 +316,13 @@ impl Release for Session<'_, '_> {
         };
         let observed =
             inspect_resource(&self.engine, &self.receipt, resource)?.ok_or_else(refused)?;
-        self.verify_config(service, &observed)?;
+        Self::verify_config(
+            &self.receipt,
+            service,
+            &self.configs[service],
+            &self.expected_environment[service],
+            &observed,
+        )?;
         if observed["State"]["Status"] != "exited"
             || observed["State"]["Running"] != false
             || observed["State"]["Paused"] != false

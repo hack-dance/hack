@@ -7663,9 +7663,9 @@ async function runDownCommand({
         writeDownNotice({ json, level, message });
       },
     });
-    // The activity record names the instance this down actually targets.
-    noteActivityBranch(branch);
   }
+  // Include an already-pinned autostart target as well as implicit reconciliation.
+  noteActivityBranch(branch);
   await recordBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
   const cachePruneCandidates =

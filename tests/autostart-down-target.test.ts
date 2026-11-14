@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resolveFinalAutostartDownTarget } from "../src/commands/project-autostart-intent.ts";
+import { readActivity } from "../src/lib/activity-log.ts";
 import { withAutostartProjectLock } from "../src/lib/autostart-project-lock.ts";
 import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -326,6 +327,14 @@ process.exitCode = await runCli(["down", "--json", "--no-interactive"]);
         expect(downArgs).toContain(ownedComposeProject);
       }
       expect(downArgs).not.toContain("example--new-branch");
+      const activity = await readActivity({
+        path: join(registryDir, "activity.jsonl"),
+        limit: 10,
+      });
+      expect(activity.at(-1)).toMatchObject({
+        action: "down",
+        branch: ownedBranch,
+      });
     } finally {
       release.resolve();
       await lock;

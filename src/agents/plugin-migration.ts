@@ -13,6 +13,10 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { readOptionalTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  readUpgradeSnapshot,
+  verifyUpgradeSnapshotRecovery,
+} from "../lib/upgrade-snapshot.ts";
+import {
   classifyIntegrationContent,
   classifyIntegrationFile,
   describePreservedReason,
@@ -414,6 +418,8 @@ export type PluginMigrationApplyHooks = {
  */
 export async function applyPluginMigration(
   input: PluginMigrationInput & {
+    /** Existing metadata-only upgrade snapshot covering every removal. */
+    readonly upgradeSnapshotManifest?: string;
     readonly backupDir: string;
     readonly hooks?: PluginMigrationApplyHooks;
   }
@@ -456,7 +462,8 @@ export async function applyPluginMigration(
 
   const now = input.hooks?.now?.() ?? new Date();
   const id = input.hooks?.id ?? manifestId(now);
-  const manifestPath = join(input.backupDir, `${id}.json`);
+  const manifestPath =
+    input.upgradeSnapshotManifest ?? join(input.backupDir, `${id}.json`);
   const manifest: MigrationManifest = {
     version: MIGRATION_MANIFEST_VERSION,
     kind: "hack-plugin-migration",
@@ -466,13 +473,43 @@ export async function applyPluginMigration(
     entries: backups,
   };
   // Commit point: nothing is removed before this write succeeds.
-  await writeManifest({ path: manifestPath, manifest });
+  if (input.upgradeSnapshotManifest === undefined) {
+    await writeManifest({ path: manifestPath, manifest });
+  } else {
+    if (
+      !(await verifyUpgradeSnapshotRecovery({
+        manifestPath,
+        paths: backups.map((backup) => backup.path),
+      }))
+    ) {
+      return { status: "refused", reason: "backup-failed", plan };
+    }
+    const loaded = await readUpgradeSnapshot({ manifestPath });
+    if (
+      loaded.status !== "ok" ||
+      backups.some((backup) => {
+        const entry = loaded.snapshot.manifest.entries.find(
+          (e) => e.path === backup.path
+        );
+        return (
+          entry?.before.kind !== "file" ||
+          entry.before.sha256 !== backup.sha256 ||
+          entry.before.mode !== backup.mode
+        );
+      })
+    ) {
+      return { status: "refused", reason: "backup-failed", plan };
+    }
+  }
 
   const results: MigrationApplyEntry[] = [];
   const recorded: ManifestEntry[] = [];
   for (const [index, backup] of backups.entries()) {
     await input.hooks?.beforeRemove?.({ path: backup.path, index });
-    const status = await removeBackedUpFile({ backup });
+    const status = await removeBackedUpFile({
+      backup,
+      keepDirectory: input.upgradeSnapshotManifest !== undefined,
+    });
     results.push({
       scope: backup.scope,
       target: backup.target,
@@ -481,10 +518,12 @@ export async function applyPluginMigration(
     });
     recorded.push({ ...backup, outcome: status.status });
   }
-  await writeManifest({
-    path: manifestPath,
-    manifest: { ...manifest, state: "applied", entries: recorded },
-  });
+  if (input.upgradeSnapshotManifest === undefined) {
+    await writeManifest({
+      path: manifestPath,
+      manifest: { ...manifest, state: "applied", entries: recorded },
+    });
+  }
   return { status: "applied", plan, manifestPath, results };
 }
 
@@ -538,6 +577,7 @@ async function writeManifest(opts: {
 
 async function removeBackedUpFile(opts: {
   readonly backup: ManifestEntry;
+  readonly keepDirectory?: boolean;
 }): Promise<Pick<MigrationApplyEntry, "status" | "reason" | "message">> {
   const { backup } = opts;
   const target = listOwnedFileTargets(backup.scope).find(
@@ -569,7 +609,7 @@ async function removeBackedUpFile(opts: {
       surface: target.surface,
       path: backup.path,
       currentRender: target.render(),
-      removeEmptyDirectory: target.removeEmptyDirectory,
+      removeEmptyDirectory: !opts.keepDirectory && target.removeEmptyDirectory,
     });
     if (outcome.status === "preserved") {
       return {

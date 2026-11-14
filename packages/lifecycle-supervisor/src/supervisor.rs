@@ -19,6 +19,7 @@ use std::{
 };
 
 const GRACE: Duration = Duration::from_secs(5);
+const IDLE_TICK: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(20);
 const LINE_LIMIT: usize = 64 * 1024;
 
@@ -29,6 +30,30 @@ struct Receipt {
     supervisor_pid: u32,
     outcome: &'static str,
     processes: Vec<State>,
+    live_process_names: Vec<String>,
+    unknown_process_names: Vec<String>,
+}
+
+impl Receipt {
+    fn new(supervisor_pid: u32, outcome: &'static str, processes: Vec<State>) -> Self {
+        let mut live_process_names = Vec::new();
+        let mut unknown_process_names = Vec::new();
+        for state in &processes {
+            match os::observe_state(state) {
+                os::Observation::Live => live_process_names.push(state.name.clone()),
+                os::Observation::Absent => (),
+                os::Observation::Unknown => unknown_process_names.push(state.name.clone()),
+            }
+        }
+        Self {
+            version: 1,
+            supervisor_pid,
+            outcome,
+            processes,
+            live_process_names,
+            unknown_process_names,
+        }
+    }
 }
 
 pub fn main() -> Result<()> {
@@ -67,22 +92,20 @@ pub fn main() -> Result<()> {
             };
             protocol::write(
                 &mut std::io::stdout(),
-                &Receipt {
-                    version: 1,
-                    supervisor_pid: 0,
-                    outcome: if result.is_err() {
+                &Receipt::new(
+                    0,
+                    if result.is_err() {
                         "unknown"
                     } else if args[0] == "stop" {
                         "stopped"
                     } else {
                         "observed"
                     },
-                    processes: root
-                        .states()?
+                    root.states()?
                         .into_iter()
                         .filter(|state| state.owner_token == request.owner_token)
                         .collect(),
-                },
+                ),
             )?;
             result
         }
@@ -103,7 +126,8 @@ fn run(request: Launch) -> Result<()> {
         }
     }
     let root = Root::open(&request.root)?;
-    let _instance_lock = root.lock(".instance.lock")?;
+    let _instance_lock = instance_lock(&root)?;
+    os::census_preflight()?;
     let launch_lock = root.lock_wait(".stop.lock")?;
     // Validate every old claim before starting any new command. A guard survives
     // project-owner death; its command lock also closes concurrent restart races.
@@ -127,7 +151,10 @@ fn run(request: Launch) -> Result<()> {
                 .env_clear()
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                // Keep stop admission leased even if this supervisor dies
+                // before the guard publishes its durable identity. fd 2 is
+                // reserved until guard receipt delivery/detach (or exit).
+                .stderr(Stdio::from(launch_lock.try_clone()?));
             // SAFETY: setsid is async-signal-safe, and this closure allocates no
             // application state. It runs in the freshly forked child only.
             unsafe {
@@ -154,12 +181,7 @@ fn run(request: Launch) -> Result<()> {
         }
         protocol::write(
             &mut std::io::stdout(),
-            &Receipt {
-                version: 1,
-                supervisor_pid: std::process::id(),
-                outcome: "ready",
-                processes: states,
-            },
+            &Receipt::new(std::process::id(), "ready", states),
         )?;
         drop(launch_lock);
         detach_stdio()?;
@@ -182,7 +204,7 @@ fn run(request: Launch) -> Result<()> {
             if !running {
                 return Ok(());
             }
-            thread::sleep(TICK);
+            os::wait_activity(&[], IDLE_TICK)?;
         }
     })();
     if outcome.is_err() {
@@ -191,6 +213,31 @@ fn run(request: Launch) -> Result<()> {
         rollback(&mut children);
     }
     outcome
+}
+
+fn instance_lock(root: &Root) -> Result<File> {
+    // Preserve the uncontended fast path; a bounded retry below distinguishes
+    // contention from persistent file/OS failures with the actual errno.
+    if let Ok(file) = root.lock(".instance.lock") {
+        return Ok(file);
+    }
+    let file = root.file(".instance.lock", libc::O_RDWR | libc::O_CREAT)?;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        // SAFETY: file remains owned throughout this bounded retry.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ) || Instant::now() >= deadline
+        {
+            return Err(error);
+        }
+        thread::sleep(TICK);
+    }
 }
 
 fn rollback(children: &mut [Child]) {
@@ -223,7 +270,7 @@ fn guard(request: GuardLaunch) -> Result<()> {
     protocol::validate_control(request.version, &request.root, &request.owner_token)?;
     request.process.validate()?;
     let root = Root::open(&request.root)?;
-    let _command_lock = root.lock(&format!("{}.lock", request.process.name))?;
+    let _command_lock = root.lock_wait(&format!("{}.lock", request.process.name))?;
     if let Some(previous) = root.load(&request.process.name)?
         && os::recorded_live(&previous, false)?
     {
@@ -236,6 +283,7 @@ fn guard(request: GuardLaunch) -> Result<()> {
     }
     os::signals()?;
     os::subreaper()?;
+    os::census_preflight()?;
     let mut state = State {
         version: 1,
         name: request.process.name.clone(),
@@ -316,10 +364,19 @@ fn guard_command(
     let mut killed = false;
     let mut direct_exited = false;
     let mut drained_after_exit = None;
+    let mut last_census = Instant::now() - IDLE_TICK;
+    let mut live = true;
+    let mut stdout_open = true;
+    let mut stderr_open = true;
     loop {
         // Alternate bounded reads so stdout bursts cannot starve stderr/stop.
-        out.drain(&mut stdout, log, &state.name, "stdout")?;
-        err.drain(&mut stderr, log, &state.name, "stderr")?;
+        if stdout_open {
+            stdout_open = out.drain(&mut stdout, log, &state.name, "stdout")?;
+        }
+        if stderr_open {
+            stderr_open = err.drain(&mut stderr, log, &state.name, "stderr")?;
+        }
+        let was_exited = direct_exited;
         if !direct_exited && let Some(status) = child.try_wait()? {
             direct_exited = true;
             state.exit_code = status.code();
@@ -335,7 +392,14 @@ fn guard_command(
                 state.signal = status.signal();
             }
         }
-        let live = os::live_group(state.process_group_id, Some(state.guard_pid))?;
+        // A live direct child already proves work remains. Census is needed
+        // only after that child exits (descendants may remain), or during stop.
+        if (direct_exited && (last_census.elapsed() >= IDLE_TICK || !was_exited))
+            || stopping.is_some()
+        {
+            live = os::live_group(state.process_group_id, Some(state.guard_pid))?;
+            last_census = Instant::now();
+        }
         if os::STOP.swap(false, Ordering::Relaxed) && stopping.is_none() {
             state.phase = "stopping".into();
             root.save(state)?;
@@ -366,43 +430,108 @@ fn guard_command(
             }
             os::session_signal(state.guard_pid, libc::SIGKILL)?;
         }
-        thread::sleep(TICK);
+        let fds: Vec<_> = [
+            (stdout_open, stdout.as_raw_fd()),
+            (stderr_open, stderr.as_raw_fd()),
+        ]
+        .into_iter()
+        .filter_map(|(open, fd)| open.then_some(fd))
+        .collect();
+        os::wait_activity(
+            &fds,
+            if stopping.is_some() || drained_after_exit.is_some() {
+                TICK
+            } else {
+                IDLE_TICK
+            },
+        )?;
     }
 }
 
 fn stop(states: &[State]) -> Result<()> {
+    struct Target {
+        state: State,
+        guard_live: bool,
+        orphan_term: Option<Instant>,
+    }
     let mut active = Vec::new();
-    // Validate the full set before taking the first effect.
+    // Validate every receipt before the first effect. Absence may race a guard's
+    // natural exit; a dead leader still leaves a recoverable recorded session.
     for state in states {
         if !os::recorded_live(state, false)? {
             continue;
         }
-        let identity = os::inspect(state.guard_pid)?.ok_or_else(refused)?;
-        os::same(state, &identity)?;
-        active.push(state.clone());
+        let guard_live = match os::inspect(state.guard_pid)? {
+            Some(identity) if !identity.zombie => {
+                os::same(state, &identity)?;
+                true
+            }
+            _ => false,
+        };
+        active.push(Target {
+            state: state.clone(),
+            guard_live,
+            orphan_term: None,
+        });
     }
-    for state in &active {
-        if let Err(error) = os::signal_guard(state) {
-            // Natural exit can race between admission and pidfd delivery.
-            // Only a new kernel absence proof turns that race into success.
-            if os::recorded_live(state, false)? {
-                return Err(error);
+    for target in &mut active {
+        let state = &target.state;
+        let result = if target.guard_live {
+            os::signal_guard(state)
+        } else {
+            let result = os::signal_recorded_session(state, libc::SIGTERM);
+            target.orphan_term = Some(Instant::now());
+            result
+        };
+        if let Err(error) = result {
+            if !os::recorded_live(state, false)? {
+                continue;
+            }
+            // Guard death during admission switches to verified session recovery.
+            match os::inspect(state.guard_pid)? {
+                None => {
+                    os::signal_recorded_session(state, libc::SIGTERM)?;
+                    target.orphan_term = Some(Instant::now());
+                }
+                Some(identity) if identity.zombie => {
+                    os::signal_recorded_session(state, libc::SIGTERM)?;
+                    target.orphan_term = Some(Instant::now());
+                }
+                _ => return Err(error),
             }
         }
     }
-    let deadline = Instant::now() + GRACE + Duration::from_secs(2);
-    while Instant::now() < deadline {
+    let start = Instant::now();
+    while start.elapsed() < GRACE + Duration::from_secs(2) {
         let mut live = false;
-        for state in &active {
-            live |= os::recorded_live(state, false)?;
+        for target in &mut active {
+            let state = &target.state;
+            if !os::recorded_live(state, false)? {
+                continue;
+            }
+            live = true;
+            // Guard death after TERM admission must not skip authored TERM or
+            // borrow the dead guard's grace interval. Late loss may time out as
+            // unknown; it never shortens this recovered session's own grace.
+            let orphan = os::inspect(state.guard_pid)?.is_none_or(|p| p.zombie);
+            if orphan {
+                if target.orphan_term.is_none() {
+                    os::signal_recorded_session(state, libc::SIGTERM)?;
+                    target.orphan_term = Some(Instant::now());
+                }
+                if target
+                    .orphan_term
+                    .is_some_and(|since| since.elapsed() >= GRACE)
+                {
+                    os::signal_recorded_session(state, libc::SIGKILL)?;
+                }
+            }
         }
         if !live {
             return Ok(());
         }
         thread::sleep(TICK);
     }
-    // Unknown outcome: the guard retains its command lock while any live
-    // member remains. Neither timeout nor zombie-only existence implies alive.
     Err(refused())
 }
 
@@ -433,11 +562,11 @@ impl Lines {
         log: &mut File,
         name: &str,
         stream: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut buffer = [0u8; 8192];
         for _ in 0..32 {
             match input.read(&mut buffer) {
-                Ok(0) => break,
+                Ok(0) => return Ok(false),
                 Ok(count) => {
                     for byte in &buffer[..count] {
                         if *byte == b'\n' {
@@ -458,7 +587,7 @@ impl Lines {
                 Err(error) => return Err(error),
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn flush(&mut self, log: &mut File, name: &str, stream: &str, trim_cr: bool) -> Result<()> {
@@ -471,17 +600,11 @@ impl Lines {
         let record = format!("{}\t{name}\t{stream}\t{message}\n", os::timestamp()?);
         // One append per complete record; concurrent guards share the same
         // flock so records larger than PIPE_BUF never interleave.
-        // SAFETY: flock borrows this live file descriptor until LOCK_UN.
-        if unsafe { libc::flock(log.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        os::flock_retry(log.as_raw_fd(), libc::LOCK_EX)?;
         let result = log.write_all(record.as_bytes());
-        // SAFETY: unlock the same live descriptor after the write completes.
-        let unlocked = unsafe { libc::flock(log.as_raw_fd(), libc::LOCK_UN) };
+        let unlocked = os::flock_retry(log.as_raw_fd(), libc::LOCK_UN);
         result?;
-        if unlocked != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        unlocked?;
         self.pending.clear();
         Ok(())
     }

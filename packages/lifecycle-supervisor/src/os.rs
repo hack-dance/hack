@@ -1,11 +1,16 @@
 use crate::{Result, refused};
-#[cfg(target_os = "linux")]
 use std::fs;
 use std::{
     io,
     os::fd::AsRawFd,
     sync::atomic::{AtomicBool, Ordering},
 };
+
+pub static CHILD_CHANGED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn child_signal(_: i32) {
+    CHILD_CHANGED.store(true, Ordering::Relaxed);
+}
 
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -18,7 +23,7 @@ pub fn signals() -> Result<()> {
     // atomic flag; the kernel copies the action and retains no Rust pointer.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = libc::SIG_DFL;
+        action.sa_sigaction = child_signal as *const () as usize;
         libc::sigemptyset(&mut action.sa_mask);
         if libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) != 0 {
             return Err(io::Error::last_os_error());
@@ -112,12 +117,26 @@ pub fn census() -> Result<Vec<Identity>> {
     let mut result = Vec::new();
     for entry in fs::read_dir("/proc")? {
         let entry = entry?;
-        if let Some(pid) = entry.file_name().to_str().and_then(|v| v.parse().ok())
-            && let Some(identity) = inspect(pid)?
-        {
-            result.push(identity);
+        if let Some(pid) = entry.file_name().to_str().and_then(|v| v.parse().ok()) {
+            match inspect(pid) {
+                Ok(Some(identity)) => result.push(identity),
+                Ok(None) => (),
+                Err(error)
+                    if matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES)) =>
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    match entry.metadata() {
+                        // SAFETY: geteuid is an observation with no preconditions.
+                        Ok(metadata) if metadata.uid() != unsafe { libc::geteuid() } => (),
+                        Err(error) if absent_error(&error) => (),
+                        _ => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
+    readable_self(&result)?;
     Ok(result)
 }
 
@@ -208,11 +227,36 @@ pub fn census() -> Result<Vec<Identity>> {
             Ok(None) => (),
             // Unrelated protected processes cannot belong to this user's
             // authored session. Exact guard reads remain strict in inspect.
-            Err(error) if error.raw_os_error() == Some(libc::EPERM) => (),
+            Err(error) if error.raw_os_error() == Some(libc::EPERM) && foreign_uid(pid)? => (),
             Err(error) => return Err(error),
         }
     }
+    readable_self(&result)?;
     Ok(result)
+}
+
+#[cfg(target_os = "macos")]
+fn foreign_uid(pid: i32) -> Result<bool> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    // SAFETY: bounded writable struct buffer, retained only for this call.
+    let size = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdshortinfo>() as i32,
+        )
+    };
+    if size as usize != std::mem::size_of::<libc::proc_bsdshortinfo>() {
+        let error = io::Error::last_os_error();
+        if absent_error(&error) {
+            return Ok(true);
+        }
+        return Err(refused());
+    }
+    // SAFETY: exact struct size was initialized; geteuid only observes identity.
+    Ok(unsafe { info.assume_init().pbsi_uid != libc::geteuid() })
 }
 
 #[cfg(target_os = "macos")]
@@ -280,6 +324,41 @@ pub fn recorded_live(state: &crate::storage::State, excluding_guard: bool) -> Re
         return Ok(false);
     }
     live_group(state.guard_pid, excluding_guard.then_some(state.guard_pid))
+}
+
+pub enum Observation {
+    Absent,
+    Live,
+    Unknown,
+}
+
+/// Health observation is stricter than a persisted running phase. A lost guard
+/// with remaining session members is unknown, never healthy or absent.
+pub fn observe_state(state: &crate::storage::State) -> Observation {
+    let observed = (|| -> Result<Observation> {
+        if state.boot_id != boot()? {
+            return Ok(Observation::Absent);
+        }
+        let leader = inspect(state.guard_pid)?;
+        if let Some(identity) = &leader
+            && (identity.start != state.guard_start_time
+                || identity.uid != state.uid
+                || identity.session != state.guard_pid)
+        {
+            return Ok(Observation::Absent);
+        }
+        if !live_group(state.guard_pid, Some(state.guard_pid))? {
+            return Ok(Observation::Absent);
+        }
+        Ok(
+            if leader.is_some_and(|p| !p.zombie && p.group == state.guard_pid) {
+                Observation::Live
+            } else {
+                Observation::Unknown
+            },
+        )
+    })();
+    observed.unwrap_or(Observation::Unknown)
 }
 
 /// The guard is never a member of an authored process group. It retains the
@@ -446,18 +525,24 @@ pub fn close_inherited() -> Result<()> {
             return Ok(());
         }
     }
-    // Portable fallback is bounded by the process's descriptor limit and does
-    // not allocate or retain descriptor references while closing them.
-    let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
-    // SAFETY: getrlimit initializes one live rlimit value.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if limit.rlim_cur > 1_048_576 {
-        return Err(refused());
-    }
-    for fd in 3..limit.rlim_cur as i32 {
-        // SAFETY: startup owns no fd >=3; failed closes are harmless gaps.
+    // Collect first, so the directory iterator's descriptor is closed before
+    // the sweep. Work is proportional to open descriptors, not RLIMIT_NOFILE.
+    #[cfg(target_os = "linux")]
+    let directory = "/proc/self/fd";
+    #[cfg(target_os = "macos")]
+    let directory = "/dev/fd";
+    let descriptors: Vec<i32> = fs::read_dir(directory)?
+        .map(|entry| {
+            entry?
+                .file_name()
+                .to_str()
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(refused)
+        })
+        .collect::<Result<_>>()?;
+    for fd in descriptors.into_iter().filter(|fd| *fd >= 3) {
+        // SAFETY: startup owns no application descriptors >=3. The iterator's
+        // former descriptor may already be closed; that gap is harmless.
         unsafe {
             libc::close(fd);
         }
@@ -509,11 +594,132 @@ pub fn group_signal(group: i32, signal: i32) -> Result<()> {
     // SAFETY: validated positive group number is negated for group delivery.
     if unsafe { libc::kill(-group, signal) } != 0 {
         let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
+        group_signal_result(group, error, census)?;
+    }
+    Ok(())
+}
+
+/// EPERM may race the last live member becoming an unreaped zombie. Only a
+/// fresh, successful group census proving no non-zombie member makes it benign.
+fn group_signal_result(
+    group: i32,
+    error: io::Error,
+    census: impl FnOnce() -> Result<Vec<Identity>>,
+) -> Result<()> {
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    if error.raw_os_error() == Some(libc::EPERM)
+        && !census()?.iter().any(|p| p.group == group && !p.zombie)
+    {
+        return Ok(());
+    }
+    Err(error)
+}
+
+/// Poll only pipe readiness between slow session checks. SIGCHLD and stop
+/// signals interrupt poll; flags also cover signals arriving before this call.
+pub fn wait_activity(fds: &[i32], timeout: std::time::Duration) -> Result<()> {
+    if STOP.load(Ordering::Relaxed) || CHILD_CHANGED.swap(false, Ordering::Relaxed) {
+        return Ok(());
+    }
+    let mut polls: Vec<_> = fds
+        .iter()
+        .map(|fd| libc::pollfd {
+            fd: *fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    // SAFETY: initialized pollfd slice is live for its supplied length.
+    if unsafe {
+        libc::poll(
+            polls.as_mut_ptr(),
+            polls.len() as _,
+            timeout.as_millis() as i32,
+        )
+    } < 0
+    {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
     }
     Ok(())
+}
+
+/// A dead leader's SID cannot be reused while any old session member remains.
+/// Validate the receipt and each incarnation again before individual delivery.
+/// Never use group delivery here: a group number can outlive its observed members.
+pub fn signal_recorded_session(state: &crate::storage::State, signal: i32) -> Result<()> {
+    if !recorded_live(state, false)? {
+        return Ok(());
+    }
+    for member in census()?
+        .into_iter()
+        .filter(|p| p.session == state.guard_pid && !p.zombie)
+    {
+        if member.uid != state.uid || member.start < state.guard_start_time {
+            return Err(refused());
+        }
+        if !recorded_live(state, false)? {
+            return Ok(());
+        }
+        signal_member(&member, signal)?;
+    }
+    Ok(())
+}
+
+/// A successful census must contain our own readable identity. Known restricted
+/// proc mounts are unsupported: hidden same-user members defeat absence proofs.
+pub fn census_preflight() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let mounts = fs::read_to_string("/proc/self/mountinfo")?;
+        if restricted_mount(&mounts) {
+            return Err(refused());
+        }
+    }
+    readable_self(&census()?)
+}
+
+#[cfg(target_os = "linux")]
+fn restricted_mount(mounts: &str) -> bool {
+    mounts.lines().any(|line| {
+        line.split_whitespace().any(|field| {
+            field
+                .split(',')
+                .any(|option| option.starts_with("hidepid=") && option != "hidepid=0")
+        })
+    })
+}
+
+fn readable_self(members: &[Identity]) -> Result<()> {
+    let pid = std::process::id() as i32;
+    if !members.iter().any(|p| p.pid == pid && !p.zombie) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+pub fn flock_retry(fd: i32, operation: i32) -> Result<()> {
+    retry_interrupted(|| {
+        // SAFETY: caller retains ownership of the live descriptor across retries.
+        if unsafe { libc::flock(fd, operation) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    })
+}
+
+fn retry_interrupted(mut operation: impl FnMut() -> Result<()>) -> Result<()> {
+    loop {
+        match operation() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
 }
 
 pub fn nonblocking(fd: &impl AsRawFd) -> Result<()> {
@@ -554,6 +760,96 @@ pub fn timestamp() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flock_interruption_retries_but_other_errors_do_not() {
+        let mut calls = 0;
+        super::retry_interrupted(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(std::io::Error::from_raw_os_error(libc::EINTR))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        let error =
+            super::retry_interrupted(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)))
+                .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    }
+
+    #[test]
+    fn unusable_census_refuses_before_launch() {
+        assert!(super::readable_self(&[]).is_err());
+        assert!(super::readable_self(&super::census().unwrap()).is_ok());
+        #[cfg(target_os = "linux")]
+        {
+            assert!(super::restricted_mount(
+                "1 2 0:1 / /proc rw - proc proc rw,hidepid=2"
+            ));
+            assert!(super::restricted_mount(
+                "1 2 0:1 / /proc rw - proc proc rw,hidepid=invisible"
+            ));
+            assert!(!super::restricted_mount(
+                "1 2 0:1 / /proc rw - proc proc rw,hidepid=0"
+            ));
+        }
+    }
+
+    #[test]
+    fn eperm_requires_fresh_zombie_only_group_proof() {
+        use super::*;
+        let member = Identity {
+            pid: 123,
+            group: 123,
+            session: 123,
+            start: 1,
+            uid: 0,
+            zombie: true,
+        };
+        let denied = || io::Error::from_raw_os_error(libc::EPERM);
+        assert!(group_signal_result(123, denied(), || Ok(vec![member.clone()])).is_ok());
+        let mut live = member.clone();
+        live.zombie = false;
+        assert!(group_signal_result(123, denied(), || Ok(vec![member.clone(), live])).is_err());
+        assert!(group_signal_result(123, denied(), || Err(refused())).is_err());
+        assert!(
+            group_signal_result(123, io::Error::from_raw_os_error(libc::EIO), || Ok(vec![]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn real_unreaped_group_is_not_live() {
+        use super::*;
+        // SAFETY: child uses only async-signal-safe calls and _exit, never Rust.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::setsid();
+                libc::_exit(0);
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if inspect(pid).unwrap().is_some_and(|p| p.zombie) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!live_group(pid, None).unwrap());
+        assert!(
+            group_signal_result(pid, io::Error::from_raw_os_error(libc::EPERM), census).is_ok()
+        );
+        group_signal(pid, libc::SIGTERM).unwrap();
+        let mut status = 0;
+        // SAFETY: reap only our own still-unreaped child, with a valid status pointer.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn non_utf8_process_name_does_not_invalidate_identity_fields() {

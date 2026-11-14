@@ -95,7 +95,7 @@ describe("launchd plist generation", () => {
     expect(plist).toContain("/bin");
     expect(plist).toContain(".bun/bin");
     expect(plist).toContain(".hack/bin");
-    expect(plist).toContain("/Users/testuser/.docker/bin");
+    expect(plist).not.toContain("/Users/testuser/.docker/bin");
   });
 
   test("plist is valid XML structure", () => {

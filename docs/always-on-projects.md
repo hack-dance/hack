@@ -399,3 +399,8 @@ including the passwordless DNS helper. Prepare DNS manually before relying on
 login routing; manual `hack global up` retains its existing DNS behavior.
 If Docker stops between readiness and routing startup, login fails without
 launching a backend VM or app. Start the engine manually before retrying.
+
+The service daemon keeps its existing helper PATH; this feature does not add
+`~/.docker/bin` to daemon cache or watcher lookups. Automatic-start children may
+use that directory only after their separate strict executable audit. Broader
+hardening of existing daemon observation helpers is outside this feature.

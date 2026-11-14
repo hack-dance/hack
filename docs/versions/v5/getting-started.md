@@ -138,3 +138,5 @@ containers running. Change default Grafana credentials before network exposure.
 Login requires a non-SSH Docker transport and already-prepared DNS. It skips
 macOS dnsmasq startup and passwordless DNS recovery; use manual `hack global up`
 when DNS needs starting or recovery.
+The daemon service PATH is unchanged; only automatic-start children use the
+separately audited Docker user-bin path.

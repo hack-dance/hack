@@ -32,7 +32,7 @@ beforeEach(async () => {
   root = await realpath(
     await mkdtemp(join(tmpdir(), "native-adoption-branch-"))
   );
-  await mkdir(join(root, ".hack/.branch"), { recursive: true });
+  await mkdir(join(root, ".hack/.branch"), { recursive: true, mode: 0o700 });
   await writeFile(join(root, ".hack/hack.config.json"), configText);
   await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
   const fragment = buildRuntimeHostMetadataOverride({

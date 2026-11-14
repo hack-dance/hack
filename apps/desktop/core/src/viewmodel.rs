@@ -236,6 +236,11 @@ impl AppModel {
     }
 
     #[must_use]
+    pub fn project_list_readable(&self) -> bool {
+        self.snapshot.is_some() && self.last_error.is_none()
+    }
+
+    #[must_use]
     pub fn selected_row(&self) -> Option<&ProjectRow> {
         let s = self.snapshot.as_ref()?;
         let name = self.selected.as_ref()?;

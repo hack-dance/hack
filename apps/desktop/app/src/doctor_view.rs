@@ -150,7 +150,9 @@ fn cards(v: &DoctorView, pane: &DoctorPane, cx: &mut Context<HackApp>) -> AnyEle
     };
     let any_shown = v.cards().any(|c| shown(&c));
     if !any_shown {
-        let (dot_color, text) = if v.is_clean() {
+        let (dot_color, text) = if pane.stale {
+            (t.warning, "Results are out of date; check again")
+        } else if v.is_clean() {
             (t.success, "No problems found")
         } else if pane.filter.is_some() {
             (t.muted_foreground, "No findings for this project")

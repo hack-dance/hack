@@ -493,7 +493,14 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
             DoctorRun::project(
                 "storefront",
                 "/work/storefront",
-                report(vec![c("project", "ok", ""), c("env key", "ok", "")]),
+                report(vec![
+                    c(
+                        "project",
+                        "ok",
+                        "Found .hack/ (or legacy .dev/) at /work/storefront/.hack",
+                    ),
+                    c("env key", "ok", ""),
+                ]),
             ),
         ];
     }
@@ -529,7 +536,11 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
             "storefront",
             "/work/storefront",
             report(vec![
-                c("project", "ok", ""),
+                c(
+                    "project",
+                    "ok",
+                    "Found .hack/ (or legacy .dev/) at /work/storefront/.hack",
+                ),
                 c("env key", "error", "The env key file is missing"),
                 c(
                     "caddy local ca",
@@ -547,7 +558,11 @@ pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
             "billing-api",
             "/work/billing-api",
             report(vec![
-                c("project", "ok", ""),
+                c(
+                    "project",
+                    "ok",
+                    "Found .hack/ (or legacy .dev/) at /work/billing-api/.hack",
+                ),
                 c("env key", "error", "The env key file is missing"),
             ]),
         ),

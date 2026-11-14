@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { nativePlanHomeMatches } from "./lib/native-plan-home.ts";
 
 /** Exercise the relocated executable/sidecar with isolated policy and real linked Git worktrees. */
 const root = resolve(import.meta.dir, "..");
@@ -378,6 +379,15 @@ try {
     "local route injection refused"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
+  assert(
+    await nativePlanHomeMatches({
+      home,
+      privateRoot: directory,
+      existing: [".hack", ".hack/hack.config.json"],
+      failedActions: 0,
+    }),
+    "planning writes no unexpected home state"
+  );
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -393,7 +403,13 @@ try {
       (await readdir(join(checkout, ".hack"))).some(
         (name) => name === ".internal" || name === ".branch"
       )
-    ) && (await readdir(join(home, ".hack"))).join() === "hack.config.json",
+    ) &&
+      (await nativePlanHomeMatches({
+        home,
+        privateRoot: directory,
+        existing: [".hack", ".hack/hack.config.json"],
+        failedActions: 1,
+      })),
     "no hook, registry, route publication or generated-state effects"
   );
   process.stdout.write(

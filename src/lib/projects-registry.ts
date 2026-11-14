@@ -1188,17 +1188,24 @@ export async function claimProjectAutostart(
 export async function recordProjectAutostartResult(
   opts: AutostartRegistryOptions & {
     readonly id: string;
-    readonly bootId: string;
+    /** Expected existing claim; null also supports a refusal before any claim. */
+    readonly bootId: string | null;
     readonly result: ProjectAutostartResult;
+    readonly onlyIfWanted?: boolean;
+    readonly expectedBranch?: string | null;
   }
 ): Promise<boolean> {
   let recorded = false;
   await mutateProjectAutostart({
     ...opts,
+    respectGlobalPause: opts.onlyIfWanted,
     update: (project) => {
       if (
         project.autostart?.invalid ||
-        project.autostart?.lastAttemptBootId !== opts.bootId
+        project.autostart?.lastAttemptBootId !== opts.bootId ||
+        (opts.onlyIfWanted && project.autostart?.paused) ||
+        (opts.expectedBranch !== undefined &&
+          project.autostart?.branch !== opts.expectedBranch)
       ) {
         return project;
       }

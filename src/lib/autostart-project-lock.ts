@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { assertAutostartCheckoutTrusted } from "./autostart-checkout-trust.ts";
 import { HackCliError } from "./cli-result.ts";
 import {
   readProjectsRegistry,
@@ -71,7 +72,8 @@ export async function assertAutostartProjectCurrent(opts: {
   const projects = registry.projects.filter(
     (project) => project.id === opts.scope.projectId
   );
-  const marker = projects.length === 1 ? projects[0]?.autostart : undefined;
+  const selected = projects.length === 1 ? projects[0] : undefined;
+  const marker = selected?.autostart;
   let reason: string | null = null;
   if (registry.autostartGlobal?.paused) {
     reason = "global_paused";
@@ -90,6 +92,12 @@ export async function assertAutostartProjectCurrent(opts: {
       message:
         "Autostart was cancelled by changed machine intent; no further startup effects ran.",
       detail: { reason },
+    });
+  }
+  if (opts.expectedRoot !== undefined && selected) {
+    assertAutostartCheckoutTrusted({
+      repoRoot: selected.repoRoot,
+      projectDir: selected.projectDir,
     });
   }
 }

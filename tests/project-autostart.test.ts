@@ -1101,6 +1101,33 @@ for (const operation of ["register", "prune"] as const) {
   });
 }
 
+test("a refusal without a boot claim preserves admission and cannot bypass a pause or recreate intent", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  const refusal = {
+    id: "alpha",
+    registryPath,
+    bootId: null,
+    expectedBranch: null,
+    onlyIfWanted: true,
+    result: {
+      status: "skipped" as const,
+      reason: "boot_identity_unavailable",
+      at: "2026-01-01T00:00:00.000Z",
+    },
+  };
+  expect(await recordProjectAutostartResult(refusal)).toBe(true);
+  expect((await read())?.autostart?.lastAttemptBootId).toBeNull();
+  await setProjectAutostartPaused({ id: "alpha", paused: true, registryPath });
+  expect(await recordProjectAutostartResult(refusal)).toBe(false);
+  await setProjectAutostartPaused({ id: "alpha", paused: false, registryPath });
+  await setAutostartGlobalPaused({ paused: true, registryPath });
+  expect(await recordProjectAutostartResult(refusal)).toBe(false);
+  await setAutostartGlobalPaused({ paused: false, registryPath });
+  await removeProjectAutostart({ id: "alpha", registryPath });
+  expect(await recordProjectAutostartResult(refusal)).toBe(false);
+  expect((await read())?.autostart).toBeUndefined();
+});
+
 test("ordinary registration replaces an unmarked registry symlink without changing its target", async () => {
   const project = await createTrustProject();
   const target = join(root, "linked-legacy-registry.json");

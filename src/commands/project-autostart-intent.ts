@@ -6,6 +6,7 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
+import { assertAutostartCheckoutTrusted } from "../lib/autostart-checkout-trust.ts";
 import {
   assertAutostartProjectCurrent,
   withAutostartProjectLock,
@@ -277,6 +278,12 @@ export async function withAutostartCommandLock<T>(opts: {
   const registry = await readProjectsRegistry(
     login ? { requireAutostartTrust: true } : undefined
   );
+  if (login) {
+    assertLoginCheckoutBeforeDiscovery({
+      projectId: process.env.HACK_AUTOSTART_PROJECT_ID,
+      projects: registry.projects,
+    });
+  }
   const context = await discoverAutostartCommandContext({ ...opts, registry });
   if (!context) {
     return await opts.run();
@@ -317,6 +324,25 @@ export async function withAutostartCommandLock<T>(opts: {
       return await opts.run();
     },
   });
+}
+
+/** Check the trusted registry target before even reading repository-controlled inputs. */
+function assertLoginCheckoutBeforeDiscovery(opts: {
+  readonly projectId?: string;
+  readonly projects: readonly RegisteredProject[];
+}): void {
+  const matches = opts.projects.filter(
+    (project) => project.id === opts.projectId
+  );
+  const project = matches.length === 1 ? matches[0] : undefined;
+  if (!project) {
+    throw new HackCliError({
+      code: "E_CANCELLED",
+      message: "Autostart project path changed; no start ran.",
+      detail: { reason: "target_changed" },
+    });
+  }
+  assertAutostartCheckoutTrusted(project);
 }
 
 function assertLoginProjectIdentity(opts: {

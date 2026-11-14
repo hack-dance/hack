@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,10 +13,12 @@ import {
   classifyAutostartContainers,
   classifyAutostartExit,
   completedDependencyServices,
+  createAutostartProductionDependencies,
   resolveAutostartEngineWaitMs,
   runAutostartAtLogin,
   runAutostartSubprocess,
 } from "../src/daemon/autostart.ts";
+import { assertAutostartExecutablePathTrusted } from "../src/lib/autostart-executable-trust.ts";
 import {
   beginAutostartLoginRun,
   claimProjectAutostart,
@@ -250,6 +252,23 @@ test("engine wait uses bounded exponential backoff and leaves attempts unclaimed
     started: ["alpha"],
     failed: [],
   });
+});
+
+test("a failed boot probe preserves prior claims and cannot authorize replay when identity recovers", async () => {
+  await seed(["alpha"]);
+  await run();
+  expect(starts).toHaveLength(1);
+  deps = { ...deps, bootId: async () => null };
+  await run();
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+  ).toMatchObject({
+    lastAttemptBootId: "boot-1",
+    lastResult: { reason: "boot_identity_unavailable" },
+  });
+  deps = { ...deps, bootId: async () => "boot-1" };
+  await run();
+  expect(starts).toHaveLength(1);
 });
 
 test("routing failure, unknown runtime and unavailable boot identity fail closed", async () => {
@@ -1049,4 +1068,85 @@ test("service PATH derives known user install directories from its owned home an
       process.env.PATH = previous;
     }
   }
+});
+
+test("production executable trust refuses a poisoned home bin before engine helpers execute", async () => {
+  await seed(["alpha"]);
+  const bin = join(root, ".bun/bin");
+  await mkdir(bin, { recursive: true, mode: 0o700 });
+  const receipt = join(root, "docker-executed");
+  await writeFile(
+    join(bin, "docker"),
+    `#!/bin/sh\nprintf invoked > '${receipt}'\n`,
+    { mode: 0o700 }
+  );
+  await chmod(bin, 0o777);
+  const production = createAutostartProductionDependencies(
+    { home: root, hackHome: join(root, "state") },
+    {
+      executablePath: async ({ path }) => {
+        expect(path.split(":")).toContain(bin);
+        await assertAutostartExecutablePathTrusted({ path: bin });
+      },
+    }
+  );
+  deps = {
+    ...deps,
+    startupRefusal: production.startupRefusal,
+    bootId: async () => {
+      events.push("boot");
+      return "boot-1";
+    },
+  };
+  await run();
+  expect(events).toEqual(["boot"]);
+  expect(starts).toEqual([]);
+  expect(await Bun.file(receipt).exists()).toBe(false);
+  expect((await results())[0]?.result).toMatchObject({
+    status: "skipped",
+    reason: "executable_path_untrusted",
+  });
+});
+
+test("untrusted checkout observations and child permission refusals are closed skips", async () => {
+  await seed(["alpha"]);
+  deps = { ...deps, inspect: async () => "untrusted" };
+  await run();
+  expect(starts).toEqual([]);
+  expect((await results())[0]?.result).toMatchObject({
+    status: "skipped",
+    reason: "checkout_untrusted",
+  });
+  for (const reason of ["checkout_untrusted", "executable_path_untrusted"]) {
+    expect(
+      classifyAutostartExit({
+        exitCode: 1,
+        stdout: JSON.stringify({
+          error: { code: "E_PERMISSION", detail: { reason } },
+        }),
+      })
+    ).toEqual({ status: "skipped", reason });
+  }
+});
+
+test("a refused executable path never overwrites an earlier real-boot claim or permits duplicate starts", async () => {
+  await seed(["alpha"]);
+  await run();
+  const before = (await readProjectsRegistry({ registryPath })).projects[0]
+    ?.autostart;
+  expect(before?.lastAttemptBootId).toBe("boot-1");
+  deps = {
+    ...deps,
+    startupRefusal: async () => "executable_path_untrusted" as const,
+  };
+  await run();
+  const refused = (await readProjectsRegistry({ registryPath })).projects[0]
+    ?.autostart;
+  expect(refused).toEqual(before);
+  deps = { ...deps, startupRefusal: async () => null };
+  await run();
+  expect(starts.map((start) => start.id)).toEqual(["alpha"]);
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+  ).toEqual(before);
 });

@@ -69,6 +69,11 @@ Children receive a fixed environment allow-list and an executable search
 path built from system directories and known Bun, Hack and Docker directories
 under the owned home (plus Linux `.local/bin`); launching-shell `DOCKER_*`, `COMPOSE_*` and `HACK_*` overrides are not copied.
 Hack adds only its explicit internal noninteractive and identity settings.
+Every login-service launch checks its effective executable lookup path before
+starting an engine watcher. Explicit passes check the derived path before helper
+lookup too. Directories, executable files and symlink targets must satisfy the
+same read-only ownership and permission checks used by the Linux service; unsafe
+paths are refused without automatic permission repair.
 Already-running instances are adopted without repeating startup hooks. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
 
@@ -94,6 +99,12 @@ runs the normal `up` path. This slice reads the primary Compose file; branch
 overrides, declared `scale` or `deploy.replicas`, explicit Compose file/profile
 overrides and unsupported composition
 cannot prove adoption, so they run ordinary `up` and may repeat startup hooks.
+
+Before project input discovery and again under the instance start lock, login
+checks that the checkout and project-directory ancestor chains belong to the
+current user or root and cannot be replaced by other users. The check repeats
+before container startup. A shared writable parent is refused even when the
+saved registry pathname still matches. Normal owner Git updates remain allowed.
 
 No terminal or keychain prompt is allowed. Missing keys, required interaction,
 pending env migration, unavailable project paths and startup failures produce a
@@ -128,7 +139,9 @@ history of arbitrary external permission changes or revoke an existing writer.
 A claim is saved before each attempt, once per OS boot. Restarting the daemon in
 the same boot does not repeat starts. A crash after the claim can leave an
 interrupted attempt; its outcome is unknown, so this slice requires manual
-`hack up` recovery. A new boot permits a new attempt. Resume permits the next login
+`hack up` recovery. A new boot permits a new attempt. An unavailable boot identity records a refusal
+without replacing a prior claim, so recovering the probe cannot replay an
+already-attempted project. Resume permits the next login
 attempt; use `hack up` to start immediately.
 A routing failure consumes that boot's attempt; an engine timeout does not.
 A start has a 120-second bound, then receives TERM and a two-second grace before
@@ -227,7 +240,8 @@ additive and stable; internal boot claims are not part of this public contract.
 Current skip reasons are `engine_timeout`, `routing_failed`,
 `boot_identity_unavailable`, `native_unsupported`, `runtime_unknown`,
 `interactive_required`, `env_key_missing`, `keychain_unavailable`,
-`pending_env_migration`, `project_unavailable`, `paused`, `target_changed`,
+`pending_env_migration`, `project_unavailable`, `checkout_untrusted`,
+`executable_path_untrusted`, `paused`, `target_changed`,
 `daemon_stopped`, `global_paused`, and `invalid_marker`. Failure reasons are `start_failed`,
 `start_timeout`, and `output_limit`.
 

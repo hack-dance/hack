@@ -9,6 +9,8 @@ import {
   GLOBAL_CADDY_DIR_NAME,
   GLOBAL_PROJECTS_REGISTRY_FILENAME,
 } from "../constants.ts";
+import { assertAutostartCheckoutTrusted } from "../lib/autostart-checkout-trust.ts";
+import { assertAutostartExecutablePathTrusted } from "../lib/autostart-executable-trust.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -24,6 +26,7 @@ import {
   recordProjectAutostartResult,
   setAutostartLoginWaitingForEngine,
 } from "../lib/projects-registry.ts";
+import { checkServiceExecutableTrusted } from "./systemd.ts";
 
 export type AutostartResult = {
   readonly status: "started" | "skipped" | "failed" | "already_running";
@@ -32,11 +35,17 @@ export type AutostartResult = {
 };
 
 type StartResult = Omit<AutostartResult, "at">;
+type AutostartStartupRefusal =
+  | "native_unsupported"
+  | "executable_path_untrusted"
+  | null;
 
 /** Side effects are explicit so ordering, bounds and restart recovery can be tested without an engine. */
 export type AutostartDependencies = {
   readonly bootId: () => Promise<string | null>;
-  readonly startupRefusal?: () => "native_unsupported" | null;
+  readonly startupRefusal?: () =>
+    | AutostartStartupRefusal
+    | Promise<AutostartStartupRefusal>;
   readonly now: () => number;
   readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly engineReady: (opts?: {
@@ -48,7 +57,7 @@ export type AutostartDependencies = {
   readonly inspect: (
     project: RegisteredProject,
     signal?: AbortSignal
-  ) => Promise<"running" | "stopped" | "unknown">;
+  ) => Promise<"running" | "stopped" | "unknown" | "untrusted">;
   readonly start: (
     project: RegisteredProject,
     signal?: AbortSignal
@@ -91,7 +100,7 @@ export async function runAutostartAtLogin(
   const runtime = opts.runtime;
   const deps =
     opts.dependencies ??
-    productionDependencies(requireAutostartRuntime(runtime));
+    createAutostartProductionDependencies(requireAutostartRuntime(runtime));
   const registryPath =
     opts.registryPath ??
     (runtime
@@ -123,6 +132,7 @@ async function runAutostartLoginPass(opts: {
   if (registry.autostartGlobal?.paused) {
     return { waitingForEngine: false };
   }
+  const startupRefusal = (await deps.startupRefusal?.()) ?? null;
   const machineBootId = await deps.bootId().catch(() => null);
   const bootId = machineBootId ?? "unavailable";
   const pending = registry.projects
@@ -152,6 +162,17 @@ async function runAutostartLoginPass(opts: {
   }
   let waitingForEngine = false;
   try {
+    if (machineBootId === null) {
+      await recordUnclaimedAutostartRefusal({
+        pending,
+        runId: loginRun.runId,
+        registryPath: opts.registryPath,
+        deps,
+        reason: startupRefusal ?? "boot_identity_unavailable",
+        signal: opts.signal,
+      });
+      return { waitingForEngine: false };
+    }
     const refusal = await prepareAutostartRuntime({
       deps,
       machineBootId,
@@ -159,6 +180,7 @@ async function runAutostartLoginPass(opts: {
       registryPath: opts.registryPath,
       engineWaitMs: opts.engineWaitMs ?? opts.runtime?.engineWaitMs,
       runId: loginRun.runId,
+      startupRefusal,
     });
     if (refusal === "engine_timeout" && !opts.signal?.aborted) {
       waitingForEngine = true;
@@ -185,6 +207,45 @@ async function runAutostartLoginPass(opts: {
     });
   }
   return { waitingForEngine: false };
+}
+
+/** Unknown boot identity cannot replace a real claim and authorize a later replay. */
+async function recordUnclaimedAutostartRefusal(opts: {
+  readonly pending: readonly RegisteredProject[];
+  readonly runId: string;
+  readonly registryPath?: string;
+  readonly deps: AutostartDependencies;
+  readonly reason: string;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  await setAutostartLoginWaitingForEngine({
+    runId: opts.runId,
+    waitingForEngine: false,
+    registryPath: opts.registryPath,
+  });
+  for (const project of opts.pending) {
+    const recorded =
+      !opts.signal?.aborted &&
+      (await recordProjectAutostartResult({
+        id: project.id,
+        bootId: project.autostart?.lastAttemptBootId ?? null,
+        expectedBranch: project.autostart?.branch,
+        onlyIfWanted: true,
+        result: {
+          status: "skipped",
+          reason: opts.reason,
+          at: new Date(opts.deps.now()).toISOString(),
+        },
+        registryPath: opts.registryPath,
+      }));
+    await recordAutostartLoginOutcome({
+      runId: opts.runId,
+      id: project.id,
+      succeeded: false,
+      cancelled: !recorded,
+      registryPath: opts.registryPath,
+    });
+  }
 }
 
 async function dispatchAutostartProjects(opts: {
@@ -260,12 +321,13 @@ async function dispatchAutostartProjects(opts: {
 async function prepareAutostartRuntime(opts: {
   readonly deps: AutostartDependencies;
   readonly machineBootId: string | null;
+  readonly startupRefusal: AutostartStartupRefusal;
   readonly runId: string;
   readonly engineWaitMs?: number;
   readonly registryPath?: string;
   readonly signal?: AbortSignal;
 }): Promise<string | null> {
-  const refusal = opts.deps.startupRefusal?.();
+  const refusal = opts.startupRefusal;
   if (refusal) {
     return refusal;
   }
@@ -356,6 +418,8 @@ async function startClaimedProject(opts: {
       const state = await opts.deps.inspect(current, opts.signal);
       if (state === "running") {
         result = { status: "already_running", reason: null };
+      } else if (state === "untrusted") {
+        result = { status: "skipped", reason: "checkout_untrusted" };
       } else if (state === "unknown") {
         result = { status: "skipped", reason: "runtime_unknown" };
       } else {
@@ -461,6 +525,14 @@ export function classifyAutostartExit(opts: {
   ) {
     return { status: "skipped", reason: detail.reason };
   }
+  if (
+    code === "E_PERMISSION" &&
+    isRecord(detail) &&
+    (detail.reason === "checkout_untrusted" ||
+      detail.reason === "executable_path_untrusted")
+  ) {
+    return { status: "skipped", reason: detail.reason };
+  }
   if (code === "E_PROJECT_NOT_FOUND") {
     return { status: "skipped", reason: "project_unavailable" };
   }
@@ -497,8 +569,11 @@ export async function autostartRoutingInstalled(
   ).exists();
 }
 
-function productionDependencies(
-  runtime: AutostartRuntimeOptions
+export function createAutostartProductionDependencies(
+  runtime: AutostartRuntimeOptions,
+  checks?: {
+    readonly executablePath?: typeof assertAutostartExecutablePathTrusted;
+  }
 ): AutostartDependencies {
   const env = autostartServiceEnvironment(runtime);
   const invocation = [
@@ -511,7 +586,16 @@ function productionDependencies(
         ]),
   ];
   return {
-    startupRefusal: () => autostartRuntimeRefusal(env),
+    startupRefusal: async () => {
+      try {
+        await (checks?.executablePath ?? assertAutostartExecutablePathTrusted)({
+          path: env.PATH ?? "",
+        });
+      } catch {
+        return "executable_path_untrusted";
+      }
+      return autostartRuntimeRefusal(env);
+    },
     now: Date.now,
     sleep: async (ms, signal) => {
       if (signal?.aborted) {
@@ -613,7 +697,15 @@ async function inspectComposeProject(
   project: RegisteredProject,
   signal?: AbortSignal,
   env: Readonly<Record<string, string | undefined>> = {}
-): Promise<"running" | "stopped" | "unknown"> {
+): Promise<"running" | "stopped" | "unknown" | "untrusted"> {
+  try {
+    assertAutostartCheckoutTrusted({
+      repoRoot: project.repoRoot,
+      projectDir: project.projectDir,
+    });
+  } catch {
+    return "untrusted";
+  }
   const context = await findProjectContextAtRoot({
     projectRoot: project.repoRoot,
     projectDirName: project.projectDirName,
@@ -857,8 +949,14 @@ async function readMachineBootId(
     }
   }
   if (process.platform === "darwin") {
+    const sysctl = "/usr/sbin/sysctl";
+    if (
+      (await checkServiceExecutableTrusted({ path: sysctl, uid: 0 })) !== null
+    ) {
+      return null;
+    }
     const result = await runAutostartSubprocess(
-      ["sysctl", "-n", "kern.boottime"],
+      [sysctl, "-n", "kern.boottime"],
       {
         timeoutMs: 2000,
         env,

@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-state" viewBox="0 0 969 743" width="969" height="743" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_fm:var(--pele-font-mono,Geist Mono);font:15px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Geist)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="state" data-theme="light"><style><![CDATA[/* Hack Dance house theme for Pele 1.9.x: ink on cream (fleet palette B). Light by default; dark via [data-theme=dark].
+   Colour only for meaning (house classes). Never resize label text: Pele sized label boxes for its own font size. */
+.pele {
+  --pele-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --pele-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --pele-bg: #F3EFE3;
+  --pele-fg: #1D1D1B;
+  --pele-muted: #3D3C37;
+  --pele-line: #3D3C37;
+  --pele-surface: #FBF9F1;
+  --pele-surface-alt: #E8E4D8;
+  --pele-border: #66625A;
+  --pele-accent: #1D1D1B;
+  --pele-critical: #C2461F;
+  --pele-error: #C2461F;
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: #5b3df5; --pele-series-2: #0e9f8a; --pele-series-3: #e08a00; --pele-series-4: #d6345a;
+  --pele-series-5: #2f7de1; --pele-series-6: #8a5cf6; --pele-series-7: #4f9d2d; --pele-series-8: #a0674b;
+  /* semantic state tints (house classes) */
+  --hd-live: #4B4790;  --hd-live-bg: #E6E4F0;
+  --hd-wait: #34506E;  --hd-wait-bg: #D3DBE5;
+  --hd-ok:   #3A7A2E;  --hd-ok-bg:   #E2EBD9;
+  --hd-fail: #C2461F;  --hd-fail-bg: #F5E0D6;
+  --hd-idle: #8A8576;  --hd-idle-bg: #E8E4D8;
+  background: var(--pele-bg);
+}
+.pele[data-theme="dark"], [data-theme="dark"] .pele {
+  --pele-bg: #11100E;
+  --pele-fg: #EDE8D9;
+  --pele-muted: #C9C3B2;
+  --pele-line: #C9C3B2;
+  --pele-surface: #191815;
+  --pele-surface-alt: #1B1A17;
+  --pele-border: #8F897A;
+  --pele-accent: #EDE8D9;
+  --pele-critical: #FF7A52;
+  --pele-error: #FF7A52;
+  --pele-series-1: #9a86ff; --pele-series-2: #3fd1b8; --pele-series-3: #ffb547; --pele-series-4: #ff6b8b;
+  --pele-series-5: #6aa8ff; --pele-series-6: #c4a5ff; --pele-series-7: #8fd16a; --pele-series-8: #d29b7f;
+  --hd-live: #A39CE0;  --hd-live-bg: #24223A;
+  --hd-wait: #9DB4CF;  --hd-wait-bg: #22303D;
+  --hd-ok:   #7CC25E;  --hd-ok-bg:   #1C2A17;
+  --hd-fail: #FF7A52;  --hd-fail-bg: #33190F;
+  --hd-idle: #7A7466;  --hd-idle-bg: #1B1A17;
+}
+/* polish */
+.pele .pele-edge path { stroke-width: 1.4px; stroke-linecap: round; }
+.pele .pele-edge-label rect { fill: var(--pele-bg); }
+.pele .pele-edge-label text { fill: var(--pele-muted); }
+.pele .pele-cluster-label, .pele .pele-title { letter-spacing: .01em; }
+.pele .pele-node > rect, .pele .pele-node > path, .pele .pele-node > polygon, .pele .pele-node > circle, .pele .pele-node > ellipse { stroke-width: 1.2px; }
+/* house semantic classes: in Mermaid write `classDef live stroke-width:1.6px` + `class X live` */
+.pele .live > rect, .pele .live > path, .pele .live > polygon, .pele .live > circle, .pele .live > ellipse { fill: var(--hd-live-bg) !important; stroke: var(--hd-live) !important; }
+.pele .wait > rect, .pele .wait > path, .pele .wait > polygon, .pele .wait > circle, .pele .wait > ellipse { fill: var(--hd-wait-bg) !important; stroke: var(--hd-wait) !important; }
+.pele .ok   > rect, .pele .ok   > path, .pele .ok   > polygon, .pele .ok > circle, .pele .ok > ellipse { fill: var(--hd-ok-bg)   !important; stroke: var(--hd-ok)   !important; }
+.pele .fail > rect, .pele .fail > path, .pele .fail > polygon, .pele .fail > circle, .pele .fail > ellipse { fill: var(--hd-fail-bg) !important; stroke: var(--hd-fail) !important; }
+.pele .idle > rect, .pele .idle > path, .pele .idle > polygon, .pele .idle > circle, .pele .idle > ellipse { fill: var(--hd-idle-bg) !important; stroke: var(--hd-idle) !important; stroke-dasharray: 4 3; }
+.pele .live .pele-label { fill: var(--hd-live); font-weight: 600; }
+.pele .wait .pele-label { fill: var(--hd-wait); font-weight: 600; }
+.pele .ok   .pele-label { fill: var(--hd-ok);   font-weight: 600; }
+.pele .fail .pele-label { fill: var(--hd-fail); font-weight: 600; }
+.pele .idle .pele-label { fill: var(--hd-idle); }
+]]></style><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge pele-transition" data-id="edge0"><path d="M546.24,38L546.24,99"/><path class="pele-marker" d="M546.24,106L542.88,98L549.6,98Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge1"><path d="M530.24,149L530.24,157.09C530.24,159.7 190.38,164.9 190.38,167.5L190.38,217L190.38,213.5"/><path class="pele-marker" d="M190.38,220.5L187.02,212.5L193.74,212.5Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge2"><path d="M190.38,263.5L190.38,328"/><path class="pele-marker" d="M190.38,335L187.02,327L193.74,327Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge3"><path d="M174.38,378C174.38,412 109.49,412 109.49,446L109.49,492"/><path class="pele-marker" d="M109.49,499L106.13,491L112.85,491Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge4"><path d="M190.38,378C190.38,402.8 239.06,418 318.48,418C397.9,418 446.58,428.64 446.58,446L446.58,492"/><path class="pele-marker" d="M446.58,499L443.22,491L449.94,491Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge5"><path d="M206.38,378C206.38,395.36 284.51,406 412,406C539.48,406 617.62,421.2 617.62,446L617.62,470C617.62,482.75 637.96,482.75 637.96,495.5L637.96,492"/><path class="pele-marker" d="M637.96,499L634.6,491L641.32,491Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge6"><path d="M637.96,499L637.96,495.5C637.96,479.75 666.29,479.75 666.29,464L666.29,217C666.29,189.5 562.24,189.5 562.24,162L562.24,156"/><path class="pele-marker" d="M562.24,149L565.6,157L558.88,157Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge7"><path d="M109.49,542L109.49,606.5"/><path class="pele-marker" d="M109.49,613.5L106.13,605.5L112.85,605.5Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge8"><path d="M462.58,499L462.58,486C462.58,475 498.87,475 498.87,464L498.87,217C498.87,189.5 546.24,189.5 546.24,162L546.24,156"/><path class="pele-marker" d="M546.24,149L549.6,157L542.88,157Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge9"><path d="M109.49,656.5L109.49,693.5"/><path class="pele-marker" d="M109.49,700.5L106.13,692.5L112.85,692.5Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-note-edge" stroke="var(--_b)" stroke-dasharray="3 4" data-id="planned-planned----note-10"><path d="M233.06,242L277.06,242"/></g><g class="pele-edge pele-note-edge" stroke="var(--_b)" stroke-dasharray="3 4" data-id="interrupted-interrupted----note-11"><path d="M689.81,520.5L733.81,520.5"/></g></g><g class="pele-edge-labels" font-size="13"><g class="pele-edge-label" data-id="edge0"><rect x="509.01" y="58.5" width="74.47" height="20" rx="3" fill="var(--_bg)"/><text x="546.24" y="73.05" text-anchor="middle">fresh check</text></g><g class="pele-edge-label" data-id="edge1"><rect x="126.04" y="169.5" width="128.68" height="20" rx="3" fill="var(--_bg)"/><text x="190.38" y="184.05" text-anchor="middle">snapshot and journal</text></g><g class="pele-edge-label" data-id="edge2"><rect x="134" y="287.5" width="112.77" height="20" rx="3" fill="var(--_bg)"/><text x="190.38" y="302.05" text-anchor="middle">journal target start</text></g><g class="pele-edge-label" data-id="edge3"><rect x="26" y="448" width="166.98" height="20" rx="3" fill="var(--_bg)"/><text x="109.49" y="462.55" text-anchor="middle">record output then outcome</text></g><g class="pele-edge-label" data-id="edge4"><rect x="404.29" y="448" width="84.58" height="20" rx="3" fill="var(--_bg)"/><text x="446.58" y="462.55" text-anchor="middle">closed failure</text></g><g class="pele-edge-label" data-id="edge5"><rect x="578.94" y="448" width="77.36" height="20" rx="3" fill="var(--_bg)"/><text x="617.62" y="462.55" text-anchor="middle">process lost</text></g><g class="pele-edge-label" data-id="edge6"><rect x="592.58" y="346.5" width="147.43" height="20" rx="3" fill="var(--_bg)"/><text x="666.29" y="361.05" text-anchor="middle">explicit resume manifest</text></g><g class="pele-edge-label" data-id="edge7"><rect x="57.44" y="566" width="104.1" height="20" rx="3" fill="var(--_bg)"/><text x="109.49" y="580.55" text-anchor="middle">guarded rollback</text></g><g class="pele-edge-label" data-id="edge8"><rect x="425.16" y="346.5" width="147.43" height="20" rx="3" fill="var(--_bg)"/><text x="498.87" y="361.05" text-anchor="middle">explicit resume manifest</text></g></g><g class="pele-nodes"><g class="pele-node pele-state-start" data-id="root_start" transform="translate(546.24,31)"><circle r="7" fill="var(--_l)"/></g><g class="pele-node pele-state" data-id="checked" transform="translate(546.24,127.5)"><rect x="-43.93" y="-21.5" width="87.86" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">checked</text></g><g class="pele-node pele-state" data-id="started" transform="translate(190.38,356.5)"><rect x="-38.93" y="-21.5" width="77.85" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">started</text></g><g class="pele-node pele-state" data-id="applied" transform="translate(109.49,520.5)"><rect x="-40.18" y="-21.5" width="80.36" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">applied</text></g><g class="pele-node pele-state" data-id="failed" transform="translate(462.55,520.5)"><rect x="-33.92" y="-21.5" width="67.85" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">failed</text></g><g class="pele-node pele-state" data-id="restored" transform="translate(109.49,635)"><rect x="-43.51" y="-21.5" width="87.02" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">restored</text></g><g class="pele-node pele-state-end" data-id="root_end" transform="translate(109.49,709.5)"><circle r="8.5" fill="var(--_bg)" stroke="var(--_l)"/><circle r="5" fill="var(--_l)"/></g><g class="pele-node pele-state" data-id="planned" transform="translate(190.38,242)"><rect x="-42.68" y="-21.5" width="85.37" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">planned</text></g><g class="pele-node pele-state" data-id="interrupted" transform="translate(637.96,520.5)"><rect x="-51.85" y="-21.5" width="103.7" height="43" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">interrupted</text></g><g class="pele-note" data-id="planned----note-10" transform="translate(373.97,242)"><path d="M-96.9,-25H88.9L96.9,-17V25H-96.9Z" fill="var(--_bg)" stroke="var(--_b)"/><path d="M88.9,-25V-17H96.9" fill="none" stroke="var(--_b)"/><text class="pele-label" font-size="13" fill="var(--_m)" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-3.95">Coverage and gaps persisted</tspan><tspan x="0" y="13.05">before target writes</tspan></text></g><g class="pele-note" data-id="interrupted----note-11" transform="translate(839.37,520.5)"><path d="M-105.57,-25H97.57L105.57,-17V25H-105.57Z" fill="var(--_bg)" stroke="var(--_b)"/><path d="M97.57,-25V-17H105.57" fill="none" stroke="var(--_b)"/><text class="pele-label" font-size="13" fill="var(--_m)" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-3.95">Unexpected edits refuse resume</tspan><tspan x="0" y="13.05">No implicit run selection</tspan></text></g></g></svg>

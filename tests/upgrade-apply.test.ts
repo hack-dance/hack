@@ -15,7 +15,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
+import { renderCodexSkill } from "../src/agents/codex-skill.ts";
+import { HACK_PLUGIN_ID } from "../src/agents/plugin-replacement.ts";
 import { runUpgradeApply } from "../src/lib/upgrade-apply.ts";
 import {
   runUpgradeCheck,
@@ -274,11 +275,16 @@ test("100 checkouts fit one screen: summary first, worktrees folded, plan groupe
   expect(ignore?.applies).toBe(true);
   expect(ignore?.count).toBeGreaterThan(90);
   // A manual step over several checkouts names one command pattern.
-  const legacy = report.plan.find((s) => s.id === "env-format" && !s.blocker);
+  const legacy = report.plan.find((s) => s.id === "env-format");
+  expect(legacy?.blocker).toBe(true);
+  expect(report.plan.filter((s) => s.id === "env-format")).toHaveLength(1);
   expect(legacy?.command).toBeNull();
-  expect(legacy?.action).toContain(
-    "hack doctor --migrate-env-config --path <checkout>"
-  );
+  expect(legacy?.action).toContain("checkout");
+  expect(
+    legacy?.targets.some((target) =>
+      target.command?.includes("doctor --migrate-env-config")
+    )
+  ).toBe(true);
   expect(report.plan.length).toBeLessThanOrEqual(10);
 
   const text = renderUpgradeCheck(report);
@@ -874,4 +880,252 @@ test("a backup that cannot be inspected after a failed migration keeps its journ
   } finally {
     await chmod(backupDir, 0o700).catch(() => undefined);
   }
+}, 60_000);
+
+test("SIGKILL at every apply boundary resumes the same snapshot and rolls back exact bytes and modes", async () => {
+  const a = await project("app-a", 1);
+  await writeRegistry([a]);
+  const ignore = join(a.projectDir, ".gitignore");
+  await writeFile(ignore, "# keep custom rules\ncustom\n");
+  await chmod(ignore, 0o640);
+  const report = await check();
+  const reportPath = join(root, "report.json");
+  await writeFile(reportPath, JSON.stringify(report));
+  const before = [
+    ...(await tree(join(root, "repos"))),
+    ...(await tree(join(root, "worktrees"))),
+  ];
+  // Initial journal, then started / published / recorded for both targets.
+  for (let boundary = 1; boundary <= 7; boundary += 1) {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "fixtures/upgrade-apply-worker.ts"),
+        reportPath,
+        String(boundary),
+      ],
+      {
+        cwd: root,
+        env: privateCliEnv({
+          root,
+          home,
+          env: {
+            HACK_HOME: hackHome,
+            HACK_GLOBAL_CONFIG_PATH: join(hackHome, "hack.config.json"),
+            HACK_HOST_PROBES_DISABLE: "1",
+            HACK_SYSTEMD_DISABLE: "1",
+            HACK_NO_INTERACTIVE: "1",
+          },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const reader = child.stdout.getReader();
+    try {
+      const reached = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error("No interruption checkpoint")),
+            15_000
+          ).unref();
+        }),
+      ]);
+      expect(new TextDecoder().decode(reached.value)).toContain("checkpoint");
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+      reader.releaseLock();
+    }
+    const [snapshot] = await listUpgradeSnapshots();
+    if (snapshot === undefined) {
+      throw new Error("Missing interrupted snapshot");
+    }
+    const resumed = await runUpgradeApply({
+      report: await check(),
+      home,
+      dryRun: false,
+      resumeManifest: snapshot.manifestPath,
+      collect: async () => {
+        throw new Error("Resume must reuse coverage");
+      },
+    });
+    expect(resumed.status).toBe("applied");
+    if (resumed.status !== "applied") {
+      throw new Error(JSON.stringify(resumed));
+    }
+    expect(resumed.coverage.manifest_path).toBe(snapshot.manifestPath);
+    expect(await readFile(ignore, "utf8")).toContain("# keep custom rules");
+    expect(await readFile(resumed.journal_path, "utf8")).not.toContain(
+      SENTINEL
+    );
+    expect(
+      (await restoreUpgradeSnapshot({ manifestPath: snapshot.manifestPath }))
+        .status
+    ).toBe("restored");
+    expect([
+      ...(await tree(join(root, "repos"))),
+      ...(await tree(join(root, "worktrees"))),
+    ]).toEqual(before);
+  }
+}, 120_000);
+
+test("resume refuses an unknown journal and preserves edits after apply", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const result = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    only: ["ignore-rules"],
+    collect: collectUpgradeSnapshotTargets,
+  });
+  if (result.status !== "applied") {
+    throw new Error("Expected apply");
+  }
+  const path = join(a.projectDir, ".gitignore");
+  await writeFile(path, "later edit\n");
+  const resumed = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    resumeManifest: result.coverage.manifest_path,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(resumed.status).toBe("partial");
+  expect(await readFile(path, "utf8")).toBe("later edit\n");
+  await writeFile(result.journal_path, '{"version":999}\n', { mode: 0o600 });
+  const before = await tree(root);
+  expect(
+    (
+      await runUpgradeApply({
+        report: await check(),
+        home,
+        dryRun: false,
+        resumeManifest: result.coverage.manifest_path,
+        collect: collectUpgradeSnapshotTargets,
+      })
+    ).status
+  ).toBe("refused");
+  expect(await tree(root)).toEqual(before);
+}, 60_000);
+
+test("agent removals keep metadata-only snapshots and rollback exact files and directories after interruption", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const agent = await staleHomeAgentFile();
+  await writeFile(agent, renderCodexSkill());
+  await chmod(agent, 0o640);
+  await writeFile(
+    join(home, ".codex/config.toml"),
+    `[plugins."${HACK_PLUGIN_ID}"]\nenabled = true\n`
+  );
+  await writeFile(
+    join(a.repoRoot, "AGENTS.md"),
+    "<!-- hack:agent-docs:start -->\nold\n<!-- hack:agent-docs:end -->\n"
+  );
+  const beforeAgentTree = await tree(join(home, ".codex"));
+  const report = await check();
+  expect(report.plan.some((step) => step.id === "agent-integrations")).toBe(
+    true
+  );
+  const reportPath = join(root, "report.json");
+  await writeFile(reportPath, JSON.stringify(report));
+  // Interrupt after the real plugin migration has removed the global file,
+  // before apply records its after state or commits the target outcome.
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "fixtures/upgrade-apply-worker.ts"),
+      reportPath,
+      "3",
+      "agent-integrations",
+    ],
+    {
+      cwd: root,
+      env: privateCliEnv({
+        root,
+        home,
+        env: {
+          HACK_HOME: hackHome,
+          HACK_GLOBAL_CONFIG_PATH: join(hackHome, "hack.config.json"),
+          HACK_HOST_PROBES_DISABLE: "1",
+          HACK_SYSTEMD_DISABLE: "1",
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const reader = child.stdout.getReader();
+  try {
+    const reached = await reader.read();
+    expect(new TextDecoder().decode(reached.value)).toContain("checkpoint");
+  } finally {
+    child.kill("SIGKILL");
+    await child.exited;
+    reader.releaseLock();
+  }
+  expect(await lstat(agent).catch(() => null)).toBeNull();
+  const [snapshot] = await listUpgradeSnapshots();
+  if (snapshot === undefined) {
+    throw new Error("Missing snapshot");
+  }
+  const resumed = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    resumeManifest: snapshot.manifestPath,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(resumed.status).toBe("applied");
+  const manifest = await readFile(snapshot.manifestPath, "utf8");
+  expect(manifest).not.toContain("contentBase64");
+  expect(manifest).not.toContain(Buffer.from(SENTINEL).toString("base64"));
+  expect(
+    (await restoreUpgradeSnapshot({ manifestPath: snapshot.manifestPath }))
+      .status
+  ).toBe("restored");
+  expect(await tree(join(home, ".codex"))).toEqual(beforeAgentTree);
+}, 60_000);
+
+test("resume refuses damaged snapshot originals before applying another fix", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  await writeFile(join(a.projectDir, ".gitignore"), "keep\n");
+  const result = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    only: ["ignore-rules"],
+    collect: collectUpgradeSnapshotTargets,
+  });
+  if (result.status !== "applied") {
+    throw new Error("Expected apply");
+  }
+  const [snapshot] = await listUpgradeSnapshots();
+  const original = snapshot?.manifest.entries.find(
+    (entry) => entry.path === join(a.projectDir, ".gitignore")
+  );
+  if (snapshot === undefined || original?.before.kind !== "file") {
+    throw new Error("Missing original");
+  }
+  await writeFile(
+    join(snapshot.dir, "blobs", original.before.sha256),
+    "damaged\n",
+    { mode: 0o600 }
+  );
+  const before = await tree(join(root, "repos"));
+  const resumed = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    resumeManifest: result.coverage.manifest_path,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(resumed.status).toBe("partial");
+  expect(await tree(join(root, "repos"))).toEqual(before);
 }, 60_000);

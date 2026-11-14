@@ -168,3 +168,23 @@ the inspected immutable ID. Uncovered: real VM/foreground signals, external Dock
 writers, fsync failures, native publication retirement, boot rollover recovery,
 application flush behavior and live container absence. Linux portable checks do
 not qualify those macOS behaviors.
+
+### Upgrade apply recovery (HACK-2220)
+
+![Upgrade apply recovery](upgrade-apply.svg) ([source](upgrade-apply.mmd))
+
+The apply journal records `planned → started → applied|unchanged|refused|failed`
+per target, with snapshot coverage persisted before the first target starts.
+`--resume` requires an explicit manifest and admits only the original input or
+that run's deterministic ignore-rule output; agent removal rechecks ownership,
+plugin replacement and snapshot coverage. A per-snapshot lock serializes writers.
+
+[Upgrade apply regressions](../../tests/upgrade-apply.test.ts) exercise seven real
+SIGKILL boundaries over two checkouts, plus interruption after a real agent-file
+removal. Each resumes the original snapshot and compares restored file bytes,
+modes and directory entries. The metadata-only manifest checks include encoded
+sentinels. This is implementation evidence, not a maintained finite TLA+ model.
+Uncovered: power-loss durability, arbitrary filesystem-call interruption,
+unsynchronized external writers, multiple independent snapshots writing the same
+checkout, service-manager changes and env migration's separate journal. No
+whole-machine upgrade or native runtime qualification follows from these tests.

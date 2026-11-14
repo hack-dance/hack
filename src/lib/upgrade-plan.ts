@@ -165,12 +165,16 @@ export function buildUpgradePlan(opts: {
       if (!actionable(finding)) {
         continue;
       }
-      const key = `${finding.id}\u0000${finding.status}`;
+      const key = finding.id;
       const group = groups.get(key) ?? {
         id: finding.id,
         status: finding.status,
         findings: [],
       };
+      const severity = { blocker: 0, incomplete: 1, warn: 2, info: 3, ok: 4 };
+      if (severity[finding.status] < severity[group.status]) {
+        group.status = finding.status;
+      }
       group.findings.push({
         target: {
           scope: project.name,
@@ -245,7 +249,7 @@ function groupStep(opts: {
     targets,
     blocker: status === "blocker",
   };
-  if (status === "warn" && isUpgradeApplyFix(id)) {
+  if (isUpgradeApplyFix(id)) {
     const args = ["upgrade", "apply", "--only", id];
     return {
       ...base,

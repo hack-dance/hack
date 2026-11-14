@@ -55,6 +55,7 @@ export function renderUpgradeCheck(
     buildLine(report),
     "",
     ...machineLines(report),
+    ...findingCounts(report),
     "",
     ...projectSummaryLines(report),
     ...(opts.verbose === true ? verboseLines(report) : []),
@@ -62,6 +63,21 @@ export function renderUpgradeCheck(
     ...planLines(report),
   ];
   return `${lines.map((text) => escapeTerminalControls(text)).join("\n")}\n`;
+}
+
+/** Count finding kinds across all live checkouts, including folded-away projects. */
+function findingCounts(report: UpgradeCheckReport): string[] {
+  const counts = new Map<string, number>();
+  for (const checkout of report.projects) {
+    for (const finding of checkout.findings) {
+      if (NEEDS_WORK.has(finding.status)) {
+        counts.set(finding.id, (counts.get(finding.id) ?? 0) + 1);
+      }
+    }
+  }
+  return [...counts].map(
+    ([id, count]) => `  ${count} checkout(s): ${LABEL[id] ?? id}`
+  );
 }
 
 /** First line: version, channel, and whether a source build or a candidate launcher ran. */
@@ -204,12 +220,14 @@ function verboseLines(report: UpgradeCheckReport): string[] {
 }
 
 function planLines(report: UpgradeCheckReport): string[] {
-  if (report.plan.length === 0) {
-    return report.ready
-      ? ["Nothing to do: this machine and its projects are ready."]
-      : ["No step to suggest, but the check is not complete; see above."];
-  }
-  const lines = ["Plan", ...report.plan.flatMap(stepLines)];
+  const lines =
+    report.plan.length === 0
+      ? [
+          report.ready
+            ? "Nothing to do: this machine and its projects are ready."
+            : "No step to suggest, but the check is not complete; see below.",
+        ]
+      : ["Plan", ...report.plan.flatMap(stepLines)];
   if (report.plan.some((step) => step.applies)) {
     lines.push(
       "  Steps marked (apply) run for all their checkouts with hack upgrade apply (--dry-run to preview, --project <name> for one project)."

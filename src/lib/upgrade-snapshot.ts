@@ -519,6 +519,41 @@ const JOURNAL_NAME = "journal.json";
 const MAX_JOURNAL_BYTES = 16 * 1024 * 1024;
 
 /**
+ * Read-only admission for a snapshot-backed writer. Every named path must be
+ * covered, its original blob intact, and its parent on the snapshot filesystem.
+ * This does not promise a filesystem transaction or exclude later writers.
+ */
+export async function verifyUpgradeSnapshotRecovery(input: {
+  readonly manifestPath: string;
+  readonly paths: readonly string[];
+}): Promise<boolean> {
+  const loaded = await readUpgradeSnapshot(input);
+  if (loaded.status !== "ok") {
+    return false;
+  }
+  const { snapshot } = loaded;
+  try {
+    const device = (await stat(snapshot.dir)).dev;
+    for (const path of input.paths) {
+      const entry = snapshot.manifest.entries.find((e) => e.path === path);
+      if (entry === undefined || (await stat(dirname(path))).dev !== device) {
+        return false;
+      }
+      if (
+        entry.before.kind === "file" &&
+        (await readBlob({ dir: snapshot.dir, sha256: entry.before.sha256 })) ===
+          null
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Writes the step journal of the step that owns this snapshot (for example
  * `hack upgrade apply`) beside its manifest, atomically and privately.
  * The journal is caller data and, like labels, must hold no value: paths,

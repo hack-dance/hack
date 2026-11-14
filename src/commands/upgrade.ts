@@ -138,7 +138,21 @@ const optDryRun = defineOption({
   description: "List what would change and change nothing",
 } as const);
 
-const applyOptions = [optOnly, optProject, optDryRun, optJson] as const;
+const optResume = defineOption({
+  name: "resume",
+  type: "string",
+  long: "--resume",
+  valueHint: "<manifest>",
+  description:
+    "Resume the apply journal beside this explicit snapshot manifest",
+} as const);
+const applyOptions = [
+  optOnly,
+  optProject,
+  optDryRun,
+  optResume,
+  optJson,
+] as const;
 
 const applySpec = defineCommand({
   name: "apply",
@@ -148,10 +162,11 @@ const applySpec = defineCommand({
   description: [
     "Checks first, then runs the plan steps marked (apply) for every checkout they cover: refreshing",
     "outdated .hack/.gitignore files and removing stale standalone agent files the hack plugin replaces",
-    "(each removal backed up by the plugin migration). Before changing anything it keeps an upgrade",
+    "(each removal covered by the same snapshot). Before changing anything it keeps an upgrade",
     "snapshot and writes a journal beside it with the snapshot's coverage and gaps and each checkout's",
     "outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback",
     "command. --dry-run lists what would change. Exits 1 when anything selected was not done.",
+    "After interruption, --resume <manifest> reuses that run's selection and snapshot; unexpected edits refuse.",
   ].join("\n"),
   options: applyOptions,
   positionals: [],
@@ -417,14 +432,21 @@ async function handleUpgradeApply({
     throw new CliUsageError("--project needs a registered project name.");
   }
   const dryRun = args.options.dryRun === true;
+  if (args.options.resume !== undefined && !args.options.resume.trim()) {
+    throw new CliUsageError("--resume needs a snapshot manifest path.");
+  }
   const report = await check(ctx);
   const result = await runUpgradeApply({
     report,
-    only,
+    only: args.options.only === undefined ? undefined : only,
     project,
     dryRun,
     home: resolveUserHomeDir(),
     collect: collectUpgradeSnapshotTargets,
+    resumeManifest:
+      args.options.resume === undefined
+        ? undefined
+        : resolve(ctx.cwd, args.options.resume),
   });
   const ran = result.status === "applied" || result.status === "partial";
   // Fresh evidence: what the check finds after the run.
@@ -465,6 +487,15 @@ function applyJson(opts: {
   return {
     ...result,
     rollback_command: opts.rollback,
+    resume_command:
+      result.status === "applied" || result.status === "partial"
+        ? command([
+            "upgrade",
+            "apply",
+            "--resume",
+            result.coverage.manifest_path,
+          ])
+        : null,
     after:
       after === null
         ? null
@@ -531,6 +562,13 @@ function outcomeLines(
       lines.push(`  ${first.message}`);
     }
   }
+  if (result.status === "dry-run") {
+    lines.push(
+      ...result.targets.flatMap((target) =>
+        (target.files ?? []).map((path) => `  ${path}`)
+      )
+    );
+  }
   if (result.status === "blocked") {
     lines.push(
       "Nothing ran: every selected checkout has a blocker or a check that could not be performed."
@@ -555,13 +593,20 @@ function recoveryLines(opts: {
     "",
     `Snapshot ${coverage.snapshot_id}: ${coverage.files} file(s)${gaps}.`,
     `Journal: ${result.journal_path}`,
+    ...(result.status === "partial"
+      ? [
+          `To resume: ${command(["upgrade", "apply", "--resume", coverage.manifest_path])}`,
+        ]
+      : []),
     ...(opts.rollback === null
       ? []
       : [`To put the files back: ${opts.rollback}`]),
-    ...result.agent_backups.map(
-      (manifest) =>
-        `To put removed agent files back: ${command(["setup", "migrate", "--rollback-manifest", manifest])}`
-    ),
+    ...result.agent_backups
+      .filter((manifest) => manifest !== coverage.manifest_path)
+      .map(
+        (manifest) =>
+          `To put removed agent files back: ${command(["setup", "migrate", "--rollback-manifest", manifest])}`
+      ),
   ];
 }
 

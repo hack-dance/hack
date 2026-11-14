@@ -1934,10 +1934,11 @@ hack upgrade apply [options]
 
 Checks first, then runs the plan steps marked (apply) for every checkout they cover: refreshing
 outdated .hack/.gitignore files and removing stale standalone agent files the hack plugin replaces
-(each removal backed up by the plugin migration). Before changing anything it keeps an upgrade
+(each removal covered by the same snapshot). Before changing anything it keeps an upgrade
 snapshot and writes a journal beside it with the snapshot's coverage and gaps and each checkout's
 outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback
 command. --dry-run lists what would change. Exits 1 when anything selected was not done.
+After interruption, --resume <manifest> reuses that run's selection and snapshot; unexpected edits refuse.
 
 ### Options
 
@@ -1946,6 +1947,7 @@ command. --dry-run lists what would change. Exits 1 when anything selected was n
 | `--only <fix>` | Run only this plan step: ignore-rules or agent-integrations (comma-separated for both) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--dry-run` | List what would change and change nothing |
+| `--resume <manifest>` | Resume the apply journal beside this explicit snapshot manifest |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

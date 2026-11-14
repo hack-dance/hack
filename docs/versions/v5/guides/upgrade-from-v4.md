@@ -118,8 +118,31 @@ not run. Before it changes anything it keeps an upgrade snapshot (below) and
 writes a journal beside the snapshot manifest: the snapshot's coverage (whether
 it is complete, and its gaps), and each checkout's outcome. Agent files are
 removed only when the hack plugin that replaces them is verified, and each
-removal is backed up by `hack setup migrate`'s manifest. Apply prints the
-rollback commands and then rechecks.
+removal is covered by the same upgrade snapshot. File bytes live only in private
+snapshot blobs; the manifest and journal contain metadata. Apply prints the
+rollback command and then rechecks. Ignore-rule writes stage inside the snapshot,
+so they leave no staging files in the checkout.
+
+After an interruption, choose the run explicitly:
+
+```sh
+hack upgrade apply --resume <snapshot-manifest> --dry-run
+hack upgrade apply --resume <snapshot-manifest>
+hack upgrade rollback --rollback-manifest <snapshot-manifest>
+```
+
+Resume uses the journal's selection and original snapshot, including its coverage
+and gaps; it cannot be combined with `--only` or `--project`. It rechecks the
+registered checkouts, refuses unexpected file edits, and verifies the snapshot's
+original blobs before writing. It never chooses the latest run automatically.
+Rollback restores ignore rules and removed agent files together, with their exact
+bytes and modes. Files edited after apply require an explicit `--overwrite` to
+restore; their current copies are retained. Service state and installed versions
+are outside this file rollback.
+
+Env migration remains a separate grouped command until its journal owner is
+integrated. Apply does not perform env cleanup or accept tracked-file edits on
+your behalf.
 
 Before you follow the rest of the plan, keep a private copy of the files it changes:
 

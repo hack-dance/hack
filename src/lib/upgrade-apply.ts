@@ -4,10 +4,12 @@ import { join, normalize, resolve } from "node:path";
 import {
   applyPluginMigration,
   type PluginMigrationApplyResult,
+  planPluginMigration,
 } from "../agents/plugin-migration.ts";
 import { MIGRATION_CLIENTS } from "../agents/plugin-replacement.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureHackDirGitignore } from "./project-env-config.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 import type { UpgradeCheckReport } from "./upgrade-check.ts";
 import {
   isUpgradeApplyFix,
@@ -46,8 +48,8 @@ import {
  *   migration can remove anything) and when it ends. After an interruption
  *   a `started` target may have changed files; `planned` ones have not.
  *   Paths, ids, statuses, counts and closed messages only: never a value.
- * - Stale agent files are removed only by the plugin migration, which backs
- *   up each file to its own manifest first and refuses when the hack plugin
+ * - Stale agent files are removed only by the plugin migration, with each
+ *   original kept in this snapshot's blobs. It refuses when the hack plugin
  *   that replaces them is not verified. Machine-wide agent files (under
  *   HOME) are migrated only without `--project`; with it they are left out
  *   and noted, not counted as unfinished work.
@@ -56,8 +58,17 @@ import {
  *   standalone files the verified plugin replaces.
  */
 
-export const UPGRADE_APPLY_JOURNAL_VERSION = 1;
-export const UPGRADE_APPLY_JOURNAL_KIND = "hack-upgrade-apply";
+import {
+  agentPaths,
+  UPGRADE_APPLY_JOURNAL_KIND as JOURNAL_KIND,
+  UPGRADE_APPLY_JOURNAL_VERSION as JOURNAL_VERSION,
+  loadApplyRecovery,
+  verifyAgentInput,
+  verifyApplyInput,
+} from "./upgrade-apply-recovery.ts";
+
+export const UPGRADE_APPLY_JOURNAL_KIND = JOURNAL_KIND;
+export const UPGRADE_APPLY_JOURNAL_VERSION = JOURNAL_VERSION;
 
 export type UpgradeApplyTargetStatus =
   /** Would run (dry run), or not reached yet (journal). */
@@ -86,6 +97,8 @@ export type UpgradeApplyTarget = {
   readonly message: string | null;
   /** The plugin migration's backup manifest: set before it can remove a file. */
   readonly backup_manifest: string | null;
+  /** Candidate file paths, supplied by read-only dry-run previews. */
+  readonly files?: readonly string[];
 };
 
 export type UpgradeApplyCoverage = {
@@ -150,7 +163,7 @@ export type UpgradeApplySnapshotSet = {
   readonly gaps: readonly { readonly name: string; readonly reason: string }[];
 };
 
-type Planned = {
+export type Planned = {
   readonly fix: UpgradeApplyFix;
   readonly scope: string;
   readonly project: string | null;
@@ -175,7 +188,7 @@ const NOT_RECORDED =
  * returns the upgrade snapshot set (production:
  * `collectUpgradeSnapshotTargets`).
  */
-export async function runUpgradeApply(input: {
+export type RunUpgradeApplyInput = {
   readonly report: UpgradeCheckReport;
   readonly only?: readonly string[];
   readonly project?: string;
@@ -188,23 +201,64 @@ export async function runUpgradeApply(input: {
   readonly now?: () => Date;
   readonly applyPluginMigration?: typeof applyPluginMigration;
   readonly recordAfter?: typeof recordUpgradeSnapshotAfter;
-}): Promise<UpgradeApplyResult> {
-  const only = input.only ?? [];
+  /** Explicit recovery point; never choose the newest run implicitly. */
+  readonly resumeManifest?: string;
+  /** Test seam for real process interruption at durable boundaries. */
+  readonly checkpoint?: (boundary: string) => Promise<void>;
+};
+
+export async function runUpgradeApply(
+  input: RunUpgradeApplyInput
+): Promise<UpgradeApplyResult> {
+  const recovery =
+    input.resumeManifest === undefined
+      ? null
+      : await loadApplyRecovery(input.resumeManifest);
+  if (input.resumeManifest !== undefined && recovery === null) {
+    return {
+      status: "refused",
+      reason: "snapshot",
+      message: "The apply journal or snapshot is invalid; nothing was changed.",
+    };
+  }
+  if (
+    recovery !== null &&
+    (input.only !== undefined || input.project !== undefined)
+  ) {
+    return {
+      status: "refused",
+      reason: "snapshot",
+      message:
+        "Resume uses the saved selection; do not combine --resume with --only or --project.",
+    };
+  }
+  const only = recovery?.journal.filters.only ?? input.only ?? [];
   const refusal = selectionRefusal({
     report: input.report,
     only,
-    project: input.project,
+    project: recovery?.journal.filters.project ?? input.project,
   });
   if (refusal !== null) {
     return refusal;
   }
   const fixes = only.filter(isUpgradeApplyFix);
-  const { planned, notes } = planTargets({
+  const fresh = planTargets({
     report: input.report,
     only: fixes,
     project: input.project ?? null,
     home: input.home,
   });
+  const notes = recovery?.journal.notes ?? fresh.notes;
+  const planned: Planned[] =
+    recovery === null
+      ? fresh.planned
+      : recovery.journal.targets.map((target) =>
+          recoverPlannedTarget({
+            target,
+            report: input.report,
+            home: input.home,
+          })
+        );
   const runnable = planned.filter((target) => target.skip === null);
   const skipped = planned
     .filter((target) => target.skip !== null)
@@ -215,18 +269,32 @@ export async function runUpgradeApply(input: {
     skipped,
     notes,
   });
-  if (early !== null) {
-    return early;
+  if (early !== null && shouldReturnEarly(recovery, input.dryRun)) {
+    return await previewEarlyResult({
+      result: early,
+      planned,
+      home: input.home,
+    });
   }
 
   // The snapshot comes first: nothing is written unless it is kept.
-  const collected = await input.collect();
-  const created = await createUpgradeSnapshot({
-    purpose: "hack upgrade apply",
-    targets: await snapshotTargets({ runnable, collected }),
-    root: input.snapshotRoot,
-    now: input.now?.(),
-  });
+  const collected =
+    recovery === null
+      ? await input.collect()
+      : { targets: [], gaps: recovery.journal.snapshot.gaps };
+  const created =
+    recovery === null
+      ? await createUpgradeSnapshot({
+          purpose: "hack upgrade apply",
+          targets: await snapshotTargets({
+            runnable,
+            collected,
+            home: input.home,
+          }),
+          root: input.snapshotRoot,
+          now: input.now?.(),
+        })
+      : { status: "created" as const, snapshot: recovery.snapshot };
   if (created.status !== "created") {
     return {
       status: "refused",
@@ -238,15 +306,53 @@ export async function runUpgradeApply(input: {
     };
   }
   const { snapshot } = created;
-  const coverage: UpgradeApplyCoverage = {
+  const coverage: UpgradeApplyCoverage = recovery?.journal.snapshot ?? {
     snapshot_id: snapshot.id,
     manifest_path: snapshot.manifestPath,
     files: snapshot.manifest.entries.length,
     complete: collected.gaps.length === 0,
     gaps: collected.gaps,
   };
+  return await withProjectsRegistryLock({
+    lockPath: join(snapshot.dir, "apply.lock"),
+    label: "upgrade apply",
+    timeoutMs: 1000,
+    run: () =>
+      executeApplyRun({
+        input,
+        recovery,
+        notes,
+        fixes,
+        runnable,
+        skipped,
+        snapshot,
+        coverage,
+      }),
+  });
+}
+
+async function executeApplyRun(opts: {
+  input: RunUpgradeApplyInput;
+  recovery: Awaited<ReturnType<typeof loadApplyRecovery>>;
+  notes: readonly string[];
+  fixes: readonly UpgradeApplyFix[];
+  runnable: readonly Planned[];
+  skipped: readonly UpgradeApplyTarget[];
+  snapshot: UpgradeSnapshot;
+  coverage: UpgradeApplyCoverage;
+}): Promise<UpgradeApplyResult> {
+  const {
+    input,
+    recovery,
+    notes,
+    fixes,
+    runnable,
+    skipped,
+    snapshot,
+    coverage,
+  } = opts;
   const now = () => (input.now?.() ?? new Date()).toISOString();
-  const startedAt = now();
+  const startedAt = recovery?.journal.started_at ?? now();
   const results: UpgradeApplyTarget[] = [...skipped];
   const journal = (
     state: UpgradeApplyJournal["state"],
@@ -263,7 +369,10 @@ export async function runUpgradeApply(input: {
       updated_at: now(),
       state,
       cli_version: input.report.cli.version,
-      filters: { only: fixes, project: input.project ?? null },
+      filters: {
+        only: fixes,
+        project: recovery?.journal.filters.project ?? input.project ?? null,
+      },
       snapshot: coverage,
       targets: [...results, ...(current === null ? [] : [current]), ...pending],
       notes,
@@ -274,6 +383,7 @@ export async function runUpgradeApply(input: {
     snapshot,
     journal: journal("applying", null),
   });
+  await input.checkpoint?.("journal-created");
   const inSnapshot = new Set(snapshot.manifest.entries.map((e) => e.path));
   const backupDir =
     input.agentBackupDir ?? join(resolveGlobalHackDir(), "agent-migrations");
@@ -282,7 +392,10 @@ export async function runUpgradeApply(input: {
       target.fix === "agent-integrations"
         ? {
             id: `upgrade-apply-${snapshot.id}-${index}`,
-            path: join(backupDir, `upgrade-apply-${snapshot.id}-${index}.json`),
+            path:
+              input.applyPluginMigration === undefined
+                ? snapshot.manifestPath
+                : join(backupDir, `upgrade-apply-${snapshot.id}-${index}.json`),
           }
         : null;
     // Before anything can change: this target started, with its backup.
@@ -293,18 +406,40 @@ export async function runUpgradeApply(input: {
         backup_manifest: backup?.path ?? null,
       }),
     });
-    results.push(
-      await applyTarget({
-        target,
-        snapshot,
-        inSnapshot,
-        home: input.home,
-        backupDir,
-        backup,
-        migrate: input.applyPluginMigration ?? applyPluginMigration,
-        recordAfter: input.recordAfter ?? recordUpgradeSnapshotAfter,
-      })
+    await input.checkpoint?.("target-started");
+    const previous = recovery?.journal.targets.find(
+      (t) => t.fix === target.fix && t.root === target.root
     );
+    const safe = await verifyApplyInput({ snapshot, target, previous });
+    if (safe === "conflict") {
+      results.push(
+        outcome(
+          target,
+          "refused",
+          "The target changed outside this run; restore or review it before resuming."
+        )
+      );
+    } else if (
+      previous?.status === "applied" ||
+      previous?.status === "unchanged"
+    ) {
+      results.push(previous);
+    } else {
+      results.push(
+        await applyTarget({
+          target,
+          snapshot,
+          inSnapshot,
+          home: input.home,
+          backupDir,
+          backup,
+          migrate: input.applyPluginMigration ?? applyPluginMigration,
+          recordAfter: input.recordAfter ?? recordUpgradeSnapshotAfter,
+          checkpoint: input.checkpoint,
+        })
+      );
+    }
+    await input.checkpoint?.("target-recorded");
     await writeUpgradeSnapshotJournal({
       snapshot,
       journal: journal("applying", null),
@@ -323,9 +458,13 @@ export async function runUpgradeApply(input: {
     notes,
     coverage,
     journal_path: journalPath,
-    agent_backups: results.flatMap((r) =>
-      r.backup_manifest === null ? [] : [r.backup_manifest]
-    ),
+    agent_backups: [
+      ...new Set(
+        results.flatMap((r) =>
+          r.backup_manifest === null ? [] : [r.backup_manifest]
+        )
+      ),
+    ],
   };
 }
 
@@ -492,6 +631,7 @@ async function applyTarget(opts: {
   readonly backup: { readonly id: string; readonly path: string } | null;
   readonly migrate: typeof applyPluginMigration;
   readonly recordAfter: typeof recordUpgradeSnapshotAfter;
+  readonly checkpoint?: (boundary: string) => Promise<void>;
 }): Promise<UpgradeApplyTarget> {
   const { target } = opts;
   if (target.fix === "ignore-rules") {
@@ -510,6 +650,7 @@ async function applyTarget(opts: {
       clients: MIGRATION_CLIENTS,
       skipPluginCheck: [],
       backupDir: opts.backupDir,
+      upgradeSnapshotManifest: opts.snapshot.manifestPath,
       hooks: { id: backup.id },
     });
   } catch (error) {
@@ -525,7 +666,35 @@ async function applyTarget(opts: {
       backup_manifest: kept,
     };
   }
-  return agentOutcome({ target, migrated });
+  const result = agentOutcome({ target, migrated });
+  await opts.checkpoint?.("agent-written");
+  if (
+    migrated.status === "applied" ||
+    migrated.status === "nothing-to-migrate"
+  ) {
+    const paths = agentPaths(opts.snapshot, target);
+    if (
+      (await verifyAgentInput({ snapshot: opts.snapshot, target })) !== "safe"
+    ) {
+      return { ...result, status: "failed", message: NOT_RECORDED };
+    }
+    let recorded = false;
+    try {
+      recorded =
+        (
+          await opts.recordAfter({
+            manifestPath: opts.snapshot.manifestPath,
+            paths,
+          })
+        ).status === "recorded";
+    } catch {
+      recorded = false;
+    }
+    if (!recorded) {
+      return { ...result, status: "failed", message: NOT_RECORDED };
+    }
+  }
+  return result;
 }
 
 async function applyIgnoreRules(opts: {
@@ -533,6 +702,7 @@ async function applyIgnoreRules(opts: {
   readonly snapshot: UpgradeSnapshot;
   readonly inSnapshot: ReadonlySet<string>;
   readonly recordAfter: typeof recordUpgradeSnapshotAfter;
+  readonly checkpoint?: (boundary: string) => Promise<void>;
 }): Promise<UpgradeApplyTarget> {
   const { target } = opts;
   if (target.projectDir === null) {
@@ -549,13 +719,41 @@ async function applyIgnoreRules(opts: {
   let result: Awaited<ReturnType<typeof ensureHackDirGitignore>> | null = null;
   let failure: unknown = null;
   try {
-    result = await ensureHackDirGitignore({ projectDir: target.projectDir });
+    result = await ensureHackDirGitignore({
+      projectDir: target.projectDir,
+      stagingDirectory: opts.snapshot.dir,
+      beforePublish: async () => {
+        if (
+          (await verifyApplyInput({
+            snapshot: opts.snapshot,
+            target,
+            previous: outcome(target, "started", null),
+          })) !== "safe"
+        ) {
+          throw new Error("Upgrade target changed before publication.");
+        }
+      },
+    });
   } catch (error) {
     failure = error;
   }
+  await opts.checkpoint?.("target-written");
   // Whatever is there now is this step's output, even after a failure.
   let recorded = false;
   try {
+    if (
+      (await verifyApplyInput({
+        snapshot: opts.snapshot,
+        target,
+        previous: outcome(target, "started", null),
+      })) !== "safe"
+    ) {
+      return outcome(
+        target,
+        "failed",
+        "The target changed outside this run; its after state was not adopted."
+      );
+    }
     const record = await opts.recordAfter({
       manifestPath: opts.snapshot.manifestPath,
       paths: [path],
@@ -571,7 +769,7 @@ async function applyIgnoreRules(opts: {
       `${closedError(failure)}${recorded ? "" : ` ${NOT_RECORDED}`}`
     );
   }
-  if (result.changed && !recorded) {
+  if (!recorded) {
     return outcome(target, "failed", NOT_RECORDED);
   }
   if (result.readOnly) {
@@ -653,12 +851,34 @@ function outcome(
 async function snapshotTargets(opts: {
   readonly runnable: readonly Planned[];
   readonly collected: UpgradeApplySnapshotSet;
+  readonly home: string;
 }): Promise<UpgradeSnapshotTarget[]> {
   const collectedPaths = new Set(
     opts.collected.targets.map((t) => normalize(t.path))
   );
   const extra: UpgradeSnapshotTarget[] = [];
   for (const target of opts.runnable) {
+    if (target.fix === "agent-integrations") {
+      const plan = await planPluginMigration({
+        scopes: [
+          target.projectDir === null
+            ? { scope: "global", root: opts.home }
+            : { scope: "project", root: target.root },
+        ],
+        home: opts.home,
+        clients: MIGRATION_CLIENTS,
+        skipPluginCheck: [],
+      });
+      for (const entry of plan.entries) {
+        if (entry.action === "remove" && !collectedPaths.has(entry.path)) {
+          collectedPaths.add(entry.path);
+          extra.push({
+            path: entry.path,
+            label: `agent ${target.root}: ${entry.target}`,
+          });
+        }
+      }
+    }
     if (target.fix !== "ignore-rules" || target.projectDir === null) {
       continue;
     }
@@ -701,4 +921,86 @@ function closedError(error: unknown): string {
       ? String((error as { code: unknown }).code)
       : "error";
   return `Failed (${ERROR_CODE.test(code) ? code : "error"}).`;
+}
+
+function recoverPlannedTarget(opts: {
+  target: UpgradeApplyTarget;
+  report: UpgradeCheckReport;
+  home: string;
+}): Planned {
+  const { target, report, home } = opts;
+  const checkout = report.projects.find(
+    (p) =>
+      normalize(p.root) === normalize(target.root) &&
+      p.project === target.project
+  );
+  let skip: string | null = null;
+  if (target.project === null) {
+    skip = target.root === home ? null : SKIP_BLOCKED;
+  } else if (
+    checkout === undefined ||
+    unsafeRoots(report).has(normalize(target.root))
+  ) {
+    skip = SKIP_BLOCKED;
+  }
+  return {
+    fix: target.fix,
+    scope: target.scope,
+    root: target.root,
+    project: target.project,
+    projectDir: checkout?.project_dir ?? null,
+    skip,
+  };
+}
+
+function shouldReturnEarly(recovery: unknown, dryRun: boolean): boolean {
+  return recovery === null || dryRun;
+}
+
+async function previewTargetFiles(
+  target: Planned,
+  home: string
+): Promise<string[]> {
+  if (target.fix === "ignore-rules") {
+    return target.projectDir === null ? [] : [gitignorePath(target.projectDir)];
+  }
+  const plan = await planPluginMigration({
+    scopes: [
+      target.projectDir === null
+        ? { scope: "global", root: home }
+        : { scope: "project", root: target.root },
+    ],
+    home,
+    clients: MIGRATION_CLIENTS,
+    skipPluginCheck: [],
+  });
+  return plan.entries
+    .filter((entry) => entry.action === "remove" || entry.action === "blocked")
+    .map((entry) => entry.path);
+}
+
+async function previewEarlyResult(opts: {
+  result: Extract<
+    UpgradeApplyResult,
+    { status: "nothing-to-do" | "dry-run" | "blocked" }
+  >;
+  planned: readonly Planned[];
+  home: string;
+}): Promise<UpgradeApplyResult> {
+  if (opts.result.status !== "dry-run") {
+    return opts.result;
+  }
+  const targets = await Promise.all(
+    opts.result.targets.map(async (target) => {
+      const planned = opts.planned.find(
+        (p) => p.root === target.root && p.fix === target.fix
+      );
+      const files =
+        planned === undefined
+          ? []
+          : await previewTargetFiles(planned, opts.home);
+      return { ...target, files };
+    })
+  );
+  return { ...opts.result, targets };
 }

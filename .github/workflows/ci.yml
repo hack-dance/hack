@@ -254,9 +254,25 @@ jobs:
         run: bun -e 'if (process.platform !== process.env.EXPECTED_PLATFORM || process.arch !== process.env.EXPECTED_ARCH) throw new Error("Unexpected compiler release host");'
       # TypeScript-only pull requests cannot change the compiler crate, which
       # reads nothing outside packages/config-compiler.
+      - name: Install pinned process-per-test runner
+        if: ${{ needs.changes.outputs.compiler_rust == 'true' }}
+        shell: bash
+        run: |
+          bash scripts/install-cargo-nextest.sh "$RUNNER_TEMP/compiler-nextest"
+          echo "$RUNNER_TEMP/compiler-nextest" >> "$GITHUB_PATH"
       - name: Check and test the compiler crate
         if: ${{ needs.changes.outputs.compiler_rust == 'true' }}
+        env:
+          HACK_RUST_TEST_RUNNER: nextest
+          HACK_RUST_TEST_REPORT_DIR: ${{ runner.temp }}/compiler-rust-results
         run: bun run check:config-compiler && bun run test:config-compiler
+      - name: Preserve compiler test inventory and results
+        if: ${{ always() && needs.changes.outputs.compiler_rust == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-rust-results-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compiler-rust-results
+          if-no-files-found: error
       - run: bun run build:config-compiler
       # Intentionally permanent: the owner test emits closed stage tokens only, never values.
       - name: Test private file sources and owner with the matching compiler

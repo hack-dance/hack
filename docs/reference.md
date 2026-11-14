@@ -11,8 +11,10 @@
 ## Environment & sessions
 
 - [Project state](./reference/project-state.md) — shared backend-aware CLI and daemon project/service observations
+- [Version identity](./reference/version.md) — `hack version --json` describes the running CLI without starting services
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
+- [Admin plans](./reference/global-admin-plan.md) — `hack global install|trust --plan --json`: the ordered root and user steps and exact root argv, without running anything
 - [Activity log](./reference/activity-log.md) — the `up`/`down`/`restart` history `hack activity` reads: records, origins, concurrency, rotation and what is never recorded
 - [Observe-only global status](./reference/global-status-observe.md) — `hack global status --json --observe`: routing, DNS and proxy state without starting anything, and its probe list
 - [Local CA trust check](./reference/local-ca-trust.md) — `hack doctor`'s read-only `local ca trust` check: which stores trust the Caddy Local CA, or unknown

@@ -1235,6 +1235,8 @@ hack global install [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--plan` | Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1410,6 +1412,8 @@ hack global trust [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--plan` | Print the steps (root and user) and exact root argv this command would run, without running anything (needs --json) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2071,6 +2075,7 @@ hack version [options]
 
 | Option | Description |
 | --- | --- |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

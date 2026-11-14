@@ -17,6 +17,7 @@
  * did not happen is skipped, never synthesized.
  */
 
+import { writeSync } from "node:fs";
 import { CliUsageError } from "../cli/command.ts";
 import { type CliResult, errorResult, renderCliResult } from "./cli-result.ts";
 import type { DependencyStartupPhase } from "./dependency-startup-progress.ts";
@@ -210,9 +211,16 @@ export function armLifecycleProgress(opts: {
 }): LifecycleProgressStream {
   active = new LifecycleProgressStream({
     action: opts.action,
-    write: opts.write ?? ((line) => process.stdout.write(line)),
+    // Synchronous: the signal path closes the stream and then re-raises the
+    // signal, which would drop a write still queued on a stdout pipe.
+    write: opts.write ?? ((line) => writeSync(1, line)),
     now: opts.now,
   });
+  // Installed when armed, well before `start`: signal handlers may register
+  // asynchronously, and a signal before `start` closes nothing (close is a
+  // no-op while armed) and still ends the process by that signal.
+  removeSignalClose();
+  installSignalClose();
   return active;
 }
 
@@ -224,16 +232,13 @@ export function beginLifecycleProgress(opts: {
     return;
   }
   active.begin(opts);
-  if (signalHandlers.length === 0) {
-    installSignalClose();
-  }
 }
 
 let signalHandlers: Array<readonly [NodeJS.Signals, () => void]> = [];
 
 /**
  * SIGINT/SIGTERM after `start` closes the stream with an `E_CANCELLED`
- * envelope. Other handlers (lifecycle cleanup) keep running and own the exit;
+ * envelope; before `start` it writes nothing. Other handlers (lifecycle cleanup) keep running and own the exit;
  * when none remain, the signal is raised again so the process still ends by
  * that signal, as it would without `--progress`.
  */

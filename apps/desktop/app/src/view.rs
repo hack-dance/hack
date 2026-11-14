@@ -21,6 +21,7 @@ use gpui_kit::{
     AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, SharedString,
     Styled, Window, div, prelude::*, px,
 };
+use hack_desktop_core::daemon_state::{DaemonAction, DaemonModel, always_on};
 use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
 use hack_desktop_core::models::LogEntry;
 use hack_desktop_core::source::{
@@ -41,6 +42,9 @@ const TAIL_LINES: u32 = 20;
 
 pub struct HackApp {
     model: AppModel,
+    daemon: DaemonModel,
+    daemon_epoch: u64,
+    daemon_last_read: Option<std::time::Instant>,
     source: Arc<dyn Source>,
     tab: usize,
     tail: Result<Vec<LogEntry>, String>,
@@ -55,8 +59,6 @@ pub struct HackApp {
     /// runs wait for it.
     window_visible: bool,
     _visibility: Option<gpui_kit::Subscription>,
-    recovery_busy: bool,
-    recovery_error: Option<String>,
     /// When each project's running action started, for the slow-action
     /// warning. Display only: the app never terminates a lifecycle command.
     action_started: std::collections::HashMap<String, std::time::Instant>,
@@ -67,6 +69,9 @@ impl HackApp {
     pub fn new(source: Arc<dyn Source>, live: bool, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             model: AppModel::new(),
+            daemon: DaemonModel::default(),
+            daemon_epoch: 0,
+            daemon_last_read: None,
             source,
             tab: 0,
             pane: Pane::Project,
@@ -79,8 +84,6 @@ impl HackApp {
             tail: Ok(Vec::new()),
             follow: true,
             live,
-            recovery_busy: false,
-            recovery_error: None,
             action_started: std::collections::HashMap::new(),
         };
         if live {
@@ -96,6 +99,7 @@ impl HackApp {
 
     /// Synchronous refresh, for fixtures and screenshots.
     pub fn refresh_now(&mut self) {
+        self.daemon.observed = self.source.daemon_observation();
         let snap = self.source.snapshot();
         self.model.apply(Event::Refreshed(snap));
         self.tail = self.selected_root().map_or_else(
@@ -309,9 +313,39 @@ impl HackApp {
                         async move { source.snapshot() }
                     })
                     .await;
+                let daemon_epoch = this
+                    .update(cx, |this, _| {
+                        (this.window_visible
+                            && this.daemon.busy.is_none()
+                            && this
+                                .daemon_last_read
+                                .is_none_or(|last| last.elapsed() >= Duration::from_secs(10)))
+                        .then_some(this.daemon_epoch)
+                    })
+                    .ok()
+                    .flatten();
+                let daemon = if let Some(epoch) = daemon_epoch {
+                    let source = source.clone();
+                    Some((
+                        epoch,
+                        cx.background_executor()
+                            .spawn(async move { source.daemon_observation() })
+                            .await,
+                    ))
+                } else {
+                    None
+                };
                 let root = this
                     .update(cx, |this, cx| {
+                        if this.daemon.busy.is_none()
+                            && let Some((epoch, o)) = daemon
+                            && epoch == this.daemon_epoch
+                        {
+                            this.daemon.observed = o;
+                            this.daemon_last_read = Some(std::time::Instant::now());
+                        }
                         if !this.apply_snapshot(token, snap, cx) {
+                            cx.notify();
                             return None;
                         }
                         this.follow.then(|| this.selected_root()).flatten()
@@ -342,7 +376,7 @@ impl HackApp {
     }
 
     fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
-        if self.recovery_busy || self.setup.action_busy {
+        if self.daemon.busy.is_some() || self.setup.action_busy {
             return;
         }
         let Some(row) = self.model.selected_row() else {
@@ -353,7 +387,7 @@ impl HackApp {
         let Some(root) = row.repo_root.clone().map(PathBuf::from) else {
             return;
         };
-        if !self.model.can_start(&project) {
+        if self.daemon.observed.cli_missing || !self.model.can_start(&project) {
             return;
         }
         self.model.apply(Event::ActionStarted {
@@ -390,6 +424,129 @@ impl HackApp {
         .detach();
     }
 
+    fn run_daemon_action(&mut self, action: DaemonAction, cx: &mut Context<Self>) {
+        if !self.live
+            || self.setup.action_busy
+            || self.model.cli_missing()
+            || (!self.setup.report.cards.is_empty() && !self.setup.report.cli_ready())
+            || !self.daemon.begin_machine(
+                action,
+                self.model.daemon_recovery(),
+                Some(&self.setup.report),
+            )
+        {
+            return;
+        }
+        self.daemon_epoch += 1;
+        // Invalidate project reads started before this machine action.
+        self.model.begin_refresh();
+        cx.notify();
+        let source = self.source.clone();
+        cx.spawn(async move |this, cx| {
+            let action_source = source.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { action_source.daemon_action(action) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon.finished(&result);
+                this.setup.result = Some(match &result {
+                    Ok(()) => "Daemon command exited successfully. Checking fresh status.".into(),
+                    Err(e) => format!("Daemon command failed: {e}. Checking fresh status."),
+                });
+                cx.notify();
+            });
+            // This read starts only after the action process and output have settled.
+            let fresh = cx
+                .background_executor()
+                .spawn(async move { source.daemon_observation() })
+                .await;
+            let Ok(token) = this.update(cx, |this, _| {
+                this.daemon.refreshed(fresh);
+                this.daemon.busy = Some(action);
+                this.daemon_last_read = Some(std::time::Instant::now());
+                this.model.begin_refresh()
+            }) else {
+                return;
+            };
+            let source = this.update(cx, |this, _| this.source.clone()).ok();
+            let Some(source) = source else {
+                return;
+            };
+            let snap = cx
+                .background_executor()
+                .spawn(async move { source.snapshot() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_snapshot(token, snap, cx);
+                this.daemon.busy = None;
+                this.load_setup(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn daemon_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let mut buttons = h_flex().gap_2();
+        for action in self.daemon.observed.actions() {
+            buttons = buttons.child(
+                Button::new(action.verb())
+                    .label(action.label())
+                    .small()
+                    .outline()
+                    .disabled(
+                        !self.live
+                            || self.setup.action_busy
+                            || self.daemon.busy.is_some()
+                            || self.model.cli_missing()
+                            || (!self.setup.report.cards.is_empty()
+                                && !self.setup.report.cli_ready()),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.run_daemon_action(action, cx)),
+                    ),
+            );
+        }
+        v_flex()
+            .px_5()
+            .py_2()
+            .gap_1()
+            .border_b_1()
+            .border_color(t.border)
+            .text_sm()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(dot(tone_color(self.daemon.observed.tone(), cx)))
+                    .child(
+                        div()
+                            .text_color(tone_color(self.daemon.observed.tone(), cx))
+                            .child(self.daemon.observed.label()),
+                    )
+                    .child(div().flex_1())
+                    .child(buttons),
+            )
+            .children(self.daemon.busy.map(|a| {
+                div()
+                    .text_color(t.info)
+                    .child(format!("{}… checking fresh status after exit", a.label()))
+            }))
+            .children(
+                self.daemon
+                    .observed
+                    .detail()
+                    .map(|s| div().text_xs().text_color(t.muted_foreground).child(s)),
+            )
+            .children(self.daemon.action_error.clone().map(|e| {
+                div()
+                    .text_xs()
+                    .text_color(t.danger)
+                    .child(format!("Last daemon action failed: {e}"))
+            }))
+    }
+
     fn refresh_now_async(&mut self, cx: &mut Context<Self>) {
         let source = self.source.clone();
         let token = self.model.begin_refresh();
@@ -420,32 +577,6 @@ impl HackApp {
         self.maybe_auto_refresh(cx);
         cx.notify();
         true
-    }
-
-    fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
-        if self.recovery_busy || self.setup.action_busy || !self.live {
-            return;
-        }
-        self.recovery_busy = true;
-        self.recovery_error = None;
-        let source = self.source.clone();
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { source.recover_daemon(action) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.recovery_busy = false;
-                this.recovery_error = result.err();
-                // A command exit is not evidence that a compatible daemon
-                // is ready. Only the next ordered snapshot can restore rows.
-                this.refresh_now_async(cx);
-                this.load_setup(cx);
-                cx.notify();
-            });
-        })
-        .detach();
     }
 }
 
@@ -681,7 +812,12 @@ impl HackApp {
                     .child(b.text()),
             );
         }
-        if let Some(action) = self.model.daemon_recovery() {
+        if let Some(action) = self.model.daemon_recovery()
+            && !self.daemon.observed.actions().contains(&match action {
+                DaemonRecovery::Start => DaemonAction::Start,
+                DaemonRecovery::Restart => DaemonAction::Restart,
+            })
+        {
             col = col.child(
                 h_flex()
                     .px_4()
@@ -691,14 +827,26 @@ impl HackApp {
                         Button::new("recover-hackd")
                             .label(action.label())
                             .small()
-                            .disabled(self.recovery_busy || self.setup.action_busy)
-                            .loading(self.recovery_busy)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
-                            ),
+                            .disabled(
+                                !self.live
+                                    || self.daemon.busy.is_some()
+                                    || self.setup.action_busy
+                                    || self.daemon.observed.cli_missing,
+                            )
+                            .loading(self.daemon.busy.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_daemon_action(
+                                    match action {
+                                        DaemonRecovery::Start => DaemonAction::Start,
+                                        DaemonRecovery::Restart => DaemonAction::Restart,
+                                    },
+                                    cx,
+                                )
+                            })),
                     )
                     .children(
-                        self.recovery_error
+                        self.daemon
+                            .action_error
                             .clone()
                             .map(|e| div().text_sm().text_color(t.danger).child(e)),
                     ),
@@ -714,10 +862,12 @@ impl HackApp {
             if !d.actions.contains(&a) {
                 continue;
             }
-            let mut b = Button::new(a.label())
-                .label(a.label())
-                .small()
-                .disabled(d.busy || self.recovery_busy || self.setup.action_busy);
+            let mut b = Button::new(a.label()).label(a.label()).small().disabled(
+                d.busy
+                    || self.setup.action_busy
+                    || self.daemon.busy.is_some()
+                    || self.daemon.observed.cli_missing,
+            );
             b = match a {
                 Action::Start => b.primary(),
                 Action::Stop => b.outline(),
@@ -763,13 +913,41 @@ impl HackApp {
                     .child(div().flex_1())
                     .child(
                         Switch::new("always-on")
-                            .label("Always on")
+                            .label(
+                                if self
+                                    .model
+                                    .selected_row()
+                                    .and_then(|r| r.autostart.as_ref())
+                                    .and_then(|a| a.enabled)
+                                    .is_none()
+                                {
+                                    "Always on · unknown"
+                                } else {
+                                    "Always on"
+                                },
+                            )
                             .checked(d.always_on)
                             .small()
                             .disabled(true)
-                            .tooltip("Needs hack autostart (HACK-2213)"),
+                            .tooltip("Read-only: needs R12a/R12b"),
                     ),
             )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(t.muted_foreground)
+                    .child(always_on(
+                        self.model.selected_row().and_then(|r| r.autostart.as_ref()),
+                        self.model.always_on_global(),
+                        &self.daemon.observed,
+                    )),
+            )
+            .children(self.source.always_on_error().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(t.danger)
+                    .child(format!("Last always-on command failed: {error}"))
+            }))
             .children(reason_line(&d.state, d.last_error.as_deref(), cx))
             .children(self.doctor_link(&d.name, cx))
             .children(
@@ -953,19 +1131,20 @@ impl HackApp {
         } else {
             ("Docker ok", t.success)
         };
+
         let daemon = if list
             .banners
             .iter()
             .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::DaemonOff))
         {
-            ("hackd off", t.muted_foreground)
+            ("hackd off".to_owned(), t.muted_foreground)
         } else if list.banners.iter().any(|b| {
             matches!(
                 b,
                 hack_desktop_core::viewmodel::Banner::DaemonMismatch { .. }
             )
         }) {
-            ("hackd version mismatch", t.warning)
+            ("hackd version mismatch".to_owned(), t.warning)
         } else if stale
             || list.banners.iter().any(|b| {
                 matches!(
@@ -974,10 +1153,14 @@ impl HackApp {
                 )
             })
         {
-            ("hackd unknown", t.muted_foreground)
+            ("hackd unknown".to_owned(), t.muted_foreground)
         } else {
-            ("hackd on", t.success)
+            (
+                self.daemon.observed.label(),
+                tone_color(self.daemon.observed.tone(), cx),
+            )
         };
+
         h_flex()
             .h(px(26.))
             .px_3()
@@ -1099,7 +1282,7 @@ impl Render for HackApp {
         let (bg, fg, font) = (t.background, t.foreground, t.font_family.clone());
         let main: AnyElement = match &list.phase {
             _ if self.pane == Pane::Setup => {
-                crate::setup_view::render(&self.setup, self.recovery_busy, cx)
+                crate::setup_view::render(&self.setup, self.daemon.busy.is_some(), cx)
             }
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
@@ -1156,6 +1339,7 @@ impl Render for HackApp {
                             .min_w_0()
                             .when(self.pane != Pane::Setup, |el| {
                                 el.child(self.banners(&list, cx))
+                                    .child(self.daemon_panel(cx))
                             })
                             .child(main),
                     ),

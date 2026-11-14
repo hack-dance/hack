@@ -262,7 +262,9 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         return ProjectState::NeedsAttention {
             reason: format!(
                 "Always-on stopped trying after {} failures",
-                a.failures.count
+                a.failures
+                    .count
+                    .map_or_else(|| "unknown".into(), |n| n.to_string())
             ),
         };
     }

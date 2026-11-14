@@ -15,6 +15,21 @@ use crate::state::{Action, LocalContext};
 /// Every designed state that can be shown with `--fixtures <name>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fixture {
+    DaemonNotInstalled,
+    DaemonStopped,
+    DaemonStarting,
+    DaemonIncompatible,
+    DaemonStale,
+    DaemonStaleUnit,
+    DaemonUnknown,
+    AlwaysOff,
+    AlwaysOn,
+    AlwaysPaused,
+    AlwaysAttention,
+    AlwaysGlobalPaused,
+    AlwaysLogin,
+    AlwaysNoLogin,
+    AlwaysCommandFailed,
     // List states.
     Loading,
     Empty,
@@ -46,7 +61,22 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 34] = [
+        Self::DaemonNotInstalled,
+        Self::DaemonStopped,
+        Self::DaemonStarting,
+        Self::DaemonIncompatible,
+        Self::DaemonStale,
+        Self::DaemonStaleUnit,
+        Self::DaemonUnknown,
+        Self::AlwaysOff,
+        Self::AlwaysOn,
+        Self::AlwaysPaused,
+        Self::AlwaysAttention,
+        Self::AlwaysGlobalPaused,
+        Self::AlwaysLogin,
+        Self::AlwaysNoLogin,
+        Self::AlwaysCommandFailed,
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -71,6 +101,21 @@ impl Fixture {
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
+            Self::DaemonNotInstalled => "daemon-not-installed",
+            Self::DaemonStopped => "daemon-stopped",
+            Self::DaemonStarting => "daemon-starting",
+            Self::DaemonIncompatible => "daemon-incompatible",
+            Self::DaemonStale => "daemon-stale",
+            Self::DaemonStaleUnit => "daemon-stale-unit",
+            Self::DaemonUnknown => "daemon-unknown",
+            Self::AlwaysOff => "always-off",
+            Self::AlwaysOn => "always-on",
+            Self::AlwaysPaused => "always-paused",
+            Self::AlwaysAttention => "always-attention",
+            Self::AlwaysGlobalPaused => "always-global-paused",
+            Self::AlwaysLogin => "always-login",
+            Self::AlwaysNoLogin => "always-no-login",
+            Self::AlwaysCommandFailed => "always-command-failed",
             Self::Loading => "loading",
             Self::Empty => "empty",
             Self::DaemonDown => "daemon-down",
@@ -195,7 +240,7 @@ fn simple(name: &str, status: &str, backend: &str, always_on: bool) -> ProjectRo
             },
         }),
         autostart: always_on.then(|| Autostart {
-            enabled: true,
+            enabled: Some(true),
             state: "on".into(),
             ..Autostart::default()
         }),
@@ -232,13 +277,14 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         Fixture::NeedsAttention => {
             let mut r = storefront(vec![], "stopped");
             r.autostart = Some(Autostart {
-                enabled: true,
+                enabled: Some(true),
                 state: "needs_attention".into(),
+                max_failures: Some(3),
                 paused_reason: None,
                 failures: AutostartFailures {
-                    count: 3,
+                    count: Some(3),
                     last_at: Some("2026-01-01T09:00:00Z".into()),
-                    failed_services: vec!["api".into()],
+                    failed_services: Some(vec!["api".into()]),
                     last_error_code: Some("E_STARTUP_INCOMPLETE".into()),
                 },
             });
@@ -251,6 +297,31 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         }
         _ => storefront(all_up(), "running"),
     };
+    let mut main = main;
+    if f.name().starts_with("always-") {
+        main.autostart = Some(Autostart {
+            enabled: Some(f != Fixture::AlwaysOff),
+            state: match f {
+                Fixture::AlwaysOff => "off",
+                Fixture::AlwaysPaused => "paused",
+                Fixture::AlwaysAttention => "needs_attention",
+                Fixture::AlwaysLogin => "starting",
+                _ => "on",
+            }
+            .into(),
+            paused_reason: (f == Fixture::AlwaysPaused).then(|| "manual_stop".into()),
+            max_failures: Some(3),
+            failures: AutostartFailures {
+                count: Some(if f == Fixture::AlwaysAttention { 3 } else { 0 }),
+                failed_services: Some(if f == Fixture::AlwaysAttention {
+                    vec!["api".into(), "worker".into()]
+                } else {
+                    vec![]
+                }),
+                ..Default::default()
+            },
+        });
+    }
     let mut projects = vec![main];
     projects.extend(others());
     if f == Fixture::NeedsAttention {
@@ -279,6 +350,20 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         runtime_error: (f == Fixture::EngineDown)
             .then(|| "Cannot connect to the Docker daemon".into()),
         projects,
+        autostart_global: f
+            .name()
+            .starts_with("always-")
+            .then(|| crate::models::AutostartGlobal {
+                paused: Some(f == Fixture::AlwaysGlobalPaused),
+                service_ready: Some(f != Fixture::AlwaysNoLogin),
+                login_run: Some(crate::models::LoginRun {
+                    in_progress: Some(f == Fixture::AlwaysLogin),
+                    pending: Some(vec!["storefront".into(), "notes".into()]),
+                    started: Some(vec!["docs-site".into(), "billing-api".into()]),
+                    failed: Some(vec![]),
+                    ..Default::default()
+                }),
+            }),
     }
 }
 
@@ -433,6 +518,60 @@ pub fn log_tail(f: Fixture) -> Vec<LogEntry> {
             line("web", "info", "ready on :3000"),
             line("worker", "info", "processed 12 jobs"),
         ],
+    }
+}
+
+/// Pure fixture observation: no process or socket access.
+#[must_use]
+pub fn daemon_observation(f: Fixture) -> crate::daemon_state::Observation {
+    use crate::daemon_state::Observation;
+    use serde_json::json;
+    if f == Fixture::CliMissing {
+        return Observation {
+            cli_missing: true,
+            ..Default::default()
+        };
+    }
+    if f == Fixture::DaemonUnknown {
+        return Observation {
+            cli_version: Some(CLI_VERSION.into()),
+            error: Some("Could not read daemon status".into()),
+            ..Default::default()
+        };
+    }
+    let status = match f {
+        Fixture::DaemonDown | Fixture::DaemonNotInstalled | Fixture::AlwaysNoLogin => {
+            json!({"status":"stopped","running":false,"service":{"installed":false}})
+        }
+        Fixture::DaemonStopped => {
+            json!({"status":"stopped","running":false,"service":{"installed":true}})
+        }
+        Fixture::DaemonStarting => {
+            json!({"status":"starting","running":false,"issue":"Waiting for status socket"})
+        }
+        Fixture::DaemonIncompatible => {
+            json!({"status":"incompatible","running":true,"issue":"API incompatible; restart with current CLI"})
+        }
+        Fixture::DaemonStale => {
+            json!({"status":"stale","running":false,"stale":true,"stale_reason":"pid_not_running"})
+        }
+        Fixture::DaemonStaleUnit => {
+            json!({"status":"running","running":true,"service":{"installed":true,"unit_stale":true,"unit_stale_reason":"binary_missing","next_step":"hack daemon install"}})
+        }
+        _ => json!({"status":"running","running":true,"service":{"installed":true}}),
+    };
+    Observation {
+        cli_version: Some(CLI_VERSION.into()),
+        status: Some(crate::models::DaemonStatus::from_value(status).expect("fixture status")),
+        socket_version: Some(
+            if f == Fixture::DaemonMismatch {
+                "4.3.0"
+            } else {
+                CLI_VERSION
+            }
+            .into(),
+        ),
+        ..Default::default()
     }
 }
 

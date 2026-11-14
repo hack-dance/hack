@@ -22,3 +22,5 @@ pub mod source;
 pub mod state;
 pub mod terminal;
 pub mod viewmodel;
+
+pub mod daemon_state;

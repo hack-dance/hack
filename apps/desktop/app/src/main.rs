@@ -103,7 +103,7 @@ fn main() {
     let args = parse_args();
     #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.screenshots {
-        screenshots::run(dir);
+        screenshots::run(dir, args.fixture);
         return;
     }
     #[cfg(not(feature = "screenshots"))]

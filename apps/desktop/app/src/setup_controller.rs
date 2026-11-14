@@ -16,7 +16,7 @@ impl HackApp {
             self.setup.refresh_again = true;
             return;
         }
-        if self.setup.action_busy || self.recovery_busy {
+        if self.setup.action_busy || self.daemon.busy.is_some() {
             return;
         }
         let generation = self.setup.begin();
@@ -60,7 +60,7 @@ impl HackApp {
         if self.setup.report.cli_ready()
             && !self.setup.loading
             && !self.setup.action_busy
-            && !self.recovery_busy
+            && !self.daemon.busy.is_some()
         {
             self.pane = Pane::Project;
             cx.notify();
@@ -72,7 +72,7 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         use hack_desktop_core::setup::{Remedy, Status};
-        if self.recovery_busy
+        if self.daemon.busy.is_some()
             || self.setup.loading
             || self.setup.action_busy
             || !self.setup.report.cli_ready()
@@ -90,22 +90,13 @@ impl HackApp {
             cx.notify();
             return;
         }
-        self.setup.action_busy = true;
-        let source = self.source.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { source.setup_action(action) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.setup.action_busy = false;
-                this.setup.result = Some(result);
-                this.refresh_now_async(cx);
-                this.load_setup(cx);
-            });
-        })
-        .detach();
-        cx.notify();
+        self.run_daemon_action(
+            match action {
+                hack_desktop_core::setup::SafeAction::StartDaemon => DaemonAction::Start,
+                hack_desktop_core::setup::SafeAction::InstallDaemon => DaemonAction::Install,
+            },
+            cx,
+        );
     }
     pub fn open_setup_terminal(&mut self, args: Vec<String>, cx: &mut Context<Self>) {
         use hack_desktop_core::terminal::{
@@ -116,7 +107,7 @@ impl HackApp {
             cx.notify();
             return;
         }
-        if self.recovery_busy
+        if self.daemon.busy.is_some()
             || self.setup.loading
             || self.setup.action_busy
             || !self.setup.report.cli_ready()

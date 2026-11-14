@@ -138,6 +138,16 @@ pub struct AppModel {
 
 impl AppModel {
     #[must_use]
+    pub fn cli_missing(&self) -> bool {
+        matches!(self.last_error, Some(SourceError::CliMissing))
+    }
+
+    #[must_use]
+    pub fn always_on_global(&self) -> Option<&crate::models::AutostartGlobal> {
+        self.snapshot.as_ref()?.projects.autostart_global.as_ref()
+    }
+
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -388,7 +398,10 @@ impl AppModel {
                         p,
                         self.local.get(&p.name).unwrap_or(&LocalContext::default()),
                     ),
-                    always_on: p.autostart.as_ref().is_some_and(|a| a.enabled),
+                    always_on: p
+                        .autostart
+                        .as_ref()
+                        .is_some_and(|a| a.enabled == Some(true)),
                     selected: Some(&p.name) == self.selected.as_ref(),
                     name: p.name.clone(),
                 };
@@ -449,7 +462,10 @@ impl AppModel {
                 row.backend.clone().unwrap_or_else(|| "compose".into())
             },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
-            always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
+            always_on: row
+                .autostart
+                .as_ref()
+                .is_some_and(|a| a.enabled == Some(true)),
             actions: if row.is_native() || self.last_error.is_some() {
                 vec![]
             } else {

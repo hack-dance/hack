@@ -185,13 +185,16 @@ fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
     source.recover_daemon(DaemonRecovery::Start).unwrap();
     assert_eq!(
         std::fs::read_to_string(home.join("called")).unwrap(),
-        "daemon start"
+        "daemon start --no-interactive"
     );
-    let error = source.recover_daemon(DaemonRecovery::Restart).unwrap_err();
+    let error = source
+        .recover_daemon(DaemonRecovery::Restart)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("daemon could not restart"));
     assert_eq!(
         std::fs::read_to_string(home.join("called")).unwrap(),
-        "daemon restart"
+        "daemon restart --no-interactive"
     );
     std::fs::remove_dir_all(home).unwrap();
 }

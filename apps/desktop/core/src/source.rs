@@ -123,8 +123,8 @@ pub trait Source: Send + Sync {
     /// Explicit user recovery only; never called by a poll.
     /// # Errors
     /// Failed or unavailable daemon command.
-    fn recover_daemon(&self, _action: DaemonRecovery) -> Result<(), String> {
-        Err("Daemon actions are unavailable for this source".into())
+    fn recover_daemon(&self, _action: DaemonRecovery) -> Result<(), RunError> {
+        Err(RunError::NotFound)
     }
     /// # Errors
     /// A [`SourceError`] when no usable snapshot could be read.
@@ -141,6 +141,22 @@ pub trait Source: Send + Sync {
         native: bool,
         action: Action,
     ) -> Result<ActionOutcome, SourceError>;
+
+    /// Session error fixture; no local always-on policy is inferred.
+    fn always_on_error(&self) -> Option<String> {
+        None
+    }
+
+    /// Observe daemon state without starting anything.
+    fn daemon_observation(&self) -> crate::daemon_state::Observation {
+        crate::daemon_state::Observation::default()
+    }
+    /// Explicit non-admin action; no terminal adapter is involved.
+    /// # Errors
+    /// CLI missing or command failure.
+    fn daemon_action(&self, _action: crate::daemon_state::DaemonAction) -> Result<(), RunError> {
+        Err(RunError::NotFound)
+    }
 
     /// Last log lines for a project (no follow).
     ///
@@ -385,28 +401,14 @@ impl Source for LiveSource {
         crate::setup_io::run_safe(&self.runner, action)
     }
 
-    fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
-        let (_, stderr, code) = self
-            .runner
-            .run_raw(
-                &["daemon", action.command()],
-                None,
-                Duration::from_secs(120),
-            )
-            .map_err(|e| e.to_string())?;
-        if code == Some(0) {
-            Ok(())
-        } else {
-            let exit = code.map_or_else(
-                || "was killed by a signal".into(),
-                |n| format!("exited with code {n}"),
-            );
-            Err(format!(
-                "Could not {} hackd: command {exit}. {}",
-                action.command(),
-                stderr.trim()
-            ))
-        }
+    fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), RunError> {
+        crate::daemon_state::act(
+            &self.runner,
+            match action {
+                DaemonRecovery::Start => crate::daemon_state::DaemonAction::Start,
+                DaemonRecovery::Restart => crate::daemon_state::DaemonAction::Restart,
+            },
+        )
     }
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         let cli_version = self.runner.version(Duration::from_secs(5))?;
@@ -445,6 +447,21 @@ impl Source for LiveSource {
             daemon,
             doctor: None,
         })
+    }
+
+    fn daemon_observation(&self) -> crate::daemon_state::Observation {
+        crate::daemon_state::observe(&self.runner, self.daemon.as_ref())
+    }
+    fn daemon_action(&self, action: crate::daemon_state::DaemonAction) -> Result<(), RunError> {
+        match action {
+            crate::daemon_state::DaemonAction::Start => self.recover_daemon(DaemonRecovery::Start),
+            crate::daemon_state::DaemonAction::Restart => {
+                self.recover_daemon(DaemonRecovery::Restart)
+            }
+            crate::daemon_state::DaemonAction::Install => {
+                crate::daemon_state::act(&self.runner, action)
+            }
+        }
     }
 
     fn act(
@@ -663,6 +680,15 @@ pub struct FixtureSource(pub Fixture);
 impl Source for FixtureSource {
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
+    }
+
+    fn always_on_error(&self) -> Option<String> {
+        (self.0 == Fixture::AlwaysCommandFailed)
+            .then(|| "E_COMMAND_FAILED (fixture; observed switch retained)".into())
+    }
+
+    fn daemon_observation(&self) -> crate::daemon_state::Observation {
+        fixtures::daemon_observation(self.0)
     }
 
     fn doctor_runs(&self, _projects: &[DoctorTarget]) -> Vec<DoctorRun> {

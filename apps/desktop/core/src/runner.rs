@@ -961,11 +961,15 @@ wait $!"#,
 
     #[test]
     fn log_stream_parses_ndjson_and_stops_on_drop() {
+        // Establish the pipe-holding descendant before publishing events. If
+        // sleep starts after the last event, drop can race that fork rather
+        // than exercise cleanup of an already-running process group.
         let f = FakeHack::new(
-            r#"echo '{"type":"start","backend":"compose"}'
+            r#"sleep 30 &
+echo '{"type":"start","backend":"compose"}'
 echo '{"type":"log","entry":{"service":"api","message":"hi"}}'
 echo 'plain text'
-sleep 30"#,
+wait $!"#,
         );
         let s = f.runner().stream_logs(&["logs", "--json"], None).unwrap();
         let mut got = Vec::new();

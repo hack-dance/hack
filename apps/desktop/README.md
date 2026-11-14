@@ -104,3 +104,7 @@ following resumes through Resume, not automatically when scrolling to the bottom
 Env and Activity tabs, CPU and memory, onboarding, always-on, daemon actions
 and upgrades come in later units. The design and the CLI/daemon requests they
 need are in `DESIGN.md`.
+Process-cleanup regression tests use a generous 60-second scheduling deadline,
+then check process retirement rather than enforcing a short wall-clock latency.
+The stream-drop test also proves the reader was waiting before Drop and that
+Drop's reader join completes. These test allowances do not change CLI timeouts.

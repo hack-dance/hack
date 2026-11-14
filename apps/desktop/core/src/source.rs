@@ -137,6 +137,7 @@ pub trait Source: Send + Sync {
 /// A project to run doctor for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorTarget {
+    pub missing: bool,
     pub name: String,
     pub repo_root: std::path::PathBuf,
     pub native: bool,
@@ -147,7 +148,7 @@ pub struct DoctorTarget {
 pub fn target_keys(targets: &[DoctorTarget]) -> Vec<crate::doctor::TargetKey> {
     targets
         .iter()
-        .map(|t| (t.name.clone(), t.repo_root.clone(), t.native))
+        .map(|t| (t.name.clone(), t.repo_root.clone(), t.native, t.missing))
         .collect()
 }
 
@@ -161,17 +162,16 @@ impl DoctorTarget {
         }
     }
 
-    /// Doctor targets for every project row with a checkout.
+    /// Retain missing rows for coverage, but never probe them.
     #[must_use]
     pub fn from_projects(p: &ProjectsPayload) -> Vec<Self> {
         p.projects
             .iter()
-            .filter_map(|r| {
-                Some(Self {
-                    name: r.name.clone(),
-                    repo_root: r.repo_root.clone()?.into(),
-                    native: r.is_native(),
-                })
+            .map(|r| Self {
+                missing: r.status == "missing" || r.repo_root.is_none(),
+                name: r.name.clone(),
+                repo_root: r.repo_root.clone().unwrap_or_default().into(),
+                native: r.is_native(),
             })
             .collect()
     }
@@ -196,7 +196,10 @@ fn read_doctor(
     let v: serde_json::Value = runner
         .run_json(&["doctor", "--json"], root, timeout)
         .map_err(|e| e.to_string())?;
-    if !v.get("checks").is_some_and(serde_json::Value::is_array) {
+    if !v
+        .get("checks")
+        .is_some_and(|c| c.as_array().is_some_and(|a| !a.is_empty()))
+    {
         return Err("doctor printed no checks list".into());
     }
     serde_json::from_value(v).map_err(|e| e.to_string())
@@ -236,15 +239,15 @@ impl LiveSource {
         };
         // The machine run must happen outside every checkout, or doctor
         // would report that checkout's project checks as machine checks.
-        // Prefer a user-private directory; the shared temp dir is a last
-        // resort (children get an all-absolute PATH either way).
+        // Prefer a user-private directory, then root. A shared temp cwd
+        // would permit another user to plant a project marker after inspection.
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
         if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
             && crate::doctor::is_private_dir(&run)
         {
             candidates.push(run);
         }
-        candidates.extend([std::env::temp_dir(), std::path::PathBuf::from("/")]);
+        candidates.push(std::path::PathBuf::from("/"));
         let machine = match crate::doctor::neutral_dir(&candidates) {
             Some(dir) if !left().is_zero() => read(
                 &self
@@ -267,7 +270,9 @@ impl LiveSource {
                         let runner = self.runner_for(t.native).with_term_grace(DOCTOR_TERM_GRACE);
                         let timeout = per_call.min(left());
                         s.spawn(move || {
-                            let result = if timeout.is_zero() {
+                            let result = if t.missing {
+                                Err("not checked (checkout missing)".into())
+                            } else if timeout.is_zero() {
                                 Err(NOT_CHECKED_BUDGET.to_owned())
                             } else {
                                 read(&runner, Some(&t.repo_root), timeout)
@@ -311,7 +316,9 @@ impl LiveSource {
                 .clone()
                 .with_env("HACK_RUNTIME_BACKEND", "native")
         } else {
-            self.runner.clone()
+            self.runner
+                .clone()
+                .with_env("HACK_RUNTIME_BACKEND", "compose")
         }
     }
 
@@ -792,6 +799,7 @@ esac
     fn targets(n: usize) -> Vec<DoctorTarget> {
         (0..n)
             .map(|i| DoctorTarget {
+                missing: false,
                 name: format!("p{i}"),
                 repo_root: format!("/work/p{i}").into(),
                 native: false,
@@ -819,7 +827,7 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
 "#,
         );
         let src = LiveSource {
-            runner: CliRunner::new(&hack).with_env("HACK_RUNTIME_BACKEND", "compose"),
+            runner: CliRunner::new(&hack).with_env("HACK_RUNTIME_BACKEND", "native"),
             daemon: None,
         };
         let mut projects = targets(2);
@@ -847,6 +855,31 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
             crate::doctor::DoctorState::from_runs(&runs),
             crate::doctor::DoctorState::Error(_)
         ));
+    }
+
+    #[test]
+    fn missing_registry_targets_are_not_probed_but_remain_unchecked() {
+        let hack = fake_hack(
+            "doctor-missing",
+            r#"[ "$*" = 'doctor --json' ] || exit 9
+echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'"#,
+        );
+        let source = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let payload: ProjectsPayload = serde_json::from_str(r#"{"projects":[{"name":"gone","status":"missing","repo_root":"/work/gone"},{"name":"no-root","status":"missing"}]}"#).unwrap();
+        let runs = source.doctor_runs(&DoctorTarget::from_projects(&payload));
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert_eq!(runs.len(), 3);
+        assert!(
+            runs[1..]
+                .iter()
+                .all(|r| r.result.as_ref().unwrap_err() == "not checked (checkout missing)")
+        );
+        let view = crate::doctor::aggregate(&runs);
+        assert_eq!((view.projects_total, view.projects_checked), (2, 0));
+        assert!(!view.is_clean());
     }
 
     #[test]
@@ -917,7 +950,7 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
             &hack,
             r#"#!/bin/sh
 case "$*" in
-  *--path*) echo '{"ok":true,"data":{"checks":[{"id":"env key","status":"error","detail":"key missing"}],"summary":[],"counts":{"ok":0,"warn":0,"error":1}}}'; exit 1 ;;
+  *--path*) echo '{"ok":true,"data":{"checks":[{"id":"env key","status":"error","detail":"key missing"},{"id":"project","status":"ok","detail":"Found .hack/ (or legacy .dev/) at /work/alpha/.hack"}],"summary":[],"counts":{"ok":0,"warn":0,"error":1}}}'; exit 1 ;;
   *) echo '{"ok":true,"data":{"checks":[{"id":"docker daemon","status":"ok","detail":""}],"summary":[],"counts":{"ok":1,"warn":0,"error":0}}}' ;;
 esac
 "#,
@@ -929,6 +962,7 @@ esac
             daemon: None,
         };
         let runs = src.doctor_runs(&[DoctorTarget {
+            missing: false,
             name: "alpha".into(),
             repo_root: "/work/alpha".into(),
             native: false,
@@ -940,7 +974,7 @@ esac
         assert_eq!(alpha.checks[0].id, "env key");
         let v = crate::doctor::aggregate(&runs);
         assert_eq!(v.attention_count(), 1);
-        assert_eq!(v.passed, 1);
+        assert_eq!(v.passed, 2);
     }
 
     /// Whether the temp dir's own ancestors are private enough for the

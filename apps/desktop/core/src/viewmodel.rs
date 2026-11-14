@@ -281,6 +281,11 @@ impl AppModel {
     }
 
     #[must_use]
+    pub fn project_list_readable(&self) -> bool {
+        self.snapshot.is_some() && self.last_error.is_none()
+    }
+
+    #[must_use]
     pub fn selected_row(&self) -> Option<&ProjectRow> {
         let s = self.snapshot.as_ref()?;
         let name = self.selected.as_ref()?;
@@ -544,6 +549,7 @@ mod tests {
     #[test]
     fn failed_refresh_keeps_last_good_and_marks_stale() {
         let mut m = model(Fixture::Running);
+        assert!(m.project_list_readable());
         m.apply(Event::Refreshed(Err(SourceError::Cli {
             code: "E_UNEXPECTED".into(),
             message: "boom".into(),
@@ -553,6 +559,7 @@ mod tests {
         assert_eq!(v.phase, Phase::Ready);
         assert!(matches!(v.banners.last(), Some(Banner::Stale { .. })));
         assert_eq!(v.running.len(), 2);
+        assert!(!m.project_list_readable());
     }
 
     #[test]

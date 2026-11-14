@@ -164,6 +164,9 @@ pub fn shell_quote(s: &str) -> String {
 
 /// Daemon repairs depend on the state the check reports (doctor-daemon.ts).
 fn daemon_command(id: &str, detail: &str) -> Option<String> {
+    if detail.contains("candidate") {
+        return None;
+    }
     let d = detail.to_ascii_lowercase();
     let cmd = match id {
         "daemon" if d.contains("incompatible") => "hack daemon restart",
@@ -227,6 +230,7 @@ const PRUNE_PROJECT: &str = "hack projects prune --project ";
 
 fn is_plain_name(s: &str) -> bool {
     !s.is_empty()
+        && !s.starts_with('-')
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
@@ -236,10 +240,9 @@ fn is_plain_name(s: &str) -> bool {
 /// back to its documented default), so a hostile project name can never
 /// put a shell program on the clipboard.
 fn remedy_in_detail(detail: &str) -> Option<String> {
-    let start = detail.find("run: ")? + "run: ".len();
-    let rest = &detail[start..];
-    let end = rest.find([')', '(', ';', '\n']).unwrap_or(rest.len());
-    let cmd = rest[..end].trim().trim_end_matches('.').trim_matches('`');
+    let tail = detail.trim().strip_suffix(')')?;
+    let start = tail.rfind("(run: ")? + "(run: ".len();
+    let cmd = tail[start..].trim();
     if KNOWN_REMEDIES.contains(&cmd) {
         return Some(cmd.to_owned());
     }
@@ -481,6 +484,35 @@ fn severity(status: &str) -> Result<Option<Severity>, ()> {
 
 type ProjectKey = (String, Severity, String);
 
+/// Legacy Compose output identifies the selected Hack directory. Native
+/// output has no project row, so require a known project-scoped check.
+fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
+    let Some(root) = &run.root else { return false };
+    if run.native {
+        return report.checks.iter().any(|c| {
+            matches!(
+                c.id.as_str(),
+                "env key"
+                    | "secret integrity"
+                    | "compose backend features"
+                    | "native settings"
+                    | "native source size"
+                    | "amd64 emulation"
+            )
+        });
+    }
+    report.checks.iter().any(|c| {
+        c.id == "project"
+            && c.status == "ok"
+            && c.detail
+                .strip_prefix("Found .hack/ (or legacy .dev/) at ")
+                .is_some_and(|p| {
+                    let path = Path::new(p);
+                    path == root.join(".hack") || path == root.join(".dev")
+                })
+    })
+}
+
 /// Aggregate runs into the Doctor view.
 #[must_use]
 pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
@@ -504,9 +536,21 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
                 continue;
             }
         };
-        if run.project.is_some() {
-            projects_checked += 1;
+        if let Some(name) = &run.project {
+            if project_evidence(run, report) {
+                projects_checked += 1;
+            } else {
+                failed_runs.push((
+                    name.clone(),
+                    "could not check (no exact project evidence)".into(),
+                ));
+                continue;
+            }
         } else {
+            if report.checks.is_empty() {
+                failed_runs.push(("machine".into(), "could not check (empty report)".into()));
+                continue;
+            }
             machine_checked = true;
         }
         for DoctorCheck { id, status, detail } in &report.checks {
@@ -656,8 +700,8 @@ impl DoctorState {
     }
 }
 
-/// What identifies a doctor target: name, checkout and backend.
-pub type TargetKey = (String, PathBuf, bool);
+/// What identifies a doctor target: name, checkout, backend and missing state.
+pub type TargetKey = (String, PathBuf, bool, bool);
 
 fn sorted(targets: Option<&[TargetKey]>) -> Option<Vec<TargetKey>> {
     targets.map(|t| {
@@ -791,9 +835,13 @@ impl DoctorPane {
     /// report; never green unless every run was clean.
     #[must_use]
     pub fn tone(&self) -> Tone {
+        if self.stale {
+            return Tone::Warn;
+        }
         match &self.result {
             DoctorState::Loaded(v) => v.tone(),
-            DoctorState::NeverRun | DoctorState::Error(_) => Tone::Idle,
+            DoctorState::NeverRun => Tone::Idle,
+            DoctorState::Error(_) => Tone::Warn,
         }
     }
 
@@ -903,14 +951,20 @@ mod tests {
     }
 
     fn key(name: &str, root: &str, native: bool) -> TargetKey {
-        (name.into(), root.into(), native)
+        (name.into(), root.into(), native, false)
     }
 
     fn machine(checks: Vec<DoctorCheck>) -> DoctorRun {
         DoctorRun::machine(report(checks))
     }
 
-    fn proj(name: &str, checks: Vec<DoctorCheck>) -> DoctorRun {
+    fn proj(name: &str, mut checks: Vec<DoctorCheck>) -> DoctorRun {
+        checks.retain(|c| c.id != "project" || c.status != "ok");
+        checks.push(check(
+            "project",
+            "ok",
+            &format!("Found .hack/ (or legacy .dev/) at /work/{name}/.hack"),
+        ));
         DoctorRun::project(name, &format!("/work/{name}"), report(checks))
     }
 
@@ -953,7 +1007,14 @@ mod tests {
         let one = aggregate(&[DoctorRun::project(
             "alpha",
             "/work/it's here",
-            report(vec![check("caddy hosts", "warn", "mapping missing")]),
+            report(vec![
+                check("caddy hosts", "warn", "mapping missing"),
+                check(
+                    "project",
+                    "ok",
+                    "Found .hack/ (or legacy .dev/) at /work/it's here/.hack",
+                ),
+            ]),
         )]);
         let c = one.cards().next().unwrap();
         assert_eq!(c.area, Area::RoutingDns);
@@ -1028,6 +1089,15 @@ mod tests {
 
     #[test]
     fn named_remedies_are_allowlisted_and_quoted() {
+        assert_eq!(
+            remedy_in_detail("service run: hack down failed (run: hack restart)"),
+            Some("hack restart".into())
+        );
+        assert_eq!(remedy_in_detail("service run: hack down failed"), None);
+        assert_eq!(
+            remedy_in_detail("orphan (run: hack projects prune --project --all)"),
+            None
+        );
         let card = |detail: &str| {
             aggregate(&[proj(
                 "alpha",
@@ -1063,10 +1133,10 @@ mod tests {
             "warn",
             "Untrusted (run: hack x gateway token-create; echo pwned)",
         )])]);
-        assert_eq!(
+        assert!(matches!(
             m.cards().next().unwrap().action,
-            CardAction::Copy("hack x gateway token-create".into())
-        );
+            CardAction::OpenDoc(_)
+        ));
         let m = aggregate(&[machine(vec![check(
             "gateway tokens",
             "warn",
@@ -1080,6 +1150,13 @@ mod tests {
 
     #[test]
     fn daemon_commands_follow_the_reported_state() {
+        assert_eq!(
+            daemon_command(
+                "daemon",
+                "hackd incompatible; hackd is optional for candidate Compose workflows; daemon autostart and automatic repair are disabled."
+            ),
+            None
+        );
         let cmd = |detail: &str| {
             aggregate(&[machine(vec![check("daemon", "warn", detail)])])
                 .cards()
@@ -1138,6 +1215,63 @@ mod tests {
                     .contains("machine checks did not run")
             );
         }
+    }
+
+    #[test]
+    fn stale_clean_result_is_never_green() {
+        let mut pane = DoctorPane::default();
+        let generation = pane.begin(Some(&[]));
+        pane.finish(
+            generation,
+            &[machine(vec![check("docker", "ok", "")])],
+            Some(&[]),
+            Instant::now(),
+        );
+        assert_eq!(pane.tone(), Tone::Ok);
+        pane.targets_seen(Some(&[key("new", "/work/new", false)]));
+        assert!(pane.stale);
+        assert_eq!(pane.tone(), Tone::Warn);
+        let mut missing = key("new", "/work/new", false);
+        missing.3 = true;
+        let generation = pane.begin(Some(&[key("new", "/work/new", false)]));
+        pane.finish(
+            generation,
+            &[machine(vec![check("docker", "ok", "")])],
+            Some(&[missing]),
+            Instant::now(),
+        );
+        assert!(pane.stale);
+        assert_eq!(pane.tone(), Tone::Warn);
+    }
+
+    #[test]
+    fn project_coverage_requires_exact_evidence() {
+        let machine = machine(vec![check("docker", "ok", "")]);
+        for checks in [
+            vec![],
+            vec![check(
+                "project",
+                "ok",
+                "Found .hack/ (or legacy .dev/) at /work/.hack",
+            )],
+            vec![check("native root trust", "ok", "trusted")],
+        ] {
+            for native in [false, true] {
+                let mut run = DoctorRun::project("alpha", "/work/alpha", report(checks.clone()));
+                run.native = native;
+                let v = aggregate(&[machine.clone(), run]);
+                assert_eq!(v.projects_checked, 0);
+                assert!(!v.is_clean());
+            }
+        }
+        let mut native = DoctorRun::project(
+            "alpha",
+            "/work/alpha",
+            report(vec![check("native settings", "ok", "valid")]),
+        );
+        native.native = true;
+        assert_eq!(aggregate(&[machine.clone(), native]).projects_checked, 1);
+        assert!(!aggregate(&[DoctorRun::machine(report(vec![]))]).is_clean());
     }
 
     #[test]
@@ -1225,7 +1359,7 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(pane.result, DoctorState::Error("hack not found".into()));
-        assert_eq!(pane.tone(), Tone::Idle);
+        assert_eq!(pane.tone(), Tone::Warn);
         assert_eq!(
             DoctorPane::default().tone(),
             Tone::Idle,

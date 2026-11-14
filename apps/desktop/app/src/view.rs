@@ -118,6 +118,9 @@ impl HackApp {
     /// `None` when the project list has not been read: doctor then runs
     /// machine checks only and reports the projects as not checked.
     fn doctor_targets(&self) -> Option<Vec<DoctorTarget>> {
+        if !self.model.project_list_readable() {
+            return None;
+        }
         self.model
             .snapshot()
             .map(|s| DoctorTarget::from_projects(&s.projects))
@@ -369,9 +372,7 @@ impl HackApp {
                 .background_executor()
                 .spawn(async move { source.snapshot() })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                this.apply_snapshot(token, snap, cx);
-            });
+            let _ = this.update(cx, |this, cx| this.apply_snapshot(token, snap, cx));
         })
         .detach();
     }

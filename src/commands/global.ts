@@ -856,9 +856,7 @@ async function waitForDocker(opts: {
   return false;
 }
 
-function muxInstallCommand(opts: {
-  readonly provider: "tmux" | "zellij";
-}): string {
+function muxInstallCommand(opts: { readonly provider: "tmux" }): string {
   if (isMac()) {
     return `brew install ${opts.provider}`;
   }
@@ -885,7 +883,6 @@ function failIfSlimMode(opts: {
 async function warnIfSessionsMuxUnavailable(): Promise<void> {
   const mode = await resolveSessionsMuxMode({ project: null });
   const tmuxPath = findExecutableInPath("tmux");
-  const zellijPath = findExecutableInPath("zellij");
 
   if (mode === "none") {
     return;
@@ -901,20 +898,10 @@ async function warnIfSessionsMuxUnavailable(): Promise<void> {
     return;
   }
 
-  if (mode === "zellij" && !zellijPath) {
+  if (mode === "auto" && !tmuxPath) {
     logger.warn({
       message: [
-        "sessions.mux is set to zellij but zellij is not on PATH.",
-        `Install hint: ${muxInstallCommand({ provider: "zellij" })}`,
-      ].join("\n"),
-    });
-    return;
-  }
-
-  if (mode === "auto" && !tmuxPath && !zellijPath) {
-    logger.warn({
-      message: [
-        "sessions.mux is auto, but neither tmux nor zellij is available on PATH.",
+        "sessions.mux is auto, but tmux is unavailable on PATH.",
         `Install hint: ${muxInstallCommand({ provider: "tmux" })}`,
       ].join("\n"),
     });

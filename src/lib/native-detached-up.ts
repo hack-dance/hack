@@ -13,6 +13,7 @@ import {
   okResult,
 } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
+import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "./native-environment-notices.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
   "--internal-native-detached-owner";
@@ -26,7 +27,9 @@ type Ready = {
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
-let publishShellVariables: ((names: readonly string[]) => void) | undefined;
+let publishShellVariables:
+  | ((names: readonly string[], ignoredRootDotenv?: boolean) => void)
+  | undefined;
 type StartupFailure = {
   readonly code: string;
   readonly message?: string;
@@ -148,12 +151,13 @@ function startupFailureError(failure: StartupFailure): HackCliError {
 
 /** Names-only notice: never accepts or forwards an environment map or output text. */
 export function nativeDetachedUpShellVariables(
-  names: readonly string[]
+  names: readonly string[],
+  ignoredRootDotenv = false
 ): boolean {
   if (!publishShellVariables) {
     return false;
   }
-  publishShellVariables(names);
+  publishShellVariables(names, ignoredRootDotenv);
   return true;
 }
 
@@ -213,7 +217,11 @@ export async function runNativeDetachedOwner(opts: {
     value:
       | string
       | { readonly kind: "ready"; readonly data: Ready }
-      | { readonly kind: "shell-variables"; readonly names: readonly string[] }
+      | {
+          readonly kind: "shell-variables";
+          readonly names: readonly string[];
+          readonly ignoredRootDotenv?: true;
+        }
       | { readonly kind: "failure"; readonly data: StartupFailure }
   ): Promise<void> =>
     new Promise((resolve) => {
@@ -254,9 +262,13 @@ export async function runNativeDetachedOwner(opts: {
     ready = true;
     send({ kind: "ready", data });
   };
-  publishShellVariables = (names) => {
+  publishShellVariables = (names, ignoredRootDotenv) => {
     if (!stopping) {
-      send({ kind: "shell-variables", names });
+      send({
+        kind: "shell-variables",
+        names,
+        ...(ignoredRootDotenv ? { ignoredRootDotenv: true as const } : {}),
+      });
     }
   };
   // A fresh owner starts with no names from any earlier attempt.
@@ -391,11 +403,18 @@ export async function startNativeDetachedUp(opts: {
     if (isRecord(value) && value.kind === "shell-variables") {
       if (
         !shellVariablesReported &&
-        Object.keys(value).length === 2 &&
+        Object.keys(value).every((key) =>
+          ["kind", "names", "ignoredRootDotenv"].includes(key)
+        ) &&
+        (value.ignoredRootDotenv === undefined ||
+          value.ignoredRootDotenv === true) &&
         isShellVariables(value.names)
       ) {
         shellVariablesReported = true;
         process.stderr.write(`${nativeShellForwardingNotice(value.names)}\n`);
+        if (value.ignoredRootDotenv === true) {
+          process.stderr.write(`${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`);
+        }
       }
       return;
     }

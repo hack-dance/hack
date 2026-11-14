@@ -70,6 +70,34 @@ test("fresh exec reads selected service overlay and ignores a changed default", 
     })
   ).toEqual({ VALUE: "base" });
 });
+
+test("fresh exec privately resolves selected-service env files with the caller context", async () => {
+  const opts = await fixture();
+  const sentinel = "synthetic-fresh-exec-file-canary";
+  await writeFile(
+    opts.composeFile,
+    JSON.stringify({
+      services: {
+        web: { image: "fixture", env_file: "web.env" },
+        other: { image: "fixture", env_file: "missing-other.env" },
+      },
+    })
+  );
+  await writeFile(
+    join(opts.scope.projectDir, "web.env"),
+    "TOKEN=${SOURCE:?}\nVALUE=overridden-file-value\n",
+    { mode: 0o600 }
+  );
+  expect(
+    await prepareNativeExecEnvironment({ ...opts, env: { SOURCE: sentinel } })
+  ).toEqual({ VALUE: "selected", TOKEN: sentinel });
+  const error: unknown = await prepareNativeExecEnvironment({
+    ...opts,
+    env: {},
+  }).catch((caught: unknown) => caught);
+  expect(String(error)).toContain("Values omitted");
+  expect(String(error)).not.toContain(sentinel);
+});
 test("fresh exec refuses missing selectors or deleted overlays before AWS export", async () => {
   const opts = await fixture();
   let calls = 0;

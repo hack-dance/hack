@@ -512,7 +512,6 @@ const DOCTOR_SUMMARY_GROUPS = [
       "gum (optional)",
       "fzf (optional)",
       "tmux (sessions)",
-      "zellij (sessions)",
       "mutagen",
       "go (optional)",
       "caddy (optional)",
@@ -828,11 +827,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   results.push(
     await runCheck(s, "tmux", () =>
       checkTool({ name: "tmux (sessions)", cmd: "tmux", optional: true })
-    )
-  );
-  results.push(
-    await runCheck(s, "zellij", () =>
-      checkTool({ name: "zellij (sessions)", cmd: "zellij", optional: true })
     )
   );
   results.push(await runCheck(s, "mutagen", () => checkMutagenBinary()));
@@ -1748,9 +1742,7 @@ async function checkTool(opts: {
   return { name: opts.name, status, message };
 }
 
-function muxInstallCommand(opts: {
-  readonly provider: "tmux" | "zellij";
-}): string {
+function muxInstallCommand(opts: { readonly provider: "tmux" }): string {
   if (isMac()) {
     return `brew install ${opts.provider}`;
   }
@@ -1765,7 +1757,6 @@ async function checkSessionsMuxConfig(opts: {
   const project = opts.adopted ? null : await findProjectContext(opts.startDir);
   const mode = await resolveSessionsMuxMode({ project });
   const tmuxPath = findExecutableInPath("tmux");
-  const zellijPath = findExecutableInPath("zellij");
 
   if (mode === "none") {
     return {
@@ -1790,21 +1781,6 @@ async function checkSessionsMuxConfig(opts: {
     };
   }
 
-  if (mode === "zellij") {
-    if (!zellijPath) {
-      return {
-        name: "sessions mux",
-        status: "warn",
-        message: `sessions.mux=zellij, but zellij is missing (run: ${muxInstallCommand({ provider: "zellij" })})`,
-      };
-    }
-    return {
-      name: "sessions mux",
-      status: "ok",
-      message: `sessions.mux=zellij (${zellijPath})`,
-    };
-  }
-
   if (tmuxPath) {
     return {
       name: "sessions mux",
@@ -1813,18 +1789,10 @@ async function checkSessionsMuxConfig(opts: {
     };
   }
 
-  if (zellijPath) {
-    return {
-      name: "sessions mux",
-      status: "ok",
-      message: `sessions.mux=auto (using zellij: ${zellijPath})`,
-    };
-  }
-
   return {
     name: "sessions mux",
     status: "warn",
-    message: `sessions.mux=auto, but neither tmux nor zellij is available (run: ${muxInstallCommand({ provider: "tmux" })})`,
+    message: `sessions.mux=auto, but tmux is unavailable (run: ${muxInstallCommand({ provider: "tmux" })})`,
   };
 }
 

@@ -760,11 +760,7 @@ function canonicalPath(path: string): string {
 }
 
 async function listMuxSessions(): Promise<readonly MuxSession[]> {
-  const [tmux, zellij] = await Promise.all([
-    listTmuxSessions(),
-    listZellijSessions(),
-  ]);
-  return [...tmux, ...zellij];
+  return await listTmuxSessions();
 }
 
 async function listTmuxSessions(): Promise<readonly MuxSession[]> {
@@ -836,58 +832,6 @@ function parseTmuxSessionFields(
     return byTab;
   }
   return null;
-}
-
-async function listZellijSessions(): Promise<readonly MuxSession[]> {
-  if (!findExecutableInPath("zellij")) {
-    return [];
-  }
-
-  let result: Awaited<ReturnType<typeof exec>>;
-  try {
-    result = await exec(["zellij", "list-sessions", "--no-formatting"], {
-      stdin: "ignore",
-    });
-  } catch {
-    return [];
-  }
-  if (result.exitCode !== 0) {
-    return [];
-  }
-
-  const out: MuxSession[] = [];
-  const lines = result.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  for (const line of lines) {
-    if (line.includes("(EXITED")) {
-      continue;
-    }
-    const name = parseZellijSessionName(line);
-    if (!name) {
-      continue;
-    }
-    out.push({
-      name,
-      backend: "zellij",
-      attached: false,
-      path: null,
-      windows: null,
-      createdAt: null,
-    });
-  }
-
-  return out;
-}
-
-function parseZellijSessionName(line: string): string | null {
-  const boundaries = [line.indexOf(" ["), line.indexOf(" (")].filter(
-    (index) => index > 0
-  );
-  const end = boundaries.length > 0 ? Math.min(...boundaries) : line.length;
-  const name = line.slice(0, end).trim();
-  return name.length > 0 ? name : null;
 }
 
 async function readComposeServices(opts: {

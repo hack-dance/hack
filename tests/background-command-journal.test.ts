@@ -132,7 +132,10 @@ async function expectCode(promise: Promise<unknown>, code: string) {
 
 describe("journal events and cursors", () => {
   test("accepted is persisted first; writers keep seq dense and strictly increasing", async () => {
-    const { paths, meta } = await acceptCommand({ input: input(), root });
+    const { paths, meta } = await acceptCommand({
+      input: input({ caller: "test:env" }),
+      root,
+    });
     expect((await stat(paths.dir)).mode & 0o777).toBe(0o700);
     expect((await stat(paths.meta)).mode & 0o777).toBe(0o600);
     expect((await stat(paths.events)).mode & 0o777).toBe(0o600);
@@ -154,7 +157,10 @@ describe("journal events and cursors", () => {
         seq: 4,
       })
     );
-    expect(JSON.stringify(meta)).not.toContain("env");
+    const persisted: unknown = JSON.parse(await readFile(paths.meta, "utf8"));
+    expect(persisted).toEqual(meta);
+    expect(persisted).not.toHaveProperty("env");
+    expect(persisted).not.toHaveProperty("environment");
   });
 
   test("an unterminated final line is a write in progress, not an event", () => {

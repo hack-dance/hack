@@ -93,6 +93,13 @@ nonempty. Full discovery and independent Git enumeration still agree before
 filtering. Duplicate/unknown selections fail. Every selected file runs exactly
 once per active host pool or is explicitly deferred. `BOTH_POOL_FILES` deliberately
 runs the named daemon files on both hosts so Linux-only cases are exercised too.
+It also runs the portable `open --json` subprocess contract in
+`tests/local-network-hint.test.ts` on light PRs' Linux shards, while preserving
+its macOS hint checks in the macOS pool. A change to CLI commands or shared
+output modules therefore checks this contract before integration. This adds no
+macOS minutes per PR; the duration table budgets about four Linux seconds when
+the file is selected. The deferral report separates files already run on Linux
+from files awaiting all execution; both still await macOS qualification.
 Each file retains its suite
 working directory and Bun preload.
 

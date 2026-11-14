@@ -295,6 +295,9 @@ impl CliRunner {
     /// `NotFound` or `Spawn`.
     pub fn stream_logs(&self, args: &[&str], path: Option<&Path>) -> Result<LogStream, RunError> {
         let mut child = self.spawn(args, path)?;
+        // Diagnostics must not fill the stderr pipe and block ndjson output.
+        // Drain concurrently with a bounded tail, as for finite CLI reads.
+        let _stderr = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
         let stdout = child.stdout.take();
         // Bounded: a reader that outruns the UI blocks, which in turn blocks
         // the CLI on its pipe, instead of queueing without limit.
@@ -727,7 +730,10 @@ mod tests {
             Self { dir }
         }
         fn runner(&self) -> CliRunner {
-            CliRunner::new(self.dir.join("hack")).with_env("HACK_HOME", &self.dir.to_string_lossy())
+            CliRunner::new(self.dir.join("hack"))
+                .with_env("HACK_HOME", &self.dir.to_string_lossy())
+                .with_env("HOME", &self.dir.to_string_lossy())
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
         }
     }
 
@@ -847,6 +853,16 @@ mod tests {
             .run_json::<Value>(&["x"], None, Duration::from_millis(300));
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn log_stream_drains_stderr_without_blocking_stdout() {
+        let f = FakeHack::new(
+            "head -c 2097152 /dev/zero >&2; echo '{\"type\":\"log\",\"entry\":{\"message\":\"after diagnostics\"}}'",
+        );
+        let s = f.runner().stream_logs(&["logs"], None).unwrap();
+        let event = s.next_timeout(T).expect("stderr must not block stdout");
+        assert_eq!(event.entry.unwrap().message, "after diagnostics");
     }
 
     #[test]

@@ -143,7 +143,7 @@ fn main() {
                     app.simulate_in_flight(a);
                 }
                 if let Some(l) = logs_fixture {
-                    app.show_logs_fixture(l);
+                    app.show_logs_fixture(l, window, cx);
                 }
                 app
             })

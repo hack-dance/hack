@@ -63,8 +63,11 @@ impl LogsPane {
     }
 
     /// Show a fixture state (screenshots and `--logs-fixture`).
-    pub fn set_model(&mut self, model: LogsModel) {
+    pub fn set_model(&mut self, model: LogsModel, window: &mut Window, cx: &mut Context<HackApp>) {
         self.feed = None;
+        self.search.update(cx, |input, cx| {
+            input.set_value(model.search.clone(), window, cx);
+        });
         self.model = model;
         self.refresh_visible();
         if self.should_autoscroll() {
@@ -321,6 +324,15 @@ impl HackApp {
         }
 
         let banner = m.banner().map(|text| {
+            let stopped = self
+                .model
+                .detail()
+                .is_some_and(|d| d.state == hack_desktop_core::state::ProjectState::Stopped);
+            let text = if !m.follow && stopped && !unavailable {
+                format!("{text} · project stopped")
+            } else {
+                text
+            };
             let failed = matches!(m.state, StreamState::Failed { .. });
             div()
                 .mx_5()

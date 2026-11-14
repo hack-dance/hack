@@ -71,13 +71,18 @@ impl HackApp {
     }
 
     /// Fixtures: show the Logs tab in a designed state.
-    pub fn show_logs_fixture(&mut self, f: hack_desktop_core::logs::fixtures::LogsFixture) {
+    pub fn show_logs_fixture(
+        &mut self,
+        f: hack_desktop_core::logs::fixtures::LogsFixture,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use hack_desktop_core::logs::fixtures::{LogsFixture, model};
         if f == LogsFixture::Native {
             self.select("docs-site");
         }
         self.tab = 1;
-        self.logs.set_model(model(f));
+        self.logs.set_model(model(f), window, cx);
     }
 
     /// Synchronous refresh, for fixtures and screenshots.

@@ -537,7 +537,10 @@ esac
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         let src = LiveSource {
-            runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
+            runner: CliRunner::new(&hack)
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("HOME", &dir.to_string_lossy())
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
             daemon: Some(DaemonClient::new(
                 dir.join("none.sock"),
                 Duration::from_millis(100),

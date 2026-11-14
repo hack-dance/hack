@@ -53,7 +53,7 @@ pub fn run(dir: &Path) {
                                 app.simulate_in_flight(a);
                             }
                             if let Some(l) = logs {
-                                app.show_logs_fixture(l);
+                                app.show_logs_fixture(l, window, cx);
                             }
                             app
                         })

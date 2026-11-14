@@ -67,6 +67,7 @@ degraded / stopping, failed-start, needs-attention):
 - Pause (reading continues, with an "N new" count), search, and a filter for one service (`hack logs <service>`).
 - Click any line to show it in full below the list (long or width-clipped lines); lines over 4 KB show how much is hidden.
 - "Log stream ended" and failures are shown distinctly, with Reconnect.
+- CLI stderr is drained concurrently with an 8 KB retained tail, so diagnostic output cannot block the log stream. Stream failure details come from ndjson error events and the exit status.
 - The buffer holds at most 10,000 lines and 8 MB (service and timestamp included); a single line is capped at 64 KB on intake. Memory only: nothing is written to disk and there is no copy-all.
 - Scrolling up pauses following. Every text field of an event is capped before it is queued (log message 64 KB, notice 4 KB, other fields 256 bytes), and events reach the UI in bounded batches through a 1,024-event queue, so queued text stays under about 70 MiB, so a very busy stream slows `hack logs` down instead of the window.
 - "Copy command" copies the equivalent `hack logs --path … [service]` for a terminal.
@@ -76,6 +77,8 @@ Fixtures: `--logs-fixture <state>` (`--list-fixtures` lists them). Boards:
 [light](screenshots/logs-light.png), [dark](screenshots/logs-dark.png). Row by row:
 following / paused with search, long lines / service filter, follow ended /
 failed, native / stopped.
+The paused-search fixture shows its active query in the search field. Finite
+reads for observed stopped projects include that state alongside the stream status.
 
 ## Not yet
 

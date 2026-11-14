@@ -14,7 +14,8 @@ use crate::models::ProjectRow;
 use crate::source::{ActionOutcome, Snapshot, SourceError};
 use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "banner", rename_all = "snake_case")]
 pub enum Banner {
     DaemonOff,
     DaemonMismatch { daemon: String, cli: String },
@@ -36,7 +37,8 @@ impl Banner {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
     Loading,
     CliMissing,
@@ -45,7 +47,7 @@ pub enum Phase {
     Ready,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Row {
     pub name: String,
     pub state: ProjectState,
@@ -53,7 +55,7 @@ pub struct Row {
     pub selected: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ListView {
     pub phase: Phase,
     pub banners: Vec<Banner>,
@@ -68,14 +70,14 @@ pub struct ListView {
     pub counts: Counts,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Counts {
     pub running: usize,
     pub stopped: usize,
     pub unknown: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DetailView {
     pub name: String,
     pub state: ProjectState,

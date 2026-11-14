@@ -577,15 +577,22 @@ mod tests {
     #[test]
     fn timeout_kills_the_process_group() {
         // The child spawns a grandchild that would outlive a plain kill.
-        let f = FakeHack::new("sleep 30 & echo $! > \"$HACK_HOME/grandchild\"; wait");
+        // The timeout leaves room for a slow first start of a new script
+        // (macOS scans freshly written executables); `ready` tells a slow
+        // start apart from a runner failure.
+        let f = FakeHack::new(
+            "echo ready > \"$HACK_HOME/ready\"\nsleep 30 &\necho $! > \"$HACK_HOME/grandchild\"\nwait",
+        );
         let started = Instant::now();
         let r = f
             .runner()
-            .run_json::<Value>(&["up"], None, Duration::from_millis(300));
+            .with_term_grace(Duration::from_millis(500))
+            .run_json::<Value>(&["up"], None, Duration::from_secs(2));
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(f.dir.join("ready").exists(), "the fake CLI never started");
         assert!(started.elapsed() < Duration::from_secs(5));
         let pid: i32 = std::fs::read_to_string(f.dir.join("grandchild"))
-            .unwrap()
+            .expect("grandchild pid written")
             .trim()
             .parse()
             .unwrap();
@@ -666,20 +673,27 @@ mod tests {
 
     #[test]
     fn timeout_sends_sigterm_first_so_the_cli_can_retire_its_children() {
+        // `wait` on a background job is interrupted at once by a trapped
+        // signal in every POSIX shell; a foreground `sleep` loop is not
+        // portable for this. `ready` separates a slow start from a failure.
         let f = FakeHack::new(
             r#"trap 'echo term > "$HACK_HOME/got"; exit 0' TERM
-while :; do sleep 0.05; done"#,
+echo ready > "$HACK_HOME/ready"
+sleep 30 &
+wait $!"#,
         );
         let started = Instant::now();
         let r = f
             .runner()
             .with_term_grace(Duration::from_secs(3))
-            .run_json::<Value>(&["up"], None, Duration::from_millis(300));
+            .run_json::<Value>(&["up"], None, Duration::from_secs(2));
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(f.dir.join("ready").exists(), "the fake CLI never started");
         assert!(f.dir.join("got").exists(), "SIGTERM reached the CLI");
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "exited on TERM, no full grace"
+            started.elapsed() < Duration::from_millis(4500),
+            "exited on TERM without the full grace: {:?}",
+            started.elapsed()
         );
     }
 

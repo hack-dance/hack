@@ -30,8 +30,9 @@ const POLL: Duration = Duration::from_secs(2);
 const TAIL_LINES: u32 = 20;
 
 pub struct HackApp {
-    model: AppModel,
-    source: Arc<dyn Source>,
+    pub(crate) model: AppModel,
+    pub(crate) source: Arc<dyn Source>,
+    pub(crate) logs: crate::logs_view::LogsPane,
     tab: usize,
     tail: Result<Vec<LogEntry>, String>,
     follow: bool,
@@ -40,10 +41,17 @@ pub struct HackApp {
 
 impl HackApp {
     /// `live`: poll the source. Fixtures load once and never poll.
-    pub fn new(source: Arc<dyn Source>, live: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        source: Arc<dyn Source>,
+        live: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let logs = crate::logs_view::LogsPane::new(window, cx);
         let mut this = Self {
             model: AppModel::new(),
             source,
+            logs,
             tab: 0,
             tail: Ok(Vec::new()),
             follow: true,
@@ -54,7 +62,18 @@ impl HackApp {
         } else {
             this.refresh_now();
         }
+        this.start_log_drain(cx);
         this
+    }
+
+    /// Fixtures: show the Logs tab in a designed state.
+    pub fn show_logs_fixture(&mut self, f: hack_desktop_core::logs::fixtures::LogsFixture) {
+        use hack_desktop_core::logs::fixtures::{LogsFixture, model};
+        if f == LogsFixture::Native {
+            self.select("docs-site");
+        }
+        self.tab = 1;
+        self.logs.set_model(model(f));
     }
 
     /// Synchronous refresh, for fixtures and screenshots.
@@ -83,7 +102,7 @@ impl HackApp {
         }
     }
 
-    fn selected_root(&self) -> Option<(PathBuf, bool)> {
+    pub(crate) fn selected_root(&self) -> Option<(PathBuf, bool)> {
         let r = self.model.selected_row()?;
         Some((PathBuf::from(r.repo_root.as_ref()?), r.is_native()))
     }
@@ -332,6 +351,10 @@ impl HackApp {
                 if !this.live {
                     this.refresh_now();
                 }
+                if this.tab == 1 {
+                    this.logs.model.set_service(None);
+                    this.open_logs(cx);
+                }
                 cx.notify();
             }))
             .into_any_element()
@@ -429,11 +452,17 @@ impl HackApp {
             .small()
             .selected_index(self.tab)
             .child(Tab::new().label("Services"))
-            .child(Tab::new().label("Logs").disabled(true))
+            .child(Tab::new().label("Logs"))
             .child(Tab::new().label("Env").disabled(true))
             .child(Tab::new().label("Activity").disabled(true))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                this.tab = *ix;
+                let (from, to) = (this.tab, *ix);
+                this.tab = to;
+                if to == 1 && from != 1 {
+                    this.open_logs(cx);
+                } else if from == 1 && to != 1 {
+                    this.logs.close();
+                }
                 cx.notify();
             }));
         v_flex()
@@ -441,8 +470,15 @@ impl HackApp {
             .min_w_0()
             .child(header)
             .child(div().px_5().pt_2().child(tabs))
-            .child(services_table(&d.services, cx))
-            .child(self.log_tail(cx))
+            .map(|col| {
+                if self.tab == 1 {
+                    let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
+                    col.child(self.render_logs(&names, cx))
+                } else {
+                    col.child(services_table(&d.services, cx))
+                        .child(self.log_tail(cx))
+                }
+            })
     }
 
     fn log_tail(&self, cx: &mut Context<Self>) -> impl IntoElement {

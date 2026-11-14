@@ -72,8 +72,36 @@ pub enum ActionOutcome {
 
 /// Native finite logs are a single-service snapshot (not ndjson), so the
 /// combined tail is not available for native projects in v0.
-pub const NATIVE_LOGS_NOTE: &str =
-    "Native logs are read one service at a time; they arrive with the Logs tab.";
+pub const NATIVE_LOGS_NOTE: &str = "Native logs are read one service at a time and are not shown in this preview yet. In a terminal: HACK_RUNTIME_BACKEND=native hack logs <service> --no-follow --tail 200";
+
+/// A running log stream: live `hack logs --json`, or canned events.
+pub trait LogFeed: Send {
+    /// Events received so far, without blocking.
+    fn drain(&mut self) -> Vec<crate::models::LogEvent>;
+    /// `Some(code)` once the stream's process has exited.
+    fn try_exit(&mut self) -> Option<Option<i32>>;
+}
+
+impl LogFeed for crate::runner::LogStream {
+    fn drain(&mut self) -> Vec<crate::models::LogEvent> {
+        crate::runner::LogStream::drain(self)
+    }
+    fn try_exit(&mut self) -> Option<Option<i32>> {
+        crate::runner::LogStream::try_exit(self)
+    }
+}
+
+/// Canned events delivered once; then it keeps "following" silently.
+pub struct FixtureFeed(pub Vec<crate::models::LogEvent>);
+
+impl LogFeed for FixtureFeed {
+    fn drain(&mut self) -> Vec<crate::models::LogEvent> {
+        std::mem::take(&mut self.0)
+    }
+    fn try_exit(&mut self) -> Option<Option<i32>> {
+        None
+    }
+}
 
 pub trait Source: Send + Sync {
     /// # Errors
@@ -98,6 +126,18 @@ pub trait Source: Send + Sync {
     /// Why no tail could be read; shown in place of the tail.
     fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
     -> Result<Vec<LogEntry>, String>;
+
+    /// Start a log stream for the Logs tab (`args` from `LogsModel::cli_args`).
+    /// Dropping the feed stops the stream.
+    ///
+    /// # Errors
+    /// Why no stream can be opened (native projects in v0, spawn failure).
+    fn open_logs(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        args: &[String],
+    ) -> Result<Box<dyn LogFeed>, String>;
 }
 
 /// Live data: hackd when its version matches the CLI, else the CLI.
@@ -123,6 +163,22 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn open_logs(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        args: &[String],
+    ) -> Result<Box<dyn LogFeed>, String> {
+        if native {
+            return Err(NATIVE_LOGS_NOTE.into());
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.runner
+            .stream_logs(&args, Some(repo_root))
+            .map(|s| Box::new(s) as Box<dyn LogFeed>)
+            .map_err(|e| e.to_string())
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         let cli_version = self.runner.version(Duration::from_secs(5))?;
         let daemon = self.daemon.as_ref().and_then(|d| d.status().ok());
@@ -246,6 +302,32 @@ pub fn parse_log_tail(out: &str, err: &str, code: Option<i32>) -> Result<Vec<Log
 pub struct FixtureSource(pub Fixture);
 
 impl Source for FixtureSource {
+    fn open_logs(
+        &self,
+        _repo_root: &Path,
+        native: bool,
+        args: &[String],
+    ) -> Result<Box<dyn LogFeed>, String> {
+        if native {
+            return Err(NATIVE_LOGS_NOTE.into());
+        }
+        // Replay the "following" fixture, filtered to the chosen service.
+        // The service filter is the trailing positional, if any.
+        let service = args
+            .last()
+            .filter(|a| !a.starts_with("--") && a.parse::<u32>().is_err() && a.as_str() != "logs");
+        let events = crate::logs::fixtures::events()
+            .into_iter()
+            .filter(|e| {
+                service.is_none()
+                    || e.entry
+                        .as_ref()
+                        .is_none_or(|x| x.service.as_ref() == service)
+            })
+            .collect();
+        Ok(Box::new(FixtureFeed(events)))
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
     }
@@ -386,6 +468,25 @@ esac
             parse_log_tail(err_ev, "", Some(0)).unwrap_err(),
             "no engine"
         );
+    }
+
+    #[test]
+    fn fixture_logs_honour_the_service_filter_and_native_note() {
+        let src = FixtureSource(Fixture::Running);
+        let args: Vec<String> = ["logs", "--json", "--tail", "500", "worker"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let mut feed = src.open_logs(Path::new("/work/x"), false, &args).unwrap();
+        let events = feed.drain();
+        assert!(
+            events
+                .iter()
+                .filter_map(|e| e.entry.as_ref())
+                .all(|e| e.service.as_deref() == Some("worker"))
+        );
+        assert!(feed.drain().is_empty(), "delivered once");
+        assert!(src.open_logs(Path::new("/work/x"), true, &args).is_err());
     }
 
     #[test]

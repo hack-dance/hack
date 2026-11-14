@@ -249,6 +249,13 @@ impl LogStream {
     pub fn next_timeout(&self, timeout: Duration) -> Option<LogEvent> {
         self.rx.recv_timeout(timeout).ok()
     }
+
+    /// `Some(code)` once the CLI process has exited (the code is `None` when
+    /// a signal ended it), `None` while it runs. Drain events first: lines
+    /// read before the exit may still be queued.
+    pub fn try_exit(&mut self) -> Option<Option<i32>> {
+        self.child.try_wait().ok().flatten().map(|s| s.code())
+    }
 }
 
 impl Drop for LogStream {
@@ -479,6 +486,18 @@ mod tests {
     }
 
     #[test]
+    fn log_stream_reports_exit_code() {
+        let f = FakeHack::new("echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 3");
+        let mut s = f.runner().stream_logs(&["logs"], None).unwrap();
+        assert_eq!(s.next_timeout(T).unwrap().kind, "end");
+        let code = (0..200).find_map(|_| {
+            thread::sleep(Duration::from_millis(10));
+            s.try_exit()
+        });
+        assert_eq!(code, Some(Some(3)));
+    }
+
+    #[test]
     fn missing_binary_is_not_found() {
         let r = CliRunner::new("/nonexistent/hack").run_json::<Value>(&["x"], None, T);
         assert_eq!(r, Err(RunError::NotFound));
@@ -513,7 +532,7 @@ echo '{"type":"log","entry":{"service":"api","message":"hi"}}'
 echo 'plain text'
 sleep 30"#,
         );
-        let s = f.runner().stream_logs(&["logs", "--json"], None).unwrap();
+        let mut s = f.runner().stream_logs(&["logs", "--json"], None).unwrap();
         let mut got = Vec::new();
         while got.len() < 3 {
             got.push(s.next_timeout(T).expect("event"));
@@ -521,6 +540,7 @@ sleep 30"#,
         assert_eq!(got[0].kind, "start");
         assert_eq!(got[1].entry.as_ref().unwrap().message, "hi");
         assert_eq!(got[2].message.as_deref(), Some("plain text"));
+        assert_eq!(s.try_exit(), None, "still running");
         let t = Instant::now();
         drop(s);
         assert!(t.elapsed() < Duration::from_secs(5));

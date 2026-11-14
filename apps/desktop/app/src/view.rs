@@ -129,8 +129,12 @@ impl HackApp {
                     .await;
                 let root = this
                     .update(cx, |this, cx| {
+                        let previous = this.selected_root();
                         if !this.model.finish_refresh(token, snap) {
                             return None;
+                        }
+                        if previous != this.selected_root() {
+                            this.tail = Ok(Vec::new());
                         }
                         cx.notify();
                         this.follow.then(|| this.selected_root()).flatten()
@@ -218,7 +222,10 @@ impl HackApp {
                 .spawn(async move { source.snapshot() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.model.finish_refresh(token, snap);
+                let previous = this.selected_root();
+                if this.model.finish_refresh(token, snap) && previous != this.selected_root() {
+                    this.tail = Ok(Vec::new());
+                }
                 cx.notify();
             });
         })

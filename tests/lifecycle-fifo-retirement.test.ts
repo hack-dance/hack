@@ -149,12 +149,24 @@ for (const behavior of [
         }
       }
       if (child.exitCode === null) {
-        process.kill(-child.pid, "SIGKILL");
+        killOwnedWrapper(child.pid);
       }
       await child.exited;
       await rm(root, { recursive: true, force: true });
     }
   }, 30_000);
+}
+
+function killOwnedWrapper(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if (
+      !(error instanceof Error && "code" in error && error.code === "ESRCH")
+    ) {
+      throw error;
+    }
+  }
 }
 
 /** The main command waits for its separately grouped child, but forwards no TERM. */

@@ -1,0 +1,33 @@
+---
+title: Project detail · display states
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Unknown
+  Unknown --> Observed : observation ok
+  Observed --> Unknown : observation failed
+  state Observed {
+    Stopped --> Starting : Start
+    Stopped --> Running : started elsewhere
+    Starting --> Running : all running
+    Starting --> FailedStart : a service failed
+    Running --> Degraded : a service down
+    Degraded --> Running : service back
+    Running --> Stopping : Stop
+    Degraded --> Stopping : Stop
+    FailedStart --> Stopping : Stop
+    Running --> Stopped : stopped elsewhere
+    Stopping --> Stopped : observed stopped
+    FailedStart --> Starting : Retry
+    FailedStart --> NeedsAttention : always-on gave up
+    NeedsAttention --> Starting : Retry
+    NeedsAttention --> Stopped : cause fixed
+  }
+  note right of Unknown
+    INV a failed or timed-out
+    read never shows Stopped
+  end note
+  classDef live stroke-width:1.6px
+  classDef fail stroke-width:2px
+  class Running live
+  class FailedStart,NeedsAttention,Degraded,Unknown fail

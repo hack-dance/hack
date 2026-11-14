@@ -311,7 +311,7 @@ async function envPolicyReason(
 
 function isEnvironmentInput(name: string): boolean {
   return (
-    (name.startsWith(".env") &&
+    ((name === ".env" || name.startsWith(".env.")) &&
       name !== PROJECT_ENV_STATE_FILENAME &&
       !(
         name.startsWith(".env.") && isExcludedLegacyDotenvName(name.slice(5))

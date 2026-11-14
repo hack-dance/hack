@@ -423,3 +423,5 @@ login startup; use manual starts rather than changing system permissions.
 Docker plugin directories must also prevent other accounts from creating names:
 sticky writable directories are refused even when empty. A missing plugin path
 is refused if its nearest existing parent permits new entries by another account.
+Only `.env` and `.env.*` names are considered dotenv inputs; unrelated names such
+as `.envrc` do not block admission and are not executed by login startup.

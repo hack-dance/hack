@@ -508,3 +508,21 @@ test("dotenv templates and backups are not active inputs in either project direc
     "compose_inputs_require_manual_start"
   );
 });
+
+test("direnv and other env-prefixed filenames are not dotenv inputs", async () => {
+  for (const directory of [opts.repoRoot, opts.projectDir]) {
+    for (const name of [".envrc", ".environment", ".env-not-an-overlay"]) {
+      const path = join(directory, name);
+      const contents = "echo fixture-shell-code\n";
+      await writeFile(path, contents, { mode: 0o600 });
+      expect(await autostartStartPolicyRefusal(opts)).toBeNull();
+      expect(await readFile(path, "utf8")).toBe(contents);
+    }
+    const active = join(directory, ".env.production");
+    await writeFile(active, "ACTIVE_VALUE=nonempty\n", { mode: 0o600 });
+    expect(await autostartStartPolicyRefusal(opts)).toBe(
+      "pending_env_migration"
+    );
+    await rm(active);
+  }
+});

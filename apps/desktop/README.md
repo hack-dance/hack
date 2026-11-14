@@ -95,6 +95,85 @@ Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
 
 ## What v0 does not do yet
 
-Logs, Env and Activity tabs, CPU and memory, onboarding, always-on,
-daemon actions and upgrades come in later units. The design and the CLI/daemon
+Logs, Env and Activity tabs, CPU and memory, always-on, broader
+daemon controls and upgrades come in later units. The design and the CLI/daemon
 requests they need are in `DESIGN.md` (PR #800).
+
+## Setup
+
+![Setup evidence flow](diagrams/setup-evidence.svg) ([source](diagrams/setup-evidence.mmd))
+
+On launch, fresh background checks determine whether setup is needed. The app
+supports Hack CLI 5.x; the CLI card cannot be skipped. Doctor offers **Run setup
+again**. Every card offers **Check again**. Skips last only until the next check
+and never count as passed. Continue permits unresolved optional steps once the
+CLI is available; the next launch checks everything again. No first-run flag,
+setup results or command output are saved.
+
+Cards cover CLI, Compose Docker, each native runtime, hackd, routing, trust and
+the login service. An empty registry checks Compose prerequisites. A native-only
+registry offers native documentation instead of global install/trust. Native DNS
+stays Unknown when doctor did not receive a browser URL. Compose macOS DNS needs
+all built-in resolver/dnsmasq pairs, any reported/custom host domain, port 53 and
+CoreDNS forwarding. Linux requires `linux dns route`. Missing checks stay Unknown.
+Only the explicit `local ca trust` check can prove Compose trust; `caddy local ca`
+only proves export. Older CLIs without R16 leave trust Unknown.
+
+Setup observes with a version-matched hackd snapshot, native `ps`, `daemon status
+--json`, socket status and bounded Doctor reads. CLI project listing is refused
+until R18 because it writes the registry; unavailable project coverage stays Unknown. It never observes through
+`global status`. A setup refresh has a 120-second budget (plus the bounded socket
+read); individual commands and Doctor cleanup also have deadlines. Native checks
+not reached within the budget remain Unknown. `running` plus the socket version
+matching the CLI proves hackd; bare status exit zero does not. `service.installed`
+proves login installation separately.
+
+Only the fixed `daemon start` and `daemon install` actions offer **Run**, with
+bounded, memory-only output followed by fresh checks. Admin cards offer **Copy
+command** and **Open Terminal**. The private one-use `.command` script quotes every
+argument, prints the command and waits for Enter. macOS requests a new Terminal
+window through `open -g -a Terminal`; Linux uses `xdg-terminal-exec` when available,
+otherwise Copy. No existing pane is typed into and no password is requested by
+the app. The script removes itself and its private directory after use or
+cancellation; a terminal that never executes the script may leave that private
+temp directory behind. Launching a terminal never proves a fix succeeded.
+GPUI's window activation observer rechecks setup when the window becomes active;
+visible setup also refreshes every ten minutes. Actual host focus and terminal
+behavior still need macOS/Linux live qualification; tests use injected launchers.
+
+Offline examples (no CLI, terminal or services):
+
+```sh
+cargo run -p hack-desktop -- --setup-fixture partial --theme dark
+cargo run -p hack-desktop-core --bin hack-desktop-state -- --setup-fixture native-unknown
+```
+
+Other setup fixtures: `missing-cli`, `ready`. `--screenshots` renders all four
+in light and dark offscreen. Evidence: [light](screenshots/setup-light.png),
+[dark](screenshots/setup-dark.png).
+
+Reusable terminal API (`core::terminal`): `CommandSpec { program, args }` provides
+`display()` with shell quoting; `Script::create(temp_root, &spec)` owns the private
+script; `open(Platform, linux_adapter, &dyn Launcher)` transfers cleanup to the
+script after launch. `Launcher::launch(program, args)` is the injected boundary;
+`SystemLauncher` is used only on explicit live clicks. `linux_adapter()` discovers
+an absolute `xdg-terminal-exec`. Build upgrade commands from authored argv, never
+from arbitrary CLI finding text.
+
+The CLI setup card links to [v5 installation](../../docs/versions/v5/install.md),
+not the stable v4 Homebrew command. A terminal shell function does not change the
+app's executable. Select a prepared supported CLI explicitly when launching:
+
+```sh
+HACK_DESKTOP_CLI="$HOME/.hack-next/bin/hack-next" HACK_RUNTIME_BACKEND=compose hack-desktop
+```
+
+`HACK_DESKTOP_CLI` must be an absolute executable path. This selects the CLI for
+checks, safe actions and terminal hand-offs; it does not install anything or
+change PATH. Without it, each command rediscovers `hack` on absolute PATH entries,
+so installing into an existing PATH directory can recover through **Check again**
+without restarting. The app inherits PATH at launch; a changed PATH still needs a
+relaunch. Follow the installation page's platform limits and existing-v4 migration
+steps before using a candidate against a shared home.
+On Linux, this preview requires a separately prepared source-built 5.x CLI; the
+Apple Silicon prerelease download is not a Linux installer.

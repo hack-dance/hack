@@ -687,10 +687,10 @@ mod tests {
         let v = m.list();
         assert_eq!(v.phase, Phase::Ready);
         assert!(matches!(v.banners.last(), Some(Banner::Stale { .. })));
-        assert!(!m.project_list_readable());
         assert!(v.running.is_empty());
         assert_eq!(v.counts.unknown, 4);
         assert!(m.detail().unwrap().actions.is_empty());
+        assert!(!m.project_list_readable());
     }
 
     #[test]

@@ -12,6 +12,7 @@
 mod doctor_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+mod setup_view;
 mod view;
 
 use std::sync::Arc;
@@ -23,13 +24,14 @@ use hack_desktop_core::source::{FixtureSource, LiveSource, Source};
 
 pub(crate) struct Args {
     pub fixture: Option<Fixture>,
+    pub setup_fixture: Option<String>,
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
+        "usage: hack-desktop [--setup-fixture missing-cli|partial|ready|native-unknown] [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
     );
     std::process::exit(2)
 }
@@ -37,12 +39,20 @@ fn usage() -> ! {
 fn parse_args() -> Args {
     let mut a = Args {
         fixture: None,
+        setup_fixture: None,
         theme: None,
         screenshots: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--setup-fixture" => {
+                let name = it.next().unwrap_or_else(|| usage());
+                if hack_desktop_core::setup_fixtures::load(&name).is_none() {
+                    usage();
+                }
+                a.setup_fixture = Some(name);
+            }
             "--fixtures" => {
                 let name = it.next().unwrap_or_else(|| usage());
                 a.fixture = Some(Fixture::parse(&name).unwrap_or_else(|| {
@@ -103,7 +113,10 @@ fn main() {
     }
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        let fixture = args.fixture;
+        let setup_fixture = args.setup_fixture;
+        let fixture = args
+            .fixture
+            .or(setup_fixture.as_ref().map(|_| Fixture::Running));
         let theme = args.theme;
         let source = source_for(fixture);
         gpui_kit::open_window(window_options(), cx, move |window, cx| {
@@ -116,15 +129,21 @@ fn main() {
                 app.watch_window(window, cx);
                 if let Some(f) = fixture {
                     app.select(fixtures::selected(f));
+                    if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
+                        app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
+                    }
                     if fixtures::loads_doctor(f) {
                         app.show_doctor_now();
                         if !fixtures::opens_doctor(f) {
                             app.show_project();
                         }
                     }
-                    if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
-                        app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
-                    }
+                }
+                if let Some(report) = setup_fixture
+                    .as_deref()
+                    .and_then(hack_desktop_core::setup_fixtures::load)
+                {
+                    app.show_setup_now(report);
                 }
                 if let Some(a) = fixture.and_then(|f| fixtures::local(f).in_flight) {
                     app.simulate_in_flight(a);

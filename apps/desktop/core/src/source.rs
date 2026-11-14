@@ -149,6 +149,21 @@ pub trait Source: Send + Sync {
     fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
     -> Result<Vec<LogEntry>, String>;
 
+    /// Fresh setup checks. Fixture implementations stay fully offline.
+    fn setup(&self) -> crate::setup::Report {
+        crate::setup::fixture(self.snapshot(), &self.doctor_runs(&[]))
+    }
+
+    /// Selected executable for an explicit terminal hand-off. Fixtures refuse.
+    fn cli_program(&self) -> Result<String, String> {
+        Err("Fixture: terminal disabled".into())
+    }
+
+    /// Explicit, fixed non-admin setup action; never inferred from Doctor text.
+    fn setup_action(&self, _action: crate::setup::SafeAction) -> String {
+        "Fixture: no action executed".into()
+    }
+
     /// Doctor runs: one outside any project, then one per project
     /// (DESIGN.md section 3). Each run fails on its own.
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun>;
@@ -325,7 +340,7 @@ impl LiveSource {
             std::env::var("HOME").ok().as_deref(),
         );
         Self {
-            runner: CliRunner::on_path("hack"),
+            runner: CliRunner::selected(std::env::var_os("HACK_DESKTOP_CLI").as_deref()),
             daemon: socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
         }
     }
@@ -354,6 +369,22 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn cli_program(&self) -> Result<String, String> {
+        self.runner
+            .resolve_program()
+            .map_err(|e| e.to_string())?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "CLI path is not UTF-8".into())
+    }
+
+    fn setup(&self) -> crate::setup::Report {
+        self.read_setup()
+    }
+    fn setup_action(&self, action: crate::setup::SafeAction) -> String {
+        crate::setup_io::run_safe(&self.runner, action)
+    }
+
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
         let (_, stderr, code) = self
             .runner

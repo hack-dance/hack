@@ -88,6 +88,7 @@ esac
         .env("HACK_HOME", &home)
         .env("HOME", &home)
         .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .env_remove("HACK_DESKTOP_CLI")
         .output()
         .unwrap();
     server.join().unwrap();
@@ -127,6 +128,7 @@ fn dump_state_without_hack_reports_the_missing_cli() {
         .env("HACK_HOME", &empty)
         .env("HOME", &empty)
         .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .env_remove("HACK_DESKTOP_CLI")
         .output()
         .unwrap();
     let _ = std::fs::remove_dir_all(&empty);
@@ -147,6 +149,7 @@ fn missing_daemon_never_runs_the_registry_writing_cli_listing() {
         .env("HOME", &home)
         .env("HACK_HOME", &home)
         .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .env_remove("HACK_DESKTOP_CLI")
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -191,4 +194,29 @@ fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
         "daemon restart"
     );
     std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn setup_fixture_cli_never_resolves_hack() {
+    let home = temp_dir("setup-offline");
+    let output = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
+        .args(["--setup-fixture", "native-unknown"])
+        .env("PATH", &home)
+        .env("HOME", &home)
+        .env("HACK_HOME", &home)
+        .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .env_remove("HACK_DESKTOP_CLI")
+        .env_remove("HACK_DESKTOP_CLI")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "native:sample" && c["status"] == "Unknown")
+    );
 }

@@ -30,6 +30,8 @@ import {
   assessExecutableDurability,
   checkServiceExecutableTrusted,
   checkServicePathDirectories,
+  checkSystemdEffectivePath,
+  checkSystemdEffectiveService,
   checkSystemdLoadedUnitPaths,
   checkSystemdStopHooks,
   checkSystemdUnitTrusted,
@@ -258,9 +260,25 @@ export async function refuseSystemdStartBeforeReplacing(
       hooks,
       expected,
     });
-    return "error" in rewrite
-      ? { message: rewrite.error, blocked: "rewrite-refused" }
-      : null;
+    if ("error" in rewrite) {
+      return { message: rewrite.error, blocked: "rewrite-refused" };
+    }
+    // The rewrite replaces only the main file: drop-ins survive it, and
+    // the start checks the effective configuration (drop-ins included)
+    // after writing. Check what survives now, as that start will. This
+    // reads the configuration systemd has loaded, so an unsafe setting the
+    // rewrite itself would remove can also refuse here: that only keeps
+    // the running daemon, and `hack daemon install` resolves it. A program
+    // retarget replaces the (missing) program the loaded copy names, so
+    // only the effective PATH is checked then.
+    const retained =
+      plan.rewrite === "program"
+        ? await checkSystemdEffectivePath({ deps })
+        : ((await checkSystemdLoadedUnitPaths({ unitPath, deps })) ??
+          (await checkSystemdEffectiveService({ deps })));
+    return retained === null
+      ? null
+      : { message: retained, blocked: "rewrite-refused" };
   }
   const loaded =
     (await checkSystemdLoadedUnitPaths({ unitPath, deps })) ??

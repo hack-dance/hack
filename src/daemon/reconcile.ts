@@ -291,10 +291,22 @@ export interface DaemonCommandTrace {
   readonly stale: Set<DaemonStaleReason>;
   /** Why a stale service was left as it is, if it was. */
   blocked: DaemonReconcileBlock | null;
+  /**
+   * `direct`: a running daemon was replaced, the service could not start
+   * its replacement, and this home's hackd was started directly instead,
+   * so a replacement never leaves hackd stopped (HACK-2216).
+   */
+  fallback: "direct" | null;
 }
 
 export function createDaemonCommandTrace(): DaemonCommandTrace {
-  return { manager: "none", action: "none", stale: new Set(), blocked: null };
+  return {
+    manager: "none",
+    action: "none",
+    stale: new Set(),
+    blocked: null,
+    fallback: null,
+  };
 }
 
 /** Records a carried-out plan on `trace`. */
@@ -350,6 +362,7 @@ export function buildDaemonCommandData(opts: {
   readonly stale: boolean;
   readonly stale_reasons: readonly DaemonStaleReason[];
   readonly blocked: DaemonReconcileBlock | null;
+  readonly fallback: "direct" | null;
   readonly cli_version: string;
   readonly daemon: {
     readonly running: boolean;
@@ -366,6 +379,7 @@ export function buildDaemonCommandData(opts: {
     stale: reasons.length > 0,
     stale_reasons: reasons,
     blocked: opts.trace.blocked,
+    fallback: opts.trace.fallback,
     cli_version: opts.cliVersion,
     daemon: {
       running: opts.daemon.running,

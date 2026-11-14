@@ -15,6 +15,7 @@ import {
   checkRunningLaunchdDaemon,
   startViaLaunchdIfLoaded,
 } from "../src/commands/daemon-launchd.ts";
+import { startReplacementDaemon } from "../src/commands/daemon-replace.ts";
 import {
   observePostUpdateDaemon,
   parseStartEnvelope,
@@ -242,6 +243,7 @@ test("the --json data is closed and schema-tagged", () => {
     stale: true,
     stale_reasons: ["content", "version-mismatch"],
     blocked: null,
+    fallback: null,
     cli_version: "2.0.0",
     daemon: { running: true, pid: 12, version: "2.0.0", compatible: true },
   });
@@ -1158,4 +1160,95 @@ test("launchd: an incompatible direct daemon is not replaced when the loaded job
   expect(await checkRunningLaunchdDaemon(ours)).toBeNull();
   // Nothing was repaired or kickstarted while deciding.
   expect(effects).toEqual([]);
+});
+
+// Review round 10 (HACK-2216): a replacement never leaves hackd stopped.
+
+test("a refused service start after the stop falls back to a direct start", async () => {
+  const trace = createDaemonCommandTrace();
+  const steps: string[] = [];
+  const code = await startReplacementDaemon({
+    trace,
+    startViaService: () => {
+      steps.push("service");
+      // As startViaSystemdIfInstalled does after a post-stop refusal.
+      trace.manager = "systemd";
+      trace.blocked = "rewrite-refused";
+      return Promise.resolve(1);
+    },
+    startDirect: () => {
+      steps.push("direct");
+      return Promise.resolve(0);
+    },
+    isRunning: () => Promise.resolve(false),
+  });
+  expect(code).toBe(0);
+  expect(steps).toEqual(["service", "direct"]);
+  expect(trace).toMatchObject({
+    manager: "systemd",
+    action: "restarted",
+    blocked: "rewrite-refused",
+    fallback: "direct",
+  });
+  expect(
+    buildDaemonCommandData({
+      command: "start",
+      trace,
+      daemon: { running: true, pid: 9, version: "2.0.0" },
+      cliVersion: "2.0.0",
+    })
+  ).toMatchObject({
+    action: "restarted",
+    blocked: "rewrite-refused",
+    fallback: "direct",
+  });
+});
+
+test("the fallback is not used when the service start worked, is still starting, or was already direct", async () => {
+  const run = async (opts: {
+    readonly serviceCode: number;
+    readonly manager: "systemd" | "launchd" | "none";
+    readonly running: boolean;
+    readonly directCode?: number;
+  }) => {
+    const trace = createDaemonCommandTrace();
+    const steps: string[] = [];
+    const code = await startReplacementDaemon({
+      trace,
+      startViaService: () => {
+        steps.push("service");
+        trace.manager = opts.manager;
+        trace.action = opts.serviceCode === 0 ? "started" : "none";
+        return Promise.resolve(opts.serviceCode);
+      },
+      startDirect: () => {
+        steps.push("direct");
+        return Promise.resolve(opts.directCode ?? 0);
+      },
+      isRunning: () => Promise.resolve(opts.running),
+    });
+    return { code, steps, trace };
+  };
+  const ok = await run({ serviceCode: 0, manager: "launchd", running: true });
+  expect(ok).toMatchObject({ code: 0, steps: ["service"] });
+  expect(ok.trace.action).toBe("restarted");
+  expect(ok.trace.fallback).toBeNull();
+  // The service started hackd but it was not ready in time: no second one.
+  expect(
+    (await run({ serviceCode: 1, manager: "systemd", running: true })).steps
+  ).toEqual(["service"]);
+  // The service path was not used: the direct start already ran.
+  expect(
+    (await run({ serviceCode: 1, manager: "none", running: false })).steps
+  ).toEqual(["service"]);
+  // The direct start fails too: the service path's error stands.
+  const both = await run({
+    serviceCode: 1,
+    manager: "launchd",
+    running: false,
+    directCode: 1,
+  });
+  expect(both.code).toBe(1);
+  expect(both.steps).toEqual(["service", "direct"]);
+  expect(both.trace.fallback).toBeNull();
 });

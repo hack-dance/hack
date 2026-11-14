@@ -5121,3 +5121,34 @@ linuxTest(
     expect(await readFile(unitPath, "utf8")).toBe(stale);
   }
 );
+
+// Review round 10 (HACK-2216): retained drop-ins are checked before a stop.
+
+linuxTest(
+  "a stale unit with an unsafe PATH from a retained drop-in is refused before the stop",
+  async () => {
+    const fake = fakeSystemd();
+    const stale = await writeStaleUnit(fake);
+    // A trusted drop-in (this user's, not writable by others) that puts a
+    // directory everyone can write on the service PATH. The rewrite keeps
+    // drop-ins, so the start would refuse the effective PATH after it.
+    const shared = join(root, "shared-bin");
+    await mkdir(shared);
+    await chmod(shared, 0o777);
+    const dropInDir = `${unitPath}.d`;
+    await mkdir(dropInDir, { recursive: true });
+    await chmod(dropInDir, 0o755);
+    const dropIn = join(dropInDir, "path.conf");
+    await writeFile(dropIn, `[Service]\nEnvironment="PATH=${shared}"\n`);
+    await chmod(dropIn, 0o644);
+    fake.dropInPaths = dropIn;
+    fake.unitEnvironment = `PATH=${shared} HACK_NO_INTERACTIVE=1`;
+    fake.calls.length = 0;
+
+    const refusal = await refuseSystemdStartBeforeReplacing(startHooks(fake));
+    expect(refusal?.blocked).toBe("rewrite-refused");
+    expect(refusal?.message).toContain(shared);
+    expect(systemctlMutations(fake)).toEqual([]);
+    expect(await readFile(unitPath, "utf8")).toBe(stale);
+  }
+);

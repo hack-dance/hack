@@ -65,6 +65,7 @@ import {
   refuseForeignLaunchdProgram,
   startViaLaunchdIfLoaded,
 } from "./daemon-launchd.ts";
+import { startReplacementDaemon } from "./daemon-replace.ts";
 import { runDaemonCommand } from "./daemon-result.ts";
 import {
   describeSystemdIncompatibleOwner,
@@ -338,17 +339,27 @@ async function startDaemon(opts: {
     }
     replaced = true;
   }
-  const code = await startStoppedDaemon({
-    paths,
-    foreground: opts.foreground,
-    trace,
-    trackedPid: status.pid,
-    stalePid: pidIsDaemon ? null : livePid,
-  });
-  if (code === 0 && replaced && trace.action === "started") {
-    trace.action = "restarted";
+  const startStopped = () =>
+    startStoppedDaemon({
+      paths,
+      foreground: opts.foreground,
+      trace,
+      trackedPid: status.pid,
+      stalePid: pidIsDaemon ? null : livePid,
+    });
+  if (!replaced || opts.foreground) {
+    return await startStopped();
   }
-  return code;
+  // A running daemon was just stopped: never leave hackd stopped.
+  return await startReplacementDaemon({
+    trace,
+    startViaService: startStopped,
+    startDirect: () => startDaemonDetached({ paths }),
+    isRunning: async () => {
+      const now = await readDaemonStatus({ paths });
+      return now.running && now.socketExists;
+    },
+  });
 }
 
 /** `start` once no hackd of this home runs (or it was just replaced). */

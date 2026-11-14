@@ -606,6 +606,7 @@ test.skipIf(process.platform !== "linux")(
         stale: false,
         stale_reasons: [],
         blocked: null,
+        fallback: null,
         cli_version: expect.any(String),
         daemon: { running: false, pid: null, version: null, compatible: false },
       },

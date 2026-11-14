@@ -722,13 +722,23 @@ Such a plist is never replaced automatically; `start` reports it and
     for its loaded files or program;
   - a missing program cannot be repaired in read-only mode;
   - a needed rewrite would be refused: no durable `hack` to retarget a missing
-    program to, or a program or service `PATH` that fails install's checks.
+    program to, or a program or service `PATH` that fails install's checks,
+    including a `PATH` or program that a drop-in the rewrite keeps supplies.
 
   If the start would be refused, `start` refuses first (exit 1,
   `E_DAEMON_SERVICE`, with `home-binding`, `unproven-owner`, `read-only` or
-  `rewrite-refused` as `blocked`) and leaves the running daemon alone. A change
-  between the check and the start, or a write, reload or start that fails at
-  runtime, can still leave hackd stopped.
+  `rewrite-refused` as `blocked`) and leaves the running daemon alone.
+
+  The check cannot foresee everything: a change between the check and the
+  start, or a write, reload or start that fails at runtime. So when the service
+  cannot start the replacement after the stop, `start` starts this home's hackd
+  directly instead, the way it does when the unit serves another home. It
+  reports action `restarted` with `fallback: "direct"`, keeps the service's
+  `blocked` reason, and warns to run `hack daemon install` (a directly started
+  hackd stops at logout or reboot). Only if that direct start fails too does
+  hackd stay stopped, and `start` reports the error. The post-update
+  reconcile-only mode uses the fallback as well, because that daemon was
+  running before.
 
 ```mermaid
 stateDiagram-v2
@@ -786,6 +796,7 @@ else on stdout (human lines go to stderr). Success is
 | `action` | `none`, `started`, `restarted`, `reinstalled`, `stopped` or `installed` |
 | `stale`, `stale_reasons` | whether the service or daemon was stale, and why: `content`, `program-missing`, `version-mismatch` |
 | `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service`, `unproven-owner`, `rewrite-refused` |
+| `fallback` | `"direct"` when a replaced daemon was started directly because the service could not start it, else `null` |
 | `cli_version` | this CLI's version |
 | `daemon` | `running`, `pid`, `version` and `compatible` after the command |
 

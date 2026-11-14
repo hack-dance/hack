@@ -2611,6 +2611,33 @@ function errorMessage(error: unknown): string {
  * drop-in can set HACK_HOME), its PATH directories and the programs it
  * runs are safe (a drop-in can set PATH or add Exec* entries).
  */
+/**
+ * The service as systemd has it loaded now, drop-ins included: its
+ * effective PATH directories and every program it runs must pass the
+ * install checks. What {@link checkBeforeEnable} applies after a write,
+ * available before one (HACK-2216). Null when they pass.
+ */
+export async function checkSystemdEffectiveService(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  return (
+    (await checkSystemdEffectivePath(opts)) ??
+    (await checkSystemdServicePrograms({ deps: opts.deps }))
+  );
+}
+
+/** The PATH half of {@link checkSystemdEffectiveService}. */
+export async function checkSystemdEffectivePath(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  const servicePath = await readSystemdServicePathDirectories({
+    deps: opts.deps,
+  });
+  return "error" in servicePath
+    ? servicePath.error
+    : await checkServicePathDirectories({ dirs: servicePath.dirs });
+}
+
 async function checkBeforeEnable(opts: {
   readonly deps: SystemdDeps;
   readonly hackHome: string | undefined;
@@ -2624,14 +2651,7 @@ async function checkBeforeEnable(opts: {
       return `Not enabling ${SYSTEMD_UNIT_NAME}: a drop-in makes it run hackd for ${unitHome.path}, not ${resolve(opts.hackHome)}; remove that override or install from that Hack home`;
     }
   }
-  const servicePath = await readSystemdServicePathDirectories({
-    deps: opts.deps,
-  });
-  const error =
-    ("error" in servicePath
-      ? servicePath.error
-      : await checkServicePathDirectories({ dirs: servicePath.dirs })) ??
-    (await checkSystemdServicePrograms({ deps: opts.deps }));
+  const error = await checkSystemdEffectiveService({ deps: opts.deps });
   return error === null ? null : `Not enabling ${SYSTEMD_UNIT_NAME}: ${error}`;
 }
 

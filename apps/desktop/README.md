@@ -52,7 +52,7 @@ degraded / stopping, failed-start, needs-attention):
 - Click any line to show it in full below the list (long or width-clipped lines); lines over 4 KB show how much is hidden.
 - "Log stream ended" and failures are shown distinctly, with Reconnect.
 - The buffer holds at most 10,000 lines and 8 MB (service and timestamp included); a single line is capped at 64 KB on intake. Memory only: nothing is written to disk and there is no copy-all.
-- Scrolling up pauses following. Events are capped at 64 KB each before they are queued and reach the UI in bounded batches through a bounded queue (about 64 MiB worst case), so a very busy stream slows `hack logs` down instead of the window.
+- Scrolling up pauses following. Every text field of an event is capped before it is queued (log message 64 KB, notice 4 KB, other fields 256 bytes), and events reach the UI in bounded batches through a 1,024-event queue, so queued text stays under about 70 MiB, so a very busy stream slows `hack logs` down instead of the window.
 - "Copy command" copies the equivalent `hack logs --path … [service]` for a terminal.
 - Native projects show the terminal command instead, because native logs are a one-service snapshot.
 

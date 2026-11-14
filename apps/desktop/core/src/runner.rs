@@ -274,15 +274,23 @@ impl CliRunner {
 }
 
 /// Events queued between the reader thread and the UI.
-/// Together with `cap_event`, this bounds queued text at about
-/// `STREAM_QUEUE * 2 * MAX_LINE_BYTES` (64 MiB for message plus notice text).
 pub const STREAM_QUEUE: usize = 1024;
+/// Cap for the top-level `message` of an event (notices, errors).
+pub const MAX_NOTICE_BYTES: usize = 4 * 1024;
+/// Cap for every other short text field (kind, timestamps, service, ...).
+pub const MAX_FIELD_BYTES: usize = 256;
+/// Upper bound on the text one queued event retains after `cap_event`:
+/// the log message, the notice message and eight short fields.
+pub const MAX_EVENT_BYTES: usize =
+    crate::logs::MAX_LINE_BYTES + MAX_NOTICE_BYTES + 8 * MAX_FIELD_BYTES;
+/// Upper bound on queued text: `STREAM_QUEUE * MAX_EVENT_BYTES` (~70 MiB).
+pub const MAX_QUEUED_BYTES: usize = STREAM_QUEUE * MAX_EVENT_BYTES;
 
-/// Cap an event's text fields at `logs::MAX_LINE_BYTES` (on a character
-/// boundary), marking a capped log entry as truncated.
+/// Bound every text field an event retains, so one event never holds more
+/// than `MAX_EVENT_BYTES` (cut on a character boundary into a new, small
+/// string). A capped log message marks its entry truncated.
 fn cap_event(e: &mut LogEvent) {
-    fn cap(s: &mut String) -> bool {
-        let max = crate::logs::MAX_LINE_BYTES;
+    fn cap(s: &mut String, max: usize) -> bool {
         if s.len() <= max {
             return false;
         }
@@ -293,15 +301,41 @@ fn cap_event(e: &mut LogEvent) {
         *s = s[..keep].to_owned();
         true
     }
-    if let Some(m) = e.message.as_mut() {
-        cap(m);
+    fn cap_opt(s: &mut Option<String>, max: usize) {
+        if let Some(v) = s.as_mut() {
+            cap(v, max);
+        }
     }
-    if let Some(entry) = e.entry.as_mut()
-        && cap(&mut entry.message)
-    {
-        entry.truncated = Some(true);
+    cap(&mut e.kind, MAX_FIELD_BYTES);
+    cap_opt(&mut e.ts, MAX_FIELD_BYTES);
+    cap_opt(&mut e.backend, MAX_FIELD_BYTES);
+    cap_opt(&mut e.reason, MAX_FIELD_BYTES);
+    cap_opt(&mut e.message, MAX_NOTICE_BYTES);
+    if let Some(entry) = e.entry.as_mut() {
+        cap_opt(&mut entry.service, MAX_FIELD_BYTES);
+        cap_opt(&mut entry.stream, MAX_FIELD_BYTES);
+        cap_opt(&mut entry.timestamp, MAX_FIELD_BYTES);
+        cap_opt(&mut entry.level, MAX_FIELD_BYTES);
+        if cap(&mut entry.message, crate::logs::MAX_LINE_BYTES) {
+            entry.truncated = Some(true);
+        }
     }
 }
+
+/// Text bytes an event retains (for the bound's test).
+#[cfg(test)]
+fn event_bytes(e: &LogEvent) -> usize {
+    let o = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+    e.kind.len()
+        + o(&e.ts)
+        + o(&e.backend)
+        + o(&e.reason)
+        + o(&e.message)
+        + e.entry.as_ref().map_or(0, |x| {
+            x.message.len() + o(&x.service) + o(&x.stream) + o(&x.timestamp) + o(&x.level)
+        })
+}
+
 /// Longest raw ndjson line read; the rest of a longer line is skipped.
 pub const MAX_RAW_LINE: usize = 1024 * 1024;
 
@@ -726,20 +760,30 @@ mod tests {
     fn queued_events_are_capped_before_send() {
         let big = "x".repeat(crate::logs::MAX_LINE_BYTES * 3);
         let mut e = LogEvent {
-            kind: "log".into(),
+            kind: big.clone(),
+            ts: Some(big.clone()),
+            backend: Some(big.clone()),
+            reason: Some(big.clone()),
             message: Some(big.clone()),
             entry: Some(crate::models::LogEntry {
-                message: big,
-                ..Default::default()
+                service: Some(big.clone()),
+                message: big.clone(),
+                stream: Some(big.clone()),
+                timestamp: Some(big.clone()),
+                level: Some(big),
+                truncated: None,
             }),
-            ..LogEvent::default()
         };
         cap_event(&mut e);
-        let entry = e.entry.unwrap();
+        assert!(event_bytes(&e) <= MAX_EVENT_BYTES, "{}", event_bytes(&e));
+        let entry = e.entry.as_ref().unwrap();
         assert_eq!(entry.message.len(), crate::logs::MAX_LINE_BYTES);
         assert!(entry.message.capacity() < crate::logs::MAX_LINE_BYTES + 1024);
         assert_eq!(entry.truncated, Some(true));
-        assert_eq!(e.message.unwrap().len(), crate::logs::MAX_LINE_BYTES);
+        assert_eq!(e.message.as_ref().unwrap().len(), MAX_NOTICE_BYTES);
+        assert_eq!(entry.timestamp.as_ref().unwrap().len(), MAX_FIELD_BYTES);
+        assert_eq!(e.reason.as_ref().unwrap().len(), MAX_FIELD_BYTES);
+        const { assert!(MAX_QUEUED_BYTES < 80 * 1024 * 1024) };
     }
 
     #[test]

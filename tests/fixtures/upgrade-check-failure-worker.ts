@@ -1,3 +1,4 @@
+import { ProjectEnvLayerRefusalError } from "../../src/lib/project-env-layer-path.ts";
 import { CommandError } from "../../src/lib/shell.ts";
 import { upgradeCheckFailureClass } from "../../src/lib/upgrade-check-failure.ts";
 
@@ -8,6 +9,9 @@ const cases: unknown[] = [
   new TypeError(sentinel),
   new SyntaxError(sentinel),
   new RangeError(sentinel),
+  new ProjectEnvLayerRefusalError(
+    `/fixture/${sentinel}/hack.env.dev.local.yaml`
+  ),
   Object.assign(new Error(sentinel), { code: "EACCES" }),
   Object.assign(new Error(sentinel), { code: "ENOENT" }),
   Object.assign(new Error(sentinel), { code: sentinel, name: sentinel }),

@@ -36,6 +36,7 @@ test("upgrade diagnostics classify failures without exposing messages, output or
     "type-error",
     "parse-error",
     "range-error",
+    "env-layer-refused",
     "permission-denied",
     "missing-path",
     "unexpected-error",

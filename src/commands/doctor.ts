@@ -132,6 +132,11 @@ import {
 } from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import {
+  type DoctorMetadata,
+  type DoctorScope,
+  doctorMetadata,
+} from "../lib/doctor-metadata.ts";
+import {
   AMD64_EMULATION_CHECK,
   type Amd64EmulationReport,
   amd64EmulationCheckResult,
@@ -321,6 +326,7 @@ interface CheckResult {
   readonly name: string;
   readonly status: CheckStatus;
   readonly message: string;
+  readonly scope?: DoctorScope;
   /** Counts and public fingerprints only; never paths or keychain contents. */
   readonly supersededRoots?: SupersededRootInventory;
   /** Native hack.local route state; lines and paths only, never file contents. */
@@ -1564,7 +1570,7 @@ export async function checkNativeHackLocalRoute(opts: {
   return results;
 }
 
-export type DoctorJsonCheck = {
+export type DoctorJsonCheck = DoctorMetadata & {
   readonly id: string;
   readonly status: CheckStatus;
   readonly detail: string;
@@ -1592,6 +1598,7 @@ export type DoctorJsonCheck = {
 };
 
 export type DoctorJsonData = {
+  readonly schema: 1;
   readonly checks: readonly DoctorJsonCheck[];
   readonly summary: readonly string[];
   readonly counts: {
@@ -1612,8 +1619,10 @@ export function buildDoctorJsonData(opts: {
     counts[result.status] += 1;
   }
   return {
+    schema: 1,
     checks: opts.results.map((result) => ({
       id: result.name,
+      ...doctorMetadata({ id: result.name, scope: result.scope }),
       status: result.status,
       detail: result.message,
       durationMs: result.durationMs,
@@ -3255,10 +3264,13 @@ export async function resolveSecretsHygieneScope(opts: {
 export async function checkSecretsHygiene(opts: {
   readonly startDir: string;
 }): Promise<CheckResult> {
-  const findings = await inspectSecretsHygiene(
-    await resolveSecretsHygieneScope(opts)
-  );
-  return { name: SECRETS_HYGIENE_CHECK, ...describeSecretsHygiene(findings) };
+  const scope = await resolveSecretsHygieneScope(opts);
+  const findings = await inspectSecretsHygiene(scope);
+  return {
+    name: SECRETS_HYGIENE_CHECK,
+    scope: scope.project ? "project" : "machine",
+    ...describeSecretsHygiene(findings),
+  };
 }
 
 function describeSecretsHygiene(findings: readonly SecretsHygieneFinding[]): {

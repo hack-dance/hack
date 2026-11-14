@@ -405,3 +405,56 @@ test.skipIf(!Bun.which("tmux"))(
     }
   }
 );
+
+/** kill-server acknowledges before exit; a defunct process is no live server. */
+async function serverStopped(pid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const server = Bun.spawnSync(["ps", "-p", String(pid), "-o", "stat="], {
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 1000,
+    });
+    if (
+      server.exitCode === 1 ||
+      server.stdout.toString().trim().startsWith("Z")
+    ) {
+      return true;
+    }
+    await Bun.sleep(50);
+  }
+  return false;
+}
+
+test.skipIf(!Bun.which("tmux"))(
+  "closing a private root stops named and explicit-socket servers inside it",
+  async () => {
+    const mux = privateTmux();
+    const root = process.env.TMUX_TMPDIR ?? "";
+    const pids: number[] = [];
+    try {
+      for (const client of [
+        ["-L", "named-fixture"],
+        ["-S", join(root, "explicit.sock")],
+      ]) {
+        const made = Bun.spawnSync(
+          ["tmux", ...client, "new-session", "-d", "-s", "extra", "sleep 60"],
+          { stdout: "pipe", stderr: "pipe" }
+        );
+        expect(made.exitCode, made.stderr.toString()).toBe(0);
+        const pid = Bun.spawnSync(
+          ["tmux", ...client, "display-message", "-p", "#{pid}"],
+          { stdout: "pipe", stderr: "pipe" }
+        );
+        expect(pid.exitCode).toBe(0);
+        pids.push(Number(pid.stdout.toString().trim()));
+      }
+    } finally {
+      mux.close();
+    }
+    expect(pids).toHaveLength(2);
+    expect(existsSync(root)).toBe(false);
+    for (const pid of pids) {
+      expect(await serverStopped(pid)).toBe(true);
+    }
+  }
+);

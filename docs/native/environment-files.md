@@ -19,7 +19,27 @@ The reviewed runtime active set must agree before private delivery or effects;
 an active service with unprepared file inputs refuses.
 
 Paths are literal and relative to the Compose file, within the current canonical
-project root. Absolute paths inside that root are accepted. Escaping the root or
+project root.
+
+Hack's own key and secret-store files are never environment sources. Before any
+inspection or read, a service `env_file` or the automatic `.env` is refused with
+"Hack key and secret-store files cannot be environment sources" when it is:
+
+- named `.hack.secret.key` at any depth (the checkout, shared and
+  primary-checkout project key copies);
+- named `.hack-secrets.enc.json` or `.hack-secrets-file.key` (legacy
+  project-relative encrypted store and key);
+- under the Hack home (`HACK_HOME`, else `~/.hack`) when the Hack home lies inside
+  the project root. A Hack home equal to the project root refuses every source.
+
+Names compare after Unicode NFC normalization and ASCII case folding, so a case
+alias is refused too. An absent optional entry with such a name is refused rather
+than skipped. The check uses paths only and opens nothing. It does not recognize
+a Hack home reached only through a symlink, or an encrypted store configured at
+another path; symlinked and multi-link sources are already refused below. A
+project that lies inside the Hack home keeps the name rules. Start, preflight,
+restart preflight and fresh exec share this check.
+ Absolute paths inside that root are accepted. Escaping the root or
 following a symlink inside it is refused. Files must be regular, single-link,
 owned by the current user, owner-readable and not writable by group or others;
 ordinary 0644 checkouts work. Directories inside the root must be owned by the
@@ -83,7 +103,8 @@ File-local cloud names can be used by later assignments without reading those
 names from the shell.
 
 Support includes export prefixes, `=` and `:` separators in default format,
-comments, single-quoted literals, double-quoted escapes, multiline quoted values,
+comments (an unquoted inline comment starts at a space followed by `#`; a tab
+before `#` is part of the value, as in Compose), single-quoted literals, double-quoted escapes, multiline quoted values,
 `$NAME`, `${NAME}`, defaults (`-`, `:-`), alternatives (`+`, `:+`), required references
 (`?`, `:?`), nesting to four levels, and `$$`. An unset `${NAME}` yields empty with a
 notice naming the destination key, file and assignment line; neither notices nor
@@ -193,7 +214,27 @@ compose-go v2.16.1 results, alongside the documented [environment-file rules](ht
 and [interpolation rules](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/).
 Actual guest delivery is qualified separately on a Mac.
 
+### Dotenv grammar parity
+
+`tests/native-compose-env-parity.test.ts` checks 86 dotenv cases against results
+recorded with Docker Compose v5.6.1: quoting and escapes, `export` prefixes,
+inline comments, multi-line quoted values, empty versus unset, bare names and the
+`${VAR:-x}`, `${VAR-x}`, `${VAR:?err}`, `${VAR?err}`, `${VAR:+x}` and `${VAR+x}`
+operators. Native matches Compose in every case except these deliberate
+refusals, where Compose accepts the input:
+
+| Input | Compose | Native |
+| --- | --- | --- |
+| Text after a closing quote, such as `A="v"x` or `A='v'x` | Drops the text and keeps `v` | Refuses the file and names the line, rather than silently lose part of the value |
+| A key that is not an identifier, such as `A.B`, `A-B` or `1A` | Accepts it | Refuses; see the identifier rule above |
+
 ## Changes for earlier v5 prereleases
+
+- A tab before `#` in an unquoted dotenv value no longer starts a comment:
+  `A=val\t# note` now delivers `val\t# note`, as Compose does. Earlier native
+  builds delivered `val`. Use a space before `#` for a comment.
+- An `env_file` or `.env` that is a Hack key or secret-store file is refused, as
+  described above.
 
 - `.hack/.env` is read on every native start and preflight, including when managed
   env already exists. A symlink, other-owner file, group/other-writable file or

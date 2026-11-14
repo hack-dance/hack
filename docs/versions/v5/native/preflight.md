@@ -25,6 +25,9 @@ structured blocker with recovery guidance; the command still produces a report.
 A project-root `.env` outside the Compose directory is ignored with one notice.
 Detached starts omit per-key "unresolved input" notices because owner stdio is
 ignored; use this preflight or a foreground start to inspect missing inputs.
+Later source changes: an env file or `.env` that is a Hack key or secret-store
+file (such as `.hack.secret.key`) is refused before it is read, and a tab before
+`#` no longer starts a dotenv comment, matching Compose.
 See the [environment-file rules](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/native/environment-files.md) and
 [migration notes](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/guides/v5-release-notes.md#next17-what-changed-and-what-to-do)
 before upgrading an earlier prerelease.

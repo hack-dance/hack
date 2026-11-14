@@ -200,14 +200,14 @@ impl HackApp {
                     .ok()
                     .flatten();
                 if let Some((root, native)) = root {
-                    let requested = root.clone();
+                    let requested = (root.clone(), native);
                     let tail = cx
                         .background_executor()
                         .spawn(async move { source.log_tail(&root, native, TAIL_LINES) })
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        // Drop a tail fetched for a project no longer selected.
-                        if this.selected_root().is_some_and(|(r, _)| r == requested) {
+                        // Root and backend both identify the requested tail.
+                        if this.selected_root().as_ref() == Some(&requested) {
                             this.tail = tail;
                             cx.notify();
                         }

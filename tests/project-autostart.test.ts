@@ -1,15 +1,29 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   claimProjectAutostart,
+  isTrustedAutostartRegistryFile,
   readProjectsRegistry,
   readProjectsRegistryStrict,
   recordProjectAutostartResult,
   removeProjectAutostart,
+  removeProjectsById,
   setProjectAutostart,
   setProjectAutostartPaused,
+  touchProjectRegistration,
   upsertProjectRegistration,
 } from "../src/lib/projects-registry.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -29,7 +43,8 @@ beforeEach(async () => {
   await mkdir(join(root, ".hack"), { recursive: true });
   await writeFile(
     registryPath,
-    JSON.stringify({ version: 1, projects: [entry("alpha"), entry("beta")] })
+    JSON.stringify({ version: 1, projects: [entry("alpha"), entry("beta")] }),
+    { mode: 0o600 }
   );
 });
 
@@ -368,4 +383,181 @@ test("unknown and ambiguous ids cannot opt in a different project", async () => 
   await expect(
     setProjectAutostart({ id: "alpha", registryPath })
   ).rejects.toThrow("Ambiguous project ID");
+});
+
+test("autostart trusted reads accept a private registry and missing registry", async () => {
+  expect(
+    await readProjectsRegistry({ registryPath, requireAutostartTrust: true })
+  ).toMatchObject({ projects: [{ id: "alpha" }, { id: "beta" }] });
+  const missing = join(root, "absent.json");
+  expect(
+    await readProjectsRegistry({
+      registryPath: missing,
+      requireAutostartTrust: true,
+    })
+  ).toEqual({ version: 1, projects: [] });
+  expect(
+    await readProjectsRegistryStrict({
+      registryPath: missing,
+      requireAutostartTrust: true,
+    })
+  ).toEqual({ kind: "absent" });
+});
+
+test("autostart rejects group and other writable registries while ordinary reads still work", async () => {
+  for (const mode of [0o660, 0o606]) {
+    await chmod(registryPath, mode);
+    expect(
+      (await readProjectsRegistry({ registryPath })).projects
+    ).toHaveLength(2);
+    await expect(
+      readProjectsRegistry({ registryPath, requireAutostartTrust: true })
+    ).rejects.toMatchObject({ code: "E_PERMISSION" });
+    await expect(
+      readProjectsRegistryStrict({ registryPath, requireAutostartTrust: true })
+    ).rejects.toThrow("regular file owned by the current user with mode 0600");
+  }
+});
+
+test("autostart rejects a symlink without authorizing its private target", async () => {
+  const target = join(root, "target.json");
+  await rename(registryPath, target);
+  await symlink(target, registryPath);
+  expect((await readProjectsRegistry({ registryPath })).projects).toHaveLength(
+    2
+  );
+  await expect(
+    readProjectsRegistry({ registryPath, requireAutostartTrust: true })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await expect(
+    claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  expect((await stat(target)).mode & 0o777).toBe(0o600);
+  expect(
+    (await readProjectsRegistry({ registryPath: target })).projects[0]
+      ?.autostart
+  ).toBeUndefined();
+});
+
+test("every autostart mutation rechecks trust after a previously trusted read", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath });
+  await readProjectsRegistry({ registryPath, requireAutostartTrust: true });
+  await chmod(registryPath, 0o666);
+  const before = await readFile(registryPath, "utf8");
+  const operations = [
+    () => setProjectAutostart({ id: "alpha", registryPath }),
+    () => removeProjectAutostart({ id: "alpha", registryPath }),
+    () =>
+      setProjectAutostartPaused({ id: "alpha", paused: true, registryPath }),
+    () =>
+      claimProjectAutostart({ id: "alpha", bootId: "boot-b", registryPath }),
+    () =>
+      recordProjectAutostartResult({
+        id: "alpha",
+        bootId: "boot-a",
+        registryPath,
+        result: {
+          status: "started" as const,
+          reason: null,
+          at: "2026-01-01T00:00:00.000Z",
+        },
+      }),
+  ];
+  for (const operation of operations) {
+    await expect(operation()).rejects.toMatchObject({ code: "E_PERMISSION" });
+    expect(await readFile(registryPath, "utf8")).toBe(before);
+  }
+});
+
+test("trusted reads reject nonregular and oversized files with value-free errors", async () => {
+  await expect(
+    readProjectsRegistry({ registryPath: root, requireAutostartTrust: true })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await truncate(registryPath, 16 * 1024 * 1024 + 1);
+  try {
+    await readProjectsRegistry({ registryPath, requireAutostartTrust: true });
+    throw new Error("Expected trust refusal");
+  } catch (error: unknown) {
+    expect(error).toMatchObject({ code: "E_PERMISSION" });
+    expect(String(error)).not.toContain(root);
+    expect(String(error)).not.toContain("EACCES");
+  }
+});
+
+test("owner validation rejects a foreign UID without changing real file ownership", () => {
+  const owned = {
+    regular: true,
+    fileUid: 1001,
+    currentUid: 1001,
+    mode: 0o600,
+    size: 128,
+  };
+  expect(isTrustedAutostartRegistryFile(owned)).toBe(true);
+  expect(isTrustedAutostartRegistryFile({ ...owned, fileUid: 1002 })).toBe(
+    false
+  );
+  expect(isTrustedAutostartRegistryFile({ ...owned, regular: false })).toBe(
+    false
+  );
+  expect(
+    isTrustedAutostartRegistryFile({ ...owned, currentUid: undefined })
+  ).toBe(true);
+});
+
+test("trusted mutations publish owner-private registry files", async () => {
+  await chmod(registryPath, 0o644);
+  await setProjectAutostart({ id: "alpha", registryPath });
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+  await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath });
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+});
+
+async function createTrustProject() {
+  const projectDir = join(root, "alpha", ".hack");
+  await mkdir(projectDir, { recursive: true });
+  const configFile = join(projectDir, "hack.config.json");
+  const composeFile = join(projectDir, "docker-compose.yml");
+  const envFile = join(projectDir, ".env");
+  await writeFile(configFile, JSON.stringify({ name: "alpha" }));
+  await writeFile(composeFile, "services: {}\n");
+  await writeFile(envFile, "");
+  return {
+    projectRoot: join(root, "alpha"),
+    projectDir,
+    projectDirName: ".hack" as const,
+    composeFile,
+    envFile,
+    configFile,
+  };
+}
+
+test("ordinary upsert, touch and prune cannot launder writable autostart intent", async () => {
+  const project = await createTrustProject();
+  await setProjectAutostart({ id: "alpha", registryPath });
+  await chmod(registryPath, 0o664);
+  const before = await readFile(registryPath, "utf8");
+  await expect(upsertProjectRegistration({ project })).rejects.toMatchObject({
+    code: "E_PERMISSION",
+  });
+  expect(await touchProjectRegistration({ project })).toBeNull();
+  await expect(removeProjectsById({ ids: ["beta"] })).rejects.toMatchObject({
+    code: "E_PERMISSION",
+  });
+  expect(await readFile(registryPath, "utf8")).toBe(before);
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o664);
+});
+
+test("ordinary writes retain trusted intent and can upgrade unmarked legacy permissions", async () => {
+  const project = await createTrustProject();
+  await chmod(registryPath, 0o664);
+  expect((await upsertProjectRegistration({ project })).status).toBe("updated");
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+  await setProjectAutostart({ id: "alpha", branch: "preview", registryPath });
+  await upsertProjectRegistration({
+    project,
+    nowIso: "2027-01-01T00:00:00.000Z",
+  });
+  expect((await read())?.autostart?.branch).toBe("preview");
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
 });

@@ -1,5 +1,7 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { type FileHandle, open, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_PROJECTS_REGISTRY_FILENAME } from "../constants.ts";
 import { HackCliError } from "./cli-result.ts";
@@ -39,6 +41,7 @@ import {
 const REGISTRY_VERSION = 1 as const;
 const REGISTRY_LOCK_FILENAME = `${GLOBAL_PROJECTS_REGISTRY_FILENAME}.lock`;
 const REGISTRY_TOUCH_INTERVAL_MS = 60_000;
+const AUTOSTART_REGISTRY_LIMIT_BYTES = 16 * 1024 * 1024;
 
 export interface RegisteredProjectWorktree {
   readonly path: string;
@@ -167,6 +170,101 @@ async function readRegistryText(path: string): Promise<string | null> {
   }
 }
 
+/** Value-free refusal: an untrusted registry must never authorize login code execution. */
+export class AutostartRegistryTrustError extends HackCliError {
+  constructor() {
+    super({
+      code: "E_PERMISSION",
+      message:
+        "Autostart cannot trust projects.json. Use a regular file owned by the current user with mode 0600, without a symbolic link; keep it below 16 MiB. Values omitted.",
+    });
+    this.name = "AutostartRegistryTrustError";
+  }
+}
+
+/**
+ * Trust the opened file, never a pre-open path observation. The UID check applies
+ * on hosts with a user identity; Unix file modes must deny group/other writes.
+ * Kept pure so owner rejection can be tested without changing real ownership.
+ */
+export function isTrustedAutostartRegistryFile(opts: {
+  readonly regular: boolean;
+  readonly fileUid: number;
+  readonly currentUid: number | undefined;
+  readonly mode: number;
+  readonly size: number;
+}): boolean {
+  return (
+    opts.regular &&
+    (opts.currentUid === undefined || opts.fileUid === opts.currentUid) &&
+    (opts.mode & 0o022) === 0 &&
+    opts.size >= 0 &&
+    opts.size <= AUTOSTART_REGISTRY_LIMIT_BYTES
+  );
+}
+
+/** No-follow, non-blocking and bounded read from the same descriptor we validate. */
+async function readTrustedAutostartRegistryText(
+  path: string
+): Promise<string | null> {
+  let file: FileHandle;
+  try {
+    file = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    );
+  } catch (error: unknown) {
+    const errno = isRecord(error) ? error.code : undefined;
+    if (errno === "ENOENT" || errno === "ENOTDIR") {
+      return null;
+    }
+    throw new AutostartRegistryTrustError();
+  }
+  try {
+    const info = await file.stat();
+    if (
+      !isTrustedAutostartRegistryFile({
+        regular: info.isFile(),
+        fileUid: info.uid,
+        currentUid: process.getuid?.(),
+        mode: info.mode,
+        size: info.size,
+      })
+    ) {
+      throw new AutostartRegistryTrustError();
+    }
+    const chunks: Buffer[] = [];
+    const buffer = Buffer.alloc(64 * 1024);
+    let total = 0;
+    while (true) {
+      const { bytesRead } = await file.read(
+        buffer,
+        0,
+        Math.min(buffer.length, AUTOSTART_REGISTRY_LIMIT_BYTES + 1 - total),
+        null
+      );
+      if (bytesRead === 0) {
+        return Buffer.concat(chunks, total).toString("utf8");
+      }
+      total += bytesRead;
+      if (total > AUTOSTART_REGISTRY_LIMIT_BYTES) {
+        throw new AutostartRegistryTrustError();
+      }
+      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+    }
+  } catch {
+    throw new AutostartRegistryTrustError();
+  } finally {
+    await file.close().catch(() => undefined);
+  }
+}
+
+type RegistryReadOptions = {
+  readonly registryPath?: string;
+  /** Automatic starts require a private, current-user-owned regular registry file. */
+  readonly requireAutostartTrust?: true;
+};
+
 /**
  * Read an explicit session registry without changing process-wide environment.
  *
@@ -174,12 +272,16 @@ async function readRegistryText(path: string): Promise<string | null> {
  * JSON or not a registry. A registry that exists but cannot be read refuses
  * with {@link ProjectsRegistryReadError}; writers reread under the lock, so
  * they refuse too instead of replacing it.
+ * `requireAutostartTrust` additionally refuses unsafe file identity, mode or
+ * size with {@link AutostartRegistryTrustError}, before parsing any intent.
  */
-export async function readProjectsRegistry(opts?: {
-  readonly registryPath?: string;
-}): Promise<ProjectsRegistry> {
+export async function readProjectsRegistry(
+  opts?: RegistryReadOptions
+): Promise<ProjectsRegistry> {
   const path = opts?.registryPath ?? getRegistryPath();
-  const text = await readRegistryText(path);
+  const text = opts?.requireAutostartTrust
+    ? await readTrustedAutostartRegistryText(path)
+    : await readRegistryText(path);
   if (!text) {
     return { version: REGISTRY_VERSION, projects: [] };
   }
@@ -200,10 +302,11 @@ export async function readProjectsRegistry(opts?: {
  * registry for an empty one (HACK-2177): `absent` (no file), `valid`, or
  * `invalid` (not JSON, or not a registry). A file that cannot be read
  * throws {@link ProjectsRegistryReadError}, as {@link readProjectsRegistry}.
+ * Trusted autostart reads also throw {@link AutostartRegistryTrustError}.
  */
-export async function readProjectsRegistryStrict(opts?: {
-  readonly registryPath?: string;
-}): Promise<
+export async function readProjectsRegistryStrict(
+  opts?: RegistryReadOptions
+): Promise<
   | { readonly kind: "absent" | "invalid" }
   | {
       readonly kind: "valid";
@@ -214,7 +317,10 @@ export async function readProjectsRegistryStrict(opts?: {
       readonly invalidAutostart: number;
     }
 > {
-  const text = await readRegistryText(opts?.registryPath ?? getRegistryPath());
+  const path = opts?.registryPath ?? getRegistryPath();
+  const text = opts?.requireAutostartTrust
+    ? await readTrustedAutostartRegistryText(path)
+    : await readRegistryText(path);
   if (text === null) {
     return { kind: "absent" };
   }
@@ -257,6 +363,20 @@ export async function readProjectsRegistryStrict(opts?: {
       (project) => project.autostart?.invalid
     ).length,
   };
+}
+
+/**
+ * Ordinary registry writers must not launder untrusted login intent into a
+ * current-user-owned atomic replacement. Call only while holding the registry
+ * lock; if the first read carries intent, build the update from a trusted fresh
+ * read instead. If it carries none, a later path replacement cannot inject a
+ * marker into the already-read state that this writer publishes.
+ */
+async function readProjectsRegistryForMutation(): Promise<ProjectsRegistry> {
+  const observed = await readProjectsRegistry();
+  return observed.projects.some((project) => project.autostart)
+    ? await readProjectsRegistry({ requireAutostartTrust: true })
+    : observed;
 }
 
 type RegistrationUpsertOptions = {
@@ -330,7 +450,7 @@ async function upsertObservedRegistration(input: {
       await assertLegacyProjectDirectory({
         projectDir: opts.project.projectDir,
       });
-      const current = await readProjectsRegistry();
+      const current = await readProjectsRegistryForMutation();
       const update = await upsertInMemory({
         current,
         nowIso,
@@ -419,7 +539,7 @@ async function refreshUnchangedPrimary(opts: {
       await assertLegacyProjectDirectory({
         projectDir: opts.observation.projectDir,
       });
-      const current = await readProjectsRegistry();
+      const current = await readProjectsRegistryForMutation();
       const primary = selectUnchangedPrimary({
         registry: current,
         observation: opts.observation,
@@ -791,7 +911,10 @@ async function mutateProjectAutostart(
     lockPath: `${registryPath}.lock`,
     signal: opts.signal,
     run: async () => {
-      const read = await readProjectsRegistryStrict({ registryPath });
+      const read = await readProjectsRegistryStrict({
+        registryPath,
+        requireAutostartTrust: true,
+      });
       if (
         read.kind === "invalid" ||
         (read.kind === "valid" && read.rejected > 0)
@@ -855,7 +978,7 @@ export async function removeProjectsById(opts: {
   const removeIds = new Set(opts.ids);
   return await withRegistryLock(
     async () => {
-      const current = await readProjectsRegistry();
+      const current = await readProjectsRegistryForMutation();
       for (const id of removeIds) {
         selectRegisteredProjectById({ projects: current.projects, id });
       }

@@ -46,7 +46,8 @@ async function writeRegistry(paused: boolean) {
           },
         },
       ],
-    })
+    }),
+    { mode: 0o600 }
   );
 }
 async function marker() {

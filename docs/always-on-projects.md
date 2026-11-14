@@ -53,6 +53,11 @@ No terminal or keychain prompt is allowed. Missing keys, required interaction,
 pending env migration, unavailable project paths and startup failures produce a
 recorded result. Run `hack up` manually to investigate and recover. The daemon does
 not install routing, start Docker, sign in, or migrate configuration at login.
+Before trusting intent, Hack opens `projects.json` without following links and
+requires a regular file owned by the current user, with no group or other write
+access. That check repeats at every autostart read and mutation. Unsafe registry
+permissions refuse startup; inspect ownership and set the registry mode to `0600`
+before retrying. Ordinary project listings remain readable for diagnosis.
 
 A claim is saved before each attempt, once per OS boot. Restarting the daemon in
 the same boot does not repeat starts. A crash after the claim can leave an

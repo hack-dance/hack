@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -80,6 +80,7 @@ async function seed(
       })),
     })
   );
+  await chmod(registryPath, 0o600);
 }
 
 async function run(signal?: AbortSignal): Promise<void> {
@@ -122,6 +123,27 @@ test("a daemon restart in the same boot never dispatches twice; a new boot can r
   deps = { ...deps, bootId: async () => "boot-2" };
   await run();
   expect(starts.map((start) => start.id)).toEqual(["alpha", "alpha"]);
+});
+
+test("an untrusted registry cannot trigger even an engine probe or start", async () => {
+  await seed(["alpha"]);
+  await chmod(registryPath, 0o660);
+  await expect(run()).rejects.toMatchObject({ code: "E_PERMISSION" });
+  expect(events).toEqual([]);
+  expect(starts).toEqual([]);
+});
+
+test("trust is rechecked after observation immediately before dispatch", async () => {
+  await seed(["alpha"]);
+  deps = {
+    ...deps,
+    inspect: async () => {
+      await chmod(registryPath, 0o660);
+      return "stopped";
+    },
+  };
+  await expect(run()).rejects.toMatchObject({ code: "E_PERMISSION" });
+  expect(starts).toEqual([]);
 });
 
 test("paused projects and down followed by daemon restart are not started", async () => {

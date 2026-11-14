@@ -68,6 +68,7 @@ export async function runAutostartAtLogin(
   const deps = opts.dependencies ?? productionDependencies();
   const registry = await readProjectsRegistry({
     registryPath: opts.registryPath,
+    requireAutostartTrust: true,
   });
   const candidates = registry.projects
     .filter((project) => project.autostart && !project.autostart.paused)
@@ -202,6 +203,7 @@ async function startClaimedProject(opts: {
   try {
     const registry = await readProjectsRegistry({
       registryPath: opts.registryPath,
+      requireAutostartTrust: true,
     });
     const current = registry.projects.find(
       (project) => project.id === opts.project.id
@@ -246,7 +248,10 @@ async function dispatchIfStillWanted(opts: {
   readonly registryPath?: string;
 }): Promise<StartResult> {
   const latest = (
-    await readProjectsRegistry({ registryPath: opts.registryPath })
+    await readProjectsRegistry({
+      registryPath: opts.registryPath,
+      requireAutostartTrust: true,
+    })
   ).projects.find((project) => project.id === opts.project.id);
   if (!latest?.autostart || latest.autostart.paused || opts.signal?.aborted) {
     return {

@@ -1012,7 +1012,7 @@ wait $!"#,
         // sleep starts after the last event, drop can race that fork rather
         // than exercise cleanup of an already-running process group.
         let f = FakeHack::new(
-            r#"sleep 30 &
+            r#"sleep 300 &
 echo '{"type":"start","backend":"compose"}'
 echo '{"type":"log","entry":{"service":"api","message":"hi"}}'
 echo 'plain text'

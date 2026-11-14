@@ -340,6 +340,9 @@ fn trusted_probe_path_with_limits(
         }
         let Some(real) = trusted_tool_path(&p, uid, true) else {
             for tool in crate::doctor_tools::NAMES {
+                if names.contains(std::ffi::OsStr::new(tool)) {
+                    continue;
+                }
                 if !matches!(std::fs::symlink_metadata(p.join(tool)), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
                 {
                     tools.unchecked.insert(tool);
@@ -1563,6 +1566,48 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             .is_err()
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejected_later_path_directory_cannot_invalidate_selected_tool() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack("doctor-path-priority", "echo '{}'");
+        let root = hack.parent().unwrap();
+        let trusted = root.join("trusted");
+        let shared = root.join("shared");
+        for dir in [&trusted, &shared] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::copy(&hack, dir.join("docker")).unwrap();
+        }
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let path = std::env::join_paths([&trusted, &shared]).unwrap();
+        let tools = trusted_probe_path(&path).unwrap();
+        assert!(Path::new(tools.path()).join("docker").exists());
+        assert!(!tools.unchecked.contains("docker"));
+        let mut runs = vec![DoctorRun::machine(Ok(crate::models::DoctorReport {
+            checks: vec![crate::models::DoctorCheck {
+                id: "docker daemon".into(),
+                status: "error".into(),
+                detail: "validated Docker reported an engine error".into(),
+            }],
+            summary: vec![],
+        }))];
+        let before = crate::doctor::aggregate(&runs);
+        apply_tool_coverage(&mut runs, &tools);
+        assert_eq!(
+            crate::doctor::aggregate(&runs),
+            before,
+            "later rejected shadows preserve findings and remedies"
+        );
+        let reverse = std::env::join_paths([&shared, &trusted]).unwrap();
+        assert!(
+            trusted_probe_path(&reverse)
+                .unwrap()
+                .unchecked
+                .contains("docker"),
+            "a rejected earlier selection still has incomplete coverage"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

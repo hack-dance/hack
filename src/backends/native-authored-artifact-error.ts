@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { dirname } from "node:path";
 import {
   NativeComposeGenerationError,
   NativeComposeInspectionError,
@@ -22,18 +23,79 @@ type ArtifactCause =
   | "host_deadline"
   | "io_failed"
   | "action_failed";
+/** Closed errno names. Anything else reports no system code, never its raw value. */
 const SYSTEM_CODES = new Set([
+  "E2BIG",
   "EACCES",
+  "EADDRINUSE",
+  "EADDRNOTAVAIL",
   "EAGAIN",
+  "EBADF",
   "EBUSY",
+  "ECANCELED",
+  "ECHILD",
+  "ECONNREFUSED",
+  "ECONNRESET",
   "EEXIST",
+  "EFAULT",
+  "EFBIG",
+  "EINTR",
+  "EINVAL",
   "EIO",
+  "EISDIR",
+  "ELOOP",
   "EMFILE",
+  "EMLINK",
+  "ENAMETOOLONG",
   "ENFILE",
+  "ENODEV",
   "ENOENT",
+  "ENOEXEC",
+  "ENOMEM",
   "ENOSPC",
+  "ENOTCONN",
+  "ENOTDIR",
+  "ENOTEMPTY",
+  "ENOTSOCK",
+  "ENOTSUP",
+  "ENXIO",
+  "EOPNOTSUPP",
   "EPERM",
+  "EPIPE",
+  "EROFS",
+  "ESPIPE",
+  "ESRCH",
+  "ETIMEDOUT",
+  "ETXTBSY",
+  "EXDEV",
 ]);
+type ErrorClass =
+  | "TypeError"
+  | "RangeError"
+  | "SyntaxError"
+  | "ReferenceError"
+  | "AggregateError"
+  | "DOMException"
+  | "Error"
+  | "non_error";
+const ERROR_CLASSES: readonly [
+  abstract new (...args: never[]) => unknown,
+  ErrorClass,
+][] = [
+  [TypeError, "TypeError"],
+  [RangeError, "RangeError"],
+  [SyntaxError, "SyntaxError"],
+  [ReferenceError, "ReferenceError"],
+  [AggregateError, "AggregateError"],
+  [DOMException, "DOMException"],
+  [Error, "Error"],
+];
+/** Source frames kept per failure; enough for a refusal helper and its callers. */
+const MAX_SITES = 4;
+const SOURCE_FRAME = /\(?([^\s()]+\.ts):(\d+):\d+\)?\s*$/;
+/** This checkout's `src/`; frames outside it (tests, dependencies, a bundle) are dropped. */
+const SOURCE_ROOT = `${dirname(import.meta.dir)}/`;
+const SITE_PATH = /^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*\.ts$/;
 const INSPECTION_CAUSES = {
   timeout: "lock_inspection_timeout",
   failed: "lock_inspection_failed",
@@ -45,6 +107,14 @@ export type NativeAuthoredArtifactDiagnostic = Readonly<{
   inspection: "boot-session" | "process-birth" | null;
   elapsed_ms: number | null;
   system_code: string | null;
+  /** Built-in class of the thrown value; subclasses report their nearest built-in. */
+  error_class: ErrorClass | null;
+  /**
+   * Innermost Hack source frames (`backends/file.ts:line`, relative to `src/`).
+   * A fixed source location, never a path prefix, message or value. Empty when the
+   * error carries no own stack (native fs errors) or runs from a compiled bundle.
+   */
+  sites: readonly string[];
 }>;
 type Diagnostic = NativeAuthoredArtifactDiagnostic;
 const issuedDiagnostics = new WeakMap<object, Diagnostic>();
@@ -88,7 +158,10 @@ export class NativeAuthoredArtifactError extends Error {
     super(
       "Native authored run artifact is unsafe, changed, or owned by another run; inspect native state before retrying. Values omitted."
     );
-    this.diagnostic = Object.freeze({ ...diagnostic });
+    this.diagnostic = Object.freeze({
+      ...diagnostic,
+      sites: Object.freeze([...diagnostic.sites]),
+    });
   }
 }
 
@@ -107,8 +180,61 @@ export function nativeAuthoredArtifactError(
       inspection: null,
       elapsed_ms: null,
       system_code: null,
+      error_class: null,
+      sites: [],
     });
   }
+}
+
+/** Read only own data properties: getters and proxy traps never run here. */
+function ownData(value: object, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function errorClass(error: unknown): ErrorClass | null {
+  try {
+    for (const [builtIn, name] of ERROR_CLASSES) {
+      if (error instanceof builtIn) {
+        return name;
+      }
+    }
+    return "non_error";
+  } catch {
+    return null;
+  }
+}
+
+/** Keep Hack source locations relative to `src/`; the checkout prefix never leaves. */
+function sourceSites(error: unknown): string[] {
+  if (typeof error !== "object" || error === null) {
+    return [];
+  }
+  const stack = ownData(error, "stack");
+  if (typeof stack !== "string") {
+    return [];
+  }
+  const sites: string[] = [];
+  for (const line of stack.split("\n", 64)) {
+    const match = SOURCE_FRAME.exec(line);
+    const path = match?.[1];
+    if (!(path?.startsWith(SOURCE_ROOT) && match?.[2])) {
+      continue;
+    }
+    const relative = path.slice(SOURCE_ROOT.length);
+    if (!SITE_PATH.test(relative) || match[2].length > 6) {
+      continue;
+    }
+    sites.push(`${relative}:${match[2]}`);
+    if (sites.length === MAX_SITES) {
+      break;
+    }
+  }
+  return sites;
 }
 
 function inspectionFields(
@@ -143,6 +269,8 @@ function classifyArtifactError(
     inspection: null,
     elapsed_ms: null,
     system_code: null,
+    error_class: errorClass(error),
+    sites: sourceSites(error),
   } as const;
   if (typeof error === "object" && error !== null) {
     const original = issuedDiagnostics.get(error);
@@ -180,16 +308,11 @@ function classifyArtifactError(
       cause_code: "mux_presence_unknown",
     });
   }
-  let code: unknown;
-  try {
-    code =
-      typeof error === "object" && error !== null
-        ? Object.getOwnPropertyDescriptor(error, "code")?.value
-        : undefined;
-  } catch {
-    // An arbitrary callback can reject with a proxy. Its traps are not diagnostics.
-    code = undefined;
-  }
+  // An arbitrary callback can reject with a proxy. Its traps are not diagnostics.
+  const code =
+    typeof error === "object" && error !== null
+      ? ownData(error, "code")
+      : undefined;
   if (typeof code === "string" && SYSTEM_CODES.has(code)) {
     return closedFailure({
       ...base,

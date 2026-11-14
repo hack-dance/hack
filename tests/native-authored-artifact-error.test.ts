@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
+import { dirname } from "node:path";
 import {
   NativeAuthoredHostDeadlineError,
   nativeAuthoredArtifactError,
   observeNativeAuthoredArtifactErrors,
 } from "../src/backends/native-authored-artifact-error.ts";
+import { serveLifecycleProcessDelivery } from "../src/lib/lifecycle-process-delivery.ts";
 import {
   NativeComposeGenerationError,
   NativeComposeInspectionError,
@@ -62,12 +64,13 @@ test("inspection diagnostics retain only the fixed observation, outcome and dura
       }),
       "action"
     );
-    expect(failure.diagnostic).toEqual({
+    expect(failure.diagnostic).toMatchObject({
       phase: "action",
       cause_code: `lock_inspection_${outcome}`,
       inspection: "process-birth",
       elapsed_ms: 3001,
       system_code: null,
+      error_class: "Error",
     });
   }
 });
@@ -109,4 +112,76 @@ test("arbitrary codes, getters and proxy traps never become public diagnostics",
     expect(JSON.stringify(failure)).not.toContain(CANARY);
   }
   expect(invoked).toBe(false);
+});
+
+test("a generic action failure names its source sites and built-in class, never its message or checkout path", async () => {
+  const refusal = await serveLifecycleProcessDelivery({
+    root: CANARY,
+    launch: { command: [], cwd: CANARY, env: {} },
+    signal: new AbortController().signal,
+    remaining: () => 1000,
+    assertFresh: () => Promise.resolve(),
+  }).catch((error: unknown) => error);
+  const failure = nativeAuthoredArtifactError(refusal, "action");
+  expect(failure.diagnostic.cause_code).toBe("action_failed");
+  expect(failure.diagnostic.error_class).toBe("Error");
+  expect(failure.diagnostic.sites[0]).toMatch(
+    /^lib\/lifecycle-process-delivery\.ts:\d+$/
+  );
+  expect(failure.diagnostic.sites.length).toBeGreaterThan(1);
+  expect(failure.diagnostic.sites.length).toBeLessThanOrEqual(4);
+  expect(Object.isFrozen(failure.diagnostic.sites)).toBe(true);
+  const serialized = JSON.stringify(failure);
+  expect(serialized).not.toContain(CANARY);
+  expect(serialized).not.toContain(import.meta.dir);
+  expect(serialized).not.toContain("refused");
+});
+
+test("frames outside Hack source, other classes and non-errors keep closed values", () => {
+  const local = nativeAuthoredArtifactError(new TypeError(CANARY), "action");
+  expect(local.diagnostic.error_class).toBe("TypeError");
+  expect(local.diagnostic.sites).toEqual([]);
+  const plain = nativeAuthoredArtifactError({ message: CANARY }, "action");
+  expect(plain.diagnostic.error_class).toBe("non_error");
+  const forged = nativeAuthoredArtifactError(
+    Object.assign(new Error(CANARY), {
+      stack: [
+        "Error",
+        `    at x (${dirname(import.meta.dir)}/src/../${CANARY}/a.ts:1:1)`,
+        `    at y (/elsewhere/src/lib/${CANARY}.ts:2:1)`,
+        `    at z (${dirname(import.meta.dir)}/src/lib/a.ts:1234567:1)`,
+      ].join("\n"),
+    }),
+    "action"
+  );
+  expect(forged.diagnostic.sites).toEqual([]);
+  expect(JSON.stringify(forged)).not.toContain(CANARY);
+  let invoked = false;
+  const stackGetter = Object.defineProperty(new Error(CANARY), "stack", {
+    get() {
+      invoked = true;
+      return CANARY;
+    },
+  });
+  expect(
+    nativeAuthoredArtifactError(stackGetter, "action").diagnostic.sites
+  ).toEqual([]);
+  expect(invoked).toBe(false);
+});
+
+test("errno names outside the original set are reported, unknown codes are not", () => {
+  for (const code of ["EADDRINUSE", "ENAMETOOLONG", "ETIMEDOUT", "ENOTSOCK"]) {
+    const failure = nativeAuthoredArtifactError(
+      Object.assign(new Error(CANARY), { code }),
+      "action"
+    );
+    expect(failure.diagnostic.cause_code).toBe("io_failed");
+    expect(failure.diagnostic.system_code).toBe(code);
+  }
+  const unknown = nativeAuthoredArtifactError(
+    Object.assign(new Error(CANARY), { code: "ECANARY" }),
+    "action"
+  );
+  expect(unknown.diagnostic.cause_code).toBe("action_failed");
+  expect(unknown.diagnostic.system_code).toBeNull();
 });

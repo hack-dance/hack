@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { applyEnvMigration } from "../src/lib/env-migration.ts";
 import { bindEnvMigrationSnapshots } from "../src/lib/env-migration-snapshot.ts";
 import { isRecord } from "../src/lib/guards.ts";
@@ -100,7 +100,11 @@ async function fixture() {
   return project;
 }
 
-async function cli(projectRoot: string, args: readonly string[]) {
+async function runMigrationCli(
+  projectRoot: string,
+  args: readonly string[],
+  { json = true }: { readonly json?: boolean } = {}
+) {
   if (compiled && !isAbsolute(compiled)) {
     throw new Error("Compiled test executable must be absolute");
   }
@@ -118,7 +122,7 @@ async function cli(projectRoot: string, args: readonly string[]) {
       "migrate",
       "--path",
       projectRoot,
-      "--json",
+      ...(json ? ["--json"] : []),
       ...args,
     ],
     cwd: projectRoot,
@@ -134,6 +138,11 @@ async function cli(projectRoot: string, args: readonly string[]) {
     }),
   });
   expect(result.stdout + result.stderr).not.toContain(sentinel);
+  return result;
+}
+
+async function cli(projectRoot: string, args: readonly string[]) {
+  const result = await runMigrationCli(projectRoot, args);
   const raw: unknown = JSON.parse(result.stdout);
   if (!(isRecord(raw) && typeof raw.ok === "boolean")) {
     throw new Error("Expected CLI result envelope");
@@ -212,6 +221,56 @@ test("production snapshot provider backs source CLI apply, no-op and guarded rol
     `TOKEN=${sentinel}\n`
   );
 });
+
+for (const json of [true, false]) {
+  test(`incomplete production rollback exits 1 with details (${json ? "JSON" : "plain"})`, async () => {
+    const project = await fixture();
+    const applied = await cli(project.projectRoot, [
+      "--apply",
+      "--accept-tracked-env-changes",
+    ]);
+    expect(applied.exitCode, applied.stderr).toBe(0);
+    const manifestPath = pathField(applied.envelope.data, "manifestPath");
+    const journalPath = pathField(applied.envelope.data, "journalPath");
+    // A real malformed provider work directory refuses restoration on every
+    // platform, including root. No permission-based skip or mock is needed.
+    const blocked = join(dirname(manifestPath), "staging");
+    const marker = "synthetic restore-work-directory blocker";
+    await writeFile(blocked, marker, { mode: 0o600 });
+    const incomplete = await runMigrationCli(
+      project.projectRoot,
+      ["--rollback-manifest", manifestPath],
+      { json }
+    );
+    expect(incomplete.exitCode).toBe(1);
+    expect(incomplete.stdout + incomplete.stderr).not.toContain(marker);
+    const raw: unknown = JSON.parse(incomplete.stdout);
+    const data = json && isRecord(raw) ? raw.data : raw;
+    if (!isRecord(data)) {
+      throw new Error("Expected rollback restoration details");
+    }
+    expect(data.status).toBe("incomplete");
+    expect(data.results).toContainEqual(
+      expect.objectContaining({ status: "error" })
+    );
+    expect(JSON.parse(await readFile(journalPath, "utf8")).state).toBe(
+      "rolling_back"
+    );
+    await expect(
+      resolveProjectEnvConfig({ ...project, envName: null })
+    ).rejects.toThrow("unfinished");
+    await rm(blocked);
+    const restored = await cli(project.projectRoot, [
+      "--rollback-manifest",
+      manifestPath,
+    ]);
+    expect(restored.exitCode, restored.stderr).toBe(0);
+    expect(restored.envelope.data.status).toBe("restored");
+    expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+      `TOKEN=${sentinel}\n`
+    );
+  });
+}
 
 test("production rollback maps preserved edits to retrievable private files without printing them", async () => {
   const project = await fixture();

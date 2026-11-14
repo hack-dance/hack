@@ -160,8 +160,12 @@ root key ignore entry is retained with a checkout-local key. The rollback result
 names these paths in `retained`; key removal is not part of rollback.
 Ordinary rollback refuses later edits. Explicit `--preserve-changes` restores the
 originals and keeps replaced bytes privately in the snapshot instead; it does not
-select or merge values. Rollback can resume an incomplete restoration. Keep the manifest, blobs and journal together
-until the upgrade is accepted. Neither file-level atomic writes nor cooperative
+select or merge values. Rollback can resume an incomplete restoration. An
+incomplete rollback exits 1 in both JSON and plain modes, preserving its per-file
+restoration details and leaving the journal in `rolling_back`. Project commands
+remain blocked until the same rollback completes; a restored result exits 0.
+Keep the manifest, blobs and journal together until the upgrade is accepted.
+Neither file-level atomic writes nor cooperative
 locks protect against an unrelated process replacing files outside Hack's locks.
 
 ### Recovering retained edits

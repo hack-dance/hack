@@ -129,13 +129,16 @@ export async function handleEnvMigrate({
     action = "rollback";
   }
   let data: unknown;
+  let exitCode = 0;
   if (opts.rollbackManifest) {
-    data = await rollbackEnvMigration({
+    const result = await rollbackEnvMigration({
       project,
       manifestPath: resolve(ctx.cwd, opts.rollbackManifest),
       snapshots: await envMigrationSnapshots(),
       preserveChanges: opts.preserveChanges === true,
     });
+    data = result;
+    exitCode = result.status === "restored" ? 0 : 1;
   } else if (opts.apply) {
     data = await (opts.cleanup ? cleanupEnvMigration : applyEnvMigration)({
       project,
@@ -155,10 +158,10 @@ export async function handleEnvMigrate({
   }
   if (opts.json) {
     emitCliResult({ result: okResult({ data }) });
-    return 0;
+    return exitCode;
   }
   process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
-  return 0;
+  return exitCode;
 }
 
 export const envMigrateCommand = withHandler(spec, handleEnvMigrate);

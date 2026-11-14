@@ -7,6 +7,7 @@ import {
   LIFECYCLE_PROCESS_CLIENT,
   serveLifecycleProcessDelivery,
 } from "../lib/lifecycle-process-delivery.ts";
+import { traceLifecycleRetirement } from "../lib/lifecycle-retirement-trace.ts";
 import {
   type LifecycleStateEntry,
   resolveLifecycleStatePath,
@@ -609,12 +610,16 @@ export async function createNativeAuthoredHostProcesses(input: {
     await synchronizeDirectories(directories);
     const saved = await capture(path);
     const check = async () => {
+      traceLifecycleRetirement("native-owner-check", { active });
       if (!active) {
         return refuse();
       }
       await opts.assertFresh();
+      traceLifecycleRetirement("native-inputs-fresh");
       await recheckDirectories(directories);
+      traceLifecycleRetirement("native-directories-fresh");
       await unchanged(saved);
+      traceLifecycleRetirement("native-owner-fresh");
     };
     /** Groups this owner launched, recorded before their launch completes. */
     const launchedGroups = new Set<number>();
@@ -636,6 +641,9 @@ export async function createNativeAuthoredHostProcesses(input: {
       env: {},
       definitionHash: opts.semanticHash,
       assertFresh: async () => {
+        traceLifecycleRetirement("native-controller-fresh", {
+          abandoningLaunch,
+        });
         await check();
         // Startup cancellation must not veto the missing-birth refresh during
         // abandonment. Owner/artifact freshness still holds for every check.
@@ -713,10 +721,19 @@ export async function createNativeAuthoredHostProcesses(input: {
      */
     const abandonLaunch = async () => {
       abandoningLaunch = true;
+      traceLifecycleRetirement("native-abandon-begin");
       try {
         const launched = await currentEntry(opts.scope, composeProject);
-        await controller.abort();
+        traceLifecycleRetirement("native-abandon-entry", {
+          processes: launched?.processes.length ?? 0,
+          groups: [...launchedGroups],
+        });
+        const result = await controller.abort();
+        traceLifecycleRetirement("native-abandon-controller", {
+          retained: result !== undefined,
+        });
         if ((await currentEntry(opts.scope, composeProject)) !== null) {
+          traceLifecycleRetirement("native-abandon-retained");
           return;
         }
         const groups = new Set(launchedGroups);
@@ -730,7 +747,11 @@ export async function createNativeAuthoredHostProcesses(input: {
           await settledGroup(group);
         }
         abandoned = true;
-      } catch {
+        traceLifecycleRetirement("native-abandon-settled", {
+          groups: [...groups],
+        });
+      } catch (error) {
+        traceLifecycleRetirement("native-abandon-failed", {}, error);
         // Unproven teardown keeps the launch intent and owner retained.
       }
     };

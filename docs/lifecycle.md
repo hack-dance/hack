@@ -79,6 +79,11 @@ failed process observations never count as absence.
 Native launch cancellation still permits the owned cleanup to retry a missing
 start time: its ownership and artifact checks remain active independently of the
 canceled startup deadline.
+
+For value-free retirement diagnostics, set `HACK_LIFECYCLE_RETIREMENT_TRACE=1`.
+Stderr records fixed decision labels, PIDs/group IDs, counts and boolean outcomes.
+It excludes paths, names, command/env values, ownership tokens and raw errors.
+Leave it unset for normal operation.
 `hack doctor --fix` also captures groups before mux teardown and waits for
 commands before wrappers when repairing an ownership-proven orphan. An
 unconfirmed retirement keeps that entry and is reported while repair continues

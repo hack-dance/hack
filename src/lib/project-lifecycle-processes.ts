@@ -1,3 +1,4 @@
+import { traceLifecycleRetirement } from "./lifecycle-retirement-trace.ts";
 import type { LifecycleStateEntry } from "./lifecycle-runtime.ts";
 import {
   type ProcessIdentityRow,
@@ -303,8 +304,18 @@ export async function terminateLifecycleProcessGroups(opts: {
   const signal = (group: number, name: NodeJS.Signals | 0): boolean => {
     try {
       runtime.signal(group, name);
+      traceLifecycleRetirement("group-signal", {
+        group,
+        probe: name === 0,
+        kill: name === "SIGKILL",
+      });
       return true;
     } catch (error: unknown) {
+      traceLifecycleRetirement(
+        "group-signal-failed",
+        { group, probe: name === 0, kill: name === "SIGKILL" },
+        error
+      );
       if (hasProcessErrorCode(error, "ESRCH")) {
         return false;
       }
@@ -331,7 +342,16 @@ export async function terminateLifecycleProcessGroups(opts: {
     let live: Set<number>;
     try {
       live = new Set(await runtime.liveGroups(existing));
+      traceLifecycleRetirement("group-census", {
+        groups: existing,
+        live: [...live],
+      });
     } catch (cause) {
+      traceLifecycleRetirement(
+        "group-census-failed",
+        { groups: existing },
+        cause
+      );
       throw new LifecycleCensusUnavailable(
         "Could not inspect live lifecycle process-group members",
         { cause }
@@ -384,6 +404,12 @@ export async function terminateLifecycleProcessGroups(opts: {
       }
       const forced = allowForce && opts.force?.aborted === true;
       if (runtime.now() >= deadline || (observed && forced)) {
+        traceLifecycleRetirement("group-wait-ended", {
+          groups: remaining,
+          observed,
+          forced,
+          timeoutMs,
+        });
         if (!observed) {
           throw unavailable;
         }
@@ -475,15 +501,24 @@ export function createLifecycleSessionRetirement(boundary?: {
   };
   return async (opts) => {
     if (!captured) {
+      traceLifecycleRetirement("capture-begin", {
+        processes: opts.processes.length,
+      });
       captured = await captureRetirementGroups({
         processes: opts.processes,
         os,
       });
     }
+    traceLifecycleRetirement("retirement-captured", {
+      unknown: captured === "unknown",
+      missingIdentity: captured === "identity_unavailable",
+      groups: typeof captured === "object" ? captured.groups : [],
+    });
     if (!(await opts.stopSession())) {
       captured = undefined;
       return false;
     }
+    traceLifecycleRetirement("retirement-mux-stopped");
     if (captured === "unknown") {
       throw new Error(
         "Lifecycle mux stopped, but descendant retirement could not be confirmed because process inspection failed"
@@ -534,6 +569,27 @@ async function captureRetirementGroups(opts: {
     readRetirementSnapshot({ read: opts.os.readSnapshot }),
     readRetirementIdentities(opts.os.readIdentities),
   ]);
+  traceLifecycleRetirement("capture-reads", {
+    snapshotRows: snapshot.length,
+    identityRows: identities.length,
+    panePids: opts.processes.flatMap((process) =>
+      process.panePid ? [process.panePid] : []
+    ),
+    livePanePids: identities
+      .filter(
+        (row) =>
+          !row.zombie &&
+          opts.processes.some((process) => process.panePid === row.pid)
+      )
+      .map((row) => row.pid),
+    zombiePanePids: identities
+      .filter(
+        (row) =>
+          row.zombie &&
+          opts.processes.some((process) => process.panePid === row.pid)
+      )
+      .map((row) => row.pid),
+  });
   if (snapshot.length === 0 || identities.length === 0) {
     return "unknown";
   }
@@ -585,6 +641,11 @@ async function captureRetirementGroups(opts: {
       ),
     ])
   );
+  traceLifecycleRetirement("capture-complete", {
+    groups,
+    paneGroups: [...paneGroups],
+    roots,
+  });
   return { groups, paneGroups, signalledGroups, members };
 }
 

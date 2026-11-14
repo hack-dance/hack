@@ -14,6 +14,7 @@ import {
 import { buildLifecycleSessionName } from "../mux/session-names.ts";
 import { logger } from "../ui/logger.ts";
 import { readTextFile } from "./fs.ts";
+import { traceLifecycleRetirement } from "./lifecycle-retirement-trace.ts";
 import {
   appendLifecycleLogRecord,
   ensurePrivateLifecycleLog,
@@ -840,6 +841,16 @@ export function createLifecycleProcessController(opts: {
     const backend = (await opts.mux()).backends.get(backendName);
     let stopped = false;
     let failure = "";
+    traceLifecycleRetirement("abort-begin", {
+      backendAvailable: backend?.available === true,
+      processes: startedProcesses.length,
+      panePids: startedProcesses.flatMap((process) =>
+        process.panePid ? [process.panePid] : []
+      ),
+      missingBirths: startedProcesses.filter(
+        (process) => process.panePid && !process.paneBirth
+      ).length,
+    });
     if (backend?.available) {
       const ownershipToken = createdOwnershipToken;
       try {
@@ -850,28 +861,44 @@ export function createLifecycleProcessController(opts: {
             readTmuxPanePids({ sessionName, windowName, strict: true }),
           assertOwned: async () => {
             await opts.assertFresh?.();
+            traceLifecycleRetirement("abort-refresh-fresh");
             if (
               (await backend.readLifecycleOwnerToken?.({
                 name: sessionName,
               })) !== ownershipToken
             ) {
+              traceLifecycleRetirement("abort-refresh-token", {
+                matched: false,
+              });
               throw new Error(
                 "Lifecycle ownership changed before identity refresh"
               );
             }
+            traceLifecycleRetirement("abort-refresh-token", { matched: true });
           },
+        });
+        traceLifecycleRetirement("abort-refreshed", {
+          missingBirths: processes.filter(
+            (process) => process.panePid && !process.paneBirth
+          ).length,
         });
         stopped = await retireSession({
           processes,
-          stopSession: () =>
-            killLifecycleSessionWithOwnership({
+          stopSession: async () => {
+            traceLifecycleRetirement("abort-mux-stop-begin");
+            const result = await killLifecycleSessionWithOwnership({
               backend,
               sessionName,
               ownershipToken,
-            }),
+            });
+            traceLifecycleRetirement("abort-mux-stop-end", { stopped: result });
+            return result;
+          },
           force: cleanupOpts?.force,
         });
-      } catch {
+        traceLifecycleRetirement("abort-retired", { stopped });
+      } catch (error) {
+        traceLifecycleRetirement("abort-failed", {}, error);
         failure = "Lifecycle process-group retirement could not be confirmed.";
       }
     }
@@ -1403,6 +1430,9 @@ export async function refreshMissingLifecyclePaneBirths(opts: {
   const missing = opts.processes.filter(
     (process) => process.panePid !== undefined && !process.paneBirth
   );
+  traceLifecycleRetirement("birth-refresh-begin", {
+    missingBirths: missing.length,
+  });
   if (missing.length === 0) {
     return opts.processes;
   }
@@ -1422,10 +1452,25 @@ export async function refreshMissingLifecyclePaneBirths(opts: {
       )
     )
   );
+  traceLifecycleRetirement("birth-refresh-panes", {
+    panePids: [...panes.values()].flat(),
+  });
   let identities = await opts.readIdentities();
   if (identities.length === 0) {
     identities = await opts.readIdentities();
   }
+  traceLifecycleRetirement("birth-refresh-identities", {
+    rows: identities.length,
+    matchingPids: identities
+      .filter((row) => missing.some((process) => process.panePid === row.pid))
+      .map((row) => row.pid),
+    zombiePids: identities
+      .filter(
+        (row) =>
+          row.zombie && missing.some((process) => process.panePid === row.pid)
+      )
+      .map((row) => row.pid),
+  });
   await opts.assertOwned();
   return opts.processes.map((process) => {
     if (

@@ -105,6 +105,23 @@ the copy display string. Standalone Doctor's copy display names `hack` from the
 user's terminal PATH; it does not select a candidate CLI or home. A recipe grants
 no permission to run a fix, and Doctor has no dependency on Setup's context types.
 
+Doctor accepts owner-writable tool directories, including a normal user-owned
+`/opt/homebrew/bin` with mode `0755`. A PATH directory, each selected executable,
+its resolved symlink target and canonical ancestors must be owned by this user
+or root, with no group/other-write bits. A root-owned sticky ancestor such as
+`/tmp` is allowed above a private entry; a shared writable PATH entry itself is
+not. An unsafe executable is excluded individually, so it does not hide safe
+siblings such as Git. Foreign-owned executable targets are excluded too.
+
+Each refresh creates one private temporary PATH of wrappers that exec the checked
+absolute tool paths, preserving normal shim script locations and nested lookup.
+It stores no environment values and removes its own temporary files afterward.
+Scans are bounded to 64 PATH entries and 8,192 directory entries; excess or
+unknown outcomes remain unchecked. This is an ownership/permission boundary,
+not a sandbox or content/signature check: trusted tools, their plugins and
+same-user/root updates remain trusted. Real macOS/Homebrew behavior still needs
+the combined Mac pass; the layout and nested shims are tested with owned fixtures.
+
 ## What v0 does not do yet
 
 Logs, Env and Activity tabs, CPU and memory, onboarding, always-on,

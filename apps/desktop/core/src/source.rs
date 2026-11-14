@@ -217,11 +217,6 @@ fn read_doctor(
     // those observations into fsmonitor or hook execution.
     let v: serde_json::Value = runner
         .clone()
-        .with_env(
-            "PATH",
-            &trusted_probe_path(std::env::var_os("PATH").unwrap_or_default().as_os_str())
-                .to_string_lossy(),
-        )
         .with_env("GIT_CONFIG_PARAMETERS", "")
         .with_env("GIT_CONFIG_COUNT", "2")
         .with_env("GIT_CONFIG_KEY_0", "core.fsmonitor")
@@ -239,58 +234,124 @@ fn read_doctor(
     serde_json::from_value(v).map_err(|e| e.to_string())
 }
 
-/// Doctor invokes bare-name tools. Pin PATH directories to canonical paths
-/// whose directory chains cannot be replaced by another local user.
-fn trusted_probe_path(path: &std::ffi::OsStr) -> std::ffi::OsString {
+/// Owner-write is allowed; group/other-write and foreign ownership are not.
+/// A root-owned sticky ancestor (such as /tmp) may contain a private entry.
+fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    let dirs = std::env::split_paths(path).filter_map(|p| {
-        if !p.is_absolute() {
+    let real = std::fs::canonicalize(path).ok()?;
+    for (index, component) in real.ancestors().enumerate() {
+        let meta = std::fs::metadata(component).ok()?;
+        let sticky_root = index > 0 && meta.uid() == 0 && meta.mode() & 0o1000 != 0;
+        if (index > 0 || directory) && !meta.is_dir()
+            || (index == 0 && !directory && (!meta.is_file() || meta.mode() & 0o111 == 0))
+            || (meta.uid() != uid && meta.uid() != 0)
+            || (meta.mode() & 0o022 != 0 && !sticky_root)
+        {
             return None;
         }
-        let real = std::fs::canonicalize(p).ok()?;
-        for (index, ancestor) in real.ancestors().enumerate() {
-            let meta = std::fs::metadata(ancestor).ok()?;
-            let sticky_root = index > 0 && meta.uid() == 0 && meta.mode() & 0o1000 != 0;
-            if !meta.is_dir()
-                || (meta.uid() != uid && meta.uid() != 0)
-                || (meta.mode() & 0o022 != 0 && !sticky_root)
-            {
-                return None;
-            }
+    }
+    Some(real)
+}
+
+/// A per-read private PATH containing only wrappers for checked executables.
+/// Wrappers exec the original absolute path so shims keep their normal $0.
+/// No environment values are persisted. Drop removes only this owned scratch.
+#[derive(Debug)]
+struct ProbeTools {
+    dir: PathBuf,
+}
+
+impl ProbeTools {
+    fn path(&self) -> &std::ffi::OsStr {
+        self.dir.as_os_str()
+    }
+}
+
+impl Drop for ProbeTools {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn trusted_probe_path(path: &std::ffi::OsStr) -> Result<ProbeTools, String> {
+    use std::io::Write;
+    use std::os::unix::{
+        ffi::OsStrExt,
+        fs::{DirBuilderExt, OpenOptionsExt},
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if trusted_tool_path(Path::new("/bin/sh"), uid, false).is_none() {
+        return Err("Doctor wrapper interpreter is not trusted".into());
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "hack-desktop-tools-{}-{stamp}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| e.to_string())?;
+    let tools = ProbeTools { dir };
+    if trusted_tool_path(&tools.dir, uid, true).is_none() {
+        return Err("Doctor tool scratch is not private".into());
+    }
+    let mut seen_dirs = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
+    let mut entries = 0;
+    for (index, p) in std::env::split_paths(path).enumerate() {
+        if index >= 64 {
+            return Err("Doctor tool PATH exceeds 64 directories".into());
         }
-        // Closed directories can still contain a writable executable or a
-        // symlink into a writable tree. Validate every executable Git/Docker
-        // or their nested tools could resolve here. Bound directory scans;
-        // oversized or unreadable directories are excluded conservatively.
-        for (index, entry) in std::fs::read_dir(&real).ok()?.enumerate() {
-            if index >= 8192 {
-                return None;
+        if !p.is_absolute() {
+            continue;
+        }
+        let Some(real) = trusted_tool_path(&p, uid, true) else {
+            continue;
+        };
+        if !seen_dirs.insert(real.clone()) {
+            continue;
+        }
+        let Ok(children) = std::fs::read_dir(real) else {
+            continue;
+        };
+        for entry in children {
+            entries += 1;
+            if entries > 8192 {
+                return Err("Doctor tool PATH exceeds 8192 entries".into());
             }
-            let entry = entry.ok()?;
-            let meta = match std::fs::metadata(entry.path()) {
-                Ok(meta) => meta,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return None,
-            };
-            if !meta.is_file() || meta.mode() & 0o111 == 0 {
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            if names.contains(&name) || trusted_tool_path(&entry.path(), uid, false).is_none() {
                 continue;
             }
-            let executable = std::fs::canonicalize(entry.path()).ok()?;
-            for (index, component) in executable.ancestors().enumerate() {
-                let meta = std::fs::metadata(component).ok()?;
-                let sticky_root = index > 0 && meta.uid() == 0 && meta.mode() & 0o1000 != 0;
-                if (meta.uid() != uid && meta.uid() != 0)
-                    || (meta.mode() & 0o022 != 0 && !sticky_root)
-                {
-                    return None;
+            let mut script = b"#!/bin/sh\nexec '".to_vec();
+            for byte in entry.path().as_os_str().as_bytes() {
+                if *byte == b'\'' {
+                    script.extend_from_slice(b"'\\''");
+                } else {
+                    script.push(*byte);
                 }
             }
+            script.extend_from_slice(b"' \"$@\"\n");
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o700)
+                .open(tools.dir.join(&name))
+                .map_err(|e| e.to_string())?;
+            file.write_all(&script).map_err(|e| e.to_string())?;
+            names.insert(name);
         }
-        Some(real)
-    });
-    std::env::join_paths(dirs).unwrap_or_default()
+    }
+    Ok(tools)
 }
 
 /// Live data from a matching hackd. CLI listing fallback needs R18:
@@ -315,6 +376,23 @@ impl LiveSource {
         per_call: Duration,
     ) -> Vec<DoctorRun> {
         let deadline = std::time::Instant::now() + budget;
+        // Resolve once per refresh, not once per project. The private PATH
+        // stays alive until every bounded child has completed.
+        let tools =
+            match trusted_probe_path(std::env::var_os("PATH").unwrap_or_default().as_os_str()) {
+                Ok(tools) => tools,
+                Err(why) => {
+                    return std::iter::once(DoctorRun::machine(Err(why.clone())))
+                        .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
+                        .collect();
+                }
+            };
+        let Some(tool_path) = tools.path().to_str() else {
+            let why = "Doctor tool PATH is not UTF-8".to_owned();
+            return std::iter::once(DoctorRun::machine(Err(why.clone())))
+                .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
+                .collect();
+        };
         // Each call's timeout leaves room for its SIGTERM grace, so stopping
         // a slow check also finishes within the overall budget.
         let left = || {
@@ -341,6 +419,7 @@ impl LiveSource {
                 &self
                     .runner
                     .clone()
+                    .with_env("PATH", tool_path)
                     .with_cwd(dir)
                     .with_term_grace(DOCTOR_TERM_GRACE),
                 None,
@@ -355,7 +434,10 @@ impl LiveSource {
                 let handles: Vec<_> = chunk
                     .iter()
                     .map(|t| {
-                        let runner = self.runner_for(t.native).with_term_grace(DOCTOR_TERM_GRACE);
+                        let runner = self
+                            .runner_for(t.native)
+                            .with_env("PATH", tool_path)
+                            .with_term_grace(DOCTOR_TERM_GRACE);
                         let timeout = per_call.min(left());
                         s.spawn(move || {
                             let result = if t.missing {
@@ -378,8 +460,10 @@ impl LiveSource {
                             {
                                 let timeout = per_call.min(left());
                                 if !timeout.is_zero() {
-                                    let compose =
-                                        self.runner_for(false).with_term_grace(DOCTOR_TERM_GRACE);
+                                    let compose = self
+                                        .runner_for(false)
+                                        .with_env("PATH", tool_path)
+                                        .with_term_grace(DOCTOR_TERM_GRACE);
                                     if let Ok(report) = read(&compose, Some(&t.repo_root), timeout)
                                         && crate::doctor::adopted_project_evidence(
                                             &t.repo_root,
@@ -1105,10 +1189,10 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             "negative control must execute the harmless nested tool"
         );
         std::fs::remove_file(dir.join("executed")).unwrap();
-        let trusted = trusted_probe_path(std::ffi::OsStr::new(&inherited));
-        assert!(!std::env::split_paths(&trusted).any(|p| p == hostile));
+        let trusted = trusted_probe_path(std::ffi::OsStr::new(&inherited)).unwrap();
+        assert_ne!(Path::new(trusted.path()), hostile);
         runner
-            .with_env("PATH", &trusted.to_string_lossy())
+            .with_env("PATH", &trusted.path().to_string_lossy())
             .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
             .unwrap();
         assert!(!dir.join("executed").exists());
@@ -1147,16 +1231,78 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                 .unwrap();
             assert!(dir.join("executed").exists(), "negative control {linked}");
             std::fs::remove_file(dir.join("executed")).unwrap();
-            let trusted = trusted_probe_path(std::ffi::OsStr::new(&inherited));
-            assert!(!std::env::split_paths(&trusted).any(|p| p == bin));
+            let trusted = trusted_probe_path(std::ffi::OsStr::new(&inherited)).unwrap();
+            assert_ne!(Path::new(trusted.path()), bin);
             runner
                 .clone()
-                .with_env("PATH", &trusted.to_string_lossy())
+                .with_env("PATH", &trusted.path().to_string_lossy())
                 .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
                 .unwrap();
             assert!(!dir.join("executed").exists());
             std::fs::remove_file(&git).unwrap();
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn homebrew_owned_paths_keep_nested_tools_and_shims_despite_unrelated_unsafe_files() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let hack = fake_hack(
+            "doctor-homebrew",
+            "docker --version >/dev/null || exit 2\ngit --version >/dev/null || exit 3\ntmux -V >/dev/null || exit 4\nmise --version >/dev/null || exit 5\necho '{}'",
+        );
+        let dir = hack.parent().unwrap();
+        let brew = dir.join("opt/homebrew");
+        let bin = brew.join("bin");
+        let cellar = brew.join("Cellar/tools/1.0/bin");
+        let shims = brew.join("var/mise/shims' owned");
+        for p in [&bin, &cellar, &shims] {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for (name, body) in [
+            ("mise", "printf 'mise fixture\\n'"),
+            (
+                "docker",
+                "git --version >/dev/null || exit 8\nprintf 'docker fixture\\n'",
+            ),
+            (
+                "tmux",
+                "mise --version >/dev/null || exit 9\nprintf 'tmux fixture\\n'",
+            ),
+        ] {
+            let target = cellar.join(name);
+            std::fs::write(&target, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+            symlink(&target, bin.join(name)).unwrap();
+        }
+        let git = shims.join("git");
+        std::fs::write(&git, "#!/bin/sh\n[ \"$0\" = \"$HACK_HOME/opt/homebrew/var/mise/shims' owned/git\" ] || exit 10\nmise --version >/dev/null || exit 11\nprintf 'git fixture\\n'\n").unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A hosted image can have one unsafe tool beside a trusted Git.
+        // Reject that tool, never discard every safe sibling in the directory.
+        let unsafe_tool = bin.join("unsafe-unrelated");
+        std::fs::write(
+            &unsafe_tool,
+            "#!/bin/sh\nprintf bad > \"$HACK_HOME/executed\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&unsafe_tool, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let inherited = std::env::join_paths([&bin, &shims]).unwrap();
+        let tools = trusted_probe_path(&inherited).unwrap();
+        assert!(!Path::new(tools.path()).join("unsafe-unrelated").exists());
+        for name in ["docker", "git", "tmux", "mise"] {
+            assert!(Path::new(tools.path()).join(name).is_file());
+        }
+        CliRunner::new(&hack)
+            .with_env("HACK_HOME", &dir.to_string_lossy())
+            .with_env("PATH", &tools.path().to_string_lossy())
+            .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
+            .unwrap();
+        assert!(!dir.join("executed").exists());
+        let private = PathBuf::from(tools.path());
+        drop(tools);
+        assert!(!private.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

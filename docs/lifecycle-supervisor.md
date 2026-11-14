@@ -304,3 +304,7 @@ On Linux, guard spawning uses the kernel's executable reference under
 `/proc/self/exe`, which remains usable when an installer atomically replaces the
 running helper. A rebuild between the first command and a later add therefore
 does not depend on the deleted executable pathname.
+
+Linux ownership checks read the process's effective UID from `/proc/<pid>/status`.
+They do not infer UID from proc-file ownership, which changes when a command
+disables dumpability. Such a command remains recoverable after guard loss.

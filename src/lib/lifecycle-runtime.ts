@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, rename } from "node:fs/promises";
 import { resolve } from "node:path";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { getString, isRecord } from "./guards.ts";
@@ -39,6 +39,8 @@ export type LifecycleStateEntry = {
   readonly processes: readonly LifecycleStateProcess[];
   readonly updatedAt: string;
   readonly supervisorPid?: number;
+  readonly supervisorRoot?: string;
+  readonly supervisorLaunchAttempted?: boolean;
   readonly cleanupEpoch?: string;
 };
 
@@ -160,6 +162,7 @@ export async function ensurePrivateLifecycleLog(opts: {
 
 export async function readLifecycleState(opts: {
   readonly projectDir: string;
+  readonly stateLocked?: boolean;
 }): Promise<readonly LifecycleStateEntry[]> {
   const root = resolveLifecycleRootDir(opts);
   const path = resolveLifecycleStatePath(opts);
@@ -191,7 +194,27 @@ export async function readLifecycleState(opts: {
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw lifecycleStateRefused();
+    if (
+      await lstat(resolve(root, "supervisor-state")).catch((error: unknown) => {
+        if (isRecord(error) && error.code === "ENOENT") {
+          return null;
+        }
+        throw error;
+      })
+    ) {
+      throw lifecycleStateRefused();
+    }
+    if (!opts.stateLocked) {
+      return await mutateLifecycleState(opts.projectDir, () =>
+        readLifecycleState({ ...opts, stateLocked: true })
+      );
+    }
+    await verifyLifecycleStateTarget(path);
+    await rename(path, `${path}.legacy-${Date.now()}-${crypto.randomUUID()}`);
+    console.error(
+      "Moved unreadable legacy lifecycle JSON aside; continuing without lifecycle state."
+    );
+    return [];
   }
   if (!isRecord(parsed)) {
     throw lifecycleStateRefused();
@@ -221,7 +244,16 @@ export async function upsertLifecycleStateEntry(opts: {
   readonly entry: LifecycleStateEntry;
 }): Promise<void> {
   return await mutateLifecycleState(opts.projectDir, async () => {
-    const state = await readLifecycleState({ projectDir: opts.projectDir });
+    if (opts.entry.backend === "supervisor") {
+      await appendPrivateFile({
+        path: resolve(resolveLifecycleRootDir(opts), "supervisor-state"),
+        data: "",
+      });
+    }
+    const state = await readLifecycleState({
+      projectDir: opts.projectDir,
+      stateLocked: true,
+    });
     const withoutCurrent = state.filter(
       (entry) => entry.composeProject !== opts.entry.composeProject
     );
@@ -242,7 +274,10 @@ export async function removeLifecycleStateEntry(opts: {
   readonly composeProject: string;
 }): Promise<void> {
   return await mutateLifecycleState(opts.projectDir, async () => {
-    const state = await readLifecycleState({ projectDir: opts.projectDir });
+    const state = await readLifecycleState({
+      projectDir: opts.projectDir,
+      stateLocked: true,
+    });
     const nextEntries = state.filter(
       (entry) => entry.composeProject !== opts.composeProject
     );
@@ -262,7 +297,10 @@ export async function removeLifecycleStateEntryIfOwned(opts: {
   readonly ownershipToken: string;
 }): Promise<boolean> {
   return await mutateLifecycleState(opts.projectDir, async () => {
-    const state = await readLifecycleState({ projectDir: opts.projectDir });
+    const state = await readLifecycleState({
+      projectDir: opts.projectDir,
+      stateLocked: true,
+    });
     const current = state.find(
       (entry) => entry.composeProject === opts.composeProject
     );
@@ -286,7 +324,10 @@ export async function removeLifecycleStateEntryIfMatching(opts: {
   readonly expectedEntry: LifecycleStateEntry;
 }): Promise<boolean> {
   return await mutateLifecycleState(opts.projectDir, async () => {
-    const state = await readLifecycleState({ projectDir: opts.projectDir });
+    const state = await readLifecycleState({
+      projectDir: opts.projectDir,
+      stateLocked: true,
+    });
     const current = state.find(
       (entry) => entry.composeProject === opts.expectedEntry.composeProject
     );
@@ -369,6 +410,13 @@ function parseLifecycleStateEntry(value: unknown): LifecycleStateEntry | null {
     processes,
     updatedAt,
     ...(supervisorPid ? { supervisorPid } : {}),
+    ...(typeof value.supervisorRoot === "string" &&
+    value.supervisorRoot.startsWith("/")
+      ? { supervisorRoot: value.supervisorRoot }
+      : {}),
+    ...(typeof value.supervisorLaunchAttempted === "boolean"
+      ? { supervisorLaunchAttempted: value.supervisorLaunchAttempted }
+      : {}),
     ...(cleanupEpoch ? { cleanupEpoch } : {}),
   };
 }

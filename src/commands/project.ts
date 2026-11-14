@@ -1,5 +1,6 @@
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
+import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -6581,6 +6582,11 @@ async function runUpCommand({
   if (sharedHelperRefusal !== null) {
     return sharedHelperRefusal;
   }
+  if (
+    resolveLifecycleRunner({ runner: cfg.lifecycle?.runner }) === "supervisor"
+  ) {
+    await preflightLifecycleSupervisor();
+  }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
@@ -8517,6 +8523,11 @@ async function runRestartCommand({
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
+  if (
+    resolveLifecycleRunner({ runner: cfg.lifecycle?.runner }) === "supervisor"
+  ) {
+    await preflightLifecycleSupervisor();
+  }
   const { composeProjectName, lifecycleComposeProject } = resolveRestartTarget({
     baseProjectName,
     branch,

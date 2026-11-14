@@ -218,7 +218,7 @@ fn connect() -> Result<UnixStream> {
 pub(crate) fn serve(request: Launch) -> Result<()> {
     supervisor::validate_launch(&request)?;
     let root = Root::open(&request.root)?;
-    let _instance_lock = root.lock(".instance.lock")?;
+    let _instance_lock = root.lock_wait(".instance.lock")?;
     let launch_lock = root.lock_wait(".stop.lock")?;
     for state in root.states()? {
         if os::recorded_live(&state, false)? {

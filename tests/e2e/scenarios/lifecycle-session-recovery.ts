@@ -1,4 +1,4 @@
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, copyFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { restoreEnv } from "../../helpers/env.ts";
 
@@ -622,6 +622,39 @@ async function runSupervisorRecovery(opts: {
     );
   const branches = ["feat-supervisor-handoff"];
   try {
+    const originalCli = process.env.HACK_E2E_CLI_BIN;
+    const missingBinary = join(ctx.tempRoot, "missing-supervisor");
+    if (originalCli) {
+      const isolatedInstall = join(ctx.tempRoot, "cli-without-companion");
+      await mkdir(isolatedInstall);
+      const isolatedCli = join(isolatedInstall, "hack");
+      await copyFile(originalCli, isolatedCli);
+      await chmod(isolatedCli, 0o700);
+      process.env.HACK_E2E_CLI_BIN = isolatedCli;
+    }
+    try {
+      expectExit({
+        result: await cli(["up", "--detach", "--json"], {
+          ...cliEnv,
+          HACK_LIFECYCLE_SUPERVISOR_BINARY: originalCli
+            ? binary
+            : missingBinary,
+        }),
+        codes: [1],
+        message:
+          "missing companion must fail before ownership even with a production override",
+      });
+      expect({
+        that: !(await readEntry()),
+        message: "failed preflight published ownership",
+      });
+      assertOk(
+        await cli(["down", "--json"]),
+        "missing companion must not wedge down before any launch"
+      );
+    } finally {
+      restoreEnv("HACK_E2E_CLI_BIN", originalCli);
+    }
     assertOk(
       await cli(["up", "--detach", "--json"]),
       "supervisor up should start persistent hook and process"

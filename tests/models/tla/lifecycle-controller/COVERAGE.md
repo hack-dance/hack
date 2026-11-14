@@ -47,3 +47,21 @@ multiple processes' independent liveness, multiple instances, command output and
 default-runner migration. Physical-process ownership remains covered separately
 by `LifecycleSupervisor.tla` and Rust tests. This small controller model is not
 whole-product, macOS runtime, packaging or installed-artifact qualification.
+
+The finite model assumes `Begin` is admitted only after the executable preflight.
+It does not prove executable selection, version compatibility, canonical paths,
+legacy JSON recovery, or the meaning of a missing native directory. Those are
+implementation boundaries, covered by these real-controller regressions:
+
+| Boundary / transition | Required outcome | Regression |
+| --- | --- | --- |
+| Absent → preflight fails | No ownership entry; down remains usable | `missing companion fails before ownership and down remains usable` |
+| Pending, no launch attempted → down | Retire without requiring an executable | `never-attempted ownership can be retired without the companion` |
+| Pending → launch attempted | Publish the attempt before native dispatch; an uncertain result retains ownership | Lost incremental reply regression and atomic state-publication tests |
+| Running → HOME or path spelling changes | Use the persisted native root, never create a replacement owner | `recorded native root survives a changed home and a symlinked checkout` |
+| Running → recorded root missing | Unconfirmed; retain ownership | `missing recorded root never grants retirement authority` |
+
+`supervisorLaunchAttempted = false` is an explicit durable observation, not an
+inference from an empty process array. Older entries without that field remain
+conservative. An absent PID alone cannot rule out a lost launch reply. Native
+root loss is outside the model's abstract successful-stop action.

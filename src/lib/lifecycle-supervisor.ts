@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
-import { lstat } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { constants, realpathSync } from "node:fs";
+import { access, lstat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
-import { resolveLifecycleLogPath } from "./lifecycle-runtime.ts";
+import {
+  readLifecycleState,
+  resolveLifecycleLogPath,
+} from "./lifecycle-runtime.ts";
 import { ensurePrivateDirectory } from "./private-file.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
@@ -52,23 +56,41 @@ export function resolveLifecycleSupervisorRoot(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
 }): string {
-  const hostRoot = resolve(resolveGlobalHackDir(), "lifecycle-supervisors");
-  const inside = relative(dirname(resolve(opts.projectDir)), hostRoot);
+  const hostRoot = canonicalPath(
+    resolve(resolveGlobalHackDir(), "lifecycle-supervisors")
+  );
+  const inside = relative(dirname(realpathSync(opts.projectDir)), hostRoot);
   if (inside === "" || !(inside.startsWith("../") || isAbsolute(inside))) {
     throw new Error(
       "Lifecycle supervisor state must be outside the project checkout."
     );
   }
   const key = createHash("sha256")
-    .update(JSON.stringify([resolve(opts.projectDir), opts.composeProject]))
+    .update(
+      JSON.stringify([realpathSync(opts.projectDir), opts.composeProject])
+    )
     .digest("hex");
   return resolve(hostRoot, key);
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    if (
+      !(isRecord(error) && error.code === "ENOENT") ||
+      dirname(path) === path
+    ) {
+      throw error;
+    }
+    return resolve(canonicalPath(dirname(path)), basename(path));
+  }
 }
 
 /** Resolve only the current installation or an explicit test executable. */
 export function resolveLifecycleSupervisorBinary(): string {
   const selected = process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY;
-  if (selected !== undefined) {
+  if (selected !== undefined && !Bun.main.startsWith("/$bunfs/")) {
     if (
       !(selected.trim() && selected.startsWith("/")) ||
       selected.includes("\0")
@@ -84,11 +106,71 @@ export function resolveLifecycleSupervisorBinary(): string {
     : resolve(import.meta.dir, "../../dist/hack-lifecycle-supervisor");
 }
 
+export const LIFECYCLE_SUPERVISOR_VERSION =
+  "hack-lifecycle-supervisor 0.1.0 protocol=1 incremental=1";
+
+/** Validate the public, value-free handshake before publishing any ownership. */
+export async function preflightLifecycleSupervisor(): Promise<{
+  path: string;
+  version: string;
+}> {
+  const path = resolveLifecycleSupervisorBinary();
+  try {
+    await access(path, constants.X_OK);
+    if (!(await lstat(realpathSync(path))).isFile()) {
+      throw failure();
+    }
+    const child = Bun.spawn([path, "--version"], {
+      env: {},
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: 2000,
+    });
+    const version = (await new Response(child.stdout).text()).trim();
+    if (
+      (await child.exited) !== 0 ||
+      version !== LIFECYCLE_SUPERVISOR_VERSION
+    ) {
+      throw failure();
+    }
+    return { path, version };
+  } catch {
+    throw new Error(
+      "Lifecycle supervisor executable is missing, incompatible or not executable; install the matching companion beside this CLI before opting in."
+    );
+  }
+}
+
+async function recordedRoot(
+  opts: Instance
+): Promise<{ root: string; neverStarted: boolean }> {
+  const entry = (await readLifecycleState(opts)).find(
+    (entry) => entry.composeProject === opts.composeProject
+  );
+  const root = entry?.supervisorRoot ?? resolveLifecycleSupervisorRoot(opts);
+  const inside = relative(
+    dirname(realpathSync(opts.projectDir)),
+    canonicalPath(root)
+  );
+  if (inside === "" || !(inside.startsWith("../") || isAbsolute(inside))) {
+    throw failure();
+  }
+  return {
+    root,
+    neverStarted:
+      !entry ||
+      (entry.supervisorLaunchAttempted === false &&
+        !entry.supervisorPid &&
+        entry.processes.length === 0),
+  };
+}
+
 /** Native observations, never a persisted `running` phase, establish liveness. */
 export async function inspectLifecycleSupervisor(
   opts: Instance
 ): Promise<LifecycleSupervisorReceipt> {
-  if (await lifecycleSupervisorRootAbsent(opts)) {
+  if (await lifecycleSupervisorProvenUnstarted(opts)) {
     return {
       version: 1,
       supervisorPid: 0,
@@ -105,7 +187,7 @@ export async function inspectLifecycleSupervisor(
 export async function stopLifecycleSupervisor(
   opts: Instance
 ): Promise<LifecycleSupervisorReceipt> {
-  if (await lifecycleSupervisorRootAbsent(opts)) {
+  if (await lifecycleSupervisorProvenUnstarted(opts)) {
     return {
       version: 1,
       supervisorPid: 0,
@@ -118,9 +200,15 @@ export async function stopLifecycleSupervisor(
   return await request({ ...opts, action: "stop" });
 }
 
-async function lifecycleSupervisorRootAbsent(opts: Instance): Promise<boolean> {
+async function lifecycleSupervisorProvenUnstarted(
+  opts: Instance
+): Promise<boolean> {
+  const recorded = await recordedRoot(opts);
+  if (recorded.neverStarted) {
+    return true;
+  }
   try {
-    await lstat(resolveLifecycleSupervisorRoot(opts));
+    await lstat(recorded.root);
     return false;
   } catch (error) {
     if (isRecord(error) && error.code === "ENOENT") {
@@ -129,7 +217,7 @@ async function lifecycleSupervisorRootAbsent(opts: Instance): Promise<boolean> {
         await lstat(`${resolveLifecycleLogPath(opts)}.supervisor`);
       } catch (legacyError) {
         if (isRecord(legacyError) && legacyError.code === "ENOENT") {
-          return true;
+          throw failure();
         }
         throw failure();
       }
@@ -157,10 +245,11 @@ async function request(
     readonly processes?: readonly LifecycleSupervisorProcess[];
   }
 ): Promise<LifecycleSupervisorReceipt> {
+  await preflightLifecycleSupervisor();
   const payload = new TextEncoder().encode(
     JSON.stringify({
       version: 1,
-      root: resolveLifecycleSupervisorRoot(opts),
+      root: (await recordedRoot(opts)).root,
       ownerToken: opts.ownershipToken,
       ...(opts.processes
         ? {

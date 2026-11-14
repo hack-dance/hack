@@ -7,7 +7,10 @@ import {
   readLifecycleState,
   resolveLifecycleLogPath,
 } from "../src/lib/lifecycle-runtime.ts";
-import { inspectLifecycleSupervisor } from "../src/lib/lifecycle-supervisor.ts";
+import {
+  inspectLifecycleSupervisor,
+  resolveLifecycleSupervisorRoot,
+} from "../src/lib/lifecycle-supervisor.ts";
 import {
   createLifecycleProcessController,
   stopLifecycleProcessController,
@@ -43,6 +46,13 @@ async function fixture(
   await mkdir(project.projectDir, { recursive: true });
   const savedHackHome = process.env.HACK_HOME;
   process.env.HACK_HOME = join(root, "host-home");
+  // Fail before any native effect if path resolution reaches the real home.
+  expect(
+    resolveLifecycleSupervisorRoot({
+      ...project,
+      composeProject: "fixture",
+    }).startsWith(`${process.env.HACK_HOME}/`)
+  ).toBe(true);
   try {
     await run(project);
   } finally {
@@ -226,7 +236,7 @@ nativeTest(
             composeProject: "fixture",
             ownershipToken: entry.ownershipToken,
           })
-        ).rejects.toThrow("unavailable");
+        ).rejects.toThrow("executable");
         expect((await readLifecycleState(project))[0]?.ownershipToken).toBe(
           entry.ownershipToken
         );
@@ -273,6 +283,10 @@ nativeTest(
       await Bun.write(
         wrapper,
         `#!${process.execPath} --no-env-file
+if (process.argv.at(-1) === "--version") {
+  const child = Bun.spawn([${JSON.stringify(supervisorBinary)}, "--version"], {env:{},stdin:"ignore",stdout:"inherit",stderr:"ignore"});
+  process.exit(await child.exited);
+}
 const reader = Bun.stdin.stream().getReader();
 let frame = Buffer.alloc(0);
 while (true) {
@@ -365,6 +379,179 @@ nativeTest(
           .map((p) => p.name)
           .sort()
       ).toEqual(["first", "second"]);
+    }),
+  30_000
+);
+
+nativeTest(
+  "missing companion fails before ownership and down remains usable",
+  () =>
+    fixture(async (project) => {
+      const saved = process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY;
+      process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY = join(
+        project.projectRoot,
+        "missing-companion"
+      );
+      try {
+        await expect(
+          controller(project).startMany({
+            processes: [{ name: "worker", command }],
+          })
+        ).rejects.toThrow("executable");
+        expect(await readLifecycleState(project)).toEqual([]);
+        await stopLifecycleProcessController({
+          project,
+          projectName: "fixture",
+          composeProject: "fixture",
+          branch: null,
+          definitionHash: "synthetic",
+        });
+        expect(await readLifecycleState(project)).toEqual([]);
+      } finally {
+        restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", saved);
+      }
+    }),
+  30_000
+);
+
+nativeTest(
+  "recorded native root survives a changed home and a symlinked checkout",
+  () =>
+    fixture(async (project) => {
+      const { symlink } = await import("node:fs/promises");
+      const owner = controller(project);
+      await owner.startMany({ processes: [{ name: "worker", command }] });
+      await owner.finalize();
+      const entry = (await readLifecycleState(project))[0];
+      if (!(entry?.ownershipToken && entry.supervisorRoot)) {
+        throw new Error("missing fixture identity");
+      }
+      const savedHome = process.env.HACK_HOME;
+      const alias = join(project.projectRoot, "alias");
+      await symlink(project.projectDir, alias);
+      process.env.HACK_HOME = join(project.projectRoot, "unused-home");
+      try {
+        const observed = await inspectLifecycleSupervisor({
+          projectDir: alias,
+          composeProject: "fixture",
+          ownershipToken: entry.ownershipToken,
+        });
+        expect(observed.liveProcessNames).toEqual(["worker"]);
+        await stopLifecycleProcessController({
+          project: { ...project, projectDir: alias },
+          projectName: "fixture",
+          composeProject: "fixture",
+          branch: null,
+          definitionHash: "synthetic",
+        });
+        expect(await readLifecycleState(project)).toEqual([]);
+      } finally {
+        restoreEnv("HACK_HOME", savedHome);
+      }
+    }),
+  30_000
+);
+
+nativeTest(
+  "missing recorded root never grants retirement authority",
+  () =>
+    fixture(async (project) => {
+      const { rename } = await import("node:fs/promises");
+      const owner = controller(project);
+      await owner.startMany({ processes: [{ name: "worker", command }] });
+      await owner.finalize();
+      const entry = (await readLifecycleState(project))[0];
+      if (!(entry?.ownershipToken && entry.supervisorRoot)) {
+        throw new Error("missing fixture identity");
+      }
+      const moved = `${entry.supervisorRoot}.retained`;
+      await rename(entry.supervisorRoot, moved);
+      try {
+        await expect(
+          stopLifecycleProcessController({
+            project,
+            projectName: "fixture",
+            composeProject: "fixture",
+            branch: null,
+            definitionHash: "synthetic",
+          })
+        ).rejects.toThrow();
+        expect((await readLifecycleState(project))[0]?.ownershipToken).toBe(
+          entry.ownershipToken
+        );
+      } finally {
+        await rename(moved, entry.supervisorRoot);
+      }
+    }),
+  30_000
+);
+
+nativeTest(
+  "never-attempted ownership can be retired without the companion",
+  () =>
+    fixture(async (project) => {
+      const { upsertLifecycleStateEntry } = await import(
+        "../src/lib/lifecycle-runtime.ts"
+      );
+      await upsertLifecycleStateEntry({
+        projectDir: project.projectDir,
+        entry: {
+          composeProject: "fixture",
+          projectName: "fixture",
+          branch: null,
+          sessionName: "fixture-lifecycle",
+          backend: "supervisor",
+          ownershipToken: "synthetic-never-started",
+          cleanupEpoch: "synthetic-epoch",
+          processes: [],
+          supervisorLaunchAttempted: false,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      const saved = process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY;
+      process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY = join(
+        project.projectRoot,
+        "missing-companion"
+      );
+      try {
+        await stopLifecycleProcessController({
+          project,
+          projectName: "fixture",
+          composeProject: "fixture",
+          branch: null,
+          definitionHash: "synthetic",
+        });
+        expect(await readLifecycleState(project)).toEqual([]);
+      } finally {
+        restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", saved);
+      }
+    }),
+  30_000
+);
+
+nativeTest(
+  "incompatible companion fails before command environment delivery",
+  () =>
+    fixture(async (project) => {
+      const { chmod } = await import("node:fs/promises");
+      const wrapper = join(project.projectRoot, "wrong-version");
+      await Bun.write(
+        wrapper,
+        `#!${process.execPath} --no-env-file\nconsole.log("synthetic incompatible version");\n`
+      );
+      await chmod(wrapper, 0o700);
+      const saved = process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY;
+      process.env.HACK_LIFECYCLE_SUPERVISOR_BINARY = wrapper;
+      try {
+        await expect(
+          controller(project).startMany({
+            processes: [{ name: "worker", command }],
+          })
+        ).rejects.toThrow("incompatible");
+        expect(await readLifecycleState(project)).toEqual([]);
+      } finally {
+        restoreEnv("HACK_LIFECYCLE_SUPERVISOR_BINARY", saved);
+      }
     }),
   30_000
 );

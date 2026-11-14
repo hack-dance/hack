@@ -239,3 +239,24 @@ leftover native roots are never treated as proof of absence.
 Doctor holds the same instance controller lock as `up` throughout final
 inspection, generation validation, native stop and conditional state removal.
 Adoption cannot interleave between validation and the stop effect.
+
+Before creating ownership or running hooks, Hack checks the sibling executable's
+permissions and exact version/capability handshake. Compiled installations ignore
+`HACK_LIFECYCLE_SUPERVISOR_BINARY`; that override is for source development and
+tests only. `hack doctor` reports the resolved executable and its version.
+A missing or incompatible executable fails before publication. An entry durably
+marked as never having attempted launch, with no recorded PID or process, can be
+retired by `down` or doctor without that executable. An interrupted launch with
+an uncertain result retains ownership.
+
+The native root is keyed on the checkout's real path and its absolute location
+is recorded with ownership. Changing HOME or HACK_HOME does not relocate a
+running instance. Losing that recorded directory after a launch attempt is an
+unconfirmed outcome, never proof of stopped processes; down and doctor retain
+ownership. Restore access to the recorded host state before retrying retirement.
+
+Run `hack down` before downgrading or switching CLI builds. Older CLIs cannot
+preserve supervisor entries when rewriting shared project state and may start
+mux duplicates. After the project owner is killed, existing guards keep working
+and `down` can recover them; adding a new persistent hook may refuse until `down`
+retires the old owner. Stop and retry rather than removing its socket or state.

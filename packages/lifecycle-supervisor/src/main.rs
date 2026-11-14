@@ -29,6 +29,10 @@ mod storage;
 mod supervisor;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("hack-lifecycle-supervisor 0.1.0 protocol=1 incremental=1");
+        return;
+    }
     if supervisor::main().is_err() {
         // Inputs can contain credentials. Never include parser or OS error text.
         eprintln!("Lifecycle supervisor refused or failed; values omitted.");

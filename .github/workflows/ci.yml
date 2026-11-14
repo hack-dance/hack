@@ -691,6 +691,22 @@ jobs:
           HACK_E2E_COMPOSE_PLUGIN_SHA256="$(sha256sum "$HACK_E2E_COMPOSE_PLUGIN_PATH" | cut -d ' ' -f1)"
           export HACK_E2E_DOCKER_HOST HACK_E2E_NETWORK_SOURCE_REVISION HACK_E2E_NETWORK_CLI_SHA256 HACK_E2E_NETWORK_COMPILER_SHA256 HACK_E2E_COMPOSE_PLUGIN_PATH HACK_E2E_COMPOSE_PLUGIN_SHA256
           HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker --shard="$HACK_E2E_SHARD"
+      - name: Setup supervisor toolchain
+        if: matrix.shard == 4
+        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Qualify lifecycle scenarios with the supervisor runner
+        if: matrix.shard == 4
+        env:
+          HACK_DAEMON_AUTOSTART_DISABLE: '1'
+          HACK_LIFECYCLE_RUNNER: supervisor
+          HACK_LIFECYCLE_SUPERVISOR_BINARY: ${{ github.workspace }}/dist/hack-lifecycle-supervisor
+          HACK_E2E_REQUIRE_DOCKER: '1'
+          HACK_E2E_DOCKER: '1'
+          HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack
+        run: |
+          cargo +1.97.1 build --locked --release --manifest-path packages/lifecycle-supervisor/Cargo.toml --target-dir .hack-local/target/lifecycle-supervisor
+          cp .hack-local/target/lifecycle-supervisor/release/hack-lifecycle-supervisor dist/hack-lifecycle-supervisor
+          bun tests/e2e/run.ts --only=lifecycle-host-process,lifecycle-session-recovery
       - name: Preserve process-policy capsule and startup diagnostic
         # Closed fixed-field JSON only (counts, enums, booleans); the gh log viewer truncates it inline.
         if: failure()

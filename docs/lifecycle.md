@@ -90,7 +90,9 @@ If the launch missed a pane start time, foreground cleanup re-reads the current
 pane in the recorded window while checking the session's ownership token before
 and after the query. It fills only a missing birth for that same current pane;
 it never replaces a stored birth or borrows identity from a reused PID outside
-the window. Unavailable identity still retains ownership state.
+the window. A failed pane query leaves the original missing birth intact: Hack
+still attempts the token-checked mux stop, then retains unconfirmed descendant
+state. A replaced owner still refuses the stop.
 
 ![Foreground lifecycle retirement](diagrams/compose-lifecycle-retirement.svg)
 

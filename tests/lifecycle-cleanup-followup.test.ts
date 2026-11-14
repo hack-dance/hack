@@ -104,6 +104,22 @@ test("missing birth is never filled from a PID outside the current owned window"
   expect(refreshed).toEqual([processRecord]);
 });
 
+test("failed pane refresh preserves the unknown record for owned mux cleanup", async () => {
+  let checks = 0;
+  const refreshed = await refreshMissingLifecyclePaneBirths({
+    processes: [processRecord],
+    readPanes: async () => {
+      throw new Error("window is gone");
+    },
+    readIdentities: async () => [pane],
+    assertOwned: async () => {
+      checks += 1;
+    },
+  });
+  expect(refreshed).toEqual([processRecord]);
+  expect(checks).toBe(2);
+});
+
 test("identity refresh refuses a replacement owner after reading the pane", async () => {
   let checks = 0;
   await expect(

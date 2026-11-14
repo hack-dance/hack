@@ -86,7 +86,10 @@ and **Check again**, with a 10-second deadline. Native projects select
 `HACK_RUNTIME_BACKEND=native`. There is no polling or disk state for Env.
 A bare report on exit 1 is still a report. Missing required names appear first
 in red; both legacy scope arrays and canonical scope strings are supported.
-Only an explicit empty `vars` array shows “This project has no env layers”.
+An explicit empty `vars` array shows “This project has no env layers” only
+when the report has no configured files/scopes or selected scope. Canonical
+reports label the selected scope (global by default); an empty scope is not
+project-wide absence. Other service scopes are not included in this listing.
 Malformed output shows “Could not read environment metadata”.
 
 The model retains only name, layer/source, scope, storage kind, set and required

@@ -49,8 +49,25 @@ pub struct EnvReport {
     pub vars: Vec<EnvRow>,
     pub missing_required: Vec<String>,
     #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub selected_scope: Option<String>,
+    #[serde(default)]
     pub key_state: KeyState,
 }
+impl EnvReport {
+    /// An empty default-scope listing does not establish project-wide absence.
+    #[must_use]
+    pub fn empty_label(&self) -> &'static str {
+        if self.files.is_empty() && self.scopes.is_empty() && self.selected_scope.is_none() {
+            "This project has no env layers"
+        } else {
+            "No names in this scope. Other env scopes or layers may be configured."
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum EnvView {
     #[default]
@@ -132,7 +149,7 @@ pub fn fixture(name: &str) -> EnvView {
             };
             EnvView::parse(
                 &format!(
-                    r#"{{"key_state":"{key_state}","missing_required":[{missing}],"vars":[{{"key":"APP_MODE","required":false,"storage":{{"kind":"plain"}},"resolved_from":"project","has_value":true,"scope":"project","layer":null}},{{"key":"API_TOKEN","required":true,"storage":{{"kind":"encrypted"}},"resolved_from":null,"has_value":false,"scope":["runtime"],"layer":"local"}}]}}"#
+                    r#"{{"files":["hack.env.default.yaml"],"scopes":["global","api"],"selected_scope":"global","key_state":"{key_state}","missing_required":[{missing}],"vars":[{{"key":"APP_MODE","required":false,"storage":{{"kind":"plain"}},"resolved_from":"project","has_value":true,"scope":"project","layer":null}},{{"key":"API_TOKEN","required":true,"storage":{{"kind":"encrypted"}},"resolved_from":null,"has_value":false,"scope":["runtime"],"layer":"local"}}]}}"#
                 ),
                 Some(1),
             )
@@ -207,6 +224,23 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r.scope, Scope::Legacy(_)))
         );
+    }
+
+    #[test]
+    fn empty_default_scope_does_not_hide_configured_layers() {
+        let view = EnvView::parse(
+            r#"{"vars":[],"missing_required":[],"files":["hack.env.default.yaml"],"scopes":["api"],"selected_scope":"global"}"#,
+            Some(0),
+        );
+        let EnvView::Report(report) = view else {
+            panic!("report");
+        };
+        assert_ne!(report.empty_label(), "This project has no env layers");
+        assert_eq!(report.selected_scope.as_deref(), Some("global"));
+        let EnvView::Report(empty) = fixture("env-empty") else {
+            panic!("report");
+        };
+        assert_eq!(empty.empty_label(), "This project has no env layers");
     }
 
     #[test]

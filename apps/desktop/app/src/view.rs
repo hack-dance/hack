@@ -642,6 +642,11 @@ impl HackApp {
                     .child("Could not read environment metadata. Check again or run hack doctor.")
             }
             EnvView::Report(report) => {
+                if let Some(scope) = &report.selected_scope {
+                    body = body.child(format!(
+                        "Scope: {scope} · other scopes are not included in this listing"
+                    ));
+                }
                 body = body.child(match report.key_state {
                     KeyState::Missing | KeyState::Unreadable => "🔒 Names are shown; values cannot be resolved. Needs R10.",
                     KeyState::Unknown => "Key state unknown · needs R10. Set markers do not prove the key is readable.",
@@ -660,7 +665,7 @@ impl HackApp {
                     );
                 }
                 if report.vars.is_empty() {
-                    body = body.child("This project has no env layers").child(
+                    body = body.child(report.empty_label()).child(
                         Button::new("env-docs")
                             .label("Environment docs")
                             .small()

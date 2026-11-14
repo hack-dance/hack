@@ -429,6 +429,20 @@ jobs:
           (cd "$destination" && echo "$checksum  $archive" | shasum -a 256 --check)
           tar -xf "$destination/$archive" -C "$destination"
           echo "$destination/zig-${platform}-0.15.2" >> "$GITHUB_PATH"
+      - name: Build and verify bundle guest
+        run: |
+          rustup target add aarch64-unknown-linux-musl
+          sh scripts/check-native-guest.sh
+      - name: Test interactive guest launcher on a real Linux PTY
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(zig version)" = '0.15.2'
+          command -v python3
+          zig test packages/runtime-core/guest/environment-launcher.zig
+          zig build-exe packages/runtime-core/guest/environment-launcher.zig -target x86_64-linux-musl -O ReleaseSmall -femit-bin="$RUNNER_TEMP/interactive-environment-launcher"
+          python3 tests/fixtures/environment-launcher-tty.py "$RUNNER_TEMP/interactive-environment-launcher"
       - name: Check candidate formatting
         run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
       - name: Install pinned process-per-test runner

@@ -892,7 +892,7 @@ Manage persistent project workspaces with tmux-first onboarding
 hack session <subcommand> [options]
 ```
 
-Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work. The guided default is tmux, including `hack setup tmux` for a popup picker. Other mux backends such as zellij still exist through `sessions.mux`, but the interactive session tooling is tmux-first today.
+Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work. The guided default is tmux, including `hack setup tmux` for a popup picker. Interactive workspaces require tmux.
 
 ### Subcommands
 
@@ -999,7 +999,7 @@ Attach to an existing workspace
 hack session attach <workspace> [options]
 ```
 
-Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux, while zellij attaches to the named session directly.
+Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux.
 
 ### Arguments
 
@@ -1027,7 +1027,7 @@ hack session exec [options] <workspace> <command>
 
 `<command>` is one argument: quote a command that has its own arguments or flags, as in `"npm --version"`. Put Hack options before it; a leading `--` is optional.
 
-Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.
+Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane. This is useful for long-running agents, background checks, or remote follow-up work.
 
 ### Arguments
 

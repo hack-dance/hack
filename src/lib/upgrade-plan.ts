@@ -1,3 +1,4 @@
+import type { UpgradeActionKind } from "./upgrade-action-kind.ts";
 import type {
   UpgradeProjectReport,
   UpgradeReportFinding,
@@ -51,6 +52,8 @@ export type UpgradePlanTarget = {
 };
 
 export type UpgradePlanStep = {
+  /** Classification of this grouped action, not its per-checkout commands. */
+  readonly kind: UpgradeActionKind;
   readonly order: number;
   /** The finding id this step resolves, or `snapshot`. */
   readonly id: string;
@@ -150,6 +153,7 @@ export function buildUpgradePlan(opts: {
     .sort((a, b) => rank(MACHINE_ORDER, a.id) - rank(MACHINE_ORDER, b.id))
     .map((finding) => ({
       id: finding.id,
+      kind: finding.kind,
       scope: "machine",
       status: finding.status,
       count: 0,
@@ -223,6 +227,7 @@ export function buildUpgradePlan(opts: {
       ? [
           {
             id: "snapshot",
+            kind: "safe",
             scope: "machine",
             status: "step",
             count: 0,
@@ -257,6 +262,7 @@ function groupStep(opts: {
   const targets = findings.map((finding) => finding.target);
   const base = {
     id,
+    kind: "manual" as const,
     status,
     count: targets.length,
     targets,
@@ -266,6 +272,9 @@ function groupStep(opts: {
     const args = ["upgrade", "apply", "--only", id];
     return {
       ...base,
+      kind: targets.every((target) => target.apply_eligible)
+        ? "safe"
+        : "manual",
       scope:
         targets.length === 1 ? (targets[0]?.scope ?? "projects") : "projects",
       command: opts.render(args),

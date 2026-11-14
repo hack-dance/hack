@@ -70,6 +70,7 @@ import {
   describeSystemdIncompatibleOwner,
   installDaemonSystemdService,
   reconcileRunningSystemdDaemon,
+  refuseSystemdStartBeforeReplacing,
   resolveSystemdSummary,
   startViaSystemdIfInstalled,
   stopViaSystemdIfInstalled,
@@ -591,6 +592,20 @@ async function handleRunningDaemonAtStart(opts: {
       message: `hackd is incompatible with this CLI, but pid ${opts.pid} was not replaced: ${describeDaemonProcessRefusal(proof.reason)} | Check: hack daemon status`,
     });
     return 1;
+  }
+  // Refuse before stopping when the start that follows would be refused:
+  // otherwise a running hackd is left stopped (HACK-2216). The launchd case
+  // was checked above (checkRunningLaunchdDaemon).
+  if (process.platform === "linux" && !opts.foreground) {
+    const refusal = await refuseSystemdStartBeforeReplacing({ paths });
+    if (refusal !== null) {
+      trace.manager = "systemd";
+      trace.blocked = refusal.blocked;
+      logger.warn({
+        message: `hackd (pid ${opts.pid}) is incompatible with this CLI, but it was not replaced, because hackd.service could not be started for this home afterwards: ${refusal.message}`,
+      });
+      return 1;
+    }
   }
   logger.warn({ message: `Replacing incompatible hackd (pid ${opts.pid})` });
   if (!(await stopProvenDaemon({ proof, paths: opts.paths }))) {

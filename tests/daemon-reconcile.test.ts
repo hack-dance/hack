@@ -1095,3 +1095,67 @@ test("any continued line in the main unit file counts as a home binding", () => 
   // The rendered unit itself has none.
   expect(findDroppedHomeBinding({ unitText: rendered, rendered })).toBeNull();
 });
+
+// Codex finding on PR #854: refuse before stopping a direct daemon.
+
+test("launchd: an incompatible direct daemon is not replaced when the loaded job is another home's", async () => {
+  const effects: string[] = [];
+  const plistWith = (env: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>EnvironmentVariables</key>\n  <dict>\n${env}\n  </dict>\n</dict>\n</plist>\n`;
+  const hooks = (opts: {
+    readonly plist: string;
+    readonly proven: boolean;
+  }) => ({
+    paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+    trace: createDaemonCommandTrace(),
+    pid: 777,
+    compatible: false,
+    waitForReady: () => Promise.reject(new Error("must not start")),
+    readStatus: () =>
+      Promise.resolve({
+        installed: true,
+        loaded: true,
+        running: true,
+        pid: 4242,
+        exitStatus: null,
+        observation: "reported" as const,
+      }),
+    isAncestor: () => Promise.resolve(false),
+    readProgram: () =>
+      Promise.resolve({
+        kind: "ours" as const,
+        program: "/opt/hack/bin/hack",
+        resolved: "/opt/hack/bin/hack",
+      }),
+    readPlist: () => Promise.resolve(opts.plist),
+    proveJob: () => Promise.resolve(opts.proven),
+    repair: () => {
+      effects.push("repair");
+      return Promise.resolve("ok" as const);
+    },
+    kickstart: () => {
+      effects.push("kickstart");
+      return Promise.resolve({ ok: true });
+    },
+  });
+  const otherHome = hooks({
+    plist: plistWith(
+      "    <key>HACK_HOME</key>\n    <string>/srv/other/.hack</string>"
+    ),
+    proven: true,
+  });
+  expect(await checkRunningLaunchdDaemon(otherHome)).toBe(1);
+  expect(otherHome.trace.blocked).toBe("home-binding");
+  expect([...otherHome.trace.stale]).toEqual(["version-mismatch"]);
+
+  const unproven = hooks({ plist: plistWith(""), proven: false });
+  expect(await checkRunningLaunchdDaemon(unproven)).toBe(1);
+  expect(unproven.trace.blocked).toBe("unproven-owner");
+
+  // This home's job: the replacement may go on (the caller stops and
+  // restarts through launchd).
+  const ours = hooks({ plist: plistWith(""), proven: true });
+  expect(await checkRunningLaunchdDaemon(ours)).toBeNull();
+  // Nothing was repaired or kickstarted while deciding.
+  expect(effects).toEqual([]);
+});

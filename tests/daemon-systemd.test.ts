@@ -16,6 +16,7 @@ import {
   describeSystemdIncompatibleOwner,
   installDaemonSystemdService,
   reconcileRunningSystemdDaemon,
+  refuseSystemdStartBeforeReplacing,
   startViaSystemdIfInstalled,
   stopViaSystemdIfInstalled,
   uninstallDaemonSystemdService,
@@ -4966,5 +4967,79 @@ linuxTest(
     expect(running.calls).not.toContain(
       "systemctl --user restart hackd.service"
     );
+  }
+);
+
+// Codex finding on PR #854: decide before stopping a direct daemon.
+
+linuxTest(
+  "a direct daemon is not replaced when the unit's start would be refused, without touching systemd",
+  async () => {
+    const fake = fakeSystemd();
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const paths = resolveDaemonPaths({ home: root });
+    const mutations = () =>
+      fake.calls.filter((call) =>
+        [
+          " start ",
+          " stop ",
+          " restart ",
+          "daemon-reload",
+          " enable ",
+          "reset-failed",
+        ].some((verb) => ` ${call} `.includes(verb))
+      );
+
+    // The unit's Hack home cannot be read: start would refuse.
+    fake.environmentFiles = "/srv/env (ignore_errors=no)";
+    fake.calls.length = 0;
+    const unknownHome = await refuseSystemdStartBeforeReplacing({
+      paths,
+      deps: fake.deps,
+    });
+    expect(unknownHome?.blocked).toBe("unproven-owner");
+    expect(unknownHome?.message).toContain("Hack home could not be read");
+    expect(mutations()).toEqual([]);
+
+    // The unit serves another home: start leaves it alone and starts this
+    // home's hackd directly, so the replacement may go on.
+    fake.environmentFiles = "";
+    fake.unitEnvironment = `PATH=${sysBin} HACK_HOME=${join(root, "other", ".hack")}`;
+    expect(
+      await refuseSystemdStartBeforeReplacing({ paths, deps: fake.deps })
+    ).toBeNull();
+
+    // A missing program that read-only mode may not repair.
+    fake.unitEnvironment = `PATH=${sysBin} HACK_NO_INTERACTIVE=1`;
+    const old = await writeOldUnit(fake);
+    await rm(old);
+    fake.deps = {
+      ...fake.deps,
+      env: { ...fake.deps.env, [SYSTEMD_READ_ONLY_ENV]: "1" },
+    };
+    fake.calls.length = 0;
+    const readOnly = await refuseSystemdStartBeforeReplacing({
+      paths,
+      deps: fake.deps,
+    });
+    expect(readOnly?.blocked).toBe("read-only");
+    expect(mutations()).toEqual([]);
+
+    // This home's usable unit: the replacement may go on.
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: {
+        ...fake.deps,
+        env: { ...fake.deps.env, [SYSTEMD_READ_ONLY_ENV]: "" },
+      },
+    });
+    expect(
+      await refuseSystemdStartBeforeReplacing({ paths, deps: fake.deps })
+    ).toBeNull();
   }
 );

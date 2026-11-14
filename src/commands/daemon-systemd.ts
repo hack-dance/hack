@@ -183,6 +183,66 @@ export async function resolveSystemdSummary(opts: {
  * directly. See {@link prepareSystemdUnitForStart} for what start may change
  * in the unit (almost nothing).
  */
+/**
+ * Before `start` stops this home's incompatible, directly started hackd to
+ * replace it (HACK-2216): whether the start that follows would be refused
+ * by {@link startViaSystemdIfInstalled}, so the refusal comes first and the
+ * running daemon is left alone. Checks what refuses there regardless of
+ * the daemon: an untrusted unit, a unit whose Hack home cannot be read, a
+ * missing program that read-only mode may not repair, and loaded files or
+ * a program Hack cannot vouch for. Null when the start may go on (or does
+ * not go through systemd at all, which starts hackd directly).
+ */
+export async function refuseSystemdStartBeforeReplacing(
+  hooks: Pick<SystemdCommandHooks, "paths" | "deps">
+): Promise<{
+  readonly message: string;
+  readonly blocked: "unproven-owner" | "read-only";
+} | null> {
+  const deps = hooks.deps ?? defaultSystemdDeps();
+  if (!resolveSystemdAccess({ env: deps.env }).allowed) {
+    return null;
+  }
+  const unitPath = resolveSystemdUnitPath({ env: deps.env });
+  if (!(await pathExists(unitPath))) {
+    return null;
+  }
+  const status = await readSystemdServiceStatus({ unitPath, deps });
+  if (!status?.availability.available) {
+    return null;
+  }
+  const untrusted = await checkSystemdUnitTrusted({ unitPath });
+  if (untrusted !== null) {
+    return { message: untrusted, blocked: "unproven-owner" };
+  }
+  const unitHome = await checkUnitServesHome({
+    hackHome: dirname(hooks.paths.root),
+    deps,
+    action: "starting",
+  });
+  if (unitHome.kind === "foreign") {
+    // Start leaves that unit alone and starts this home's hackd directly.
+    return null;
+  }
+  if (unitHome.kind === "unknown") {
+    return { message: unitHome.message, blocked: "unproven-owner" };
+  }
+  if (status.drift === "program-missing") {
+    return isSystemdReadOnly(deps.env)
+      ? {
+          message: `${describeMissingProgram(status)}; not changing the service here | Run: hack daemon install`,
+          blocked: "read-only",
+        }
+      : null;
+  }
+  const loaded =
+    (await checkSystemdLoadedUnitPaths({ unitPath, deps })) ??
+    (await checkUnitProgramTrusted({ unitPath }));
+  return loaded === null
+    ? null
+    : { message: loaded, blocked: "unproven-owner" };
+}
+
 export async function startViaSystemdIfInstalled(
   hooks: Omit<SystemdCommandHooks, "startDetached" | "stopDirect">
 ): Promise<number | null> {

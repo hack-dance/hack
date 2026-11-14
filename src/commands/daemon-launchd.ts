@@ -4,12 +4,15 @@ import {
   type LaunchdProgramRepairResult,
   type LaunchdProgramState,
   type LaunchdServiceStatus,
+  plistKeepsThisHome,
+  proveLaunchdJobOwnership,
   readLaunchdProgramState,
   repairLaunchdProgramIfInvalid,
 } from "../daemon/launchd.ts";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import { hasAncestorProcess } from "../daemon/process-ancestry.ts";
 import type { DaemonCommandTrace } from "../daemon/reconcile.ts";
+import { readTextFile } from "../lib/fs.ts";
 import { logger } from "../ui/logger.ts";
 
 /**
@@ -30,6 +33,10 @@ export interface LaunchdStartHooks {
   readonly readProgram?: () => Promise<LaunchdProgramState>;
   /** Defaults to {@link repairLaunchdProgramIfInvalid}. */
   readonly repair?: () => Promise<LaunchdProgramRepairResult>;
+  /** Defaults to reading the plist; tests pin it. */
+  readonly readPlist?: () => Promise<string | null>;
+  /** Defaults to {@link proveLaunchdJobOwnership}; tests pin it. */
+  readonly proveJob?: () => Promise<boolean>;
   /** Defaults to {@link kickstartLaunchdService}. */
   readonly kickstart?: () => Promise<{
     readonly ok: boolean;
@@ -154,7 +161,45 @@ export async function checkRunningLaunchdDaemon(
     });
     return 1;
   }
+  // The caller is about to stop this daemon and start through launchd:
+  // refuse now, with the daemon left running, when launchd would refuse
+  // the start (the job binds another home, or is not this home's).
+  const blocked = await launchdJobBlocksReplacement({ hooks, status });
+  if (blocked !== null) {
+    trace.stale.add("version-mismatch");
+    trace.blocked = blocked;
+    logger.warn({
+      message: `hackd (pid ${hooks.pid}) is incompatible with this CLI, but the loaded launchd job ${blocked === "home-binding" ? "binds another Hack home" : "is not proven to be this Hack home's"}, so it was not replaced: hackd keeps running | Check: hack daemon status; to take the service over for this home, run: hack daemon install`,
+    });
+    return 1;
+  }
   return null;
+}
+
+/**
+ * Whether replacing this home's running hackd through the loaded launchd
+ * job would be refused (HACK-2216), checked before anything is stopped:
+ * `home-binding` when the plist binds another home (or cannot be read),
+ * `unproven-owner` when the job runs a process that is not proven to be
+ * this home's hackd (`pid`, a launchd-run hackd of this home, counts as
+ * proven). Null when the replacement may go on.
+ */
+async function launchdJobBlocksReplacement(opts: {
+  readonly hooks: LaunchdStartHooks & { readonly pid: number };
+  readonly status: LaunchdServiceStatus;
+}): Promise<"home-binding" | "unproven-owner" | null> {
+  const { hooks, status } = opts;
+  const plistText = await (
+    hooks.readPlist ?? (() => readTextFile(hooks.paths.launchdPlistPath))
+  )();
+  if (plistText === null || !plistKeepsThisHome({ plistText })) {
+    return "home-binding";
+  }
+  const proven = await (
+    hooks.proveJob ??
+    (() => proveLaunchdJobOwnership({ paths: hooks.paths, status }))
+  )();
+  return proven ? null : "unproven-owner";
 }
 
 /**

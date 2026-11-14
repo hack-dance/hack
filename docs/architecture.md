@@ -711,6 +711,16 @@ Such a plist is never replaced automatically; `start` reports it and
   itself: exit 113 with "Could not find service". Any other failed query is an
   observation failure. It is treated as unproven, so nothing is unloaded,
   rewritten or loaded.
+- When `start` finds this home's hackd running directly and incompatible, it
+  replaces that daemon by stopping it and starting through the service.
+  Before it stops anything, it checks that the start would go through. On
+  macOS the loaded launchd job must not bind another home and must be this
+  home's. On Linux, start would otherwise refuse when the unit is untrusted,
+  its Hack home cannot be read, a missing program cannot be repaired in
+  read-only mode, or Hack cannot vouch for its loaded files or program. If the
+  start would be refused, `start` refuses first (exit 1, `E_DAEMON_SERVICE`,
+  with `home-binding`, `unproven-owner` or `read-only` as `blocked`) and leaves
+  the running daemon alone.
 
 ```mermaid
 stateDiagram-v2

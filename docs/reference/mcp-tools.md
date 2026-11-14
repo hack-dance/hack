@@ -2,8 +2,10 @@
 
 `hack mcp serve` exposes the tools below to MCP clients that have no shell. Each
 tool runs one `hack` CLI command as a child process, with the session's captured
-working directory and environment, and `HACK_NO_INTERACTIVE=1`. When a shell is
-available, run the CLI command directly instead.
+working directory and environment, and `HACK_NO_INTERACTIVE=1`. Unless that
+environment sets `HACK_ORIGIN`, the child also gets `HACK_ORIGIN=agent`, so
+lifecycle tools appear as `agent` in the [activity log](./activity-log.md).
+When a shell is available, run the CLI command directly instead.
 
 This page is the contract for tool names, annotations, inputs, the argv each tool
 runs, and result shapes. The log tools have their own page:

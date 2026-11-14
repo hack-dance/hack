@@ -335,11 +335,19 @@ function boundedLimitInput(opts: {
     .describe(`${opts.description} (1-${opts.ceiling})`);
 }
 
-/** Child environment: the frozen session env plus forced non-interactivity. */
+/**
+ * Child environment: the frozen session env plus forced non-interactivity,
+ * and `HACK_ORIGIN=agent` unless the session already names an origin, so the
+ * activity log attributes lifecycle tools to an agent (HACK-2218).
+ */
 function buildChildEnv(
   env: Readonly<Record<string, string>>
 ): Record<string, string> {
-  return { ...env, HACK_NO_INTERACTIVE: "1" };
+  return {
+    HACK_ORIGIN: "agent",
+    ...env,
+    HACK_NO_INTERACTIVE: "1",
+  };
 }
 
 /**

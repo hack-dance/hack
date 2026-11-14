@@ -489,10 +489,17 @@ type ProjectKey = (String, Severity, String);
 fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
     let Some(root) = &run.root else { return false };
     if run.native {
-        return report
-            .checks
-            .iter()
-            .any(|c| matches!(classify(&c.id), Some((_, Scope::Project))) && c.id != "project");
+        return report.checks.iter().any(|c| {
+            matches!(
+                c.id.as_str(),
+                "env key"
+                    | "secret integrity"
+                    | "compose backend features"
+                    | "native settings"
+                    | "native source size"
+                    | "amd64 emulation"
+            )
+        });
     }
     report.checks.iter().any(|c| {
         c.id == "project"
@@ -693,8 +700,8 @@ impl DoctorState {
     }
 }
 
-/// What identifies a doctor target: name, checkout and backend.
-pub type TargetKey = (String, PathBuf, bool);
+/// What identifies a doctor target: name, checkout, backend and missing state.
+pub type TargetKey = (String, PathBuf, bool, bool);
 
 fn sorted(targets: Option<&[TargetKey]>) -> Option<Vec<TargetKey>> {
     targets.map(|t| {
@@ -944,7 +951,7 @@ mod tests {
     }
 
     fn key(name: &str, root: &str, native: bool) -> TargetKey {
-        (name.into(), root.into(), native)
+        (name.into(), root.into(), native, false)
     }
 
     fn machine(checks: Vec<DoctorCheck>) -> DoctorRun {
@@ -1082,6 +1089,15 @@ mod tests {
 
     #[test]
     fn named_remedies_are_allowlisted_and_quoted() {
+        assert_eq!(
+            remedy_in_detail("service run: hack down failed (run: hack restart)"),
+            Some("hack restart".into())
+        );
+        assert_eq!(remedy_in_detail("service run: hack down failed"), None);
+        assert_eq!(
+            remedy_in_detail("orphan (run: hack projects prune --project --all)"),
+            None
+        );
         let card = |detail: &str| {
             aggregate(&[proj(
                 "alpha",
@@ -1117,7 +1133,10 @@ mod tests {
             "warn",
             "Untrusted (run: hack x gateway token-create; echo pwned)",
         )])]);
-        assert!(matches!(m.cards().next().unwrap().action, CardAction::OpenDoc(_)));
+        assert!(matches!(
+            m.cards().next().unwrap().action,
+            CardAction::OpenDoc(_)
+        ));
         let m = aggregate(&[machine(vec![check(
             "gateway tokens",
             "warn",
@@ -1131,6 +1150,13 @@ mod tests {
 
     #[test]
     fn daemon_commands_follow_the_reported_state() {
+        assert_eq!(
+            daemon_command(
+                "daemon",
+                "hackd incompatible; hackd is optional for candidate Compose workflows; daemon autostart and automatic repair are disabled."
+            ),
+            None
+        );
         let cmd = |detail: &str| {
             aggregate(&[machine(vec![check("daemon", "warn", detail)])])
                 .cards()
@@ -1203,6 +1229,17 @@ mod tests {
         );
         assert_eq!(pane.tone(), Tone::Ok);
         pane.targets_seen(Some(&[key("new", "/work/new", false)]));
+        assert!(pane.stale);
+        assert_eq!(pane.tone(), Tone::Warn);
+        let mut missing = key("new", "/work/new", false);
+        missing.3 = true;
+        let generation = pane.begin(Some(&[key("new", "/work/new", false)]));
+        pane.finish(
+            generation,
+            &[machine(vec![check("docker", "ok", "")])],
+            Some(&[missing]),
+            Instant::now(),
+        );
         assert!(pane.stale);
         assert_eq!(pane.tone(), Tone::Warn);
     }

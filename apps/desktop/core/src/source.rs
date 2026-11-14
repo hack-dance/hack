@@ -133,7 +133,7 @@ pub struct DoctorTarget {
 pub fn target_keys(targets: &[DoctorTarget]) -> Vec<crate::doctor::TargetKey> {
     targets
         .iter()
-        .map(|t| (t.name.clone(), t.repo_root.clone(), t.native))
+        .map(|t| (t.name.clone(), t.repo_root.clone(), t.native, t.missing))
         .collect()
 }
 
@@ -147,18 +147,16 @@ impl DoctorTarget {
         }
     }
 
-    /// Doctor targets for every project row with a checkout.
+    /// Retain missing rows for coverage, but never probe them.
     #[must_use]
     pub fn from_projects(p: &ProjectsPayload) -> Vec<Self> {
         p.projects
             .iter()
-            .filter_map(|r| {
-                Some(Self {
-                    missing: r.status == "missing" || r.repo_root.is_none(),
-                    name: r.name.clone(),
-                    repo_root: r.repo_root.clone().unwrap_or_default().into(),
-                    native: r.is_native(),
-                })
+            .map(|r| Self {
+                missing: r.status == "missing" || r.repo_root.is_none(),
+                name: r.name.clone(),
+                repo_root: r.repo_root.clone().unwrap_or_default().into(),
+                native: r.is_native(),
             })
             .collect()
     }
@@ -226,8 +224,8 @@ impl LiveSource {
         };
         // The machine run must happen outside every checkout, or doctor
         // would report that checkout's project checks as machine checks.
-        // Prefer a user-private directory; the shared temp dir is a last
-        // resort (children get an all-absolute PATH either way).
+        // Prefer a user-private directory, then root. A shared temp cwd
+        // would permit another user to plant a project marker after inspection.
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
         if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
             && crate::doctor::is_private_dir(&run)
@@ -826,6 +824,31 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
             crate::doctor::DoctorState::from_runs(&runs),
             crate::doctor::DoctorState::Error(_)
         ));
+    }
+
+    #[test]
+    fn missing_registry_targets_are_not_probed_but_remain_unchecked() {
+        let hack = fake_hack(
+            "doctor-missing",
+            r#"[ "$*" = 'doctor --json' ] || exit 9
+echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'"#,
+        );
+        let source = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let payload: ProjectsPayload = serde_json::from_str(r#"{"projects":[{"name":"gone","status":"missing","repo_root":"/work/gone"},{"name":"no-root","status":"missing"}]}"#).unwrap();
+        let runs = source.doctor_runs(&DoctorTarget::from_projects(&payload));
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert_eq!(runs.len(), 3);
+        assert!(
+            runs[1..]
+                .iter()
+                .all(|r| r.result.as_ref().unwrap_err() == "not checked (checkout missing)")
+        );
+        let view = crate::doctor::aggregate(&runs);
+        assert_eq!((view.projects_total, view.projects_checked), (2, 0));
+        assert!(!view.is_clean());
     }
 
     #[test]

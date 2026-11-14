@@ -353,7 +353,12 @@ impl HackApp {
     /// Apply a polled snapshot. A new, removed or moved project (or a
     /// project list that becomes readable) makes a shown Doctor result
     /// stale, so a visible Doctor pane checks again.
-    fn apply_snapshot(&mut self, token: hack_desktop_core::viewmodel::RefreshToken, snap: Result<Snapshot, SourceError>, cx: &mut Context<Self>) -> bool {
+    fn apply_snapshot(
+        &mut self,
+        token: hack_desktop_core::viewmodel::RefreshToken,
+        snap: Result<Snapshot, SourceError>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.model.finish_refresh(token, snap) {
             return false;
         }

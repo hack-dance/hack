@@ -77,6 +77,11 @@ once per registered checkout. Machine checks are deduplicated by check id;
 project findings link from the project header. Unknown statuses, failed reads
 and projects not reached within the 90-second refresh budget remain unchecked.
 Checks refresh on opening the pane and every ten minutes while it is visible.
+Stale results cannot show an all-clear message or green Doctor indicator.
+Missing registry rows remain unchecked and are never probed. Compose coverage
+requires a report identifying that exact checkout's Hack directory; native
+coverage requires a known project-only check. A machine-only or ancestor-project
+report cannot establish Compose project coverage.
 
 Cards group findings by area and offer one copied command or documentation link.
 Project commands include the checkout path. The app never runs a Doctor fix:

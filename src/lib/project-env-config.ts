@@ -5877,9 +5877,15 @@ export async function discoverComposeServiceNames(opts: {
 export async function inspectLegacyComposeEnvFileReferences(opts: {
   readonly composeFile: string;
   readonly projectDir: string;
+  readonly strict?: boolean;
 }): Promise<readonly LegacyComposeEnvFileReference[]> {
   const parsed = await readComposeFile({ composeFile: opts.composeFile });
   if (!parsed) {
+    if (opts.strict) {
+      throw new ClosedCliError(
+        "Cannot inspect Compose repair: the configuration is unavailable or malformed; values omitted."
+      );
+    }
     return [];
   }
 

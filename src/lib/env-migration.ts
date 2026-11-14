@@ -38,6 +38,7 @@ import {
   assertMachineLocalFileGitPrivate,
   assertProjectEnvKeyUntracked,
   assertProjectEnvLayerPaths,
+  inspectLegacyComposeEnvFileReferences,
   isGitTrackedOrUnknownProjectPath,
   LegacyEnvCleanupError,
   type LegacyProjectEnvMigration,
@@ -75,6 +76,8 @@ export type EnvMigrationPreview = {
   }[];
   readonly journalPath: string;
   readonly manifestPath: string | null;
+  /** Completed env layers remain usable while a deferred repair needs manual review. */
+  readonly composeRepair?: "unavailable";
 };
 
 type Publication = EnvMigrationFileState & {
@@ -401,11 +404,10 @@ export async function previewEnvMigration(
   const path = envMigrationJournalPath(project.projectRoot);
   const journal = await readJournal(path, project);
   if (needsComposeRepair(journal, input.repairCompose)) {
-    const prepared = await prepareDeferredComposeRepair(project, journal);
-    return {
-      ...(await previewPrepared(project, prepared.prepared, path)),
-      manifestPath: journal.manifestPath,
-    };
+    const preview = await previewDeferredComposeRepair(project, journal, path);
+    if (preview) {
+      return preview;
+    }
   }
   if (journal && journal.state !== "rolled_back") {
     const files: EnvMigrationPreview["files"][number][] = [];
@@ -460,6 +462,32 @@ export async function previewEnvMigration(
     ).prepared,
     path
   );
+}
+
+async function previewDeferredComposeRepair(
+  project: EnvMigrationProject,
+  journal: Journal,
+  path: string
+): Promise<EnvMigrationPreview | null> {
+  try {
+    const prepared = await prepareDeferredComposeRepair(project, journal);
+    return prepared
+      ? {
+          ...(await previewPrepared(project, prepared.prepared, path)),
+          manifestPath: journal.manifestPath,
+        }
+      : null;
+  } catch {
+    return {
+      version: 1,
+      project,
+      status: "recovery_required",
+      composeRepair: "unavailable",
+      files: [],
+      journalPath: path,
+      manifestPath: journal.manifestPath,
+    };
+  }
 }
 
 function previewStatus(journal: Journal): EnvMigrationPreview["status"] {
@@ -666,7 +694,20 @@ function needsComposeRepair(
 async function prepareDeferredComposeRepair(
   project: EnvMigrationProject,
   journal: Journal
-): Promise<Preparation> {
+): Promise<Preparation | null> {
+  const composeFile = join(project.projectDir, "docker-compose.yml");
+  const before = (await readState(composeFile)).state;
+  const references = await inspectLegacyComposeEnvFileReferences({
+    ...project,
+    composeFile,
+    strict: true,
+  });
+  if (!same(before, (await readState(composeFile)).state)) {
+    throw refuse();
+  }
+  if (references.length === 0) {
+    return null;
+  }
   await assertSources(journal, {
     allowLayerChanges: true,
     allowTighterModes: true,
@@ -699,10 +740,13 @@ async function extendComposeRepair(
   snapshots: EnvMigrationSnapshots,
   accept: boolean
 ): Promise<Journal> {
-  const { prepared, sources } = await prepareDeferredComposeRepair(
-    project,
-    journal
-  );
+  const preparation = await prepareDeferredComposeRepair(project, journal);
+  if (!preparation) {
+    const completed: Journal = { ...journal, composeRepair: "complete" };
+    await writeMetadata(path, completed);
+    return completed;
+  }
+  const { prepared, sources } = preparation;
   await assertConsent(
     project,
     prepared.files.map((file) => file.path),
@@ -912,6 +956,7 @@ export async function applyEnvMigration(input: {
   await assertConsent(project, changed, input.acceptTrackedChanges);
   if (
     preparation &&
+    (!existing || existing.state === "rolled_back") &&
     preparation.prepared.files.length === 0 &&
     preparation.prepared.removable.length === 0
   ) {
@@ -1484,6 +1529,16 @@ async function rollbackLocked(
     ) {
       expected = journal.cleanupConfig;
     }
+    if (
+      matchesMigrationSource({
+        current,
+        source: expected,
+        write: undefined,
+        allowTighterModes: true,
+      })
+    ) {
+      expected = current;
+    }
     expectedCurrent.push(expected);
   }
   journal = {
@@ -1502,11 +1557,17 @@ async function rollbackLocked(
     ],
   };
   await writeMetadata(path, journal);
-  const result = await input.snapshots.rollback({
+  const restored = await input.snapshots.rollback({
     manifestPath: journal.manifestPath,
     expectedCurrent,
     preserveChanges: input.preserveChanges,
   });
+  const result = {
+    ...restored,
+    warnings: [
+      "Rollback restores original file permissions too. After recovery, run hack doctor --fix --path <project> to review them.",
+    ],
+  };
   if (result.status !== "restored") {
     return result;
   }

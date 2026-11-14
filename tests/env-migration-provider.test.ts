@@ -247,7 +247,73 @@ test("production cleanup accepts Doctor permission tightening while preserving o
     pathField(migrated.envelope.data, "manifestPath"),
   ]);
   expect(rollback.exitCode, rollback.stderr).toBe(0);
+  expect(rollback.envelope.data.warnings).toContainEqual(
+    expect.stringContaining("original file permissions")
+  );
   expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
+});
+
+test("production rollback accepts a byte-identical tighter mode before cleanup and reports original-mode review", async () => {
+  const project = await fixture();
+  const envPath = join(project.projectDir, ".env");
+  await chmod(envPath, 0o644);
+  const migrated = await cli(project.projectRoot, ["--apply"]);
+  expect(migrated.exitCode, migrated.stderr).toBe(0);
+  await runCliCommand(project.projectRoot, [
+    "doctor",
+    "--fix",
+    "--path",
+    project.projectRoot,
+  ]);
+  expect((await lstat(envPath)).mode & 0o777).toBe(0o600);
+  const rollback = await cli(project.projectRoot, [
+    "--rollback-manifest",
+    pathField(migrated.envelope.data, "manifestPath"),
+  ]);
+  expect(rollback.exitCode, rollback.stderr).toBe(0);
+  expect(rollback.envelope.data.warnings).toContainEqual(
+    expect.stringContaining("original file permissions")
+  );
+  expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
+});
+
+test("production previews report deferred repair unavailable without failing, printing drift values or changing files", async () => {
+  const project = await fixture();
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  const compose =
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n";
+  await writeFile(composePath, compose);
+  const implicit = await runCliCommand(project.projectRoot, [
+    "env",
+    "exec",
+    "--path",
+    project.projectRoot,
+    "--",
+    "/usr/bin/true",
+  ]);
+  expect(implicit.exitCode, implicit.stderr).toBe(0);
+  const drift = "synthetic-drift-preview-value";
+  const envPath = join(project.projectDir, ".env");
+  await writeFile(envPath, `TOKEN=${drift}\n`);
+  const journalPath = envMigrationJournalPath(project.projectRoot);
+  const journal = await readFile(journalPath, "utf8");
+  for (const json of [true, false]) {
+    const result = await runMigrationCli(project.projectRoot, [], { json });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain(drift);
+    const parsed = JSON.parse(result.stdout);
+    expect(json ? parsed.data : parsed).toMatchObject({
+      status: "recovery_required",
+      composeRepair: "unavailable",
+      files: [],
+    });
+  }
+  const refused = await cli(project.projectRoot, ["--apply"]);
+  expect(refused.exitCode).not.toBe(0);
+  expect(refused.stdout + refused.stderr).not.toContain(drift);
+  expect(await readFile(journalPath, "utf8")).toBe(journal);
+  expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${drift}\n`);
+  expect(await readFile(composePath, "utf8")).toBe(compose);
 });
 
 for (const damage of ["manifest", "missing-blob", "changed-blob"] as const) {

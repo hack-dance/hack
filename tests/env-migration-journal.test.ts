@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
+import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
 import {
   applyEnvMigration,
   cleanupEnvMigration,
@@ -265,7 +266,11 @@ test("journalled implicit migration keeps undeclared Compose overlay inputs; exp
       await readFile(envMigrationJournalPath(project.projectRoot), "utf8")
     ).state
   ).toBe("complete");
-  await expect(previewEnvMigration(project)).rejects.toThrow(".env.staging");
+  expect(await previewEnvMigration(project)).toMatchObject({
+    status: "recovery_required",
+    composeRepair: "unavailable",
+    files: [],
+  });
   await expect(
     applyEnvMigration({
       project,
@@ -333,6 +338,88 @@ test("explicit migration after implicit completion previews only Compose repair 
   expectRestored(await projectFiles(), before);
 });
 
+test("deferred repair preview and Doctor plan report unavailable legacy drift without changing or blocking current layers", async () => {
+  await writeFile(
+    join(project.projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n"
+  );
+  await migrateLegacyEnvForCommand({ ...project, materialize: false });
+  await writeFile(join(project.projectDir, ".env"), `TOKEN=${QA}\n`);
+  const before = await projectFiles();
+  const path = envMigrationJournalPath(project.projectRoot);
+  const journal = await readFile(path, "utf8");
+  const preview = await previewEnvMigration(project);
+  expect(preview).toMatchObject({
+    status: "recovery_required",
+    composeRepair: "unavailable",
+    files: [],
+  });
+  expect(JSON.stringify(preview)).not.toContain(QA);
+  const plan = await buildDoctorRemediationPlanLines({
+    startDir: project.projectRoot,
+    migrateEnvConfig: true,
+  });
+  expect(plan.some((line) => line.includes("Compose repair unavailable"))).toBe(
+    true
+  );
+  expect(
+    (await resolveProjectEnvConfig({ ...project, envName: null }))?.globalEnv
+      .TOKEN
+  ).toBe(SENTINEL);
+  await expect(
+    apply({
+      project,
+      snapshots: envMigrationSnapshots(),
+      acceptTrackedChanges: true,
+    })
+  ).rejects.toThrow("input changed");
+  expect(await projectFiles()).toEqual(before);
+  expect(await readFile(path, "utf8")).toBe(journal);
+});
+
+test("explicit no-op clears deferred Compose repair after manual removal of references", async () => {
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  await writeFile(
+    composePath,
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n"
+  );
+  await migrateLegacyEnvForCommand({ ...project, materialize: false });
+  await writeFile(composePath, "services: [unclosed\n");
+  expect(await previewEnvMigration(project)).toMatchObject({
+    status: "recovery_required",
+    composeRepair: "unavailable",
+  });
+  await expect(
+    apply({
+      project,
+      snapshots: envMigrationSnapshots(),
+      acceptTrackedChanges: false,
+    })
+  ).rejects.toThrow("configuration");
+  await writeFile(composePath, "services:\n  api:\n    image: alpine:3.22\n");
+  const before = await projectFiles();
+  expect((await previewEnvMigration(project)).status).toBe("complete");
+  const result = await apply({
+    project,
+    snapshots: envMigrationSnapshots(),
+    acceptTrackedChanges: false,
+  });
+  expect(result.status).toBe("already_complete");
+  const journal = await readFile(result.journalPath, "utf8");
+  expect(JSON.parse(journal).composeRepair).toBe("complete");
+  expect(await projectFiles()).toEqual(before);
+  expect(
+    (
+      await apply({
+        project,
+        snapshots: envMigrationSnapshots(),
+        acceptTrackedChanges: false,
+      })
+    ).status
+  ).toBe("already_complete");
+  expect(await readFile(result.journalPath, "utf8")).toBe(journal);
+});
+
 test("later Compose repair accepts layer additions and tighter modes, invalidates old run proof and refuses lost values", async () => {
   await writeFile(
     join(project.projectDir, "docker-compose.yml"),
@@ -343,7 +430,18 @@ test("later Compose repair accepts layer additions and tighter modes, invalidate
   const layer = join(project.projectDir, "hack.env.local.yaml");
   const original = await readFile(layer, "utf8");
   await writeFile(layer, original.replace(SENTINEL, "changed-synthetic-value"));
-  await expect(previewEnvMigration(project)).rejects.toThrow();
+  expect(await previewEnvMigration(project)).toMatchObject({
+    status: "recovery_required",
+    composeRepair: "unavailable",
+    files: [],
+  });
+  await expect(
+    apply({
+      project,
+      snapshots: envMigrationSnapshots(),
+      acceptTrackedChanges: true,
+    })
+  ).rejects.toThrow();
   const changedLayer = original.replace(
     "  global:\n",
     "  global:\n    EXTRA: additional-synthetic-value\n"
@@ -351,12 +449,16 @@ test("later Compose repair accepts layer additions and tighter modes, invalidate
   expect(changedLayer).not.toBe(original);
   await writeFile(layer, changedLayer);
   await chmod(join(project.projectDir, ".env"), 0o600);
+  await chmod(join(project.projectDir, "docker-compose.yml"), 0o600);
   await apply({
     project,
     snapshots: envMigrationSnapshots(),
     acceptTrackedChanges: true,
   });
   expect(await readFile(layer, "utf8")).toBe(changedLayer);
+  expect(
+    (await lstat(join(project.projectDir, "docker-compose.yml"))).mode & 0o777
+  ).toBe(0o600);
   await expect(
     cleanupEnvMigration({
       project,

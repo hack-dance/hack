@@ -1376,6 +1376,9 @@ filesystem aliases. Use `--rollback-manifest <path>` to restore the snapshot;
 later edits are refused. See the [versioned preview and recovery
 contract](reference/env-migration.md) for the JSON shape, journal boundaries and
 partial-cleanup recovery.
+Rollback also restores original file modes, including modes Doctor may have
+tightened since migration. Its result warns to run `hack doctor --fix --path
+<project>` after recovery to review those permissions.
 
 Commands that need env values, such as `hack env exec`, can also migrate a
 project that has `hack.env.json` and no env layers. These implicit migrations

@@ -36,7 +36,8 @@ The preview's `data` has these stable fields:
 | --- | --- |
 | `version` | Integer `1`; consumers must reject unsupported versions. |
 | `project` | `projectRoot`, `projectDir`, `projectName` and `serviceNames`; paths are absolute and canonical. |
-| `status` | `ready` for unfinished migration work; `complete` when migration has completed; `recovery_required` for interrupted cleanup or rollback. |
+| `status` | `ready` for unfinished migration work; `complete` when migration has completed; `recovery_required` for interrupted cleanup/rollback or an unavailable deferred Compose repair. |
+| `composeRepair` | Optional `"unavailable"` when completed env migration still has Compose references but their repair cannot be verified. The preview exits 0 with no file actions; apply still refuses. Existing env layers remain usable. |
 | `action` | `preview`, or `cleanup` with `--cleanup`. |
 | `dryRun` | Always `true` for a preview. |
 | `files` | Ordered array of `{ path, action, keys, tracked }`. |
@@ -113,6 +114,16 @@ The phase retains all legacy files and clears an earlier startup proof, so
 cleanup still needs a later successful full-project run. Once the repair is
 complete, another explicit apply is a no-op.
 
+If retained legacy inputs were edited or cannot be checked, default preview and
+Doctor's plan report the deferred repair as unavailable instead of failing the
+read-only report. They do not infer new write or cleanup authority. Keep the
+legacy copies and review them privately against current layers and Compose
+references. Editing those references yourself is an alternative to restoring
+pre-migration inputs; a later explicit apply records that no repair remains,
+without rewriting the project. Such manual edits stay outside the journal and
+normal cleanup checks still apply. Snapshot rollback with `--preserve-changes`
+remains an explicit recovery option, not a prerequisite to inspect the plan.
+
 Migration refuses a Git-tracked project key path even when its file is absent
 from the worktree, including case-folded aliases such as `.Hack.Secret.Key`.
 Tracked-change consent does not allow publishing key bytes at that path.
@@ -188,6 +199,13 @@ select or merge values. Rollback can resume an incomplete restoration. An
 incomplete rollback exits 1 in both JSON and plain modes, preserving its per-file
 restoration details and leaving the journal in `rolling_back`. Project commands
 remain blocked until the same rollback completes; a restored result exits 0.
+Rollback accepts byte-identical permission tightening without requiring
+`--preserve-changes`. It restores the snapshot's original modes as well as its
+bytes, so it can undo Doctor's earlier permission repair. Every rollback result
+includes a fixed `warnings` entry to run `hack doctor --fix --path <project>`
+after recovery to review the restored permissions; both JSON and plain output
+carry it. The snapshot's permission metadata is never rewritten to hide that
+original state.
 Keep the manifest, blobs and journal together until the upgrade is accepted.
 Neither file-level atomic writes nor cooperative
 locks protect against an unrelated process replacing files outside Hack's locks.

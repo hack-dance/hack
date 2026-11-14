@@ -515,7 +515,9 @@ key, cannot be removed. Changed layers require another full-project run.
 Rollback uses `env migrate --rollback-manifest <manifest>` with the path returned
 by apply. It refuses later edits unless `--preserve-changes` is explicit; that
 option retains those bytes privately and reports their recovery paths. An
-incomplete rollback exits nonzero and must be resumed. See the
+incomplete rollback exits nonzero and must be resumed.
+Rollback also restores original file permissions and reports a warning to run
+`hack doctor --fix --path /absolute/project` after recovery to review them. See the
 [preview and recovery contract](https://github.com/hack-dance/hack/blob/a87b13bf7fdf01811efe33e97dfc27e1b39e87a3/docs/reference/env-migration.md) for the
 versioned JSON and partial-cleanup recovery rules.
 

@@ -4325,6 +4325,9 @@ async function buildEnvMigrationPlanStep(opts: {
         composeFile,
       }),
     });
+    if (preview.composeRepair === "unavailable") {
+      return "Compose repair unavailable: keep legacy copies and review their values privately against current layers and Compose references, or explicitly restore the snapshot with --preserve-changes.";
+    }
     if (
       preview.files.some(
         (file) => file.action === "change" && file.path === composeFile

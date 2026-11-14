@@ -555,7 +555,6 @@ mod tests {
     /// A trusted fake daemon provides rows; only native ps uses the fake CLI.
     #[test]
     fn live_source_reads_native_rows_with_native_backend() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "hack-desktop-source-{}-{}",
             std::process::id(),
@@ -566,7 +565,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let hack = dir.join("hack");
-        std::fs::write(
+        crate::test_support::script(
             &hack,
             r#"#!/bin/sh
 case "$1" in
@@ -575,9 +574,7 @@ case "$1" in
   ps) if [ "$HACK_RUNTIME_BACKEND" = native ]; then echo '{"ok":true,"data":{"backend":"native","status":"pending","items":[]}}'; else echo '{"ok":false,"error":{"code":"E_NATIVE_PROJECT_UNSUPPORTED","message":"m"}}'; exit 1; fi ;;
 esac
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // Complete macOS first-launch scanning before the fake daemon's
         // bounded accept window starts. --version has no fixture effects.
         CliRunner::new(&hack)
@@ -616,7 +613,6 @@ esac
 
     #[test]
     fn live_source_rejects_a_payload_without_projects() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "hack-desktop-source-empty-{}-{}",
             std::process::id(),
@@ -627,12 +623,10 @@ esac
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let hack = dir.join("hack");
-        std::fs::write(
+        crate::test_support::script(
             &hack,
             "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0' ;; projects) echo '{}' ;; esac\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         CliRunner::new(&hack)
             .version(Duration::from_secs(60))
             .unwrap();
@@ -822,17 +816,14 @@ esac
     fn lifecycle_actions_run_to_completion_without_an_app_deadline() {
         // A Start slower than any read timeout still completes; Open keeps
         // its bounded limit. (The CLI owns lifecycle timeouts.)
-        use std::os::unix::fs::PermissionsExt;
         let b = base("lifecycle");
         let p = b.join("p");
         make_project(&p, ".hack", "docker-compose.yml");
         let hack = b.join("hack");
-        std::fs::write(
+        crate::test_support::script(
             &hack,
             "#!/bin/sh\nsleep 1\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let src = LiveSource {
             runner: CliRunner::new(&hack),
             daemon: None,

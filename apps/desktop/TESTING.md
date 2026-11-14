@@ -1,0 +1,53 @@
+# Desktop process tests
+
+Run `bash scripts/test.sh` from `apps/desktop`. It checks the exact nextest pin
+from the repository installer, runs the workspace tests in separate processes
+with zero retries, then runs doctests. Each invocation creates and removes its
+own HOME/HACK_HOME. Both desktop CI jobs use this command. To qualify a native
+Mac, run `HACK_DESKTOP_TEST_REPETITIONS=200 bash scripts/test.sh`; preserve the
+complete output and exact commit. Three consecutive green hosted macOS desktop
+jobs are a separate acceptance gate.
+
+The default threaded libtest runner is not the qualification route. Tests can
+write executables and create descriptors concurrently within a single process;
+Rust 1.98.1 on Apple creates a pipe and sets close-on-exec in later calls. Linux
+uses atomic `pipe2(O_CLOEXEC)`. Separate test processes prevent one test's open
+fixture writer or pipe-creation window from being inherited by another test's
+child. Executable fixtures are also written to a private pending filename,
+flushed, closed, marked executable, then renamed into place before use. Existing
+first-launch warmups remain outside timed observations.
+
+## Reported symptoms and what they prove
+
+| Symptom | Interpretation and coverage |
+| --- | --- |
+| Fake CLI `NotFound` | The runner received a spawn ENOENT, not proof that the fixture pathname was absent. An unavailable script interpreter or a transient executable-launch failure can also produce ENOENT. The precise origin in the reported Mac runs was not captured; do not label it proven descriptor leakage. Separate test processes and closed-before-publish scripts remove cross-test writer inheritance. |
+| Fake CLI never started | No ready marker was written before a product timeout. This can reflect startup scheduling or failed launch. Warmups, process isolation and the ready marker distinguish startup from tested cleanup; the timeout contract is unchanged. |
+| Fake daemon `WouldBlock` (Darwin error 35) | The socket read deadline expired before the request arrived. This is a socket scheduling symptom, not a spawn ENOENT. Version warmups precede the server's accept deadline; per-test processes remove cross-test descriptor interference. |
+| Slow stream Drop / late pipe EOF | An inherited pipe writer can keep a reader alive after the intended writer exits. The Apple product boundary below closes unlisted descriptors. #843 separately replaces the tight elapsed-time oracle with reader completion and process retirement under a generous deadline. |
+
+These are evidence boundaries, not a claim that every observed failure has one
+proven cause. Linux checks and Apple-target compilation do not establish Mac
+reliability. The 200-run native result and three hosted results must be recorded
+before HACK-2243 acceptance.
+
+## Product spawning
+
+Test isolation alone cannot protect the multi-threaded application. The Apple
+CLI runner uses `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`, explicitly
+installing only null stdin and the two output pipes, a fresh process group, cwd,
+and the authored environment overrides. It preserves the normal SIGPIPE default
+and inherited signal mask. Pipe/action/attribute ownership uses RAII; waiting
+reaps the owned child and caches its status. Linux keeps standard `Command`.
+
+A runner-only mutex is insufficient because GPUI or another library can open a
+descriptor outside it. The native regression deliberately holds an inheritable
+high-numbered descriptor open: the standard-spawn control must see it; the app's
+spawn must not. A second native regression checks argv, environment, cwd, null
+stdin, separate stderr and process-group identity. They use only fixed system
+commands and owned fixtures, with no daemon, engine, services or network.
+
+The helper is an internal CLI-runner boundary, not a general replacement for
+`Command`: it implements the runner's fixed null/piped stdio and process-group
+contract. If a future runner adds environment clearing or other Command options,
+it must carry those explicitly into this boundary as well.

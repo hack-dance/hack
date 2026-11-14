@@ -172,6 +172,7 @@ import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
 import {
   type AdminPlan,
+  classifyDockerInfo,
   planGlobalTrust,
   type TrustPlanDeps,
 } from "./global-admin-plan.ts";
@@ -3457,12 +3458,12 @@ function trustPlanDeps(): TrustPlanDeps {
     ...(isLinux() ? { linuxHost: createLinuxTrustHost() } : {}),
     prepareLinux: prepareLinuxSystemTrust,
     dockerAnswers: async () =>
-      (
+      classifyDockerInfo(
         await exec(["docker", "info", "--format", "{{.ServerVersion}}"], {
           stdin: "ignore",
           timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
-        }).catch(() => ({ exitCode: 127 }))
-      ).exitCode === 0,
+        }).catch(() => null)
+      ),
     // The export's own selector (exportCaddyLocalCaCert), read without
     // writing: no single container means the export keeps the current file.
     readExportSource: async () => {

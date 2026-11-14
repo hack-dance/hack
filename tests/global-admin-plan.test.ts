@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   type AdminPlan,
+  classifyDockerInfo,
   planGlobalTrust,
   type TrustPlanDeps,
 } from "../src/commands/global-admin-plan.ts";
@@ -397,4 +398,33 @@ test("macOS: the keychain phase is decided only for a CA known now; otherwise it
     complete: false,
     steps: [],
   });
+});
+
+test("macOS: a Docker probe that times out or cannot start leaves the phase unknown, never 'Docker is down'", async () => {
+  // The production mapping of the bounded probe.
+  expect(classifyDockerInfo({ exitCode: 0 })).toBe(true);
+  expect(classifyDockerInfo({ exitCode: 1 })).toBe(false);
+  for (const result of [{ exitCode: 124 }, { exitCode: 127 }, null]) {
+    expect(classifyDockerInfo(result)).toBe("unknown");
+  }
+  // A slow Docker with a trusted export: the run may still copy a different
+  // CA, so the plan is blocked and lists no root step, not complete.
+  const plan = await planGlobalTrust(
+    trustDeps({
+      platform: "darwin",
+      dockerAnswers: async () =>
+        await Promise.resolve(classifyDockerInfo({ exitCode: 124 })),
+      readExportSource: async () => {
+        throw new Error("not reached");
+      },
+      prepareMac: async (opts) =>
+        await prepareMacTrust({
+          ...opts,
+          checkTrust: async () =>
+            await Promise.resolve({ trusted: true, installable: true }),
+        }),
+    })
+  );
+  expect(plan).toMatchObject({ complete: false, refused: null });
+  expect(rootSteps(plan)).toEqual([]);
 });

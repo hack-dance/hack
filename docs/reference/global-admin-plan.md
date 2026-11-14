@@ -86,7 +86,10 @@ macOS:
   keychain step decided now. Otherwise, or when it cannot be read, the keychain
   phase is blocked (`complete: false`, no root argv).
 - When Docker is down and there is no export, the run starts Docker and exports
-  first: blocked. With an export and Docker down, the current file decides.
+  first: blocked. With an export and Docker confirmed down (its `docker info`
+  completed and failed), the current file decides. When `docker info` times out
+  or cannot start, the run's own unbounded probe may still find Docker, so the
+  keychain phase is blocked.
 - An export the keychain step would reject (expired, malformed) makes the plan
   `refused`, as the run exits 1.
 - If the keychain already trusts the CA: no root step. Otherwise

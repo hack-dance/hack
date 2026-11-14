@@ -38,6 +38,20 @@ import {
 
 export const ADMIN_PLAN_SCHEMA = "hack.global-admin-plan.v1";
 
+/**
+ * A bounded `docker info` result as the plan reads it: exit 0 answers;
+ * another completed exit is a definite no; a timeout (124), a failure to
+ * start (127, or no result) is unknown, never "down".
+ */
+export function classifyDockerInfo(
+  result: { readonly exitCode: number } | null
+): boolean | "unknown" {
+  if (result === null || result.exitCode === 124 || result.exitCode === 127) {
+    return "unknown";
+  }
+  return result.exitCode === 0;
+}
+
 export type PlanStep = {
   /** 1-based position in the run. */
   readonly order: number;
@@ -152,8 +166,12 @@ export type TrustPlanDeps = {
     readonly ca: ValidatedCa;
     readonly manualCertPath: string;
   }) => Promise<PreparedLinuxSystemTrust>;
-  /** macOS: whether `docker info` answers (bounded). */
-  readonly dockerAnswers: () => Promise<boolean>;
+  /**
+   * macOS: whether `docker info` answers: true, false when it completed and
+   * said no, "unknown" when it timed out or could not start (the real run's
+   * own probe has no deadline, so a slow Docker may still answer it).
+   */
+  readonly dockerAnswers: () => Promise<boolean | "unknown">;
   /**
    * macOS, Docker answering: the CA the run's export would copy, selected
    * the way the export selects Caddy (the installed Compose file's `caddy`
@@ -355,7 +373,16 @@ async function macTrustCa(deps: TrustPlanDeps): Promise<{
   readonly exported: string | null;
 }> {
   const exported = await deps.readExport();
-  if (await deps.dockerAnswers()) {
+  const docker = await deps.dockerAnswers();
+  if (docker === "unknown") {
+    return {
+      steps: [],
+      exported,
+      unresolved:
+        "Docker did not answer in time; whether the run first copies a CA from the running Caddy is unknown",
+    };
+  }
+  if (docker) {
     const copy = userStep(
       "export-ca",
       `Copy the CA of the Caddy in the installed Compose stack to ${deps.certPath} (docker cp)`,

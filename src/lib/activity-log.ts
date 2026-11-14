@@ -9,7 +9,10 @@ import {
   readProjectsRegistry,
   selectRegisteredProjectByName,
 } from "./projects-registry.ts";
-import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
+import {
+  ProjectsRegistryLockTimeoutError,
+  withProjectsRegistryLock,
+} from "./projects-registry-lock.ts";
 
 /**
  * The activity log (HACK-2218): `<hack home>/activity.jsonl`, one JSON line
@@ -42,7 +45,8 @@ export const ACTIVITY_SCHEMA_VERSION = 1;
 export const ACTIVITY_LINE_LIMIT = 4096;
 /** Size at which the current file becomes the kept generation. */
 export const ACTIVITY_ROTATE_BYTES = 1024 * 1024;
-const ROTATE_LOCK_WAIT_MS = 2000;
+/** How long an append waits for the log lock before appending without it. */
+const APPEND_LOCK_WAIT_MS = 2000;
 
 export const ACTIVITY_ACTIONS = ["up", "down", "restart", "autostart"] as const;
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
@@ -226,33 +230,33 @@ export function encodeActivityRecord(record: ActivityRecord): Buffer {
   }
 }
 
+/** Attempts to land a record in a file that is still linked (fallback). */
+const APPEND_ATTEMPTS = 3;
+
+type LogFile = Awaited<ReturnType<typeof open>>;
+
+type OpenedLog = {
+  readonly file: LogFile;
+  readonly size: number;
+  readonly ino: number;
+  readonly dev: number;
+};
+
 /**
- * Append one record. Throws on any failure (callers swallow it): a symlinked
- * or non-regular file, one owned by another user, or a short write.
+ * Open `path` for appending and enforce the private-file policy on the
+ * descriptor: never through a symlink, a regular file of this user, mode
+ * 0600 (a looser one is tightened). Throws otherwise.
  */
-export async function appendActivityRecord(opts: {
-  readonly record: ActivityRecord;
-  readonly path?: string;
-  readonly rotateBytes?: number;
-}): Promise<void> {
-  const path = opts.path ?? resolveActivityPath();
-  const line = encodeActivityRecord(opts.record);
-  if (line.byteLength > ACTIVITY_LINE_LIMIT) {
-    throw new Error("Activity record exceeds the line limit");
-  }
-  const dir = resolve(path, "..");
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await rotateIfFull({
-    path,
-    incoming: line.byteLength,
-    rotateBytes: opts.rotateBytes ?? ACTIVITY_ROTATE_BYTES,
-  });
+async function openPrivateLog(opts: {
+  readonly path: string;
+  readonly create: boolean;
+}): Promise<OpenedLog> {
   // Read-write only to look at the last byte; every write appends.
   const file = await open(
-    path,
+    opts.path,
     constants.O_RDWR |
       constants.O_APPEND |
-      constants.O_CREAT |
+      (opts.create ? constants.O_CREAT : 0) |
       constants.O_NOFOLLOW |
       constants.O_NONBLOCK,
     0o600
@@ -266,50 +270,139 @@ export async function appendActivityRecord(opts: {
     if ((info.mode & 0o077) !== 0) {
       await file.chmod(0o600);
     }
-    // After a torn write (a crash or a full disk mid-line) the file does not
-    // end in a newline: start a fresh line so this record stays whole. Still
-    // one write. Seen during another writer's append this can leave a blank
-    // line, which readers skip; appends themselves never interleave.
-    let bytes = line;
-    if (info.size > 0) {
-      const last = Buffer.alloc(1);
-      await file.read(last, 0, 1, info.size - 1);
-      if (last[0] !== 0x0a) {
-        bytes = Buffer.concat([Buffer.from("\n"), line]);
-      }
-    }
-    const { bytesWritten } = await file.write(bytes, 0, bytes.byteLength);
-    if (bytesWritten !== bytes.byteLength) {
-      throw new Error("Short activity write");
-    }
-  } finally {
+    return { file, size: info.size, ino: info.ino, dev: info.dev };
+  } catch (error: unknown) {
     await file.close();
+    throw error;
   }
 }
 
-async function rotateIfFull(opts: {
-  readonly path: string;
-  readonly incoming: number;
-  readonly rotateBytes: number;
+/**
+ * Append one record. Throws on any failure (callers swallow it): a symlinked
+ * or non-regular file, one owned by another user, or a short write.
+ *
+ * Appends and rotation take the same lock (`<path>.lock`), so a rotation
+ * never retires a file between a writer's open and its write: a completed
+ * append is lost only to retention, after a later rotation has kept a full
+ * newer generation. When the lock stays busy past its short wait, the record
+ * is appended without it and without rotating; then the descriptor's link
+ * count is checked after the write, and a record that landed in a retired
+ * (unlinked) file is appended again.
+ */
+export async function appendActivityRecord(opts: {
+  readonly record: ActivityRecord;
+  readonly path?: string;
+  readonly rotateBytes?: number;
+  /** Tests only: runs after the file is opened, before the write. */
+  readonly afterOpen?: () => Promise<void>;
+  /** Tests only: the lock wait. */
+  readonly lockWaitMs?: number;
 }): Promise<void> {
-  const before = await lstat(opts.path).catch(() => null);
-  if (!before?.isFile() || before.size + opts.incoming <= opts.rotateBytes) {
-    return;
+  const path = opts.path ?? resolveActivityPath();
+  const line = encodeActivityRecord(opts.record);
+  if (line.byteLength > ACTIVITY_LINE_LIMIT) {
+    throw new Error("Activity record exceeds the line limit");
   }
-  await withProjectsRegistryLock({
-    lockPath: `${opts.path}.lock`,
-    label: "activity log",
-    timeoutMs: ROTATE_LOCK_WAIT_MS,
-    run: async () => {
-      // Another writer may have rotated while this one waited.
-      const info = await lstat(opts.path).catch(() => null);
-      if (info?.isFile() && info.size + opts.incoming > opts.rotateBytes) {
+  await mkdir(resolve(path, ".."), { recursive: true, mode: 0o700 });
+  let locked = false;
+  try {
+    await withProjectsRegistryLock({
+      lockPath: `${path}.lock`,
+      label: "activity log",
+      timeoutMs: opts.lockWaitMs ?? APPEND_LOCK_WAIT_MS,
+      run: async () => {
+        locked = true;
+        await appendHoldingLock({
+          path,
+          line,
+          rotateBytes: opts.rotateBytes ?? ACTIVITY_ROTATE_BYTES,
+          afterOpen: opts.afterOpen,
+        });
+      },
+    });
+  } catch (error: unknown) {
+    if (locked || !(error instanceof ProjectsRegistryLockTimeoutError)) {
+      throw error;
+    }
+    await appendWithoutLock({ path, line, afterOpen: opts.afterOpen });
+  }
+}
+
+async function appendHoldingLock(opts: {
+  readonly path: string;
+  readonly line: Buffer;
+  readonly rotateBytes: number;
+  readonly afterOpen?: () => Promise<void>;
+}): Promise<void> {
+  let opened = await openPrivateLog({ path: opts.path, create: true });
+  try {
+    if (
+      opened.size > 0 &&
+      opened.size + opts.line.byteLength > opts.rotateBytes
+    ) {
+      // Keep the file just checked (0600, this user's) as the generation,
+      // only if the name still points at it.
+      const named = await lstat(opts.path);
+      if (named.ino === opened.ino && named.dev === opened.dev) {
         await rename(opts.path, `${opts.path}.1`);
       }
-    },
-  }).catch(() => {
-    // Busy or unavailable: append to the current file; a later write rotates.
-  });
+      await opened.file.close();
+      opened = await openPrivateLog({ path: opts.path, create: true });
+    }
+    await opts.afterOpen?.();
+    await writeLine({ file: opened.file, size: opened.size, line: opts.line });
+  } finally {
+    await opened.file.close();
+  }
+}
+
+async function appendWithoutLock(opts: {
+  readonly path: string;
+  readonly line: Buffer;
+  readonly afterOpen?: () => Promise<void>;
+}): Promise<void> {
+  for (let attempt = 1; attempt <= APPEND_ATTEMPTS; attempt += 1) {
+    const opened = await openPrivateLog({ path: opts.path, create: true });
+    try {
+      if (attempt === 1) {
+        await opts.afterOpen?.();
+      }
+      await writeLine({
+        file: opened.file,
+        size: opened.size,
+        line: opts.line,
+      });
+      if ((await opened.file.stat()).nlink > 0) {
+        return;
+      }
+    } finally {
+      await opened.file.close();
+    }
+  }
+  throw new Error("Activity record landed only in retired files");
+}
+
+async function writeLine(opts: {
+  readonly file: LogFile;
+  readonly size: number;
+  readonly line: Buffer;
+}): Promise<void> {
+  // After a torn write (a crash or a full disk mid-line) the file does not
+  // end in a newline: start a fresh line so this record stays whole. Still
+  // one write. A writer without the lock that looks during another append
+  // can leave a blank line, which readers skip; appends never interleave.
+  let bytes = opts.line;
+  if (opts.size > 0) {
+    const last = Buffer.alloc(1);
+    await opts.file.read(last, 0, 1, opts.size - 1);
+    if (last[0] !== 0x0a) {
+      bytes = Buffer.concat([Buffer.from("\n"), opts.line]);
+    }
+  }
+  const { bytesWritten } = await opts.file.write(bytes, 0, bytes.byteLength);
+  if (bytesWritten !== bytes.byteLength) {
+    throw new Error("Short activity write");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -416,8 +509,9 @@ async function openPrivate(path: string): Promise<PrivateFile | null> {
   }
   try {
     const info = await file.stat();
-    if (!info.isFile()) {
-      throw new Error("Activity log is not a regular file");
+    const uid = process.getuid?.();
+    if (!info.isFile() || (uid !== undefined && info.uid !== uid)) {
+      throw new Error("Activity log is not this user's regular file");
     }
     return { file, info };
   } catch (error: unknown) {
@@ -444,7 +538,18 @@ export function parseActivityText(text: string): ActivityRecord[] {
       continue;
     }
     if (isActivityRecord(parsed)) {
-      records.push(parsed);
+      // Only the known fields: a line edited by hand cannot add others.
+      records.push({
+        v: parsed.v,
+        ts: parsed.ts,
+        project: parsed.project,
+        branch: parsed.branch,
+        action: parsed.action,
+        origin: parsed.origin,
+        outcome: parsed.outcome,
+        failed_services: [...parsed.failed_services],
+        duration_ms: parsed.duration_ms,
+      });
     }
   }
   return records;

@@ -2,9 +2,9 @@
 
 Hack keeps a short history of project lifecycle actions: every `hack up`,
 `hack down` and `hack restart`, on the Compose and the native backend alike.
-`hack activity` reads it. The desktop app's Activity tab uses it, and so can
-any script that wants to know what was started or stopped, when, by whom and
-how it ended.
+`hack activity` reads it. It is meant for the planned desktop app's Activity
+tab, and for any script that wants to know what was started or stopped, when,
+by whom and how it ended.
 
 ## Reading it
 
@@ -63,23 +63,31 @@ rather than written.
 
 ## Durability and concurrency
 
-- Each record is one `write(2)` of a whole line, at most 4,096 bytes, on a
-  file opened with `O_APPEND`. Concurrent Hack commands therefore never
-  interleave within a line. If the file does not end in a newline (a crash or
-  full disk mid-write), the next record starts on a fresh line; during a
-  concurrent append this check can leave a blank line, which readers skip.
-- The file is created with mode 0600. An existing file with group or other
-  access is tightened before writing. A symlink, a non-regular file or a file
-  owned by another user is refused.
-- When the file would pass 1 MiB, it is renamed to `activity.jsonl.1`,
-  replacing the previous generation, under a short lock. One generation is
-  kept, so the log holds roughly the last 1 to 2 MiB of actions. A writer that
-  had the old file open finishes its line there; readers read both files.
-  A reader opens both files before reading either; if a rotation happens
+- Each record is one `write(2)` of a whole line, at most 4,096 bytes (plus a
+  leading newline after a torn line), on a file opened with `O_APPEND`.
+- Appends and rotation take the same short lock (`activity.jsonl.lock`), so a
+  rotation never retires a file between a writer's open and its write. A
+  completed record is lost only to retention: after a later rotation has kept
+  a full newer generation.
+- If the lock stays busy for 2 seconds, the record is appended without it and
+  without rotating. Concurrent appends still never interleave within a line.
+  After that write the writer checks that the file it wrote is still linked;
+  if a rotation retired it meanwhile, the record is appended again.
+- If the file does not end in a newline (a crash or full disk mid-write), the
+  next record starts on a fresh line. An unlocked writer that looks during
+  another append can leave a blank line, which readers skip.
+- Both files are this user's regular files with mode 0600, opened without
+  following a symlink. A writer tightens a looser current file before writing
+  or keeping it as the generation; a symlink, a non-regular file or another
+  user's file is refused by writers and by `hack activity`.
+- When the current file would pass 1 MiB it is renamed to `activity.jsonl.1`,
+  replacing the previous generation, so the log holds roughly the last 1 to 2
+  MiB of actions.
+- A reader opens both files before reading either; if a rotation happens
   between the two opens it sees the same file twice and opens the pair again,
-  so a read never returns the same records twice.
-- Readers skip any line that is not a complete, valid record, such as a torn
-  last line.
+  so a read never returns the same records twice. It returns only the fields
+  above and skips any line that is not a complete, valid record, such as a
+  torn last line.
 - Recording is best effort. A write that fails (full disk, unwritable Hack
   home, refused file) is dropped silently and never changes the command's
   output, envelope or exit code.

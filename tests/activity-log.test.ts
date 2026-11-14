@@ -389,3 +389,90 @@ test("a rotation between the reader's two opens never duplicates records", async
   expect(new Set(durations).size).toBe(durations.length);
   expect(durations).toEqual([6, 5, 4, 3]);
 });
+
+test("appends and rotation are serialized: a paused writer holds off the next one", async () => {
+  let second: Promise<void> | null = null;
+  let secondDone = false;
+  await appendActivityRecord({
+    path,
+    record: record({ project: "first" }),
+    afterOpen: async () => {
+      second = appendActivityRecord({
+        path,
+        rotateBytes: 1,
+        record: record({ project: "second" }),
+      }).then(() => {
+        secondDone = true;
+      });
+      await Bun.sleep(300);
+      // The second writer (which would rotate) waits for the first's write.
+      expect(secondDone).toBe(false);
+    },
+  });
+  await second;
+  expect(secondDone).toBe(true);
+  // The second rotated after the first wrote: both are readable.
+  expect(
+    (await readActivity({ path, limit: 10 })).map((e) => e.project)
+  ).toEqual(["second", "first"]);
+});
+
+test("without the lock, a record that landed in a retired file is appended again", async () => {
+  await appendActivityRecord({ path, record: record({ project: "seed" }) });
+  let release: (() => void) | null = null;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  // A writer that holds the lock for the whole test.
+  const holder = appendActivityRecord({
+    path,
+    record: record({ project: "holder" }),
+    afterOpen: () => held,
+  });
+  await Bun.sleep(50);
+  await appendActivityRecord({
+    path,
+    lockWaitMs: 100,
+    record: record({ project: "late" }),
+    // Two rotations by other writers retire the file this one opened.
+    afterOpen: async () => {
+      await rename(path, `${path}.1`);
+      await writeFile(path, "", { mode: 0o600 });
+      await rename(path, `${path}.1`);
+    },
+  });
+  (release as unknown as () => void)();
+  await holder;
+  const projects = (await readActivity({ path, limit: 10 })).map(
+    (e) => e.project
+  );
+  expect(projects).toContain("late");
+  expect(projects.filter((p) => p === "late")).toHaveLength(1);
+});
+
+test("rotation keeps a loose current file only after tightening it to 0600", async () => {
+  await appendActivityRecord({ path, record: record({ project: "old" }) });
+  await chmod(path, 0o644);
+  await appendActivityRecord({
+    path,
+    rotateBytes: 1,
+    record: record({ project: "new" }),
+  });
+  expect((await lstat(`${path}.1`)).mode & 0o777).toBe(0o600);
+  expect((await lstat(path)).mode & 0o777).toBe(0o600);
+  expect(
+    (await readActivity({ path, limit: 10 })).map((e) => e.project)
+  ).toEqual(["new", "old"]);
+});
+
+test("the reader returns only the known fields", async () => {
+  await mkdir(join(root, "home"), { recursive: true });
+  const line = JSON.stringify({
+    ...record(),
+    extra: "/somewhere/private",
+  });
+  await writeFile(path, `${line}\n`, { mode: 0o600 });
+  const [entry] = await readActivity({ path, limit: 1 });
+  expect(entry).toBeDefined();
+  expect(Object.hasOwn(entry as object, "extra")).toBe(false);
+});

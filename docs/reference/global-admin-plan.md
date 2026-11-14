@@ -16,9 +16,12 @@ to run the listed commands.
   the real command uses. The real command then runs the steps that code prepared,
   so a planned root step is the spawned one (tested at the spawn boundary).
 - `argv` is the spawned argv after privilege wrapping:
-  - Linux: Hack's vetted `sudo` (real path, root-owned, setuid), then
+  - Linux trust and DNS: Hack's vetted `sudo` (real path, root-owned, setuid), then
     `/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C`, then the
     command.
+  - Linux Docker system-service startup: `sudo` from `PATH`, then
+    `systemctl start docker`, with the inherited environment, matching the
+    existing install command.
   - macOS: `sudo` from `PATH`, then the command.
 - `stdin` gives the size and SHA-256 of what a step reads on stdin (for Linux
   trust, the verified CA PEM), never the bytes. The step's own arguments carry the
@@ -113,7 +116,8 @@ The initial user steps prepare optional tools, ensure shared networks and
 materialize the Compose files and schemas. When Docker is stopped, the plan uses
 the same detected startup backend as the command. Linux system-service startup
 is a conditional root step (`sudo systemctl start docker`); desktop-backend
-startup is a user step. Unknown status or backend leaves startup incomplete.
+startup is a user step. Unknown status leaves startup incomplete. Docker
+confirmed down with no detected backend is refused with install/start guidance.
 Compose startup and the optional
 user daemon need no administrator rights. Homebrew formula installation is a
 user step; any separate Homebrew authentication is outside Hack's root argv.

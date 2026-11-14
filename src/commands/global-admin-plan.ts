@@ -9,7 +9,8 @@
  *   (`prepareLinuxSystemTrust`, `prepareMacTrust`), whose prepared argv the
  *   real command then runs; nothing here rebuilds argv separately.
  * - A root step's `argv` is the spawned argv, after privilege wrapping (the
- *   vetted sudo and fixed environment on Linux; PATH `sudo` on macOS), and
+ *   vetted sudo and fixed environment for Linux trust/DNS; PATH `sudo` for
+ *   Docker service startup and macOS), and
  *   `stdin` gives the byte count and SHA-256 of what it is fed.
  * - A step that only runs under a condition says so in `when`; alternatives
  *   (a probe that can skip the next step) are marked. Where a later phase
@@ -35,7 +36,10 @@ import type {
   PreparedLinuxSystemTrust,
 } from "../lib/linux-trust-setup.ts";
 import { trustedSudoInvocation } from "../lib/privileged-sudo.ts";
-import type { DockerBackend } from "../lib/runtime-guidance.ts";
+import {
+  type DockerBackend,
+  formatDockerConnectionGuidance,
+} from "../lib/runtime-guidance.ts";
 import {
   macAuthorizationArgv,
   macDnsmasqNeedsStart,
@@ -223,14 +227,21 @@ export async function planGlobalInstall(
   ];
   const blocked: AdminPlan["blocked"][number][] = [];
   const docker = await deps.dockerStartup();
-  if (
-    docker.reachable === "unknown" ||
-    (!docker.reachable && docker.backend === null)
-  ) {
+  if (docker.reachable === false && docker.backend === null) {
+    return plan({
+      ...base,
+      refused: formatDockerConnectionGuidance({
+        backend: null,
+        failureText:
+          "Docker does not seem to be running and no Docker backend was detected.",
+        retryCommand: "hack global install",
+      }),
+    });
+  }
+  if (docker.reachable === "unknown") {
     blocked.push({
       phase: "Docker startup",
-      reason:
-        "Docker reachability or its startup backend could not be determined",
+      reason: "Docker reachability could not be determined",
       prerequisite:
         "A readable Docker status and detected startup backend, then plan again",
     });

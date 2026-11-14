@@ -213,10 +213,6 @@ test("install refuses before probing, and unknown network, bridge, resolver or s
         Promise.resolve({ reachable: "unknown", backend: null }),
       useStaticIps: () => Promise.resolve("unknown"),
     },
-    {
-      dockerStartup: () => Promise.resolve({ reachable: false, backend: null }),
-      useStaticIps: () => Promise.resolve("unknown"),
-    },
     { useStaticIps: () => Promise.resolve("unknown") },
     { linuxHost: dnsHost([], { link: null }) },
     { unreadableLinux: () => true },
@@ -234,6 +230,13 @@ test("install refuses before probing, and unknown network, bridge, resolver or s
   expect(skipped.complete).toBe(true);
   expect(rootSteps(skipped)).toEqual([]);
   expect(skipped.steps.some((step) => step.id === "skip-dns")).toBe(true);
+  const noBackend = await planGlobalInstall(
+    deps({
+      dockerStartup: () => Promise.resolve({ reachable: false, backend: null }),
+    })
+  );
+  expect(noBackend.refused).toContain("Install or start Docker");
+  expect(noBackend).toMatchObject({ complete: false, blocked: [], steps: [] });
 });
 
 test("macOS install plans terminal retry alternatives even with non-TTY planning stdin", async () => {

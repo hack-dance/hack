@@ -35,6 +35,7 @@ import {
 import {
   acquireLegacyEnvCleanupContext,
   assertMachineLocalFileGitPrivate,
+  assertProjectEnvKeyUntracked,
   assertProjectEnvLayerPaths,
   isGitTrackedOrUnknownProjectPath,
   LegacyEnvCleanupError,
@@ -597,6 +598,9 @@ async function publishEntry(
   entry: Publication
 ): Promise<void> {
   const run = async () => {
+    if (entry.kind === "key") {
+      await assertProjectEnvKeyUntracked({ keyPath: entry.path });
+    }
     await checkPrivateDirectory(dirname(entry.payload));
     const current = await readState(entry.path);
     if (same(current.state, entry)) {
@@ -636,6 +640,9 @@ async function publishEntry(
       mode: entry.mode ?? 0o600,
       refusal: refuse,
       beforeRename: async () => {
+        if (entry.kind === "key") {
+          await assertProjectEnvKeyUntracked({ keyPath: entry.path });
+        }
         if (!same((await readState(entry.path)).state, entry.before)) {
           throw refuse();
         }

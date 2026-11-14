@@ -29,9 +29,11 @@ import {
   resolveProjectEnvConfigForNativeSelection,
   resolveProjectEnvMetadata,
   resolveProjectEnvMetadataForNativeSelection,
+  resolveProjectEnvSharedKeyLocation,
   resolveProjectEnvSharedKeyPath,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureEnvSnapshots } from "./helpers/env-migration-fixture.ts";
@@ -597,6 +599,115 @@ async function addLegacySecret() {
   const store = await resolveSecretStore(project);
   await store.set({ key: "SEC", value: SENTINEL });
 }
+
+async function migrationFixtureGit(args: readonly string[]): Promise<void> {
+  const result = await runFixtureGit({ cwd: project.projectRoot, args });
+  expect(result.exitCode, result.stderr).toBe(0);
+}
+
+test("secret migration refuses a git-tracked absent project key before planning or writes", async () => {
+  await addLegacySecret();
+  await migrationFixtureGit(["init", "--quiet"]);
+  const keyPath = join(project.projectRoot, ".hack.secret.key");
+  await writeFile(keyPath, "synthetic indexed placeholder\n");
+  await migrationFixtureGit(["add", "--force", "--", ".hack.secret.key"]);
+  await rm(keyPath);
+  const before = await projectFiles();
+  await expect(previewEnvMigration(project)).rejects.toThrow("git-tracked");
+  await expect(
+    applyEnvMigration({
+      project,
+      snapshots: fixtureEnvSnapshots(root),
+      acceptTrackedChanges: true,
+    })
+  ).rejects.toThrow("git-tracked");
+  expect(await projectFiles()).toEqual(before);
+  expect(await Bun.file(keyPath).exists()).toBe(false);
+  expect(
+    await Bun.file(envMigrationJournalPath(project.projectRoot)).exists()
+  ).toBe(false);
+});
+
+test("key publication rechecks Git after waiting for its lock and can resume after untracking", async () => {
+  await addLegacySecret();
+  await migrationFixtureGit(["init", "--quiet"]);
+  const keyPath = join(project.projectRoot, ".hack.secret.key");
+  const preview = await previewEnvMigration(project);
+  const keyIndex = preview.files.findIndex((file) => file.path === keyPath);
+  expect(keyIndex).toBeGreaterThanOrEqual(0);
+  const location = await resolveProjectEnvSharedKeyLocation(project);
+  if (!location) {
+    throw new Error("Fixture expected a shared Git key lock");
+  }
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const reachedKey = Promise.withResolvers<void>();
+  const holder = withProjectsRegistryLock({
+    lockPath: `${location.path}.lock`,
+    run: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  await entered.promise;
+  const snapshots = fixtureEnvSnapshots(root);
+  const applying = applyEnvMigration({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+    hooks: {
+      boundary: async ({ phase, index }) => {
+        if (phase === "before_publish" && index === keyIndex) {
+          reachedKey.resolve();
+        }
+      },
+    },
+  }).then(
+    () => ({ kind: "unexpected-success" as const }),
+    (error: unknown) => ({ kind: "refused" as const, error })
+  );
+  try {
+    await Promise.race([
+      reachedKey.promise,
+      applying.then(() => {
+        throw new Error("Migration settled before reaching key publication");
+      }),
+    ]);
+    // The worktree returns to the planned absent state, but the index now
+    // tracks that name while the actual key owner lock is still held.
+    await writeFile(keyPath, "synthetic indexed placeholder\n");
+    await migrationFixtureGit(["add", "--force", "--", ".hack.secret.key"]);
+    await rm(keyPath);
+  } finally {
+    release.resolve();
+    await holder;
+    await applying;
+  }
+  const result = await applying;
+  if (!(result.kind === "refused" && result.error instanceof Error)) {
+    throw new Error("Expected a tracked-key refusal after lock acquisition");
+  }
+  expect(result.error.message).toContain("git-tracked");
+  expect(result.error.message).not.toContain(SENTINEL);
+  expect(await Bun.file(keyPath).exists()).toBe(false);
+  expect(
+    await Bun.file(join(project.projectDir, "hack.env.default.yaml")).exists()
+  ).toBe(false);
+  await migrationFixtureGit([
+    "rm",
+    "--cached",
+    "--force",
+    "--",
+    ".hack.secret.key",
+  ]);
+  expect(
+    (await apply({ project, snapshots, acceptTrackedChanges: true })).status
+  ).toBe("applied");
+  expect(
+    (await resolveProjectEnvConfig({ ...project, envName: null }))?.serviceEnv
+      .api?.SEC
+  ).toBe(SENTINEL);
+}, 20_000);
 
 test("fresh delivery refusal before unlink keeps migration complete and cleanup retryable", async () => {
   await addLegacySecret();

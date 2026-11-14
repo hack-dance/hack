@@ -5309,8 +5309,10 @@ function projectEnvTrackedKeyError(): ProjectEnvKeyRefusalError {
  * stays allowed for v4 compatibility; `hack doctor` reports the tracked key.
  * An undeterminable status (git unavailable, path outside a work tree) is not
  * treated as tracked.
+ * The index is checked even if the path is absent. Key publishers must call
+ * this again under the key owner lock immediately before publication.
  */
-async function assertProjectEnvKeyUntracked(opts: {
+export async function assertProjectEnvKeyUntracked(opts: {
   readonly keyPath: string;
 }): Promise<void> {
   const tracked = await isGitTrackedProjectEnvPath({
@@ -6421,9 +6423,7 @@ async function prepareContractMigrationKey(
     }
     const keyPath = existingPath ?? shared ?? localPath;
     extraSources.add(keyPath);
-    if (existingPath) {
-      await assertProjectEnvKeyUntracked({ keyPath });
-    }
+    await assertProjectEnvKeyUntracked({ keyPath });
     const keyText = existingPath
       ? await readLegacyProjectEnvKeyFile({ path: keyPath })
       : randomBytes(32).toString("base64url");

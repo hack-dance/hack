@@ -73,8 +73,8 @@ Hack does not bypass that prompt or include the values in the preview.
 
 ## Apply and recovery
 
-Apply takes a private snapshot of originals and absent destinations before any
-project write. The journal and staged payloads live outside working trees under
+Apply takes a private snapshot of originals and absent destinations before
+publishing any migration target. The journal and staged payloads live outside working trees under
 Hack's private data directory. The snapshot manifest and journal hold only names,
 paths, statuses, modes, sizes and SHA-256 checksums. Original bytes and staged
 payloads are separate private files; they can contain values and keys and must
@@ -90,11 +90,16 @@ all legacy files. Doctor can also perform its existing hygiene repairs before
 migration, such as adding ignore rules or tightening permissions; those separate
 doctor repairs are outside the env migration journal. Use `hack env migrate
 --apply` when the preview and rollback must cover only the migration's writes.
-Implicit migrations from env, session and startup commands also
-keep legacy files and resume an unfinished journal; they preserve existing
+Implicit migrations from env, session and startup commands also use this journal
+and keep legacy files; they preserve existing
 Compose `env_file` references.
 Implicit commands refuse an unfinished apply or rollback journal before using
 partially published layers. Resume the explicit apply or rollback command first.
+
+Migration refuses a Git-tracked project key path even when its file is absent
+from the worktree. Tracked-change consent does not allow publishing key bytes at
+that path. Git tracking is checked again under the key lock before publication;
+keep the key out of the index before resuming a refused migration.
 
 Completed publication payloads are removed; retries also sweep receipted orphan
 staging directories. Unknown or edited entries are retained, reported as

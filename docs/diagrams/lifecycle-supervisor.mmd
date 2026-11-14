@@ -1,0 +1,31 @@
+---
+title: Lifecycle supervisor · ownership and recovery
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Absent
+  Absent --> Starting : Reserve [locks acquired]
+  Starting --> Running : Spawn [identity durable]
+  Starting --> Exited : StartFailure
+  Running --> Recoverable : SupervisorDeath
+  Recoverable --> Recoverable : Retry [duplicate refused]
+  Running --> Orphaned : GuardDeath [members live]
+  Recoverable --> Orphaned : GuardDeath [members live]
+  Recoverable --> Stopping : Stop [identity matches]
+  Orphaned --> Stopping : RecoverStop [exact witness; capture members]
+  Orphaned --> StopUnknown : RecoverStop [identity unconfirmed]
+  Running --> Stopping : Stop [identity matches]
+  Running --> Exited : Reap [no live members]
+  Stopping --> Exited : Reap [no live members]
+  Stopping --> KillPending : Kill [grace elapsed]
+  Stopping --> Stopping : WitnessExit [captured identities retained]
+  KillPending --> Exited : Reap [no live members]
+  KillPending --> StopUnknown : StopUnknown [members live]
+  note right of Starting
+    INV identity precedes command
+  end note
+  note right of Orphaned
+    Unknown health retains ownership
+    No exact witness refuses capture
+    Live session refuses duplicate
+  end note

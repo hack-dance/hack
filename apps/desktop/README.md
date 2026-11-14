@@ -127,4 +127,3 @@ Process-cleanup regression tests use a generous 60-second scheduling deadline,
 then check process retirement rather than enforcing a short wall-clock latency.
 The stream-drop test also proves the reader was waiting before Drop and that
 Drop's reader join completes. These test allowances do not change CLI timeouts.
-

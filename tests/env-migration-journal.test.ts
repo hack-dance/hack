@@ -16,6 +16,7 @@ import {
   cleanupEnvMigration,
   type EnvMigrationProject,
   envMigrationJournalPath,
+  migrateLegacyEnvForCommand,
   previewEnvCleanup,
   previewEnvMigration,
   recordEnvMigrationProjectRun,
@@ -230,6 +231,38 @@ test("preview makes no writes and exactly names what apply publishes; completed 
   ).toBe("already_complete");
   expect(await projectFiles()).toEqual(after);
   expect(await readFile(result.journalPath, "utf8")).toBe(journal);
+});
+
+test("journalled implicit migration keeps undeclared Compose overlay inputs; explicit repair still refuses their loss", async () => {
+  const composePath = join(project.projectDir, "docker-compose.yml");
+  const compose =
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env.staging\n";
+  await writeFile(composePath, compose);
+  const overlayPath = join(project.projectDir, ".env.staging");
+  await writeFile(overlayPath, `UNDECLARED=${QA}\n`);
+  const before = await projectFiles();
+  // Explicit migration repairs Compose references, so it must still refuse
+  // dropping an overlay value that the contract does not carry into layers.
+  await expect(previewEnvMigration(project)).rejects.toThrow(".env.staging");
+  expect(await projectFiles()).toEqual(before);
+  const result = await migrateLegacyEnvForCommand({
+    ...project,
+    materialize: false,
+  });
+  expect(result.legacyDetected).toBe(true);
+  expect(JSON.stringify(result)).not.toContain(SENTINEL);
+  expect(JSON.stringify(result)).not.toContain(QA);
+  expect(await readFile(composePath, "utf8")).toBe(compose);
+  expect(await readFile(overlayPath, "utf8")).toBe(`UNDECLARED=${QA}\n`);
+  expect(
+    (await resolveProjectEnvConfig({ ...project, envName: null }))?.globalEnv
+      .TOKEN
+  ).toBe(SENTINEL);
+  expect(
+    JSON.parse(
+      await readFile(envMigrationJournalPath(project.projectRoot), "utf8")
+    ).state
+  ).toBe("complete");
 });
 
 test("retry sweeps only receipted staging artifacts and retains unknown contents", async () => {

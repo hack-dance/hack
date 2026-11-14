@@ -6533,7 +6533,7 @@ async function prepareContractMigration(
   const selected = await selectContractMigrationOverlays({
     ...opts,
     contract,
-    composeRepairFollows: true,
+    composeRepairFollows: opts.repairCompose !== false,
   });
   const overlayNames = selected.overlayNames;
   const store = {

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, expect } from "bun:test";
 import {
   mkdir,
   mkdtemp,
@@ -10,12 +10,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NativeAuthoredHostDeadlineError } from "../src/backends/native-authored-artifact-error.ts";
 import { nativeHookPermitVersion } from "../src/backends/native-authored-hook-journal.ts";
 import {
   createNativeAuthoredHostProcesses,
   retireNativeAuthoredHostProcesses,
 } from "../src/backends/native-authored-host-processes.ts";
 import { withNativeAuthoredProjectAdmission } from "../src/backends/native-authored-project-run.ts";
+import { isRecord } from "../src/lib/guards.ts";
 import {
   readLifecycleState,
   resolveLifecycleStatePath,
@@ -26,60 +28,67 @@ import {
   endLifecycleMuxFixtureGroups,
   writeLifecycleMuxFixture,
 } from "./helpers/lifecycle-mux-fixture.ts";
+import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
+import { createNativeFixtureCases } from "./helpers/native-fixture-cases.ts";
 
-const roots = new Set<string>();
-let unknown = false;
-let active = false;
-let unconfirmed = false;
-let restore: (() => void) | undefined;
-afterEach(async () => {
-  if (active || unknown || unconfirmed) {
-    unconfirmed = true;
-    return;
-  }
-  restore?.();
-  restore = undefined;
-  for (const root of roots) {
-    await rm(root, { recursive: true });
-  }
-  roots.clear();
+const cases = createNativeFixtureCases({
+  label: "Host process fixture",
+  defaultTimeoutMs: 20_000,
+  settlementBudgetMs: 5000,
 });
+const fixtureParent = tmpdir();
+afterAll(() => cases.drain(), 30_000);
+isolateMuxTempDir();
 async function fixture() {
+  const owner = cases.current();
+  const abort = new AbortController();
+  owner.onFailure(() => abort.abort());
   const root = await realpath(
-    await mkdtemp(join(tmpdir(), "native-host-owner-"))
+    await mkdtemp(join(fixtureParent, "native-host-owner-"))
   );
-  roots.add(root);
+  owner.root(root);
   const projectDir = join(root, ".hack");
   const bin = join(root, "bin");
   await mkdir(projectDir, { mode: 0o700 });
   await mkdir(bin);
   await writeLifecycleMuxFixture(bin);
-  const before = {
-    PATH: process.env.PATH,
-    HACK_SESSIONS_MUX: process.env.HACK_SESSIONS_MUX,
-    HACK_TEST_MUX_STATE: process.env.HACK_TEST_MUX_STATE,
-  };
-  const previousUmask = process.umask(0o077);
-  restore = () => {
-    process.umask(previousUmask);
-    for (const [key, value] of Object.entries(before)) {
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-  };
+  const before = owner.saveEnv([
+    "PATH",
+    "HACK_SESSIONS_MUX",
+    "HACK_TEST_MUX_STATE",
+  ]);
+  process.umask(0o077);
   process.env.PATH = `${bin}:${before.PATH ?? "/usr/bin:/bin"}`;
   process.env.HACK_SESSIONS_MUX = "tmux";
   const state = join(root, "mux.json");
   process.env.HACK_TEST_MUX_STATE = state;
-  const abort = new AbortController();
+  owner.onFailure(() => endLifecycleMuxFixtureGroups(state));
+  owner.settlement.record({
+    kind: "pid-file",
+    name: "host process fixture groups",
+    path: state,
+    group: true,
+    emptySettled: true,
+    parse: (text) => {
+      let value: unknown;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        return;
+      }
+      if (!(isRecord(value) && isRecord(value.windows))) {
+        return;
+      }
+      return Object.values(value.windows).flatMap((row: unknown) =>
+        isRecord(row) && typeof row.pid === "number" ? [row.pid] : []
+      );
+    },
+  });
   const deadline = performance.now() + 12_000;
   const remaining = () => {
     const value = Math.ceil(deadline - performance.now());
     if (value < 1 || abort.signal.aborted) {
-      throw new Error("expired");
+      throw new NativeAuthoredHostDeadlineError();
     }
     return value;
   };
@@ -159,21 +168,7 @@ function ownedCase(
   name: string,
   action: (f: Awaited<ReturnType<typeof fixture>>) => Promise<void>
 ) {
-  test(name, async () => {
-    if (active || unknown || unconfirmed) {
-      throw new Error("Previous host process case is unresolved");
-    }
-    active = true;
-    try {
-      const f = await fixture();
-      await action(f);
-    } catch (error) {
-      unconfirmed = true;
-      throw error;
-    } finally {
-      active = false;
-    }
-  }, 20_000);
+  cases.test(name, async () => action(await fixture()));
 }
 ownedCase(
   "Source5 private process proof starts the shipping controller and exact-token stop preserves value privacy",
@@ -202,7 +197,6 @@ ownedCase(
       });
       expect(nativeHookPermitVersion(permit)).toBe(5);
       try {
-        unknown = true;
         await owner.start();
         await owner.assertReady();
         const process = (
@@ -222,7 +216,6 @@ ownedCase(
       } finally {
         await owner.stop();
         await owner.close();
-        unknown = false;
       }
       await hooks.retire();
     });
@@ -231,6 +224,7 @@ ownedCase(
 ownedCase(
   "pre-Ready observation refuses live host records without stopping and accepts settled records without retiring",
   async (f) => {
+    let unknown = true;
     await withNativeAuthoredProjectAdmission(f.scope, async (admission) => {
       const owner = await createNativeAuthoredHostProcesses({
         scope: f.scope,
@@ -244,7 +238,6 @@ ownedCase(
         signal: f.abort.signal,
         remaining: f.remaining,
       });
-      unknown = true;
       try {
         await owner.start();
         const calls = await readFile(`${f.state}.calls`, "utf8");
@@ -303,7 +296,6 @@ ownedCase(
         signal: f.abort.signal,
         remaining: f.remaining,
       });
-      unknown = true;
       await owner.start();
       const state = await readFile(f.state, "utf8");
       const foreign = JSON.parse(state);
@@ -323,7 +315,6 @@ ownedCase(
         run,
         assertFresh: admission.assertHeld,
       });
-      unknown = false;
       const metadata = JSON.parse(
         await readFile(
           resolveLifecycleStatePath({ projectDir: f.projectDir }),
@@ -350,7 +341,6 @@ ownedCase(
         signal: f.abort.signal,
         remaining: f.remaining,
       });
-      unknown = true;
       await owner.start();
       const proof = await owner.proof(true);
       const original = `${proof.path}.preserved`;
@@ -374,7 +364,6 @@ ownedCase(
         run,
         assertFresh: admission.assertHeld,
       });
-      unknown = false;
     });
   }
 );

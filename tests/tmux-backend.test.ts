@@ -4,6 +4,10 @@ import { dirname } from "node:path";
 import { HACK_KEY_MATERIAL_VARIABLES } from "../src/lib/child-environment.ts";
 
 import type { ExecOptions } from "../src/lib/shell.ts";
+import {
+  type MuxCommandSample,
+  observeMuxCommands,
+} from "../src/mux/mux-backend.ts";
 import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
@@ -104,12 +108,25 @@ test("tmux session overrides cannot restore Hack key material through -e", async
 
 test("tmux creates lifecycle ownership through stdin, never argv", async () => {
   const backend = await loadTmuxBackend();
-  const created = await backend.createSession({
-    name: "demo",
-    cwd: "/repo",
-    env: { FAKE_API_KEY: "fake-test-key" },
-    lifecycleOwnerToken: "owner-123",
+  const samples: MuxCommandSample[] = [];
+  const created = await observeMuxCommands({
+    onSample: (sample) => {
+      samples.push(sample);
+    },
+    action: () =>
+      backend.createSession({
+        name: "demo",
+        cwd: "/repo",
+        env: { FAKE_API_KEY: "fake-test-key" },
+        lifecycleOwnerToken: "owner-123",
+      }),
   });
+  expect(samples.some((sample) => sample.operation === "new-session")).toBe(
+    true
+  );
+  expect(samples.some((sample) => sample.operation === "start-server")).toBe(
+    false
+  );
   const ownerToken = await backend.readLifecycleOwnerToken?.({ name: "demo" });
 
   expect(created.ok).toBe(true);

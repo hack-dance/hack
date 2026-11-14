@@ -31,6 +31,12 @@ export interface ExecOptions {
    * held in memory.
    */
   readonly maxStdoutBytes?: number;
+  /** Passive scalar timing only; observer failures never change command results. */
+  readonly onTiming?: (sample: {
+    readonly elapsedMs: number;
+    readonly timedOut: boolean;
+    readonly exitCode: number;
+  }) => void;
 }
 
 /** Exit code `exec` reports when `maxStdoutBytes` was exceeded. */
@@ -72,6 +78,7 @@ export async function exec(
   if (timeoutMs !== undefined && timeoutMs <= 0) {
     return { exitCode: 124, stdout: "", stderr: "" };
   }
+  const started = performance.now();
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
     env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
@@ -116,6 +123,18 @@ export async function exec(
   const exitCode = await proc.exited;
   observeCpu(exitCode);
   timeout.dispose();
+  try {
+    const observed: unknown = opts.onTiming?.(
+      Object.freeze({
+        elapsedMs: Math.max(0, performance.now() - started),
+        timedOut: timeout.didTimeout(),
+        exitCode,
+      })
+    );
+    void Promise.resolve(observed).catch(() => undefined);
+  } catch {
+    // Optional diagnostics cannot replace a command's exit or timeout outcome.
+  }
 
   if (overflowed) {
     return {

@@ -7,6 +7,7 @@ import {
   MuxCommandTimeoutError,
   type MuxSession,
   type MuxSessionCreateResult,
+  muxCommandOperation,
   runMuxCommand,
 } from "./mux-backend.ts";
 import { stageMuxEnvironment } from "./private-environment.ts";
@@ -49,6 +50,7 @@ async function execTmuxSource(
     ["tmux", "-u", "start-server", ";", "source-file", "-"],
     {
       stdin: new Blob([`${args.map(tmuxQuote).join(" ")}\n`]),
+      diagnosticOperation: muxCommandOperation(args[0]),
     }
   );
   if (result.exitCode === 0) {

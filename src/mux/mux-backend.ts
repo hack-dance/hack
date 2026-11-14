@@ -1,4 +1,56 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { type ExecOptions, type ExecResult, exec } from "../lib/shell.ts";
+
+const MUX_OPERATIONS = [
+  "list-sessions",
+  "has-session",
+  "new-session",
+  "new-window",
+  "kill-session",
+  "list-panes",
+  "list-windows",
+  "show-options",
+  "set-option",
+  "send-keys",
+  "start-server",
+] as const;
+type MuxCommandOperation = (typeof MUX_OPERATIONS)[number] | "other";
+
+/** Labels are closed even when the command itself is transported over stdin. */
+export function muxCommandOperation(
+  value: string | undefined
+): MuxCommandOperation {
+  return MUX_OPERATIONS.find((operation) => operation === value) ?? "other";
+}
+export type MuxCommandSample = Readonly<{
+  backend: "tmux" | "zellij" | "other";
+  operation: MuxCommandOperation;
+  phase: "started" | "finished";
+  elapsedMs: number;
+  timedOut: boolean;
+  exitCode: number | null;
+}>;
+const commandObservers = new AsyncLocalStorage<
+  (sample: MuxCommandSample) => void
+>();
+
+/** Scope value-free mux timings to one asynchronous caller; no global observer or command arguments. */
+export function observeMuxCommands<T>(opts: {
+  readonly onSample: (sample: MuxCommandSample) => void;
+  readonly action: () => T;
+}): T {
+  return commandObservers.run(opts.onSample, opts.action);
+}
+function recordCommand(sample: MuxCommandSample): void {
+  try {
+    const observed: unknown = commandObservers.getStore()?.(
+      Object.freeze(sample)
+    );
+    void Promise.resolve(observed).catch(() => undefined);
+  } catch {
+    // Diagnostic callbacks are passive, including when their caller has failed.
+  }
+}
 
 /** Interactive workspaces use tmux; zellij remains a legacy lifecycle-state tag until migration. */
 export type MuxBackendName = "tmux" | "zellij";
@@ -60,12 +112,29 @@ export async function runMuxCommand(
   command: readonly string[],
   opts: Omit<ExecOptions, "timeoutMs"> & {
     readonly timeoutMs?: number;
+    readonly diagnosticOperation?: MuxCommandOperation;
   } = {}
 ): Promise<ExecResult> {
+  const backend =
+    command[0] === "tmux" || command[0] === "zellij" ? command[0] : "other";
+  const selected = command[1] === "-u" ? command[2] : command[1];
+  const operation = muxCommandOperation(opts.diagnosticOperation ?? selected);
+  recordCommand({
+    backend,
+    operation,
+    phase: "started",
+    elapsedMs: 0,
+    timedOut: false,
+    exitCode: null,
+  });
   const result = await exec(command, {
     ...opts,
     stdin: opts.stdin instanceof Blob ? opts.stdin : "ignore",
     timeoutMs: opts.timeoutMs ?? muxCommandTimeoutMs(),
+    onTiming: (sample) => {
+      recordCommand({ backend, operation, phase: "finished", ...sample });
+      return opts.onTiming?.(sample);
+    },
   });
   if (result.exitCode === 124) {
     throw new MuxCommandTimeoutError(command);

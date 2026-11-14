@@ -32,6 +32,7 @@ pub struct HackApp {
     model: AppModel,
     source: Arc<dyn Source>,
     tab: usize,
+    env: hack_desktop_core::env::EnvModel,
     tail: Result<Vec<LogEntry>, String>,
     follow: bool,
     live: bool,
@@ -49,6 +50,7 @@ impl HackApp {
             model: AppModel::new(),
             source,
             tab: 0,
+            env: Default::default(),
             tail: Ok(Vec::new()),
             follow: true,
             live,
@@ -78,6 +80,42 @@ impl HackApp {
     pub fn select(&mut self, name: &str) {
         self.model.apply(Event::Select(name.to_owned()));
         self.refresh_now();
+        self.env.begin();
+    }
+
+    /// Select the Env fixture without opening a window.
+    pub fn show_env_fixture(&mut self) {
+        self.tab = 2;
+        let generation = self.env.begin();
+        if let Some((root, native)) = self.selected_root() {
+            self.env.finish(generation, self.source.env(&root, native));
+        }
+    }
+
+    fn read_env(&mut self, cx: &mut Context<Self>) {
+        let generation = self.env.begin();
+        let Some((root, native)) = self.selected_root() else {
+            return;
+        };
+        if !self.live {
+            self.env.finish(generation, self.source.env(&root, native));
+            return;
+        }
+        let source = self.source.clone();
+        let requested = root.clone();
+        cx.spawn(async move |this, cx| {
+            let view = cx
+                .background_executor()
+                .spawn(async move { source.env(&root, native) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.tab == 2 && this.selected_root() == Some((requested, native)) {
+                    this.env.finish(generation, view);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Fixtures: mark an action as in flight without running it.
@@ -135,6 +173,10 @@ impl HackApp {
                         }
                         if previous != this.selected_root() {
                             this.tail = Ok(Vec::new());
+                            this.env.begin();
+                            if this.tab == 2 {
+                                this.read_env(cx);
+                            }
                         }
                         cx.notify();
                         this.follow.then(|| this.selected_root()).flatten()
@@ -223,10 +265,16 @@ impl HackApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let previous = this.selected_root();
-                if this.model.finish_refresh(token, snap) && previous != this.selected_root() {
-                    this.tail = Ok(Vec::new());
+                if this.model.finish_refresh(token, snap) {
+                    if previous != this.selected_root() {
+                        this.tail = Ok(Vec::new());
+                        this.env.begin();
+                        if this.tab == 2 {
+                            this.read_env(cx);
+                        }
+                    }
+                    cx.notify();
                 }
-                cx.notify();
             });
         })
         .detach();
@@ -410,6 +458,10 @@ impl HackApp {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.model.apply(Event::Select(name.clone()));
+                this.env.begin();
+                if this.tab == 2 {
+                    this.read_env(cx);
+                }
                 this.tail = Ok(Vec::new());
                 if !this.live {
                     this.refresh_now();
@@ -520,7 +572,7 @@ impl HackApp {
                             .checked(d.always_on)
                             .small()
                             .disabled(true)
-                            .tooltip("Needs hack autostart (HACK-2213)"),
+                            .tooltip("Always-on controls are not available yet"),
                     ),
             )
             .children(reason_line(&d.state, d.last_error.as_deref(), cx))
@@ -539,10 +591,14 @@ impl HackApp {
             .selected_index(self.tab)
             .child(Tab::new().label("Services"))
             .child(Tab::new().label("Logs").disabled(true))
-            .child(Tab::new().label("Env").disabled(true))
+            .child(Tab::new().label("Env"))
             .child(Tab::new().label("Activity").disabled(true))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.env.begin();
                 this.tab = *ix;
+                if *ix == 2 {
+                    this.read_env(cx);
+                }
                 cx.notify();
             }));
         // The header and tabs stay fixed; the tab content scrolls within the
@@ -559,9 +615,120 @@ impl HackApp {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(services_table(&d.services, cx))
-                    .child(self.log_tail(cx)),
+                    .child(if self.tab == 2 {
+                        self.env_tab(cx).into_any_element()
+                    } else {
+                        v_flex()
+                            .child(services_table(&d.services, cx))
+                            .child(self.log_tail(cx))
+                            .into_any_element()
+                    }),
             )
+    }
+
+    fn env_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use hack_desktop_core::env::{EnvView, KeyState};
+        let t = cx.theme().clone();
+        let mut body = v_flex().p_5().gap_3().text_sm().child(
+            h_flex().gap_3().child("Environment · names only").child(
+                Button::new("env-check")
+                    .label("Check again")
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.read_env(cx);
+                        cx.notify();
+                    })),
+            ),
+        );
+        match &self.env.view {
+            EnvView::Loading => body = body.child("Reading environment metadata…"),
+            EnvView::Unreadable => {
+                body = body
+                    .child("Could not read environment metadata. Check again or run hack doctor.")
+            }
+            EnvView::Report(report) => {
+                if let Some(scope) = &report.selected_scope {
+                    body = body.child(format!(
+                        "Scope: {scope} · other scopes are not included in this listing"
+                    ));
+                }
+                body = body.child(match report.key_state {
+                    KeyState::Missing | KeyState::Unreadable => {
+                        "🔒 Names are shown; stored values cannot be read."
+                    }
+                    KeyState::Unknown => "Key readability is unknown.",
+                    KeyState::Ok => "Key is readable",
+                });
+                body = body.child(
+                    "Set means a value is stored. It does not confirm that the value can be read.",
+                );
+                if matches!(report.key_state, KeyState::Missing | KeyState::Unreadable) {
+                    body = body.child(
+                        h_flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .font_family(t.mono_font_family.clone())
+                                    .child("hack doctor"),
+                            )
+                            .child(
+                                Button::new("env-doctor")
+                                    .label("Copy command")
+                                    .small()
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            "hack doctor".into(),
+                                        ));
+                                    })),
+                            ),
+                    );
+                }
+                if report.vars.is_empty() {
+                    body = body.child(report.empty_label()).child(
+                        Button::new("env-docs")
+                            .label("Environment docs")
+                            .small()
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.open_url(
+                                    "https://github.com/hack-dance/hack/blob/next/docs/env.md",
+                                );
+                            })),
+                    );
+                } else {
+                    body = body.child(
+                        h_flex().gap_2().children(
+                            ["Name", "Layer / source", "Scope", "Kind", "Set", "Required"]
+                                .map(|s| div().flex_1().child(s)),
+                        ),
+                    );
+                    for row in &report.vars {
+                        body = body.child(
+                            h_flex()
+                                .gap_2()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(t.border)
+                                .when(row.missing, |d| d.text_color(t.danger))
+                                .children(
+                                    [
+                                        row.key.clone(),
+                                        row.layer
+                                            .clone()
+                                            .or_else(|| row.resolved_from.clone())
+                                            .unwrap_or_else(|| "—".into()),
+                                        row.scope.label(),
+                                        row.storage.kind.clone(),
+                                        if row.has_value { "✓" } else { "✗" }.into(),
+                                        if row.required { "Yes" } else { "No" }.into(),
+                                    ]
+                                    .map(|s| div().flex_1().min_w_0().child(s)),
+                                ),
+                        );
+                    }
+                }
+            }
+        }
+        body
     }
 
     /// Shown, never acted on, once an action has run past

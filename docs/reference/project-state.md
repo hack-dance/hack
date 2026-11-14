@@ -1,5 +1,10 @@
 # Backend-aware project state
 
+Plain `hack projects --json` retains its published top-level object. With
+`--observe`, the payload is inside the [machine-output envelope](./machine-readable-output.md)
+with `data.schema: "hack.projects.observe.v1"`. The row fields below are shared
+by both CLI forms and the daemon payload.
+
 Full and summary `hack projects --json` rows and hackd's `GET /v1/projects`
 share these additional fields. Older `status` and `runtime_status` fields remain
 for compatibility; consumers of this contract use `state`.

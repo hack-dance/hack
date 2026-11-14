@@ -440,6 +440,8 @@ pub struct DoctorRun {
     /// Source verified exact CLI root selection and unchanged marker identity
     /// before/after the native read. Check ids alone never prove a checkout.
     pub exact_native_root: bool,
+    /// False for local preflight notes: no CLI checks ran.
+    pub probe_started: bool,
     pub result: Result<DoctorReport, String>,
 }
 
@@ -451,6 +453,7 @@ impl DoctorRun {
             root: None,
             native: false,
             exact_native_root: false,
+            probe_started: true,
             result,
         }
     }
@@ -462,6 +465,7 @@ impl DoctorRun {
             root: Some(root.into()),
             native: false,
             exact_native_root: false,
+            probe_started: true,
             result,
         }
     }
@@ -648,7 +652,7 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
                 failed_runs.push(("machine".into(), "could not check (empty report)".into()));
                 continue;
             }
-            machine_checked = true;
+            machine_checked |= run.probe_started;
         }
         for DoctorCheck { id, status, detail } in &report.checks {
             let (area, scope) = classify(id).unwrap_or((

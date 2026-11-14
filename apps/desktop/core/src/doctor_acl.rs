@@ -3,27 +3,37 @@ use std::path::Path;
 
 #[cfg(target_os = "macos")]
 pub(crate) fn controlled(path: &Path) -> bool {
-    use libc::{c_char, c_int, c_void};
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    use libc::{c_int, c_void};
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
     unsafe extern "C" {
-        fn acl_get_file(path: *const c_char, kind: c_int) -> *mut c_void;
+        fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
         fn acl_get_entry(acl: *mut c_void, selector: c_int, entry: *mut *mut c_void) -> c_int;
         fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
         fn acl_get_permset(entry: *mut c_void, perms: *mut *mut c_void) -> c_int;
         fn acl_get_perm_np(perms: *mut c_void, permission: c_int) -> c_int;
         fn acl_free(acl: *mut c_void) -> c_int;
     }
-    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    else {
         return false;
     };
+    if !file.metadata().is_ok_and(|m| m.is_file() || m.is_dir()) {
+        return false;
+    }
     // Darwin sys/acl.h: extended ACL, allow entries, first/next selectors,
     // and mutation rights (delete, write, append, child delete, attributes,
     // extended attributes, security and owner). Deny/read-only entries are safe.
-    // SAFETY: path is NUL-terminated; all handles remain owned by this call.
+    // Darwin Libc acl_file.c/filesec.c: on a valid descriptor, ENOENT
+    // means FILESEC_ACL is absent. Opening first distinguishes missing paths.
+    // SAFETY: descriptor and ACL handles remain owned by this call.
     unsafe {
-        let acl = acl_get_file(path.as_ptr(), 0x100);
+        *libc::__error() = 0;
+        let acl = acl_get_fd_np(file.as_raw_fd(), 0x100);
         if acl.is_null() {
-            return false;
+            return std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT);
         }
         let mut entry = std::ptr::null_mut();
         let mut selector = 0;

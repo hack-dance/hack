@@ -179,6 +179,7 @@ impl DoctorTarget {
             root: Some(self.repo_root.clone()),
             native: self.native,
             exact_native_root: false,
+            probe_started: true,
             result,
         }
     }
@@ -264,6 +265,7 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
 #[derive(Debug)]
 struct ProbeTools {
     dir: PathBuf,
+    coverage: Option<&'static str>,
 }
 
 impl ProbeTools {
@@ -279,6 +281,14 @@ impl Drop for ProbeTools {
 }
 
 fn trusted_probe_path(path: &std::ffi::OsStr) -> Result<ProbeTools, String> {
+    trusted_probe_path_with_limits(path, 64, 8192)
+}
+
+fn trusted_probe_path_with_limits(
+    path: &std::ffi::OsStr,
+    max_dirs: usize,
+    max_entries: usize,
+) -> Result<ProbeTools, String> {
     use std::io::Write;
     use std::os::unix::{
         ffi::OsStrExt,
@@ -304,37 +314,68 @@ fn trusted_probe_path(path: &std::ffi::OsStr) -> Result<ProbeTools, String> {
         .mode(0o700)
         .create(&dir)
         .map_err(|e| e.to_string())?;
-    let tools = ProbeTools { dir };
+    let mut tools = ProbeTools {
+        dir,
+        coverage: None,
+    };
     if trusted_tool_path(&tools.dir, uid, true).is_none() {
         return Err("Doctor tool scratch is not private".into());
     }
     let mut seen_dirs = std::collections::BTreeSet::new();
     let mut names = std::collections::BTreeSet::new();
     let mut entries = 0;
-    for (index, p) in std::env::split_paths(path).enumerate() {
-        if index >= 64 {
-            return Err("Doctor tool PATH exceeds 64 directories".into());
-        }
-        if !p.is_absolute() {
+    'directories: for p in std::env::split_paths(path) {
+        if !p.is_absolute()
+            || !seen_dirs.insert(std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone()))
+        {
             continue;
+        }
+        if seen_dirs.len() > max_dirs {
+            tools.coverage = Some(
+                "Doctor tool PATH directory scan limit reached; remaining tools were not searched",
+            );
+            break;
         }
         let Some(real) = trusted_tool_path(&p, uid, true) else {
+            if p.exists() {
+                tools.coverage = Some(
+                    "Doctor skipped an untrusted PATH install location (ownership, group/other write or ACL); tools there were not checked",
+                );
+            }
             continue;
         };
-        if !seen_dirs.insert(real.clone()) {
-            continue;
-        }
         let Ok(children) = std::fs::read_dir(real) else {
+            tools.coverage =
+                Some("Doctor could not enumerate a PATH directory; tools there were not checked");
             continue;
         };
         for entry in children {
             entries += 1;
-            if entries > 8192 {
-                return Err("Doctor tool PATH exceeds 8192 entries".into());
+            if entries > max_entries {
+                tools.coverage = Some(
+                    "Doctor tool PATH entry scan limit reached; remaining tools were not searched",
+                );
+                break 'directories;
             }
-            let Ok(entry) = entry else { continue };
+            let Ok(entry) = entry else {
+                tools.coverage =
+                    Some("Doctor could not inspect a PATH entry; tool coverage is incomplete");
+                continue;
+            };
             let name = entry.file_name();
-            if names.contains(&name) || trusted_tool_path(&entry.path(), uid, false).is_none() {
+            if names.contains(&name) {
+                continue;
+            }
+            if trusted_tool_path(&entry.path(), uid, false).is_none() {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::symlink_metadata(entry.path()).is_ok_and(|m| {
+                    m.file_type().is_symlink()
+                        || (m.is_file() && m.permissions().mode() & 0o111 != 0)
+                }) {
+                    tools.coverage = Some(
+                        "Doctor skipped an executable or link with untrusted ownership, group/other write, ACL or target; filtered tools were not checked",
+                    );
+                }
                 continue;
             }
             let mut script = b"#!/bin/sh\nexec '".to_vec();
@@ -402,13 +443,15 @@ impl LiveSource {
             let why = format!("Could not check Doctor executable discovery: {reason}");
             let report = crate::models::DoctorReport {
                 checks: vec![crate::models::DoctorCheck {
-                    id: "docker plugin discovery".into(),
+                    id: "desktop preflight".into(),
                     status: "unknown".into(),
                     detail: why.clone(),
                 }],
                 summary: vec![],
             };
-            return std::iter::once(DoctorRun::machine(Ok(report)))
+            let mut machine = DoctorRun::machine(Ok(report));
+            machine.probe_started = false;
+            return std::iter::once(machine)
                 .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
                 .collect();
         }
@@ -535,6 +578,19 @@ impl LiveSource {
                     .collect()
             });
             runs.extend(chunk_runs);
+        }
+        if let Some(note) = tools.coverage {
+            for run in &mut runs {
+                if let Ok(report) = &mut run.result {
+                    for check in &mut report.checks {
+                        check.status = "unknown".into();
+                        check.detail = format!(
+                            "{note}; filtered or unsearched tools cannot establish this check"
+                        );
+                    }
+                }
+            }
+            runs.push(DoctorRun::machine(Err(note.into())));
         }
         runs
     }
@@ -921,6 +977,28 @@ impl Source for FixtureSource {
 mod tests {
     use super::*;
 
+    fn fixture_runner(hack: &Path) -> CliRunner {
+        let root = hack.parent().unwrap().to_str().unwrap();
+        let bin = hack.parent().unwrap().join("fixture-tools");
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["sleep", "cat", "pwd", "git"] {
+            let tool = bin.join(name);
+            if !tool.exists() {
+                let installed = if name == "git" {
+                    Path::new("/usr/bin")
+                } else {
+                    Path::new("/bin")
+                };
+                std::os::unix::fs::symlink(installed.join(name), tool).unwrap();
+            }
+        }
+        CliRunner::new(hack)
+            .with_env("HOME", root)
+            .with_env("HACK_HOME", root)
+            .with_env("HACK_MUTAGEN_PATH", "")
+            .with_env("PATH", bin.to_str().unwrap())
+    }
+
     impl LiveSource {
         // Fake CLIs must not inspect the runner's actual Docker configuration
         // or installed plugin directories. The production gate is exercised
@@ -1026,14 +1104,14 @@ esac
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         // Complete macOS first-launch scanning before the fake daemon's
         // bounded accept window starts. --version has no fixture effects.
-        CliRunner::new(&hack)
+        fixture_runner(&hack)
             .version(Duration::from_secs(60))
             .unwrap();
         let (daemon, server) = fake_daemon(
             r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","backend":"native"}]}"#,
         );
         let src = LiveSource {
-            runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
+            runner: fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: Some(daemon),
         };
         let snap = src.snapshot().unwrap();
@@ -1079,12 +1157,12 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
-        CliRunner::new(&hack)
+        fixture_runner(&hack)
             .version(Duration::from_secs(60))
             .unwrap();
         let (daemon, server) = fake_daemon("{}");
         let src = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: fixture_runner(&hack),
             daemon: Some(daemon),
         };
         let r = src.snapshot();
@@ -1134,7 +1212,7 @@ esac
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         // Match the core fixture warmup: macOS first-launch scanning must
         // finish before Doctor's short budget tests start their clocks.
-        CliRunner::new(&hack)
+        fixture_runner(&hack)
             .run_json::<serde_json::Value>(&["__warmup"], None, Duration::from_secs(60))
             .expect("Doctor fake CLI warmup");
         hack
@@ -1171,7 +1249,7 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
 "#,
         );
         let src = LiveSource {
-            runner: CliRunner::new(&hack).with_env("HACK_RUNTIME_BACKEND", "native"),
+            runner: fixture_runner(&hack).with_env("HACK_RUNTIME_BACKEND", "native"),
             daemon: None,
         };
         let mut projects = targets(2);
@@ -1196,7 +1274,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"native root trust","status":"ok","deta
 fi"#,
         );
         let source = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: fixture_runner(&hack),
             daemon: None,
         };
         let mut targets = targets(1);
@@ -1221,7 +1299,9 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let repo = dir.join("repo");
         std::fs::create_dir(&repo).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            std::process::Command::new("/usr/bin/git")
+                .env("HOME", dir)
+                .env("PATH", "/usr/bin:/bin")
                 .arg("-C")
                 .arg(&repo)
                 .args(args)
@@ -1253,7 +1333,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         );
         std::fs::remove_file(dir.join("executed")).unwrap();
         let source = LiveSource {
-            runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
+            runner: fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: None,
         };
         let runs = source.fixture_doctor_runs(&[]);
@@ -1277,7 +1357,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         std::fs::write(&git, "#!/bin/sh\nprintf called > \"$HACK_HOME/executed\"\n").unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let inherited = format!("{}:/usr/bin:/bin", hostile.display());
-        let runner = CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy());
+        let runner = fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy());
         runner
             .clone()
             .with_env("PATH", &inherited)
@@ -1315,7 +1395,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o777)).unwrap();
         let git = bin.join("git");
         let inherited = format!("{}:/usr/bin:/bin", bin.display());
-        let runner = CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy());
+        let runner = fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy());
         for linked in [false, true] {
             if linked {
                 symlink(&target, &git).unwrap();
@@ -1349,6 +1429,22 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let hack = fake_hack("doctor-tool-acl", "echo '{}'");
         let dir = hack.parent().unwrap();
         let uid = unsafe { libc::getuid() };
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .arg("-N")
+                .arg(&hack)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            crate::doctor_acl::controlled(&hack),
+            "no ACL is not an unknown ACL"
+        );
+        assert!(
+            !crate::doctor_acl::controlled(&dir.join("missing")),
+            "missing is not no-ACL"
+        );
         for rule in ["everyone deny delete", "everyone allow read"] {
             assert!(
                 std::process::Command::new("/bin/chmod")
@@ -1401,7 +1497,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let managed = dir.join("bin/mutagen");
         std::fs::create_dir(dir.join("bin")).unwrap();
         std::fs::copy(&hack, &managed).unwrap();
-        let runner = CliRunner::new(&hack)
+        let runner = fixture_runner(&hack)
             .with_env("HACK_HOME", dir.to_str().unwrap())
             .with_env("HACK_MUTAGEN_PATH", "");
         for explicit in [false, true] {
@@ -1424,6 +1520,68 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             .is_err()
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn path_caps_keep_checked_tools_and_report_unsearched_coverage() {
+        let hack = fake_hack("doctor-path-bounds", "echo '{}'");
+        let root = hack.parent().unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::os::unix::fs::symlink(&hack, first.join("git")).unwrap();
+        std::os::unix::fs::symlink(&hack, second.join("docker")).unwrap();
+        let repeated = std::env::join_paths(std::iter::repeat_n(&first, 69)).unwrap();
+        let tools = trusted_probe_path_with_limits(&repeated, 1, 1).unwrap();
+        assert!(tools.coverage.is_none());
+        assert!(Path::new(tools.path()).join("git").exists());
+        let path = std::env::join_paths([&first, &second]).unwrap();
+        for (dirs, entries) in [(1, 10), (10, 1)] {
+            let tools = trusted_probe_path_with_limits(&path, dirs, entries).unwrap();
+            assert!(tools.coverage.is_some());
+            assert!(Path::new(tools.path()).join("git").exists());
+            assert!(!Path::new(tools.path()).join("docker").exists());
+        }
+        let mut dirs = vec![first.clone()];
+        for index in 1..65 {
+            let dir = root.join(format!("path-{index}"));
+            std::fs::create_dir(&dir).unwrap();
+            dirs.push(dir);
+        }
+        let ordinary =
+            std::env::join_paths(dirs[..64].iter().chain(std::iter::repeat_n(&first, 5))).unwrap();
+        let tools = trusted_probe_path(&ordinary).unwrap();
+        assert!(
+            tools.coverage.is_none(),
+            "69 raw / 64 unique must be supported"
+        );
+        let over = std::env::join_paths(&dirs).unwrap();
+        std::fs::write(
+            &hack,
+            r#"#!/bin/sh
+echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
+"#,
+        )
+        .unwrap();
+        let source = LiveSource {
+            runner: fixture_runner(&hack).with_env("PATH", over.to_str().unwrap()),
+            daemon: None,
+        };
+        let runs = source.fixture_doctor_runs(&[]);
+        let report = runs[0]
+            .result
+            .as_ref()
+            .expect("bounded scan still runs Doctor");
+        assert!(report.checks.iter().all(|c| c.status == "unknown"));
+        let view = crate::doctor::aggregate(&runs);
+        assert!(!view.is_clean());
+        assert!(
+            view.failed_runs
+                .iter()
+                .any(|(_, why)| why.contains("scan limit"))
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1503,7 +1661,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         for name in ["docker", "git", "tmux", "mise"] {
             assert!(Path::new(tools.path()).join(name).is_file());
         }
-        let runner = CliRunner::new(&hack).with_env("PATH", &tools.path().to_string_lossy());
+        let runner = fixture_runner(&hack).with_env("PATH", &tools.path().to_string_lossy());
         // Reproduce the reported Mac Exit(2) without depending on /var or
         // any runner Homebrew path: spelling an aliased root as $0 fails.
         let aliased = runner
@@ -1528,7 +1686,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
     fn doctor_payload_without_checks_is_not_a_report() {
         let hack = fake_hack("doctor-empty", r#"echo '{"ok":true,"data":{}}'"#);
         let src = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: fixture_runner(&hack),
             daemon: None,
         };
         let runs = src.fixture_doctor_runs(&targets(1));
@@ -1579,7 +1737,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         )
         .unwrap();
         let source = LiveSource {
-            runner: CliRunner::new(&hack)
+            runner: fixture_runner(&hack)
                 .with_env("PATH", &bin.to_string_lossy())
                 .with_env("HACK_HOME", &root.to_string_lossy())
                 .with_env("HOME", &home.to_string_lossy())
@@ -1660,6 +1818,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
                 source.doctor_runs_with_discovery(&[], DOCTOR_BUDGET, DOCTOR_TIMEOUT, &discovery);
             let view = crate::doctor::aggregate(&runs);
             assert!(!view.is_clean());
+            assert!(!view.machine_checked, "preflight did not invoke the CLI");
             let card = view.cards().next().unwrap();
             assert_eq!(card.severity, crate::doctor::Severity::CouldNotCheck);
             assert!(card.detail.contains(reason), "{case}: {}", card.detail);
@@ -1695,7 +1854,7 @@ esac"#,
         let marker = child.join(".hack/hack.project.json");
         std::fs::write(&marker, "{}").unwrap();
         let source = LiveSource {
-            runner: CliRunner::new(&hack).with_env("HACK_HOME", &root.to_string_lossy()),
+            runner: fixture_runner(&hack).with_env("HACK_HOME", &root.to_string_lossy()),
             daemon: None,
         };
         let target = DoctorTarget {
@@ -1732,7 +1891,7 @@ esac"#,
 echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'"#,
         );
         let source = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: fixture_runner(&hack),
             daemon: None,
         };
         let payload: ProjectsPayload = serde_json::from_str(r#"{"projects":[{"name":"gone","status":"missing","repo_root":"/work/gone"},{"name":"no-root","status":"missing"}]}"#).unwrap();
@@ -1757,7 +1916,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             "trap '' TERM\nwhile :; do sleep 0.05; done",
         );
         let src = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: fixture_runner(&hack),
             daemon: None,
         };
         let budget = Duration::from_secs(4);
@@ -1776,7 +1935,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
     fn doctor_budget_marks_late_projects_not_checked() {
         let hack = fake_hack("doctor-slow", "sleep 5");
         let src = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: fixture_runner(&hack),
             daemon: None,
         };
         let started = std::time::Instant::now();
@@ -1825,7 +1984,7 @@ esac
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         let src = LiveSource {
-            runner: CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
+            runner: fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: None,
         };
         let runs = src.fixture_doctor_runs(&[DoctorTarget {
@@ -2010,7 +2169,7 @@ esac
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         let src = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: fixture_runner(&hack),
             daemon: None,
         };
         if host_temp_is_trustworthy() {

@@ -189,6 +189,9 @@ pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<(), &'static str> {
         };
         home.join("bin/mutagen")
     };
+    if !candidate.is_absolute() {
+        return Err("relative Doctor Mutagen helper selection is unsupported");
+    }
     let uid = unsafe { libc::getuid() };
     if present(&candidate, uid)? && trusted_tool_path(&candidate, uid, false).is_none() {
         return Err("Doctor absolute helper or its ancestors/ACLs are untrusted");

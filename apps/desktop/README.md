@@ -118,14 +118,22 @@ refused for any principal; deny/read-only entries remain supported. Linux access
 ACLs are conservatively refused. Unreadable ACL metadata is untrusted. The same
 ACL policy covers Docker discovery/config paths and their link targets. This
 may refuse owner-only ACL grants; it never attempts to infer group membership
-or effective ACL ordering. Native ACL fixtures need hosted macOS qualification.
+or effective ACL ordering. Native ACL fixtures need hosted macOS qualification. Darwin no-ACL detection
+uses an opened descriptor: NULL with ENOENT means absent ACL metadata, while
+missing paths, other errors and unreadable descriptors remain untrusted.
 
 Each refresh creates one private temporary PATH of wrappers that exec the checked
 absolute tool paths, preserving normal shim script locations and nested lookup.
 Wrappers contain checked tool paths only, not credentials or injected context
 values, and their temporary files are removed afterward.
-Scans are bounded to 64 PATH entries and 8,192 directory entries; excess or
-unknown outcomes remain unchecked. This is an ownership/permission boundary,
+Scans deduplicate absolute directories (including canonical aliases) before the
+64-directory bound and inspect at most 8,192 entries. Reaching either bound
+keeps already checked tools and runs Doctor with explicit incomplete coverage;
+its checks become Unknown so unsearched tools cannot look missing or healthy.
+Skipped/unreadable executable locations produce the same conservative coverage.
+A root:admin group-writable `/Applications` or app-bundle target is refused too;
+this preview does not widen trust for Docker Desktop or OrbStack. The lead's
+Mac pass must qualify these layouts; a skip is not proof Docker is missing. This is an ownership/permission boundary,
 not a sandbox or content/signature check: trusted tools, their plugins and
 same-user/root updates remain trusted. Real macOS/Homebrew behavior still needs
 the combined Mac pass; the layout and nested shims are tested with owned fixtures.

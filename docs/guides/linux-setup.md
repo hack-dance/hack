@@ -65,6 +65,8 @@ unit once for the current bridge. Neither reboot nor network recreation has
 been verified on a real host yet; the evidence so far is unit tests with fake
 `resolvectl`, `ip` and root runner, and static checks of the unit and rule
 (`systemd-analyze verify`, `udevadm verify`).
+[Qualify a fresh Linux host](linux-host-qualification.md) is the runbook for
+checking both on a real host.
 
 Each confirmed repair runs the whole sequence: install the files if they differ,
 then `systemctl daemon-reload`, `udevadm control --reload` and a restart of the

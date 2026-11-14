@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readdirSync } from "node:fs";
 import {
@@ -18,6 +18,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  type NativeAuthoredArtifactDiagnostic,
+  NativeAuthoredArtifactError,
+  observeNativeAuthoredArtifactErrors,
+} from "../src/backends/native-authored-artifact-error.ts";
 import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-graph-protocol.ts";
 import {
   withNativeAuthoredProjectAdmission as admit,
@@ -35,6 +40,7 @@ import {
 } from "../src/backends/native-project-run.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import type { NativeEnvMetadata } from "../src/lib/native-env-plan-protocol.ts";
+import { MuxCommandTimeoutError } from "../src/mux/mux-backend.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -167,6 +173,98 @@ test("storage still redacts arbitrary errors and lookalike routing errors", asyn
     expect(failure).not.toBeInstanceOf(NativeAuthoredStopUnavailableError);
   }
 });
+
+test("real admission keeps the value-free mux failure instead of blaming the artifact", async () => {
+  const scope = await fixture();
+  const failure = await admit(scope, async () => {
+    throw new MuxCommandTimeoutError([
+      "tmux",
+      "synthetic-private-artifact-error",
+    ]);
+  }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(NativeAuthoredArtifactError);
+  if (!(failure instanceof NativeAuthoredArtifactError)) {
+    throw new Error("expected closed admission diagnostic");
+  }
+  expect(failure.diagnostic.cause_code).toBe("mux_timeout");
+  expect(failure.diagnostic.phase).toBe("action");
+  expect(JSON.stringify(failure)).not.toContain(
+    "synthetic-private-artifact-error"
+  );
+});
+
+test("scoped admission diagnostics survive an outer startup wrapper replacing the error", async () => {
+  const scope = await fixture();
+  const diagnostics: NativeAuthoredArtifactDiagnostic[] = [];
+  const failure = await observeNativeAuthoredArtifactErrors({
+    onDiagnostic: (diagnostic) => {
+      diagnostics.push(diagnostic);
+    },
+    action: () =>
+      admit(scope, async () => {
+        throw new MuxCommandTimeoutError([
+          "tmux",
+          "synthetic-private-artifact-error",
+        ]);
+      }).catch(() => {
+        throw new Error("fixed outer startup error");
+      }),
+  }).catch((error: unknown) => error);
+  expect(String(failure)).toBe("Error: fixed outer startup error");
+  expect(
+    diagnostics.some((diagnostic) => diagnostic.cause_code === "mux_timeout")
+  ).toBe(true);
+  expect(JSON.stringify(diagnostics)).not.toContain(
+    "synthetic-private-artifact-error"
+  );
+  const count = diagnostics.length;
+  await admit(scope, async () => {
+    throw new Error("outside observation");
+  }).catch(() => undefined);
+  expect(diagnostics).toHaveLength(count);
+});
+
+test("a real lock-inspection deadline survives storage redaction and reaps its child", async () => {
+  const scope = await fixture();
+  const originalSpawn = Bun.spawn;
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  const mocked = spyOn(Bun, "spawn").mockImplementation((...args) => {
+    const [command] = args;
+    if (Array.isArray(command) && command[0] === "/bin/ps") {
+      child = originalSpawn(
+        [process.execPath, "--no-env-file", "-e", "setTimeout(()=>{},10000)"],
+        { stdin: "ignore", stdout: "pipe", stderr: "ignore" }
+      );
+      return child;
+    }
+    return Reflect.apply(originalSpawn, Bun, args);
+  });
+  try {
+    let admitted = false;
+    const failure = await admit(scope, async () => {
+      admitted = true;
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(NativeAuthoredArtifactError);
+    if (!(failure instanceof NativeAuthoredArtifactError)) {
+      throw new Error("expected closed inspection diagnostic");
+    }
+    expect(failure.diagnostic.cause_code).toBe("lock_inspection_timeout");
+    expect(failure.diagnostic.inspection).toBe("process-birth");
+    expect(failure.diagnostic.elapsed_ms).toBeGreaterThanOrEqual(2900);
+    expect(admitted).toBe(false);
+    if (!child) {
+      throw new Error("expected captured inspection child");
+    }
+    expect(await child.exited).not.toBe(0);
+    expect(child.signalCode).toBe("SIGKILL");
+  } finally {
+    mocked.mockRestore();
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+    await child?.exited;
+  }
+}, 10_000);
 
 test("absent native artifact reads have no writes and storage remains private and excluded", async () => {
   const opts = await fixture();

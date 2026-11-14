@@ -1,0 +1,14 @@
+sequenceDiagram
+    autonumber
+    participant Gate as Acceptance gate
+    participant CLI as Relocated CLI
+    participant Home as Isolated HOME
+    Gate->>Home: Assert only prepared config
+    Gate->>CLI: up --detach --json (invalid project JSON)
+    CLI->>CLI: Refuse startup before runtime work
+    CLI->>Home: Append failed up to .hack/activity.jsonl
+    CLI-->>Gate: Exit 1, E_STARTUP_INCOMPLETE
+    Note over Gate,Home: Old check rejected the intentional activity log
+    Gate->>Home: Assert only prepared config and activity log
+    Gate->>Home: Verify exact failed up record count
+    Note over Gate,CLI: Registry, .internal and .branch still forbidden

@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
-import { assertNativePlanHome } from "./lib/native-plan-home-assertions.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home.ts";
 
 /** Real compiled CLI/sidecar, isolated HOME and Git worktrees, no source or toolchain on PATH. */
 const root = resolve(import.meta.dir, "..");
@@ -252,7 +252,7 @@ try {
   await rm(join(checkout, ".hack/hack.config.json"));
   await assertNativePlanHome({
     home,
-    failedUpCount: 0,
+    failedUps: 0,
     privateInputs: [sentinel, directory],
   });
   const unsupported = await invoke(
@@ -289,7 +289,7 @@ try {
   ), "no registry or generated runtime state");
   await assertNativePlanHome({
     home,
-    failedUpCount: 2,
+    failedUps: 2,
     privateInputs: [sentinel, directory],
   });
   process.stdout.write(

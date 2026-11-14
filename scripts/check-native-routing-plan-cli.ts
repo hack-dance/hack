@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
-import { assertNativePlanHome } from "./lib/native-plan-home-assertions.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home.ts";
 
 /** Exercise the relocated executable/sidecar with isolated policy and real linked Git worktrees. */
 const root = resolve(import.meta.dir, "..");
@@ -381,8 +381,8 @@ try {
   await rm(join(checkout, ".hack/hack.local.json"));
   await assertNativePlanHome({
     home,
-    hasGlobalConfig: true,
-    failedUpCount: 0,
+    preparedHackFiles: ["hack.config.json"],
+    failedUps: 0,
     privateInputs: [canary, directory],
   });
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
@@ -405,8 +405,8 @@ try {
   );
   await assertNativePlanHome({
     home,
-    hasGlobalConfig: true,
-    failedUpCount: 1,
+    preparedHackFiles: ["hack.config.json"],
+    failedUps: 1,
     privateInputs: [canary, directory],
   });
   process.stdout.write(

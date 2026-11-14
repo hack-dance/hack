@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
-import { assertNativePlanHome } from "./lib/native-plan-home-assertions.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home.ts";
 
 /** Qualify pure acquisition intent in a relocated bundle and a real linked worktree. */
 const root = resolve(import.meta.dir, "..");
@@ -267,7 +267,7 @@ try {
   );
   await assertNativePlanHome({
     home,
-    failedUpCount: 0,
+    failedUps: 0,
     privateInputs: [canary, directory],
   });
   const runtime = await invoke(["up", "web", "--detach"], checkout, false, {
@@ -290,7 +290,7 @@ try {
   }
   await assertNativePlanHome({
     home,
-    failedUpCount: 1,
+    failedUps: 1,
     privateInputs: [canary, directory],
   });
   process.stdout.write(

@@ -100,6 +100,17 @@ source provenance. Raw `bun test <paths>` remains available for focused tests;
 it bypasses the suite preflight and does not prepare compiler-dependent fixtures.
 
 All test files share one Bun process. `bunfig.toml` preloads
+private tmux isolation before the state guard: every run owns a short socket
+directory and stops its server in `afterAll`, including assertion failures.
+`privateCliEnv` forwards that socket root, never inherited `TMUX`. Direct
+`Bun.spawn`/`spawnSync` tmux calls require a private 0700 directory registered
+by the fixture with `registerPrivateTmuxRoot`; a separate socket fixture must
+stop its own server before removing its root. The E2E scenario runner owns a
+separate tmux scope and closes it in `finally`. This guard covers direct Bun
+spawns, not arbitrary shell scripts or independently launched children: those
+must receive the private socket environment explicitly.
+
+`bunfig.toml` also preloads
 [the global-state guard](../../../tests/helpers/global-state-guard-preload.ts) for
 every `bun test` run: a test or file that leaves the environment, cwd, umask,
 exit code, a guarded global function or a process listener changed fails with a

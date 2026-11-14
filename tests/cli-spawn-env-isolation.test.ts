@@ -24,6 +24,11 @@ import {
 const ALLOWED: Readonly<
   Record<string, { readonly reason: string; readonly count: number }>
 > = {
+  "tests/helpers/tmux-socket-guard.ts": {
+    reason:
+      "tmux-only spawn forwarding pins the validated environment, not a source CLI invocation",
+    count: 1,
+  },
   // `runCommand` runs git and docker for the real-engine E2E suite, not the
   // CLI. CLI invocations in this harness use `buildCliEnv`.
   "tests/e2e/harness.ts": {
@@ -434,6 +439,7 @@ test("privateCliEnv keeps only the allow-list, test values and a private HOME", 
         "HACK_HOME",
         "HOME",
         "PATH",
+        "TMUX_TMPDIR",
         PRIVATE_CLI_DAEMON_AUTOSTART_ENV,
       ].sort()
     );

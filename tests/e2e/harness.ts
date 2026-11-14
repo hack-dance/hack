@@ -27,6 +27,7 @@ import {
   LAUNCHD_DISABLE_ENV,
 } from "../../src/daemon/launchd.ts";
 import { fixtureGitEnv } from "../helpers/fixture-git.ts";
+import { privateTmux } from "../helpers/private-tmux.ts";
 
 import {
   type ComposeResource,
@@ -74,6 +75,7 @@ const PASSTHROUGH_ENV_KEYS = [
   "PATH",
   "HOME",
   "TMPDIR",
+  "TMUX_TMPDIR",
   "USER",
   "SHELL",
   "LANG",
@@ -1011,6 +1013,17 @@ function newNames(opts: {
 export async function runScenarios(
   opts: RunScenariosOptions
 ): Promise<ScenarioOutcome[]> {
+  const mux = privateTmux();
+  try {
+    return await runIsolatedScenarios(opts);
+  } finally {
+    mux.close();
+  }
+}
+
+async function runIsolatedScenarios(
+  opts: RunScenariosOptions
+): Promise<ScenarioOutcome[]> {
   const outcomes: ScenarioOutcome[] = [];
   const selected = selectScenarios(opts);
 
@@ -1090,8 +1103,7 @@ export async function runScenarios(
               durationMs: Date.now() - startedAt,
               reason: error instanceof Error ? error.message : String(error),
             };
-      preserveFailedFixture =
-        outcome.status === "fail" && scenario.preserveFixtureOnFailure === true;
+      preserveFailedFixture = shouldPreserveFailedFixture(outcome, scenario);
     } finally {
       await cleanupScenarioRoots({
         keep: opts.keepTempDirs === true || preserveFailedFixture,
@@ -1115,6 +1127,15 @@ export async function runScenarios(
 
   printSummary({ outcomes });
   return outcomes;
+}
+
+function shouldPreserveFailedFixture(
+  outcome: ScenarioOutcome,
+  scenario: Scenario
+): boolean {
+  return (
+    outcome.status === "fail" && scenario.preserveFixtureOnFailure === true
+  );
 }
 
 async function applyDockerLeakCheck(opts: {

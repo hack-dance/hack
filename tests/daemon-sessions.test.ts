@@ -595,8 +595,8 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       });
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
-      // May fail if tmux isn't available, but should not fail on validation
-      expect(result?.status).not.toBe(400);
+      // The test preload owns a private tmux server and stops it in afterAll.
+      expect(result?.status).toBe(201);
     });
 
     test("accepts names with dashes", async () => {
@@ -607,7 +607,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       });
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
-      expect(result?.status).not.toBe(400);
+      expect(result?.status).toBe(201);
     });
 
     test("accepts names with underscores", async () => {
@@ -618,7 +618,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       });
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
-      expect(result?.status).not.toBe(400);
+      expect(result?.status).toBe(201);
     });
 
     test("rejects names with dots", async () => {

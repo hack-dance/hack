@@ -12,12 +12,7 @@ import { GLOBAL_CLOUDFLARE_DIR_NAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { readDaemonPid } from "../daemon/process.ts";
-import {
-  emitCliResult,
-  errorResult,
-  HackCliError,
-  okResult,
-} from "../lib/cli-result.ts";
+import { emitCliResult, errorResult, okResult } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
@@ -27,6 +22,7 @@ import {
   readHostCommandRecords,
   readObservedProcesses,
 } from "../lib/host-command-observation.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import {
   findProjectContext,
   readProjectConfig,
@@ -1593,10 +1589,7 @@ async function resolveByServiceProject(opts: {
       ? await findProjectContext(resolve(opts.cwd, opts.path ?? "."))
       : await resolveRegisteredProjectOption({ projectOpt: opts.project });
   if (!context) {
-    throw new HackCliError({
-      code: "E_PROJECT_NOT_FOUND",
-      message: "No Hack project was found at that path.",
-    });
+    throw new MissingProjectContextError();
   }
   const cfg = await readProjectConfig(context);
   return await resolveComposeProjectName({ project: context, cfg });

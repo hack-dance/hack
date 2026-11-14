@@ -58,7 +58,8 @@ Version 1 may add fields; it does not remove or rename them.
 
 - `E_DOCKER_UNAVAILABLE`: Docker is not installed or not responding, or
   `docker stats` failed.
-- `E_PROJECT_NOT_FOUND`: no Hack project at the path.
+- `E_PROJECT_NOT_FOUND`: no Hack project at the path (the same message as other
+  project commands).
 - `E_NATIVE_PROJECT_UNSUPPORTED`, `E_NATIVE_PROJECT_CONFLICT`: the path holds
   a native-authored project, which this report does not cover.
 - `E_USAGE`: an invalid option combination or an unknown `--project` name.

@@ -1526,6 +1526,8 @@ hack projects <subcommand> [options]
 | `--summary` | Return compact project counts with --json; load details with --project |
 | `--timings` | Write numeric listing phase timings to stderr (requires --json) |
 | `--no-daemon` | Read runtime directly instead of the daemon cache |
+| `--observe` | Read projects without registry writes or engine contact; --runtime opts in to Docker queries (requires --json) |
+| `--runtime` | With --observe, query Docker for live state; socket contact can start an on-demand engine |
 | `--meta` | Include git/worktree/session/env metadata (implies --details) |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--all` | Include unregistered docker compose projects (best-effort) |

@@ -367,7 +367,14 @@ test("preflight and start refuse ignored root dotenv in a native build before ef
   for (const args of [["up"], ["up", "--json"]]) {
     const started = await cli(f, args, env);
     expect(started.code).toBe(1);
-    expect(started.output).toContain("overlap an environment source");
+    if (args.includes("--json")) {
+      expect(JSON.parse(started.stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_STARTUP_INCOMPLETE" },
+      });
+    } else {
+      expect(started.output).toContain("overlap an environment source");
+    }
     expect(started.output).not.toContain(PRIVATE);
     expect((await f.calls()).slice(before.length)).toEqual([]);
   }

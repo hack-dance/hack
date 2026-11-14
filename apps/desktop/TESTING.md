@@ -37,7 +37,7 @@ Test isolation alone cannot protect the multi-threaded application. The Apple
 CLI runner uses `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`, explicitly
 installing only null stdin and the two output pipes, a fresh process group, cwd,
 and the authored environment overrides. It preserves the normal SIGPIPE default
-and inherited signal mask. Pipe/action/attribute ownership uses RAII; waiting
+and an empty signal mask, so a GPUI worker cannot pass a blocked SIGTERM to the CLI. Pipe/action/attribute ownership uses RAII; waiting
 reaps the owned child and caches its status. Linux keeps standard `Command`.
 
 A runner-only mutex is insufficient because GPUI or another library can open a
@@ -51,3 +51,11 @@ The helper is an internal CLI-runner boundary, not a general replacement for
 `Command`: it implements the runner's fixed null/piped stdio and process-group
 contract. If a future runner adds environment clearing or other Command options,
 it must carry those explicitly into this boundary as well.
+
+The Apple boundary marks initial pipe descriptors close-on-exec immediately,
+then promotes sources above standard IO with atomic close-on-exec duplication.
+A small initial pipe-to-fcntl window remains for external spawners that do not
+use CLOEXEC_DEFAULT; the application boundary cannot change those libraries.
+All CLI spawns through this boundary close unlisted descriptors regardless of
+that window. Executable resolution uses the captured child PATH and absolute
+`posix_spawn`, avoiding libc's process-global PATH lookup.

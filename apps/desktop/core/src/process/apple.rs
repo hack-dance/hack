@@ -53,6 +53,13 @@ fn pipe() -> io::Result<(File, File)> {
     }
     // SAFETY: each successful pipe descriptor is uniquely owned here.
     let original = unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+    for file in [&original.0, &original.1] {
+        // SAFETY: the owned descriptor is live. Minimize the exposure window
+        // to external spawners that do not use CLOEXEC_DEFAULT.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
     let duplicate = |file: &File| {
         // Keep action sources above stdio even when the parent has closed 0–2.
         // SAFETY: file is live; returned descriptor has independent ownership.
@@ -123,9 +130,11 @@ impl Child {
 
 /// The runner always supplies null stdin, piped outputs, and its own process
 /// group. Environment overrides/removals and cwd come from the authored Command.
-/// This boundary currently inherits the parent environment like CliRunner.
+/// This boundary inherits the parent environment like CliRunner. It does not
+/// accept env_clear: the caller must use only Command options built by the
+/// current runner. Future clear-environment support must be carried explicitly
+/// here; Command offers no accessor for its environment-clear flag.
 pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
-    let program = cstring(command.get_program())?;
     let args: Vec<CString> = std::iter::once(command.get_program())
         .chain(command.get_args())
         .map(cstring)
@@ -138,6 +147,31 @@ pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
             environment.remove(key);
         }
     }
+    // Resolve before entering libc: posix_spawnp consults process-global PATH,
+    // not the owned child environment. No environment pointer is shared with
+    // another thread during the actual spawn.
+    let requested = std::path::Path::new(command.get_program());
+    let resolved = if requested.is_absolute() {
+        requested.to_owned()
+    } else if requested.components().count() > 1 {
+        let base = match command.get_current_dir() {
+            Some(cwd) if cwd.is_absolute() => cwd.to_owned(),
+            Some(cwd) => std::env::current_dir()?.join(cwd),
+            None => std::env::current_dir()?,
+        };
+        base.join(requested)
+    } else {
+        crate::runner::resolve_on_path(
+            requested.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 executable name")
+            })?,
+            environment
+                .get(std::ffi::OsStr::new("PATH"))
+                .map(OsString::as_os_str),
+        )
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?
+    };
+    let program = cstring(resolved.as_os_str())?;
     let environment: Vec<CString> = environment
         .into_iter()
         .map(|(key, value)| {
@@ -195,6 +229,10 @@ pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
             return Err(io::Error::last_os_error());
         }
         let mut defaults = defaults.assume_init();
+        check(libc::posix_spawnattr_setsigmask(
+            &mut attributes.0,
+            &defaults,
+        ))?;
         if libc::sigaddset(&mut defaults, libc::SIGPIPE) != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -206,11 +244,12 @@ pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
             &mut attributes.0,
             (libc::POSIX_SPAWN_CLOEXEC_DEFAULT
                 | libc::POSIX_SPAWN_SETPGROUP
-                | libc::POSIX_SPAWN_SETSIGDEF) as _,
+                | libc::POSIX_SPAWN_SETSIGDEF
+                | libc::POSIX_SPAWN_SETSIGMASK) as _,
         ))?;
         check(libc::posix_spawnattr_setpgroup(&mut attributes.0, 0))?;
         let mut pid = 0;
-        check(libc::posix_spawnp(
+        check(libc::posix_spawn(
             &mut pid,
             program.as_ptr(),
             &actions.0,
@@ -327,5 +366,56 @@ mod contract_tests {
         assert_eq!(lines[4].trim().parse::<u32>().unwrap(), child.id());
         assert_eq!(stderr, "diagnostic");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    struct RestoreMask(libc::sigset_t);
+    impl Drop for RestoreMask {
+        fn drop(&mut self) {
+            // SAFETY: restore the mask captured on this same test thread.
+            unsafe {
+                libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut());
+            }
+        }
+    }
+
+    #[test]
+    fn cli_unblocks_sigterm_inherited_from_worker() {
+        std::thread::spawn(|| {
+            let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
+            let mut original = MaybeUninit::<libc::sigset_t>::uninit();
+            // SAFETY: initialized masks and writable storage, this thread only.
+            unsafe {
+                assert_eq!(libc::sigemptyset(empty.as_mut_ptr()), 0);
+                let empty = empty.assume_init();
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &empty, original.as_mut_ptr()),
+                    0
+                );
+                let _restore = RestoreMask(original.assume_init());
+                // Standard Command control on a known-unblocked thread.
+                let status = Command::new("/bin/sh")
+                    .args(["-c", "kill -TERM $$; sleep 5; echo survived"])
+                    .status()
+                    .unwrap();
+                assert_eq!(status.signal(), Some(libc::SIGTERM));
+                let mut blocked = empty;
+                assert_eq!(libc::sigaddset(&mut blocked, libc::SIGTERM), 0);
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()),
+                    0
+                );
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", "kill -TERM $$; sleep 5; echo survived"]);
+                let mut child = spawn(&mut command).unwrap();
+                assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+            }
+        })
+        .join()
+        .unwrap();
     }
 }

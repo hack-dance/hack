@@ -1,6 +1,11 @@
 import { test as boundedTest, expect, spyOn } from "bun:test";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  resolveFinalAutostartDownTarget,
+  withAutostartCommandLock,
+} from "../src/commands/project-autostart-intent.ts";
+import { autostartStartPolicyRefusal } from "../src/lib/autostart-start-policy.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import { runLegacyComposeRetainedOperation } from "../src/lib/native-compose-adoption-execution.ts";
 import { openLegacyComposeAdoptedGenerationStore } from "../src/lib/native-compose-adoption-generation.ts";
@@ -8,6 +13,7 @@ import * as adoptionRuntime from "../src/lib/native-compose-adoption-runtime.ts"
 import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { createAdoptionGenerationFixture } from "./helpers/native-compose-adoption-generation-fixture.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const context = createAdoptionGenerationFixture();
 const {
@@ -494,6 +500,7 @@ boundedTest(
         join(context.projectRoot, ".hack/hack.project.json"),
         "utf8"
       );
+      await expectAdoptionLoginRefused();
       context.fixture.sourceRace = true;
       await save();
       await expect(
@@ -505,6 +512,10 @@ boundedTest(
       ).rejects.toThrow("values omitted");
       expect(await mutationCommands()).toEqual([["container", "start", ID]]);
       expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      await expectAdoptionLoginRefused();
+      expect(
+        await resolveFinalAutostartDownTarget({ cwd: context.projectRoot })
+      ).toBeUndefined();
       context.fixture = JSON.parse(
         await readFile(join(context.root, "fixture.json"), "utf8")
       );
@@ -515,10 +526,15 @@ boundedTest(
         candidate
       );
       expect(
-        await tryLegacyComposeAdoptedCommand({
+        await withAutostartCommandLock({
+          action: "down",
           cwd: context.projectRoot,
-          operation: "down",
-          recover: true,
+          run: () =>
+            tryLegacyComposeAdoptedCommand({
+              cwd: context.projectRoot,
+              operation: "down",
+              recover: true,
+            }),
         })
       ).toBe(0);
       expect((await mutationCommands()).slice(1)).toEqual([
@@ -534,6 +550,78 @@ boundedTest(
   },
   retainedOperationCaseTimeout(2)
 );
+
+/** Exercise daemon admission, CLI serialization and the actual retained dispatch backstop. */
+async function expectAdoptionLoginRefused() {
+  const before = await readFile(join(context.root, "commands"), "utf8");
+  const home = privateCliEnv({ root: context.root }).HOME;
+  if (!home) {
+    throw new Error("Fixture HOME required");
+  }
+  await mkdir(join(home, ".hack"), { mode: 0o700, recursive: true });
+  await writeFile(
+    join(home, ".hack/projects.json"),
+    JSON.stringify({
+      version: 1,
+      projects: [
+        {
+          id: "fixture",
+          name: "fixture",
+          repoRoot: context.projectRoot,
+          projectDir: join(context.projectRoot, ".hack"),
+          projectDirName: ".hack",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+    }),
+    { mode: 0o600 }
+  );
+  expect(
+    await autostartStartPolicyRefusal({
+      repoRoot: context.projectRoot,
+      projectDir: join(context.projectRoot, ".hack"),
+      projectDirName: ".hack",
+    })
+  ).toBe("adopted_project_requires_manual_start");
+  const prior = {
+    HOME: process.env.HOME,
+    HACK_AUTOSTART_LOGIN: process.env.HACK_AUTOSTART_LOGIN,
+    HACK_AUTOSTART_PROJECT_ID: process.env.HACK_AUTOSTART_PROJECT_ID,
+  };
+  try {
+    process.env.HOME = home;
+    process.env.HACK_AUTOSTART_LOGIN = "1";
+    process.env.HACK_AUTOSTART_PROJECT_ID = "fixture";
+    const refusal = {
+      code: "E_PERMISSION",
+      detail: { reason: "adopted_project_requires_manual_start" },
+    };
+    await expect(
+      resolveFinalAutostartDownTarget({ cwd: context.projectRoot })
+    ).rejects.toMatchObject(refusal);
+    await expect(
+      withAutostartCommandLock({
+        cwd: context.projectRoot,
+        action: "up",
+        run: () => {
+          throw new Error("Unattended dispatch must not run");
+        },
+      })
+    ).rejects.toMatchObject(refusal);
+    await expect(
+      tryLegacyComposeAdoptedCommand({
+        cwd: context.projectRoot,
+        operation: "up",
+        detach: true,
+      })
+    ).rejects.toMatchObject(refusal);
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      restoreEnv(key, value);
+    }
+  }
+  expect(await readFile(join(context.root, "commands"), "utf8")).toBe(before);
+}
 
 boundedTest(
   "v5 final unhealthy observation cannot acknowledge a successful effect",

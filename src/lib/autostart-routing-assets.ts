@@ -35,6 +35,7 @@ import {
   renderProjectEnvSchemaJson,
   renderProjectManagedEnvSchemaJson,
 } from "../templates.ts";
+import { assertAutostartPathAclsTrusted } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { parseDefaultDomain } from "./default-domain.ts";
 import { checkReplaceableChain } from "./path-trust.ts";
@@ -196,12 +197,18 @@ async function assertSafeAssetParent(opts: {
   readonly uid: number;
 }): Promise<void> {
   const parent = dirname(opts.path);
+  const checked = new Set<string>();
   if (
-    checkReplaceableChain({ path: parent, uid: opts.uid, hackHome: null }) !==
-    null
+    checkReplaceableChain({
+      path: parent,
+      uid: opts.uid,
+      hackHome: null,
+      checked,
+    }) !== null
   ) {
     throw new Error("Unsafe directory chain");
   }
+  await assertAutostartPathAclsTrusted(checked);
   let current = resolve(opts.root);
   for (const component of [
     "",
@@ -239,6 +246,7 @@ async function readCurrentAsset(opts: {
   );
   try {
     const before = await file.stat();
+    await assertAutostartPathAclsTrusted(new Set([opts.asset.path]));
     if (
       !before.isFile() ||
       before.uid !== opts.uid ||
@@ -314,6 +322,7 @@ async function publishFreshAsset(opts: {
     await assertSafeAssetParent({ ...opts, path: asset.path });
     const staged = await file.stat();
     const stagedPath = await lstat(staging);
+    await assertAutostartPathAclsTrusted(new Set([staging]));
     if (
       !staged.isFile() ||
       staged.uid !== opts.uid ||

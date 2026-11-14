@@ -73,7 +73,11 @@ Only automatic passes check the derived executable path before helper
 lookup too. Directories, executable files and symlink targets must satisfy the
 same read-only ownership and permission checks used by the Linux service; unsafe
 paths are refused without automatic permission repair. This strict policy also
-applies to group-writable Homebrew directories, including group `admin`: install
+checks Darwin ACLs on lookup directories, programs and symlink chains, checkout
+and env inputs, Docker config and plugins, registries and locks, routing assets
+and TLS trust files; mutation
+grants, unknown rights or an unsuccessful bounded inspection refuse startup.
+It also applies to group-writable Homebrew directories, including group `admin`: install
 required helpers in a trusted lookup directory before retrying. A refused search
 path does not consume a project's attempt for this boot.
 The daemon keeps its installed PATH and continues normal status observation;
@@ -104,6 +108,9 @@ declarations require manual startup in this slice. Images must already be presen
 locally: both Compose phases use `--no-build --pull never` and disable implicit
 dotenv imports. Missing images never trigger a build or pull. The intent/trust
 guard runs before preparation as well as before container start.
+Retained projects created by `hack config adopt` also require manual starts;
+their runtime does not implement these unattended guards. Manual adoption and
+`hack down --recover` retain their existing recovery path.
 These manual-start requirements produce a closed skip and consume no boot claim
 or failure entry. Doctor reports the reason. Fix the unsupported prerequisite or
 start manually; ordinary manual starts retain their behavior.

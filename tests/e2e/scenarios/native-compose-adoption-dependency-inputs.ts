@@ -1,5 +1,50 @@
 import { join } from "node:path";
+import { HACK_ERROR_CODES } from "../../../src/lib/cli-result.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
+
+const COMMAND_STAGES = new Set([
+  "unspecified",
+  "bootstrap-original",
+  "dependency-preview",
+  "dependency-adopt-recovery",
+  "dependency-down-recovery",
+  "dependency-second-adopt",
+  "dependency-up",
+]);
+
+/** Fixed stage, exit and known code only: never command arguments, messages or values. */
+export function adoptionFixtureCommandFailure(opts: {
+  readonly stage: string;
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly stdout: string;
+}): string {
+  let code = "unavailable";
+  try {
+    const envelope: unknown =
+      opts.stdout.length <= 65_536 ? JSON.parse(opts.stdout) : null;
+    const error =
+      isRecord(envelope) && isRecord(envelope.error)
+        ? envelope.error
+        : undefined;
+    if (
+      typeof error?.code === "string" &&
+      HACK_ERROR_CODES.some((known) => known === error.code)
+    ) {
+      code = error.code;
+    }
+  } catch {
+    // A non-JSON engine response contributes no content to the public diagnostic.
+  }
+  const stage = COMMAND_STAGES.has(opts.stage) ? opts.stage : "unspecified";
+  const exit =
+    Number.isSafeInteger(opts.exitCode) &&
+    opts.exitCode >= 0 &&
+    opts.exitCode <= 255
+      ? opts.exitCode
+      : -1;
+  return `Expected successful isolated adoption fixture command: stage=${stage} exit=${exit} timedOut=${opts.timedOut === true} code=${code}; values omitted`;
+}
 
 const CONTAINER_ID = /^[a-f0-9]{64}$/;
 

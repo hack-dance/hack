@@ -62,6 +62,8 @@ for (const scenario of [
   "safe-existing",
   "safe-missing",
   "generated-bind",
+  "trusted-unicode-bind",
+  "invalid-utf8",
 ] as const) {
   test(`real unattended resolved-storage probes handle ${scenario} before any unsafe up`, async () => {
     const root = await mkdtemp(join(tmpdir(), "hack-storage-probe-"));
@@ -81,10 +83,13 @@ for (const scenario of [
           image: "example.invalid/app",
           environment: { PRIVATE_SENTINEL: "synthetic-model-value" },
           volumes: [
-            scenario === "generated-bind"
+            scenario === "generated-bind" || scenario === "trusted-unicode-bind"
               ? {
                   type: "bind",
-                  source: "/host/private",
+                  source:
+                    scenario === "trusted-unicode-bind"
+                      ? "/fixture/unicode-é/.hack/caddy/pki/authority.crt"
+                      : "/host/private",
                   target: "/data",
                   read_only: true,
                 }
@@ -110,7 +115,7 @@ for (const scenario of [
       join(bin, "docker"),
       `#!${process.execPath}
 const args=process.argv.slice(2);
-if(args.includes("config")){process.stdout.write(${JSON.stringify(JSON.stringify(model))});process.exit(0);}
+if(args.includes("config")){process.stdout.write(${scenario === "invalid-utf8" ? "Buffer.from([0xff])" : JSON.stringify(JSON.stringify(model))});process.exit(0);}
 if(args[0]==="image"){process.stdout.write("sha256:${"a".repeat(64)}");process.exit(0);}
 if(args[0]==="volume"){
  if(${JSON.stringify(scenario)}==="safe-missing" && !(await Bun.file(${JSON.stringify(called)}).exists())){process.stderr.write("Error response from daemon: get fixture_data: no such volume\\n");process.exit(1);}
@@ -127,6 +132,13 @@ process.exit(99);
       env: privateCliEnv({ root, env: { PATH: bin } }),
       detach: true,
       unattended: true,
+      unattendedTrustedBinds: async () => [
+        {
+          source: "/fixture/unicode-é/.hack/caddy/pki/authority.crt",
+          target: "/data",
+          readOnly: true,
+        },
+      ],
       imageTimeoutMs: 10_000,
       startupTimeoutMs: 10_000,
     });
@@ -135,6 +147,9 @@ process.exit(99);
         code: "E_PERMISSION",
         detail: { reason: "compose_inputs_require_manual_start" },
       });
+      expect(await Bun.file(called).exists()).toBe(false);
+    } else if (scenario === "invalid-utf8") {
+      expect(await action).toBe(1);
       expect(await Bun.file(called).exists()).toBe(false);
     } else {
       expect(await action).toBe(0);

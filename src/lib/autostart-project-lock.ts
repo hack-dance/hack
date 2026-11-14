@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { assertAutostartCheckoutTrusted } from "./autostart-checkout-trust.ts";
 import { assertAutostartDockerConfigTrusted } from "./autostart-docker-trust.ts";
+import { assertAutostartFileAclsTrusted } from "./autostart-path-acl.ts";
 import { assertAutostartStartPolicy } from "./autostart-start-policy.ts";
 import { HackCliError } from "./cli-result.ts";
 import {
@@ -40,6 +41,18 @@ export async function withAutostartProjectLock<T>(opts: {
     (info.mode & 0o022) !== 0 ||
     (process.getuid && info.uid !== process.getuid())
   ) {
+    throw new HackCliError({
+      code: "E_PERMISSION",
+      message:
+        "Project start/stop lock directory is unsafe; no runtime operation ran.",
+    });
+  }
+  try {
+    await assertAutostartFileAclsTrusted({
+      path: directory,
+      uid: process.getuid?.() ?? -1,
+    });
+  } catch {
     throw new HackCliError({
       code: "E_PERMISSION",
       message:

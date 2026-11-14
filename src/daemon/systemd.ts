@@ -2012,6 +2012,8 @@ export async function checkServicePathDirectories(opts: {
   readonly dirs: readonly string[];
   /** Defaults to this process's uid. */
   readonly uid?: number;
+  /** Optional inventory for additional read-only platform checks; never a trust cache. */
+  readonly inspectedPaths?: Set<string>;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
   const checked = new Set<string>();
@@ -2020,16 +2022,19 @@ export async function checkServicePathDirectories(opts: {
     if (!isAbsolute(dir)) {
       return `the hackd.service PATH has a directory that is not absolute (${dir || "empty"})`;
     }
+    const directoryPaths = opts.inspectedPaths ? new Set<string>() : undefined;
     const walk = await walkReplaceableChain({
       path: dir,
       uid,
       // Not repaired: programs may already have been planted.
       hackHome: null,
       allowMissing: true,
+      checked: directoryPaths,
     });
     if ("error" in walk) {
       return `the hackd.service PATH directory ${dir} is not safe: ${walk.error}`;
     }
+    recordInspectedPaths(directoryPaths, opts.inspectedPaths);
     const writable = lettingOthersCreate(walk.existing);
     if (writable !== null) {
       return `other users can ${walk.complete ? "add programs to" : "create"} the hackd.service PATH directory ${dir} (${walk.existing}, ${writable}); run: chmod go-w ${walk.existing}`;
@@ -2041,13 +2046,26 @@ export async function checkServicePathDirectories(opts: {
         dir: walk.existing,
         uid,
         checked,
+        inspectedPaths: opts.inspectedPaths,
       });
       if (program !== null) {
         return `the hackd.service PATH directory ${dir} holds ${program}`;
       }
     }
   }
+  recordInspectedPaths(checked, opts.inspectedPaths);
   return null;
+}
+
+function recordInspectedPaths(
+  paths?: ReadonlySet<string>,
+  target?: Set<string>
+): void {
+  if (paths && target) {
+    for (const path of paths) {
+      target.add(path);
+    }
+  }
 }
 
 /**
@@ -2064,6 +2082,7 @@ async function checkPathDirectoryPrograms(opts: {
   readonly dir: string;
   readonly uid: number;
   readonly checked: Set<string>;
+  readonly inspectedPaths?: Set<string>;
 }): Promise<string | null> {
   let entries: string[];
   let systemDir: boolean;
@@ -2093,6 +2112,7 @@ async function checkPathDirectoryPrograms(opts: {
     if (error !== null) {
       return error;
     }
+    opts.inspectedPaths?.add(path);
   }
   return null;
 }

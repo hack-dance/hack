@@ -55,6 +55,7 @@ import {
 } from "./native-compose-adoption-build-inputs.ts";
 import {
   adoptionDependencyHealthcheck,
+  adoptionFixtureCommandFailure,
   assertAdoptionDependencyControl,
   assertAdoptionDependencyHealthcheck,
 } from "./native-compose-adoption-dependency-inputs.ts";
@@ -575,12 +576,16 @@ function privateReport(result: CliResult) {
     refused();
   }
 }
-function successful(result: CliResult) {
+function successful(result: CliResult, stage = "unspecified") {
   privateReport(result);
   expect({
     that: !result.timedOut && result.exitCode === 0,
-    message:
-      "Expected successful isolated adoption fixture command; values omitted",
+    message: adoptionFixtureCommandFailure({
+      stage,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      stdout: result.stdout,
+    }),
   });
   return result;
 }
@@ -2346,7 +2351,7 @@ export async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
     resources: captured,
     source: originalSource,
   });
-  successful(started);
+  successful(started, "bootstrap-original");
   if (
     captured.container.length !== (instance.routing ? 3 : 2) ||
     captured.volume.length !== 1 ||
@@ -3407,7 +3412,7 @@ const child=Bun.spawn([engine,...args],{stdin:'inherit',stdout:'inherit',stderr:
       refused();
     }
   } else {
-    successful(result);
+    successful(result, "dependency-up");
   }
 }
 
@@ -3841,7 +3846,8 @@ async function runDependencyWorktrees(
             "--dry-run",
             "--stop",
             "--json",
-          ])
+          ]),
+          "dependency-preview"
         );
         if (object(preview.stdout).complete !== true) {
           refused();
@@ -3860,7 +3866,8 @@ async function runDependencyWorktrees(
           "--recover",
           "--stop",
           "--json",
-        ])
+        ]),
+        "dependency-adopt-recovery"
       );
       await h.assertStopped(h.first);
       refusedPreview(await h.cli(h.first, ["up", "db", "--detach", "--json"]));
@@ -3875,7 +3882,10 @@ async function runDependencyWorktrees(
         refused();
       }
       await dependencyCandidateDriftRefusal(h);
-      successful(await h.cli(h.first, ["down", "--recover", "--json"]));
+      successful(
+        await h.cli(h.first, ["down", "--recover", "--json"]),
+        "dependency-down-recovery"
+      );
       await h.assertStopped(h.first);
       await h.check(h.second);
       await dependencyFixtureUp(h, h.first, false);
@@ -3885,7 +3895,8 @@ async function runDependencyWorktrees(
       await rollbackDependencyInstance(h, h.first);
       await h.check(h.second);
       successful(
-        await h.cli(h.second, ["config", "adopt", "--stop", "--json"])
+        await h.cli(h.second, ["config", "adopt", "--stop", "--json"]),
+        "dependency-second-adopt"
       );
       await h.assertStopped(h.second);
       await h.check(h.first);

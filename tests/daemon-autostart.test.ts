@@ -1169,30 +1169,35 @@ test("repairing an executable path permits a first attempt in the same boot", as
   expect(starts.map((start) => start.id)).toEqual(["alpha"]);
 });
 
-test("manual-start policy refuses before engine access without claims or failed progress", async () => {
-  await seed(["alpha"]);
-  deps = {
-    ...deps,
-    projectRefusal: async () => "host_commands_require_manual_start",
-  };
-  await run();
-  expect(events).toEqual([]);
-  expect(starts).toEqual([]);
-  expect(
-    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
-      ?.lastAttemptBootId
-  ).toBeNull();
-  expect((await readAutostartGlobal({ registryPath })).loginRun.failed).toEqual(
-    []
-  );
-  expect((await results())[0]?.result).toMatchObject({
-    status: "skipped",
-    reason: "host_commands_require_manual_start",
+for (const reason of [
+  "host_commands_require_manual_start",
+  "adopted_project_requires_manual_start",
+]) {
+  test(`manual-start policy ${reason} refuses before engine access without claims or failed progress`, async () => {
+    await seed(["alpha"]);
+    deps = {
+      ...deps,
+      projectRefusal: async () => reason,
+    };
+    await run();
+    expect(events).toEqual([]);
+    expect(starts).toEqual([]);
+    expect(
+      (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+        ?.lastAttemptBootId
+    ).toBeNull();
+    expect(
+      (await readAutostartGlobal({ registryPath })).loginRun.failed
+    ).toEqual([]);
+    expect((await results())[0]?.result).toMatchObject({
+      status: "skipped",
+      reason,
+    });
+    deps = { ...deps, projectRefusal: async () => null };
+    await run();
+    expect(starts.map((start) => start.id)).toEqual(["alpha"]);
   });
-  deps = { ...deps, projectRefusal: async () => null };
-  await run();
-  expect(starts.map((start) => start.id)).toEqual(["alpha"]);
-});
+}
 
 test("late child manual-start refusal releases only its unstarted claim and remains neutral", async () => {
   await seed(["alpha"]);

@@ -201,7 +201,7 @@ function probeFor(opts: RuntimeUpOptions, timeoutMs: number) {
     if (remaining <= 0) {
       return { exitCode: 124, stdout: "", stderr: "" };
     }
-    return await exec(args, {
+    const result = await exec(args, {
       cwd: opts.cwd,
       env: opts.env,
       stdin: "ignore",
@@ -210,6 +210,16 @@ function probeFor(opts: RuntimeUpOptions, timeoutMs: number) {
       maxStderrBytes: 4096,
       forwardSignals: true,
     });
+    // Bounded captures preserve bytes as Latin-1; Compose emits UTF-8 JSON.
+    return {
+      ...result,
+      stdout: new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.from(result.stdout, "latin1")
+      ),
+      stderr: new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.from(result.stderr, "latin1")
+      ),
+    };
   };
 }
 type Probe = ReturnType<typeof probeFor>;

@@ -3,6 +3,7 @@ import { X509Certificate } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { assertAutostartPathAclsTrusted } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
@@ -63,11 +64,13 @@ async function authenticateCertificates(path: string): Promise<boolean> {
   if (uid === undefined) {
     throw new Error("Unavailable owner");
   }
+  const checked = new Set<string>();
   const parent = walkReplaceableChain({
     path: dirname(path),
     uid,
     hackHome: null,
     allowMissing: true,
+    checked,
   });
   if ("error" in parent) {
     throw new Error("Unsafe certificate parent");
@@ -98,6 +101,8 @@ async function authenticateCertificates(path: string): Promise<boolean> {
     ) {
       throw new Error("Unsafe certificate file");
     }
+    checked.add(path);
+    await assertAutostartPathAclsTrusted(checked);
     const bytes = new Uint8Array(before.size + 1);
     let length = 0;
     while (length < bytes.length) {

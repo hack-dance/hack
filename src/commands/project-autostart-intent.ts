@@ -13,11 +13,13 @@ import {
   assertAutostartProjectCurrent,
   withAutostartProjectLock,
 } from "../lib/autostart-project-lock.ts";
+import { assertAutostartAdoptionAllowed } from "../lib/autostart-refusal.ts";
 import { assertAutostartStartPolicy } from "../lib/autostart-start-policy.ts";
 import { resolveEffectiveBranch } from "../lib/branches.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { pathExists } from "../lib/fs.ts";
+import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
 import {
   findProjectContextAtRoot,
   type ProjectContext,
@@ -129,6 +131,12 @@ async function discoverAutostartCommandContext(
     }
   | undefined
 > {
+  // Retained adoption owns recovery, including pending operations that ordinary
+  // input discovery deliberately refuses. Do not fence its dispatcher here.
+  if (await selectLegacyComposeAdoptedRoot(opts)) {
+    assertAutostartAdoptionAllowed();
+    return undefined;
+  }
   const requested = resolve(opts.cwd, opts.path ?? ".");
   const cwd = await realpath(requested).catch(() => requested);
   const selected =

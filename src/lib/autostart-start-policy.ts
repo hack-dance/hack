@@ -13,9 +13,11 @@ import {
 } from "../constants.ts";
 import { assertAutostartCheckoutTrusted } from "./autostart-checkout-trust.ts";
 import { hasOnlyEngineManagedMounts } from "./autostart-compose-mounts.ts";
+import { assertAutostartPathAclsTrusted } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
+import { inspectLegacyComposeAdoptionSelection } from "./native-compose-adoption-marker.ts";
 import { checkReplaceableChain } from "./path-trust.ts";
 import {
   findProjectContextAtRoot,
@@ -29,7 +31,8 @@ export type AutostartStartPolicyReason =
   | "command_provider_requires_manual_start"
   | "compose_inputs_require_manual_start"
   | "checkout_untrusted"
-  | "pending_env_migration";
+  | "pending_env_migration"
+  | "adopted_project_requires_manual_start";
 export type AutostartStartPolicyOptions = {
   readonly repoRoot: string;
   readonly projectDir: string;
@@ -44,7 +47,7 @@ const HOST_CONTROL_ENV_KEY =
   /^(?:COMPOSE_|GIT_|DOCKER_|HACK_|XDG_|LD_|DYLD_|BUN_|HOME$|USER$|LOGNAME$|TMPDIR$|TMP$|TEMP$|SHELL$|PATH$|NODE_OPTIONS$|NODE_PATH$|BASH_ENV$|ENV$|SHELLOPTS$|IFS$|CDPATH$|GCONV_PATH$|PYTHON(?:PATH|HOME|STARTUP|INSPECT)$|RUBYOPT$|RUBYLIB$|PERL5OPT$|PERL5LIB$)/;
 const DEPENDENCY_INSTALL =
   /(?:^|\s)(?:bun|npm|pnpm|yarn|uv|pip)(?:\s+run)?\s+(?:install|ci|sync)(?:\s|$)/i;
-type Budget = { remaining: number };
+type Budget = { remaining: number; readonly checked: Set<string> };
 
 /** Read-only unattended admission. It never resolves a secret, provider or command. */
 export async function autostartStartPolicyRefusal(
@@ -56,6 +59,12 @@ export async function autostartStartPolicyRefusal(
     return "checkout_untrusted";
   }
   try {
+    const adoption = await inspectLegacyComposeAdoptionSelection({
+      projectRoot: opts.repoRoot,
+    });
+    if (["active", "pending"].includes(adoption ?? "")) {
+      return "adopted_project_requires_manual_start";
+    }
     if (
       resolve(opts.repoRoot, opts.projectDirName) !== resolve(opts.projectDir)
     ) {
@@ -68,18 +77,8 @@ export async function autostartStartPolicyRefusal(
     if (!context) {
       return "compose_inputs_require_manual_start";
     }
-    const budget = { remaining: MAX_TOTAL_BYTES };
-    const jsonPath = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
-    const json = await readPolicyText(jsonPath, budget);
-    const path =
-      json === null
-        ? resolve(opts.projectDir, PROJECT_CONFIG_LEGACY_FILENAME)
-        : jsonPath;
-    const text = json ?? (await readPolicyText(path, budget));
-    let raw: unknown = {};
-    if (text !== null) {
-      raw = json === null ? Bun.TOML.parse(text) : JSON.parse(text);
-    }
+    const budget = { remaining: MAX_TOTAL_BYTES, checked: new Set<string>() };
+    const { raw, path } = await readProjectPolicyConfig(opts, budget);
     const config = parseProjectConfigRecord(raw, path);
     if (config.parseError || !isRecord(raw)) {
       return "compose_inputs_require_manual_start";
@@ -110,7 +109,9 @@ export async function autostartStartPolicyRefusal(
     if (composeReason) {
       return composeReason;
     }
-    return await envPolicyReason({ ...opts, budget });
+    const envReason = await envPolicyReason({ ...opts, budget });
+    await assertAutostartPathAclsTrusted(budget.checked);
+    return envReason;
   } catch {
     return "compose_inputs_require_manual_start";
   }
@@ -331,6 +332,24 @@ function environmentScopeReason(
   return null;
 }
 
+async function readProjectPolicyConfig(
+  opts: AutostartStartPolicyOptions,
+  budget: Budget
+) {
+  const jsonPath = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
+  const json = await readPolicyText(jsonPath, budget);
+  const path =
+    json === null
+      ? resolve(opts.projectDir, PROJECT_CONFIG_LEGACY_FILENAME)
+      : jsonPath;
+  const text = json ?? (await readPolicyText(path, budget));
+  let raw: unknown = {};
+  if (text !== null) {
+    raw = json === null ? Bun.TOML.parse(text) : JSON.parse(text);
+  }
+  return { raw, path };
+}
+
 async function readPolicyText(
   path: string,
   budget: Budget
@@ -342,6 +361,7 @@ async function readPolicyText(
       path: dirname(path),
       uid,
       hackHome: null,
+      checked: budget.checked,
     }) !== null
   ) {
     throw new Error("Unsafe input parent");
@@ -396,6 +416,7 @@ async function readPolicyText(
       throw new Error("Input changed");
     }
     budget.remaining -= length;
+    budget.checked.add(path);
     return new TextDecoder("utf-8", { fatal: true }).decode(
       bytes.subarray(0, length)
     );

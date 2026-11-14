@@ -1,5 +1,6 @@
 import { readdirSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { assertAutostartPathAclsTrustedSync } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { checkReplaceableChain, walkReplaceableChain } from "./path-trust.ts";
 
@@ -116,6 +117,7 @@ export function assertAutostartCheckoutTrusted(opts: {
     };
     checkGenerated(join(opts.projectDir, ".internal"), 0);
     checkGenerated(join(opts.projectDir, ".branch"), 0);
+    assertAutostartPathAclsTrustedSync(checked);
   } catch {
     throw refusal();
   }

@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { assertAutostartPathAclsTrustedSync } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { walkReplaceableChain } from "./path-trust.ts";
@@ -66,6 +67,7 @@ export function assertAutostartDockerConfigTrusted(opts: {
       visit(directory, 0);
     }
     const configPath = join(root, "config.json");
+    assertAutostartPathAclsTrustedSync(checked);
     const configTrust = walkReplaceableChain({
       path: configPath,
       uid,

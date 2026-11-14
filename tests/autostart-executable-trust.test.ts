@@ -98,3 +98,78 @@ test("empty or relative lookup entries refuse with fixed value-free errors", asy
     expect(String(error)).not.toContain("private-sentinel");
   }
 });
+
+test("Darwin ACL inspection includes lookup ancestors, programs and symlink target chains", async () => {
+  const targetDir = join(root, "targets");
+  await mkdir(targetDir, { mode: 0o700 });
+  const target = join(targetDir, "helper");
+  await writeFile(target, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await symlink(target, join(bin, "helper"));
+  const inspected = new Set<string>();
+  await assertAutostartExecutablePathTrusted(
+    { path: `${bin}:${join(root, "missing", "bin")}` },
+    {
+      platform: "darwin",
+      inspect: async (paths, timeoutMs) => {
+        expect(timeoutMs).toBeGreaterThan(0);
+        expect(timeoutMs).toBeLessThanOrEqual(3000);
+        for (const path of paths) {
+          inspected.add(path);
+        }
+        return {
+          exitCode: 0,
+          stdout:
+            " 0: group:everyone deny delete\n 1: user:reader allow read,execute\n",
+        };
+      },
+    }
+  );
+  for (const path of [
+    "/",
+    root,
+    bin,
+    program,
+    join(bin, "helper"),
+    targetDir,
+    target,
+  ]) {
+    expect(inspected.has(path)).toBe(true);
+  }
+  expect(inspected.has(join(root, "missing"))).toBe(false);
+});
+
+for (const stdout of [
+  " 0: user:other allow write\n",
+  " 0: group:other allow add_file,add_subdirectory\n",
+  " 0: user:other allow unknown_right\n",
+  " 0: malformed ACL\n",
+]) {
+  test(`Darwin mutation or unknown ACL refuses without exposing output: ${stdout.trim()}`, async () => {
+    await expect(
+      assertAutostartExecutablePathTrusted(
+        { path: bin },
+        { platform: "darwin", inspect: async () => ({ exitCode: 0, stdout }) }
+      )
+    ).rejects.toMatchObject({
+      code: "E_PERMISSION",
+      detail: { reason: "executable_path_untrusted" },
+    });
+    expect((await Bun.file(program).stat()).mode & 0o777).toBe(0o700);
+  });
+}
+
+test("Darwin ACL probe failures refuse with closed diagnostics", async () => {
+  for (const exitCode of [1, 124, 125]) {
+    await expect(
+      assertAutostartExecutablePathTrusted(
+        { path: bin },
+        {
+          platform: "darwin",
+          inspect: async () => ({ exitCode, stdout: "private-sentinel" }),
+        }
+      )
+    ).rejects.toThrow(
+      "Automatic startup refused an unsafe executable search path."
+    );
+  }
+});

@@ -72,6 +72,7 @@ permission refusals, including app-bundle and Homebrew paths on macOS.
 This slice starts only eligible Compose projects with images already available
 locally. Hooks, host helpers, command providers and image builds require manual
 `hack up`; doctor explains those manual-start requirements.
+Retained projects created by `hack config adopt` also require manual starts.
 Host-file/source-code bind mounts also require manual starts. Verified default
 engine volumes and Hack's authenticated read-only TLS mounts remain supported.
 

@@ -1,4 +1,8 @@
 import { checkServicePathDirectories } from "../daemon/systemd.ts";
+import {
+  type AutostartAclDependencies,
+  assertAutostartPathAclsTrusted,
+} from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 
 /**
@@ -6,14 +10,19 @@ import { HackCliError } from "./cli-result.ts";
  * both platforms. Check every lookup directory and its executable/symlink
  * entries before any helper runs; inherited shell paths are never repaired.
  */
-export async function assertAutostartExecutablePathTrusted(opts: {
-  readonly path: string;
-}): Promise<void> {
+export async function assertAutostartExecutablePathTrusted(
+  opts: { readonly path: string },
+  deps?: AutostartAclDependencies
+): Promise<void> {
   try {
+    const inspectedPaths = new Set<string>();
     if (
-      (await checkServicePathDirectories({ dirs: opts.path.split(":") })) ===
-      null
+      (await checkServicePathDirectories({
+        dirs: opts.path.split(":"),
+        inspectedPaths,
+      })) === null
     ) {
+      await assertAutostartPathAclsTrusted(inspectedPaths, deps);
       return;
     }
   } catch {

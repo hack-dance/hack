@@ -219,6 +219,7 @@ pub(crate) fn serve(request: Launch) -> Result<()> {
     supervisor::validate_launch(&request)?;
     let root = Root::open(&request.root)?;
     let _instance_lock = root.lock_wait(".instance.lock")?;
+    os::census_preflight()?;
     let launch_lock = root.lock_wait(".stop.lock")?;
     for state in root.states()? {
         if os::recorded_live(&state, false)? {
@@ -236,6 +237,7 @@ pub(crate) fn serve(request: Launch) -> Result<()> {
                 &request.root,
                 &request.owner_token,
                 request.log_path.as_deref(),
+                &launch_lock,
                 process,
                 &mut children,
             )?;
@@ -345,7 +347,8 @@ fn handle_add(
         return Err(refused());
     }
     let before = children.len();
-    let started = supervisor::start_guard(&root.path, owner, log_path, process, children);
+    let started =
+        supervisor::start_guard(&root.path, owner, log_path, &_stop_lock, process, children);
     if started.is_err() {
         supervisor::rollback(&mut children[before..]);
         return Err(refused());

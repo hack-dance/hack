@@ -122,6 +122,23 @@ test("writable startup inputs and symlink targets are refused despite protected 
   ).not.toThrow();
 });
 
+test("generated internal Compose and branch configuration must also be trusted", async () => {
+  for (const directory of [".internal", ".branch"]) {
+    const generated = join(projectDir, directory, "example");
+    await mkdir(generated, { recursive: true, mode: 0o700 });
+    const file = join(generated, "docker-compose.override.yml");
+    await writeFile(file, "services: {}", { mode: 0o600 });
+    await chmod(file, 0o666);
+    expect(() =>
+      assertAutostartCheckoutTrusted({ repoRoot, projectDir })
+    ).toThrow();
+    await chmod(file, 0o600);
+    expect(() =>
+      assertAutostartCheckoutTrusted({ repoRoot, projectDir })
+    ).not.toThrow();
+  }
+});
+
 test("a real checkout replacement beneath a writable parent is refused without changing permissions", async () => {
   const parent = join(root, "projects");
   await chmod(parent, 0o770);

@@ -1,11 +1,13 @@
-import { readdirSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
+import { isRecord } from "./guards.ts";
 import { walkReplaceableChain } from "./path-trust.ts";
 
-/** Authenticate Docker's engine-selection inputs without reading credentials. */
+/** Authenticate Docker's engine-selection inputs without exposing credentials. */
 export function assertAutostartDockerConfigTrusted(opts: {
   readonly home: string;
+  readonly systemPluginDirectories?: readonly string[];
 }): void {
   try {
     const uid = process.getuid?.();
@@ -54,6 +56,36 @@ export function assertAutostartDockerConfigTrusted(opts: {
     // caches do not select an engine and can be arbitrarily large.
     visit(join(root, "config.json"), 0);
     visit(join(root, "contexts"), 0);
+    visit(join(root, "cli-plugins"), 0);
+    for (const directory of opts.systemPluginDirectories ?? [
+      "/usr/local/lib/docker/cli-plugins",
+      "/usr/local/libexec/docker/cli-plugins",
+      "/usr/lib/docker/cli-plugins",
+      "/usr/libexec/docker/cli-plugins",
+    ]) {
+      visit(directory, 0);
+    }
+    const configPath = join(root, "config.json");
+    const configTrust = walkReplaceableChain({
+      path: configPath,
+      uid,
+      hackHome: null,
+      allowMissing: true,
+    });
+    if (!("error" in configTrust) && configTrust.complete) {
+      if (statSync(configPath).size > 1024 * 1024) {
+        throw new Error("Docker configuration exceeds bound");
+      }
+      // Credential fields stay inside this parser and never enter diagnostics.
+      const config: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+      if (!isRecord(config)) {
+        throw new Error("Invalid Docker configuration");
+      }
+      if (config.cliPluginsExtraDirs !== undefined) {
+        // Custom plugin discovery is not part of the fixed login toolchain.
+        throw new Error("Custom plugin search path requires manual startup");
+      }
+    }
   } catch {
     throw new HackCliError({
       code: "E_PERMISSION",

@@ -69,15 +69,29 @@ Children receive a fixed environment allow-list and an executable search
 path built from system directories and known Bun, Hack and Docker directories
 under the owned home (plus Linux `.local/bin`); launching-shell `DOCKER_*`, `COMPOSE_*` and `HACK_*` overrides are not copied.
 Hack adds only its explicit internal noninteractive and identity settings.
-Every login-service launch removes unsafe directories from its executable lookup
-path before starting an engine watcher; it keeps serving the local API when an
-optional tool directory is unsafe. Explicit passes check the derived path before helper
+Only automatic passes check the derived executable path before helper
 lookup too. Directories, executable files and symlink targets must satisfy the
 same read-only ownership and permission checks used by the Linux service; unsafe
 paths are refused without automatic permission repair. This strict policy also
 applies to group-writable Homebrew directories, including group `admin`: install
 required helpers in a trusted lookup directory before retrying. A refused search
 path does not consume a project's attempt for this boot.
+The daemon keeps its installed PATH and continues normal status observation;
+automatic-start refusal does not change ordinary daemon operation.
+The strict policy also applies to Linux user-private groups. Check `hack doctor`
+for the affected trust category. After reviewing ownership and who belongs to the
+group, remove group/other write only on the intended files and directories with
+`chmod go-w <reviewed-path>`; do not recursively change a shared checkout or
+Homebrew installation. Using a private checkout and private tool installation is
+an alternative. Hack never changes those permissions automatically.
+Use `umask 022` in shells that run `hack up` so changed generated inputs retain
+safe modes; with umask 002, a later manual start can recreate group-writable
+generated files and require another review before automatic startup.
+This restriction can also affect Docker Desktop and OrbStack: their CLI and
+Compose plugin links can point into app bundles beneath group-writable
+`/Applications`. Such installations are refused by the automatic path even when
+manual Docker works. Do not change `/Applications` permissions as an automatic
+repair; use reviewed private tools or keep starting projects manually.
 Already-running instances are adopted without repeating startup hooks. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
 
@@ -115,15 +129,19 @@ current user or root and cannot be replaced by other users. The check repeats
 before container startup. A shared writable parent is refused even when the
 saved registry pathname still matches. Startup configuration, Compose and environment
 input files and their symlink targets also require trusted ownership and modes;
+generated JSON/YAML/env inputs under `.hack/.internal` and `.hack/.branch` are included.
 protected directories alone do not make a writable lifecycle configuration safe.
 Normal owner Git updates remain allowed. This is not a recursive audit of all
 repository code a hook or build may execute.
 
 Docker's `config.json` and context metadata/TLS paths must likewise be owned by
 the current user or root and not writable by other users. These checks inspect
-filesystem metadata without reading credentials, and repeat in login children
+filesystem metadata without exposing credentials, and repeat in login children
 before runtime startup. Unsafe engine selection refuses without consuming a boot
 attempt; owner-controlled context changes remain supported.
+Docker Compose plugin directories and their executables receive the same checks.
+A Docker config with `cliPluginsExtraDirs` requires manual startup; automatic
+startup parses only this policy setting and never reports credential fields.
 
 No terminal or keychain prompt is allowed. Missing keys, required interaction,
 pending env migration, unavailable project paths and startup failures produce a

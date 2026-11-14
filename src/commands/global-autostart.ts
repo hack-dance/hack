@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";
 import { secureAutostartRoutingAssets } from "../lib/autostart-routing-assets.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveDefaultDomain } from "../lib/default-domain.ts";
@@ -66,6 +68,3 @@ export async function reconcileGlobalRoutingBridge(opts: {
     });
   }
 }
-
-import { homedir } from "node:os";
-import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";

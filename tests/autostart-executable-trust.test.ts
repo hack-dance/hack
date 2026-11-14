@@ -10,10 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  assertAutostartExecutablePathTrusted,
-  trustedAutostartServicePath,
-} from "../src/lib/autostart-executable-trust.ts";
+import { assertAutostartExecutablePathTrusted } from "../src/lib/autostart-executable-trust.ts";
 
 let root = "";
 let bin = "";
@@ -36,17 +33,16 @@ test("safe owned lookup directories and programs are accepted without execution"
   expect(await readFile(program, "utf8")).toBe("#!/bin/sh\nexit 0\n");
 });
 
-test("a group-writable optional tool directory is omitted without blocking the service", async () => {
+test("a group-writable optional tool directory refuses only automatic execution", async () => {
   const homebrew = join(root, "homebrew");
   await mkdir(homebrew, { mode: 0o775 });
   await chmod(homebrew, 0o775);
   await writeFile(join(homebrew, "docker"), "#!/bin/sh\nexit 99\n", {
     mode: 0o755,
   });
-  expect(
-    await trustedAutostartServicePath({ path: `${homebrew}:${bin}` })
-  ).toBe(bin);
-  expect(await trustedAutostartServicePath({ path: homebrew })).toBe("");
+  await expect(
+    assertAutostartExecutablePathTrusted({ path: `${homebrew}:${bin}` })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
   expect((await Bun.file(homebrew).stat()).mode & 0o777).toBe(0o775);
 });
 

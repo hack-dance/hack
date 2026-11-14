@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
@@ -66,6 +67,7 @@ import {
   resolveSystemdUnitPath,
   SYSTEMD_READ_ONLY_ENV,
 } from "../daemon/systemd.ts";
+import { autostartTrustWarnings } from "../lib/autostart-trust-diagnostics.ts";
 import {
   type CaTrustReport,
   inspectCaTrust,
@@ -1979,6 +1981,17 @@ async function checkAutostartLoginService(): Promise<CheckResult> {
       name: "autostart login service",
       status: "ok",
       message: "No always-on projects marked.",
+    };
+  }
+  const warnings = await autostartTrustWarnings({
+    projects: registry.projects,
+    home: homedir(),
+  });
+  if (warnings.length > 0) {
+    return {
+      name: "autostart login service",
+      status: "warn",
+      message: `Automatic startup trust prerequisites are not met: ${warnings.join(", ")}. Review ownership and group/other write permissions; see docs/always-on-projects.md. On macOS this can include Homebrew, Docker Desktop or OrbStack links through /Applications. Ordinary daemon operation is unaffected.`,
     };
   }
   let unitPath: string | null = null;

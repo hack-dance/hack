@@ -1,22 +1,6 @@
 import { checkServicePathDirectories } from "../daemon/systemd.ts";
 import { HackCliError } from "./cli-result.ts";
 
-/** Omit unsafe service lookup directories without preventing daemon startup. */
-export async function trustedAutostartServicePath(opts: {
-  readonly path: string;
-}): Promise<string> {
-  const trusted: string[] = [];
-  for (const directory of opts.path.split(":")) {
-    try {
-      await assertAutostartExecutablePathTrusted({ path: directory });
-      trusted.push(directory);
-    } catch {
-      // A missing or unsafe optional tool directory is not a daemon failure.
-    }
-  }
-  return trusted.join(":");
-}
-
 /**
  * Login helper lookup has the same read-only ownership and mode requirements on
  * both platforms. Check every lookup directory and its executable/symlink

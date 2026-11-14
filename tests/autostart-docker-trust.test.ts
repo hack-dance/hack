@@ -20,12 +20,32 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-test("missing or owner-controlled Docker engine selection is accepted without parsing values", async () => {
+test("missing or owner-controlled Docker engine selection is accepted without exposing values", async () => {
   expect(() => assertAutostartDockerConfigTrusted({ home })).not.toThrow();
-  await writeFile(join(home, ".docker/config.json"), "not JSON", {
+  await writeFile(join(home, ".docker/config.json"), "{}", {
     mode: 0o600,
   });
   expect(() => assertAutostartDockerConfigTrusted({ home })).not.toThrow();
+});
+
+test("writable Compose plugins and custom plugin search paths refuse automatic startup", async () => {
+  const plugins = join(home, ".docker/cli-plugins");
+  await mkdir(plugins, { mode: 0o700 });
+  const plugin = join(plugins, "docker-compose");
+  await writeFile(plugin, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await chmod(plugin, 0o777);
+  expect(() =>
+    assertAutostartDockerConfigTrusted({ home, systemPluginDirectories: [] })
+  ).toThrow();
+  await chmod(plugin, 0o700);
+  await writeFile(
+    join(home, ".docker/config.json"),
+    JSON.stringify({ cliPluginsExtraDirs: [plugins] }),
+    { mode: 0o600 }
+  );
+  expect(() =>
+    assertAutostartDockerConfigTrusted({ home, systemPluginDirectories: [] })
+  ).toThrow();
 });
 
 test("writable Docker config or context inputs refuse before contacting an engine", async () => {

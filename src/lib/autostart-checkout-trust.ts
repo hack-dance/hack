@@ -1,10 +1,11 @@
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import { checkReplaceableChain, walkReplaceableChain } from "./path-trust.ts";
 
 const STARTUP_INPUT =
   /^(?:hack\.(?:config|env)(?:\..*)?\.(?:json|ya?ml)|docker-compose(?:\..*)?\.ya?ml|\.env(?:\..*)?)$/;
+const GENERATED_INPUT = /\.(?:json|ya?ml)$|^\.env/;
 
 /**
  * Automatic startup may execute checkout hooks only through paths another user
@@ -58,6 +59,63 @@ export function assertAutostartCheckoutTrusted(opts: {
         throw refusal();
       }
     }
+    const visited = new Set<string>();
+    let entries = 0;
+    const generatedDirectoryExists = (path: string): boolean => {
+      const result = walkReplaceableChain({
+        path,
+        uid,
+        hackHome: null,
+        checked,
+        allowMissing: true,
+      });
+      if ("error" in result) {
+        throw refusal();
+      }
+      if (!result.complete) {
+        return false;
+      }
+      if (!statSync(path).isDirectory()) {
+        throw refusal();
+      }
+      const physical = realpathSync(path);
+      if (visited.has(physical)) {
+        throw refusal();
+      }
+      visited.add(physical);
+      return true;
+    };
+    const checkGenerated = (path: string, depth: number): void => {
+      entries += 1;
+      if (entries > 4096 || depth > 16) {
+        throw refusal();
+      }
+      if (!generatedDirectoryExists(path)) {
+        return;
+      }
+      for (const entry of readdirSync(path, { withFileTypes: true })) {
+        const input = join(path, entry.name);
+        if (
+          entry.isDirectory() ||
+          (entry.isSymbolicLink() && statSync(input).isDirectory())
+        ) {
+          checkGenerated(input, depth + 1);
+        } else if (
+          GENERATED_INPUT.test(entry.name) &&
+          (checkReplaceableChain({
+            path: input,
+            uid,
+            hackHome: null,
+            checked,
+          }) !== null ||
+            !statSync(input).isFile())
+        ) {
+          throw refusal();
+        }
+      }
+    };
+    checkGenerated(join(opts.projectDir, ".internal"), 0);
+    checkGenerated(join(opts.projectDir, ".branch"), 0);
   } catch {
     throw refusal();
   }

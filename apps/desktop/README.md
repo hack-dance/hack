@@ -51,7 +51,9 @@ degraded / stopping, failed-start, needs-attention):
 - Pause (reading continues, with an "N new" count), search, and a filter for one service (`hack logs <service>`).
 - Long lines are cut on screen and expand below the list.
 - "Log stream ended" and failures are shown distinctly, with Reconnect.
-- The buffer holds at most 10,000 lines and 8 MB, in memory only: nothing is written to disk and there is no copy-all.
+- The buffer holds at most 10,000 lines and 8 MB (service and timestamp included); a single line is capped at 64 KB on intake. Memory only: nothing is written to disk and there is no copy-all.
+- Scrolling up pauses following. Events reach the UI in bounded batches through a bounded queue, so a very busy stream slows `hack logs` down instead of the window.
+- "Copy command" copies the equivalent `hack logs --path … [service]` for a terminal.
 - Native projects show the terminal command instead, because native logs are a one-service snapshot.
 
 Fixtures: `--logs-fixture <state>` (`--list-fixtures` lists them). Boards:

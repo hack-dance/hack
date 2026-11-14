@@ -206,11 +206,13 @@ impl CliRunner {
     pub fn stream_logs(&self, args: &[&str], path: Option<&Path>) -> Result<LogStream, RunError> {
         let mut child = self.spawn(args, path)?;
         let stdout = child.stdout.take();
-        let (tx, rx) = mpsc::channel();
+        // Bounded: a reader that outruns the UI blocks, which in turn blocks
+        // the CLI on its pipe, instead of queueing without limit.
+        let (tx, rx) = mpsc::sync_channel(STREAM_QUEUE);
         let reader = thread::spawn(move || {
             let Some(stdout) = stdout else { return };
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+            let mut r = BufReader::new(stdout);
+            while let Some(line) = read_bounded_line(&mut r, MAX_RAW_LINE) {
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -232,6 +234,43 @@ impl CliRunner {
     }
 }
 
+/// Events queued between the reader thread and the UI.
+pub const STREAM_QUEUE: usize = 4096;
+/// Longest raw ndjson line read; the rest of a longer line is skipped.
+pub const MAX_RAW_LINE: usize = 1024 * 1024;
+
+/// Read one `\n`-terminated line, keeping at most `max` bytes of it.
+/// `None` at end of input (or on a read error).
+fn read_bounded_line<R: BufRead>(r: &mut R, max: usize) -> Option<String> {
+    let mut buf = Vec::new();
+    let mut saw_any = false;
+    loop {
+        let chunk = r.fill_buf().ok()?;
+        if chunk.is_empty() {
+            return saw_any.then(|| String::from_utf8_lossy(&buf).into_owned());
+        }
+        saw_any = true;
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i, true),
+            None => (chunk.len(), false),
+        };
+        let room = max.saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..take.min(room)]);
+        r.consume(if done { take + 1 } else { take });
+        if done {
+            return Some(String::from_utf8_lossy(&buf).into_owned());
+        }
+    }
+}
+
+/// One poll of a stream: up to `max` events, and the exit code once the
+/// process has exited **and** every line it wrote has been delivered.
+#[derive(Debug, Default)]
+pub struct StreamPoll {
+    pub events: Vec<LogEvent>,
+    pub exit: Option<Option<i32>>,
+}
+
 /// A running log stream. Dropping it kills the process group.
 pub struct LogStream {
     child: Child,
@@ -250,11 +289,23 @@ impl LogStream {
         self.rx.recv_timeout(timeout).ok()
     }
 
-    /// `Some(code)` once the CLI process has exited (the code is `None` when
-    /// a signal ended it), `None` while it runs. Drain events first: lines
-    /// read before the exit may still be queued.
-    pub fn try_exit(&mut self) -> Option<Option<i32>> {
-        self.child.try_wait().ok().flatten().map(|s| s.code())
+    /// Up to `max` queued events. `exit` is set only when the reader has
+    /// reached end of output and the queue is empty, so no trailing line is
+    /// lost; its inner value is `None` when a signal ended the process.
+    pub fn poll(&mut self, max: usize) -> StreamPoll {
+        // Checked before draining: once the reader is done, nothing new
+        // arrives, so an under-full batch means the queue is exhausted.
+        let reader_done = self
+            .reader
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished);
+        let events: Vec<LogEvent> = self.rx.try_iter().take(max).collect();
+        let exit = if reader_done && events.len() < max {
+            self.child.try_wait().ok().flatten().map(|s| s.code())
+        } else {
+            None
+        };
+        StreamPoll { events, exit }
     }
 }
 
@@ -486,15 +537,35 @@ mod tests {
     }
 
     #[test]
-    fn log_stream_reports_exit_code() {
-        let f = FakeHack::new("echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 3");
+    fn log_stream_reports_exit_only_after_every_line() {
+        // Many lines, then exit 3: the exit must not be reported while lines
+        // are still queued or unread, even with a small batch size.
+        let f = FakeHack::new(
+            "i=0; while [ $i -lt 300 ]; do echo \"{\\\"type\\\":\\\"log\\\",\\\"entry\\\":{\\\"message\\\":\\\"l$i\\\"}}\"; i=$((i+1)); done; echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 3",
+        );
         let mut s = f.runner().stream_logs(&["logs"], None).unwrap();
-        assert_eq!(s.next_timeout(T).unwrap().kind, "end");
-        let code = (0..200).find_map(|_| {
-            thread::sleep(Duration::from_millis(10));
-            s.try_exit()
-        });
-        assert_eq!(code, Some(Some(3)));
+        let mut got = 0;
+        let mut exit = None;
+        for _ in 0..500 {
+            let p = s.poll(7);
+            got += p.events.len();
+            if let Some(code) = p.exit {
+                exit = Some(code);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(got, 301, "every line and the end event delivered first");
+        assert_eq!(exit, Some(Some(3)));
+    }
+
+    #[test]
+    fn bounded_line_reader_skips_the_tail_of_huge_lines() {
+        let data = format!("{}\nnext\n", "x".repeat(50));
+        let mut r = std::io::BufReader::with_capacity(8, data.as_bytes());
+        assert_eq!(read_bounded_line(&mut r, 10).unwrap(), "x".repeat(10));
+        assert_eq!(read_bounded_line(&mut r, 10).unwrap(), "next");
+        assert!(read_bounded_line(&mut r, 10).is_none());
     }
 
     #[test]
@@ -540,7 +611,7 @@ sleep 30"#,
         assert_eq!(got[0].kind, "start");
         assert_eq!(got[1].entry.as_ref().unwrap().message, "hi");
         assert_eq!(got[2].message.as_deref(), Some("plain text"));
-        assert_eq!(s.try_exit(), None, "still running");
+        assert!(s.poll(10).exit.is_none(), "still running");
         let t = Instant::now();
         drop(s);
         assert!(t.elapsed() < Duration::from_secs(5));

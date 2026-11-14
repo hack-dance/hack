@@ -25,6 +25,9 @@ use hack_desktop_core::source::LogFeed;
 use crate::view::HackApp;
 
 const DRAIN_EVERY: Duration = Duration::from_millis(150);
+/// Events applied per tick. The reader's queue is bounded too, so a busy
+/// stream slows the CLI down instead of stalling the UI or growing memory.
+const BATCH: usize = 500;
 
 /// Logs tab state owned by the window.
 pub struct LogsPane {
@@ -64,10 +67,18 @@ impl LogsPane {
         self.feed = None;
         self.model = model;
         self.refresh_visible();
-        if !self.visible.is_empty() && !self.model.paused {
+        if self.should_autoscroll() {
             self.scroll
                 .scroll_to_item(self.visible.len() - 1, ScrollStrategy::Bottom);
         }
+    }
+
+    /// Auto-scroll only while following a live stream and not paused.
+    fn should_autoscroll(&self) -> bool {
+        self.model.follow
+            && self.model.state == StreamState::Following
+            && !self.model.paused
+            && !self.visible.is_empty()
     }
 
     fn refresh_visible(&mut self) {
@@ -83,6 +94,22 @@ impl LogsPane {
 }
 
 impl HackApp {
+    /// The equivalent terminal command for the current project and filter,
+    /// shell-quoted. Following, so it keeps streaming in the terminal.
+    fn logs_command(&self) -> Option<String> {
+        let (root, native) = self.selected_root()?;
+        if native {
+            return None;
+        }
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        let mut cmd = format!("hack logs --path {}", quote(&root.to_string_lossy()));
+        if let Some(svc) = &self.logs.model.service {
+            cmd.push(' ');
+            cmd.push_str(&quote(svc));
+        }
+        Some(cmd)
+    }
+
     /// (Re)open the stream for the selected project and current filter.
     pub(crate) fn open_logs(&mut self, cx: &mut Context<Self>) {
         self.logs.close();
@@ -141,12 +168,7 @@ impl HackApp {
         let Some(feed) = self.logs.feed.as_mut() else {
             return;
         };
-        let events = feed.drain();
-        let exit = if events.is_empty() {
-            feed.try_exit()
-        } else {
-            None
-        };
+        let hack_desktop_core::runner::StreamPoll { events, exit } = feed.poll(BATCH);
         if events.is_empty() && exit.is_none() {
             return;
         }
@@ -158,7 +180,7 @@ impl HackApp {
             self.logs.model.exited(code);
         }
         self.logs.refresh_visible();
-        if !self.logs.model.paused && !self.logs.visible.is_empty() {
+        if self.logs.should_autoscroll() {
             self.logs
                 .scroll
                 .scroll_to_item(self.logs.visible.len() - 1, ScrollStrategy::Bottom);
@@ -247,6 +269,18 @@ impl HackApp {
                     .child(format!("{} matches", self.logs.visible.len())),
             );
         }
+        if let Some(cmd) = self.logs_command() {
+            toolbar = toolbar.child(
+                Button::new("logs-copy-cmd")
+                    .label("Copy command")
+                    .small()
+                    .ghost()
+                    .tooltip("Copy the hack logs command to run in a terminal")
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(cmd.clone()));
+                    }),
+            );
+        }
         if m.can_reconnect() {
             toolbar = toolbar.child(
                 Button::new("logs-reconnect")
@@ -284,7 +318,8 @@ impl HackApp {
                     .filter_map(|ix| {
                         let buf_ix = *this.logs.visible.get(ix)?;
                         let line = this.logs.model.line(buf_ix)?;
-                        let (text, hidden) = line.display(false);
+                        let (text, shown_hidden) = line.display(false);
+                        let hidden = shown_hidden + line.cut;
                         let seq = line.seq;
                         let color = if line.error_level || line.stderr {
                             t.danger
@@ -352,6 +387,18 @@ impl HackApp {
                 StreamState::Unavailable { .. } | StreamState::Failed { .. }
             );
         let body = v_flex()
+            .id("log-body")
+            // Scrolling up to read older lines pauses following.
+            .on_scroll(cx.listener(|this, ev: &gpui_kit::ScrollEvent, _, cx| {
+                let up = match ev.delta {
+                    gpui_kit::ScrollDelta::Pixels(p) => p.y > px(0.),
+                    gpui_kit::ScrollDelta::Lines(l) => l.y > 0.,
+                };
+                if up && this.logs.model.follow && !this.logs.model.paused {
+                    this.logs.model.set_paused(true);
+                    cx.notify();
+                }
+            }))
             .mx_5()
             .flex_1()
             .min_h(px(160.))

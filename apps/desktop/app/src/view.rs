@@ -86,6 +86,23 @@ impl HackApp {
         );
     }
 
+    /// Apply a fresh snapshot. If it changed the selected project (the old
+    /// one disappeared), the Logs tab's stream follows the new selection.
+    fn apply_refresh(
+        &mut self,
+        snap: Result<hack_desktop_core::source::Snapshot, hack_desktop_core::source::SourceError>,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.model.selected_row().map(|r| r.name.clone());
+        self.model.apply(Event::Refreshed(snap));
+        let after = self.model.selected_row().map(|r| r.name.clone());
+        if self.tab == 1 && before != after {
+            self.logs.model.set_service(None);
+            self.open_logs(cx);
+        }
+        cx.notify();
+    }
+
     /// Fixtures: select a project by name.
     pub fn select(&mut self, name: &str) {
         self.model.apply(Event::Select(name.to_owned()));
@@ -122,8 +139,7 @@ impl HackApp {
                     .await;
                 let root = this
                     .update(cx, |this, cx| {
-                        this.model.apply(Event::Refreshed(snap));
-                        cx.notify();
+                        this.apply_refresh(snap, cx);
                         this.follow.then(|| this.selected_root()).flatten()
                     })
                     .ok()
@@ -198,10 +214,7 @@ impl HackApp {
                 .background_executor()
                 .spawn(async move { source.snapshot() })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                this.model.apply(Event::Refreshed(snap));
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.apply_refresh(snap, cx));
         })
         .detach();
     }

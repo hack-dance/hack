@@ -76,30 +76,27 @@ pub const NATIVE_LOGS_NOTE: &str = "Native logs are read one service at a time a
 
 /// A running log stream: live `hack logs --json`, or canned events.
 pub trait LogFeed: Send {
-    /// Events received so far, without blocking.
-    fn drain(&mut self) -> Vec<crate::models::LogEvent>;
-    /// `Some(code)` once the stream's process has exited.
-    fn try_exit(&mut self) -> Option<Option<i32>>;
+    /// Up to `max` events without blocking, and the exit once every event
+    /// has been delivered (see [`crate::runner::LogStream::poll`]).
+    fn poll(&mut self, max: usize) -> crate::runner::StreamPoll;
 }
 
 impl LogFeed for crate::runner::LogStream {
-    fn drain(&mut self) -> Vec<crate::models::LogEvent> {
-        crate::runner::LogStream::drain(self)
-    }
-    fn try_exit(&mut self) -> Option<Option<i32>> {
-        crate::runner::LogStream::try_exit(self)
+    fn poll(&mut self, max: usize) -> crate::runner::StreamPoll {
+        crate::runner::LogStream::poll(self, max)
     }
 }
 
-/// Canned events delivered once; then it keeps "following" silently.
+/// Canned events delivered in batches; then it keeps "following" silently.
 pub struct FixtureFeed(pub Vec<crate::models::LogEvent>);
 
 impl LogFeed for FixtureFeed {
-    fn drain(&mut self) -> Vec<crate::models::LogEvent> {
-        std::mem::take(&mut self.0)
-    }
-    fn try_exit(&mut self) -> Option<Option<i32>> {
-        None
+    fn poll(&mut self, max: usize) -> crate::runner::StreamPoll {
+        let n = max.min(self.0.len());
+        crate::runner::StreamPoll {
+            events: self.0.drain(..n).collect(),
+            exit: None,
+        }
     }
 }
 
@@ -478,14 +475,14 @@ esac
             .map(|s| (*s).to_owned())
             .collect();
         let mut feed = src.open_logs(Path::new("/work/x"), false, &args).unwrap();
-        let events = feed.drain();
+        let events = feed.poll(1000).events;
         assert!(
             events
                 .iter()
                 .filter_map(|e| e.entry.as_ref())
                 .all(|e| e.service.as_deref() == Some("worker"))
         );
-        assert!(feed.drain().is_empty(), "delivered once");
+        assert!(feed.poll(1000).events.is_empty(), "delivered once");
         assert!(src.open_logs(Path::new("/work/x"), true, &args).is_err());
     }
 

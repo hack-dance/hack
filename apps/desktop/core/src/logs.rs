@@ -20,6 +20,9 @@ pub const MAX_LINES: usize = 10_000;
 pub const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Lines longer than this are cut on screen until expanded.
 pub const DISPLAY_CUT: usize = 4 * 1024;
+/// Longest message kept per line; the rest is dropped on intake and
+/// counted in `LogLine::cut`, so one line can never exceed the byte bound.
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
 pub const FOLLOW_TAIL: u32 = 500;
 pub const STOPPED_TAIL: u32 = 200;
 
@@ -33,6 +36,18 @@ pub struct LogLine {
     pub timestamp: Option<String>,
     /// The CLI cut this line (`entry.truncated`).
     pub truncated_by_hack: bool,
+    /// Bytes the app dropped from this line on intake (over `MAX_LINE_BYTES`).
+    pub cut: usize,
+}
+
+impl LogLine {
+    /// Bytes this line holds in the buffer (message, service, timestamp).
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        self.message.len()
+            + self.service.as_ref().map_or(0, String::len)
+            + self.timestamp.as_ref().map_or(0, String::len)
+    }
 }
 
 impl LogLine {
@@ -212,6 +227,7 @@ impl LogsModel {
                         error_level: entry.level.as_deref() == Some("error"),
                         timestamp: entry.timestamp.clone(),
                         truncated_by_hack: entry.truncated == Some(true),
+                        cut: 0,
                     });
                 }
             }
@@ -228,9 +244,12 @@ impl LogsModel {
                 let failed =
                     reason == "error" || (reason.starts_with("exit:") && reason != "exit:0");
                 if failed {
-                    self.state = StreamState::Failed {
-                        reason: format!("log stream ended with {reason}"),
-                    };
+                    // Keep a specific reason from an earlier `error` event.
+                    if !matches!(self.state, StreamState::Failed { .. }) {
+                        self.state = StreamState::Failed {
+                            reason: format!("log stream ended with {reason}"),
+                        };
+                    }
                 } else if !matches!(self.state, StreamState::Failed { .. }) {
                     self.state = if self.follow {
                         StreamState::FollowEnded
@@ -271,16 +290,24 @@ impl LogsModel {
     fn push(&mut self, mut line: LogLine) {
         line.seq = self.next_seq;
         self.next_seq += 1;
-        self.bytes += line.message.len();
+        if line.message.len() > MAX_LINE_BYTES {
+            let mut keep = MAX_LINE_BYTES;
+            while !line.message.is_char_boundary(keep) {
+                keep -= 1;
+            }
+            line.cut = line.message.len() - keep;
+            line.message.truncate(keep);
+        }
+        self.bytes += line.retained_bytes();
         self.lines.push_back(line);
         if self.paused {
             self.unseen += 1;
         }
-        while self.lines.len() > self.max_lines
-            || (self.bytes > self.max_bytes && self.lines.len() > 1)
-        {
+        // Strict: lines are capped on intake, so this always terminates
+        // with the buffer within both bounds.
+        while self.lines.len() > self.max_lines || self.bytes > self.max_bytes {
             if let Some(old) = self.lines.pop_front() {
-                self.bytes -= old.message.len();
+                self.bytes -= old.retained_bytes();
                 self.dropped += 1;
                 self.expanded.retain(|s| *s != old.seq);
             }
@@ -587,12 +614,45 @@ mod tests {
         assert_eq!(m.dropped, 2);
         assert_eq!(m.visible()[0].message, "l2");
 
+        // "api" (3) + 6 = 9 bytes per line; the bound is strict.
         let mut b = LogsModel::with_limits(100, 10);
         b.start(true);
         b.apply(&line("aaaaaa"));
         b.apply(&line("bbbbbb"));
         assert_eq!(b.len(), 1, "byte bound drops the oldest");
         assert!(b.bytes() <= 10);
+        b.apply(&line(&"z".repeat(20)));
+        assert!(b.bytes() <= 10, "a line over the bound is not kept");
+    }
+
+    #[test]
+    fn huge_lines_are_capped_on_intake() {
+        let mut m = LogsModel::default();
+        m.start(true);
+        m.apply(&line(&"y".repeat(MAX_LINE_BYTES + 5000)));
+        let l = m.visible()[0];
+        assert_eq!(l.message.len(), MAX_LINE_BYTES);
+        assert_eq!(l.cut, 5000);
+        assert_eq!(m.bytes(), MAX_LINE_BYTES + "api".len());
+    }
+
+    #[test]
+    fn loki_error_then_end_error_keeps_the_specific_reason() {
+        let mut m = LogsModel::default();
+        m.start(true);
+        m.apply(&LogEvent {
+            kind: "error".into(),
+            message: Some("Loki query failed: 502".into()),
+            ..LogEvent::default()
+        });
+        m.apply(&ev("end", Some("error")));
+        m.exited(Some(1));
+        assert_eq!(
+            m.state,
+            StreamState::Failed {
+                reason: "Loki query failed: 502".into()
+            }
+        );
     }
 
     #[test]
@@ -651,6 +711,7 @@ mod tests {
             error_level: false,
             timestamp: None,
             truncated_by_hack: false,
+            cut: 0,
         };
         let (shown, hidden) = l.display(false);
         assert!(shown.len() <= DISPLAY_CUT);

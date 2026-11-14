@@ -978,13 +978,13 @@ removing anything. A legacy store and its key use their separate owner locks,
 including the key lock shared by every store using that path.
 Changed sources or delivery refuse cleanup with reconciliation
 advice; migration writes already completed remain. Confirmed removals before a
-failure are named. Implicit cleanup warns and lets the original command continue
-even if a lock times out, a key is unavailable or a file is unreadable.
-Once YAML layers exist, rerunning migration may not import changed legacy
-values. Keep the copies and keys, reconcile chosen values with `env set KEY
---value-stdin` (use `--local` for machine-local values, add `--secret` for secrets
-and preserve scope/overlay), check
-delivery, then remove only copies confirmed obsolete. Editors and older writers
+failure are named. Implicit commands retain legacy files; cleanup needs the
+separate explicit invocation and its snapshot and successful-project-run checks.
+A completed migration is a no-op on retry. Keep the copies and keys if legacy
+values changed afterward. Restore the snapshot with `--preserve-changes` to keep
+later edits privately, or reconcile chosen values with `env set KEY --value-stdin`
+(use `--local` for machine-local values, add `--secret` for secrets and preserve
+scope/overlay). Check delivery before previewing cleanup again. Editors and older writers
 that do not take Hack's locks can still race a filesystem operation.
 
 ### Concurrent writes to one env file
@@ -1336,53 +1336,63 @@ YAML inputs, including filesystem aliases. It does not recover keys already remo
 files until their original key is recovered; creating a replacement key is not
 recovery.
 
-Hack still detects and reads that legacy format. After those backup checks,
-the explicit migration path is:
+Hack still detects and reads that legacy format. Preview the migration first:
 
 ```bash
-hack doctor --migrate-env-config
+hack env migrate --json
+hack env migrate --apply --accept-tracked-env-changes
 ```
 
-That migrates the repo into:
+Preview is read-only and lists file actions and key names, never values. Apply
+creates a private snapshot outside the working tree and records idempotent steps
+in a journal. Re-run it after interruption; a finished migration is a no-op.
+`doctor --migrate-env-config` still applies migration; its existing hygiene
+repairs can run before the migration snapshot and are reported separately.
+Use `hack env migrate --apply` for migration-only preview and rollback.
+Both backends use the
+same file migration; Compose users need no native runtime, and neither preview
+nor apply needs Docker or a daemon.
 
-- `.hack/hack.env.default.yaml`
-- `.hack/hack.env.<overlay>.yaml`
-- `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` for plain values
-- `.hack.secret.key` when needed
+The migration writes tracked `hack.env.default.yaml` and overlay YAML layers,
+private `hack.env.local.yaml` and overlay local layers for plain values, and a
+private project key when required. Tracked layers receive secret-backed
+ciphertext, never legacy plaintext. It can also repair Compose `env_file`
+references and old config keys. A tracked edit always requires consent;
+`--accept-tracked-env-changes` keeps its meaning and never bypasses safety checks.
+Without a prompt, doctor refuses tracked edits before its fix steps write.
 
-Tracked layers receive secret-backed ciphertext, not legacy plaintext.
-
-The migration runs the same way on the Compose and native backends: it changes project
-files only, so native `hack doctor --migrate-env-config` needs no Docker and no native
-runtime.
-
-`hack.env.json` and the Compose file are shared, git-tracked configuration, so the
-migration never deletes or edits a git-tracked file without your consent. Interactively,
-doctor lists the git-tracked files that may change before it migrates, and asks before it
-removes `env_file` entries from a tracked Compose file and, separately, before it removes
-git-tracked legacy files such as `hack.env.json`. A file whose git status can't be read
-inside a git checkout counts as tracked. A run that can't prompt (no TTY,
-`HACK_NO_INTERACTIVE`, or `--no-interactive`) refuses with `E_INTERACTIVE_REQUIRED` before
-any doctor step writes, naming each tracked file it would delete or edit, unless you pass
-`--accept-tracked-env-changes`:
+**Migration keeps all legacy files.** Cleanup is a separate later action:
 
 ```bash
-hack doctor --migrate-env-config --no-interactive --accept-tracked-env-changes
+hack up
+hack env migrate --cleanup --json
+hack env migrate --cleanup --apply --accept-tracked-env-changes
 ```
 
-The list is conservative; with a contract it can include `hack.config.json`, which the
-migration rewrites when it still holds legacy keys such as `defaultEnvConfig`, and a legacy
-dotenv file the migration ends up keeping. Commit the changes so teammates get them.
+Cleanup requires a successful complete-project run on the current layers, an
+intact snapshot, fresh delivery of every migrated value and the live-input guard.
+Current env keys, config and YAML files are never cleanup targets, including
+filesystem aliases. Use `--rollback-manifest <path>` to restore the snapshot;
+later edits are refused. See the [versioned preview and recovery
+contract](reference/env-migration.md) for the JSON shape, journal boundaries and
+partial-cleanup recovery.
+Rollback also restores original file modes, including modes Doctor may have
+tightened since migration. Its result warns to run `hack doctor --fix --path
+<project>` after recovery to review those permissions.
 
-Commands that need env values, such as `hack env exec`, also migrate a
-project that has `hack.env.json` and no env layers, without asking. That migration reports
-each moved key, never its value, and removes a legacy `.hack/.env` or `.hack/.env.<overlay>`
-file only when every entry now lives in an env layer, Compose no longer names it as
-`env_file`, Compose doesn't interpolate a key from it that the env layers now set only for a
-service, and git doesn't track it, so no second plaintext copy stays behind. It keeps
-`hack.env.json`, never edits the Compose file and never deletes a git-tracked file; it names
-a kept file and says why. Run `hack doctor --migrate-env-config` for those
-changes. Like doctor, it rewrites legacy keys in `hack.config.json`.
+Commands that need env values, such as `hack env exec`, can also migrate a
+project that has `hack.env.json` and no env layers. These implicit migrations
+report moved key names, retain every legacy copy and keep Compose `env_file`
+references. They never delete a tracked file or silently edit tracked config.
+Use the explicit preview/apply command when a shared config repair needs consent.
+After an implicit migration, explicit preview and Doctor can still offer the
+deferred Compose repair. That later phase keeps existing layers and legacy
+files, rechecks delivery and snapshot coverage, and requires consent for tracked
+edits. It invalidates an earlier project run, so start the complete project
+again before cleanup.
+If retained legacy inputs have drifted, Doctor reports the deferred repair as
+unavailable and skips it, keeping current layers and legacy files. Explicit
+`env migrate --apply` still refuses that unverified repair.
 
 A repo that has no `.hack/hack.env.json` is migrated as well. Its values live only in
 `.hack/.env` and `.hack/.env.<overlay>`, which are gitignored and may hold passwords or
@@ -1641,23 +1651,25 @@ lists the store's entries read-only before it writes anything, without creating 
 An overlay that exists only in the store, such as a value from
 `hack env set KEY --secret --env staging` with no `.hack/.env.staging`, is migrated like an
 overlay file. A stored overlay whose name can't be an env layer name refuses
-(`E_CONFIG_INVALID`). Doctor offers a configured store inside the project for cleanup only
+(`E_CONFIG_INVALID`). The separate cleanup preview lists a configured store inside the project only
 when the env layers now deliver every entry it holds for this project and it holds none for
-another; otherwise it keeps the store and names the entries that would be lost, never their
-values. A store it can't list (its key isn't available, it can't be read, or the backend is
+another; otherwise the store is kept. A store it can't list (its key isn't available, it can't be read, or the backend is
 the keychain) is kept too. A store key file inside the project is offered only when no store
 that needs it stays behind. Project env keys (including the shared Git key), current
 YAML layers and project config files are never legacy cleanup targets, even when
 an old backend configuration names the same file. Cleanup refuses a request that
-includes one, because migrated values may still depend on it. While a store exists, the migration keeps its pointer in
+includes one, because migrated values may still depend on it. Migration keeps every
+legacy file and its store pointer in
 `hack.config.json` (`controlPlane.secrets.encryptedFile` and `backend: encrypted_file`) on
 every route, including implicit ones such as `hack env add`, so entries it still holds stay
-readable through the secret store without hand edits; Hack reports the kept pointer with the
-key names still in the store, never values. The pointer is dropped only after doctor's
-cleanup has removed the store. If a later removal fails, doctor drops the pointer
-for that confirmed store removal before reporting the cleanup error. If the config
-cannot be updated, doctor warns about the pointer and still reports the original
-cleanup failure and confirmed removals. If the store remains, its pointer stays
+readable through the secret store without hand edits. After a successful full-project
+`hack up`, preview cleanup with `hack env migrate --cleanup --json` and request it
+with `--cleanup --apply`, adding `--accept-tracked-env-changes` for tracked edits.
+The pointer is dropped only after that explicit cleanup removes the store. If a
+later removal or receipt fails, cleanup still attempts pointer repair and reports
+every confirmed removal. If the config cannot be updated, its error also warns
+about the pointer. Restore the snapshot before retrying an incomplete cleanup.
+If the store remains, its pointer stays
 in place. A `cloud`
 backend reads the same pointer, so it always keeps it, and its store and key file are never
 offered for cleanup. The keychain backend can't list its entries, so with it an overlay

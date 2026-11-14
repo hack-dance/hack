@@ -30,6 +30,10 @@ import {
 } from "../lib/env-hydrate-input.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
+  assertEnvMigrationFinished,
+  migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
+} from "../lib/env-migration.ts";
+import {
   assertEnvValueStdinUsage,
   readEnvValueFromStdin,
 } from "../lib/env-value-stdin.ts";
@@ -89,7 +93,6 @@ import {
   hydrateProjectEnvLocalLayer,
   listProjectEnvPlaintextEntries,
   materializeProjectEnv,
-  migrateLegacyProjectEnv,
   type ProjectEnvResolvedMetadata,
   parseProjectEnvTarget,
   projectEnvConfigExists,
@@ -113,6 +116,7 @@ import {
 import { run } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
+import { envMigrateCommand } from "./env-migrate.ts";
 import { hostPsCommand } from "./host-ps.ts";
 
 const optShowSecrets = defineOption({
@@ -738,9 +742,11 @@ async function resolveProjectForEnv(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    return await resolveRegisteredProjectOption({
+    const registered = await resolveRegisteredProjectOption({
       projectOpt: opts.projectOpt,
     });
+    await assertEnvMigrationFinished(registered);
+    return registered;
   }
 
   const startDir = opts.pathOpt
@@ -750,6 +756,7 @@ async function resolveProjectForEnv(opts: {
   if (!project) {
     throw new MissingProjectContextError();
   }
+  await assertEnvMigrationFinished(project);
   return project;
 }
 
@@ -995,6 +1002,7 @@ async function maybeMigrateLegacyProjectEnv(input: {
   readonly projectName: string;
   readonly reason: "mutation" | "runtime";
 }): Promise<boolean> {
+  await assertEnvMigrationFinished(input.project);
   if (
     await projectEnvConfigExists({
       projectDir: input.project.projectDir,
@@ -2883,6 +2891,7 @@ export const envCommand = defineCommand({
   options: [],
   positionals: [],
   subcommands: [
+    envMigrateCommand,
     withHandler(listSpec, handleEnvList),
     withHandler(protectSpec, handleEnvProtect),
     withHandler(getSpec, handleEnvGet),

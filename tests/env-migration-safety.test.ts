@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -49,7 +50,10 @@ beforeEach(async () => {
   for (const key of ENV_KEYS) {
     savedEnv.set(key, process.env[key]);
   }
-  root = await mkdtemp(join(tmpdir(), "hack-env-migration-safety-"));
+  // macOS TMPDIR can use /var aliases; migration metadata requires a canonical home.
+  root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-env-migration-safety-"))
+  );
   process.env.HOME = resolve(root, "home");
   Reflect.deleteProperty(process.env, "HACK_HOME");
   Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
@@ -393,7 +397,7 @@ test("an implicit env add keeps the pointer of a store with an undeclared entry,
   });
   expect(await store.get({ key: "UNDECL" })).toBe(undeclared);
   expect(run.output).toContain(
-    "Kept the encrypted secret store pointer (controlPlane.secrets) in .hack/hack.config.json for secrets.enc.json, which stays: it still holds SEC, UNDECL (values omitted)"
+    "Legacy env files were kept. After validating the project, preview the separate cleanup step with hack env migrate --cleanup."
   );
   for (const value of [declared, undeclared, added]) {
     expect(run.output).not.toContain(value);

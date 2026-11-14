@@ -18,6 +18,7 @@ import {
   basename,
   dirname,
   isAbsolute,
+  join,
   relative,
   resolve,
   sep,
@@ -44,8 +45,14 @@ import {
 } from "../templates.ts";
 import { childEnvironment } from "./child-environment.ts";
 import { ClosedCliError, HackCliError } from "./cli-result.ts";
+import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
+import { readMigrationFile } from "./env-migration-files.ts";
+import {
+  assertEnvMigrationReadable,
+  EnvMigrationPendingError,
+} from "./env-migration-state.ts";
 import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import {
   AtomicWriteConflictError,
@@ -111,6 +118,7 @@ import {
   readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
+import { PRIVATE_STAGING_DIRNAME } from "./private-staging.ts";
 import { boundedTimeoutMs } from "./process-deadline.ts";
 import {
   parseEnvConfigSelection,
@@ -1467,6 +1475,7 @@ async function readProjectEnvLayers(opts: {
   readonly envName?: string | null;
   readonly strictRead?: boolean;
 }) {
+  await assertEnvMigrationReadable(opts);
   const selection = await resolveProjectEnvSelection({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
@@ -1507,6 +1516,7 @@ async function readProjectEnvLayers(opts: {
   const primaryDir = await resolvePrimaryLocalProjectDir(opts);
   const inheritedReads: ProjectEnvConfigReadResult[] = [];
   if (primaryDir !== null) {
+    await assertEnvMigrationReadable({ projectRoot: dirname(primaryDir) });
     const primaryDefaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
       projectRoot: dirname(primaryDir),
       projectDir: primaryDir,
@@ -1680,6 +1690,9 @@ export async function resolveProjectEnvMetadata(
           .metadata
       : null;
   } catch (error) {
+    if (error instanceof EnvMigrationPendingError) {
+      throw error;
+    }
     if (
       opts.fileDiagnostics &&
       (error instanceof ClosedCliError || error instanceof HackCliError)
@@ -2076,6 +2089,7 @@ async function readNativeProjectEnvSelection(
   onAcquired?: NativeEnvAcquisitionObserver,
   inputOwner: ExplicitManagedEnvInputOwner = nativeManagedEnvInputOwner
 ) {
+  await assertEnvMigrationReadable(opts);
   checkNativeEnvCancellation(opts.signal);
   const overlayName = opts.overlay;
   const inheritLocal = opts.inheritLocal;
@@ -2100,6 +2114,7 @@ async function readNativeProjectEnvSelection(
       signal: opts.signal,
     });
     if (primaryRoot) {
+      await assertEnvMigrationReadable({ projectRoot: primaryRoot });
       await inputOwner.assertRoot({
         projectRoot: primaryRoot,
         signal: opts.signal,
@@ -2207,6 +2222,9 @@ export async function resolveProjectEnvMetadataForNativeSelection(
   try {
     return (await readNativeProjectEnvSelection(opts)).metadata;
   } catch (error: unknown) {
+    if (error instanceof EnvMigrationPendingError) {
+      throw error;
+    }
     if (
       error instanceof NativeConfigCompilerError &&
       error.code === "E_COMPILER_CANCELLED"
@@ -2234,6 +2252,9 @@ export async function resolveProjectEnvConfigForNativeSelection(
       signal: opts.signal,
     });
   } catch (error: unknown) {
+    if (error instanceof EnvMigrationPendingError) {
+      throw error;
+    }
     if (
       error instanceof NativeConfigCompilerError &&
       error.code === "E_COMPILER_CANCELLED"
@@ -5298,16 +5319,45 @@ function projectEnvTrackedKeyError(): ProjectEnvKeyRefusalError {
  * stays allowed for v4 compatibility; `hack doctor` reports the tracked key.
  * An undeterminable status (git unavailable, path outside a work tree) is not
  * treated as tracked.
+ * The index is checked ignoring filename case even if the path is absent,
+ * protecting portable checkouts whose filesystem folds case. Key publishers
+ * must call this again under the key owner lock before publication.
  */
-async function assertProjectEnvKeyUntracked(opts: {
+export async function assertProjectEnvKeyUntracked(opts: {
   readonly keyPath: string;
 }): Promise<void> {
-  const tracked = await isGitTrackedProjectEnvPath({
+  const tracked = await isGitTrackedProjectEnvPathAnyCase({
     projectRoot: dirname(opts.keyPath),
     path: opts.keyPath,
   });
   if (tracked === true) {
     throw projectEnvTrackedKeyError();
+  }
+}
+
+/** Migration key publishers recheck effective Git protection under their key owner lock. */
+export async function assertMigrationProjectEnvKeyPrivate(opts: {
+  readonly projectRoot: string;
+  readonly keyPath: string;
+}): Promise<void> {
+  await assertProjectEnvKeyUntracked(opts);
+  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  // Only the verified Git common-directory key is outside worktree ignore rules.
+  if (opts.keyPath === shared?.path) {
+    return;
+  }
+  const projectRoot = dirname(opts.keyPath);
+  // Git ignores symlinked .gitignore files, even if their target lists the key.
+  await readMigrationFile(resolve(projectRoot, ".gitignore"));
+  if (
+    (await machineLocalLayerGitProblem({
+      projectRoot,
+      path: opts.keyPath,
+    })) !== null
+  ) {
+    throw new ClosedCliError(
+      "Refusing env migration: the project key is not verifiably untracked and ignored by Git. Repair the root .gitignore and make git status work before retrying; no key was published (values omitted)."
+    );
   }
 }
 
@@ -5854,9 +5904,15 @@ export async function discoverComposeServiceNames(opts: {
 export async function inspectLegacyComposeEnvFileReferences(opts: {
   readonly composeFile: string;
   readonly projectDir: string;
+  readonly strict?: boolean;
 }): Promise<readonly LegacyComposeEnvFileReference[]> {
   const parsed = await readComposeFile({ composeFile: opts.composeFile });
   if (!parsed) {
+    if (opts.strict) {
+      throw new ClosedCliError(
+        "Cannot inspect Compose repair: the configuration is unavailable or malformed; values omitted."
+      );
+    }
     return [];
   }
 
@@ -6103,12 +6159,28 @@ function removeLegacyComposeEnvFileEntries(opts: {
   return kept.length > 0 ? kept : undefined;
 }
 
+function assertLegacyEnvMigrationOverlayNames(
+  overlayNames: readonly string[]
+): void {
+  if (overlayNames.includes("default")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
+  if (overlayNames.includes("local")) {
+    throw new ClosedCliError(
+      "Refusing legacy env migration: .env.local would collide with the machine-local hack.env.local.yaml layer. Rename the legacy local overlay and update its project references before retrying. No env migration files were written."
+    );
+  }
+}
+
 /** Reject aliases between tracked and effective local destinations before any writes. */
 async function preflightLegacyEnvMigrationPaths(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly overlayNames: readonly string[];
 }): Promise<readonly string[]> {
+  assertLegacyEnvMigrationOverlayNames(opts.overlayNames);
   const destinations = new Set<string>();
   const localPaths: string[] = [];
   for (const envName of [null, ...opts.overlayNames]) {
@@ -6281,6 +6353,720 @@ export function describeRetainedLegacyEnvFile(opts: {
   return `Kept ${opts.shownPath}: keys not preserved in env layers: ${keys} (values omitted).`;
 }
 
+/** Public migration metadata never owns file contents; payload access is non-enumerable. */
+export type PreparedLegacyEnvMigration = {
+  readonly files: readonly {
+    readonly path: string;
+    readonly kind:
+      | "staging_guard"
+      | "ignore"
+      | "key"
+      | "local_layer"
+      | "layer"
+      | "config"
+      | "compose";
+    readonly keys: readonly string[];
+    readonly mode: number;
+  }[];
+  readonly sourcePaths: readonly string[];
+  readonly removable: readonly string[];
+  readonly overlayNames: readonly string[];
+  readonly hasContract: boolean;
+  readonly composeRepairDeferred: boolean;
+  readonly retainedEnvFiles: readonly RetainedLegacyEnvFile[];
+  readonly blockedCleanupCandidates: readonly string[];
+  readonly store?: { readonly path: string; readonly keyPath: string };
+  /** Private in-memory payload: never serialize this return value. */
+  readonly payload: (path: string) => string;
+};
+
+/**
+ * Prepares the explicit, journalled migration without any filesystem mutation.
+ * Legacy sources stay in place throughout publication. The journal owner stages
+ * payloads privately, records only their checksums, and publishes under locks.
+ */
+export async function prepareLegacyProjectEnvMigration(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly serviceNames: readonly string[];
+  readonly repairCompose?: boolean;
+}): Promise<PreparedLegacyEnvMigration> {
+  try {
+    return await prepareLegacyProjectEnvMigrationInternal(opts);
+  } catch (error) {
+    if (error instanceof ClosedCliError || error instanceof HackCliError) {
+      throw error;
+    }
+    throw new ClosedCliError(
+      "Cannot prepare env migration: an input is unreadable, malformed or unsafe; values omitted."
+    );
+  }
+}
+
+type PreparedMigrationProject = Parameters<
+  typeof prepareLegacyProjectEnvMigration
+>[0];
+type AddPreparedMigrationFile = (
+  file: PreparedLegacyEnvMigration["files"][number],
+  text: string
+) => Promise<void>;
+type AddPreparedMigrationLayer = (
+  write: PlannedEnvLayerWrite,
+  local: boolean
+) => Promise<void>;
+type ResolvedMigrationValues = readonly (Awaited<
+  ReturnType<typeof resolveHackEnv>
+> & { readonly name: string | null })[];
+
+function mergePreparedLocalValues(
+  previous: ProjectEnvConfig,
+  incoming: ProjectEnvConfig
+): ProjectEnvConfig {
+  const values = structuredClone(previous.values);
+  for (const [scope, entries] of Object.entries(incoming.values)) {
+    for (const [key, value] of Object.entries(entries)) {
+      const existing = values[scope]?.[key];
+      if (
+        existing !== undefined &&
+        JSON.stringify(existing) !== JSON.stringify(value)
+      ) {
+        throw new ClosedCliError(
+          `Migration conflicts with an existing local value for ${key}; values omitted.`
+        );
+      }
+    }
+    values[scope] = { ...values[scope], ...entries };
+  }
+  return { ...previous, values };
+}
+
+async function prepareContractMigrationKey(
+  opts: PreparedMigrationProject,
+  resolved: ResolvedMigrationValues,
+  extraSources: Set<string>,
+  add: AddPreparedMigrationFile
+): Promise<string | null> {
+  if (
+    resolved.some((entry) =>
+      entry.values.some(
+        (value) => value.source === "keychain" && value.value !== null
+      )
+    )
+  ) {
+    await refuseMigrationKeyShadowingEnvironmentKey(opts);
+    const localPath = resolveProjectEnvKeyPath(opts);
+    const shared = await resolveProjectEnvSharedKeyPath(opts);
+    const inherited = await resolveInheritedProjectEnvKey(opts);
+    let existingPath = inherited?.keyPath;
+    if (shared && (await pathExists(shared))) {
+      existingPath = shared;
+    }
+    if (await pathExists(localPath)) {
+      existingPath = localPath;
+    }
+    const keyPath = existingPath ?? shared ?? localPath;
+    extraSources.add(keyPath);
+    await assertProjectEnvKeyUntracked({ keyPath });
+    const keyText = existingPath
+      ? await readLegacyProjectEnvKeyFile({ path: keyPath })
+      : randomBytes(32).toString("base64url");
+    if (!keyText) {
+      throw projectEnvKeyFileError();
+    }
+    await add(
+      { path: keyPath, kind: "key", keys: [], mode: 0o600 },
+      `${keyText}\n`
+    );
+    if (keyPath === localPath) {
+      await prepareMigrationKeyIgnore(opts, add);
+    }
+    return keyText;
+  }
+  return null;
+}
+
+async function prepareMigrationKeyIgnore(
+  opts: PreparedMigrationProject,
+  add: AddPreparedMigrationFile
+): Promise<void> {
+  const path = resolve(opts.projectRoot, ".gitignore");
+  const existing = (await readMigrationFile(path)).text;
+  // Appending after possible negations ensures a freshly written private key
+  // is ignored. Existing effective final entries require no change.
+  if (existing?.split("\n").at(-2) === PROJECT_ENV_KEY_FILENAME) {
+    return;
+  }
+  const separator = !existing || existing.endsWith("\n") ? "" : "\n";
+  await add(
+    { path, kind: "ignore", keys: [], mode: 0o644 },
+    `${existing ?? ""}${separator}# project env key\n${PROJECT_ENV_KEY_FILENAME}\n`
+  );
+}
+
+async function prepareContractMigrationLayers(
+  opts: PreparedMigrationProject,
+  resolved: ResolvedMigrationValues,
+  keyText: string | null,
+  addLayer: AddPreparedMigrationLayer
+): Promise<void> {
+  const baseValues = new Map(
+    resolved[0]?.values.map((entry) => [entry.key, entry.value])
+  );
+  for (const entry of resolved) {
+    const values = buildMigratedValues({
+      resolvedValues: entry.values.filter(
+        (value) => value.source === "plain_env"
+      ),
+      baseValues: entry.name === null ? null : baseValues,
+      keyText: null,
+    });
+    if (Object.values(values).some((scope) => Object.keys(scope).length > 0)) {
+      await addLayer(
+        {
+          path: await resolveProjectEnvEffectiveLocalConfigPath({
+            ...opts,
+            envName: entry.name,
+          }),
+          config: buildMigratedProjectEnvConfig({
+            environment: entry.name ?? "default",
+            values,
+          }),
+        },
+        true
+      );
+    }
+    const secrets = buildMigratedValues({
+      resolvedValues: entry.values.filter(
+        (value) => value.source === "keychain"
+      ),
+      baseValues: entry.name === null ? null : baseValues,
+      keyText,
+    });
+    if (
+      entry.name === null ||
+      Object.values(secrets).some((scope) => Object.keys(scope).length > 0) ||
+      Object.values(values).some((scope) => Object.keys(scope).length > 0)
+    ) {
+      await addLayer(
+        {
+          path: resolveProjectEnvConfigPath({
+            ...opts,
+            envName: entry.name,
+          }),
+          config: buildMigratedProjectEnvConfig({
+            environment: entry.name ?? "default",
+            values: secrets,
+          }),
+        },
+        false
+      );
+    }
+  }
+}
+
+async function prepareContractMigration(
+  opts: PreparedMigrationProject,
+  contract: Awaited<ReturnType<typeof readHackEnvContract>>["contract"],
+  layersExist: boolean,
+  extraSources: Set<string>,
+  add: AddPreparedMigrationFile,
+  addLayer: AddPreparedMigrationLayer
+) {
+  const selected = await selectContractMigrationOverlays({
+    ...opts,
+    contract,
+    composeRepairFollows: opts.repairCompose !== false,
+  });
+  const overlayNames = selected.overlayNames;
+  const store = {
+    path: selected.secretStoreListing.storePath,
+    keyPath: selected.secretStoreListing.keyPath,
+  };
+  await assertNoShellValuesInContractMigration({
+    values: await findProcessOnlyContractValues({ ...opts, overlayNames }),
+  });
+  const resolved = await Promise.all(
+    [null, ...overlayNames].map(async (envName) => ({
+      name: envName,
+      ...(await resolveHackEnv({
+        ...opts,
+        envName,
+        allowKeyProvisioning: false,
+      })),
+    }))
+  );
+  const base = resolved[0];
+  if (!base) {
+    throw new ClosedCliError("Migration base is unavailable; values omitted.");
+  }
+  assertContractMigrationLayersAreWritable({
+    baseValues: base.values,
+    overlays: resolved
+      .slice(1)
+      .map((entry) => ({ name: entry.name ?? "", values: entry.values })),
+  });
+  await preflightLegacyEnvMigrationPaths({ ...opts, overlayNames });
+  if (overlayNames.includes("default") || overlayNames.includes("local")) {
+    throw new ClosedCliError(
+      "Reserved legacy overlay name; rename it before migration; values omitted."
+    );
+  }
+  const keyText = layersExist
+    ? null
+    : await prepareContractMigrationKey(opts, resolved, extraSources, add);
+  if (!layersExist) {
+    await prepareContractMigrationLayers(opts, resolved, keyText, addLayer);
+  }
+  const deliveredValues = new Map(
+    resolved.map((entry) => [
+      resolveEnvFilePath({ ...opts, envName: entry.name }),
+      new Map(entry.values.map((value) => [value.key, value.value])),
+    ])
+  );
+  const planned = await planLegacyProjectConfigChanges(opts);
+  const retained = await retainLegacySecretStoreFiles({
+    candidates: planned.cleanupCandidates,
+    listing: selected.secretStoreListing,
+    deliveredByEnv: new Map(
+      resolved.map((entry) => [
+        entry.name,
+        new Map(entry.values.map((value) => [value.key, value.value])),
+      ])
+    ),
+  });
+  const configCandidates = retained.candidates;
+  const configText = await readTextFile(planned.path);
+  if (configText) {
+    const parsed: unknown = JSON.parse(configText);
+    if (isRecord(parsed)) {
+      const normalized = normalizeLegacyProjectTopLevelConfig({
+        parsed,
+        projectRoot: opts.projectRoot,
+        keepStorePointer: true,
+      });
+      if (normalized.changed) {
+        await add(
+          { path: planned.path, kind: "config", keys: [], mode: 0o644 },
+          `${JSON.stringify(normalized.config, null, 2)}\n`
+        );
+      }
+    }
+  }
+  return { overlayNames, store, deliveredValues, configCandidates };
+}
+
+async function prepareUndeclaredMigration(
+  opts: PreparedMigrationProject,
+  addLayer: AddPreparedMigrationLayer
+) {
+  const prepared = await prepareUndeclaredLegacyDotenv({
+    ...opts,
+    materialize: false,
+  });
+  const overlayNames = prepared.overlayNames;
+  for (const write of prepared.localWrites) {
+    await addLayer(write, true);
+  }
+  for (const write of prepared.trackedWrites) {
+    await addLayer(write, false);
+  }
+  const legacyValues = await readValidatedLegacyDotenvFiles({
+    ...opts,
+    overlayNames,
+    skipBase: prepared.generatedBase,
+  });
+  const base = legacyValues.get(null) ?? {};
+  const deliveredValues = new Map(
+    [null, ...overlayNames].map((envName) => [
+      resolveEnvFilePath({ ...opts, envName }),
+      new Map(Object.entries({ ...base, ...legacyValues.get(envName) })),
+    ])
+  );
+  return {
+    overlayNames,
+    deliveredValues,
+    configCandidates: [] as readonly string[],
+    store: undefined,
+  };
+}
+
+async function prepareMigrationCompose(
+  opts: PreparedMigrationProject & {
+    readonly hasContract: boolean;
+    readonly layersExist: boolean;
+    readonly overlayNames: readonly string[];
+  },
+  add: AddPreparedMigrationFile
+): Promise<void> {
+  const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
+  const references = await inspectLegacyComposeEnvFileReferences({
+    ...opts,
+    composeFile,
+  });
+  if (references.length > 0) {
+    // Existing layers are kept, so they must already deliver every contract
+    // value before the first journal can remove its legacy Compose inputs.
+    if (opts.hasContract && opts.layersExist) {
+      await assertLegacyEnvMigrationDelivery({
+        ...opts,
+      });
+    }
+    const parsed = await readComposeFile({ composeFile });
+    if (!parsed) {
+      throw new ClosedCliError(
+        "Cannot prepare Compose repair; values omitted."
+      );
+    }
+    for (const [service, raw] of Object.entries(
+      getRecord(parsed, "services") ?? {}
+    )) {
+      if (isRecord(raw) && "env_file" in raw) {
+        raw.env_file = removeLegacyComposeEnvFileEntries({
+          service,
+          rawEnvFile: raw.env_file,
+          composeDir: opts.projectDir,
+          projectDir: opts.projectDir,
+          removed: [],
+        });
+      }
+    }
+    await add(
+      { path: composeFile, kind: "compose", keys: [], mode: 0o644 },
+      YAML.stringify(parsed, null, 2)
+    );
+  }
+}
+
+async function prepareMigrationStagingGuards(
+  files: readonly PreparedLegacyEnvMigration["files"][number][],
+  extraSources: Set<string>,
+  add: AddPreparedMigrationFile
+): Promise<void> {
+  const parents = [...new Set(files.map((file) => dirname(file.path)))];
+  for (const parent of parents) {
+    const path = join(parent, PRIVATE_STAGING_DIRNAME, ".gitignore");
+    extraSources.add(path);
+    const info = await lstat(dirname(path)).catch((error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    });
+    if (
+      info &&
+      (!info.isDirectory() ||
+        info.isSymbolicLink() ||
+        info.uid !== process.getuid?.() ||
+        (info.mode & 0o077) !== 0)
+    ) {
+      throw new ClosedCliError(
+        "Cannot prepare env migration: staging directory is unsafe or not private; values omitted."
+      );
+    }
+    const previous = await readReplaceablePrivateFile({
+      path,
+      directories: [],
+      refusal: () =>
+        new ClosedCliError(
+          "Cannot prepare env migration staging guard; values omitted."
+        ),
+    });
+    if (previous && previous.text !== "*\n") {
+      throw new ClosedCliError(
+        "Cannot prepare env migration: staging ignore file differs from the required guard; values omitted."
+      );
+    }
+    if (!previous) {
+      await add({ path, kind: "staging_guard", keys: [], mode: 0o600 }, "*\n");
+    }
+  }
+}
+
+async function prepareMigrationInputs(
+  opts: PreparedMigrationProject,
+  input: {
+    readonly contract: Awaited<ReturnType<typeof readHackEnvContract>>;
+    readonly layersExist: boolean;
+    readonly extraSources: Set<string>;
+    readonly add: AddPreparedMigrationFile;
+    readonly addLayer: AddPreparedMigrationLayer;
+  }
+) {
+  const { contract, layersExist, extraSources, add, addLayer } = input;
+  if (
+    !contract.exists &&
+    layersExist &&
+    !(await canMigrateCheckoutLegacyDotenv(opts))
+  ) {
+    return {
+      overlayNames: [],
+      store: undefined,
+      deliveredValues: new Map<string, ReadonlyMap<string, string | null>>(),
+      configCandidates: [],
+    };
+  }
+  if (contract.exists) {
+    return await prepareContractMigration(
+      opts,
+      contract.contract,
+      layersExist,
+      extraSources,
+      add,
+      addLayer
+    );
+  }
+  return await prepareUndeclaredMigration(opts, addLayer);
+}
+
+async function prepareLegacyProjectEnvMigrationInternal(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly serviceNames: readonly string[];
+  readonly repairCompose?: boolean;
+}): Promise<PreparedLegacyEnvMigration> {
+  await assertLegacyProjectDirectory(opts);
+  await assertLegacyProjectInputFamily(opts);
+  const contract = await readHackEnvContract(opts);
+  if (contract.parseError !== undefined) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason:
+        "hack.env.json can't be read or parsed as an env contract, so the migration can't tell which values to keep. Correct it, or remove it if this project doesn't use a contract, then retry.",
+      closing: "No migration files were changed; values omitted.",
+    });
+  }
+  const texts = new Map<string, string>();
+  const extraSources = new Set<string>([
+    resolveGlobalConfigPath(),
+    resolve(opts.projectDir, ".gitignore"),
+  ]);
+  const files: PreparedLegacyEnvMigration["files"][number][] = [];
+  const add = async (
+    file: PreparedLegacyEnvMigration["files"][number],
+    text: string
+  ) => {
+    const previous = await readReplaceablePrivateFile({
+      path: file.path,
+      directories: [],
+      refusal: () =>
+        new ClosedCliError(
+          "Migration input is unsafe or changed; values omitted."
+        ),
+    });
+    const mode =
+      previous && file.kind !== "key" && file.kind !== "local_layer"
+        ? previous.mode & 0o777
+        : file.mode;
+    if (previous?.text === text && (previous.mode & 0o777) === mode) {
+      return;
+    }
+    if (previous && (previous.mode & 0o222) === 0) {
+      throw new ClosedCliError(
+        `Migration target is read-only: ${file.path}; values omitted.`
+      );
+    }
+    texts.set(file.path, text);
+    files.push({ ...file, mode });
+  };
+  const keysOf = (config: ProjectEnvConfig) =>
+    [...new Set(Object.values(config.values).flatMap(Object.keys))].sort();
+  const addLayer = async (write: PlannedEnvLayerWrite, local: boolean) => {
+    await assertProjectEnvLayerPath({ ...opts, path: write.path });
+    if (local) {
+      await assertUntrackedMigrationLocalLayer({ ...opts, path: write.path });
+    }
+    const previous = await readExistingLocalLayer({
+      path: write.path,
+      environment: write.config.environment,
+    });
+    if (previous && !local) {
+      return;
+    }
+    const config = previous
+      ? mergePreparedLocalValues(previous.config, write.config)
+      : write.config;
+    await add(
+      {
+        path: write.path,
+        kind: local ? "local_layer" : "layer",
+        keys: keysOf(config),
+        mode: local ? 0o600 : 0o644,
+      },
+      serializeProjectEnvConfig(config)
+    );
+  };
+  const layersExist = await projectEnvConfigExistsForMutation(opts);
+  const { overlayNames, store, deliveredValues, configCandidates } =
+    await prepareMigrationInputs(opts, {
+      contract,
+      layersExist,
+      extraSources,
+      add,
+      addLayer,
+    });
+  if (files.some((file) => file.kind === "local_layer")) {
+    const path = resolve(opts.projectDir, ".gitignore");
+    const previous = await readReplaceablePrivateFile(
+      hackDirGitignoreFileOptions(opts)
+    );
+    await add(
+      { path, kind: "ignore", keys: [], mode: previous?.mode ?? 0o644 },
+      mergeHackDirGitignore({ existing: previous?.text ?? null })
+    );
+  }
+  const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
+  if (opts.repairCompose !== false) {
+    await prepareMigrationCompose(
+      {
+        ...opts,
+        hasContract: contract.exists,
+        layersExist,
+        overlayNames,
+      },
+      add
+    );
+  }
+  const composeEnvFileReferences =
+    opts.repairCompose === false
+      ? await inspectLegacyComposeEnvFileReferences({ ...opts, composeFile })
+      : [];
+  const candidates = await collectLegacyProjectEnvCleanupCandidates({
+    ...opts,
+    overlayNames,
+    materialize: false,
+    deliveredValues,
+    configCleanupCandidates: configCandidates,
+    composeEnvFileReferences,
+    composeInterpolatedKeys: new Map([
+      [
+        resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+        await composeInterpolatedServiceOnlyKeys({
+          projectDir: opts.projectDir,
+          resolvedValues: contract.exists
+            ? (
+                await resolveHackEnv({
+                  ...opts,
+                  envName: null,
+                  allowKeyProvisioning: false,
+                })
+              ).values
+            : [],
+        }),
+      ],
+    ]),
+  });
+  const removable = contract.exists
+    ? candidates.allowed
+    : await filterUntrackedLegacyCleanupCandidates({
+        ...opts,
+        paths: candidates.allowed,
+      });
+  for (const envName of [null, ...overlayNames]) {
+    const metadata = await resolveProjectEnvMetadata({ ...opts, envName });
+    for (const path of Object.values(metadata?.files ?? {})) {
+      if (typeof path === "string") {
+        extraSources.add(path);
+      }
+    }
+  }
+  const stagingTargets = [...files];
+  if (store && removable.includes(store.path)) {
+    stagingTargets.push({
+      path: resolve(opts.projectDir, PROJECT_CONFIG_FILENAME),
+      kind: "config",
+      keys: [],
+      mode: 0o644,
+    });
+  }
+  await prepareMigrationStagingGuards(stagingTargets, extraSources, add);
+  const sourcePaths = [
+    ...new Set([
+      contract.path,
+      composeFile,
+      resolve(opts.projectDir, PROJECT_CONFIG_FILENAME),
+      ...[null, ...overlayNames].map((envName) =>
+        resolveEnvFilePath({ ...opts, envName })
+      ),
+      ...(store ? [store.path, store.keyPath] : []),
+      ...files.map((file) => file.path),
+      ...extraSources,
+    ]),
+  ].sort();
+  const prepared: PreparedLegacyEnvMigration = {
+    files: files.sort((a, b) => {
+      const order = {
+        staging_guard: -1,
+        ignore: 0,
+        key: 1,
+        local_layer: 2,
+        layer: 3,
+        config: 4,
+        compose: 5,
+      };
+      return order[a.kind] - order[b.kind] || a.path.localeCompare(b.path);
+    }),
+    sourcePaths,
+    removable,
+    overlayNames,
+    hasContract: contract.exists,
+    composeRepairDeferred: composeEnvFileReferences.length > 0,
+    retainedEnvFiles: candidates.retainedEnvFiles,
+    blockedCleanupCandidates: candidates.blocked,
+    ...(store ? { store } : {}),
+    payload: (path) => {
+      const text = texts.get(path);
+      if (text === undefined) {
+        throw new ClosedCliError("Unknown migration payload; values omitted.");
+      }
+      return text;
+    },
+  };
+  Object.defineProperty(prepared, "payload", { enumerable: false });
+  return prepared;
+}
+
+/** Rebuild ephemeral cleanup authority only after the journal owner verifies its source checksums. */
+export async function acquireLegacyEnvCleanupContext(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+  readonly paths: readonly string[];
+  readonly store?: { readonly path: string; readonly keyPath: string };
+}): Promise<LegacyEnvCleanupContext> {
+  const contract = await readHackEnvContract(opts);
+  if (contract.parseError !== undefined) {
+    throw legacyCleanupChanged();
+  }
+  const receipts: LegacyEnvCleanupReceipt[] = [];
+  for (const path of opts.paths) {
+    const receipt = await legacyEnvCleanupReceipt(path);
+    if (receipt) {
+      receipts.push(receipt);
+    }
+  }
+  return { ...opts, contract: contract.contract, receipts };
+}
+
+/** A later Compose repair must not rely on layers merely existing after implicit migration. */
+export async function assertLegacyEnvMigrationDelivery(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+}): Promise<void> {
+  const context = await acquireLegacyEnvCleanupContext({ ...opts, paths: [] });
+  await assertLegacyCleanupDelivery({
+    projectRoot: opts.projectRoot,
+    context,
+    paths: [resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME)],
+  });
+}
+
 /**
  * Migrates a legacy v2 `.env`-based project env layout to the v3
  * `hack.env.*.yaml` config system.
@@ -6443,16 +7229,7 @@ async function migrateLegacyProjectEnvWithSources(opts: {
     overlays: overlaysResolved,
   });
 
-  if (overlayNames.includes("default")) {
-    throw new ClosedCliError(
-      "Refusing legacy env migration: .env.default would overwrite the base hack.env.default.yaml layer. Rename the legacy default overlay and update its project references before retrying. No env migration files were written."
-    );
-  }
-  if (overlayNames.includes("local")) {
-    throw new ClosedCliError(
-      "Refusing legacy env migration: .env.local would collide with the machine-local hack.env.local.yaml layer. Rename the legacy local overlay and update its project references before retrying. No env migration files were written."
-    );
-  }
+  assertLegacyEnvMigrationOverlayNames(overlayNames);
   const localPaths = await preflightLegacyEnvMigrationPaths({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
@@ -6931,23 +7708,17 @@ export type ImplicitLegacyEnvMigrationReport = {
 };
 
 /**
- * Finishes a contract migration that another command ran implicitly (such as
- * `hack env exec`), the way doctor's cleanup does for untracked files. It
- * removes a legacy `.hack/.env` or `.hack/.env.<overlay>` file only when every
- * entry in it now lives in an env layer, Compose no longer names it as
- * `env_file`, and git does not track it (or, inside a checkout, cannot say),
- * so no second plaintext copy stays behind. This step never removes or edits
- * `hack.env.json`, the Compose file, an encrypted backend file or any other
- * tracked file; `hack doctor --migrate-env-config` offers those. (The
- * migration itself still rewrites legacy keys in `hack.config.json`.)
+ * Reports an implicit migration without removing any legacy input. Cleanup
+ * is a separate, snapshot-backed action after project validation, including
+ * for files Git does not track. Retention reasons remain value-free.
  *
  * The report names written paths and moved keys, never values.
  */
-export async function finishImplicitLegacyEnvMigration(opts: {
+export function finishImplicitLegacyEnvMigration(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly migrated: LegacyProjectEnvMigration;
-}): Promise<ImplicitLegacyEnvMigrationReport> {
+}): ImplicitLegacyEnvMigrationReport {
   const { migrated } = opts;
   if (!migrated.legacyDetected || migrated.wroteFiles.length === 0) {
     return { removed: [], lines: [] };
@@ -6965,30 +7736,10 @@ export async function finishImplicitLegacyEnvMigration(opts: {
       resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlay}`)
     ),
   ]);
-  let removed: readonly string[] = [];
-  try {
-    const removable = await filterUntrackedLegacyCleanupCandidates({
-      projectRoot: opts.projectRoot,
-      paths: migrated.cleanupCandidates.filter((path) => dotenvFiles.has(path)),
-    });
-    removed = await removeLegacyProjectEnvArtifacts({
-      projectRoot: opts.projectRoot,
-      paths: removable,
-      context: migrated.cleanupContext,
-    });
-  } catch (error) {
-    const failure =
-      error instanceof LegacyEnvCleanupError
-        ? error
-        : new LegacyEnvCleanupError({ reason: "unverified" });
-    removed = failure.removedPaths;
-    lines.push(`Warning: kept remaining legacy env files. ${failure.message}`);
-  }
-  if (removed.length > 0) {
-    lines.push(
-      `Removed ${removed.map(shown).join(", ")}: env layers now hold every value ${removed.length === 1 ? "it" : "they"} set.`
-    );
-  }
+  const removed: readonly string[] = [];
+  lines.push(
+    "Legacy env files were kept. After validating the project, preview the separate cleanup step with hack env migrate --cleanup."
+  );
   if (migrated.keptSecretStorePointer) {
     lines.push(
       describeKeptSecretStorePointer({
@@ -9070,12 +9821,18 @@ async function deliveredValuesPerLegacyFile(opts: {
  *   for cleanup. Values are written to the layer files only, never returned or
  *   printed.
  */
-async function migrateUndeclaredLegacyDotenv(opts: {
+async function prepareUndeclaredLegacyDotenv(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly serviceNames: readonly string[];
   readonly materialize: boolean;
-}): Promise<LegacyProjectEnvMigration> {
+}): Promise<{
+  overlayNames: readonly string[];
+  generatedBase: boolean;
+  localWrites: PlannedEnvLayerWrite[];
+  trackedWrites: PlannedEnvLayerWrite[];
+  merges: Awaited<ReturnType<typeof planLocalLayerMerges>>;
+}> {
   // Also refuses a dangling or non-file layer entry (E_PATH_CONFLICT), which
   // an atomic write would otherwise replace or write through.
   if (
@@ -9224,6 +9981,17 @@ async function migrateUndeclaredLegacyDotenv(opts: {
       path: write.path,
     });
   }
+  return { overlayNames, generatedBase, localWrites, trackedWrites, merges };
+}
+
+async function migrateUndeclaredLegacyDotenv(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly serviceNames: readonly string[];
+  readonly materialize: boolean;
+}): Promise<LegacyProjectEnvMigration> {
+  const { overlayNames, generatedBase, localWrites, trackedWrites, merges } =
+    await prepareUndeclaredLegacyDotenv(opts);
   if (localWrites.length > 0) {
     await ensureHackDirGitignoreForLocalEnvWrite({
       projectDir: opts.projectDir,
@@ -9672,6 +10440,7 @@ export class LegacyEnvCleanupError extends ClosedCliError {
   constructor(opts: {
     readonly reason: "changed" | "live_input" | "unverified";
     readonly removedPaths?: readonly string[];
+    readonly recovery?: string;
   }) {
     const removedPaths = [...(opts.removedPaths ?? [])];
     const reasons = {
@@ -9686,7 +10455,9 @@ export class LegacyEnvCleanupError extends ClosedCliError {
       removedPaths.length > 0
         ? `Confirmed removals: ${removedPaths.map((path) => JSON.stringify(path)).join(", ")}.`
         : "No removals were confirmed.";
-    super(`${reasons[opts.reason]} ${outcome} ${LEGACY_CLEANUP_RECOVERY}`);
+    super(
+      `${reasons[opts.reason]} ${outcome} ${opts.recovery ?? LEGACY_CLEANUP_RECOVERY}`
+    );
     this.removedPaths = removedPaths;
     this.reason = opts.reason;
   }
@@ -9714,7 +10485,7 @@ async function assertLegacyCleanupReceipts(opts: {
   }
 }
 
-/** Re-evaluate delivery and Compose references after prompts, while writer locks are held. */
+/** Re-evaluate delivery without provisioning keys, including during read-only previews. */
 async function assertLegacyCleanupDelivery(opts: {
   readonly projectRoot: string;
   readonly paths: readonly string[];
@@ -9785,7 +10556,11 @@ async function assertLegacyCleanupDelivery(opts: {
       }
     }
     if (contractSelected || (envName === null && opts.paths.includes(path))) {
-      const legacy = await resolveHackEnv({ ...context, envName });
+      const legacy = await resolveHackEnv({
+        ...context,
+        envName,
+        allowKeyProvisioning: false,
+      });
       if (contractSelected) {
         for (const entry of legacy.values) {
           if (entry.value !== null) {
@@ -9872,6 +10647,47 @@ export async function dropRemovedLegacySecretStorePointer(opts: {
     keepStorePointer: false,
   });
   return migrated.changed;
+}
+
+/** Prepare the exact pointer repair before an explicit cleanup starts. No writes. */
+export async function prepareLegacyEnvCleanupConfig(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<{
+  readonly path: string;
+  readonly text: string;
+  readonly mode: number;
+} | null> {
+  const path = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
+  const existing = await readReplaceablePrivateFile({
+    path,
+    directories: [],
+    refusal: legacyCleanupChanged,
+  });
+  if (!existing) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(existing.text);
+  } catch {
+    throw legacyCleanupChanged();
+  }
+  if (!isRecord(parsed)) {
+    throw legacyCleanupChanged();
+  }
+  const normalized = normalizeLegacyProjectTopLevelConfig({
+    parsed,
+    projectRoot: opts.projectRoot,
+    keepStorePointer: false,
+  });
+  return normalized.changed
+    ? {
+        path,
+        text: `${JSON.stringify(normalized.config, null, 2)}\n`,
+        mode: existing.mode & 0o777,
+      }
+    : null;
 }
 
 async function discoverLegacyOverlayNames(opts: {

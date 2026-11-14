@@ -9,6 +9,7 @@ import {
   readdir,
   readFile,
   readlink,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -280,7 +281,9 @@ async function useStagingAsDefaultOverlay(repo: Repo): Promise<void> {
 }
 
 async function createLegacyRepo(): Promise<Repo> {
-  const root = await mkdtemp(join(tmpdir(), "hack-env-legacy-scope-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-env-legacy-scope-"))
+  );
   tempDirs.add(root);
   const projectRoot = resolve(root, "repo");
   const projectDir = resolve(projectRoot, ".hack");
@@ -3936,7 +3939,9 @@ async function runStubbedDoctor(opts: {
 }
 
 test("doctor doesn't rewrite a Compose file outside the project through a linked .hack", async () => {
-  const root = await mkdtemp(join(tmpdir(), "hack-env-legacy-scope-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-env-legacy-scope-"))
+  );
   tempDirs.add(root);
   const projectRoot = resolve(root, "repo");
   const outside = resolve(root, "outside");

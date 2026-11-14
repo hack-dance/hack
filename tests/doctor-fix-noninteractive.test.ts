@@ -15,6 +15,7 @@ import {
   readdir,
   readFile,
   readlink,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -177,7 +178,7 @@ beforeEach(async () => {
   // This fixture exercises daemon repair through a mocked shell. Its own
   // policy must be independent of the outer suite's daemon safety setting.
   Reflect.deleteProperty(process.env, "HACK_DAEMON_AUTOSTART_DISABLE");
-  tempDir = await mkdtemp(join(tmpdir(), "hack-doctor-fix-"));
+  tempDir = await realpath(await mkdtemp(join(tmpdir(), "hack-doctor-fix-")));
   process.env.HOME = tempDir;
   process.env.HACK_NO_INTERACTIVE = "1";
   // Short-circuit mutagen path resolution so the fix flow never attempts a
@@ -688,7 +689,12 @@ for (const docker of [
     });
     expect(await readFile(layerPath, "utf8")).not.toContain(value);
     const notes = noteCalls.join("\n");
-    expect(notes).toContain(`Wrote ${localPath}, ${layerPath}`);
+    expect(notes).toContain(
+      "Legacy files were kept for a separate cleanup step."
+    );
+    expect(await readFile(resolve(projectDir, ".env"), "utf8")).toBe(
+      `LEGACY_SETTING=${value}\n`
+    );
     expect(notes).toContain("Plaintext env keys remain (values omitted)");
     expect(notes).toContain("hack env protect <KEY> [KEY...]");
     expect(notes).toContain("LEGACY_SETTING");
@@ -937,11 +943,9 @@ test("doctor contract migration keeps base and untracked overlays with undeliver
   ] as const) {
     expect(await readFile(resolve(projectDir, name), "utf8")).toBe(files[name]);
   }
-  for (const key of ["UNDECLARED", "BACKUP_ONLY", "EXAMPLE_ONLY"]) {
-    expect(notes).toContain(
-      `keys not preserved in env layers: ${key} (values omitted)`
-    );
-  }
+  expect(notes).toContain(
+    "Legacy files were kept for a separate cleanup step."
+  );
   for (const text of Object.values(files)) {
     for (const line of text.trim().split("\n")) {
       const value = line.split("=")[1];
@@ -950,12 +954,12 @@ test("doctor contract migration keeps base and untracked overlays with undeliver
       }
     }
   }
-  expect(
-    await lstat(resolve(projectDir, ".env.qa")).catch(() => null)
-  ).toBeNull();
-  expect(
-    await lstat(resolve(projectDir, ".env.same")).catch(() => null)
-  ).toBeNull();
+  expect(await readFile(resolve(projectDir, ".env.qa"), "utf8")).toBe(
+    files[".env.qa"]
+  );
+  expect(await readFile(resolve(projectDir, ".env.same"), "utf8")).toBe(
+    files[".env.same"]
+  );
   expect(
     await readFile(resolve(projectDir, "hack.env.local.yaml"), "utf8")
   ).toContain("synthetic-delivered");
@@ -1195,9 +1199,8 @@ test("doctor keeps an encrypted store with an undeclared entry and its key file,
     expect(await readFile(keyPath, "utf8")).toBe(keyText);
     const notes = noteCalls.join("\n");
     expect(notes).toContain(
-      `Kept ${storePath}: keys not preserved in env layers: UNDECL (values omitted).`
+      "Legacy files were kept for a separate cleanup step."
     );
-    expect(notes).toContain(`Kept ${keyPath}: the kept encrypted secret store`);
     for (const value of [declared, undeclared, keyText.trim()]) {
       expect(notes).not.toContain(value);
     }
@@ -1219,9 +1222,6 @@ test("doctor keeps an encrypted store with an undeclared entry and its key file,
       backend: "encrypted_file",
       encryptedFile: { path: "secrets.enc.json", keyPath: "store.key" },
     });
-    expect(notes).toContain(
-      `Kept the encrypted secret store pointer (controlPlane.secrets) in ${configPath} for ${storePath}, which stays: it still holds SEC, UNDECL (values omitted)`
-    );
     const after = await resolveSecretStore({
       projectName: "store-retention",
       projectDir,
@@ -1264,7 +1264,7 @@ test("doctor keeps an encrypted store with an undeclared entry and its key file,
 }, 30_000);
 
 for (const trackedStore of [false, true]) {
-  test(`doctor removes a fully delivered encrypted store (${trackedStore ? "tracked store, untracked key" : "untracked"}), its key file and its pointer (HACK-1715)`, async () => {
+  test(`doctor retains a fully delivered encrypted store (${trackedStore ? "tracked store, untracked key" : "untracked"}), its key file and its pointer (HACK-1715)`, async () => {
     const projectRoot = await createProjectWithStaleDaemonPid();
     const projectDir = resolve(projectRoot, ".hack");
     const saved = {
@@ -1334,17 +1334,22 @@ for (const trackedStore of [false, true]) {
         ])
       ).toBe(0);
 
-      expect(existsSync(storePath)).toBe(false);
-      expect(existsSync(keyPath)).toBe(false);
+      expect(existsSync(storePath)).toBe(true);
+      expect(existsSync(keyPath)).toBe(true);
       const config = JSON.parse(await readFile(configPath, "utf8")) as {
         readonly controlPlane?: unknown;
       };
-      expect(config.controlPlane).toBeUndefined();
+      expect(config.controlPlane).toEqual({
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: "secrets.enc.json", keyPath: "store.key" },
+        },
+      });
       const notes = noteCalls.join("\n");
       expect(notes).toContain(
-        "Removed the encrypted secret store pointer from hack.config.json"
+        "Legacy files were kept for a separate cleanup step."
       );
-      expect(notes).not.toContain("Kept the encrypted secret store pointer");
+      expect(notes).not.toContain("Removed the encrypted secret store pointer");
       expect(notes).not.toContain(declared);
     } finally {
       restoreEnv("HACK_SECRETS_FILE_KEY", saved.fileKey);

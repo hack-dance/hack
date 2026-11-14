@@ -59,3 +59,11 @@ cannot recover it in this model. Native regressions include
 They qualify only their exercised boundaries on the host running them.
 No observation/lock/census refinement or liveness proof is asserted here; the
 shared registry and model-coverage map remain owned by the integration task.
+
+Durable owner-generation retirement is an additional implementation fence, not a
+transition checked by this finite model. Stop records cancellation even before a
+late launch frame arrives; run checks it while holding admission. New generations
+use fresh tokens. The regression
+`completed_stop_fences_a_run_whose_frame_arrives_after_retirement` proves the
+late frame creates no command receipt. Linux executable replacement is qualified
+by the incremental integration test in the opt-in slice, not by this model.

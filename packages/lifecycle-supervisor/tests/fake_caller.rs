@@ -1489,3 +1489,16 @@ fn status_waits_for_inflight_stop_before_reporting_adoptable_liveness() {
     assert!(wait(&mut stopping, TIMEOUT).success());
     assert!(wait(&mut caller, TIMEOUT).success());
 }
+
+#[test]
+fn completed_stop_fences_a_run_whose_frame_arrives_after_retirement() {
+    let f = Fixture::new();
+    let mut delayed = command(&f.root, "run").spawn().unwrap();
+    f.stop();
+    send(
+        delayed.stdin.as_mut().unwrap(),
+        &f.launch(vec![f.process("late", "hold")]),
+    );
+    assert!(!wait(&mut delayed, TIMEOUT).success());
+    assert!(!f.root.join("late.json").exists());
+}

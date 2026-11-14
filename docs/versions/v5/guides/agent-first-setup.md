@@ -38,3 +38,7 @@ Set `timeoutMs` up to 600000, or use `hack.project.command.start` for long work.
 A server timeout returns an error with `timedOut: true` and an explanation.
 Codex MCP setup writes a 660-second tool-call limit when none is configured;
 an explicit user limit is preserved, even if smaller.
+
+Use `hack version --json` to read the running CLI version, release channel,
+install kind and executable path without starting services or checking the
+network. See [Version identity](../../reference/version.md).

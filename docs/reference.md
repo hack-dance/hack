@@ -10,6 +10,7 @@
 
 ## Environment & sessions
 
+- [Version identity](./reference/version.md) — `hack version --json` describes the running CLI without starting services
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
 - [Activity log](./reference/activity-log.md) — the `up`/`down`/`restart` history `hack activity` reads: records, origins, concurrency, rotation and what is never recorded

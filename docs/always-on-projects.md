@@ -20,7 +20,8 @@ changes the marker; it does not start anything immediately.
 `hack down` pauses autostart for the selected marked instance before attempting to
 stop it. If `down` cannot reach the engine while it chooses between the base and
 a branch instance (for example while the login pass is still waiting for Docker),
-it pauses the marked base or current-branch instance before it fails, so the
+it pauses that project's marked instance (whatever its branch, since a renamed
+worktree may still own an old one) before it fails, so the
 waiting pass never starts what that `down` meant to stop. For a renamed linked-worktree branch, ownership reconciliation selects
 the existing instance before its pause is written; the same selected branch is
 used for the start/stop lock and teardown. Start and stop serialize on a machine-local instance lock: `down` waits

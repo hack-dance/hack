@@ -107,11 +107,11 @@ export async function resolveFinalAutostartDownTarget(
   });
   if (!runtime.ok) {
     // A login pass may be waiting for this same engine. Stop intent cannot
-    // wait for it: pause whichever candidate instance (base or this branch)
-    // is marked, so the pass never starts what this down meant to stop.
+    // wait for it: without runtime evidence any marked instance of this
+    // registration (base, this branch, or a renamed worktree's old branch)
+    // may be the target, so pause it before failing.
     const paused = await pauseCandidateDownMarker({
       registration,
-      branch: effective.branch,
       pause: deps?.setProjectAutostartPaused ?? setProjectAutostartPaused,
     });
     throw new HackCliError({
@@ -130,18 +130,18 @@ export async function resolveFinalAutostartDownTarget(
   };
 }
 
-/** Pause the marked base or current-branch instance an unresolved down could target. */
+/**
+ * Pause the registration's marked instance when an implicit down cannot read
+ * the engine. Over-pausing a different branch is the safe failure: a later
+ * `hack up` resumes it, whereas a missed pause lets a waiting login pass start
+ * what this down meant to stop.
+ */
 async function pauseCandidateDownMarker(opts: {
   readonly registration: RegisteredProject | undefined;
-  readonly branch: string | null;
   readonly pause: typeof setProjectAutostartPaused;
 }): Promise<boolean> {
   const marker = opts.registration?.autostart;
-  if (
-    !(opts.registration && marker) ||
-    marker.paused ||
-    !(marker.branch === null || marker.branch === opts.branch)
-  ) {
+  if (!(opts.registration && marker) || marker.paused) {
     return false;
   }
   await opts.pause({ id: opts.registration.id, paused: true });

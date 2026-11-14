@@ -189,7 +189,7 @@ test("unavailable runtime refuses before a final target is published", async () 
 });
 
 for (const marked of ["old-branch", "new-branch", null, "other-branch"]) {
-  test(`unavailable runtime still pauses a ${marked ?? "base"} marker that this down could target`, async () => {
+  test(`unavailable runtime still pauses a ${marked ?? "base"} marker of this registration, including a renamed branch`, async () => {
     const paused: { id: string; paused: boolean }[] = [];
     const registration = {
       id: "example-id",
@@ -234,12 +234,9 @@ for (const marked of ["old-branch", "new-branch", null, "other-branch"]) {
         }
       )
     ).rejects.toMatchObject({ code: "E_DOCKER_UNAVAILABLE" });
-    // The implicit target is either base or the worktree's current branch.
-    expect(paused).toEqual(
-      marked === null || marked === "new-branch"
-        ? [{ id: "example-id", paused: true }]
-        : []
-    );
+    // Without runtime evidence a renamed worktree may still own its old
+    // branch, so every marker of this registration is paused.
+    expect(paused).toEqual([{ id: "example-id", paused: true }]);
   });
 }
 

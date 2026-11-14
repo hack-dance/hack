@@ -37,6 +37,9 @@ const keys = [
 const sentinel = "synthetic-provider-cli-sentinel";
 const children = fixtureChildren("env-migration-provider");
 const compiled = process.env.HACK_TEST_ENV_MIGRATION_BINARY;
+// These cases run several real CLIs plus Doctor; hosted macOS exceeds Bun's
+// five-second default. The test envelope also bounds child cleanup on refusal.
+const DOCTOR_WORKFLOW_TIMEOUT_MS = 45_000;
 let root = "";
 let saved: (string | undefined)[] = [];
 
@@ -221,111 +224,125 @@ test("production CLI explicitly repairs Compose after implicit env exec, then ro
   );
 });
 
-test("production cleanup accepts Doctor permission tightening while preserving original rollback bytes", async () => {
-  const project = await fixture();
-  const envPath = join(project.projectDir, ".env");
-  await chmod(envPath, 0o644);
-  expect((await lstat(envPath)).mode & 0o777).toBe(0o644);
-  const migrated = await cli(project.projectRoot, ["--apply"]);
-  expect(migrated.exitCode, migrated.stderr).toBe(0);
-  const doctor = await runCliCommand(project.projectRoot, [
-    "doctor",
-    "--fix",
-    "--path",
-    project.projectRoot,
-  ]);
-  // The fixture intentionally has no Docker or other host tooling; hygiene still runs.
-  expect(doctor.exitCode).toBe(1);
-  expect((await lstat(envPath)).mode & 0o777).toBe(0o600);
-  expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
-  await recordEnvMigrationProjectRun(project);
-  const cleaned = await cli(project.projectRoot, ["--cleanup", "--apply"]);
-  expect(cleaned.exitCode, cleaned.stderr).toBe(0);
-  expect(await Bun.file(envPath).exists()).toBe(false);
-  const rollback = await cli(project.projectRoot, [
-    "--rollback-manifest",
-    pathField(migrated.envelope.data, "manifestPath"),
-  ]);
-  expect(rollback.exitCode, rollback.stderr).toBe(0);
-  expect(rollback.envelope.data.warnings).toContainEqual(
-    expect.stringContaining("original file permissions")
-  );
-  expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
-});
+test(
+  "production cleanup accepts Doctor permission tightening while preserving original rollback bytes",
+  async () => {
+    const project = await fixture();
+    const envPath = join(project.projectDir, ".env");
+    await chmod(envPath, 0o644);
+    expect((await lstat(envPath)).mode & 0o777).toBe(0o644);
+    const migrated = await cli(project.projectRoot, ["--apply"]);
+    expect(migrated.exitCode, migrated.stderr).toBe(0);
+    const doctor = await runCliCommand(project.projectRoot, [
+      "doctor",
+      "--fix",
+      "--path",
+      project.projectRoot,
+    ]);
+    // The fixture intentionally has no Docker or other host tooling; hygiene still runs.
+    expect(doctor.exitCode).toBe(1);
+    expect((await lstat(envPath)).mode & 0o777).toBe(0o600);
+    expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
+    await recordEnvMigrationProjectRun(project);
+    const cleaned = await cli(project.projectRoot, ["--cleanup", "--apply"]);
+    expect(cleaned.exitCode, cleaned.stderr).toBe(0);
+    expect(await Bun.file(envPath).exists()).toBe(false);
+    const rollback = await cli(project.projectRoot, [
+      "--rollback-manifest",
+      pathField(migrated.envelope.data, "manifestPath"),
+    ]);
+    expect(rollback.exitCode, rollback.stderr).toBe(0);
+    expect(rollback.envelope.data.warnings).toContainEqual(
+      expect.stringContaining("original file permissions")
+    );
+    expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
+  },
+  DOCTOR_WORKFLOW_TIMEOUT_MS
+);
 
-test("production rollback accepts a byte-identical tighter mode before cleanup and reports original-mode review", async () => {
-  const project = await fixture();
-  const envPath = join(project.projectDir, ".env");
-  await chmod(envPath, 0o644);
-  const migrated = await cli(project.projectRoot, ["--apply"]);
-  expect(migrated.exitCode, migrated.stderr).toBe(0);
-  await runCliCommand(project.projectRoot, [
-    "doctor",
-    "--fix",
-    "--path",
-    project.projectRoot,
-  ]);
-  expect((await lstat(envPath)).mode & 0o777).toBe(0o600);
-  const rollback = await cli(project.projectRoot, [
-    "--rollback-manifest",
-    pathField(migrated.envelope.data, "manifestPath"),
-  ]);
-  expect(rollback.exitCode, rollback.stderr).toBe(0);
-  expect(rollback.envelope.data.warnings).toContainEqual(
-    expect.stringContaining("original file permissions")
-  );
-  expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
-});
+test(
+  "production rollback accepts a byte-identical tighter mode before cleanup and reports original-mode review",
+  async () => {
+    const project = await fixture();
+    const envPath = join(project.projectDir, ".env");
+    await chmod(envPath, 0o644);
+    const migrated = await cli(project.projectRoot, ["--apply"]);
+    expect(migrated.exitCode, migrated.stderr).toBe(0);
+    await runCliCommand(project.projectRoot, [
+      "doctor",
+      "--fix",
+      "--path",
+      project.projectRoot,
+    ]);
+    expect((await lstat(envPath)).mode & 0o777).toBe(0o600);
+    const rollback = await cli(project.projectRoot, [
+      "--rollback-manifest",
+      pathField(migrated.envelope.data, "manifestPath"),
+    ]);
+    expect(rollback.exitCode, rollback.stderr).toBe(0);
+    expect(rollback.envelope.data.warnings).toContainEqual(
+      expect.stringContaining("original file permissions")
+    );
+    expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
+  },
+  DOCTOR_WORKFLOW_TIMEOUT_MS
+);
 
-test("production previews report deferred repair unavailable without failing, printing drift values or changing files", async () => {
-  const project = await fixture();
-  const composePath = join(project.projectDir, "docker-compose.yml");
-  const compose =
-    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n";
-  await writeFile(composePath, compose);
-  const implicit = await runCliCommand(project.projectRoot, [
-    "env",
-    "exec",
-    "--path",
-    project.projectRoot,
-    "--",
-    "/usr/bin/true",
-  ]);
-  expect(implicit.exitCode, implicit.stderr).toBe(0);
-  const drift = "synthetic-drift-preview-value";
-  const envPath = join(project.projectDir, ".env");
-  await writeFile(envPath, `TOKEN=${drift}\n`);
-  const journalPath = envMigrationJournalPath(project.projectRoot);
-  const journal = await readFile(journalPath, "utf8");
-  for (const json of [true, false]) {
-    const result = await runMigrationCli(project.projectRoot, [], { json });
-    expect(result.exitCode, result.stderr).toBe(0);
-    expect(result.stdout + result.stderr).not.toContain(drift);
-    const parsed = JSON.parse(result.stdout);
-    expect(json ? parsed.data : parsed).toMatchObject({
-      status: "recovery_required",
-      composeRepair: "unavailable",
-      files: [],
-    });
-  }
-  const doctor = await runCliCommand(project.projectRoot, [
-    "doctor",
-    "--migrate-env-config",
-    "--path",
-    project.projectRoot,
-  ]);
-  expect(doctor.stdout + doctor.stderr).toContain("Compose repair unavailable");
-  expect(doctor.stdout + doctor.stderr).not.toContain(
-    "Env migration input changed"
-  );
-  expect(doctor.stdout + doctor.stderr).not.toContain(drift);
-  const refused = await cli(project.projectRoot, ["--apply"]);
-  expect(refused.exitCode).not.toBe(0);
-  expect(refused.stdout + refused.stderr).not.toContain(drift);
-  expect(await readFile(journalPath, "utf8")).toBe(journal);
-  expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${drift}\n`);
-  expect(await readFile(composePath, "utf8")).toBe(compose);
-});
+test(
+  "production previews report deferred repair unavailable without failing, printing drift values or changing files",
+  async () => {
+    const project = await fixture();
+    const composePath = join(project.projectDir, "docker-compose.yml");
+    const compose =
+      "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n";
+    await writeFile(composePath, compose);
+    const implicit = await runCliCommand(project.projectRoot, [
+      "env",
+      "exec",
+      "--path",
+      project.projectRoot,
+      "--",
+      "/usr/bin/true",
+    ]);
+    expect(implicit.exitCode, implicit.stderr).toBe(0);
+    const drift = "synthetic-drift-preview-value";
+    const envPath = join(project.projectDir, ".env");
+    await writeFile(envPath, `TOKEN=${drift}\n`);
+    const journalPath = envMigrationJournalPath(project.projectRoot);
+    const journal = await readFile(journalPath, "utf8");
+    for (const json of [true, false]) {
+      const result = await runMigrationCli(project.projectRoot, [], { json });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout + result.stderr).not.toContain(drift);
+      const parsed = JSON.parse(result.stdout);
+      expect(json ? parsed.data : parsed).toMatchObject({
+        status: "recovery_required",
+        composeRepair: "unavailable",
+        files: [],
+      });
+    }
+    const doctor = await runCliCommand(project.projectRoot, [
+      "doctor",
+      "--migrate-env-config",
+      "--path",
+      project.projectRoot,
+    ]);
+    expect(doctor.stdout + doctor.stderr).toContain(
+      "Compose repair unavailable"
+    );
+    expect(doctor.stdout + doctor.stderr).not.toContain(
+      "Env migration input changed"
+    );
+    expect(doctor.stdout + doctor.stderr).not.toContain(drift);
+    const refused = await cli(project.projectRoot, ["--apply"]);
+    expect(refused.exitCode).not.toBe(0);
+    expect(refused.stdout + refused.stderr).not.toContain(drift);
+    expect(await readFile(journalPath, "utf8")).toBe(journal);
+    expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${drift}\n`);
+    expect(await readFile(composePath, "utf8")).toBe(compose);
+  },
+  DOCTOR_WORKFLOW_TIMEOUT_MS
+);
 
 for (const damage of ["manifest", "missing-blob", "changed-blob"] as const) {
   test(`resumed production apply refuses ${damage} damage before another publication`, async () => {

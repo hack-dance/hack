@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -49,7 +50,10 @@ beforeEach(async () => {
   for (const key of ENV_KEYS) {
     savedEnv.set(key, process.env[key]);
   }
-  root = await mkdtemp(join(tmpdir(), "hack-env-migration-safety-"));
+  // macOS TMPDIR can use /var aliases; migration metadata requires a canonical home.
+  root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-env-migration-safety-"))
+  );
   process.env.HOME = resolve(root, "home");
   Reflect.deleteProperty(process.env, "HACK_HOME");
   Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");

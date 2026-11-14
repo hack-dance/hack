@@ -6,8 +6,13 @@ import { fixture, invoke, state } from "./helpers/native-compose-command.ts";
 
 // The source CLI now performs finite witness proofs as well as the workload
 // transaction. Keep the same proof/wrapper budgets as its activation controls.
+const COMMAND_BUDGET_MS = 120_000;
+const FIXTURE_SETTLE_MS = 30_000;
+// A restore case starts, stops, then starts again. Its test envelope must
+// cover all three bounded commands and their fixture teardown.
+const RETAINED_WORKFLOW_BUDGET_MS = 3 * COMMAND_BUDGET_MS + FIXTURE_SETTLE_MS;
 function command(root: string, args = ["up", "--detach", "--json"]) {
-  return invoke(root, args, 30_000, 120_000);
+  return invoke(root, args, 30_000, COMMAND_BUDGET_MS);
 }
 
 type Volume = {
@@ -108,91 +113,108 @@ async function startAndStop() {
   return { root, volume };
 }
 
-test("genuinely cold source CLI startup may create its first persistent volume", async () => {
-  const root = await storageFixture();
-  expect(await Bun.file(join(root, "volumes")).exists()).toBe(false);
-  const result = await command(root);
-  expect(result.code).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({
-    ok: true,
-    data: { status: "ready" },
-  });
-  await retainedVolume(root);
-  expect(await composeStarts(root)).toHaveLength(1);
-}, 120_000);
+test(
+  "genuinely cold source CLI startup may create its first persistent volume",
+  async () => {
+    const root = await storageFixture();
+    expect(await Bun.file(join(root, "volumes")).exists()).toBe(false);
+    const result = await command(root);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      data: { status: "ready" },
+    });
+    await retainedVolume(root);
+    expect(await composeStarts(root)).toHaveLength(1);
+  },
+  COMMAND_BUDGET_MS + FIXTURE_SETTLE_MS
+);
 
-test("source CLI down/up restores the unchanged physical volume birth", async () => {
-  const { root, volume } = await startAndStop();
-  const result = await command(root);
-  expect(result.code).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({
-    ok: true,
-    data: { status: "ready" },
-  });
-  expect(await retainedVolume(root)).toEqual(volume);
-  expect(await composeStarts(root)).toHaveLength(2);
-  expect(await state(root)).toMatchObject({ stopped: false, pending: false });
-}, 120_000);
+test(
+  "source CLI down/up restores the unchanged physical volume birth",
+  async () => {
+    const { root, volume } = await startAndStop();
+    const result = await command(root);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      data: { status: "ready" },
+    });
+    expect(await retainedVolume(root)).toEqual(volume);
+    expect(await composeStarts(root)).toHaveLength(2);
+    expect(await state(root)).toMatchObject({ stopped: false, pending: false });
+  },
+  RETAINED_WORKFLOW_BUDGET_MS
+);
 
-test.each([
-  "missing",
-  "replaced",
-] as const)("source CLI refuses a %s retained volume before Compose can create or start", async (change) => {
-  const { root, volume } = await startAndStop();
-  const before = await savedState(root);
-  const original: unknown = await Bun.file(join(root, "volumes")).json();
-  if (
-    !Array.isArray(original) ||
-    original.length !== 1 ||
-    !isRecord(original[0])
-  ) {
-    throw new Error("Expected the retained synthetic volume row");
-  }
-  const changed =
-    change === "missing"
-      ? []
-      : [
-          {
-            // Preserve provision/root/witness backing facts so only birth drifts.
-            ...original[0],
-            createdAt: new Date(
-              Date.parse(volume.createdAt) - 1000
-            ).toISOString(),
-          },
-        ];
-  await Bun.write(join(root, "volumes"), JSON.stringify(changed));
-  const result = await command(root);
-  // The effect count is the safety oracle even if a later readiness check fails.
-  expect(await composeStarts(root)).toHaveLength(1);
-  expect(result.code).toBe(1);
-  expect(JSON.parse(result.stdout)).toMatchObject({ ok: false });
-  expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
-  expect(await Bun.file(join(root, "volumes")).json()).toEqual(changed);
-  expect(await savedState(root)).toEqual(before);
-}, 120_000);
+test.each(["missing", "replaced"] as const)(
+  "source CLI refuses a %s retained volume before Compose can create or start",
+  async (change) => {
+    const { root, volume } = await startAndStop();
+    const before = await savedState(root);
+    const original: unknown = await Bun.file(join(root, "volumes")).json();
+    if (
+      !Array.isArray(original) ||
+      original.length !== 1 ||
+      !isRecord(original[0])
+    ) {
+      throw new Error("Expected the retained synthetic volume row");
+    }
+    const changed =
+      change === "missing"
+        ? []
+        : [
+            {
+              // Preserve provision/root/witness backing facts so only birth drifts.
+              ...original[0],
+              createdAt: new Date(
+                Date.parse(volume.createdAt) - 1000
+              ).toISOString(),
+            },
+          ];
+    await Bun.write(join(root, "volumes"), JSON.stringify(changed));
+    const result = await command(root);
+    // The effect count is the safety oracle even if a later readiness check fails.
+    expect(await composeStarts(root)).toHaveLength(1);
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false });
+    expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
+    expect(await Bun.file(join(root, "volumes")).json()).toEqual(changed);
+    expect(await savedState(root)).toEqual(before);
+  },
+  RETAINED_WORKFLOW_BUDGET_MS
+);
 
-test("incomplete cold readiness retains observed storage and refuses data-loss recovery", async () => {
-  const root = await storageFixture();
-  await Bun.write(join(root, "unready"), "true");
-  const started = await command(root);
-  expect(started.code).toBe(1);
-  const volume = await retainedVolume(root);
-  const before = await savedState(root);
-  expect(before.generationId).toBeUndefined();
-  expect(before.pending).not.toBeNull();
-  expect(before.retainedStorage).toEqual([
-    { name: volume.name, storage: volume.storage, createdAt: volume.createdAt },
-  ]);
-  await Bun.write(join(root, "volumes"), "[]");
-  const recovered = await command(root, ["down", "--recover", "--json"]);
-  expect(recovered.code).toBe(1);
-  const requests: string[][] = (await Bun.file(join(root, "requests")).text())
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(
-    requests.filter((args) => args[0] === "compose" && args.includes("down"))
-  ).toHaveLength(0);
-  expect(await savedState(root)).toEqual(before);
-  expect(await Bun.file(join(root, "volumes")).json()).toEqual([]);
-}, 120_000);
+test(
+  "incomplete cold readiness retains observed storage and refuses data-loss recovery",
+  async () => {
+    const root = await storageFixture();
+    await Bun.write(join(root, "unready"), "true");
+    const started = await command(root);
+    expect(started.code).toBe(1);
+    const volume = await retainedVolume(root);
+    const before = await savedState(root);
+    expect(before.generationId).toBeUndefined();
+    expect(before.pending).not.toBeNull();
+    expect(before.retainedStorage).toEqual([
+      {
+        name: volume.name,
+        storage: volume.storage,
+        createdAt: volume.createdAt,
+      },
+    ]);
+    await Bun.write(join(root, "volumes"), "[]");
+    const recovered = await command(root, ["down", "--recover", "--json"]);
+    expect(recovered.code).toBe(1);
+    const requests: string[][] = (await Bun.file(join(root, "requests")).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      requests.filter((args) => args[0] === "compose" && args.includes("down"))
+    ).toHaveLength(0);
+    expect(await savedState(root)).toEqual(before);
+    expect(await Bun.file(join(root, "volumes")).json()).toEqual([]);
+  },
+  RETAINED_WORKFLOW_BUDGET_MS
+);

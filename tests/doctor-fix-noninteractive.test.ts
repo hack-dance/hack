@@ -15,6 +15,7 @@ import {
   readdir,
   readFile,
   readlink,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -177,7 +178,7 @@ beforeEach(async () => {
   // This fixture exercises daemon repair through a mocked shell. Its own
   // policy must be independent of the outer suite's daemon safety setting.
   Reflect.deleteProperty(process.env, "HACK_DAEMON_AUTOSTART_DISABLE");
-  tempDir = await mkdtemp(join(tmpdir(), "hack-doctor-fix-"));
+  tempDir = await realpath(await mkdtemp(join(tmpdir(), "hack-doctor-fix-")));
   process.env.HOME = tempDir;
   process.env.HACK_NO_INTERACTIVE = "1";
   // Short-circuit mutagen path resolution so the fix flow never attempts a

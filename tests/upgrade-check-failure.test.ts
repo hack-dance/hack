@@ -1,35 +1,45 @@
-import { expect, test } from "bun:test";
-import { CommandError } from "../src/lib/shell.ts";
-import { upgradeCheckFailureClass } from "../src/lib/upgrade-check-failure.ts";
+import { afterEach, expect, test } from "bun:test";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fixtureChildren } from "./helpers/fixture-children.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
-test("upgrade diagnostics classify failures without exposing messages, output or arbitrary error names", () => {
-  const sentinel = "fixture-value-must-stay-private";
-  const cases: [unknown, string][] = [
-    [new TypeError(sentinel), "type-error"],
-    [new SyntaxError(sentinel), "parse-error"],
-    [new RangeError(sentinel), "range-error"],
-    [
-      Object.assign(new Error(sentinel), { code: "EACCES" }),
-      "permission-denied",
-    ],
-    [Object.assign(new Error(sentinel), { code: "ENOENT" }), "missing-path"],
-    [
-      Object.assign(new Error(sentinel), { code: sentinel, name: sentinel }),
-      "unexpected-error",
-    ],
-    [
-      new CommandError({
-        cmd: [sentinel],
-        exitCode: 1,
-        stdout: sentinel,
-        stderr: sentinel,
-      }),
-      "command-error",
-    ],
-    [sentinel, "unexpected-error"],
-  ];
-  for (const [error, expected] of cases) {
-    expect(upgradeCheckFailureClass(error)).toBe(expected);
-    expect(upgradeCheckFailureClass(error)).not.toContain(sentinel);
+const children = fixtureChildren("upgrade-check-failure");
+const roots: string[] = [];
+afterEach(async () => {
+  await children.stopAll();
+  for (const root of roots.splice(0)) {
+    await rm(root, { recursive: true, force: true });
   }
+});
+
+test("upgrade diagnostics classify failures without exposing messages, output or arbitrary error names", async () => {
+  const sentinel = "fixture-value-must-stay-private";
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "upgrade-failure-"))
+  );
+  roots.push(root);
+  const result = await children.run({
+    cmd: [
+      process.execPath,
+      "--no-env-file",
+      join(import.meta.dir, "fixtures", "upgrade-check-failure-worker.ts"),
+    ],
+    cwd: root,
+    env: privateCliEnv({ root, env: { PATH: "/nonexistent" } }),
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(result.stdout).not.toContain(sentinel);
+  expect(JSON.parse(result.stdout)).toEqual([
+    "type-error",
+    "parse-error",
+    "range-error",
+    "permission-denied",
+    "missing-path",
+    "unexpected-error",
+    "command-error",
+    "unexpected-error",
+  ]);
 });

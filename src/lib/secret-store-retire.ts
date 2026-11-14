@@ -125,6 +125,11 @@ type StoreContexts = {
   })[];
   readonly registryRead: boolean;
   readonly unchecked: number;
+  /**
+   * Of `unchecked`: checkouts whose directory does not exist (a deleted
+   * checkout, or an unmounted volume). Retiring counts them as unchecked;
+   * the upgrade check counts them as dead registry entries.
+   */
   readonly missing: number;
 };
 
@@ -284,6 +289,40 @@ export async function listProjectsUsingSecretStore(opts: {
     readers,
     registryRead: found.registryRead,
     unchecked: found.unchecked,
+    missing: found.missing,
+  };
+}
+
+/**
+ * The registered checkouts that read the store at `storePath`, each with the
+ * key file its own configuration selects (HACK-2189): a project may share a
+ * store but name its own key. From configuration only; no store is opened.
+ */
+export async function listSecretStoreReaders(opts: {
+  readonly storePath: string;
+}): Promise<{
+  readonly readers: readonly {
+    readonly name: string;
+    readonly projectDir: string;
+    readonly keyPath: string;
+  }[];
+  readonly registryRead: boolean;
+  /** Checkouts that could not be checked, not counting missing ones. */
+  readonly unchecked: number;
+  /** Registered checkouts whose directory does not exist (dead entries). */
+  readonly missing: number;
+}> {
+  const found = await storeContexts(opts);
+  const readers: { name: string; projectDir: string; keyPath: string }[] = [];
+  for (const context of found.contexts) {
+    if (await projectUsesSecretStore({ projectDir: context.projectDir })) {
+      readers.push(context);
+    }
+  }
+  return {
+    readers,
+    registryRead: found.registryRead,
+    unchecked: found.unchecked - found.missing,
     missing: found.missing,
   };
 }

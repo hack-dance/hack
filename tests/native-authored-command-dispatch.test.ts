@@ -142,7 +142,7 @@ test.each([
   expect(value.code).toBe(1);
   expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
   expect(value.stdout + value.stderr).toContain(
-    "whole-project foreground up or restart, owner-mediated down, ps, single-service logs, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
+    "whole-project foreground up or restart, owner-mediated down, ps, single-service logs, single-service exec or noninteractive run, or explicit stored-generation down --recover on macOS"
   );
   expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
     false

@@ -346,7 +346,7 @@ test.skipIf(!supported)(
         ["error", "Candidate quiescence check failed"],
         ["active", "Candidate runtime is active or ambiguous"],
         ["malformed", "JSON Parse error"],
-      ]) {
+      ] as const) {
         writeFileSync(fixtureStatus, status, { mode: 0o600 });
         try {
           const rejected = run([

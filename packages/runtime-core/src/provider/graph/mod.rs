@@ -1,4 +1,5 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
+pub mod interactive_exec;
 pub mod one_off;
 #[cfg(any(target_os = "macos", test))]
 pub mod status;
@@ -2247,6 +2248,8 @@ fn cleanup_owned_fenced(
     .into();
     state::write(&root.join("state.json"), &receipt)?;
     fence()?;
+    #[cfg(target_os = "macos")]
+    crate::provider::interactive_session::after_cleanup(candidate, &receipt.run);
     Ok(receipt)
 }
 

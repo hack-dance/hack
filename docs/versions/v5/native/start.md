@@ -63,6 +63,10 @@ receipt-owned home and refuses a differing override. See
 
 ## Check before starting
 
+`hack upgrade check` checks native configuration only. It does not inspect runtime
+setup or runtime admission, so a finding with no configuration blockers is not
+permission to start. Run setup above and the full preflight below.
+
 ```sh
 "$CANDIDATE" doctor --native-preflight --path /absolute/project
 ```

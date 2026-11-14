@@ -7,6 +7,8 @@ process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
 // fake runner, or pass an env without this key to a CLI with a fake
 // `systemctl` first on PATH (HACK-2052).
 process.env.HACK_SYSTEMD_DISABLE = "1";
+// No upgrade-check host probe (Docker, resolver, service managers, PATH hack) runs in tests.
+process.env.HACK_HOST_PROBES_DISABLE = "1";
 
 const values = new Map<string, string>();
 function entryKey(input: { service: string; name: string }): string {

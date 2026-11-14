@@ -1,0 +1,440 @@
+//! View-model state machines for the project list and the detail pane.
+//!
+//! Pure: no I/O, no clock. The app feeds events in and renders `view()`.
+//!
+//! List rules (DESIGN.md, "Project list"):
+//! - A failed refresh keeps the last good snapshot and marks it stale; with
+//!   no snapshot yet it shows the error state.
+//! - Banners stack: daemon off, daemon version mismatch, engine down, stale.
+//! - One action per project at a time; the row's state shows it.
+
+use std::collections::HashMap;
+
+use crate::models::ProjectRow;
+use crate::source::{ActionOutcome, Snapshot, SourceError};
+use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Banner {
+    DaemonOff,
+    DaemonMismatch { daemon: String, cli: String },
+    EngineDown { error: String },
+    Stale { error: String },
+}
+
+impl Banner {
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::DaemonOff => "hackd is off: status refreshes slowly".into(),
+            Self::DaemonMismatch { daemon, cli } => {
+                format!("hackd v{daemon} is running, CLI is v{cli}: restart hackd")
+            }
+            Self::EngineDown { error } => format!("Engine not running: {error}"),
+            Self::Stale { error } => format!("Showing last known state: {error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Phase {
+    Loading,
+    CliMissing,
+    Error { code: String, message: String },
+    Empty,
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    pub name: String,
+    pub state: ProjectState,
+    pub always_on: bool,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListView {
+    pub phase: Phase,
+    pub banners: Vec<Banner>,
+    pub running: Vec<Row>,
+    pub stopped: Vec<Row>,
+    pub doctor_count: usize,
+    pub cli_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailView {
+    pub name: String,
+    pub state: ProjectState,
+    pub backend: String,
+    pub url: Option<String>,
+    pub always_on: bool,
+    pub actions: Vec<Action>,
+    pub busy: bool,
+    pub services: Vec<ServiceView>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    Refreshed(Result<Snapshot, SourceError>),
+    Select(String),
+    ActionStarted {
+        project: String,
+        action: Action,
+    },
+    ActionFinished {
+        project: String,
+        action: Action,
+        result: Result<ActionOutcome, SourceError>,
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct AppModel {
+    snapshot: Option<Snapshot>,
+    last_error: Option<SourceError>,
+    selected: Option<String>,
+    local: HashMap<String, LocalContext>,
+    action_errors: HashMap<String, String>,
+    loaded_once: bool,
+}
+
+impl AppModel {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply one event. Returns `true` when the app should refresh now.
+    pub fn apply(&mut self, event: Event) -> bool {
+        match event {
+            Event::Refreshed(Ok(s)) => {
+                self.loaded_once = true;
+                self.last_error = None;
+                if self.selected.is_none()
+                    || !s
+                        .projects
+                        .projects
+                        .iter()
+                        .any(|p| Some(&p.name) == self.selected.as_ref())
+                {
+                    self.selected = first_by_group(&s, &self.local);
+                }
+                self.snapshot = Some(s);
+                false
+            }
+            Event::Refreshed(Err(SourceError::Pending)) => false,
+            Event::Refreshed(Err(e)) => {
+                self.loaded_once = true;
+                self.last_error = Some(e);
+                false
+            }
+            Event::Select(name) => {
+                self.selected = Some(name);
+                false
+            }
+            Event::ActionStarted { project, action } => {
+                let ctx = self.local.entry(project.clone()).or_default();
+                if ctx.in_flight.is_some() {
+                    return false;
+                }
+                if action != Action::Open {
+                    ctx.in_flight = Some(action);
+                }
+                self.action_errors.remove(&project);
+                false
+            }
+            Event::ActionFinished {
+                project,
+                action,
+                result,
+            } => {
+                let ctx = self.local.entry(project.clone()).or_default();
+                if ctx.in_flight == Some(action) {
+                    ctx.in_flight = None;
+                }
+                match result {
+                    Ok(ActionOutcome::Lifecycle(r)) => {
+                        ctx.last_failed = if matches!(action, Action::Start | Action::Restart) {
+                            r.services.failed
+                        } else {
+                            vec![]
+                        };
+                    }
+                    Ok(ActionOutcome::Opened(_)) => {}
+                    Err(e) => {
+                        self.action_errors.insert(project, describe(&e));
+                    }
+                }
+                action != Action::Open
+            }
+        }
+    }
+
+    /// Can `action` start for `project` now?
+    #[must_use]
+    pub fn can_start(&self, project: &str) -> bool {
+        self.local
+            .get(project)
+            .is_none_or(|c| c.in_flight.is_none())
+    }
+
+    #[must_use]
+    pub fn selected_row(&self) -> Option<&ProjectRow> {
+        let s = self.snapshot.as_ref()?;
+        let name = self.selected.as_ref()?;
+        s.projects.projects.iter().find(|p| &p.name == name)
+    }
+
+    #[must_use]
+    pub fn list(&self) -> ListView {
+        let mut banners = Vec::new();
+        let phase = match (&self.snapshot, &self.last_error) {
+            (_, Some(SourceError::CliMissing)) => Phase::CliMissing,
+            (None, Some(SourceError::Cli { code, message })) => Phase::Error {
+                code: code.clone(),
+                message: message.clone(),
+            },
+            (None, _) => Phase::Loading,
+            (Some(s), _) if s.projects.projects.is_empty() => Phase::Empty,
+            (Some(_), _) => Phase::Ready,
+        };
+        let mut running = Vec::new();
+        let mut stopped = Vec::new();
+        if let Some(s) = &self.snapshot {
+            match (&s.daemon, s.daemon_mismatch()) {
+                (None, _) => banners.push(Banner::DaemonOff),
+                (Some(_), Some(v)) => banners.push(Banner::DaemonMismatch {
+                    daemon: v.to_owned(),
+                    cli: s.cli_version.clone(),
+                }),
+                _ => {}
+            }
+            if s.projects.engine_down() {
+                banners.push(Banner::EngineDown {
+                    error: s.projects.runtime_error.clone().unwrap_or_default(),
+                });
+            }
+            if let Some(e) = &self.last_error {
+                banners.push(Banner::Stale { error: describe(e) });
+            }
+            for p in &s.projects.projects {
+                let row = Row {
+                    state: state::derive(
+                        p,
+                        self.local.get(&p.name).unwrap_or(&LocalContext::default()),
+                    ),
+                    always_on: p.autostart.as_ref().is_some_and(|a| a.enabled),
+                    selected: Some(&p.name) == self.selected.as_ref(),
+                    name: p.name.clone(),
+                };
+                if row.state.is_active() {
+                    running.push(row);
+                } else {
+                    stopped.push(row);
+                }
+            }
+        }
+        running.sort_by(|a, b| a.name.cmp(&b.name));
+        stopped.sort_by(|a, b| a.name.cmp(&b.name));
+        ListView {
+            phase,
+            banners,
+            running,
+            stopped,
+            doctor_count: self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.doctor.as_ref())
+                .map_or(0, crate::models::DoctorReport::attention_count),
+            cli_version: self.snapshot.as_ref().map(|s| s.cli_version.clone()),
+        }
+    }
+
+    #[must_use]
+    pub fn detail(&self) -> Option<DetailView> {
+        let row = self.selected_row()?;
+        let default = LocalContext::default();
+        let local = self.local.get(&row.name).unwrap_or(&default);
+        let st = state::derive(row, local);
+        Some(DetailView {
+            name: row.name.clone(),
+            backend: row.backend.clone().unwrap_or_else(|| "compose".into()),
+            url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
+            always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
+            actions: st.actions().to_vec(),
+            busy: local.in_flight.is_some(),
+            services: state::services(row),
+            last_error: self.action_errors.get(&row.name).cloned(),
+            state: st,
+        })
+    }
+}
+
+fn first_by_group(s: &Snapshot, local: &HashMap<String, LocalContext>) -> Option<String> {
+    let default = LocalContext::default();
+    let mut rows: Vec<(bool, &str)> = s
+        .projects
+        .projects
+        .iter()
+        .map(|p| {
+            let st = state::derive(p, local.get(&p.name).unwrap_or(&default));
+            (!st.is_active(), p.name.as_str())
+        })
+        .collect();
+    rows.sort();
+    rows.first().map(|(_, n)| (*n).to_owned())
+}
+
+fn describe(e: &SourceError) -> String {
+    match e {
+        SourceError::Pending => "still loading".into(),
+        SourceError::CliMissing => "hack was not found on PATH".into(),
+        SourceError::Cli { code, message } => format!("{code}: {message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::{self, Fixture};
+    use crate::models::LifecycleResult;
+
+    fn model(f: Fixture) -> AppModel {
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(fixtures::snapshot(f)));
+        m
+    }
+
+    #[test]
+    fn list_phases_for_every_list_fixture() {
+        assert_eq!(model(Fixture::Loading).list().phase, Phase::Loading);
+        assert_eq!(model(Fixture::Empty).list().phase, Phase::Empty);
+        assert_eq!(model(Fixture::CliMissing).list().phase, Phase::CliMissing);
+        assert!(matches!(
+            model(Fixture::Error).list().phase,
+            Phase::Error { .. }
+        ));
+        assert_eq!(
+            model(Fixture::DaemonDown).list().banners,
+            vec![Banner::DaemonOff]
+        );
+        assert!(matches!(
+            model(Fixture::DaemonMismatch).list().banners[..],
+            [Banner::DaemonMismatch { .. }]
+        ));
+        let engine = model(Fixture::EngineDown).list();
+        assert!(matches!(engine.banners[..], [Banner::EngineDown { .. }]));
+        assert!(engine.running.is_empty(), "unknown is not running");
+    }
+
+    #[test]
+    fn groups_and_selection() {
+        let v = model(Fixture::Running).list();
+        let names = |rows: &[Row]| rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&v.running), ["docs-site", "storefront"]);
+        assert_eq!(names(&v.stopped), ["billing-api", "notes"]);
+        assert!(v.running[0].selected, "first running project selected");
+        assert!(v.running[0].always_on);
+        assert_eq!(v.doctor_count, 1);
+    }
+
+    #[test]
+    fn failed_refresh_keeps_last_good_and_marks_stale() {
+        let mut m = model(Fixture::Running);
+        m.apply(Event::Refreshed(Err(SourceError::Cli {
+            code: "E_UNEXPECTED".into(),
+            message: "boom".into(),
+        })));
+        let v = m.list();
+        assert_eq!(v.phase, Phase::Ready);
+        assert!(matches!(v.banners.last(), Some(Banner::Stale { .. })));
+        assert_eq!(v.running.len(), 2);
+    }
+
+    #[test]
+    fn action_lifecycle_and_single_flight() {
+        let mut m = model(Fixture::Stopped);
+        m.apply(Event::Select("storefront".into()));
+        assert_eq!(m.detail().unwrap().actions, vec![Action::Start]);
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Start,
+        });
+        let d = m.detail().unwrap();
+        assert_eq!(d.state, ProjectState::Starting);
+        assert!(d.busy);
+        assert!(!m.can_start("storefront"));
+        // A second action while one runs is ignored.
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Restart,
+        });
+        let refresh = m.apply(Event::ActionFinished {
+            project: "storefront".into(),
+            action: Action::Start,
+            result: Ok(ActionOutcome::Lifecycle(LifecycleResult {
+                services: crate::models::LifecycleServices {
+                    failed: vec!["api".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            })),
+        });
+        assert!(refresh, "lifecycle actions refresh at once");
+        assert_eq!(
+            m.detail().unwrap().state,
+            ProjectState::FailedStart {
+                services: vec!["api".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn action_error_is_shown_on_the_project() {
+        let mut m = model(Fixture::Running);
+        m.apply(Event::Select("storefront".into()));
+        m.apply(Event::ActionStarted {
+            project: "storefront".into(),
+            action: Action::Stop,
+        });
+        m.apply(Event::ActionFinished {
+            project: "storefront".into(),
+            action: Action::Stop,
+            result: Err(SourceError::Cli {
+                code: "E_DOCKER_UNAVAILABLE".into(),
+                message: "down".into(),
+            }),
+        });
+        let d = m.detail().unwrap();
+        assert_eq!(d.last_error.as_deref(), Some("E_DOCKER_UNAVAILABLE: down"));
+        assert!(!d.busy);
+    }
+
+    #[test]
+    fn every_detail_fixture_renders_a_detail() {
+        for f in [
+            Fixture::Stopped,
+            Fixture::Starting,
+            Fixture::Running,
+            Fixture::Degraded,
+            Fixture::Stopping,
+            Fixture::FailedStart,
+            Fixture::NeedsAttention,
+        ] {
+            let mut m = model(f);
+            m.apply(Event::Select(fixtures::selected(f).into()));
+            if let Some(a) = fixtures::local(f).in_flight {
+                m.apply(Event::ActionStarted {
+                    project: fixtures::selected(f).into(),
+                    action: a,
+                });
+            }
+            let d = m.detail().unwrap_or_else(|| panic!("{f:?}"));
+            assert_eq!(d.name, "storefront");
+            assert_eq!(d.url.as_deref(), Some("https://storefront.hack"));
+        }
+    }
+}

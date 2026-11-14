@@ -1,0 +1,353 @@
+//! Display state of a project, derived from a project row plus what this app
+//! knows about its own in-flight action and the last action result.
+//!
+//! This derivation exists only until the CLI reports a `state` field itself
+//! (design request R2). Rules, in order:
+//! 1. An action this app is running wins (`Starting` / `Stopping`).
+//! 2. Always-on gave up, the checkout is missing, or the config has an input
+//!    diagnostic → `NeedsAttention`.
+//! 3. The last `up` reported failed services, or a defined service exited
+//!    non-zero and none run → `FailedStart`.
+//! 4. Runtime unreadable → `Unknown` (never `Stopped`).
+//! 5. Some but not all defined services running, or one unhealthy →
+//!    `Degraded`; all running → `Running`; none → `Stopped`.
+
+use crate::models::ProjectRow;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectState {
+    Stopped,
+    Starting,
+    Running { uptime: Option<String> },
+    Degraded { down: Vec<String> },
+    Stopping,
+    FailedStart { services: Vec<String> },
+    NeedsAttention { reason: String },
+    Unknown { reason: String },
+}
+
+impl ProjectState {
+    /// Short label for the state pill.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Stopped => "Stopped".into(),
+            Self::Starting => "Starting…".into(),
+            Self::Running { uptime: Some(u) } => format!("Running · {u}"),
+            Self::Running { uptime: None } => "Running".into(),
+            Self::Degraded { down } => format!("Degraded · {} down", down.join(", ")),
+            Self::Stopping => "Stopping…".into(),
+            Self::FailedStart { services } => {
+                format!("Failed to start: {}", services.join(", "))
+            }
+            Self::NeedsAttention { .. } => "Needs attention".into(),
+            Self::Unknown { .. } => "Status unknown".into(),
+        }
+    }
+
+    /// Sidebar group: running-like states go under "Running".
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Running { .. } | Self::Degraded { .. } | Self::Starting | Self::Stopping
+        )
+    }
+
+    #[must_use]
+    pub fn tone(&self) -> Tone {
+        match self {
+            Self::Running { .. } => Tone::Ok,
+            Self::Degraded { .. } => Tone::Warn,
+            Self::Starting | Self::Stopping => Tone::Busy,
+            Self::FailedStart { .. } | Self::NeedsAttention { .. } => Tone::Error,
+            Self::Stopped | Self::Unknown { .. } => Tone::Idle,
+        }
+    }
+
+    /// Which actions the header offers in this state.
+    #[must_use]
+    pub fn actions(&self) -> &'static [Action] {
+        match self {
+            Self::Stopped | Self::Unknown { .. } => &[Action::Start],
+            Self::Starting => &[Action::Stop],
+            Self::Running { .. } | Self::Degraded { .. } => {
+                &[Action::Open, Action::Restart, Action::Stop]
+            }
+            Self::Stopping => &[],
+            Self::FailedStart { .. } | Self::NeedsAttention { .. } => {
+                &[Action::Start, Action::Stop]
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Ok,
+    Warn,
+    Busy,
+    Error,
+    Idle,
+}
+
+/// v0 project actions. Each maps to exactly one CLI command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    Start,
+    Stop,
+    Restart,
+    Open,
+}
+
+impl Action {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Stop => "Stop",
+            Self::Restart => "Restart",
+            Self::Open => "Open",
+        }
+    }
+
+    /// CLI arguments (after `hack`), run with `--path <repo_root>`.
+    #[must_use]
+    pub fn cli_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Start => &["up", "--detach", "--json", "--no-interactive"],
+            Self::Stop => &["down", "--json", "--no-interactive"],
+            Self::Restart => &["restart", "--json", "--no-interactive"],
+            Self::Open => &["open", "--json", "--no-interactive"],
+        }
+    }
+}
+
+/// What the app itself knows beyond the row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalContext {
+    pub in_flight: Option<Action>,
+    /// Failed services from the last `up`/`restart` this app ran.
+    pub last_failed: Vec<String>,
+}
+
+/// One service row for the Services table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceView {
+    pub name: String,
+    pub running: bool,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub route: Option<String>,
+}
+
+#[must_use]
+pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
+    let mut names: Vec<String> = row.defined_services.clone();
+    if let Some(rt) = &row.runtime {
+        for s in &rt.services {
+            if !names.contains(&s.service) {
+                names.push(s.service.clone());
+            }
+        }
+    }
+    let mut out: Vec<ServiceView> = names
+        .into_iter()
+        .map(|name| {
+            let containers = row
+                .runtime
+                .as_ref()
+                .and_then(|rt| rt.services.iter().find(|s| s.service == name))
+                .map(|s| s.containers.as_slice())
+                .unwrap_or_default();
+            let running = containers.iter().any(|c| c.is_running());
+            let first = containers.first();
+            ServiceView {
+                route: row
+                    .service_hosts
+                    .get(&name)
+                    .and_then(|h| h.first().cloned()),
+                running,
+                status: first.map_or_else(|| "not created".into(), |c| c.status.clone()),
+                exit_code: first.and_then(|c| c.exit_code()),
+                name,
+            }
+        })
+        .collect();
+    // Down services first, then by name.
+    out.sort_by(|a, b| a.running.cmp(&b.running).then(a.name.cmp(&b.name)));
+    out
+}
+
+#[must_use]
+pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
+    match local.in_flight {
+        Some(Action::Start | Action::Restart) => return ProjectState::Starting,
+        Some(Action::Stop) => return ProjectState::Stopping,
+        Some(Action::Open) | None => {}
+    }
+    if let Some(a) = &row.autostart
+        && a.state == "needs_attention"
+    {
+        return ProjectState::NeedsAttention {
+            reason: format!(
+                "Always-on stopped trying after {} failures",
+                a.failures.count
+            ),
+        };
+    }
+    if row.status == "missing" {
+        return ProjectState::NeedsAttention {
+            reason: "The project folder is missing".into(),
+        };
+    }
+    if let Some(d) = &row.input_diagnostic {
+        return ProjectState::NeedsAttention {
+            reason: d.message.clone(),
+        };
+    }
+    if matches!(row.status.as_str(), "unknown" | "unavailable") {
+        return ProjectState::Unknown {
+            reason: "The container runtime could not be read".into(),
+        };
+    }
+
+    let svcs = services(row);
+    let running: Vec<&ServiceView> = svcs.iter().filter(|s| s.running).collect();
+    let failed_exit: Vec<String> = svcs
+        .iter()
+        .filter(|s| !s.running && s.exit_code.is_some_and(|c| c != 0))
+        .map(|s| s.name.clone())
+        .collect();
+
+    if !local.last_failed.is_empty() && running.len() < svcs.len() {
+        return ProjectState::FailedStart {
+            services: local.last_failed.clone(),
+        };
+    }
+    if running.is_empty() {
+        if !failed_exit.is_empty() {
+            return ProjectState::FailedStart {
+                services: failed_exit,
+            };
+        }
+        // Summary rows carry counts, not services.
+        if row.running_container_count.unwrap_or(0) > 0 || row.status == "running" {
+            return ProjectState::Running { uptime: None };
+        }
+        return ProjectState::Stopped;
+    }
+    let unhealthy = row
+        .runtime
+        .iter()
+        .flat_map(|rt| rt.services.iter())
+        .filter(|s| s.containers.iter().any(|c| c.is_unhealthy()))
+        .map(|s| s.service.clone());
+    let mut down: Vec<String> = svcs
+        .iter()
+        .filter(|s| !s.running)
+        .map(|s| s.name.clone())
+        .chain(unhealthy)
+        .collect();
+    down.sort();
+    down.dedup();
+    if down.is_empty() {
+        let uptime = row
+            .runtime
+            .iter()
+            .flat_map(|rt| rt.services.iter())
+            .flat_map(|s| s.containers.iter())
+            .find_map(|c| c.uptime().map(str::to_owned));
+        ProjectState::Running { uptime }
+    } else {
+        ProjectState::Degraded { down }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures;
+
+    fn row(name: &str) -> ProjectRow {
+        fixtures::project(fixtures::Fixture::Running)
+            .projects
+            .into_iter()
+            .find(|p| p.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn running_has_uptime() {
+        let s = derive(&row("storefront"), &LocalContext::default());
+        assert_eq!(
+            s,
+            ProjectState::Running {
+                uptime: Some("2 hours".into())
+            }
+        );
+        assert_eq!(s.actions(), &[Action::Open, Action::Restart, Action::Stop]);
+    }
+
+    #[test]
+    fn in_flight_action_wins() {
+        let local = LocalContext {
+            in_flight: Some(Action::Stop),
+            ..LocalContext::default()
+        };
+        assert_eq!(derive(&row("storefront"), &local), ProjectState::Stopping);
+    }
+
+    #[test]
+    fn unknown_is_not_stopped() {
+        let mut r = row("storefront");
+        r.status = "unknown".into();
+        r.runtime = None;
+        assert!(matches!(
+            derive(&r, &LocalContext::default()),
+            ProjectState::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn every_fixture_state_derives_as_designed() {
+        use fixtures::Fixture::*;
+        let cases = [
+            (Stopped, "Stopped"),
+            (Running, "Running · 2 hours"),
+            (Degraded, "Degraded · worker down"),
+            (FailedStart, "Failed to start: api, worker"),
+            (NeedsAttention, "Needs attention"),
+        ];
+        for (fx, label) in cases {
+            let p = fixtures::project(fx);
+            let sel = fixtures::selected(fx);
+            let r = p.projects.iter().find(|r| r.name == sel).unwrap();
+            assert_eq!(
+                derive(r, &fixtures::local(fx)).label(),
+                label,
+                "fixture {fx:?}"
+            );
+        }
+        let s = fixtures::project(Starting);
+        let r = s
+            .projects
+            .iter()
+            .find(|r| r.name == fixtures::selected(Starting))
+            .unwrap();
+        assert_eq!(
+            derive(r, &fixtures::local(Starting)),
+            ProjectState::Starting
+        );
+    }
+
+    #[test]
+    fn services_sort_down_first() {
+        let p = fixtures::project(fixtures::Fixture::Degraded);
+        let r = p.projects.iter().find(|r| r.name == "storefront").unwrap();
+        let s = services(r);
+        assert_eq!(s[0].name, "worker");
+        assert!(!s[0].running);
+        assert_eq!(s[1].route.as_deref(), Some("api.storefront.hack"));
+    }
+}

@@ -715,12 +715,20 @@ Such a plist is never replaced automatically; `start` reports it and
   replaces that daemon by stopping it and starting through the service.
   Before it stops anything, it checks that the start would go through. On
   macOS the loaded launchd job must not bind another home and must be this
-  home's. On Linux, start would otherwise refuse when the unit is untrusted,
-  its Hack home cannot be read, a missing program cannot be repaired in
-  read-only mode, or Hack cannot vouch for its loaded files or program. If the
-  start would be refused, `start` refuses first (exit 1, `E_DAEMON_SERVICE`,
-  with `home-binding`, `unproven-owner` or `read-only` as `blocked`) and leaves
-  the running daemon alone.
+  home's. On Linux, the check uses the same planning and unit-rewrite
+  computation as the start itself, without writing anything. The start would
+  refuse when:
+  - the unit is untrusted, its Hack home cannot be read, or Hack cannot vouch
+    for its loaded files or program;
+  - a missing program cannot be repaired in read-only mode;
+  - a needed rewrite would be refused: no durable `hack` to retarget a missing
+    program to, or a program or service `PATH` that fails install's checks.
+
+  If the start would be refused, `start` refuses first (exit 1,
+  `E_DAEMON_SERVICE`, with `home-binding`, `unproven-owner`, `read-only` or
+  `rewrite-refused` as `blocked`) and leaves the running daemon alone. A change
+  between the check and the start, or a write, reload or start that fails at
+  runtime, can still leave hackd stopped.
 
 ```mermaid
 stateDiagram-v2
@@ -777,7 +785,7 @@ else on stdout (human lines go to stderr). Success is
 | `manager` | `systemd`, `launchd` or `none` (hackd runs directly) |
 | `action` | `none`, `started`, `restarted`, `reinstalled`, `stopped` or `installed` |
 | `stale`, `stale_reasons` | whether the service or daemon was stale, and why: `content`, `program-missing`, `version-mismatch` |
-| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service`, `unproven-owner` |
+| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service`, `unproven-owner`, `rewrite-refused` |
 | `cli_version` | this CLI's version |
 | `daemon` | `running`, `pid`, `version` and `compatible` after the command |
 

@@ -194,10 +194,18 @@ export async function resolveSystemdSummary(opts: {
  * not go through systemd at all, which starts hackd directly).
  */
 export async function refuseSystemdStartBeforeReplacing(
-  hooks: Pick<SystemdCommandHooks, "paths" | "deps">
+  hooks: Pick<
+    SystemdCommandHooks,
+    | "paths"
+    | "deps"
+    | "resolveExpected"
+    | "assessDurability"
+    | "systemPathDirectories"
+    | "cliVersion"
+  >
 ): Promise<{
   readonly message: string;
-  readonly blocked: "unproven-owner" | "read-only";
+  readonly blocked: "unproven-owner" | "read-only" | "rewrite-refused";
 } | null> {
   const deps = hooks.deps ?? defaultSystemdDeps();
   if (!resolveSystemdAccess({ env: deps.env }).allowed) {
@@ -227,12 +235,31 @@ export async function refuseSystemdStartBeforeReplacing(
   if (unitHome.kind === "unknown") {
     return { message: unitHome.message, blocked: "unproven-owner" };
   }
-  if (status.drift === "program-missing") {
-    return isSystemdReadOnly(deps.env)
-      ? {
-          message: `${describeMissingProgram(status)}; not changing the service here | Run: hack daemon install`,
-          blocked: "read-only",
-        }
+  // The same plan and rewrite computation the start itself runs after the
+  // stop (planStoppedStart, computeUnitRewrite), without writing anything.
+  const { plan, expected } = await planStoppedStart({
+    status,
+    unitPath,
+    deps,
+    hooks,
+  });
+  if (plan.service === "refuse") {
+    return {
+      message: `${describeMissingProgram(status)}; not changing the service here | Run: hack daemon install`,
+      blocked: "read-only",
+    };
+  }
+  if (plan.rewrite !== "none") {
+    const rewrite = await computeUnitRewrite({
+      plan,
+      status,
+      unitPath,
+      deps,
+      hooks,
+      expected,
+    });
+    return "error" in rewrite
+      ? { message: rewrite.error, blocked: "rewrite-refused" }
       : null;
   }
   const loaded =
@@ -808,23 +835,17 @@ async function prepareSystemdUnitForStart(opts: {
 }): Promise<number | null> {
   const { status, unitPath, deps, hooks } = opts;
   const readOnly = isSystemdReadOnly(deps.env);
-  const expected = await (
-    hooks.resolveExpected ?? resolveExpectedSystemdUnit
-  )();
-
   if (status.drift === "program-unknown") {
     // Never evidence that the program is missing: leave the unit as it is.
     logger.info({
       message: `${SYSTEMD_UNIT_NAME} has an ExecStart hack does not read (a prefix, specifier or escape); starting it unchanged`,
     });
   }
-  const plan = planDaemonReconcile({
-    unit: serviceUnitState(status.drift),
-    programIsOurs: await unitRunsExpected({ status, expected }),
-    readOnly,
-    running: null,
-    contentBlock: await readContentBlock({ status, unitPath }),
-    cliVersion: hooks.cliVersion ?? DAEMON_CLI_VERSION,
+  const { plan, expected } = await planStoppedStart({
+    status,
+    unitPath,
+    deps,
+    hooks,
   });
   recordReconcile({ trace: hooks.trace, manager: "systemd", plan });
   if (plan.service === "refuse") {
@@ -850,6 +871,36 @@ async function prepareSystemdUnitForStart(opts: {
     readOnly,
     plan,
   });
+}
+
+/**
+ * The plan for starting the unit with no hackd running: what
+ * {@link prepareSystemdUnitForStart} does, and what
+ * {@link refuseSystemdStartBeforeReplacing} checks before it stops a
+ * running daemon. Reads only; records nothing.
+ */
+async function planStoppedStart(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  readonly hooks: Pick<SystemdCommandHooks, "resolveExpected" | "cliVersion">;
+}): Promise<{
+  readonly plan: DaemonReconcilePlan;
+  readonly expected: { readonly hackBinPath: string } | null;
+}> {
+  const { status, unitPath, deps, hooks } = opts;
+  const expected = await (
+    hooks.resolveExpected ?? resolveExpectedSystemdUnit
+  )();
+  const plan = planDaemonReconcile({
+    unit: serviceUnitState(status.drift),
+    programIsOurs: await unitRunsExpected({ status, expected }),
+    readOnly: isSystemdReadOnly(deps.env),
+    running: null,
+    contentBlock: await readContentBlock({ status, unitPath }),
+    cliVersion: hooks.cliVersion ?? DAEMON_CLI_VERSION,
+  });
+  return { plan, expected };
 }
 
 /** {@link ServiceUnitState} for a unit's {@link SystemdUnitDrift}. */
@@ -920,7 +971,12 @@ function describeMissingProgram(status: SystemdServiceStatus): string {
 }
 
 type UnitRewrite =
-  | { readonly unitText: string; readonly done: string }
+  | {
+      readonly unitText: string;
+      readonly done: string;
+      /** Reported, not refused (as install reports it). */
+      readonly warning?: string;
+    }
   | { readonly error: string };
 
 /**
@@ -941,14 +997,14 @@ async function rewriteUnitForPlan(opts: {
   >;
   readonly expected: { readonly hackBinPath: string } | null;
 }): Promise<number | null> {
-  const { plan, status, unitPath, deps, hooks, expected } = opts;
-  const rewritten =
-    plan.rewrite === "program"
-      ? await retargetMissingProgram({ status, unitPath, hooks, expected })
-      : await renderCurrentUnit({ status, deps, hooks });
+  const { status, unitPath, deps } = opts;
+  const rewritten = await computeUnitRewrite(opts);
   if ("error" in rewritten) {
     logger.error({ message: rewritten.error });
     return 1;
+  }
+  if (rewritten.warning) {
+    logger.warn({ message: rewritten.warning });
   }
   const repaired = await installSystemdUnit({
     unitPath,
@@ -968,11 +1024,42 @@ async function rewriteUnitForPlan(opts: {
   return null;
 }
 
+/**
+ * The non-mutating half of a plan's rewrite: the new unit text, or why it
+ * cannot be written (an unresolvable or non-durable replacement program,
+ * an unrenderable program, or a program or service PATH that fails
+ * install's checks). Shared by the real rewrite and by the check that runs
+ * before a running daemon is stopped ({@link refuseSystemdStartBeforeReplacing}),
+ * so the two cannot disagree. It reads the file system as it is now: a
+ * change between the check and the write, or a write or reload failing,
+ * is outside what it can promise.
+ */
+async function computeUnitRewrite(opts: {
+  readonly plan: DaemonReconcilePlan;
+  readonly status: SystemdServiceStatus;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  readonly hooks: Pick<
+    SystemdCommandHooks,
+    "assessDurability" | "systemPathDirectories"
+  >;
+  readonly expected: { readonly hackBinPath: string } | null;
+}): Promise<UnitRewrite> {
+  const { plan, status, unitPath, deps, hooks, expected } = opts;
+  return plan.rewrite === "program"
+    ? await retargetMissingProgram({ status, unitPath, deps, hooks, expected })
+    : await renderCurrentUnit({ status, deps, hooks });
+}
+
 /** The unit text for a `program` rewrite: only ExecStart is replaced. */
 async function retargetMissingProgram(opts: {
   readonly status: SystemdServiceStatus;
   readonly unitPath: string;
-  readonly hooks: Pick<SystemdCommandHooks, "assessDurability">;
+  readonly deps: SystemdDeps;
+  readonly hooks: Pick<
+    SystemdCommandHooks,
+    "assessDurability" | "systemPathDirectories"
+  >;
   readonly expected: { readonly hackBinPath: string } | null;
 }): Promise<UnitRewrite> {
   const { expected } = opts;
@@ -989,6 +1076,15 @@ async function retargetMissingProgram(opts: {
     return {
       error: `${missing}. This CLI (${expected.hackBinPath}) is not a stable location for a login service: ${durability.reason} | Install hack to a stable location, then run: hack daemon install`,
     };
+  }
+  // The new program and the PATH it gives hackd pass install's checks.
+  const unsafe = await checkInstallPrograms({
+    hackBinPath: expected.hackBinPath,
+    deps: opts.deps,
+    systemPathDirectories: opts.hooks.systemPathDirectories,
+  });
+  if (unsafe !== null) {
+    return { error: `${missing}. ${unsafe}` };
   }
   const unitText = await readTextFile(opts.unitPath);
   const retargeted =
@@ -1041,14 +1137,14 @@ async function renderCurrentUnit(opts: {
   const durability = await (
     opts.hooks.assessDurability ?? assessExecutableDurability
   )({ path: program });
-  if (!durability.durable) {
-    logger.warn({
-      message: `The service runs ${program}, which may not last: ${durability.reason}. Install hack to a stable location and run \`hack daemon install\` from there.`,
-    });
-  }
   return {
     unitText,
     done: `Updated ${SYSTEMD_UNIT_NAME}: it differed from what this hack writes for ${program} (local changes belong in a drop-in: systemctl --user edit hackd)`,
+    ...(durability.durable
+      ? {}
+      : {
+          warning: `The service runs ${program}, which may not last: ${durability.reason}. Install hack to a stable location and run \`hack daemon install\` from there.`,
+        }),
   };
 }
 

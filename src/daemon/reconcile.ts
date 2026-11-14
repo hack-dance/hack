@@ -74,7 +74,11 @@ export type ServiceUnitState =
  *   job hackd started), so restarting or rewriting it would stop the caller;
  * - `unproven-owner`: a restart was needed, but the service's main process
  *   is not proven to be this home's hackd (the same proof `stop` needs), so
- *   restarting it could stop another home's daemon.
+ *   restarting it could stop another home's daemon;
+ * - `rewrite-refused`: the unit needs a rewrite before it can start, but
+ *   the rewrite would be refused (no durable `hack` to retarget to, or a
+ *   program or service PATH that fails install's checks), so a running
+ *   daemon was not stopped to make room for it.
  */
 export type DaemonReconcileBlock =
   | "read-only"
@@ -83,7 +87,8 @@ export type DaemonReconcileBlock =
   | "unmanaged"
   | "home-binding"
   | "inside-service"
-  | "unproven-owner";
+  | "unproven-owner"
+  | "rewrite-refused";
 
 export interface DaemonReconcileInput {
   readonly unit: ServiceUnitState;

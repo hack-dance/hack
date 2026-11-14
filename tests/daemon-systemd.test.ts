@@ -5043,3 +5043,81 @@ linuxTest(
     ).toBeNull();
   }
 );
+
+// Review round 9 (HACK-2216): the check before a stop runs the same
+// rewrite computation as the start after it.
+
+function systemctlMutations(fake: Fake): string[] {
+  return fake.calls.filter((call) =>
+    [
+      " start ",
+      " stop ",
+      " restart ",
+      "daemon-reload",
+      " enable ",
+      "reset-failed",
+    ].some((verb) => ` ${call} `.includes(verb))
+  );
+}
+
+linuxTest(
+  "a missing program with no durable replacement is refused before a direct daemon is stopped",
+  async () => {
+    const fake = fakeSystemd();
+    const old = await writeOldUnit(fake);
+    await rm(old);
+    const before = await readFile(unitPath);
+    fake.calls.length = 0;
+    const refusal = await refuseSystemdStartBeforeReplacing({
+      ...startHooks(fake),
+      // This CLI runs from a temporary or source-checkout path.
+      assessDurability: () =>
+        Promise.resolve({
+          durable: false,
+          reason: "it is in a temporary directory",
+        } as const),
+    });
+    expect(refusal?.blocked).toBe("rewrite-refused");
+    expect(refusal?.message).toContain("not a stable location");
+    expect(systemctlMutations(fake)).toEqual([]);
+    expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
+
+    // The start after a stop would refuse for the same reason: the two
+    // share the computation.
+    expect(
+      await startViaSystemdIfInstalled({
+        ...startHooks(fake),
+        assessDurability: () =>
+          Promise.resolve({
+            durable: false,
+            reason: "it is in a temporary directory",
+          } as const),
+      })
+    ).toBe(1);
+
+    // With a durable replacement the check lets the replacement go on.
+    expect(
+      await refuseSystemdStartBeforeReplacing(startHooks(fake))
+    ).toBeNull();
+  }
+);
+
+linuxTest(
+  "a stale unit whose rendered PATH fails install's checks is refused before the stop",
+  async () => {
+    const fake = fakeSystemd();
+    const stale = await writeStaleUnit(fake);
+    // A directory on the rendered service PATH that others can write.
+    const shared = join(root, "shared-bin");
+    await mkdir(shared);
+    await chmod(shared, 0o777);
+    fake.calls.length = 0;
+    const refusal = await refuseSystemdStartBeforeReplacing({
+      ...startHooks(fake),
+      systemPathDirectories: [sysBin, shared],
+    });
+    expect(refusal?.blocked).toBe("rewrite-refused");
+    expect(systemctlMutations(fake)).toEqual([]);
+    expect(await readFile(unitPath, "utf8")).toBe(stale);
+  }
+);

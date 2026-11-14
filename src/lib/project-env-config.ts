@@ -6694,7 +6694,8 @@ async function prepareUndeclaredMigration(
 async function prepareMigrationCompose(
   opts: PreparedMigrationProject & {
     readonly hasContract: boolean;
-    readonly existingContractOverlays?: readonly string[];
+    readonly layersExist: boolean;
+    readonly overlayNames: readonly string[];
   },
   add: AddPreparedMigrationFile
 ): Promise<void> {
@@ -6706,10 +6707,9 @@ async function prepareMigrationCompose(
   if (references.length > 0) {
     // Existing layers are kept, so they must already deliver every contract
     // value before the first journal can remove its legacy Compose inputs.
-    if (opts.hasContract && opts.existingContractOverlays) {
+    if (opts.hasContract && opts.layersExist) {
       await assertLegacyEnvMigrationDelivery({
         ...opts,
-        overlayNames: opts.existingContractOverlays,
       });
     }
     const parsed = await readComposeFile({ composeFile });
@@ -6922,7 +6922,8 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
       {
         ...opts,
         hasContract: contract.exists,
-        existingContractOverlays: layersExist ? overlayNames : undefined,
+        layersExist,
+        overlayNames,
       },
       add
     );

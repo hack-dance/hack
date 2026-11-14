@@ -12,7 +12,9 @@
 
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
+- [Activity log](./reference/activity-log.md) — the `up`/`down`/`restart` history `hack activity` reads: records, origins, concurrency, rotation and what is never recorded
 - [Observe-only global status](./reference/global-status-observe.md) — `hack global status --json --observe`: routing, DNS and proxy state without starting anything, and its probe list
+- [Local CA trust check](./reference/local-ca-trust.md) — `hack doctor`'s read-only `local ca trust` check: which stores trust the Caddy Local CA, or unknown
 - [Shared host helper lifecycle](./reference/shared-host-lifecycle.md) — identity-verified adoption, exact process claims and release rules for helpers shared across branches
 - [Sessions](./sessions.md)
 - [Background commands](./guides/background-commands.md) — `hack exec|run --detach`, cursor reads, inspect and cancel; storage, retention and partial redaction

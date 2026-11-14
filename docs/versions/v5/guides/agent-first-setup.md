@@ -32,3 +32,9 @@ when they are part of the requested work.
 A client without shell access can use the separate MCP server; see
 [Agent integrations](../integrations.md#the-separate-hack-mcp-plugin) and
 [MCP tools](../../reference/mcp-tools.md).
+
+Foreground MCP `run` and `exec` calls use a 120-second server limit by default.
+Set `timeoutMs` up to 600000, or use `hack.project.command.start` for long work.
+A server timeout returns an error with `timedOut: true` and an explanation.
+Codex MCP setup writes a 660-second tool-call limit when none is configured;
+an explicit user limit is preserved, even if smaller.

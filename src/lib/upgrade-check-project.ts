@@ -33,6 +33,7 @@ import {
   resolveFileSecretStorePaths,
 } from "./secret-store.ts";
 import { projectUsesSecretStore } from "./secret-store-retire.ts";
+import { upgradeCheckFailureClass } from "./upgrade-check-failure.ts";
 import type { NativePreflightProbe } from "./upgrade-check-probes.ts";
 
 /**
@@ -69,6 +70,8 @@ export type UpgradeFinding = {
   readonly args: readonly string[] | null;
   /** A manual action, when no command fixes it or as its alternative. Never run. */
   readonly action: string | null;
+  /** A narrower automatic fix when this finding is safe to repair without a key decision. */
+  readonly apply_fix?: "env-key-permissions";
 };
 
 /** Checks the upgrade's safety depends on; a failure there is `incomplete`. */
@@ -95,6 +98,8 @@ export type RegistryEntryState =
 export type RegisteredCheckout = {
   /** The project name, with ` (worktree <dir>)` for a linked worktree. */
   readonly name: string;
+  /** The registered project's name, the same for all its worktrees. */
+  readonly project: string;
   readonly repoRoot: string;
   readonly projectDir: string;
   readonly projectDirName: string;
@@ -107,12 +112,14 @@ export function registeredCheckouts(
   return [
     {
       name: project.name,
+      project: project.name,
       repoRoot: project.repoRoot,
       projectDir: project.projectDir,
       projectDirName: project.projectDirName,
     },
     ...(project.worktrees ?? []).map((worktree) => ({
       name: `${project.name} (worktree ${basename(worktree.path)})`,
+      project: project.name,
       repoRoot: worktree.path,
       projectDir: resolve(worktree.path, project.projectDirName),
       projectDirName: project.projectDirName,
@@ -342,6 +349,10 @@ async function envKeyFinding(opts: {
   return {
     id: "env-key",
     status: inspection.status === "error" ? "blocker" : "warn",
+    ...(codes.length > 0 &&
+    codes.every((code) => code === "env-key-weak-permissions")
+      ? { apply_fix: "env-key-permissions" as const }
+      : {}),
     summary: `Env key: ${codes.join(", ")}.`,
     args: ["doctor", "--path", opts.root],
     action: worst.remedy ? `In the project root: ${worst.remedy}` : null,
@@ -688,8 +699,10 @@ async function guarded(
           `Not checked: it took longer than ${Math.max(1, Math.round(timeoutMs / 1000))} s.`
         )
       : result;
-  } catch {
-    return notChecked("Not checked: the check failed.");
+  } catch (error) {
+    return notChecked(
+      `Not checked: the check failed (${upgradeCheckFailureClass(error)}).`
+    );
   } finally {
     clearTimeout(timer);
   }

@@ -1,0 +1,25 @@
+stateDiagram-v2
+  direction TB
+  [*] --> checked: fresh check
+  checked --> planned: same filesystem admitted
+  checked --> skipped: other filesystem
+  skipped --> checked: explicit snapshot root
+  planned --> started: journal target start
+  started --> applied: record output then outcome
+  started --> failed: closed failure
+  started --> interrupted: process lost
+  interrupted --> checked: explicit resume manifest
+  applied --> restored: guarded rollback
+  failed --> checked: explicit resume manifest
+  restored --> [*]
+  note right of planned
+    Coverage and gaps persisted
+    before target writes
+    Key permission paths frozen
+  end note
+  note right of interrupted
+    Unexpected edits refuse resume
+    No implicit run selection
+    Original key bytes required
+    Interrupted chmod admits masked mode
+  end note

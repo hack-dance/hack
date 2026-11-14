@@ -148,6 +148,15 @@ function adcMount(value: unknown, home: string): string | undefined {
   return longAdcMount(value, sources);
 }
 
+/** Exact authored mount forms consumed privately by ADC adaptation. No file is read. */
+export function nativeGcloudCredentialMount(value: unknown): boolean {
+  try {
+    return adcMount(value, "") !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 function mountTarget(mount: unknown): string {
   if (typeof mount === "string") {
     const parts = mount.split(":");

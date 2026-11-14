@@ -50,7 +50,7 @@ async function fixture(compose: Record<string, unknown>) {
   const projectDir = join(project, ".hack");
   const nativeHome = join(root, "native-home");
   const stub = join(root, "stub");
-  await mkdir(projectDir, { recursive: true });
+  await mkdir(projectDir, { recursive: true, mode: 0o700 });
   await mkdir(nativeHome, { mode: 0o700 });
   await mkdir(stub);
   await writeFile(
@@ -217,6 +217,224 @@ function codes(report: NativePreflightReport, gate: "cli" | "runtime") {
 
 const GRANT = { HACK_NATIVE_SHARED_SOURCE: "1" };
 
+test("preflight and start share env-file admission and never publish file values", async () => {
+  const f = await fixture({
+    services: {
+      web: {
+        image: IMAGE,
+        env_file: "service.env",
+        environment: { COPY: "${SOURCE}" },
+      },
+    },
+  });
+  await chmod(f.project, 0o700);
+  await writeFile(join(f.projectDir, "service.env"), `TOKEN=${PRIVATE}\n`, {
+    mode: 0o600,
+  });
+  await writeFile(join(f.projectDir, ".env"), `SOURCE=${PRIVATE}\n`, {
+    mode: 0o600,
+  });
+  await f.review([]);
+  const env = { ...f.native, ...GRANT };
+  const observed = await preflight(f, env);
+  expect(observed.report.ready).toBe(true);
+  const normalized = await readFile(
+    join(f.root, "stub/normalized.json"),
+    "utf8"
+  );
+  expect(JSON.parse(normalized).services.web.environment).toEqual({
+    TOKEN: null,
+    COPY: null,
+  });
+  expect(normalized).not.toContain(PRIVATE);
+  expect(observed.output).not.toContain(PRIVATE);
+  expect((await f.argv()).join("\n")).not.toContain(PRIVATE);
+  for (const unsafe of ["missing", "writable", "public-reference"]) {
+    if (unsafe === "missing") {
+      await rm(join(f.projectDir, "service.env"));
+    }
+    if (unsafe === "writable") {
+      await writeFile(join(f.projectDir, "service.env"), `TOKEN=${PRIVATE}\n`, {
+        mode: 0o666,
+      });
+      await chmod(join(f.projectDir, "service.env"), 0o666);
+    }
+    if (unsafe === "public-reference") {
+      await chmod(join(f.projectDir, "service.env"), 0o600);
+      await writeFile(
+        join(f.projectDir, "docker-compose.yml"),
+        JSON.stringify({
+          services: {
+            web: { image: IMAGE, command: ["echo", "${SOURCE:-fallback}"] },
+          },
+        })
+      );
+    }
+    const report = await preflight(f, env);
+    expect(codes(report.report, "cli")).toContain("environment_file_input:web");
+    const before = await f.calls();
+    const up = await cli(f, ["up", "--json"], env);
+    expect(up.code).toBe(1);
+    expect(up.output).not.toContain(PRIVATE);
+    expect(report.output).not.toContain(PRIVATE);
+    // Detached up inspects setup in the parent and the foreground child.
+    expect((await f.calls()).slice(before.length)).toEqual([
+      "runtime setup",
+      "runtime setup",
+    ]);
+  }
+}, 30_000);
+
+test("preflight and static start refuse oversized file delivery before pool effects", async () => {
+  const f = await fixture({
+    services: { web: { image: IMAGE, env_file: "service.env" } },
+  });
+  await chmod(f.project, 0o700);
+  await writeFile(
+    join(f.projectDir, "service.env"),
+    `TOKEN=${"private-quota-canary".repeat(2500)}\n`,
+    { mode: 0o600 }
+  );
+  await f.review([], { services: { web: { active: true } } });
+  const env = { ...f.native, ...GRANT };
+  const report = await preflight(f, env);
+  expect(codes(report.report, "cli")).toContain("environment_delivery");
+  expect(report.output).not.toContain("private-quota-canary");
+  const before = await f.calls();
+  const up = await cli(f, ["up"], env);
+  expect(up.code).toBe(1);
+  expect(up.output).toContain("32 KiB");
+  expect(up.output).not.toContain("private-quota-canary");
+  const [setup, ...reviews] = (await f.calls()).slice(before.length);
+  expect(setup).toBe("runtime setup");
+  expect(reviews.every((call) => call === "project plan")).toBe(true);
+});
+
+test(
+  "preflight and start refuse private sources in native build contexts before effects",
+  async () => {
+    const f = await fixture({
+      services: {
+        web: { image: IMAGE, env_file: "service.env" },
+        builder: { build: ".." },
+      },
+    });
+    await chmod(f.project, 0o700);
+    await writeFile(join(f.projectDir, "service.env"), `TOKEN=${PRIVATE}\n`, {
+      mode: 0o600,
+    });
+    await f.review([]);
+    const env = { ...f.native, ...GRANT, HACK_NATIVE_BUILDS: "1" };
+    const report = await preflight(f, env);
+    expect(report.code).toBe(1);
+    expect(report.report.ready).toBe(false);
+    expect(codes(report.report, "cli")).toContain(
+      "environment_file_input:builder"
+    );
+    expect(report.output).toContain("disjoint build inputs");
+    const before = await f.calls();
+    const up = await cli(f, ["up"], env);
+    expect(up.code).toBe(1);
+    expect(up.output).toContain("overlap an environment source");
+    expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
+    expect(report.output).not.toContain(PRIVATE);
+    expect(up.output).not.toContain(PRIVATE);
+    expect((await f.argv()).join("\n")).not.toContain(PRIVATE);
+    const beforeDetached = await f.calls();
+    const detached = await cli(f, ["up", "--json"], env);
+    expect(detached.code).toBe(1);
+    expect(detached.output).not.toContain(PRIVATE);
+    expect((await f.calls()).slice(beforeDetached.length)).toEqual([
+      "runtime setup",
+      "runtime setup",
+    ]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test("preflight and start refuse ignored root dotenv in a native build before effects", async () => {
+  const f = await fixture({ services: { builder: { build: ".." } } });
+  await writeFile(join(f.project, ".env"), `TOKEN=${PRIVATE}\n`, {
+    mode: 0o000,
+  });
+  await f.review([]);
+  const env = { ...f.native, ...GRANT, HACK_NATIVE_BUILDS: "1" };
+  const report = await preflight(f, env);
+  expect(report.code).toBe(1);
+  expect(report.report.ready).toBe(false);
+  expect(codes(report.report, "cli")).toContain(
+    "environment_file_input:builder"
+  );
+  expect(
+    report.report.blockers.find(
+      (entry) => entry.code === "environment_file_input"
+    )?.message
+  ).toContain('source "../.env"');
+  expect(report.output).not.toContain(PRIVATE);
+  for (const args of [["up"], ["up", "--json"]]) {
+    const before = await f.calls();
+    const started = await cli(f, args, env);
+    expect(started.code).toBe(1);
+    if (args.includes("--json")) {
+      expect(JSON.parse(started.stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_STARTUP_INCOMPLETE" },
+      });
+    } else {
+      expect(started.output).toContain("overlap an environment source");
+    }
+    expect(started.output).not.toContain(PRIVATE);
+    expect((await f.calls()).slice(before.length)).toEqual(
+      args.includes("--json")
+        ? ["runtime setup", "runtime setup"]
+        : ["runtime setup"]
+    );
+  }
+});
+
+test("preflight requires the same decryption key as start and closes key errors", async () => {
+  const f = await fixture({ services: { web: { image: IMAGE } } });
+  await writeFile(
+    join(f.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: { TOKEN: { secure: PRIVATE } } },
+    })
+  );
+  await f.review([]);
+  const report = await preflight(f, { ...f.native, ...GRANT });
+  expect(codes(report.report, "cli")).toEqual(["managed_env_unreadable"]);
+  expect(report.output).not.toContain(PRIVATE);
+  const before = await f.calls();
+  const up = await cli(f, ["up"], { ...f.native, ...GRANT });
+  expect(up.code).toBe(1);
+  expect(up.output).toContain("E_CONFIG_INVALID");
+  expect(up.output).not.toContain(PRIVATE);
+  expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
+});
+
+test("old runtimes cannot silently ignore explicit environment unsets", async () => {
+  const f = await fixture({
+    services: {
+      web: { image: IMAGE, environment: { ABSENT_FIXTURE_NAME: null } },
+    },
+  });
+  await f.review([]);
+  const report = await preflight(f, { ...f.native, ...GRANT });
+  expect(report.report.runtime_review.code).toBe(
+    "native_environment_unset_unavailable"
+  );
+  await f.review([], {
+    services: {
+      web: { active: true, environment_unsets: ["ABSENT_FIXTURE_NAME"] },
+    },
+  });
+  const supported = await preflight(f, { ...f.native, ...GRANT });
+  expect(supported.report.ready).toBe(true);
+});
+
 /** Replies that carry native `up` past its source checks to service admission. */
 async function scriptSourceShare(f: Fixture): Promise<void> {
   await f.reply("runtime-check-project-share.out", {
@@ -287,9 +505,7 @@ test(
     expect(report.runtime_review).toEqual({ status: "completed" });
     expect(codes(report, "cli")).toEqual([
       "build_requires_opt_in:web",
-      "dotenv_without_managed_env",
-      "env_file:api",
-      "env_file:jobs",
+      "environment_file_input:web",
       "external_network",
       "extra_hosts_without_dependencies:web",
       "invalid_restart:jobs",
@@ -395,7 +611,7 @@ test(
     expect(code).toBe(1);
     expect(report.runtime_review).toEqual({ status: "skipped" });
     expect(report.ready).toBe(false);
-    expect(codes(report, "cli")).toEqual(["env_file:web"]);
+    expect(codes(report, "cli")).toEqual(["environment_file_input:web"]);
     expect(await f.calls()).toEqual([]);
     // No blocker is still not "ready" when half the checks did not run.
     const clean = await fixture({ services: { web: { image: IMAGE } } });
@@ -421,6 +637,34 @@ test(
     expect(
       (await cli(clean, ["doctor", "--native-preflight"], incompleteEnv)).stdout
     ).toContain("native is selected without a candidate");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "ambiguous env-file aliases are a preflight blocker in JSON and text",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    await f.reviewStops("source_case_collision");
+    const env = { ...f.native, ...GRANT };
+    const result = await preflight(f, env);
+    expect(result.code).toBe(1);
+    expect(result.report.ready).toBe(false);
+    expect(result.report.runtime_review).toEqual({
+      status: "stopped",
+      code: "source_case_collision",
+    });
+    expect(result.report.blockers).toHaveLength(1);
+    expect(result.report.blockers[0]).toMatchObject({
+      gate: "runtime",
+      code: "source_case_collision",
+    });
+    expect(result.report.blockers[0]?.fix).toContain("Rename");
+    const text = await cli(f, ["doctor", "--native-preflight"], env);
+    expect(text.code).toBe(1);
+    expect(text.output).toContain("Unicode normalization and case folding");
+    expect(text.output).toContain("Rename");
+    expect(text.output).not.toContain(PRIVATE);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -493,7 +737,7 @@ test(
   "preflight agrees with native up: each CLI blocker is a refusal, and a clean project passes the gate",
   async () => {
     for (const [service, extra, expected] of [
-      [{ image: IMAGE, env_file: ".env" }, {}, "env_file:web"],
+      [{ image: IMAGE, env_file: ".env" }, {}, "environment_file_input:web"],
       [
         { image: IMAGE, logging: { driver: "syslog" } },
         {},
@@ -563,10 +807,7 @@ test(
     expect(up.output).toContain(
       "Run `hack doctor --native-preflight` to list every blocker with its fix."
     );
-    expect(await f.calls()).toEqual([
-      "runtime setup",
-      "runtime check-project-share",
-    ]);
+    expect(await f.calls()).toEqual(["runtime setup"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -1124,7 +1365,7 @@ test("preflight cannot report ready when a runtime omits or corrupts start-admis
   }
 });
 
-test("preflight supplies names-only private-delivery context without decrypting managed env or reading shell values", async () => {
+test("preflight uses the same managed resolution and shell context but sends only names to review", async () => {
   const f = await fixture({
     services: {
       managed: { image: IMAGE, restart: "always" },
@@ -1136,7 +1377,7 @@ test("preflight supplies names-only private-delivery context without decrypting 
       literal: { image: IMAGE, environment: { TOKEN: PRIVATE } },
       excluded: {
         image: IMAGE,
-        environment: ["AWS_SECRET_ACCESS_KEY", "COMPOSE_PROJECT_NAME"],
+        environment: { AWS_REGION: "explicit-literal" },
       },
     },
   });
@@ -1146,7 +1387,7 @@ test("preflight supplies names-only private-delivery context without decrypting 
       version: 1,
       environment: "default",
       secretsprovider: "project_key",
-      values: { managed: { TOKEN: { secure: "invalid-ciphertext-sentinel" } } },
+      values: { managed: { TOKEN: PRIVATE } },
     })
   );
   await f.review(
@@ -1238,6 +1479,46 @@ test("preflight reports one project-wide managed env metadata error", async () =
       (entry) => entry.code === "managed_env_unreadable"
     )
   ).toHaveLength(1);
+});
+
+test("preflight stays usable with a missing managed key and reports its recovery hint", async () => {
+  const f = await fixture({ services: { web: { image: IMAGE } } });
+  await writeFile(
+    join(f.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: { TOKEN: { secure: "synthetic-ciphertext-canary" } } },
+    })
+  );
+  await f.review([]);
+  const result = await preflight(f, f.native);
+  expect(result.code).toBe(1);
+  const blockers = result.report.blockers.filter(
+    (entry) => entry.code === "managed_env_unreadable"
+  );
+  expect(blockers).toHaveLength(1);
+  expect(blockers[0]?.message).toContain("project env key is missing");
+  expect(blockers[0]?.message).toContain("Copy .hack.secret.key");
+  expect(result.output).not.toContain("synthetic-ciphertext-canary");
+});
+
+test("preflight reports ignored root dotenv once without its contents", async () => {
+  const f = await fixture({ services: { web: { image: IMAGE } } });
+  await writeFile(join(f.project, ".env"), `ROOT_ONLY=${PRIVATE}\n`, {
+    mode: 0o000,
+  });
+  await f.review([]);
+  const result = await preflight(f, { ...f.native, ...GRANT });
+  expect(result.report.blockers).toEqual([]);
+  expect(
+    result.report.warnings.filter(
+      (entry) => entry.code === "root_dotenv_ignored"
+    )
+  ).toHaveLength(1);
+  expect(result.output.match(/Project-root \.env is ignored/g)).toHaveLength(1);
+  expect(result.output).not.toContain(PRIVATE);
 });
 
 for (const syntax of ["JSON null", "commented YAML"] as const) {

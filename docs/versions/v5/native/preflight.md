@@ -18,12 +18,27 @@ environment, can select different adaptation and dependency files. Authored
 native project files take a separate admission path; use `hack config validate`
 for them.
 
+Changes intended for next.17: preflight reads allowed caller-shell variables,
+decrypts managed env and reads `.env` beside Compose (normally `.hack/.env`),
+using the same file checks as native start. A missing decryption key is a
+structured blocker with recovery guidance; the command still produces a report.
+A project-root `.env` outside the Compose directory is ignored with one notice.
+Detached starts omit per-key "unresolved input" notices because owner stdio is
+ignored; use this preflight or a foreground start to inspect missing inputs.
+See the [environment-file rules](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/native/environment-files.md) and
+[migration notes](https://github.com/hack-dance/hack/blob/9cd2053affe4f3307703e97d5bb4cd7fc3049830/docs/guides/v5-release-notes.md#next17-what-changed-and-what-to-do)
+before upgrading an earlier prerelease.
+
 ## Read the result
 
 The CLI checks the selected native adaptation and project-wide host aliases,
 then asks the selected native runtime for a read-only project-plan review.
 For that full review, run the command through the `hack-next` launcher described
 on [Install](../install.md). The review needs no running VM.
+The selected runtime also receives a read-only setup inspection. If setup is
+incomplete or unavailable, preflight reports a `native_runtime_setup` blocker;
+run `hack native setup` before retrying. Without native selection, setup is
+reported as unavailable and the runtime review is skipped.
 
 | `runtime_review.status` | Meaning |
 | --- | --- |
@@ -33,7 +48,9 @@ on [Install](../install.md). The review needs no running VM.
 | `unavailable` | The selected runtime did not return a review. |
 
 With `--json`, the report is inside `data` of the result envelope. Read `ready`,
-`blockers`, `warnings` and `runtime_review`; `ok: true` means the command produced
+`blockers`, `warnings`, `runtime_setup` and `runtime_review`; `ready: true`
+requires setup to be ready and the runtime review to complete without blockers.
+`ok: true` means the command produced
 a report. For a produced report, exit status is 1 when blockers were found and
 0 otherwise. Usage refusals exit non-zero without producing a report. An exit
 of 0 can still have `ready: false` when the runtime review was skipped or unavailable.

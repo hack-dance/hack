@@ -503,9 +503,9 @@ test(
       "E_NATIVE_PROJECT_UNSUPPORTED: Selected (non-ignored) source is 140 MiB in 3 files; the native source limit is 128 MiB (default). Native up refuses source over the limit; no runtime, image or build work was started. Largest directories: assets (140 MiB), assets/video (140 MiB). Largest files: assets/video/intro.bin (140 MiB). Exclude paths the containers do not need in the project's .gitignore or .ignore file (for example a line such as `assets/video/`) or raise native.sourceLimitMiB in .hack/hack.config.json (maximum 512)."
     );
     expect(await f.calls()).toEqual([
+      "project plan",
+      "project plan",
       "runtime check-project-share",
-      "project plan",
-      "project plan",
       "project source-size",
     ]);
   },
@@ -529,9 +529,9 @@ test(
       "E_CONFIG_INVALID: Native host dependencies refused: the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields; listener values omitted."
     );
     expect(await f.calls()).toEqual([
+      "project plan",
+      "project plan",
       "runtime check-project-share",
-      "project plan",
-      "project plan",
     ]);
   },
   SPAWN_TIMEOUT_MS
@@ -548,10 +548,7 @@ test(
       result,
       "Native project input changed before review; prepare it again."
     );
-    expect(await f.calls()).toEqual([
-      "runtime check-project-share",
-      "project plan",
-    ]);
+    expect(await f.calls()).toEqual(["project plan"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -914,7 +911,7 @@ test(
       result,
       "E_CONFIG_INVALID: Native workspace cache layout conflicts with declared mounts or is invalid; values omitted."
     );
-    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+    expect(await f.calls()).toEqual([]);
   },
   SPAWN_TIMEOUT_MS
 );

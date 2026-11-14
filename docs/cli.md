@@ -22,7 +22,7 @@ terminal).
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack upgrade check` — read-only upgrade check of this machine and every registered project, ending in an ordered plan and the next command; `hack upgrade snapshot` and `hack upgrade rollback --rollback-manifest <manifest>` keep and restore the files the upgrade changes
+- `hack upgrade check` — read-only upgrade check of this machine and every registered project: a one-screen summary, the projects with findings (worktrees folded; `--verbose` for every checkout), and a plan with one step per kind of change, then the next command; `hack upgrade apply [--only <fix>] [--project <name>] [--dry-run]` runs the plan's apply steps (`.hack/.gitignore` refresh, stale agent files) for every checkout after keeping a snapshot and a journal; `hack upgrade snapshot` and `hack upgrade rollback --rollback-manifest <manifest>` keep and restore the files the upgrade changes
 - `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
 
 Candidate `hack-next doctor` and `hack-v5 doctor` report a missing hackd as optional
@@ -217,6 +217,9 @@ Historical remote guides are excluded from the supported documentation.
   such a flag decline or refuse; they never proceed on their own.
   Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
+- `HACK_ORIGIN` (`cli`, `app`, `autostart` or `agent`) names who started an `up`, `down` or
+  `restart` in the [activity log](./reference/activity-log.md) that `hack activity` reads; unset or
+  any other value records `cli`.
 
 Automatic agent instruction management is retired in v5. `hack setup sync`, the standalone
 `hack setup cursor|claude|agents` exports and `hack agent prime` refuse with a retirement notice,

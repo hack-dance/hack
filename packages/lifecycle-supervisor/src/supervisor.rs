@@ -306,6 +306,7 @@ fn guard(request: GuardLaunch) -> Result<()> {
         boot_id: os::boot()?,
         uid: identity.uid,
         command_pid: None,
+        command_start_time: None,
         phase: "starting".into(),
         exit_code: None,
         signal: None,
@@ -362,6 +363,7 @@ fn guard_command(
         }
     };
     state.command_pid = Some(child.id() as i32);
+    state.command_start_time = os::inspect(child.id() as i32)?.map(|identity| identity.start);
     state.phase = "running".into();
     root.save(state)?;
     let mut stdout = child.stdout.take().ok_or_else(refused)?;

@@ -1,6 +1,6 @@
 ------------------------ MODULE LifecycleSupervisor ------------------------
 EXTENDS Naturals
-CONSTANT SkipLiveFence
+CONSTANT SkipLiveFence, SkipOrphanFence
 VARIABLES phase, durable, guard, locked, live, supervisor, attempts,
           identity, unsafeSignal, duplicate
 vars == <<phase, durable, guard, locked, live, supervisor, attempts,
@@ -50,12 +50,12 @@ ReplaceIdentity == /\ identity = "match" /\ durable
 Stop == /\ phase \in {"Running", "Recoverable"}
         /\ guard /\ durable /\ identity = "match"
         /\ phase' = "Stopping"
-        /\ unsafeSignal' = unsafeSignal \/ identity # "match"
+        /\ unsafeSignal' = (unsafeSignal \/ identity # "match")
         /\ UNCHANGED <<durable, guard, locked, live, supervisor, attempts,
                         identity, duplicate>>
 Kill == /\ phase = "Stopping" /\ guard /\ identity = "match"
         /\ phase' = "KillPending"
-        /\ unsafeSignal' = unsafeSignal \/ identity # "match"
+        /\ unsafeSignal' = (unsafeSignal \/ identity # "match")
         /\ UNCHANGED <<durable, guard, locked, live, supervisor, attempts,
                         identity, duplicate>>
 StopUnknown == /\ phase \in {"Stopping", "KillPending"} /\ live
@@ -69,13 +69,27 @@ Reap == /\ ~live /\ phase \notin {"Absent", "Starting", "Exited"}
         /\ phase' = "Exited" /\ guard' = FALSE /\ locked' = FALSE
         /\ supervisor' = FALSE
         /\ UNCHANGED <<durable, live, attempts, identity, unsafeSignal, duplicate>>
-Next == Reserve \/ Publish \/ Spawn \/ StartFailure \/ SupervisorDeath
+\* Environment: after the old session empties, a new leader can take its
+\* numeric SID, fork, and exit. The survivor has no old birth witness.
+ReuseSessionID == /\ durable /\ ~guard /\ ~live
+                  /\ identity = "match"
+                  /\ phase \in {"Orphaned", "Exited"}
+                  /\ identity' = "sid-reused" /\ live' = TRUE
+                  /\ UNCHANGED <<phase, durable, guard, locked, supervisor,
+                                  attempts, unsafeSignal, duplicate>>
+RecoverOrphan == /\ phase = "Orphaned" /\ ~guard /\ live /\ durable
+                 /\ (identity = "match" \/ (SkipOrphanFence /\ identity = "sid-reused"))
+                 /\ unsafeSignal' = (unsafeSignal \/ identity # "match")
+                 /\ phase' = "Stopping"
+                 /\ UNCHANGED <<durable, guard, locked, live, supervisor,
+                                 attempts, identity, duplicate>>
+Next == ReuseSessionID \/ RecoverOrphan \/ Reserve \/ Publish \/ Spawn \/ StartFailure \/ SupervisorDeath
         \/ GuardDeath \/ Retry \/ ReplaceIdentity \/ Stop \/ Kill
         \/ StopUnknown \/ ProcessExit \/ Reap
 Spec == Init /\ [][Next]_vars
 TypeOK == /\ phase \in {"Absent", "Starting", "Running", "Recoverable",
                         "Orphaned", "Stopping", "KillPending", "StopUnknown", "Exited"}
-          /\ attempts \in 0..2 /\ identity \in {"match", "foreign", "unknown"}
+          /\ attempts \in 0..2 /\ identity \in {"match", "foreign", "unknown", "sid-reused"}
           /\ \A b \in {durable, guard, locked, live, supervisor,
                          unsafeSignal, duplicate} : b \in BOOLEAN
 DurableBeforeLaunch == live => durable

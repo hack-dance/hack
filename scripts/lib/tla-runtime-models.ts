@@ -144,10 +144,23 @@ const contracts: readonly ModelContract[] = [
   {
     name: "lifecycle-supervisor",
     module: "LifecycleSupervisor",
-    states: 129,
+    states: 168,
     invariant: "NoDuplicate",
     action: "Retry",
     fields: ["duplicate = TRUE", "live = TRUE", "durable = TRUE"],
+    additionalControls: [
+      {
+        name: "sid-reuse",
+        negative: true,
+        invariant: "NoForeignSignal",
+        action: "RecoverOrphan",
+        fields: [
+          'identity = "sid-reused"',
+          "unsafeSignal = TRUE",
+          "guard = FALSE",
+        ],
+      },
+    ],
   },
   {
     name: "interactive-session",

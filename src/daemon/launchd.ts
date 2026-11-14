@@ -828,7 +828,7 @@ export async function repairLaunchdProgramIfInvalid(opts: {
  * `other-program` for another one. A stopped job may still be repaired
  * from any CLI.
  */
-async function refuseRunningRewrite(opts: {
+export async function refuseRunningRewrite(opts: {
   readonly target: string;
   readonly executing: string | null;
 }): Promise<"other-program" | "unproven-owner" | null> {

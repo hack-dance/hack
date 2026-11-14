@@ -1502,3 +1502,123 @@ test("a compatible running daemon is restarted after a repair only when the repa
     expect(kept.trace.blocked).toBe(refused);
   }
 });
+
+// Review round 19 (HACK-2216): replacing an incompatible launchd daemon
+// whose plist names a missing program needs the same eligibility as the
+// retarget that follows the stop.
+
+test("an incompatible launchd daemon with a missing plist program is only replaced by its retarget target", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hack-replace-target-"));
+  try {
+    const target = join(dir, "hack");
+    const other = join(dir, "hack-other");
+    await writeFile(target, "#!/bin/sh\n");
+    await writeFile(other, "#!/bin/sh\n");
+    const run = async (opts: {
+      readonly executing: string | null;
+      readonly unfit?: boolean;
+    }) => {
+      const trace = createDaemonCommandTrace();
+      const effects: string[] = [];
+      const code = await checkRunningLaunchdDaemon({
+        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        trace,
+        pid: 777,
+        compatible: false,
+        waitForReady: () => Promise.reject(new Error("must not start")),
+        // The launchd job runs this home's hackd (pid 777); this command
+        // is not one of its descendants.
+        readStatus: () =>
+          Promise.resolve({
+            installed: true,
+            loaded: true,
+            running: true,
+            pid: 777,
+            exitStatus: null,
+            observation: "reported" as const,
+          }),
+        isAncestor: () => Promise.resolve(false),
+        readProgram: () =>
+          Promise.resolve({
+            kind: "missing" as const,
+            program: "/gone/hack",
+            resolved: target,
+          }),
+        readPlist: () =>
+          Promise.resolve(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n</dict>\n</plist>\n'
+          ),
+        proveJob: () => Promise.resolve(true),
+        executing: opts.executing,
+        validateRetarget: () =>
+          Promise.resolve(opts.unfit ? "not a stable location" : null),
+        repair: () => {
+          effects.push("repair");
+          return Promise.resolve("ok" as const);
+        },
+        kickstart: () => {
+          effects.push("kickstart");
+          return Promise.resolve({ ok: true });
+        },
+      });
+      return { code, trace, effects };
+    };
+
+    // A source run: refused before any stop.
+    const source = await run({ executing: null });
+    expect(source.code).toBe(1);
+    expect(source.trace.blocked).toBe("unproven-owner");
+    // A compiled CLI that is not the retarget target: refused.
+    const another = await run({ executing: other });
+    expect(another.code).toBe(1);
+    expect(another.trace.blocked).toBe("other-program");
+    // A retarget target unfit for a login service: refused.
+    const unfit = await run({ executing: target, unfit: true });
+    expect(unfit.code).toBe(1);
+    expect(unfit.trace.blocked).toBe("rewrite-refused");
+    // The compiled CLI that is the target: the replacement may go on
+    // (null: the caller stops the daemon and starts through launchd).
+    const eligible = await run({ executing: target });
+    expect(eligible.code).toBeNull();
+    expect(eligible.trace.blocked).toBeNull();
+    // Deciding never repaired or kickstarted anything.
+    for (const r of [source, another, unfit, eligible]) {
+      expect(r.effects).toEqual([]);
+    }
+
+    // restart's pre-stop check applies the same rule.
+    const restartTrace = createDaemonCommandTrace();
+    expect(
+      await refuseLaunchdBeforeReplacing({
+        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        trace: restartTrace,
+        waitForReady: () => Promise.reject(new Error("must not start")),
+        readStatus: () =>
+          Promise.resolve({
+            installed: true,
+            loaded: true,
+            running: false,
+            pid: null,
+            exitStatus: null,
+            observation: "reported" as const,
+          }),
+        readProgram: () =>
+          Promise.resolve({
+            kind: "missing" as const,
+            program: "/gone/hack",
+            resolved: target,
+          }),
+        readPlist: () =>
+          Promise.resolve(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n</dict>\n</plist>\n'
+          ),
+        proveJob: () => Promise.resolve(true),
+        executing: null,
+        validateRetarget: () => Promise.resolve(null),
+      })
+    ).toBe(1);
+    expect(restartTrace.blocked).toBe("unproven-owner");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

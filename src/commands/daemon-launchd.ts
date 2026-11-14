@@ -1,4 +1,6 @@
+import { resolveExecutingCliPath } from "../daemon/executing-cli.ts";
 import {
+  checkLaunchdRetargetTarget,
   getLaunchdServiceStatus,
   kickstartLaunchdService,
   type LaunchdProgramRepairResult,
@@ -7,6 +9,7 @@ import {
   plistKeepsThisHome,
   proveLaunchdJobOwnership,
   readLaunchdProgramState,
+  refuseRunningRewrite,
   repairLaunchdProgramIfInvalid,
 } from "../daemon/launchd.ts";
 import type { DaemonPaths } from "../daemon/paths.ts";
@@ -38,6 +41,13 @@ export interface LaunchdStartHooks {
   /** Defaults to {@link proveLaunchdJobOwnership}; tests pin it. */
   readonly proveJob?: () => Promise<boolean>;
   /**
+   * The executing CLI ({@link resolveExecutingCliPath}); null: a source
+   * invocation. Tests pin it.
+   */
+  readonly executing?: string | null;
+  /** Defaults to {@link checkLaunchdRetargetTarget}; tests pin it. */
+  readonly validateRetarget?: (path: string) => Promise<string | null>;
+  /**
    * Called before launchd may be asked to start hackd (a reload or a
    * kickstart), so the caller can tell a refusal from a failed start.
    */
@@ -63,7 +73,10 @@ async function readStatus(
 function readProgram(hooks: LaunchdStartHooks): Promise<LaunchdProgramState> {
   return hooks.readProgram
     ? hooks.readProgram()
-    : readLaunchdProgramState({ paths: hooks.paths });
+    : readLaunchdProgramState({
+        paths: hooks.paths,
+        executing: hooks.executing,
+      });
 }
 
 /**
@@ -168,31 +181,65 @@ export async function checkRunningLaunchdDaemon(
   }
   // The caller is about to stop this daemon and start through launchd:
   // refuse now, with the daemon left running, when launchd would refuse
-  // the start (the job binds another home, or is not this home's).
+  // the start (launchdJobBlocksReplacement).
   const blocked = await launchdJobBlocksReplacement({ hooks, status });
   if (blocked !== null) {
     trace.stale.add("version-mismatch");
-    trace.blocked = blocked;
+    trace.blocked = blockedReason(blocked);
     logger.warn({
-      message: `hackd (pid ${hooks.pid}) is incompatible with this CLI, but the loaded launchd job ${blocked === "home-binding" ? "binds another Hack home" : "is not proven to be this Hack home's"}, so it was not replaced: hackd keeps running | Check: hack daemon status; to take the service over for this home, run: hack daemon install`,
+      message: `hackd (pid ${hooks.pid}) is incompatible with this CLI, but ${describeReplacementBlock(blocked)}, so it was not replaced: hackd keeps running | Check: hack daemon status; then run: hack daemon install`,
     });
     return 1;
   }
   return null;
 }
 
+type ReplacementBlock =
+  | "home-binding"
+  | "unproven-owner"
+  | "other-program"
+  | "retarget-refused";
+
+/** The `--json` blocked reason for a {@link ReplacementBlock}. */
+function blockedReason(
+  block: ReplacementBlock
+): "home-binding" | "unproven-owner" | "other-program" | "rewrite-refused" {
+  return block === "retarget-refused" ? "rewrite-refused" : block;
+}
+
+function describeReplacementBlock(block: ReplacementBlock): string {
+  switch (block) {
+    case "home-binding":
+      return "the loaded launchd job binds another Hack home";
+    case "unproven-owner":
+      return "the loaded launchd job is not proven to be this Hack home's, or this CLI cannot be shown to be what it would run (a source checkout)";
+    case "other-program":
+      return "the launchd job would be retargeted to a hack that is not this CLI";
+    default:
+      return "the launchd job's program is gone and the hack it would be retargeted to is not fit for a login service";
+  }
+}
+
 /**
  * Whether replacing this home's running hackd through the loaded launchd
- * job would be refused (HACK-2216), checked before anything is stopped:
- * `home-binding` when the plist binds another home (or cannot be read),
- * `unproven-owner` when the job runs a process that is not proven to be
- * this home's hackd (`pid`, a launchd-run hackd of this home, counts as
- * proven). Null when the replacement may go on.
+ * job would be refused (HACK-2216), checked before anything is stopped, so
+ * `start` and `restart` refuse up front instead of leaving hackd stopped:
+ * - `home-binding`: the plist binds another home (or cannot be read);
+ * - `unproven-owner`: the job runs a process not proven to be this home's
+ *   hackd (`pid`, a launchd-run hackd of this home, counts as proven);
+ * - when the plist's program is missing or virtual, the start after the
+ *   stop would retarget it, which {@link repairLaunchdProgramIfInvalid}
+ *   allows for a just-stopped daemon only on the same terms as a running
+ *   one: the target must pass {@link checkLaunchdRetargetTarget}
+ *   (`retarget-refused`) and the executing CLI must be a compiled binary
+ *   that is that target ({@link refuseRunningRewrite}: `unproven-owner`
+ *   from source, `other-program` for another binary).
+ * Null when the replacement may go on.
  */
 async function launchdJobBlocksReplacement(opts: {
   readonly hooks: LaunchdStartHooks;
   readonly status: LaunchdServiceStatus;
-}): Promise<"home-binding" | "unproven-owner" | null> {
+}): Promise<ReplacementBlock | null> {
   const { hooks, status } = opts;
   const plistText = await (
     hooks.readPlist ?? (() => readTextFile(hooks.paths.launchdPlistPath))
@@ -204,15 +251,37 @@ async function launchdJobBlocksReplacement(opts: {
     hooks.proveJob ??
     (() => proveLaunchdJobOwnership({ paths: hooks.paths, status }))
   )();
-  return proven ? null : "unproven-owner";
+  if (!proven) {
+    return "unproven-owner";
+  }
+  const program = await readProgram(hooks);
+  if (program.kind !== "missing") {
+    return null;
+  }
+  if (program.resolved === null) {
+    return "retarget-refused";
+  }
+  const unfit = await (hooks.validateRetarget ?? checkLaunchdRetargetTarget)(
+    program.resolved
+  );
+  if (unfit !== null) {
+    return "retarget-refused";
+  }
+  return await refuseRunningRewrite({
+    target: program.resolved,
+    executing:
+      hooks.executing === undefined
+        ? resolveExecutingCliPath()
+        : hooks.executing,
+  });
 }
 
 /**
  * `restart` is about to stop this home's running hackd and start it again
  * through the loaded launchd job (HACK-2216): refuses first, with nothing
- * stopped, when that start would be refused (the job binds another home or
- * is not proven this home's, {@link launchdJobBlocksReplacement}). Exit
- * code (reported) or null to go on; null too when no job is loaded.
+ * stopped, when that start would be refused
+ * ({@link launchdJobBlocksReplacement}). Exit code (reported) or null to
+ * go on; null too when no job is loaded.
  */
 export async function refuseLaunchdBeforeReplacing(
   hooks: LaunchdStartHooks
@@ -226,9 +295,9 @@ export async function refuseLaunchdBeforeReplacing(
     return null;
   }
   hooks.trace.manager = "launchd";
-  hooks.trace.blocked = blocked;
+  hooks.trace.blocked = blockedReason(blocked);
   logger.warn({
-    message: `Not restarting hackd: the loaded launchd job ${blocked === "home-binding" ? "binds another Hack home" : "is not proven to be this Hack home's"}, so it could not start hackd for this home again; nothing was stopped | Check: hack daemon status; to take the service over for this home, run: hack daemon install`,
+    message: `Not restarting hackd: ${describeReplacementBlock(blocked)}, so it could not start hackd for this home again; nothing was stopped | Check: hack daemon status; then run: hack daemon install`,
   });
   return 1;
 }

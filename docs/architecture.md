@@ -724,7 +724,12 @@ Such a plist is never replaced automatically; `start` reports it and
   that: a compiled binary that is the same file as the program the plist will
   run. Otherwise the job is not touched and the daemon keeps running
   (`unproven-owner` from a source checkout, `other-program` for another
-  binary). A stopped job may still be repaired from any CLI.
+  binary). A stopped job may still be repaired from any CLI. The same rule
+  applies before `start` or `restart` stops an incompatible hackd that runs
+  under a plist whose program is gone. The start after the stop would
+  retarget the plist, so the target must pass the retarget checks
+  (`rewrite-refused`), and the CLI must be a compiled binary that is that
+  target. Otherwise nothing is stopped.
 - A plist that runs this CLI's executable (same file) is rewritten with the
   marker when it differs from what this CLI writes, if it is Hack's or its
   output paths are not `/dev/null` (the earlier output repair). launchd then

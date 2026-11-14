@@ -393,3 +393,96 @@ ownedCase(
     });
   }
 );
+
+ownedCase(
+  "cancellation with a missing launch birth still ends the owned native mux session",
+  async (f) => {
+    const ps = Bun.which("ps");
+    expect(ps).not.toBeNull();
+    const held = join(f.root, "launch-census-held");
+    const release = join(f.root, "launch-census-release");
+    await writeFile(
+      join(f.root, "bin", "ps"),
+      `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args[0] === "-A" && !(await Bun.file(${JSON.stringify(held)}).exists())) {
+  await Bun.write(${JSON.stringify(held)}, "held");
+  const deadline = performance.now() + 10_000;
+  while (!(await Bun.file(${JSON.stringify(release)}).exists()) && performance.now() < deadline) await Bun.sleep(10);
+  process.exit(0);
+}
+const child = Bun.spawn([${JSON.stringify(ps)}, ...args], {stdin:"ignore", stdout:"inherit", stderr:"inherit"});
+process.exit(await child.exited);
+`,
+      { mode: 0o700 }
+    );
+    let muxStopped = false;
+    let stateRemoved = false;
+    let startupInputsCanceled = false;
+    let cleanupChecks = 0;
+    const outcome = await withNativeAuthoredProjectAdmission(
+      f.scope,
+      async (admission) => {
+        const owner = await createNativeAuthoredHostProcesses({
+          scope: f.scope,
+          run,
+          semanticHash: semantic,
+          projectName: "fixture",
+          lifecycle: f.lifecycle,
+          report: () => f.report,
+          resolveValues: () => Promise.resolve({ TOKEN: canary }),
+          assertFresh: async () => {
+            if (startupInputsCanceled) {
+              throw new Error("startup input authority was canceled");
+            }
+            await admission.assertHeld();
+          },
+          assertCleanupFresh: async () => {
+            cleanupChecks += 1;
+            await admission.assertHeld();
+          },
+          signal: f.abort.signal,
+          remaining: f.remaining,
+        });
+        const starting = owner.start().catch((error: unknown) => error);
+        try {
+          const deadline = performance.now() + 10_000;
+          while (
+            !(await Bun.file(held).exists()) &&
+            performance.now() < deadline
+          ) {
+            await Bun.sleep(10);
+          }
+          expect(await Bun.file(held).exists()).toBe(true);
+          startupInputsCanceled = true;
+          f.abort.abort();
+          await Bun.write(release, "released");
+          expect(await starting).toBeInstanceOf(Error);
+          // The launch's aborted deadline must not veto owned teardown when
+          // the new cleanup path needs to retry missing start-time metadata.
+          muxStopped = !(await Bun.file(f.state).exists());
+          stateRemoved =
+            (await readLifecycleState({ projectDir: f.projectDir })).length ===
+            0;
+          if (muxStopped && stateRemoved) {
+            // The frontend refreshes teardown inputs after the launch settles.
+            startupInputsCanceled = false;
+            await owner.stop();
+            await owner.close();
+          }
+        } finally {
+          await Bun.write(release, "released");
+          await starting;
+          await endLifecycleMuxFixtureGroups(f.state);
+        }
+      }
+    ).catch((error: unknown) => error);
+    expect(
+      muxStopped,
+      "canceled launch must stop its owned mux despite a missing birth"
+    ).toBe(true);
+    expect(stateRemoved).toBe(true);
+    expect(cleanupChecks).toBeGreaterThan(0);
+    expect(outcome).toBeUndefined();
+  }
+);

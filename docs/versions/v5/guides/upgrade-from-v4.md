@@ -83,10 +83,19 @@ Silicon, the native preflight. It changes nothing and prints no secret value.
 - **Dead registry entries** (the checkout or its config is gone) are counted
   apart from live projects that cannot be read. Dead entries only need
   `hack projects prune`; unreadable ones need repair.
-- It ends with an ordered plan and the next command. A step either has a
-  command or is marked manual, with the action to take; manual text is never
-  printed as a command. Commands run the CLI you ran the check with (the
-  `hack-next` launcher during the prerelease).
+- The text report fits one screen: the build that ran (a source build or the
+  candidate launcher is named on the first line), the machine, project counts,
+  the projects that have a finding (worktrees folded under their project),
+  then the plan. `--verbose` (or `--all`) adds every checkout's findings and
+  the dead entries; `--json` always has the full detail.
+- The plan has one step per kind of change, with the number of checkouts it
+  covers, then the next command. A step either has a command or is marked
+  manual, with the action to take; manual text is never printed as a command.
+  Commands run the CLI you ran the check with (the `hack-next` launcher during
+  the prerelease).
+- Steps marked `(apply)` are safe hygiene that `hack upgrade apply` runs for
+  every checkout they cover: refreshing outdated `.hack/.gitignore` files and
+  removing stale standalone agent files that the hack plugin replaces.
 - It exits 1 when something blocks the upgrade, naming the blockers. Examples
   are a global secret store whose key is gone or refused while a project
   reads it, a tracked secret key, an env layer conflict, or a live project
@@ -96,7 +105,111 @@ Silicon, the native preflight. It changes nothing and prints no secret value.
   may hold the key; the check never asks the keychain, because that can
   prompt.
 
-Before you follow the plan, keep a private copy of the files it changes:
+To run the apply steps:
+
+JSON findings and plan steps include `kind: safe|admin|manual`, separately from
+severity. `safe` means the supplied action can run without an operator decision:
+the snapshot, daemon status, and grouped snapshot-backed apply steps whose
+targets are eligible. `admin` identifies host routing or login-service changes
+that belong in a terminal for review; it does not mean every command needs sudo.
+`manual` covers decisions, broad Doctor repairs and unknown actions. A grouped
+apply step can be safe while its original per-checkout Doctor command remains
+manual. Any blocked or unchecked target keeps its grouped step manual. This
+metadata does not run a command, grant privileges or bypass apply admission.
+
+```sh
+hack upgrade apply --dry-run      # what would change; changes nothing
+hack upgrade apply --dry-run --verbose  # include every candidate file path
+hack upgrade apply                # every apply step, every checkout
+hack upgrade apply --only ignore-rules --project my-app
+hack upgrade apply --only env-key-permissions --project my-app
+hack upgrade apply --only ignore-rules --project my-app --snapshot-root /path/on/project-volume/private-snapshots
+```
+
+Apply checks first and skips any checkout with a blocker or a check that could
+not run. Before it changes anything it keeps an upgrade snapshot (below) and
+writes a journal beside the snapshot manifest: the snapshot's coverage (whether
+it is complete, and its gaps), and each checkout's outcome. Agent files are
+removed only when the hack plugin that replaces them is verified, and each
+removal is covered by the same upgrade snapshot. File bytes live only in private
+snapshot blobs; the manifest and journal contain metadata. Apply prints the
+rollback command and then rechecks. Ignore-rule writes stage inside the snapshot,
+so they leave no staging files in the checkout.
+
+Permission-only key findings can also be applied. This tightens an existing,
+owner-held regular key by removing group/other access and preserving owner bits
+(0640 becomes 0600; 0444 becomes 0400). Keys without group/other access are not
+selected for repair. It never creates, rotates, moves, changes
+ownership of or untracks a key. The journal freezes the selected paths, and the
+snapshot keeps their original bytes and modes. Resume verifies those bytes and
+the recorded mode before continuing; rollback restores the original mode too.
+Snapshot blobs also hold bytes of selected weak keys outside the checkout,
+including keys in the shared Git common directory. Treat the default snapshot
+root and any explicit `--snapshot-root` as key backups. Snapshots are retained
+until you remove them; apply and rollback do not expire them automatically.
+
+For findings that need a decision, run one traversal instead of copying a
+Doctor command for every checkout:
+
+```sh
+hack upgrade review
+hack upgrade review --only env-key,tracked-files --project my-app
+```
+
+Review checks each affected checkout and prints its diagnostics and the reason
+for manual handling. It executes no fixes or suggested commands. Key identity
+and rotation require a person to choose; untracking requires reviewing staged
+work because a file snapshot does not protect the Git index.
+
+Dry-run text begins with step, checkout/scope and candidate-file counts, including
+counts for each fix. It keeps the per-file list behind `--verbose`; JSON retains
+all file paths. Check summaries list blocking or unchecked projects first and
+count projects with only ignore-rule or agent-file hygiene findings. Failed
+checks include a closed error class, such as `permission-denied` or `parse-error`,
+without exposing exception messages or process output.
+
+After an interruption, choose the run explicitly:
+
+```sh
+hack upgrade apply --resume <snapshot-manifest> --dry-run
+hack upgrade apply --resume <snapshot-manifest>
+hack upgrade rollback --rollback-manifest <snapshot-manifest>
+```
+
+Resume uses the journal's selection and original snapshot, including its coverage
+and gaps; it cannot be combined with `--only`, `--project` or `--snapshot-root`.
+It rechecks the
+registered checkouts, refuses unexpected file edits, and verifies the snapshot's
+original blobs before writing. It never chooses the latest run automatically.
+If an agent removal failed without changing its file, a later retry can record
+the successful removal while keeping ordinary rollback available.
+Rollback restores ignore rules and removed agent files together, with their exact
+bytes and modes. Files edited after apply require an explicit `--overwrite` to
+restore; their current copies are retained. Service state and installed versions
+are outside this file rollback.
+
+The snapshot and changed files must share a filesystem: rollback uses atomic
+rename and hard-link publication. Checkouts on another volume are skipped during
+planning, before any snapshot or journal is written, with `other-filesystem` and
+the `--snapshot-root` remedy. Other eligible checkouts still run. An explicit root
+must be private, owned by you, outside every Git working tree and on the selected
+targets' volume; a selection that still spans filesystems is refused. Hack does
+not discover or create snapshot roots on external volumes automatically. The
+chosen directory holds original file bytes, including the broader upgrade
+snapshot set; choose its storage and backup policy accordingly.
+
+The apply JSON field `agent_backups` lists recovery manifests and can equal
+`coverage.manifest_path`: it no longer implies a separate plugin backup. A grouped
+plan target keeps its own `status` and `apply_eligible`; the text plan counts
+blocked or unchecked checkouts that apply will skip. `--dry-run --verbose` lists
+candidate paths and can be longer than the one-screen check summary. Rollback returns
+`busy` without restoring anything while apply or resume holds that snapshot's lock.
+
+Env migration remains a separate grouped command until its journal owner is
+integrated. Apply does not perform env cleanup or accept tracked-file edits on
+your behalf.
+
+Before you follow the rest of the plan, keep a private copy of the files it changes:
 
 ```sh
 hack upgrade snapshot
@@ -861,3 +974,16 @@ The remaining record must fill these gaps, each **to be confirmed in the dogfood
 - Full application/data checks beyond the three-project start/restart/stop trials, and restored v4 data.
 - Linux DNS, host/browser trust and daemon service availability at the tested revision.
 - Explicit agent-client loading, native setup eligibility, and the actual rollback transcript.
+
+Keep the printed resume and rollback commands for a custom `--snapshot-root`:
+ordinary snapshot listings scan only the default root. Resume preserves completed
+outcomes across interruption and refuses a damaged original blob even when its
+agent file has already been removed.
+
+## Breaking change: zellij workspaces removed
+
+v5 supports tmux for interactive workspaces. `sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij` now fail with migration guidance. Install tmux, then remove the setting or set it to `tmux`; `auto` detects tmux only. Existing zellij sessions are not stopped or migrated by Hack.
+
+**Before upgrading a project that used zellij for lifecycle processes:** with zellij installed, use the v4 CLI to run `hack down` for that project and confirm its lifecycle processes have stopped. Then switch to v5 and change the mux setting. Saved zellij lifecycle state blocks v5 start, restart and down because v5 cannot verify or stop that session. If already upgraded, use the retained v4 CLI to stop the affected project first; do not delete or edit managed state files. Removing a workspace setting alone does not clear saved lifecycle state. A stale-state migration path remains part of the lifecycle supervisor work.
+
+A leftover zellij setting also makes `hack global install` fail with the same migration guidance. Fix the setting before retrying.

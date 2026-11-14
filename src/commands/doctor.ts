@@ -66,6 +66,13 @@ import {
   resolveSystemdUnitPath,
   SYSTEMD_READ_ONLY_ENV,
 } from "../daemon/systemd.ts";
+import {
+  type CaTrustReport,
+  inspectCaTrust,
+  listDirOutcome,
+  pathExistsOutcome,
+  readTextOutcome,
+} from "../lib/ca-trust-status.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
@@ -169,6 +176,8 @@ import {
   requireInteractive,
 } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
+import { createLinuxTrustHost } from "../lib/linux-trust-host.ts";
+import { resolveLiveInputScope } from "../lib/live-inputs.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
@@ -250,7 +259,6 @@ import {
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
-  resolveProjectEnvSharedKeyPath,
   type TrackedEnvMigrationChange,
 } from "../lib/project-env-config.ts";
 import {
@@ -267,7 +275,6 @@ import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
 import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
-import { resolveFileSecretStorePaths } from "../lib/secret-store.ts";
 import {
   applySecretsHygieneFixes,
   inspectSecretsHygiene,
@@ -280,6 +287,7 @@ import {
   pausableSpinner,
   withTerminalHandoff,
 } from "../lib/terminal-handoff.ts";
+import { vettedHelperEnv } from "../lib/vetted-env.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalCaddyCompose,
@@ -323,6 +331,8 @@ interface CheckResult {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Closed, value-free env key findings; project-relative subjects only. */
   readonly envKey?: EnvKeyInspection;
+  /** Trust-store states for the local CA; paths and fingerprints only. */
+  readonly caTrust?: CaTrustReport;
   /** Closed Compose-backend feature names only; never authored values. */
   readonly composeBackend?: ComposeBackendReport;
   /** Closed native data advisory codes and service names only. */
@@ -500,7 +510,6 @@ const DOCTOR_SUMMARY_GROUPS = [
       "gum (optional)",
       "fzf (optional)",
       "tmux (sessions)",
-      "zellij (sessions)",
       "mutagen",
       "go (optional)",
       "caddy (optional)",
@@ -818,11 +827,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       checkTool({ name: "tmux (sessions)", cmd: "tmux", optional: true })
     )
   );
-  results.push(
-    await runCheck(s, "zellij", () =>
-      checkTool({ name: "zellij (sessions)", cmd: "zellij", optional: true })
-    )
-  );
   results.push(await runCheck(s, "mutagen", () => checkMutagenBinary()));
   results.push(
     await runCheck(s, "go", () =>
@@ -1040,6 +1044,12 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     await runCheck(s, "caddy local ca", () => checkCaddyLocalCa(), {
       // The identity probe allows three sequential Docker calls up to 5s each.
       timeoutMs: 16_000,
+    })
+  );
+  results.push(
+    await runCheck(s, LOCAL_CA_TRUST_CHECK, () => checkLocalCaTrust(), {
+      // A few bounded trust-store queries (5s each), plus one per NSS db.
+      timeoutMs: 30_000,
     })
   );
   if (isMac()) {
@@ -1569,6 +1579,8 @@ export type DoctorJsonCheck = {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
   readonly envKey?: EnvKeyInspection;
+  /** Present only on the local CA trust check (`docs/reference/local-ca-trust.md`). */
+  readonly caTrust?: CaTrustReport;
   /** Present only on the Compose-backend feature check: closed feature names. */
   readonly composeBackend?: ComposeBackendReport;
   /** Present only on the native data-service check: closed codes and service names. */
@@ -1616,6 +1628,7 @@ export function buildDoctorJsonData(opts: {
         ? { hackLocalRoute: result.hackLocalRoute }
         : {}),
       ...(result.envKey ? { envKey: result.envKey } : {}),
+      ...(result.caTrust ? { caTrust: result.caTrust } : {}),
       ...(result.composeBackend
         ? { composeBackend: result.composeBackend }
         : {}),
@@ -1722,9 +1735,7 @@ async function checkTool(opts: {
   return { name: opts.name, status, message };
 }
 
-function muxInstallCommand(opts: {
-  readonly provider: "tmux" | "zellij";
-}): string {
+function muxInstallCommand(opts: { readonly provider: "tmux" }): string {
   if (isMac()) {
     return `brew install ${opts.provider}`;
   }
@@ -1739,7 +1750,6 @@ async function checkSessionsMuxConfig(opts: {
   const project = opts.adopted ? null : await findProjectContext(opts.startDir);
   const mode = await resolveSessionsMuxMode({ project });
   const tmuxPath = findExecutableInPath("tmux");
-  const zellijPath = findExecutableInPath("zellij");
 
   if (mode === "none") {
     return {
@@ -1764,21 +1774,6 @@ async function checkSessionsMuxConfig(opts: {
     };
   }
 
-  if (mode === "zellij") {
-    if (!zellijPath) {
-      return {
-        name: "sessions mux",
-        status: "warn",
-        message: `sessions.mux=zellij, but zellij is missing (run: ${muxInstallCommand({ provider: "zellij" })})`,
-      };
-    }
-    return {
-      name: "sessions mux",
-      status: "ok",
-      message: `sessions.mux=zellij (${zellijPath})`,
-    };
-  }
-
   if (tmuxPath) {
     return {
       name: "sessions mux",
@@ -1787,18 +1782,10 @@ async function checkSessionsMuxConfig(opts: {
     };
   }
 
-  if (zellijPath) {
-    return {
-      name: "sessions mux",
-      status: "ok",
-      message: `sessions.mux=auto (using zellij: ${zellijPath})`,
-    };
-  }
-
   return {
     name: "sessions mux",
     status: "warn",
-    message: `sessions.mux=auto, but neither tmux nor zellij is available (run: ${muxInstallCommand({ provider: "tmux" })})`,
+    message: `sessions.mux=auto, but tmux is unavailable (run: ${muxInstallCommand({ provider: "tmux" })})`,
   };
 }
 
@@ -2046,6 +2033,55 @@ export async function checkCoreDnsForwarding(): Promise<CheckResult> {
       ? `example.com → ${ip} (via ${server})`
       : "SERVFAIL (run: hack doctor --fix)",
   };
+}
+
+const LOCAL_CA_TRUST_CHECK = "local ca trust";
+
+/**
+ * Whether the system trust store (and, on Linux, NSS) trusts the exported
+ * Caddy Local CA (HACK-2218, R16). Read-only and bounded; `caddy local ca`
+ * checks the export itself. Unknown is a warning that says so.
+ */
+export async function checkLocalCaTrust(): Promise<CheckResult> {
+  const helperEnv = vettedHelperEnv();
+  const report = await inspectCaTrust({
+    platform: process.platform,
+    caPath: getGlobalPaths().caddyCaCert,
+    readText: readTextOutcome,
+    query: async (argv, queryOpts) =>
+      await exec(argv, {
+        stdin: "ignore",
+        timeoutMs: queryOpts.timeoutMs,
+        env: { ...helperEnv.env },
+        unsetEnvKeys: helperEnv.unsetEnvKeys,
+      }).catch(() => ({ exitCode: 127, stdout: "", stderr: "" })),
+    ...(isLinux() ? { linuxHost: createLinuxTrustHost() } : {}),
+    exists: pathExistsOutcome,
+    listDir: listDirOutcome,
+    now: () => Date.now(),
+  });
+  return {
+    name: LOCAL_CA_TRUST_CHECK,
+    status: report.state === "trusted" ? "ok" : "warn",
+    message: describeCaTrust(report),
+    caTrust: report,
+  };
+}
+
+function describeCaTrust(report: CaTrustReport): string {
+  const nss = report.nss
+    .filter((db) => db.state !== "trusted")
+    .map((db) => `${db.db}: ${db.detail}`);
+  if (report.state === "trusted") {
+    const browsers =
+      report.nss.length > 0 ? ` and ${report.nss.length} NSS database(s)` : "";
+    return `Trusted by ${report.system.store ?? "the system"}${browsers}`;
+  }
+  const lead =
+    report.state === "unknown"
+      ? "Could not tell whether the local CA is trusted"
+      : "The local CA is not trusted everywhere";
+  return [`${lead}: ${report.system.detail}`, ...nss].join("; ");
 }
 
 export async function checkCaddyLocalCa(): Promise<CheckResult> {
@@ -3207,45 +3243,10 @@ export async function resolveSecretsHygieneScope(opts: {
   readonly startDir: string;
   readonly strict?: boolean;
 }): Promise<SecretsHygieneScope> {
-  const strict = opts.strict === true;
-  const tolerate = <T>(promise: Promise<T>): Promise<T | null> =>
-    strict ? promise : promise.catch(() => null);
-  const project = await tolerate(findDoctorLegacyProjectContext(opts.startDir));
-  const stores = new Map<string, SecretsHygieneScope["stores"][number]>();
-  for (const projectDir of [undefined, project?.projectDir]) {
-    const resolved = await tolerate(
-      resolveFileSecretStorePaths({ projectDir, strict })
-    );
-    const paths = resolved
-      ? { storePath: resolved.storePath, keyPath: resolved.keyPath }
-      : null;
-    const key = paths ? `${paths.storePath}\0${paths.keyPath}` : null;
-    if (!(paths && key) || stores.has(key)) {
-      continue;
-    }
-    // Paths only a project's configuration chose (a cloned repository's
-    // may name any file of the user's) are fixed only inside the checkout
-    // or the Hack home.
-    stores.set(
-      key,
-      projectDir && project
-        ? { ...paths, fixRoots: [project.projectRoot, resolveGlobalHackDir()] }
-        : paths
-    );
-  }
-  return {
-    project: project
-      ? { projectRoot: project.projectRoot, projectDir: project.projectDir }
-      : null,
-    sharedKeyPath: project
-      ? await tolerate(
-          resolveProjectEnvSharedKeyPath({ projectRoot: project.projectRoot })
-        )
-      : null,
-    stores: [...stores.values()],
-    storeKeyFromEnvironment:
-      (process.env.HACK_SECRETS_FILE_KEY ?? "").trim().length > 0,
-  };
+  return await resolveLiveInputScope({
+    ...opts,
+    findProject: findDoctorLegacyProjectContext,
+  });
 }
 
 /**

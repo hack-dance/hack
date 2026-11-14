@@ -52,6 +52,7 @@ function recordCommand(sample: MuxCommandSample): void {
   }
 }
 
+/** Interactive workspaces use tmux; zellij remains a legacy lifecycle-state tag until migration. */
 export type MuxBackendName = "tmux" | "zellij";
 
 export type MuxSession = {
@@ -70,13 +71,13 @@ export type MuxSessionCreateResult =
 /**
  * Bound for every non-interactive mux command. Some run while the shared
  * helper instance lock is held (session decision and creation), so a hung
- * tmux or zellij must not hold that lock indefinitely. A command that exceeds
+ * tmux must not hold that lock indefinitely. A command that exceeds
  * it has its client killed and is reported as {@link MuxCommandTimeoutError}:
  * its outcome is unknown, never an empty or absent result.
  *
  * Killing the client bounds the caller's wait, not the command: a tmux server
  * that already received it may still apply it later (commands queue per
- * client), and zellij's background create daemonizes its session server.
+ * client).
  * Callers therefore never treat a timeout as "did not happen"; the remaining
  * late-effect residual is described in tests/models/tla/README.md ("Shared
  * helper instance") and tracked in HACK-1849. `HACK_MUX_COMMAND_TIMEOUT_MS` overrides it (tests).
@@ -141,6 +142,7 @@ export async function runMuxCommand(
   return result;
 }
 
+/** Interactive-workspace operations, implemented by tmux; not a lifecycle supervisor contract. */
 export interface MuxBackend {
   readonly name: MuxBackendName;
   readonly available: boolean;
@@ -148,7 +150,7 @@ export interface MuxBackend {
    * The session carries its lifecycle ownership token from the creating
    * command itself (tmux `new-session -e`), so no interrupted create can
    * leave a live session without one. Shared-helper lifecycle sessions
-   * require it; zellij writes its token afterwards and lacks it (HACK-1849).
+   * require it.
    */
   readonly createsWithOwnerToken?: boolean;
 

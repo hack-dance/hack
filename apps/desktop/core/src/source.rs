@@ -1,6 +1,6 @@
 //! Where the app's data comes from: the live CLI and daemon, or fixtures.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::daemon::DaemonClient;
@@ -169,9 +169,10 @@ impl Source for LiveSource {
         native: bool,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
-        // Actions run checkout-defined lifecycle commands as the user, so
-        // the registry's root must be the user's own directory.
-        check_owned_root(repo_root)?;
+        // Actions run checkout-defined lifecycle commands as the user: run
+        // only on a validated root, by its canonical path.
+        let real = trusted_root(repo_root)?;
+        let repo_root = real.as_path();
         let timeout = if action == Action::Start {
             Self::UP
         } else {
@@ -245,35 +246,106 @@ pub fn parse_log_tail(out: &str, err: &str, code: Option<i32>) -> Result<Vec<Log
     Ok(events.into_iter().filter_map(|e| e.entry).collect())
 }
 
-/// Refuse to act on a project root that is not an absolute, existing
-/// directory owned by the current user (not a symlink to one owned by
-/// someone else). The projects registry is not ownership-checked by the
-/// CLI today, so a root planted by another account must not get its
-/// lifecycle hooks run by a click here.
+/// Validate a registry-supplied project root before running an action that
+/// executes checkout-defined lifecycle commands, and return the canonical
+/// path to pass to the CLI.
+///
+/// The projects registry is not ownership-checked by the CLI today, so the
+/// app refuses a root unless:
+/// - it is absolute and canonicalises to an existing directory (the returned
+///   canonical path is what runs, so a symlink cannot be swapped between
+///   this check and the call);
+/// - every ancestor is owned by this user or root and not writable by group
+///   or others, except a root-owned sticky directory such as `/tmp`, where
+///   other users cannot rename entries;
+/// - the root itself is owned by this user and not group/other writable;
+/// - the root itself carries a Hack project marker (`hack.project.json`,
+///   `.hack/`, or `.dev/` with a project file), so the CLI's ancestor
+///   discovery cannot select some other project;
+/// - each project config entry (and each file directly in `.hack/` or
+///   `.dev/`, following symlinks) is owned by this user and not
+///   group/other writable.
+///
+/// What remains is CLI work: the CLI should verify the registry itself and
+/// bind each action to the registered identity (requested of the lead).
 ///
 /// # Errors
 /// `E_APP_UNTRUSTED_ROOT` with the reason.
-pub fn check_owned_root(root: &Path) -> Result<(), SourceError> {
+pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
     use std::os::unix::fs::MetadataExt;
-    let refuse = |why: &str| SourceError::Cli {
+    let refuse = |why: String| SourceError::Cli {
         code: "E_APP_UNTRUSTED_ROOT".into(),
-        message: format!("Not running this action: the project folder {why}."),
+        message: format!("Not running this action: {why}."),
         failed: vec![],
     };
-    if !root.is_absolute() {
-        return Err(refuse("is not an absolute path"));
-    }
-    let real = std::fs::canonicalize(root).map_err(|_| refuse("could not be read"))?;
-    let meta = std::fs::metadata(&real).map_err(|_| refuse("could not be read"))?;
-    if !meta.is_dir() {
-        return Err(refuse("is not a directory"));
-    }
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
-    if meta.uid() != uid {
-        return Err(refuse("is owned by another user"));
+    if !root.is_absolute() {
+        return Err(refuse("the project folder is not an absolute path".into()));
     }
-    Ok(())
+    let real = std::fs::canonicalize(root)
+        .map_err(|_| refuse("the project folder could not be read".into()))?;
+    let meta = std::fs::metadata(&real)
+        .map_err(|_| refuse("the project folder could not be read".into()))?;
+    if !meta.is_dir() {
+        return Err(refuse("the project folder is not a directory".into()));
+    }
+    if meta.uid() != uid || meta.mode() & 0o022 != 0 {
+        return Err(refuse(
+            "the project folder is not yours alone (owner or write permissions)".into(),
+        ));
+    }
+    for dir in real.ancestors().skip(1) {
+        let m = std::fs::metadata(dir)
+            .map_err(|_| refuse(format!("{} could not be read", dir.display())))?;
+        let owner_ok = m.uid() == uid || m.uid() == 0;
+        let sticky_root = m.uid() == 0 && m.mode() & 0o1000 != 0;
+        if !owner_ok || (m.mode() & 0o022 != 0 && !sticky_root) {
+            return Err(refuse(format!(
+                "{} can be changed by another user",
+                dir.display()
+            )));
+        }
+    }
+    let private = |p: &Path| -> Result<(), SourceError> {
+        let m = std::fs::metadata(p) // follows symlinks: checks the target
+            .map_err(|_| refuse(format!("{} could not be read", p.display())))?;
+        if m.uid() != uid || m.mode() & 0o022 != 0 {
+            return Err(refuse(format!(
+                "{} is not yours alone (owner or write permissions)",
+                p.display()
+            )));
+        }
+        Ok(())
+    };
+    let legacy_files = ["docker-compose.yml", "hack.config.json", "hack.toml"];
+    let native = real.join("hack.project.json");
+    let hack_dir = real.join(".hack");
+    let dev_dir = real.join(".dev");
+    let has_marker = native.is_file()
+        || hack_dir.is_dir()
+        || (dev_dir.is_dir() && legacy_files.iter().any(|f| dev_dir.join(f).is_file()));
+    if !has_marker {
+        return Err(refuse(
+            "the project folder has no Hack project files".into(),
+        ));
+    }
+    if native.exists() {
+        private(&native)?;
+    }
+    for d in [&hack_dir, &dev_dir] {
+        if !d.exists() {
+            continue;
+        }
+        private(d)?;
+        let entries = std::fs::read_dir(d)
+            .map_err(|_| refuse(format!("{} could not be read", d.display())))?;
+        for e in entries {
+            let e = e.map_err(|_| refuse(format!("{} could not be read", d.display())))?;
+            private(&e.path())?;
+        }
+    }
+    Ok(real)
 }
 
 /// Canned data for one designed state.
@@ -422,33 +494,99 @@ esac
         );
     }
 
-    #[test]
-    fn actions_require_an_owned_absolute_root() {
+    /// A fresh private base under the temp dir, or `None` when the temp
+    /// dir's own ancestors are not trustworthy on this host (then the
+    /// positive cases cannot be asserted and are skipped).
+    fn private_base(tag: &str) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
-            "hack-desktop-root-{}-{}",
+            "hack-desktop-trust-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(check_owned_root(&dir).is_ok());
-        let file = dir.join("f");
-        std::fs::write(&file, "").unwrap();
-        assert!(check_owned_root(&file).is_err(), "not a directory");
-        assert!(check_owned_root(Path::new("relative/dir")).is_err());
-        assert!(check_owned_root(&dir.join("missing")).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-        // A directory owned by another user (root) is refused, unless the
-        // test itself runs as root.
-        // SAFETY: getuid has no preconditions and cannot fail.
-        if unsafe { libc::getuid() } != 0 {
-            let err = check_owned_root(Path::new("/")).unwrap_err();
-            assert!(
-                matches!(err, SourceError::Cli { ref code, .. } if code == "E_APP_UNTRUSTED_ROOT")
-            );
+        std::fs::create_dir_all(dir.join(".hack")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(dir.join(".hack"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::write(dir.join(".hack/hack.config.json"), "{}").unwrap();
+        std::fs::set_permissions(
+            dir.join(".hack/hack.config.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        if trusted_root(&dir).is_ok() {
+            Some(dir)
+        } else {
+            let _ = std::fs::remove_dir_all(&dir);
+            None
         }
+    }
+
+    #[test]
+    fn trusted_root_accepts_a_private_project_and_returns_its_real_path() {
+        let Some(dir) = private_base("ok") else {
+            eprintln!("skipped: temp dir ancestors are not private on this host");
+            return;
+        };
+        let link = dir.with_extension("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let real = trusted_root(&link).unwrap();
+        assert_eq!(
+            real,
+            std::fs::canonicalize(&dir).unwrap(),
+            "runs the real path"
+        );
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusted_root_refuses_writable_or_unmarked_or_foreign() {
+        use std::os::unix::fs::PermissionsExt;
+        let set = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let untrusted = |r: Result<PathBuf, SourceError>| matches!(r, Err(SourceError::Cli { ref code, .. }) if code == "E_APP_UNTRUSTED_ROOT");
+        assert!(untrusted(trusted_root(Path::new("relative/dir"))));
+        let Some(dir) = private_base("bad") else {
+            eprintln!("skipped: temp dir ancestors are not private on this host");
+            return;
+        };
+        // World-writable root.
+        set(&dir, 0o777);
+        assert!(untrusted(trusted_root(&dir)), "0777 root");
+        set(&dir, 0o700);
+        // Group-writable config file.
+        set(&dir.join(".hack/hack.config.json"), 0o664);
+        assert!(untrusted(trusted_root(&dir)), "writable config");
+        set(&dir.join(".hack/hack.config.json"), 0o600);
+        // A config entry that is a symlink to a foreign-owned file.
+        if Path::new("/etc/hostname").exists() && unsafe { libc::getuid() } != 0 {
+            std::os::unix::fs::symlink("/etc/hostname", dir.join(".hack/docker-compose.yml"))
+                .unwrap();
+            assert!(untrusted(trusted_root(&dir)), "symlink to a foreign file");
+            std::fs::remove_file(dir.join(".hack/docker-compose.yml")).unwrap();
+        }
+        // No project marker: the CLI could pick another project above it.
+        let bare = dir.join("sub");
+        std::fs::create_dir(&bare).unwrap();
+        set(&bare, 0o700);
+        assert!(untrusted(trusted_root(&bare)), "no marker");
+        // A child whose parent is group-writable.
+        let open = dir.join("open");
+        std::fs::create_dir_all(open.join("proj/.hack")).unwrap();
+        set(&open, 0o775);
+        set(&open.join("proj"), 0o700);
+        set(&open.join("proj/.hack"), 0o700);
+        assert!(
+            untrusted(trusted_root(&open.join("proj"))),
+            "writable ancestor"
+        );
+        assert!(trusted_root(&dir).is_ok(), "restored base is trusted again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

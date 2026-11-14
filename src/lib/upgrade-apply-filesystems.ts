@@ -54,7 +54,7 @@ export async function planUpgradeFilesystems(opts: {
             };
           }
         }
-        return target;
+        return { ...target, files };
       } catch {
         return {
           ...target,

@@ -226,6 +226,35 @@ fn census() -> Vec<Identity> {
         .collect()
 }
 
+fn parent_pid(pid: i32) -> Option<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        text.rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: live writable buffer with the exact native struct size.
+        let size = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        (size as usize == std::mem::size_of::<libc::proc_bsdinfo>())
+            .then(|| unsafe { info.assume_init() }.pbi_ppid as i32)
+    }
+}
+
 fn command(root: &Path, action: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"));
     command
@@ -413,6 +442,10 @@ fn term_ignoring_command_is_killed_after_grace() {
         start.elapsed() >= Duration::from_secs(5),
         "TERM grace was shortened"
     );
+    assert!(
+        start.elapsed() < Duration::from_secs(7),
+        "stop exceeded its confirmation budget"
+    );
     assert!(wait(&mut caller, TIMEOUT).success());
 }
 
@@ -584,7 +617,6 @@ fn repeated_immediate_restart_waits_for_instance_lock_release() {
     assert!(wait(previous.as_mut().unwrap(), TIMEOUT).success());
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn raised_descriptor_limit_does_not_delay_startup() {
     // Exercise the largest supported soft limit without changing this host's
@@ -597,14 +629,12 @@ fn raised_descriptor_limit_does_not_delay_startup() {
     descriptor_limit_startup(limit.rlim_max.min(1_048_576));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "qualification requires a hard RLIMIT_NOFILE of at least 1048576"]
 fn million_descriptor_limit_qualification() {
     descriptor_limit_startup(1_048_576);
 }
 
-#[cfg(target_os = "linux")]
 fn descriptor_limit_startup(descriptors: libc::rlim_t) {
     use std::os::unix::process::CommandExt;
     let f = Fixture::new();
@@ -751,6 +781,47 @@ fn changed_process_group_remains_in_owned_session() {
     assert!(wait(&mut caller, TIMEOUT).success());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "60-second native idle CPU and kernel wakeup measurement; run alone"]
+fn idle_guard_cpu_and_wakeup_measurement() {
+    fn sample(pid: i32) -> libc::rusage_info_v2 {
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+        // SAFETY: proc_pid_rusage's opaque output points at the complete V2
+        // struct for the requested flavor, live and writable for this call.
+        assert_eq!(
+            unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, info.as_mut_ptr().cast()) },
+            0
+        );
+        unsafe { info.assume_init() }
+    }
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    f.await_log("fixture-ready");
+    let guard = pid(&f.state("worker"), "guardPid");
+    let before = sample(guard);
+    let parent_before = sample(caller.id() as i32);
+    let start = Instant::now();
+    thread::sleep(Duration::from_secs(60));
+    let after = sample(guard);
+    let parent_after = sample(caller.id() as i32);
+    for (label, before, after) in [
+        ("guard", before, after),
+        ("owner", parent_before, parent_after),
+    ] {
+        println!(
+            "{label}: wall_s={:.3} cpu_ns={} idle_wakeups={} interrupt_wakeups={}",
+            start.elapsed().as_secs_f64(),
+            (after.ri_user_time - before.ri_user_time)
+                + (after.ri_system_time - before.ri_system_time),
+            after.ri_pkg_idle_wkups - before.ri_pkg_idle_wkups,
+            after.ri_interrupt_wkups - before.ri_interrupt_wkups
+        );
+    }
+    f.stop();
+    assert!(wait(&mut caller, TIMEOUT).success());
+}
+
 #[test]
 fn inherited_ignored_signal_is_reset() {
     use std::os::unix::process::CommandExt;
@@ -781,7 +852,6 @@ fn inherited_ignored_signal_is_reset() {
     assert!(wait(&mut caller, TIMEOUT).success());
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn supervisor_and_guard_prepublication_crashes_keep_stop_admission_leased() {
     use std::os::unix::fs::OpenOptionsExt;
@@ -806,34 +876,34 @@ fn supervisor_and_guard_prepublication_crashes_keep_stop_admission_leased() {
     let first = f.state("first");
     f.remember(&json!({"processes":[first.clone()]}));
     let guard = eventually(|| {
-        fs::read_to_string(format!(
-            "/proc/{}/task/{}/children",
-            caller.id(),
-            caller.id()
-        ))
-        .ok()
-        .and_then(|s| {
-            s.split_whitespace()
-                .filter_map(|v| v.parse::<i32>().ok())
-                .find(|p| *p != pid(&first, "guardPid"))
-        })
-    });
-    // Wait for the guard to exec and close all inherited descriptors except
-    // stdio; fd 2 must still carry the stop lease while command lock is held.
-    eventually(|| {
-        fs::read_link(format!("/proc/{guard}/exe"))
-            .ok()
-            .filter(|p| {
-                p.file_name()
-                    .is_some_and(|n| n == "hack-lifecycle-supervisor")
+        census()
+            .into_iter()
+            .find(|p| {
+                p.pid != pid(&first, "guardPid")
+                    && p.session == p.pid
+                    && parent_pid(p.pid) == Some(caller.id() as i32)
             })
+            .map(|p| p.pid)
     });
-    let lease_inode = fs::metadata(f.root.join(".stop.lock")).unwrap().ino();
-    eventually(|| {
-        fs::metadata(format!("/proc/{guard}/fd/2"))
-            .ok()
-            .filter(|metadata| metadata.ino() == lease_inode)
-    });
+    // Linux additionally observes the exact fd-2 inode. Both platforms prove
+    // the lease behavior by a blocked stop after owner death below.
+    #[cfg(target_os = "linux")]
+    {
+        eventually(|| {
+            fs::read_link(format!("/proc/{guard}/exe"))
+                .ok()
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n == "hack-lifecycle-supervisor")
+                })
+        });
+        let lease_inode = fs::metadata(f.root.join(".stop.lock")).unwrap().ino();
+        eventually(|| {
+            fs::metadata(format!("/proc/{guard}/fd/2"))
+                .ok()
+                .filter(|metadata| metadata.ino() == lease_inode)
+        });
+    }
     let guard_identity = identity(guard).unwrap();
     f.owned.borrow_mut().push(guard_identity.clone());
     caller.kill().unwrap();
@@ -1070,6 +1140,106 @@ fn stale_reused_session_leader_does_not_block_fresh_launch() {
         foreign.0.try_wait().unwrap().is_none(),
         "foreign reused session was signalled"
     );
+}
+
+#[test]
+fn dead_reused_session_cannot_authorize_signals_from_old_receipt() {
+    use std::os::unix::process::CommandExt;
+    let f = Fixture::new();
+    let (mut old, _) = f.start(vec![f.process("worker", "hold")]);
+    f.await_log("fixture-ready");
+    f.stop();
+    assert!(wait(&mut old, TIMEOUT).success());
+    let terminal = f.state("worker");
+    // Use a real dead session leader and real surviving child. Relocate the
+    // old receipt's SID to that session rather than waiting for host PID wrap.
+    thread::sleep(Duration::from_millis(30));
+    let mut launch = Command::new(std::env::current_exe().unwrap());
+    launch
+        .args(["--exact", "fixture_process", "--nocapture"])
+        .env_clear()
+        .env("SUPERVISOR_FIXTURE", "leave-session-child")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    unsafe {
+        launch.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut leader = launch.spawn().unwrap();
+    let sid = leader.id() as i32;
+    let mut output = String::new();
+    leader
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut output)
+        .unwrap();
+    assert!(wait(&mut leader, TIMEOUT).success());
+    let child_pid: i32 = output
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("session-child ")
+                .and_then(|pid| pid.parse().ok())
+        })
+        .unwrap();
+    let child = identity(child_pid).unwrap();
+    f.owned.borrow_mut().push(child.clone());
+    assert_eq!(child.session, sid);
+    assert!(identity(sid).is_none(), "replacement leader must be gone");
+    let mut relocated = terminal.clone();
+    relocated["guardPid"] = json!(sid);
+    relocated["processGroupId"] = json!(sid);
+    for phase in ["running", "starting", "exited", "killed", "failed-start"] {
+        relocated["phase"] = json!(phase);
+        fs::write(
+            f.root.join("worker.json"),
+            serde_json::to_vec(&relocated).unwrap(),
+        )
+        .unwrap();
+        let (mut status, observed) = f.request("status", &f.control(TOKEN));
+        let uncertain = matches!(phase, "running" | "starting");
+        assert_eq!(wait(&mut status, TIMEOUT).success(), !uncertain);
+        assert_eq!(
+            observed["unknownProcessNames"].as_array().unwrap().len(),
+            usize::from(uncertain)
+        );
+        let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+        assert_eq!(
+            receipt["outcome"],
+            if uncertain { "unknown" } else { "stopped" }
+        );
+        assert_eq!(wait(&mut stop, TIMEOUT).success(), !uncertain);
+        assert!(
+            identity(child_pid).as_ref() == Some(&child),
+            "unrelated session was signalled"
+        );
+    }
+    // A terminal old generation must not fence an unrelated generation.
+    let (mut next, _) =
+        f.start_generation(vec![f.process("worker", "hold")], "synthetic-new-owner");
+    f.stop_generation("synthetic-new-owner");
+    assert!(wait(&mut next, TIMEOUT).success());
+    assert!(identity(child_pid).as_ref() == Some(&child));
+}
+
+#[test]
+fn preexisting_broad_log_is_refused_before_launch() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    fs::write(f.root.join("lifecycle.log"), b"sentinel").unwrap();
+    fs::set_permissions(
+        f.root.join("lifecycle.log"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    refused(&f, "run", f.launch(vec![f.process("worker", "hold")]));
+    assert!(!f.root.join("worker.json").exists());
+    assert_eq!(fs::read(f.root.join("lifecycle.log")).unwrap(), b"sentinel");
 }
 
 #[test]
@@ -1451,6 +1621,23 @@ fn fixture_process() {
             unsafe {
                 libc::signal(libc::SIGTERM, libc::SIG_IGN);
             }
+        }
+        "leave-session-child" => {
+            // SAFETY: fork child uses only async-signal-safe operations and
+            // never returns into libtest's multithreaded runtime.
+            let child = unsafe { libc::fork() };
+            assert!(child >= 0);
+            if child == 0 {
+                unsafe {
+                    libc::close(1);
+                    loop {
+                        libc::pause();
+                    }
+                }
+            }
+            println!("session-child {child}");
+            std::io::stdout().flush().unwrap();
+            std::process::exit(0);
         }
         "hold" => (),
         _ => std::process::exit(99),

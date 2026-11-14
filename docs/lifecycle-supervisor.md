@@ -48,8 +48,12 @@ processes or ownership. Stop
 requires matching ownership and a live identity before sending a signal. Unknown
 identity is a refusal, never proof that a process is absent. A different boot or a
 leader with a different start identity proves that the old session ended; it
-grants no authority over the replacement. Old terminal receipts are retained and
-ignored only after native absence is proved.
+grants no authority over the replacement. Guard-written terminal receipts are retained as proof that the old session ended.
+A missing leader plus a numeric SID is not ownership: orphan recovery requires
+a same-user surviving member born no later than the recorded command birth.
+Only newer members, or legacy receipts without that birth evidence, report
+unknown without signals. Descendants born after the command whose birth was
+recorded may therefore require manual recovery once that command exits.
 
 Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
 `observed`, `stopped`, or `unknown`). A stop whose confirmation times out emits
@@ -63,7 +67,7 @@ for incremental launches, `control.sock`. The default log is `lifecycle.log`.
 Directories are mode 0700; files and the control socket are mode 0600. Symlinks,
 hard-linked files, foreign owners and broad permissions are refused. State contains
 name, ownership token, guard PID, process group, OS start identity, boot identity,
-UID, command PID when known, phase, and the direct command's exit code or signal
+UID, command PID and start identity when known, phase, and the direct command's exit code or signal
 when observed. It contains no command or environment.
 State is atomically published and synchronized before authored code can run.
 The guard leads a new session in its own process group. The authored command
@@ -124,6 +128,12 @@ delivers TERM individually, grants a fresh five-second grace, then KILL and
 confirms absence. Unverified identity never authorizes signals or a successful
 stop. Launch and stop share a bounded lock; a startup descriptor lease keeps
 admission locked through guard publication even if the project owner dies.
+The guard temporarily inherits this stop-lock lease on stderr (fd 2), then closes
+it by detaching stdio after publication. This descriptor is an internal ownership
+lease, not a diagnostic stream; authored commands receive a separate stderr pipe.
+On Darwin, processes of a different UID may be hidden by kernel inspection
+permissions. Such descendants are unsupported: a readable census cannot prove
+absence of a hidden different-UID member, and an ordinary owner cannot signal it.
 
 The table models process death and retry, not filesystem hardware failure, hostile
 same-user mutation, commands that deliberately create new sessions, or power-loss
@@ -287,8 +297,8 @@ the exact 1,048,576 test requires a host that permits that limit.
 Darwin compilation does not qualify execution, group-signal EPERM recovery or
 idle cost on a real Mac.
 
-The 129-state TLA+ artifact is an abstract phase/ownership exploration. It does
-not model kernel census observations, real flock behavior, orphan recovery,
+The 168-state TLA+ artifact is an abstract phase/ownership exploration. It models SID reuse and a required old-birth witness for orphan signaling. It does
+not model actual kernel census observations, real flock behavior, full orphan recovery,
 startup descriptor leases or signal errors. Some safety predicates hold by
 construction. Native regressions, rather than that model, are the evidence for
 those boundaries; see the model coverage document for the reduced claims.
@@ -308,3 +318,20 @@ does not depend on the deleted executable pathname.
 Linux ownership checks read the process's effective UID from `/proc/<pid>/status`.
 They do not infer UID from proc-file ownership, which changes when a command
 disables dumpability. Such a command remains recoverable after guard loss.
+
+Restart policy and restart backoff belong to the CLI integration in #811, not
+this binary's command ownership loop. This crate does not restart commands.
+
+Logs are append-only and have no automatic rotation. Stop all generations and
+confirm native absence before archiving the private root/log and starting with
+a fresh root. Crash-left private .tmp files can be removed only while no writer
+holds the root. Retirement markers must not be pruned individually: they fence
+arbitrarily delayed frames. Retire the entire quiescent root only after all old
+callers and guards have exited. These files have no automatic size/count bound;
+long-running installations must arrange a maintenance window and offline rotation.
+
+Native crash tests currently cover prepublication command-lock blocking, incomplete
+guard launch frames, and blocked ready delivery. Deterministic tests at the two
+smaller instruction windows (starting-state save to spawn, and spawn to running-state
+save) remain unqualified; polling a receipt cannot reliably stop a process in either
+window. They require a dedicated synchronization seam, not a timing-only test.

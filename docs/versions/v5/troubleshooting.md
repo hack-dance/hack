@@ -6,6 +6,8 @@ native, use the full `hack-next` path from [Try native](native/start.md).
 Read the named finding before using `--fix`; some problems need a decision or
 an original key, not an automatic repair.
 
+`hack doctor --json` returns `{ok:true,data:{schema:1,checks,summary,counts}}`. Each check adds an area, machine/project scope and a fix category (`safe`, `admin` or `manual`), argv after `hack`, and a documentation URL. Empty argv means consult the docs. The audit remains read-only; `ok:true` means the audit ran, while error findings still exit 1. Unknown checks offer no runnable repair.
+
 The rows marked **next.17 source** describe merged code intended for next.17.
 They do not change an installed next.16 bundle. See the
 [release notes](../guides/v5-release-notes.md) for version boundaries.

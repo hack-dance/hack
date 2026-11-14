@@ -570,6 +570,11 @@ The wrapper accepts Cargo build, feature and target options; nextest-specific
 options such as `-E` need a direct `cargo nextest` invocation. Documentation-only
 selection refuses repetition or report settings intended for nextest qualification.
 
+An unmatched name filter exits **4** with pinned nextest 0.9.151 ("no tests to run"),
+where stock Cargo exits **0** after running zero tests. Check filter spelling;
+this wrapper keeps nextest's nonzero result, including in CI.
+
+
 `bun run test:local` checks `cargo nextest --version`, matching Cargo's lookup for
 the test run. If that resolves the pin, it uses nextest; a missing or different
 version prints one fallback line and uses stock `cargo test`, leaving the

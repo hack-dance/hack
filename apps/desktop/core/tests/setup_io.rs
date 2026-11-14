@@ -26,6 +26,15 @@ impl Drop for Tree {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+/// Keep platform first-launch scanning outside setup's product read deadline.
+fn warm_version(program: &std::path::Path, home: &std::path::Path) {
+    CliRunner::new(program)
+        .with_env("HOME", home.to_str().unwrap())
+        .with_env("HACK_HOME", home.join(".hack").to_str().unwrap())
+        .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .version(Duration::from_secs(60))
+        .unwrap();
+}
 #[test]
 fn checks_are_observe_only_and_safe_action_does_not_prove_health() {
     let t = Tree::new();
@@ -44,6 +53,7 @@ case "$*" in
 esac
 "#).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    warm_version(&program, &t.0);
     let runner = CliRunner::new(program)
         .with_env("CALLS", calls.to_str().unwrap())
         .with_env("HOME", t.0.to_str().unwrap())
@@ -133,6 +143,7 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o700)).unwrap();
+    warm_version(&hack, &t.0);
     let report = source.setup();
     assert!(report.cli_ready());
     assert_eq!(report.cli_program.as_deref(), hack.to_str());
@@ -180,6 +191,7 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    warm_version(&program, &t.0);
     LiveSource {
         runner: CliRunner::new(program)
             .with_env("HOME", t.0.to_str().unwrap())
@@ -356,14 +368,21 @@ fn version_timeout_is_unknown_without_forcing_a_missing_cli_gate() {
     let program = t.0.join("hack");
     std::fs::write(
         &program,
-        "#!/bin/sh\nprintf '%s' \"$*\" > \"$HOME/calls\"\n/bin/sleep 5\n",
+        "#!/bin/sh\nif [ \"$1\" = __warmup ]; then printf '{}'; exit 0; fi\nprintf '%s' \"$*\" > \"$HOME/calls\"\n/bin/sleep 5\n",
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let source = LiveSource {
-        runner: CliRunner::new(program).with_env("HOME", t.0.to_str().unwrap()),
+        runner: CliRunner::new(program)
+            .with_env("HOME", t.0.to_str().unwrap())
+            .with_env("HACK_HOME", t.0.join(".hack").to_str().unwrap())
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
         daemon: None,
     };
+    source
+        .runner
+        .run_json::<serde_json::Value>(&["__warmup"], None, Duration::from_secs(60))
+        .unwrap();
     let report = source.read_setup_within(Duration::from_secs(3));
     assert!(!report.cli_ready());
     assert!(!report.force_cli_gate);

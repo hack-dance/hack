@@ -760,7 +760,6 @@ test("draft fan-ins fail explicitly even when the light set passes or scope is c
     for (const changes of ["success", "cancelled", "failure"]) {
       const result = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
         env: {
-          ...process.env,
           PR_DRAFT: "true",
           CHANGES_RESULT: changes,
           SUITE: "true",

@@ -76,6 +76,11 @@ pub const NATIVE_LOGS_NOTE: &str =
     "Native logs are read one service at a time; they arrive with the Logs tab.";
 
 pub trait Source: Send + Sync {
+    /// Read names-only env metadata; diagnostics must never contain CLI output.
+    fn env(&self, _root: &Path, _native: bool) -> crate::env::EnvView {
+        crate::env::EnvView::Unreadable
+    }
+
     /// # Errors
     /// A [`SourceError`] when no usable snapshot could be read.
     fn snapshot(&self) -> Result<Snapshot, SourceError>;
@@ -144,6 +149,20 @@ impl LiveSource {
 }
 
 impl Source for LiveSource {
+    fn env(&self, root: &Path, native: bool) -> crate::env::EnvView {
+        match self
+            .runner_for(native)
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_raw(
+                &["env", "list", "--json"],
+                Some(root),
+                Duration::from_secs(10),
+            ) {
+            Ok((out, _, code)) => crate::env::EnvView::parse(&out, code),
+            Err(_) => crate::env::EnvView::Unreadable,
+        }
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         let cli_version = self.runner.version(Duration::from_secs(5))?;
         let daemon = self.daemon.as_ref().and_then(|d| d.status().ok());
@@ -394,6 +413,10 @@ fn cli_selects_exactly(root: &Path) -> bool {
 pub struct FixtureSource(pub Fixture);
 
 impl Source for FixtureSource {
+    fn env(&self, _root: &Path, _native: bool) -> crate::env::EnvView {
+        crate::env::fixture(self.0.name())
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
     }

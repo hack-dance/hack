@@ -63,6 +63,34 @@ degraded / stopping, failed-start, needs-attention):
 
 ## What v0 does not do yet
 
-Logs, Env and Activity tabs, CPU and memory, Doctor view, onboarding, always-on,
+Logs and Activity tabs, CPU and memory, Doctor view, onboarding, always-on,
 daemon actions and upgrades come in later units. The design and the CLI/daemon
 requests they need are in `DESIGN.md` (PR #800).
+
+## Env tab (names only)
+
+Env reads `hack env list --json --path <root>` on tab open, project selection,
+and **Check again**, with a 10-second deadline. Native projects select
+`HACK_RUNTIME_BACKEND=native`. There is no polling or disk state for Env.
+A bare report on exit 1 is still a report. Missing required names appear first
+in red; both legacy scope arrays and canonical scope strings are supported.
+Only an explicit empty `vars` array shows “This project has no env layers”.
+Malformed output shows “Could not read environment metadata”.
+
+The model retains only name, layer/source, scope, storage kind, set and required
+metadata. It discards unknown fields, including values/materialized data, and
+never includes raw output in errors. No editing, value reads, reveal, copy or
+export is offered. The locked state offers only **Copy hack doctor**.
+Missing/unreadable `key_state` shows a lock. Absent key state is unknown:
+**needs R10**, never inferred healthy from `has_value`.
+
+Fixtures: `env-loading`, `env-error`, `env-normal`, `env-missing`, `env-locked`,
+`env-empty`. Each renders offscreen in both themes through `--screenshots`.
+To bound rendering to one state, combine `--fixtures env-normal` with
+`--screenshots <output-dir>`.
+Screenshots for this slice: [normal light](screenshots/env-normal-light.png),
+[normal dark](screenshots/env-normal-dark.png),
+[missing](screenshots/env-missing-light.png), [locked](screenshots/env-locked-dark.png).
+
+This Env change is stacked on `feat/desktop-app-core` for focused review;
+the completed desktop stack ultimately targets `next`.

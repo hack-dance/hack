@@ -25,6 +25,7 @@ import {
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../src/constants.ts";
 import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
+import * as interactivity from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -38,6 +39,14 @@ const DAEMON_AUTOSTART_DENY_ENV = [
   "HACK_DAEMON_AUTOSTART_DISABLE",
 ] as const;
 const originalDenyEnv = new Map<string, string | undefined>();
+const ISOLATED_ENV = [
+  "HACK_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+] as const;
+const originalIsolatedEnv = new Map<string, string | undefined>();
 const execCalls: string[][] = [];
 const runCalls: string[][] = [];
 let runExitResponder: ((cmd: readonly string[]) => number | null) | null = null;
@@ -121,6 +130,13 @@ beforeEach(async () => {
   originalLogger = process.env.HACK_LOGGER;
   tempDir = await mkdtemp(join(tmpdir(), "hack-global-"));
   process.env.HOME = tempDir;
+  for (const key of ISOLATED_ENV) {
+    originalIsolatedEnv.set(key, process.env[key]);
+    process.env[key] = join(
+      tempDir,
+      key === "HACK_HOME" ? GLOBAL_HACK_DIR_NAME : key.toLowerCase()
+    );
+  }
   process.env.HACK_LOGGER = "console";
   for (const key of DAEMON_AUTOSTART_DENY_ENV) {
     originalDenyEnv.set(key, process.env[key]);
@@ -135,6 +151,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const key of ISOLATED_ENV) {
+    restoreEnv(key, originalIsolatedEnv.get(key));
+  }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
@@ -163,6 +182,65 @@ async function writeExecutable(path: string): Promise<void> {
   await writeFile(path, "#!/usr/bin/env sh\nexit 0\n");
   await chmod(path, 0o755);
 }
+
+test.each([
+  "install",
+  "trust",
+])("global %s --json without --plan refuses before any effect", async (command) => {
+  const confirm = spyOn(interactivity, "confirmSafe").mockImplementation(() => {
+    throw new Error("No confirmation expected");
+  });
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", command, "--json"])).toBe(2);
+    expect(execCalls).toEqual([]);
+    expect(runCalls).toEqual([]);
+    expect(linuxDnsPrivileged).toEqual([]);
+    expect(confirm).not.toHaveBeenCalled();
+  } finally {
+    confirm.mockRestore();
+  }
+});
+
+test.skipIf(process.platform !== "linux")(
+  "global install --plan --json uses read-only probes and --plan requires JSON",
+  async () => {
+    process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+    const chunks: string[] = [];
+    const stdout = spyOn(process.stdout, "write").mockImplementation(
+      (chunk) => {
+        chunks.push(String(chunk));
+        return true;
+      }
+    );
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(await runCli(["global", "install", "--plan"])).toBe(2);
+      expect(execCalls).toEqual([]);
+      expect(await runCli(["global", "install", "--plan", "--json"])).toBe(0);
+    } finally {
+      stdout.mockRestore();
+    }
+    expect(JSON.parse(chunks.join(""))).toMatchObject({
+      schema: "hack.global-admin-plan.v1",
+      command: "install",
+      complete: true,
+      refused: null,
+    });
+    expect(runCalls).toEqual([]);
+    expect(linuxDnsPrivileged).toEqual([]);
+    expect(
+      await Bun.file(
+        join(
+          tempDir!,
+          GLOBAL_HACK_DIR_NAME,
+          GLOBAL_CADDY_DIR_NAME,
+          GLOBAL_CADDY_COMPOSE_FILENAME
+        )
+      ).exists()
+    ).toBe(false);
+  }
+);
 
 async function writeStaticCaddyCompose(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -846,6 +924,61 @@ async function writeInstallStubs(): Promise<void> {
   await mkdir(dirname(bundle), { recursive: true });
   await writeFile(bundle, "stub");
 }
+
+test.skipIf(process.platform !== "linux")(
+  "install plans the same privileged Docker startup the real command runs",
+  async () => {
+    await writeInstallStubs();
+    process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+    let dockerStarted = false;
+    execMockResponder = (argv) => {
+      if (
+        argv[0] === "docker" &&
+        (argv[1] === "info" || argv[1] === "network")
+      ) {
+        return { exitCode: dockerStarted ? 0 : 1, stdout: "", stderr: "" };
+      }
+      return null;
+    };
+    runExitResponder = (argv) => {
+      if (argv[0] === "sudo") {
+        expect(argv).toEqual(["sudo", "systemctl", "start", "docker"]);
+        dockerStarted = true;
+      }
+      return 0;
+    };
+    const chunks: string[] = [];
+    const stdout = spyOn(process.stdout, "write").mockImplementation(
+      (chunk) => {
+        chunks.push(String(chunk));
+        return true;
+      }
+    );
+    const { runCli } = await import("../src/cli/run.ts");
+    try {
+      expect(await runCli(["global", "install", "--plan", "--json"])).toBe(3);
+    } finally {
+      stdout.mockRestore();
+    }
+    expect(dockerStarted).toBe(false);
+    expect(runCalls).toEqual([]);
+    const planned: unknown = JSON.parse(chunks.join(""));
+    expect(planned).toMatchObject({
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          id: "docker-start",
+          privilege: "root",
+          argv: ["sudo", "systemctl", "start", "docker"],
+          shell: "sudo systemctl start docker",
+        }),
+      ]),
+    });
+    expect(await runCli(["global", "install"])).toBe(0);
+    expect(runCalls.filter((argv) => argv[0] === "sudo")).toEqual([
+      ["sudo", "systemctl", "start", "docker"],
+    ]);
+  }
+);
 
 test(
   "global install renders the proxy ports from proxy.bind_address (HACK-2055)",

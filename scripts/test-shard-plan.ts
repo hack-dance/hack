@@ -514,6 +514,10 @@ export const MACOS_POOL_FILES: Readonly<Record<string, string>> = {};
  * added to the Linux pool as well (HACK-2142).
  */
 export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
+  "tests/lifecycle-fifo-retirement.test.ts":
+    "FIFO retirement needs Linux process groups and macOS zombie-probe EPERM coverage",
+  "tests/lifecycle-zombie-retirement.test.ts":
+    "held zombies return probe success on Linux and can return EPERM on macOS",
   "tests/v4-upgrade.test.ts":
     "historical upgrade must preserve keys and values on Linux and macOS",
   "tests/upgrade-installer.test.ts":

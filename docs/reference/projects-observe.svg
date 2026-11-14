@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-flowchart" viewBox="0 0 558 922" width="558" height="922" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_r:var(--pele-radius,4px);--_tw:var(--pele-title-weight,bold);--_fm:var(--pele-font-mono,Geist Mono);font:15px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Geist)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="flowchart" data-theme="light"><style><![CDATA[/* Hack Dance house theme for Pele 1.9.x: ink on cream (fleet palette B). Light by default; dark via [data-theme=dark].
+   Colour only for meaning (house classes). Never resize label text: Pele sized label boxes for its own font size. */
+.pele {
+  --pele-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --pele-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --pele-bg: #F3EFE3;
+  --pele-fg: #1D1D1B;
+  --pele-muted: #3D3C37;
+  --pele-line: #3D3C37;
+  --pele-surface: #FBF9F1;
+  --pele-surface-alt: #E8E4D8;
+  --pele-border: #66625A;
+  --pele-accent: #1D1D1B;
+  --pele-critical: #C2461F;
+  --pele-error: #C2461F;
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: #5b3df5; --pele-series-2: #0e9f8a; --pele-series-3: #e08a00; --pele-series-4: #d6345a;
+  --pele-series-5: #2f7de1; --pele-series-6: #8a5cf6; --pele-series-7: #4f9d2d; --pele-series-8: #a0674b;
+  /* semantic state tints (house classes) */
+  --hd-live: #4B4790;  --hd-live-bg: #E6E4F0;
+  --hd-wait: #34506E;  --hd-wait-bg: #D3DBE5;
+  --hd-ok:   #3A7A2E;  --hd-ok-bg:   #E2EBD9;
+  --hd-fail: #C2461F;  --hd-fail-bg: #F5E0D6;
+  --hd-idle: #8A8576;  --hd-idle-bg: #E8E4D8;
+  background: var(--pele-bg);
+}
+.pele[data-theme="dark"], [data-theme="dark"] .pele {
+  --pele-bg: #11100E;
+  --pele-fg: #EDE8D9;
+  --pele-muted: #C9C3B2;
+  --pele-line: #C9C3B2;
+  --pele-surface: #191815;
+  --pele-surface-alt: #1B1A17;
+  --pele-border: #8F897A;
+  --pele-accent: #EDE8D9;
+  --pele-critical: #FF7A52;
+  --pele-error: #FF7A52;
+  --pele-series-1: #9a86ff; --pele-series-2: #3fd1b8; --pele-series-3: #ffb547; --pele-series-4: #ff6b8b;
+  --pele-series-5: #6aa8ff; --pele-series-6: #c4a5ff; --pele-series-7: #8fd16a; --pele-series-8: #d29b7f;
+  --hd-live: #A39CE0;  --hd-live-bg: #24223A;
+  --hd-wait: #9DB4CF;  --hd-wait-bg: #22303D;
+  --hd-ok:   #7CC25E;  --hd-ok-bg:   #1C2A17;
+  --hd-fail: #FF7A52;  --hd-fail-bg: #33190F;
+  --hd-idle: #7A7466;  --hd-idle-bg: #1B1A17;
+}
+/* polish */
+.pele .pele-edge path { stroke-width: 1.4px; stroke-linecap: round; }
+.pele .pele-edge-label rect { fill: var(--pele-bg); }
+.pele .pele-edge-label text { fill: var(--pele-muted); }
+.pele .pele-cluster-label, .pele .pele-title { letter-spacing: .01em; }
+.pele .pele-node > rect, .pele .pele-node > path, .pele .pele-node > polygon, .pele .pele-node > circle, .pele .pele-node > ellipse { stroke-width: 1.2px; }
+/* house semantic classes: in Mermaid write `classDef live stroke-width:1.6px` + `class X live` */
+.pele .live > rect, .pele .live > path, .pele .live > polygon, .pele .live > circle, .pele .live > ellipse { fill: var(--hd-live-bg) !important; stroke: var(--hd-live) !important; }
+.pele .wait > rect, .pele .wait > path, .pele .wait > polygon, .pele .wait > circle, .pele .wait > ellipse { fill: var(--hd-wait-bg) !important; stroke: var(--hd-wait) !important; }
+.pele .ok   > rect, .pele .ok   > path, .pele .ok   > polygon, .pele .ok > circle, .pele .ok > ellipse { fill: var(--hd-ok-bg)   !important; stroke: var(--hd-ok)   !important; }
+.pele .fail > rect, .pele .fail > path, .pele .fail > polygon, .pele .fail > circle, .pele .fail > ellipse { fill: var(--hd-fail-bg) !important; stroke: var(--hd-fail) !important; }
+.pele .idle > rect, .pele .idle > path, .pele .idle > polygon, .pele .idle > circle, .pele .idle > ellipse { fill: var(--hd-idle-bg) !important; stroke: var(--hd-idle) !important; stroke-dasharray: 4 3; }
+.pele .live .pele-label { fill: var(--hd-live); font-weight: 600; }
+.pele .wait .pele-label { fill: var(--hd-wait); font-weight: 600; }
+.pele .ok   .pele-label { fill: var(--hd-ok);   font-weight: 600; }
+.pele .fail .pele-label { fill: var(--hd-fail); font-weight: 600; }
+.pele .idle .pele-label { fill: var(--hd-idle); }
+]]></style><text class="pele-title" font-weight="var(--_tw)" text-anchor="middle" xml:space="preserve"><tspan x="279" y="40.75">Observe projects without registration writes</tspan></text><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge" data-id="L_CLI_Registry_0"><path d="M204.43,106C204.43,140.75 99.75,140.75 99.75,175.5L99.75,181.5"/><path class="pele-marker" d="M99.75,188.5L96.39,180.5L103.11,180.5Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_CLI_Opt_0"><path d="M298.13,106C298.13,123.5 348.98,123.5 348.98,141L348.98,147"/><path class="pele-marker" d="M348.98,154L345.62,146L352.34,146Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Opt_Runtime_0"><path d="M333.3,260.21C333.3,275.36 250.63,275.36 250.63,290.51L250.63,335.01"/><path class="pele-marker" d="M250.63,342.01L247.27,334.01L253.99,334.01Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Opt_NoRuntime_0"><path d="M364.66,260.21C364.66,275.36 455.45,275.36 455.45,290.51L455.45,343.51"/><path class="pele-marker" d="M455.45,350.51L452.09,342.51L458.81,342.51Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Registry_Views_0"><path d="M99.75,235.5L99.75,406.01C99.75,423.51 207.94,423.51 207.94,441.01L207.94,447.01"/><path class="pele-marker" d="M207.94,454.01L204.58,446.01L211.3,446.01Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Runtime_Views_0"><path d="M250.63,406.01L250.63,447.01"/><path class="pele-marker" d="M250.63,454.01L247.27,446.01L253.99,446.01Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_NoRuntime_Views_0"><path d="M455.45,397.51C455.45,419.26 293.33,419.26 293.33,441.01L293.33,447.01"/><path class="pele-marker" d="M293.33,454.01L289.97,446.01L296.69,446.01Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Views_Native_0"><path d="M250.63,518.01L250.63,559.01"/><path class="pele-marker" d="M250.63,566.01L247.27,558.01L253.99,558.01Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Native_Unknown_0"><path d="M242.44,661.29C242.44,674.1 129.12,674.1 129.12,686.91L129.12,731.41"/><path class="pele-marker" d="M129.12,738.41L125.76,730.41L132.48,730.41Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Native_Project_0"><path d="M258.83,661.29C258.83,674.1 381.44,674.1 381.44,686.91L381.44,739.91"/><path class="pele-marker" d="M381.44,746.91L378.08,738.91L384.8,738.91Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Unknown_JSON_0"><path d="M129.12,802.41C129.12,819.91 208.79,819.91 208.79,837.41L208.79,843.41"/><path class="pele-marker" d="M208.79,850.41L205.43,842.41L212.15,842.41Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Project_JSON_0"><path d="M381.44,793.91C381.44,815.66 292.47,815.66 292.47,837.41L292.47,843.41"/><path class="pele-marker" d="M292.47,850.41L289.11,842.41L295.83,842.41Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-edge-labels" font-size="13"><g class="pele-edge-label" data-id="L_Opt_Runtime_0"><rect x="235.43" y="292.51" width="30.4" height="20" rx="3" fill="var(--_bg)"/><text x="250.63" y="307.06" text-anchor="middle">Yes</text></g><g class="pele-edge-label" data-id="L_Opt_NoRuntime_0"><rect x="443.14" y="292.51" width="24.61" height="20" rx="3" fill="var(--_bg)"/><text x="455.45" y="307.06" text-anchor="middle">No</text></g><g class="pele-edge-label" data-id="L_Native_Unknown_0"><rect x="113.92" y="688.91" width="30.4" height="20" rx="3" fill="var(--_bg)"/><text x="129.12" y="703.46" text-anchor="middle">Yes</text></g><g class="pele-edge-label" data-id="L_Native_Project_0"><rect x="369.13" y="688.91" width="24.61" height="20" rx="3" fill="var(--_bg)"/><text x="381.44" y="703.46" text-anchor="middle">No</text></g></g><g class="pele-nodes"><g class="pele-node pele-shape-rect" data-id="CLI" transform="translate(251.28,82.5)"><rect x="-98.85" y="-23.5" width="197.7" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">projects --json --observe</text></g><g class="pele-node pele-shape-rect" data-id="Registry" transform="translate(99.75,212)"><rect x="-62.59" y="-23.5" width="125.19" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Read registry</text></g><g class="pele-node pele-shape-diam" data-id="Opt" transform="translate(348.98,212)"><polygon points="0,-58 92.81,0 0,58 -92.81,0" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Explicit --runtime?</text></g><g class="pele-node pele-shape-rect" data-id="Runtime" transform="translate(250.63,374.01)"><rect x="-86.36" y="-32" width="172.73" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Read Docker ps and</tspan><tspan x="0" y="15.25">inspect</tspan></text></g><g class="pele-node pele-shape-rect" data-id="NoRuntime" transform="translate(455.45,374.01)"><rect x="-78.45" y="-23.5" width="156.9" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">No engine contact</text></g><g class="pele-node pele-shape-rect" data-id="Views" transform="translate(250.63,486.01)"><rect x="-94.69" y="-32" width="189.39" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Build registered project</tspan><tspan x="0" y="15.25">views</tspan></text></g><g class="pele-node pele-shape-diam" data-id="Native" transform="translate(250.63,616.21)"><polygon points="0,-50.2 80.32,0 0,50.2 -80.32,0" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Native inputs?</text></g><g class="pele-node pele-shape-rect" data-id="Unknown" transform="translate(129.12,770.41)"><rect x="-105.12" y="-32" width="210.24" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Keep row, native observer</tspan><tspan x="0" y="15.25">required</tspan></text></g><g class="pele-node pele-shape-rect" data-id="Project" transform="translate(381.44,770.41)"><rect x="-107.2" y="-23.5" width="214.4" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Project activity or unknown</text></g><g class="pele-node pele-shape-rect" data-id="JSON" transform="translate(250.63,873.91)"><rect x="-93.84" y="-23.5" width="187.68" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Full or summary JSON</text></g></g></svg>

@@ -539,6 +539,8 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
     });
     let calls = 0;
     let cancellations = 0;
+    let archiveReadPending = false;
+    let archiveDelivered = false;
     const signals: unknown[] = [];
     const mock = spyOn(globalThis, "fetch").mockImplementation(
       fetchMock((url, options) => {
@@ -560,19 +562,27 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
         ) {
           return Promise.resolve(
             new Response(
-              new ReadableStream<Uint8Array>({
-                start(controller) {
-                  if (scenario === "cleanup") {
-                    controller.enqueue(fixture.archive);
-                  }
+              new ReadableStream<Uint8Array>(
+                {
+                  pull(controller) {
+                    if (scenario === "cleanup") {
+                      if (archiveDelivered) {
+                        archiveReadPending = true;
+                      } else {
+                        archiveDelivered = true;
+                        controller.enqueue(fixture.archive);
+                      }
+                    }
+                  },
+                  cancel() {
+                    cancellations++;
+                    if (scenario === "cleanup") {
+                      return new Promise<void>(() => {});
+                    }
+                  },
                 },
-                cancel() {
-                  cancellations++;
-                  if (scenario === "cleanup") {
-                    return new Promise<void>(() => {});
-                  }
-                },
-              })
+                { highWaterMark: 0 }
+              )
             )
           );
         }
@@ -585,19 +595,27 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
         (error) => ({ value: undefined, error })
       );
       if (scenario === "stall" || scenario === "cleanup") {
-        // Advance the fake clock once asynchronous disk writes/close reach the
-        // request whose timeout and cancellation this case models.
+        // With no stream prefetch, the next pull proves the archive write was
+        // awaited. Fetch starting alone does not prove even open() has finished.
         for (
           let spin = 0;
-          spin < 100 && calls < (scenario === "stall" ? 2 : 5);
+          spin < 100 &&
+          (scenario === "cleanup" ? !archiveReadPending : calls < 2);
           spin++
         ) {
           await drain();
         }
         expect(calls).toBe(scenario === "stall" ? 2 : 5);
+        if (scenario === "cleanup") {
+          expect(archiveReadPending).toBe(true);
+        }
         clock.advance(31);
         await drain();
         if (scenario === "cleanup") {
+          for (let spin = 0; spin < 100 && cancellations === 0; spin++) {
+            await drain();
+          }
+          expect(cancellations).toBe(1);
           clock.advance(5);
         }
       }

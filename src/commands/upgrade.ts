@@ -28,6 +28,10 @@ import {
 import { defaultUpgradeCheckProbes } from "../lib/upgrade-check-probes.ts";
 import { renderUpgradeCheck } from "../lib/upgrade-check-render.ts";
 import {
+  collectUpgradeReview,
+  renderUpgradeReview,
+} from "../lib/upgrade-review.ts";
+import {
   createUpgradeSnapshot,
   listUpgradeSnapshots,
   type RestoreUpgradeSnapshotResult,
@@ -133,7 +137,7 @@ const optOnly = defineOption({
   long: "--only",
   valueHint: "<fix>",
   description:
-    "Run only this plan step: ignore-rules or agent-integrations (comma-separated for both)",
+    "Run selected plan steps: ignore-rules, agent-integrations or env-key-permissions (comma-separated)",
 } as const);
 
 const optDryRun = defineOption({
@@ -165,6 +169,7 @@ const applyOptions = [
   optDryRun,
   optResume,
   optSnapshotRoot,
+  optVerbose,
   optJson,
 ] as const;
 
@@ -175,16 +180,38 @@ const applySpec = defineCommand({
   group: "Diagnostics",
   description: [
     "Checks first, then runs the plan steps marked (apply) for every checkout they cover: refreshing",
-    "outdated .hack/.gitignore files and removing stale standalone agent files the hack plugin replaces",
+    "outdated .hack/.gitignore files, removing group/other access from verified weak keys without changing owner bits,",
+    "and removing stale standalone agent files the hack plugin replaces",
     "(each removal covered by the same snapshot). Before changing anything it keeps an upgrade",
     "snapshot and writes a journal beside it with the snapshot's coverage and gaps and each checkout's",
     "outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback",
-    "command. --dry-run lists what would change. Exits 1 when anything selected was not done.",
+    "command. --dry-run summarizes what would change; --verbose includes file paths. Exits 1 when anything selected was not done.",
     "After interruption, --resume <manifest> reuses that run's selection and snapshot; unexpected edits refuse.",
     "Other-volume checkouts are skipped before writing. Select one project with --snapshot-root on its volume",
     "to keep recovery bytes in an explicit private directory outside every Git working tree.",
   ].join("\n"),
   options: applyOptions,
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const optReviewOnly = defineOption({
+  name: "only",
+  type: "string",
+  long: "--only",
+  valueHint: "<finding>",
+  description:
+    "Review env-secrets, env-format, env-key or tracked-files (comma-separated)",
+} as const);
+const reviewOptions = [optReviewOnly, optProject, optJson] as const;
+const reviewSpec = defineCommand({
+  name: "review",
+  summary:
+    "Walk affected checkouts and explain decisions that cannot be applied safely",
+  group: "Diagnostics",
+  description:
+    "Runs a fresh read-only check, then walks the selected env/key/tracked-file findings with their reasons and checkout-specific diagnostics. Executes no fixes or printed commands.",
+  options: reviewOptions,
   positionals: [],
   subcommands: [],
 } as const);
@@ -198,10 +225,42 @@ export const upgradeCommand = defineCommand({
   subcommands: [
     withHandler(checkSpec, handleUpgradeCheck),
     withHandler(applySpec, handleUpgradeApply),
+    withHandler(reviewSpec, handleUpgradeReview),
     withHandler(snapshotSpec, handleUpgradeSnapshot),
     withHandler(rollbackSpec, handleUpgradeRollback),
   ],
 } as const);
+
+async function handleUpgradeReview({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: CommandArgs<typeof reviewOptions, readonly []>;
+}): Promise<number> {
+  const only = (args.options.only ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (args.options.only !== undefined && only.length === 0) {
+    throw new CliUsageError("--only needs a finding id.");
+  }
+  const project = args.options.project?.trim();
+  if (args.options.project !== undefined && !project) {
+    throw new CliUsageError("--project needs a registered project name.");
+  }
+  const result = collectUpgradeReview({
+    report: await check(ctx),
+    only,
+    project,
+  });
+  if (args.options.json) {
+    emitCliResult({ result: okResult({ data: result }) });
+  } else {
+    process.stdout.write(renderUpgradeReview(result));
+  }
+  return result.status === "refused" ? 1 : 0;
+}
 
 /** A command line that runs this CLI (the candidate launcher during the prerelease). */
 function command(args: readonly string[]): string {
@@ -478,7 +537,7 @@ async function handleUpgradeApply({
     .map((id) => id.trim())
     .filter((id) => id.length > 0);
   if (args.options.only !== undefined && only.length === 0) {
-    throw new CliUsageError("--only needs ignore-rules or agent-integrations.");
+    throw new CliUsageError("--only needs a supported fix id (see --help).");
   }
   const project = args.options.project?.trim();
   if (args.options.project !== undefined && !project) {
@@ -527,7 +586,14 @@ async function handleUpgradeApply({
       result: okResult({ data: applyJson({ result, after, rollback }) }),
     });
   } else {
-    process.stdout.write(renderApply({ result, after, rollback }));
+    process.stdout.write(
+      renderApply({
+        result,
+        after,
+        rollback,
+        verbose: args.options.verbose === true,
+      })
+    );
   }
   // Exit 1 when selected work did not all get done: refused, blocked
   // (every selected checkout skipped) or partial.
@@ -577,6 +643,7 @@ function applyJson(opts: {
 }
 
 const APPLY_LABEL: Readonly<Record<string, string>> = {
+  "env-key-permissions": "env key permissions",
   "ignore-rules": ".hack/.gitignore",
   "agent-integrations": "agent files",
 };
@@ -586,13 +653,14 @@ export function renderApply(opts: {
   readonly result: UpgradeApplyResult;
   readonly after: UpgradeCheckReport | null;
   readonly rollback: string | null;
+  readonly verbose?: boolean;
 }): string {
   const { result } = opts;
   const lines =
     result.status === "refused"
       ? [result.message]
       : [
-          ...outcomeLines(result),
+          ...outcomeLines(result, opts.verbose === true),
           ...recoveryLines({ result, rollback: opts.rollback }),
           ...afterLines(opts.after),
         ];
@@ -600,7 +668,8 @@ export function renderApply(opts: {
 }
 
 function outcomeLines(
-  result: Exclude<UpgradeApplyResult, { status: "refused" }>
+  result: Exclude<UpgradeApplyResult, { status: "refused" }>,
+  verbose: boolean
 ): string[] {
   const notes = result.notes.map((note) => `Note: ${note}`);
   if (result.targets.length === 0) {
@@ -612,7 +681,8 @@ function outcomeLines(
     groups.set(key, [...(groups.get(key) ?? []), target]);
   }
   const verb = result.status === "dry-run" ? "would change" : "changed";
-  const lines: string[] = [];
+  const lines: string[] =
+    result.status === "dry-run" ? dryRunSummary(result.targets) : [];
   for (const targets of groups.values()) {
     const first = targets[0] as (typeof targets)[number];
     const names = targets.slice(0, 3).map((t) => t.scope);
@@ -625,7 +695,7 @@ function outcomeLines(
       lines.push(`  ${first.message}`);
     }
   }
-  if (result.status === "dry-run") {
+  if (result.status === "dry-run" && verbose) {
     lines.push(
       ...result.targets.flatMap((target) =>
         (target.files ?? []).map((path) => `  ${path}`)
@@ -638,6 +708,28 @@ function outcomeLines(
     );
   }
   return [...lines, ...notes];
+}
+
+function dryRunSummary(
+  targets: readonly Exclude<
+    UpgradeApplyResult,
+    { status: "refused" }
+  >["targets"][number][]
+): string[] {
+  const fixes = new Map<string, typeof targets>();
+  for (const target of targets) {
+    fixes.set(target.fix, [...(fixes.get(target.fix) ?? []), target]);
+  }
+  const files = new Set(targets.flatMap((target) => target.files ?? []));
+  return [
+    `Preview: ${fixes.size} step(s), ${new Set(targets.map((target) => target.root)).size} checkout/scope(s), ${files.size} candidate file(s). Nothing changed.`,
+    ...[...fixes].map(
+      ([fix, items]) =>
+        `  ${APPLY_LABEL[fix] ?? fix}: ${items.length} checkout/scope(s), ${new Set(items.flatMap((target) => target.files ?? [])).size} candidate file(s).`
+    ),
+    "File paths: add --verbose (or --json for full detail).",
+    "",
+  ];
 }
 
 function recoveryLines(opts: {

@@ -15,6 +15,7 @@ import {
   installLaunchdService,
   kickstartLaunchdService,
   type LaunchdServiceStatus,
+  readLaunchdManagerState,
   resolveLaunchdAccess,
   uninstallLaunchdService,
 } from "../daemon/launchd.ts";
@@ -51,6 +52,10 @@ import {
   type DaemonStatusReport,
   readDaemonStatus,
 } from "../daemon/status.ts";
+import {
+  defaultSystemdDeps,
+  readSystemdManagerState,
+} from "../daemon/systemd.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { readTextFile } from "../lib/fs.ts";
@@ -65,7 +70,11 @@ import {
   refuseForeignLaunchdProgram,
   startViaLaunchdIfLoaded,
 } from "./daemon-launchd.ts";
-import { startReplacementDaemon } from "./daemon-replace.ts";
+import {
+  type ReplacementStartOutcome,
+  type ServiceManagerState,
+  startReplacementDaemon,
+} from "./daemon-replace.ts";
 import { runDaemonCommand } from "./daemon-result.ts";
 import {
   describeSystemdIncompatibleOwner,
@@ -348,9 +357,10 @@ async function startDaemon(opts: {
       stalePid: pidIsDaemon ? null : livePid,
     });
   if (!replaced || opts.foreground) {
-    return await startStopped();
+    return (await startStopped()).exitCode;
   }
-  // A running daemon was just stopped: never leave hackd stopped.
+  // A running daemon was just stopped: never leave hackd stopped, unless
+  // the manager may still start it (see startReplacementDaemon).
   return await startReplacementDaemon({
     trace,
     startViaService: startStopped,
@@ -359,10 +369,32 @@ async function startDaemon(opts: {
       const now = await readDaemonStatus({ paths });
       return now.running && now.socketExists;
     },
+    managerState: (manager) => readServiceManagerState({ manager, paths }),
   });
 }
 
-/** `start` once no hackd of this home runs (or it was just replaced). */
+/**
+ * The service manager's state for {@link startReplacementDaemon}; `null`:
+ * the platform's own manager (systemd on Linux, launchd on macOS).
+ */
+function readServiceManagerState(opts: {
+  readonly manager: "systemd" | "launchd" | null;
+  readonly paths: DaemonPaths;
+}): Promise<ServiceManagerState> {
+  const manager =
+    opts.manager ?? (process.platform === "darwin" ? "launchd" : "systemd");
+  if (manager === "launchd") {
+    return readLaunchdManagerState({ paths: opts.paths });
+  }
+  return process.platform === "linux"
+    ? readSystemdManagerState({ deps: defaultSystemdDeps() })
+    : Promise.resolve("idle");
+}
+
+/**
+ * `start` once no hackd of this home runs (or it was just replaced). The
+ * outcome says how far it got, for the replacement fallback.
+ */
 async function startStoppedDaemon(opts: {
   readonly paths: DaemonPaths;
   readonly foreground: boolean;
@@ -370,14 +402,15 @@ async function startStoppedDaemon(opts: {
   readonly trackedPid: number | null;
   /** A live pid already shown not to be hackd. */
   readonly stalePid: number | null;
-}): Promise<number> {
+}): Promise<ReplacementStartOutcome> {
   const { paths, trace } = opts;
   const sweep = await sweepOrphanDaemons({
     trackedPid: opts.trackedPid,
     paths,
   });
   if (!sweep.allStopped) {
-    return 1;
+    // A proven orphan still holds the socket: any start would fail.
+    return { kind: "direct-attempted", exitCode: 1, manager: null };
   }
 
   // An installed hackd.service owns the daemon on Linux. Start through it
@@ -385,13 +418,21 @@ async function startStoppedDaemon(opts: {
   // another starter may be writing them right now, and hackd replaces its
   // own socket when it starts.
   if (process.platform === "linux" && !opts.foreground) {
+    let requested = false;
     const viaSystemd = await startViaSystemdIfInstalled({
       paths,
       waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
       trace,
+      onStartRequested: () => {
+        requested = true;
+      },
     });
     if (viaSystemd !== null) {
-      return viaSystemd;
+      return {
+        kind: requested ? "service-attempted" : "service-refused",
+        exitCode: viaSystemd,
+        manager: "systemd",
+      };
     }
     // The unit serves another home, or systemd is unusable: hackd starts
     // directly, whatever was noted about the unit.
@@ -403,27 +444,36 @@ async function startStoppedDaemon(opts: {
     stalePid: opts.stalePid,
   });
   if (raced !== null) {
-    return raced;
+    // Another starter owns this start.
+    return { kind: "direct-attempted", exitCode: raced, manager: null };
   }
 
   if (opts.foreground) {
     await runDaemon({ paths, foreground: true });
-    return 0;
+    return { kind: "direct-attempted", exitCode: 0, manager: null };
   }
 
+  let requested = false;
   const viaLaunchd = await startViaLaunchdIfLoaded({
     paths,
     trace,
     waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+    onStartRequested: () => {
+      requested = true;
+    },
   });
   if (viaLaunchd !== null) {
-    return viaLaunchd;
+    return {
+      kind: requested ? "service-attempted" : "service-refused",
+      exitCode: viaLaunchd,
+      manager: "launchd",
+    };
   }
 
   const started = await startDaemonDetached({ paths });
   trace.manager = "none";
   trace.action = started === 0 ? "started" : trace.action;
-  return started;
+  return { kind: "direct-attempted", exitCode: started, manager: null };
 }
 
 /**

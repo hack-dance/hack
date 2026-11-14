@@ -2612,6 +2612,62 @@ function errorMessage(error: unknown): string {
  * runs are safe (a drop-in can set PATH or add Exec* entries).
  */
 /**
+ * Whether systemd will not start hackd.service on its own any more
+ * (HACK-2216): `idle` only when `ActiveState` is `inactive` or `failed`,
+ * `SubState` is not `auto-restart` (no restart timer) and no `Job` is
+ * queued, or when systemd positively reports the unit not loaded
+ * (`LoadState=not-found`). `pending` when it is activating, active,
+ * deactivating, restarting or has a job; `unknown` when the query fails or
+ * leaves any of these out.
+ */
+export function classifySystemdManagerState(opts: {
+  readonly exitCode: number;
+  readonly stdout: string;
+}): "idle" | "pending" | "unknown" {
+  if (opts.exitCode !== 0) {
+    return "unknown";
+  }
+  const props = parseSystemdProperties(opts.stdout);
+  if (props.LoadState === "not-found") {
+    return "idle";
+  }
+  const active = props.ActiveState;
+  const sub = props.SubState;
+  const job = props.Job;
+  if (active === undefined || sub === undefined || job === undefined) {
+    return "unknown";
+  }
+  if (job.length > 0) {
+    return "pending";
+  }
+  if (sub === "auto-restart") {
+    return "pending";
+  }
+  return active === "inactive" || active === "failed" ? "idle" : "pending";
+}
+
+export async function readSystemdManagerState(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<"idle" | "pending" | "unknown"> {
+  if (!resolveSystemdAccess({ env: opts.deps.env }).allowed) {
+    // This process may not use the user service: it cannot have started
+    // one, and does not manage one.
+    return "idle";
+  }
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    // --all: print the requested properties even when empty, so "no job"
+    // is reported as `Job=` rather than left out (left out is unknown).
+    "--all",
+    "--property=LoadState,ActiveState,SubState,Job",
+  ]);
+  return classifySystemdManagerState(show);
+}
+
+/**
  * The service as systemd has it loaded now, drop-ins included: its
  * effective PATH directories and every program it runs must pass the
  * install checks. What {@link checkBeforeEnable} applies after a write,

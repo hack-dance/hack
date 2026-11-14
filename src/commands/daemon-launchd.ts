@@ -37,6 +37,11 @@ export interface LaunchdStartHooks {
   readonly readPlist?: () => Promise<string | null>;
   /** Defaults to {@link proveLaunchdJobOwnership}; tests pin it. */
   readonly proveJob?: () => Promise<boolean>;
+  /**
+   * Called before launchd may be asked to start hackd (a reload or a
+   * kickstart), so the caller can tell a refusal from a failed start.
+   */
+  readonly onStartRequested?: () => void;
   /** Defaults to {@link kickstartLaunchdService}. */
   readonly kickstart?: () => Promise<{
     readonly ok: boolean;
@@ -223,6 +228,9 @@ export async function startViaLaunchdIfLoaded(
     return null;
   }
   trace.manager = "launchd";
+  // A repair may reload (bootstrap) the job, which can start it: from here
+  // on launchd may have been asked to start hackd.
+  hooks.onStartRequested?.();
   const repair = await (
     hooks.repair ?? (() => repairLaunchdProgramIfInvalid({ paths }))
   )();

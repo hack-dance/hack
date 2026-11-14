@@ -78,7 +78,11 @@ export type ServiceUnitState =
  * - `rewrite-refused`: the unit needs a rewrite before it can start, but
  *   the rewrite would be refused (no durable `hack` to retarget to, or a
  *   program or service PATH that fails install's checks), so a running
- *   daemon was not stopped to make room for it.
+ *   daemon was not stopped to make room for it;
+ * - `service-pending`: a replaced daemon's service start failed, but the
+ *   manager may still start it (a queued job, restart timer or KeepAlive
+ *   retry) or could not be checked, so hackd was not started directly
+ *   next to it.
  */
 export type DaemonReconcileBlock =
   | "read-only"
@@ -88,7 +92,8 @@ export type DaemonReconcileBlock =
   | "home-binding"
   | "inside-service"
   | "unproven-owner"
-  | "rewrite-refused";
+  | "rewrite-refused"
+  | "service-pending";
 
 export interface DaemonReconcileInput {
   readonly unit: ServiceUnitState;

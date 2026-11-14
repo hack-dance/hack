@@ -740,6 +740,22 @@ Such a plist is never replaced automatically; `start` reports it and
   reconcile-only mode uses the fallback as well, because that daemon was
   running before.
 
+  The fallback covers an early refusal (before the manager was asked to start
+  anything), a failed start, and a start that throws. It never starts a second
+  hackd next to one the manager may still start, so it runs only on positive
+  evidence that the manager is idle:
+  - systemd: `ActiveState` is `inactive` or `failed`, `SubState` is not
+    `auto-restart`, and no `Job` is queued (or the unit is not loaded);
+  - launchd: the job is not loaded (launchd says so), or it is loaded, not
+    running, and its plist asks for no retry (`KeepAlive` and `RunAtLoad` not
+    true). Hack's own plist has a conditional `KeepAlive`, which cannot be
+    told, so a loaded Hack plist counts as unknown.
+
+  When the manager may still start hackd, or cannot be checked, `start`
+  returns the service's error with `blocked: "service-pending"` and says the
+  service may still start hackd. Whether hackd was asked to start comes from
+  what the start itself reports, not from the `--json` record.
+
 ```mermaid
 stateDiagram-v2
   [*] --> Observe
@@ -795,7 +811,7 @@ else on stdout (human lines go to stderr). Success is
 | `manager` | `systemd`, `launchd` or `none` (hackd runs directly) |
 | `action` | `none`, `started`, `restarted`, `reinstalled`, `stopped` or `installed` |
 | `stale`, `stale_reasons` | whether the service or daemon was stale, and why: `content`, `program-missing`, `version-mismatch` |
-| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service`, `unproven-owner`, `rewrite-refused` |
+| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service`, `unproven-owner`, `rewrite-refused`, `service-pending` |
 | `fallback` | `"direct"` when a replaced daemon was started directly because the service could not start it, else `null` |
 | `cli_version` | this CLI's version |
 | `daemon` | `running`, `pid`, `version` and `compatible` after the command |

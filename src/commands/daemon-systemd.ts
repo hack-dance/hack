@@ -124,6 +124,11 @@ export interface SystemdCommandHooks {
   readonly probe?: DaemonProcessProbe;
   /** Test seam: a process's parent pid (defaults to /proc). */
   readonly parentPid?: (pid: number) => Promise<number | null>;
+  /**
+   * Called just before systemd is asked to start the unit, so the caller
+   * can tell a refusal (nothing asked) from a failed start.
+   */
+  readonly onStartRequested?: () => void;
   /** Defaults to reading `/proc/self/cgroup`; tests pin it. */
   readonly readSelfCgroup?: () => Promise<string | null>;
   /** Records what the command decided, for `--json` (HACK-2216). */
@@ -351,6 +356,7 @@ export async function startViaSystemdIfInstalled(
     logger.error({ message: loaded });
     return 1;
   }
+  hooks.onStartRequested?.();
   const started = await systemdServiceAction({ action: "start", deps });
   if (!started.ok) {
     logger.error({

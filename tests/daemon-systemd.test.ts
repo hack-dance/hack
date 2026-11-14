@@ -53,6 +53,7 @@ import {
   parseSystemdPathList,
   probeSystemdUserManager,
   programFileProblem,
+  readSystemdManagerState,
   readSystemdServicePathDirectories,
   readSystemdServiceStatus,
   renderSystemdUnit,
@@ -5152,3 +5153,64 @@ linuxTest(
     expect(await readFile(unitPath, "utf8")).toBe(stale);
   }
 );
+
+// Review round 11 (HACK-2216): explicit start outcomes and manager state.
+
+linuxTest(
+  "an early systemd refusal is reported as not having asked systemd to start",
+  async () => {
+    const fake = fakeSystemd();
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    // A unit file others could write: refused before any start request.
+    await chmod(unitPath, 0o666);
+    let requested = 0;
+    const trace = createDaemonCommandTrace();
+    fake.calls.length = 0;
+    expect(
+      await startViaSystemdIfInstalled({
+        ...startHooks(fake),
+        trace,
+        onStartRequested: () => {
+          requested += 1;
+        },
+      })
+    ).toBe(1);
+    expect(requested).toBe(0);
+    // Nothing reached the trace: the outcome, not the trace, decides.
+    expect(trace.manager).toBe("none");
+    expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+
+    // A usable unit: systemd is asked, and the hook says so first.
+    await chmod(unitPath, 0o644);
+    expect(
+      await startViaSystemdIfInstalled({
+        ...startHooks(fake),
+        onStartRequested: () => {
+          requested += 1;
+        },
+      })
+    ).toBe(0);
+    expect(requested).toBe(1);
+  }
+);
+
+linuxTest("systemd's manager state is read through the runner", async () => {
+  const fake = fakeSystemd();
+  let answer =
+    "LoadState=loaded\nActiveState=activating\nSubState=start\nJob=7\n";
+  const run = fake.deps.run;
+  const deps: SystemdDeps = {
+    ...fake.deps,
+    run: (command, args) =>
+      args.includes("--property=LoadState,ActiveState,SubState,Job")
+        ? Promise.resolve({ exitCode: 0, stdout: answer, stderr: "" })
+        : run(command, args),
+  };
+  expect(await readSystemdManagerState({ deps })).toBe("pending");
+  answer = "LoadState=loaded\nActiveState=inactive\nSubState=dead\nJob=\n";
+  expect(await readSystemdManagerState({ deps })).toBe("idle");
+});

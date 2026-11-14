@@ -15,7 +15,11 @@ import {
   checkRunningLaunchdDaemon,
   startViaLaunchdIfLoaded,
 } from "../src/commands/daemon-launchd.ts";
-import { startReplacementDaemon } from "../src/commands/daemon-replace.ts";
+import {
+  type ReplacementStartOutcome,
+  type ServiceManagerState,
+  startReplacementDaemon,
+} from "../src/commands/daemon-replace.ts";
 import {
   observePostUpdateDaemon,
   parseStartEnvelope,
@@ -31,6 +35,7 @@ import {
   parseLaunchdPlistProgram,
   plistKeepsThisHome,
   proveLaunchdJobOwnership,
+  readLaunchdManagerState,
   renderLaunchdPlist,
 } from "../src/daemon/launchd.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
@@ -45,6 +50,7 @@ import {
 } from "../src/daemon/reconcile.ts";
 import { detachedDaemonEnvironment } from "../src/daemon/spawn.ts";
 import {
+  classifySystemdManagerState,
   findDroppedHomeBinding,
   isHackManagedUnit,
   readInvokerInSystemdUnit,
@@ -1162,93 +1168,216 @@ test("launchd: an incompatible direct daemon is not replaced when the loaded job
   expect(effects).toEqual([]);
 });
 
-// Review round 10 (HACK-2216): a replacement never leaves hackd stopped.
+// Review rounds 10 and 11 (HACK-2216): a replacement does not leave hackd
+// stopped, but never starts a second daemon next to a pending manager.
 
-test("a refused service start after the stop falls back to a direct start", async () => {
+type ReplacementCase = {
+  readonly outcome?: ReplacementStartOutcome;
+  readonly rejects?: Error;
+  readonly running?: boolean;
+  readonly managerState?: ServiceManagerState;
+  readonly directCode?: number;
+};
+
+async function runReplacement(c: ReplacementCase) {
   const trace = createDaemonCommandTrace();
   const steps: string[] = [];
-  const code = await startReplacementDaemon({
-    trace,
-    startViaService: () => {
-      steps.push("service");
-      // As startViaSystemdIfInstalled does after a post-stop refusal.
-      trace.manager = "systemd";
-      trace.blocked = "rewrite-refused";
-      return Promise.resolve(1);
-    },
-    startDirect: () => {
-      steps.push("direct");
-      return Promise.resolve(0);
-    },
-    isRunning: () => Promise.resolve(false),
-  });
-  expect(code).toBe(0);
-  expect(steps).toEqual(["service", "direct"]);
-  expect(trace).toMatchObject({
-    manager: "systemd",
-    action: "restarted",
-    blocked: "rewrite-refused",
-    fallback: "direct",
-  });
-  expect(
-    buildDaemonCommandData({
-      command: "start",
-      trace,
-      daemon: { running: true, pid: 9, version: "2.0.0" },
-      cliVersion: "2.0.0",
-    })
-  ).toMatchObject({
-    action: "restarted",
-    blocked: "rewrite-refused",
-    fallback: "direct",
-  });
-});
-
-test("the fallback is not used when the service start worked, is still starting, or was already direct", async () => {
-  const run = async (opts: {
-    readonly serviceCode: number;
-    readonly manager: "systemd" | "launchd" | "none";
-    readonly running: boolean;
-    readonly directCode?: number;
-  }) => {
-    const trace = createDaemonCommandTrace();
-    const steps: string[] = [];
-    const code = await startReplacementDaemon({
+  const asked: Array<"systemd" | "launchd" | null> = [];
+  let thrown: unknown = null;
+  let code: number | null = null;
+  try {
+    code = await startReplacementDaemon({
       trace,
       startViaService: () => {
         steps.push("service");
-        trace.manager = opts.manager;
-        trace.action = opts.serviceCode === 0 ? "started" : "none";
-        return Promise.resolve(opts.serviceCode);
+        if (c.rejects) {
+          return Promise.reject(c.rejects);
+        }
+        return Promise.resolve(
+          c.outcome ?? {
+            kind: "service-attempted",
+            exitCode: 1,
+            manager: "systemd",
+          }
+        );
       },
       startDirect: () => {
         steps.push("direct");
-        return Promise.resolve(opts.directCode ?? 0);
+        return Promise.resolve(c.directCode ?? 0);
       },
-      isRunning: () => Promise.resolve(opts.running),
+      isRunning: () => Promise.resolve(c.running ?? false),
+      managerState: (manager) => {
+        asked.push(manager);
+        return Promise.resolve(c.managerState ?? "idle");
+      },
     });
-    return { code, steps, trace };
-  };
-  const ok = await run({ serviceCode: 0, manager: "launchd", running: true });
-  expect(ok).toMatchObject({ code: 0, steps: ["service"] });
-  expect(ok.trace.action).toBe("restarted");
-  expect(ok.trace.fallback).toBeNull();
-  // The service started hackd but it was not ready in time: no second one.
-  expect(
-    (await run({ serviceCode: 1, manager: "systemd", running: true })).steps
-  ).toEqual(["service"]);
-  // The service path was not used: the direct start already ran.
-  expect(
-    (await run({ serviceCode: 1, manager: "none", running: false })).steps
-  ).toEqual(["service"]);
-  // The direct start fails too: the service path's error stands.
-  const both = await run({
-    serviceCode: 1,
-    manager: "launchd",
-    running: false,
-    directCode: 1,
+  } catch (error: unknown) {
+    thrown = error;
+  }
+  return { code, thrown, steps, asked, trace };
+}
+
+test("a failed service start falls back to a direct start once the manager is idle", async () => {
+  const r = await runReplacement({
+    outcome: { kind: "service-attempted", exitCode: 1, manager: "systemd" },
   });
-  expect(both.code).toBe(1);
-  expect(both.steps).toEqual(["service", "direct"]);
-  expect(both.trace.fallback).toBeNull();
+  expect(r.code).toBe(0);
+  expect(r.steps).toEqual(["service", "direct"]);
+  expect(r.asked).toEqual(["systemd"]);
+  expect(r.trace).toMatchObject({ action: "restarted", fallback: "direct" });
+  expect(
+    buildDaemonCommandData({
+      command: "start",
+      trace: r.trace,
+      daemon: { running: true, pid: 9, version: "2.0.0" },
+      cliVersion: "2.0.0",
+    })
+  ).toMatchObject({ action: "restarted", fallback: "direct" });
+});
+
+test("a service still activating (no pid or socket yet) gets no direct start", async () => {
+  for (const managerState of ["pending", "unknown"] as const) {
+    const r = await runReplacement({
+      outcome: { kind: "service-attempted", exitCode: 1, manager: "systemd" },
+      running: false,
+      managerState,
+    });
+    expect(r.code).toBe(1);
+    expect(r.steps).toEqual(["service"]);
+    expect(r.trace.blocked).toBe("service-pending");
+    expect(r.trace.fallback).toBeNull();
+  }
+});
+
+test("a rejected service start is treated as a failed one, behind the same gate", async () => {
+  const boom = new Error("systemctl crashed");
+  const idle = await runReplacement({ rejects: boom });
+  expect(idle.thrown).toBeNull();
+  expect(idle.code).toBe(0);
+  expect(idle.steps).toEqual(["service", "direct"]);
+  // Which manager got how far is unknown: the platform's own is asked.
+  expect(idle.asked).toEqual([null]);
+  expect(idle.trace.fallback).toBe("direct");
+  // Pending, or the direct start fails too: the original error stands.
+  const pending = await runReplacement({
+    rejects: boom,
+    managerState: "pending",
+  });
+  expect(pending.thrown).toBe(boom);
+  expect(pending.steps).toEqual(["service"]);
+  const failing = await runReplacement({ rejects: boom, directCode: 1 });
+  expect(failing.thrown).toBe(boom);
+  expect(failing.steps).toEqual(["service", "direct"]);
+});
+
+test("an early service refusal with an empty trace still falls back", async () => {
+  // As an untrusted unit refuses before systemd is asked: nothing was
+  // recorded on the trace, but the outcome says the service refused.
+  const r = await runReplacement({
+    outcome: { kind: "service-refused", exitCode: 1, manager: "systemd" },
+  });
+  expect(r.code).toBe(0);
+  expect(r.steps).toEqual(["service", "direct"]);
+  expect(r.trace.manager).toBe("none");
+  expect(r.trace.fallback).toBe("direct");
+});
+
+test("no direct start when the service worked, hackd already answers, or the start was direct", async () => {
+  const ok = await runReplacement({
+    outcome: { kind: "service-attempted", exitCode: 0, manager: "launchd" },
+  });
+  expect(ok.code).toBe(0);
+  expect(ok.steps).toEqual(["service"]);
+  expect(ok.trace.fallback).toBeNull();
+  const answering = await runReplacement({ running: true });
+  expect(answering.steps).toEqual(["service"]);
+  expect(answering.code).toBe(1);
+  const direct = await runReplacement({
+    outcome: { kind: "direct-attempted", exitCode: 1, manager: null },
+  });
+  expect(direct.steps).toEqual(["service"]);
+  expect(direct.asked).toEqual([]);
+  const failing = await runReplacement({ directCode: 1 });
+  expect(failing.code).toBe(1);
+  expect(failing.trace.fallback).toBeNull();
+});
+
+test("systemd counts as idle only when inactive or failed, not restarting, with no job", () => {
+  const show = (text: string, exitCode = 0) =>
+    classifySystemdManagerState({ exitCode, stdout: text });
+  expect(
+    show("LoadState=loaded\nActiveState=inactive\nSubState=dead\nJob=\n")
+  ).toBe("idle");
+  expect(
+    show("LoadState=loaded\nActiveState=failed\nSubState=failed\nJob=\n")
+  ).toBe("idle");
+  expect(show("LoadState=not-found\nActiveState=inactive\n")).toBe("idle");
+  expect(
+    show("LoadState=loaded\nActiveState=activating\nSubState=start\nJob=12\n")
+  ).toBe("pending");
+  expect(
+    show(
+      "LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nJob=\n"
+    )
+  ).toBe("pending");
+  expect(
+    show("LoadState=loaded\nActiveState=inactive\nSubState=dead\nJob=34\n")
+  ).toBe("pending");
+  // A property left out, or a failed query, is not evidence.
+  expect(show("LoadState=loaded\nActiveState=inactive\nSubState=dead\n")).toBe(
+    "unknown"
+  );
+  expect(show("", 1)).toBe("unknown");
+});
+
+test("launchd counts as idle only when absent, or loaded, stopped and not retrying", async () => {
+  const paths = resolveDaemonPaths({ home: "/nonexistent-home" });
+  const status = (
+    over: Partial<{
+      installed: boolean;
+      loaded: boolean;
+      running: boolean;
+      pid: number | null;
+      observation: "reported" | "not-found" | "failed";
+    }>
+  ) => ({
+    installed: true,
+    loaded: true,
+    running: false,
+    pid: null,
+    exitStatus: null,
+    observation: "reported" as const,
+    ...over,
+  });
+  const plist = (keys: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n${keys}\n</dict>\n</plist>\n`;
+  const state = (
+    s: ReturnType<typeof status>,
+    text: string | null = plist("")
+  ) => readLaunchdManagerState({ paths, status: s, plistText: text });
+  expect(await state(status({ installed: false, loaded: false }))).toBe("idle");
+  expect(await state(status({ loaded: false, observation: "not-found" }))).toBe(
+    "idle"
+  );
+  expect(await state(status({ loaded: false, observation: "failed" }))).toBe(
+    "unknown"
+  );
+  expect(await state(status({ running: true, pid: 4242 }))).toBe("pending");
+  expect(await state(status({}))).toBe("idle");
+  expect(
+    await state(status({}), plist("  <key>KeepAlive</key>\n  <true/>"))
+  ).toBe("pending");
+  expect(
+    await state(status({}), plist("  <key>RunAtLoad</key>\n  <true/>"))
+  ).toBe("pending");
+  // Hack's own plist: a conditional KeepAlive dict cannot be told.
+  expect(
+    await state(
+      status({}),
+      plist(
+        "  <key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>"
+      )
+    )
+  ).toBe("unknown");
+  expect(await state(status({}), null)).toBe("unknown");
 });

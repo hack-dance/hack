@@ -280,7 +280,7 @@ test("the plan starts with the snapshot, then blockers, then machine and project
     {
       scope: "app-blocked",
       id: "env-format",
-      summary: expect.stringContaining("link or not a regular file"),
+      summary: expect.stringContaining("env-layer-refused"),
     },
   ]);
   expect(
@@ -1357,6 +1357,144 @@ test("a step with no command is manual: its action is never shown as a command",
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
+
+test("a sibling-linked env layer has a named closed refusal in check and review without values", async () => {
+  const project = await liveProject("linked-app");
+  const sibling = join(root, "sibling-checkout");
+  await mkdir(sibling);
+  const target = join(sibling, "private-layer.yaml");
+  await writeFile(target, `version: 1\nvars:\n  TOKEN: ${SENTINEL}\n`);
+  const layer = "hack.env.dev.local.yaml";
+  await symlink(target, join(project.projectDir, layer));
+  await writeRegistry([project]);
+  const before = [
+    await tree(project.repoRoot),
+    await tree(sibling),
+    await tree(hackHome),
+  ];
+  const report = await check(healthyProbes());
+  const finding = report.projects[0]?.findings.find(
+    (item) => item.id === "env-format"
+  );
+  expect(finding?.diagnostic).toEqual({
+    code: "env-layer-refused",
+    step: "env-format",
+    layer,
+  });
+  expect(finding?.summary).toContain(layer);
+  expect(finding?.summary).not.toContain("unexpected-error");
+  expect(finding?.action).toContain("replace the link with a real file here");
+  expect(finding?.action).toContain("remove the layer");
+  const checked = await cli(["upgrade", "check", "--json"]);
+  expect(checked.code).toBe(1);
+  expect(
+    JSON.parse(checked.stdout).data.projects[0].findings.find(
+      (item: { id: string }) => item.id === "env-format"
+    ).diagnostic
+  ).toEqual(finding?.diagnostic);
+  const checkedText = await cli(["upgrade", "check"]);
+  expect(checkedText.stdout).toContain("env-layer-refused");
+  expect(checkedText.stdout).toContain(layer);
+  expect(checkedText.stdout).toContain(
+    "replace the link with a readable file in this checkout"
+  );
+  const review = await cli([
+    "upgrade",
+    "review",
+    "--only",
+    "env-format",
+    "--json",
+  ]);
+  expect(review.code).toBe(0);
+  expect(
+    JSON.parse(review.stdout).data.checkouts[0].findings[0].diagnostic
+  ).toEqual(finding?.diagnostic);
+  const text = await cli(["upgrade", "review", "--only", "env-format"]);
+  expect(text.stdout).toContain("env-layer-refused");
+  expect(text.stdout).toContain(layer);
+  expect(text.stdout).toContain("rerun hack upgrade check");
+  for (const output of [
+    JSON.stringify(report),
+    checked.stdout + checked.stderr,
+    checkedText.stdout + checkedText.stderr,
+    review.stdout + review.stderr,
+    text.stdout + text.stderr,
+  ]) {
+    expect(output).not.toContain(SENTINEL);
+    expect(output).not.toContain(Buffer.from(SENTINEL).toString("base64"));
+    expect(output).not.toContain(target);
+  }
+  expect([
+    await tree(project.repoRoot),
+    await tree(sibling),
+    await tree(hackHome),
+  ]).toEqual(before);
+}, 60_000);
+
+test("an invalid env layer entry uses the same refusal code and filename-only remedy", async () => {
+  const project = await liveProject("invalid-layer");
+  const layer = "hack.env.dev.local.yaml";
+  await mkdir(join(project.projectDir, layer));
+  await writeRegistry([project]);
+  const report = await check(healthyProbes());
+  const finding = report.projects[0]?.findings.find(
+    (item) => item.id === "env-format"
+  );
+  expect(finding?.diagnostic).toEqual({
+    code: "env-layer-refused",
+    step: "env-format",
+    layer,
+  });
+  expect(finding?.status).toBe("blocker");
+  expect(finding?.action).not.toContain(project.projectDir);
+});
+
+test("unclassified upgrade errors keep a fixed failing step and never echo the error", async () => {
+  await writeRegistry([await liveProject("unknown-error")]);
+  const report = await check(
+    healthyProbes({
+      nativePreflight: async () => {
+        throw new Error(SENTINEL);
+      },
+    })
+  );
+  const finding = report.projects[0]?.findings.find(
+    (item) => item.id === "native-preflight"
+  );
+  expect(finding?.diagnostic).toEqual({
+    code: "unexpected-error",
+    step: "native-preflight",
+  });
+  expect(finding?.summary).toBe(
+    "Not checked: native-preflight failed (unexpected-error)."
+  );
+  expect(JSON.stringify(report)).not.toContain(SENTINEL);
+});
+
+test.skipIf(process.getuid?.() === 0)(
+  "an unreadable regular env layer has the same named refusal",
+  async () => {
+    const project = await liveProject("unreadable-layer");
+    const layer = "hack.env.dev.local.yaml";
+    const path = join(project.projectDir, layer);
+    await writeFile(path, SENTINEL, { mode: 0o000 });
+    await writeRegistry([project]);
+    try {
+      const report = await check(healthyProbes());
+      const finding = report.projects[0]?.findings.find(
+        (item) => item.id === "env-format"
+      );
+      expect(finding?.diagnostic).toEqual({
+        code: "env-layer-refused",
+        step: "env-format",
+        layer,
+      });
+      expect(JSON.stringify(report)).not.toContain(SENTINEL);
+    } finally {
+      await chmod(path, 0o600);
+    }
+  }
+);
 
 async function cli(args: readonly string[]) {
   const child = Bun.spawn([process.execPath, ENTRYPOINT, ...args], {

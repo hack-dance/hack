@@ -92,6 +92,9 @@ if you removed it. Then use stable `command hack up --detach` and check the app
 and data again. A native trial's data never moves into Compose volumes by itself.
 
 If Doctor blocks the trial, use [Troubleshooting](troubleshooting.md).
+If an env layer is refused, check and `upgrade review --only env-format` name
+its file with code `env-layer-refused`. Replace the link with a real readable
+file inside this checkout or remove the layer, then rerun the check.
 The detailed [machine upgrade checklist](guides/upgrade-from-v4.md) keeps the
 backup scripts, source evidence and checks still awaiting real-machine trials.
 

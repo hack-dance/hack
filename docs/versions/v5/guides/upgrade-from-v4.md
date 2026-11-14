@@ -158,6 +158,15 @@ count projects with only ignore-rule or agent-file hygiene findings. Failed
 checks include a closed error class, such as `permission-denied` or `parse-error`,
 without exposing exception messages or process output.
 
+A refused env layer has the stable diagnostic code `env-layer-refused` in check
+JSON and `hack upgrade review --only env-format` (text or JSON). Its diagnostic
+also names the fixed check `step` and the `layer` filename, never the symlink's
+target or file values. Replace a link with a real readable layer inside this
+checkout, or remove the layer, then rerun `hack upgrade check`. For an unreadable
+regular layer, restore its read permissions. Refused non-file entries remain
+blockers; checks that could not inspect a path remain incomplete. Unclassified
+errors keep `unexpected-error` and the fixed failing step, without exception text.
+
 After an interruption, choose the run explicitly:
 
 ```sh

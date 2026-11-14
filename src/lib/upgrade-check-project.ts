@@ -7,6 +7,8 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_CONFIG_LEGACY_FILENAME,
+  PROJECT_ENV_CONFIG_FILENAME_PREFIX,
+  PROJECT_ENV_CONFIG_FILENAME_SUFFIX,
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
   PROJECT_ENV_STATE_FILENAME,
@@ -27,13 +29,17 @@ import {
   ProjectEnvLayerPathConflictError,
   projectEnvConfigExistsForMutation,
 } from "./project-env-config.ts";
+import { ProjectEnvLayerRefusalError } from "./project-env-layer-path.ts";
 import type { RegisteredProject } from "./projects-registry.ts";
 import {
   inspectStoreKeyState,
   resolveFileSecretStorePaths,
 } from "./secret-store.ts";
 import { projectUsesSecretStore } from "./secret-store-retire.ts";
-import { upgradeCheckFailureClass } from "./upgrade-check-failure.ts";
+import {
+  type UpgradeCheckFailureClass,
+  upgradeCheckFailureClass,
+} from "./upgrade-check-failure.ts";
 import type { NativePreflightProbe } from "./upgrade-check-probes.ts";
 
 /**
@@ -62,6 +68,12 @@ export type UpgradeFinding = {
   readonly id: string;
   readonly status: UpgradeFindingStatus;
   readonly summary: string;
+  /** Closed diagnostic code and fixed check label; a layer is a filename only. */
+  readonly diagnostic?: {
+    readonly code: UpgradeCheckFailureClass;
+    readonly step: string;
+    readonly layer?: string;
+  };
   /**
    * The Hack CLI arguments of the command that fixes it (or diagnoses it),
    * run through the CLI that produced the report. Null when only a manual
@@ -248,16 +260,17 @@ export async function detectEnvFormats(opts: {
   readonly projectDir: string;
 }): Promise<
   | { readonly kind: "formats"; readonly formats: readonly EnvFormat[] }
-  | { readonly kind: "conflict" }
+  | { readonly kind: "conflict"; readonly layer: string }
 > {
   const formats: EnvFormat[] = [];
   try {
     if (await projectEnvConfigExistsForMutation(opts)) {
       formats.push("layers");
     }
+    await assertReadableEnvLayers(opts.projectDir);
   } catch (error: unknown) {
     if (error instanceof ProjectEnvLayerPathConflictError) {
-      return { kind: "conflict" };
+      return { kind: "conflict", layer: basename(error.path) };
     }
     throw error;
   }
@@ -280,19 +293,44 @@ export async function detectEnvFormats(opts: {
   return { kind: "formats", formats };
 }
 
+/** Readability-only preflight after the env owner admits paths; never read layer bytes. */
+async function assertReadableEnvLayers(projectDir: string): Promise<void> {
+  for (const name of await readdir(projectDir)) {
+    if (
+      !(
+        name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+      )
+    ) {
+      continue;
+    }
+    const path = resolve(projectDir, name);
+    try {
+      const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+      try {
+        if (!(await file.stat()).isFile()) {
+          throw new ProjectEnvLayerRefusalError(path);
+        }
+      } finally {
+        await file.close();
+      }
+    } catch {
+      throw new ProjectEnvLayerRefusalError(path);
+    }
+  }
+}
+
 function envFormatFinding(opts: {
   readonly detected: Awaited<ReturnType<typeof detectEnvFormats>>;
   readonly root: string;
 }): UpgradeFinding {
   if (opts.detected.kind === "conflict") {
-    return {
+    return refusedEnvLayerFinding({
       id: "env-format",
+      root: opts.root,
+      layer: opts.detected.layer,
       status: "blocker",
-      summary:
-        "An env layer path (.hack/hack.env.*.yaml) is a link or not a regular file, so the env format cannot be decided.",
-      args: ["doctor", "--path", opts.root],
-      action: null,
-    };
+    });
   }
   const { formats } = opts.detected;
   const legacy = formats.filter((format) => format !== "layers");
@@ -700,12 +738,50 @@ async function guarded(
         )
       : result;
   } catch (error) {
-    return notChecked(
-      `Not checked: the check failed (${upgradeCheckFailureClass(error)}).`
-    );
+    if (error instanceof ProjectEnvLayerRefusalError) {
+      return refusedEnvLayerFinding({
+        id,
+        root: limits.root,
+        layer: error.layer,
+        status: REQUIRED_CHECKS.has(id) ? "incomplete" : "warn",
+      });
+    }
+    const code = upgradeCheckFailureClass(error);
+    return {
+      ...notChecked(`Not checked: ${id} failed (${code}).`),
+      diagnostic: { code, step: id },
+    };
   } finally {
     clearTimeout(timer);
   }
+}
+
+function refusedEnvLayerFinding(input: {
+  readonly id: string;
+  readonly root: string;
+  readonly layer: string;
+  readonly status: UpgradeFindingStatus;
+}): UpgradeFinding {
+  const isLayer =
+    input.layer.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+    input.layer.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX);
+  const remedy = isLayer
+    ? "replace the link with a readable file in this checkout or remove the layer, then rerun hack upgrade check."
+    : "repair the readable directory inside this checkout, then rerun hack upgrade check.";
+  return {
+    id: input.id,
+    status: input.status,
+    summary: `Not checked: ${input.id} refused env layer ${input.layer} (env-layer-refused); ${remedy}`,
+    diagnostic: {
+      code: "env-layer-refused",
+      step: input.id,
+      layer: input.layer,
+    },
+    args: ["doctor", "--path", input.root],
+    action: isLayer
+      ? `Make ${input.layer} a readable regular file inside this checkout: replace the link with a real file here, or remove the layer, then rerun hack upgrade check.`
+      : `Make ${input.layer} a readable directory inside this checkout, then rerun hack upgrade check.`,
+  };
 }
 
 const PROJECT_CHECK_TIMEOUT_MS = 8000;

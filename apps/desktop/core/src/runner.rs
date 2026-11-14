@@ -67,7 +67,7 @@ pub struct CliRunner {
     program: PathBuf,
     env: Vec<(String, String)>,
     cwd: Option<PathBuf>,
-    /// `on_path` found no executable: spawn reports `NotFound`.
+    /// An invalid explicit selection: spawn reports `NotFound`.
     missing: bool,
     path_name: Option<String>,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
@@ -100,7 +100,7 @@ impl CliRunner {
         self
     }
 
-    /// Find `name` on `PATH` and run it by absolute path.
+    /// Discover `name` on `PATH` for each invocation and run its absolute path.
     ///
     /// Only absolute `PATH` entries are searched: an empty or relative entry
     /// (such as `.`) would resolve against the working directory, which for

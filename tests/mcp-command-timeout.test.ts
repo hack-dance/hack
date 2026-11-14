@@ -164,6 +164,7 @@ test("reinstalling Codex adds the limit to an entry written without one and keep
     'command = "other"',
     "",
     "[mcp_servers.hack]",
+    "# keep this comment",
     'command = "hack"',
     'args = ["mcp", "serve"]',
     "",
@@ -175,7 +176,14 @@ test("reinstalling Codex adds the limit to an entry written without one and keep
   const install = () =>
     installMcpConfig({ targets: ["codex"], scope: "user", home });
   expect((await install())[0]?.status).toBe("updated");
-  const parsed = Bun.TOML.parse(await readFile(path, "utf8"));
+  const after = await readFile(path, "utf8");
+  expect(after).toBe(
+    before.replace(
+      "[mcp_servers.hack.env]",
+      "tool_timeout_sec = 660\n[mcp_servers.hack.env]"
+    )
+  );
+  const parsed = Bun.TOML.parse(after);
   expect(parsed).toEqual({
     ...(Bun.TOML.parse(before) as Record<string, unknown>),
     mcp_servers: {
@@ -195,4 +203,23 @@ test("reinstalling Codex adds the limit to an entry written without one and keep
   await writeFile(path, custom);
   expect((await install())[0]?.status).toBe("noop");
   expect(await readFile(path, "utf8")).toBe(custom);
+});
+
+test.each([
+  'mcp_servers.hack.command = "hack"\n',
+  '[mcp_servers]\nhack = { command = "hack" }\n',
+])("reinstall leaves a working non-table layout unchanged: %s", async (before) => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), "hack-mcp-tmo-")));
+  roots.push(home);
+  await mkdir(join(home, ".codex"));
+  const path = join(home, ".codex", "config.toml");
+  await writeFile(path, before);
+  const [result] = await installMcpConfig({
+    targets: ["codex"],
+    scope: "user",
+    home,
+  });
+  expect(result?.status).toBe("noop");
+  expect(result?.message).toContain("tool_timeout_sec = 660");
+  expect(await readFile(path, "utf8")).toBe(before);
 });

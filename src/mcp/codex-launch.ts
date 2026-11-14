@@ -130,8 +130,8 @@ export function replaceCodexLaunch(opts: {
  * Add Hack's tool-call limit to an existing `[mcp_servers.hack]` entry that
  * has none (one written before the limit existed), keeping every other value
  * and table. Returns the text unchanged when there is no entry or it already
- * sets a limit; refuses, like {@link replaceCodexLaunch}, a layout it cannot
- * rewrite verifiably.
+ * sets a limit. Inserts one line without rewriting existing text; refuses a
+ * layout it cannot update verifiably.
  */
 export function addCodexToolTimeout(text: string): string {
   let parsed: unknown;
@@ -154,12 +154,53 @@ export function addCodexToolTimeout(text: string): string {
   ) {
     return text;
   }
-  return rewriteHackEntry({
-    text,
-    parsed,
-    servers,
-    entry: { ...existing, tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC },
-  });
+  const expected = {
+    ...parsed,
+    mcp_servers: {
+      ...servers,
+      hack: { ...existing, tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC },
+    },
+  };
+  return insertCodexToolTimeout(text, expected);
+}
+
+function isHackTableHeader(line: string): boolean {
+  if (!HEADER.test(line)) {
+    return false;
+  }
+  try {
+    return isDeepStrictEqual(Bun.TOML.parse(`${line}\n`), {
+      mcp_servers: { hack: {} },
+    });
+  } catch {
+    return false;
+  }
+}
+
+function insertCodexToolTimeout(text: string, expected: unknown): string {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    if (!isHackTableHeader(lines[index] ?? "")) {
+      continue;
+    }
+    let end = index + 1;
+    while (end < lines.length && !HEADER.test(lines[end] ?? "")) {
+      end++;
+    }
+    const newline = text.includes("\r\n") ? "\r\n" : "\n";
+    const offset = lines.slice(0, end).join("\n").length;
+    const insertion = end < lines.length ? offset + 1 : text.length;
+    const prefix = text.slice(0, insertion);
+    const next = `${prefix}${prefix.endsWith("\n") ? "" : newline}tool_timeout_sec = ${CODEX_TOOL_TIMEOUT_SEC}${newline}${text.slice(insertion)}`;
+    try {
+      if (isDeepStrictEqual(Bun.TOML.parse(next), expected)) {
+        return next;
+      }
+    } catch {
+      // Header-like content inside a string is not an insertion boundary.
+    }
+  }
+  throw new Error("Cannot safely update this Codex MCP layout");
 }
 
 function rewriteHackEntry(opts: {

@@ -406,13 +406,11 @@ async function installCodexConfig(opts: {
     let next: string;
     try {
       next = addCodexToolTimeout(existing);
-    } catch (error: unknown) {
+    } catch {
       return {
-        status: "error",
+        status: "noop",
         message:
-          error instanceof Error
-            ? error.message
-            : "Cannot update Codex MCP configuration",
+          "Existing Codex entry kept unchanged. To raise its tool limit, add tool_timeout_sec = 660 under [mcp_servers.hack] manually.",
       };
     }
     const result = await writeTextFileIfChanged(opts.path, next);

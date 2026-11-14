@@ -271,6 +271,10 @@ Client notes, from qualifying the tools with Claude Code and the Codex CLI:
   normally returns Hack's `timedOut: true` result. They add it to an existing
   entry that has no limit and keep a value already set, even a smaller one.
 
+Codex reinstall adds a missing timeout with a single line and preserves existing
+comments and formatting. For layouts that cannot be updated safely, it keeps the
+entry unchanged and gives manual `tool_timeout_sec = 660` guidance.
+
 ## `hack.project.doctor`
 
 Runs read-only setup diagnostics: `hack doctor [--path=…] [--branch=…] --json`.

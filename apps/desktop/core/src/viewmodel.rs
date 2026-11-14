@@ -309,6 +309,17 @@ impl AppModel {
                 .is_none_or(|c| c.in_flight.is_none())
     }
 
+    /// The last good snapshot, if any.
+    #[must_use]
+    pub fn snapshot(&self) -> Option<&Snapshot> {
+        self.snapshot.as_ref()
+    }
+
+    #[must_use]
+    pub fn project_list_readable(&self) -> bool {
+        self.snapshot.is_some() && self.last_error.is_none()
+    }
+
     #[must_use]
     pub fn selected_row(&self) -> Option<&ProjectRow> {
         let s = self.snapshot.as_ref()?;
@@ -667,6 +678,7 @@ mod tests {
     #[test]
     fn failed_refresh_keeps_last_good_and_marks_stale() {
         let mut m = model(Fixture::Running);
+        assert!(m.project_list_readable());
         m.apply(Event::Refreshed(Err(SourceError::Cli {
             code: "E_UNEXPECTED".into(),
             message: "boom".into(),
@@ -675,6 +687,7 @@ mod tests {
         let v = m.list();
         assert_eq!(v.phase, Phase::Ready);
         assert!(matches!(v.banners.last(), Some(Banner::Stale { .. })));
+        assert!(!m.project_list_readable());
         assert!(v.running.is_empty());
         assert_eq!(v.counts.unknown, 4);
         assert!(m.detail().unwrap().actions.is_empty());

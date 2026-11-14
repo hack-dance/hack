@@ -66,6 +66,7 @@ impl std::fmt::Display for RunError {
 pub struct CliRunner {
     program: PathBuf,
     env: Vec<(String, String)>,
+    cwd: Option<PathBuf>,
     /// `on_path` found no executable: spawn reports `NotFound`.
     missing: bool,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
@@ -84,6 +85,7 @@ impl CliRunner {
         Self {
             program: program.into(),
             env: vec![("HACK_NO_INTERACTIVE".into(), "1".into())],
+            cwd: None,
             missing: false,
             term_grace: TERM_GRACE,
         }
@@ -99,9 +101,10 @@ impl CliRunner {
     /// Find `name` on `PATH` and run it by absolute path.
     ///
     /// Only absolute `PATH` entries are searched: an empty or relative entry
-    /// (such as `.`) would resolve against the working directory, which
-    /// another local user may control. When nothing is found the runner
-    /// reports `NotFound` without spawning anything.
+    /// (such as `.`) would resolve against the working directory, which may
+    /// differ from the user's checkout for machine checks. When nothing is
+    /// found the runner reports `NotFound` without
+    /// spawning anything.
     #[must_use]
     pub fn on_path(name: &str) -> Self {
         let path = std::env::var_os("PATH");
@@ -115,12 +118,30 @@ impl CliRunner {
         }
     }
 
+    /// Run every command from `dir` (for checks that must run outside any
+    /// project, such as the machine-level doctor run).
+    #[must_use]
+    pub fn with_cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+
     /// Add an environment variable for every command (tests use this for
     /// a temporary `HACK_HOME`).
     #[must_use]
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
         self.env.push((key.into(), value.into()));
         self
+    }
+
+    /// Effective selector without reading any configuration or secret value.
+    pub(crate) fn env_value(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into())
+            .or_else(|| std::env::var_os(key))
     }
 
     fn command(&self, args: &[&str], path: Option<&Path>) -> Command {
@@ -138,6 +159,9 @@ impl CliRunner {
         }
         for (k, v) in &self.env {
             cmd.env(k, v);
+        }
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -705,6 +729,7 @@ mod tests {
     fn path_lookup_ignores_relative_entries() {
         let f = FakeHack::new("echo '{}'");
         let dir = f.dir.to_string_lossy().into_owned();
+        // A relative entry that would resolve to the fake via the cwd.
         let rel = std::ffi::OsString::from(format!(".:{dir}"));
         assert_eq!(
             resolve_on_path("hack", Some(&rel)),

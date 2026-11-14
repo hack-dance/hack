@@ -76,8 +76,99 @@ engine-down, error / cli-missing, many-projects, stopped / starting, running,
 degraded / stopping, failed-start, needs-attention):
 [light](screenshots/fixtures-light.png), [dark](screenshots/fixtures-dark.png).
 
+## Doctor
+
+The sidebar Doctor row reads `hack doctor --json` once outside all projects and
+once per registered checkout. Machine checks are deduplicated by check id;
+project findings link from the project header. Unknown statuses, failed reads
+and projects not reached within the 90-second refresh budget remain unchecked.
+Checks refresh on opening the pane and every ten minutes while it is visible.
+Stale results cannot show an all-clear message or green Doctor indicator.
+Missing registry rows remain unchecked and are never probed. Compose coverage
+requires a report identifying that exact checkout's Hack directory; native
+coverage requires exact root selection and unchanged marker identity before and
+after the read, plus a known project-only check. A machine-only or ancestor-project
+report cannot establish Compose project coverage.
+Machine diagnostics remain visible even when a checkout cannot be verified.
+
+Cards group findings by area and offer one copied command or documentation link.
+Project commands include the checkout path. The app never runs a Doctor fix:
+one-click fixes remain blocked on the CLI's explicit safe-fix metadata (R7a/R7b).
+The probes do not use `hack global status`, which can start Docker.
+Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
+[dark](screenshots/doctor-dark.png).
+
+For integrations, `Card.authored_remedy` exposes an `AuthoredRemedy`: `argv()`
+returns authored arguments without an executable or environment, including each
+project root as one lossless argument. Bind these arguments to the integration's
+selected, checked CLI context and retain its action gates. Do not parse or execute
+the copy display string. Standalone Doctor's copy display names `hack` from the
+user's terminal PATH; it does not select a candidate CLI or home. A recipe grants
+no permission to run a fix, and Doctor has no dependency on Setup's context types.
+
+Doctor accepts owner-writable tool directories, including a normal user-owned
+`/opt/homebrew/bin` with mode `0755`. A PATH directory, each selected executable,
+every intermediate symlink target and canonical ancestor must be owned by this user
+or root, with no group/other-write bits. A root-owned sticky ancestor such as
+`/tmp` is allowed above a private entry; a shared writable PATH entry itself is
+not. An unsafe executable is excluded individually, so it does not hide safe
+siblings such as Git. Foreign-owned executable targets are excluded too. macOS ACL mutation grants
+(write/append/delete, child deletion, attributes, security or owner changes) are
+refused for any principal; deny/read-only entries remain supported. Linux access
+ACLs are conservatively refused. Unreadable ACL metadata is untrusted. The same
+ACL policy covers Docker discovery/config paths and their link targets. This
+may refuse owner-only ACL grants; it never attempts to infer group membership
+or effective ACL ordering. Native ACL fixtures need hosted macOS qualification. Darwin ACL inspection does not require executable read access. NULL/ENOENT
+counts as absent ACL only when pre/post link and target metadata show the path
+still exists unchanged; missing, changed or unreadable metadata remains
+untrusted. These observations cannot lock out same-user/root ABA changes.
+
+Each refresh creates one private temporary PATH of wrappers that exec the checked
+absolute tool paths, preserving normal shim script locations and nested lookup.
+Wrappers contain checked tool paths only, not credentials or injected context
+values, and their temporary files are removed afterward.
+Scans deduplicate absolute directories (including canonical aliases) before the
+64-directory bound and inspect at most 8,192 entries. Reaching either bound
+keeps already checked tools and runs Doctor with explicit incomplete coverage;
+only checks dependent on filtered or unsearched Doctor tools become Unknown,
+so those tools cannot look missing or healthy. One coverage card names the
+unchecked tools; independently established checks keep their result. The fixed
+[Doctor tool/dependency audit](DOCTOR_TOOLS.md) excludes unrelated executables
+and documents actual read calls and file-only exclusions. For a scan cutoff
+or unreadable directory, tools already checked remain available and only
+unsearched Doctor tools receive incomplete coverage.
+A root:admin group-writable `/Applications` or app-bundle target is refused too;
+this preview does not widen trust for Docker Desktop or OrbStack. The lead's
+Mac pass must qualify these layouts; a skip is not proof Docker is missing. This is an ownership/permission boundary,
+not a sandbox or content/signature check: trusted tools, their plugins and
+same-user/root updates remain trusted. Real macOS/Homebrew behavior still needs
+the combined Mac pass; the layout and nested shims are tested with owned fixtures.
+Those fixtures use only a temporary Homebrew-style tree and an owned symlink
+alias; expected shim paths come from the fixture's canonical root, never from
+the runner's real Homebrew installation or filesystem modes.
+
+The fixed absolute Mutagen override (`HACK_MUTAGEN_PATH`) or managed
+`HACK_HOME/bin/mutagen` candidate is checked before Doctor too; missing candidates
+require protected ancestry, and relative/unprovable selections are refused.
+Docker plugin preflight preserves HOME, DOCKER_CONFIG and DOCKER_CONTEXT. It
+checks the selected config/plugin directories, configured `cliPluginsExtraDirs`,
+the four standard Unix system plugin directories and plugin executable/symlink
+targets with the same owner/mode/ancestor rule. It streams only the public extra
+directory list from config JSON; credentials and context contents are ignored,
+never retained, logged, copied or rewritten. Config parsing is bounded to 1 MiB;
+plugin inspection to 64 directories and 8,192 entries. Unsafe or unprovable
+discovery produces CouldNotCheck with a reason before the Doctor CLI/Docker probe.
+
+This supports the documented standard Unix Docker CLI discovery model, not
+opaque/custom discovery. A nonempty `DOCKER_CLI_PLUGIN_EXTRA_DIRS`, relative
+discovery path or unsupported/unreadable config is conservatively refused,
+without switching to another context or home. Custom/bundled discovery and real
+Mac behavior still require reviewer assessment and the combined Mac pass; this
+is not a general Docker sandbox. Native pre/post marker witnesses are read-only
+observations, not locks against concurrent same-user changes.
+
 ## What v0 does not do yet
 
-Logs, Env and Activity tabs, CPU and memory, Doctor view, onboarding, always-on,
+Logs, Env and Activity tabs, CPU and memory, onboarding, always-on,
 daemon actions and upgrades come in later units. The design and the CLI/daemon
 requests they need are in `DESIGN.md` (PR #800).

@@ -34,10 +34,19 @@ pub enum Fixture {
     Stopping,
     FailedStart,
     NeedsAttention,
+    // Doctor pane.
+    /// Findings across areas, machine and project scoped, one failed run.
+    Doctor,
+    /// Every check passed.
+    DoctorClean,
+    /// A project whose header links to its doctor findings.
+    DoctorLink,
+    /// No projects registered: the Doctor pane still shows machine checks.
+    DoctorEmpty,
 }
 
 impl Fixture {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 19] = [
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -53,6 +62,10 @@ impl Fixture {
         Self::Stopping,
         Self::FailedStart,
         Self::NeedsAttention,
+        Self::Doctor,
+        Self::DoctorClean,
+        Self::DoctorLink,
+        Self::DoctorEmpty,
     ];
 
     #[must_use]
@@ -73,6 +86,10 @@ impl Fixture {
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
+            Self::Doctor => "doctor",
+            Self::DoctorClean => "doctor-clean",
+            Self::DoctorLink => "doctor-link",
+            Self::DoctorEmpty => "doctor-empty",
         }
     }
 
@@ -336,7 +353,7 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
         _ => {}
     }
     let mut projects = project(f);
-    if f == Fixture::Empty {
+    if matches!(f, Fixture::Empty | Fixture::DoctorEmpty) {
         projects.projects.clear();
     }
     if f == Fixture::ManyProjects {
@@ -419,9 +436,159 @@ pub fn log_tail(f: Fixture) -> Vec<LogEntry> {
     }
 }
 
+/// Fixtures that open the Doctor pane instead of a project.
+#[must_use]
+pub fn opens_doctor(f: Fixture) -> bool {
+    matches!(
+        f,
+        Fixture::Doctor | Fixture::DoctorClean | Fixture::DoctorEmpty
+    )
+}
+
+/// Fixtures that load doctor results (and may still show a project).
+#[must_use]
+pub fn loads_doctor(f: Fixture) -> bool {
+    opens_doctor(f) || f == Fixture::DoctorLink
+}
+
+/// Canned doctor runs (machine run first, then per project).
+#[must_use]
+pub fn doctor_runs(f: Fixture) -> Vec<crate::doctor::DoctorRun> {
+    use crate::doctor::DoctorRun;
+    let c = |id: &str, status: &str, detail: &str| DoctorCheck {
+        id: id.into(),
+        status: status.into(),
+        detail: detail.into(),
+    };
+    let report = |checks: Vec<DoctorCheck>| {
+        Ok(DoctorReport {
+            checks,
+            summary: vec![],
+        })
+    };
+    let ok_machine = || {
+        vec![
+            c("bun", "ok", ""),
+            c("docker", "ok", ""),
+            c("docker compose", "ok", ""),
+            c("docker daemon", "ok", ""),
+            c("daemon", "ok", ""),
+            c("caddy local ca", "ok", ""),
+            c("resolver:hack", "ok", ""),
+            c("dnsmasq:53", "ok", ""),
+        ]
+    };
+    if f == Fixture::DoctorEmpty {
+        let mut machine = ok_machine();
+        machine[5] = c(
+            "caddy local ca",
+            "warn",
+            "Local CA is not trusted by the system",
+        );
+        return vec![DoctorRun::machine(report(machine))];
+    }
+    if f == Fixture::DoctorClean {
+        return vec![
+            DoctorRun::machine(report(ok_machine())),
+            DoctorRun::project(
+                "storefront",
+                "/work/storefront",
+                report(vec![
+                    c(
+                        "project",
+                        "ok",
+                        "Found .hack/ (or legacy .dev/) at /work/storefront/.hack",
+                    ),
+                    c("env key", "ok", ""),
+                ]),
+            ),
+        ];
+    }
+    let machine = vec![
+        c("bun", "ok", ""),
+        c("docker", "ok", ""),
+        c("docker daemon", "ok", ""),
+        c(
+            "daemon",
+            "warn",
+            "hackd is running but incompatible with this CLI version",
+        ),
+        c(
+            "caddy local ca",
+            "warn",
+            "Local CA is not trusted by the system",
+        ),
+        c(
+            "resolver:hack",
+            "error",
+            "No resolver file routes .hack to the local DNS server",
+        ),
+        c("dnsmasq:53", "ok", ""),
+        c(
+            "brand new check",
+            "warn",
+            "A check this app does not know yet",
+        ),
+    ];
+    vec![
+        DoctorRun::machine(report(machine)),
+        DoctorRun::project(
+            "storefront",
+            "/work/storefront",
+            report(vec![
+                c(
+                    "project",
+                    "ok",
+                    "Found .hack/ (or legacy .dev/) at /work/storefront/.hack",
+                ),
+                c("env key", "error", "The env key file is missing"),
+                c(
+                    "caddy local ca",
+                    "warn",
+                    "Local CA is not trusted by the system",
+                ),
+                c(
+                    "generated files",
+                    "warn",
+                    "A generated file is tracked by git",
+                ),
+            ]),
+        ),
+        DoctorRun::project(
+            "billing-api",
+            "/work/billing-api",
+            report(vec![
+                c(
+                    "project",
+                    "ok",
+                    "Found .hack/ (or legacy .dev/) at /work/billing-api/.hack",
+                ),
+                c("env key", "error", "The env key file is missing"),
+            ]),
+        ),
+        DoctorRun::project(
+            "notes",
+            "/work/notes",
+            Err("hack did not answer within 60s".into()),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_fixtures_aggregate_as_designed() {
+        let v = crate::doctor::aggregate(&doctor_runs(Fixture::Doctor));
+        // daemon, caddy ca, resolver, unknown (machine); env key, generated files (project).
+        assert_eq!(v.attention_count(), 6);
+        assert_eq!(v.failed_runs.len(), 1);
+        let clean = crate::doctor::aggregate(&doctor_runs(Fixture::DoctorClean));
+        assert_eq!(clean.attention_count(), 0);
+        assert!(clean.passed >= 8);
+        assert!(opens_doctor(Fixture::Doctor) && !opens_doctor(Fixture::Running));
+    }
 
     #[test]
     fn names_round_trip() {
@@ -438,7 +605,10 @@ mod tests {
                 (Fixture::Loading, Err(SourceError::Pending))
                 | (Fixture::CliMissing, Err(SourceError::CliMissing))
                 | (Fixture::Error, Err(SourceError::Cli { .. })) => {}
-                (_, Ok(s)) => assert_eq!(s.projects.projects.is_empty(), f == Fixture::Empty),
+                (_, Ok(s)) => assert_eq!(
+                    s.projects.projects.is_empty(),
+                    matches!(f, Fixture::Empty | Fixture::DoctorEmpty)
+                ),
                 (f, other) => panic!("{f:?}: {other:?}"),
             }
         }

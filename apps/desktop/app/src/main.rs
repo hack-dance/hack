@@ -9,6 +9,7 @@
 //!                                      fixture, light and dark, offscreen
 //! ```
 
+mod doctor_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod view;
@@ -112,8 +113,15 @@ fn main() {
             }
             cx.new(|cx| {
                 let mut app = view::HackApp::new(source, fixture.is_none(), cx);
+                app.watch_window(window, cx);
                 if let Some(f) = fixture {
                     app.select(fixtures::selected(f));
+                    if fixtures::loads_doctor(f) {
+                        app.show_doctor_now();
+                        if !fixtures::opens_doctor(f) {
+                            app.show_project();
+                        }
+                    }
                     if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
                         app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
                     }

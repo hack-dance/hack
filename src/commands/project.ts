@@ -6468,7 +6468,7 @@ async function updateAutostartIntent(opts: {
   });
   if (resolvedBranch.source === "detached-worktree") {
     throw new CliUsageError(
-      "Detached linked worktree requires an explicit --branch."
+      "Detached linked worktree requires an explicit --branch <name>."
     );
   }
   const branch = opts.resolvedDownTarget

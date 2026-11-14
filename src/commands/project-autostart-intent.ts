@@ -83,7 +83,7 @@ export async function resolveFinalAutostartDownTarget(
   });
   if (effective.source === "detached-worktree") {
     throw new CliUsageError(
-      "Detached linked worktree requires an explicit --branch."
+      "Detached linked worktree requires an explicit --branch <name>."
     );
   }
   if (explicitBranch !== null || effective.branch === null) {

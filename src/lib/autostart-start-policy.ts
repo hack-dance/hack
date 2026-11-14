@@ -190,7 +190,7 @@ function composePolicyReason(
     !(isRecord(compose) && isRecord(compose.services)) ||
     Object.keys(compose.services).length === 0 ||
     compose.include !== undefined ||
-    compose["<<"] !== undefined ||
+    hasUnresolvedComposeMerge(compose) ||
     !hasOnlyEngineManagedMounts(compose)
   ) {
     return "compose_inputs_require_manual_start";
@@ -202,6 +202,45 @@ function composePolicyReason(
     }
   }
   return null;
+}
+
+/** Compose must not resolve inputs hidden in a merge the admission parser left intact. */
+function hasUnresolvedComposeMerge(value: unknown): boolean {
+  const pending: { readonly value: unknown; readonly exit?: boolean }[] = [
+    { value },
+  ];
+  const visited = new Set<object>();
+  const active = new Set<object>();
+  while (pending.length > 0) {
+    const frame = pending.pop();
+    const current = frame?.value;
+    if (!(Array.isArray(current) || isRecord(current))) {
+      continue;
+    }
+    if (frame?.exit) {
+      active.delete(current);
+      continue;
+    }
+    if (active.has(current)) {
+      return true;
+    }
+    if (visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+    if (visited.size > 16_384 || Object.hasOwn(current, "<<")) {
+      return true;
+    }
+    active.add(current);
+    pending.push({ value: current, exit: true });
+    for (const child of Object.values(current)) {
+      if (pending.length >= 16_384) {
+        return true;
+      }
+      pending.push({ value: child });
+    }
+  }
+  return false;
 }
 
 function servicePolicyReason(

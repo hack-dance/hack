@@ -29,6 +29,7 @@ import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import { findProjectContext, sanitizeBranchSlug } from "../lib/project.ts";
 import { ProjectInputSelectionError } from "../lib/project-input-selection.ts";
 import { PROJECT_SELECTOR_PATTERN } from "../lib/project-name.ts";
+import { withTerminationAbort } from "../lib/project-shared-helpers.ts";
 import {
   getDefaultAutostartGlobal,
   type RegisteredProject,
@@ -377,45 +378,51 @@ const run: CommandHandlerFor<typeof runSpec> = async ({ args }) => {
       "--engine-wait-ms must be an integer from 1 to 3600000."
     );
   }
-  const result = await runAutostartAtLogin({
-    engineWaitMs,
-    runtime: {
-      home: resolveUserHomeDir(),
-      hackHome: resolveGlobalHackDir(),
-      serviceOrigin: false,
-      platform: process.platform,
-    },
-  });
-  const registry = await readProjectsRegistry();
-  if (args.options.json) {
-    const global = serializeAutostartGlobal(
-      registry.autostartGlobal ?? getDefaultAutostartGlobal(),
-      await readAutostartServiceReady()
-    );
-    emitCliResult({
-      result: okResult({
-        data: {
-          action: "run",
-          waiting_for_engine: result.waitingForEngine,
-          autostart_global: global,
-          projects: registry.projects
-            .filter((project) => project.autostart)
-            .map((project) => ({
-              project_id: project.id,
-              name: project.name,
-              autostart: projectAutostartFromGlobal({ project, global }),
-            })),
-        },
-      }),
+  return await withTerminationAbort(async (signal) => {
+    const result = await runAutostartAtLogin({
+      signal,
+      engineWaitMs,
+      runtime: {
+        home: resolveUserHomeDir(),
+        hackHome: resolveGlobalHackDir(),
+        serviceOrigin: false,
+        platform: process.platform,
+      },
     });
-  } else {
-    process.stdout.write(
-      result.waitingForEngine
-        ? "Autostart is waiting for the engine; no project start was claimed. Retry with: hack autostart run --no-interactive\n"
-        : "Autostart pass finished. Already attempted projects were not replayed; use hack up -d for manual recovery.\n"
-    );
-  }
-  return 0;
+    if (signal.aborted) {
+      return 1;
+    }
+    const registry = await readProjectsRegistry();
+    if (args.options.json) {
+      const global = serializeAutostartGlobal(
+        registry.autostartGlobal ?? getDefaultAutostartGlobal(),
+        await readAutostartServiceReady()
+      );
+      emitCliResult({
+        result: okResult({
+          data: {
+            action: "run",
+            waiting_for_engine: result.waitingForEngine,
+            autostart_global: global,
+            projects: registry.projects
+              .filter((project) => project.autostart)
+              .map((project) => ({
+                project_id: project.id,
+                name: project.name,
+                autostart: projectAutostartFromGlobal({ project, global }),
+              })),
+          },
+        }),
+      });
+    } else {
+      process.stdout.write(
+        result.waitingForEngine
+          ? "Autostart is waiting for the engine; no project start was claimed. Retry with: hack autostart run --no-interactive\n"
+          : "Autostart pass finished. Already attempted projects were not replayed; use hack up -d for manual recovery.\n"
+      );
+    }
+    return 0;
+  });
 };
 
 export const autostartCommand = defineCommand({

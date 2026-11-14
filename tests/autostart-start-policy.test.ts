@@ -147,6 +147,48 @@ test("legacy TOML startup is checked by the same canonical parser", async () => 
   );
 });
 
+test("nested Compose merges cannot hide external execution inputs", async () => {
+  for (const input of [
+    "services:\n  web:\n    <<: {extends: {file: other.yml, service: base}}\n    image: example/web:1\n",
+    "x-base: &base\n  extends: {file: other.yml, service: base}\nservices:\n  web:\n    <<: *base\n    image: example/web:1\n",
+    "services:\n  web:\n    <<: {build: .}\n    image: example/web:1\n",
+    "services:\n  web:\n    <<: {env_file: [other.env]}\n    image: example/web:1\n",
+  ]) {
+    await writeFile(join(opts.projectDir, "docker-compose.yml"), input, {
+      mode: 0o600,
+    });
+    expect(await autostartStartPolicyRefusal(opts)).not.toBeNull();
+  }
+  await compose({
+    services: {
+      web: { image: "example/web:1", environment: { "<<": "unresolved" } },
+    },
+  });
+  expect(await autostartStartPolicyRefusal(opts)).toBe(
+    "compose_inputs_require_manual_start"
+  );
+});
+
+test("shared Compose anchors remain eligible while recursive aliases refuse", async () => {
+  for (const input of [
+    "x-env: &env {APP_MODE: production}\nservices:\n  web: {image: example/web:1, environment: *env}\n  worker: {image: example/web:1, environment: *env}\n",
+    "x-base: &base {image: example/web:1, environment: {APP_MODE: production}}\nservices:\n  web: {<<: *base}\n  worker: {<<: *base}\n",
+  ]) {
+    await writeFile(join(opts.projectDir, "docker-compose.yml"), input, {
+      mode: 0o600,
+    });
+    expect(await autostartStartPolicyRefusal(opts)).toBeNull();
+  }
+  await writeFile(
+    join(opts.projectDir, "docker-compose.yml"),
+    "x-cycle: &cycle [*cycle]\nservices:\n  web: {image: example/web:1}\n",
+    { mode: 0o600 }
+  );
+  expect(await autostartStartPolicyRefusal(opts)).toBe(
+    "compose_inputs_require_manual_start"
+  );
+});
+
 test("builds, ambiguous Compose graph sources, external providers and env files never start unattended", async () => {
   for (const [service, reason] of [
     [

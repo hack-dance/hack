@@ -65,6 +65,10 @@ volumes, ownership labels, safe missing/default volumes and withdrawn TLS trust.
 These are implementation regressions; the finite model does not model Docker
 storage metadata, certificate parsing, privileged engine actors or application
 code/data inside prepared images and engine-managed volumes.
+Explicit CLI signal forwarding is covered by `autostart-cli-cancellation.test.ts`:
+SIGINT and SIGTERM stop later dispatches, await a real detached startup child's
+cleanup, finish progress and preserve signal exit status. The finite model does
+not model operating-system signal delivery or the CLI entry point.
 Multiple projects, multiple login attempts, reboot, upgrades, global pause, retries,
 network prompts, native backends and real login-service behavior are outside this
 model. Component model success does not qualify installed binaries or real login.

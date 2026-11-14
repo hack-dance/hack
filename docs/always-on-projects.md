@@ -103,6 +103,7 @@ configuration changes after the daemon's first observation. Command/cloud env
 providers also require a manual start; built-in local encrypted env layers remain
 supported without keychain fallback. Managed values that change Compose selection,
 Docker lookup or host process execution are refused without resolving secrets.
+Unresolved YAML merge keys at any depth require manual startup.
 Compose `build`, `include`, `extends`, `env_file` and external service-provider
 declarations require manual startup in this slice. Images must already be present
 locally: both Compose phases use `--no-build --pull never` and disable implicit
@@ -235,6 +236,12 @@ A start has a 120-second bound, then receives TERM and a five-second grace befor
 KILL. Detached Compose phases forward cancellation and settle their own process
 groups before releasing startup ownership. Partial startup remains possible;
 inspect and recover with `hack up`.
+An explicit `hack autostart run` forwards SIGINT/SIGTERM into the pass and waits
+for active startup children to settle before exiting with the signal status.
+Cancellation stops later dispatches and does not print a successful completion;
+it cannot undo a request Docker has already accepted.
+This explicit-command guard covers SIGINT/SIGTERM, not terminal-loss SIGHUP;
+use the installed login service for unattended operation.
 
 `HACK_DAEMON_AUTOSTART_DISABLE=1` disables this pass as well as implicit daemon
 startup. Test harnesses and the isolated `hack-v5` launcher set it; those runs do

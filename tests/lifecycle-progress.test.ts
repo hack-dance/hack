@@ -160,3 +160,25 @@ test("prepare refuses --progress without --json and on the native backend", () =
     false
   );
 });
+
+test("an error thrown after the stream started still closes it with one compact line", async () => {
+  const { handleRunCliError } = await import("../src/cli/run.ts");
+  const out = capture();
+  armLifecycleProgress({ action: "up", write: out.write, now: () => FIXED });
+  beginLifecycleProgress({ project: "shop" });
+
+  const code = await handleRunCliError({
+    error: new Error("unexpected failure"),
+    jsonRequested: true,
+  });
+
+  expect(code).toBe(1);
+  expect(out.lines).toHaveLength(2);
+  const last = out.lines[1] ?? "";
+  expect(last.endsWith("\n")).toBe(true);
+  expect(last.trimEnd().includes("\n")).toBe(false);
+  expect(JSON.parse(last)).toMatchObject({
+    ok: false,
+    error: { code: "E_UNEXPECTED" },
+  });
+});

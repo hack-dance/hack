@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -85,6 +87,7 @@ beforeEach(async () => {
     );
     await chmod(join(bin, name), 0o755);
   }
+  privateCliEnv({ root });
 });
 
 afterEach(async () => {
@@ -117,9 +120,24 @@ async function run(args: string[], extra: Record<string, string> = {}) {
   return { code, stdout, stderr };
 }
 
-test("observe full/summary/filter listings preserve registry bytes and mtime without starting services", async () => {
+async function tree(path: string): Promise<unknown> {
+  const info = await lstat(path);
+  if (!info.isDirectory()) {
+    return {
+      mode: info.mode,
+      bytes: (await readFile(path)).toString("base64"),
+    };
+  }
+  const children = await readdir(path);
+  return await Promise.all(
+    children.sort().map(async (name) => [name, await tree(join(path, name))])
+  );
+}
+
+test("observe default preserves HOME and Hack home and never contacts Docker", async () => {
   const before = await readFile(registry);
   const time = (await stat(registry)).mtimeMs;
+  const homes = [await tree(state), await tree(join(root, "user-home"))];
   for (const flags of [
     [],
     ["--summary"],
@@ -130,6 +148,9 @@ test("observe full/summary/filter listings preserve registry bytes and mtime wit
     expect(result.code).toBe(0);
     const payload = JSON.parse(result.stdout);
     expect(payload.observe).toBe(true);
+    expect(payload.runtime_requested).toBe(false);
+    expect(payload.runtime_error).toBeNull();
+    expect(payload.runtime_checked_at).toBeNull();
     const native = payload.projects.find(
       (row: { name: string }) => row.name === "native-app"
     );
@@ -138,36 +159,65 @@ test("observe full/summary/filter listings preserve registry bytes and mtime wit
     expect(native.state_reason).toBe("native-observer-required");
     expect(native.started_at).toBeNull();
     expect(native.services).toEqual([]);
-    if (flags.includes("--all")) {
-      expect(
-        payload.projects.some(
-          (row: { name: string }) => row.name === "unregistered-app"
-        )
-      ).toBe(true);
-      expect(
-        payload.projects.find(
-          (row: { name: string }) => row.name === "unregistered-app"
-        ).state
-      ).toBe("running");
-    }
+    expect(
+      payload.projects.some(
+        (row: { name: string }) => row.name === "unregistered-app"
+      )
+    ).toBe(false);
     expect(await readFile(registry)).toEqual(before);
     expect((await stat(registry)).mtimeMs).toBe(time);
+    expect([await tree(state), await tree(join(root, "user-home"))]).toEqual(
+      homes
+    );
+  }
+  expect(await stat(join(root, "calls")).catch(() => null)).toBeNull();
+  expect(await stat(join(root, "forbidden")).catch(() => null)).toBeNull();
+  expect(await stat(join(state, "daemon")).catch(() => null)).toBeNull();
+});
+
+test("observe runtime explicitly opts in to Docker reads without registering discoveries", async () => {
+  const before = await readFile(registry);
+  const time = (await stat(registry)).mtimeMs;
+  const homes = [await tree(state), await tree(join(root, "user-home"))];
+  for (const flags of [[], ["--summary"]]) {
+    const result = await run([
+      "--json",
+      "--observe",
+      "--runtime",
+      "--all",
+      ...flags,
+    ]);
+    expect(result.code).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.runtime_requested).toBe(true);
+    expect(
+      payload.projects.find(
+        (row: { name: string }) => row.name === "unregistered-app"
+      ).state
+    ).toBe("running");
+    expect(await readFile(registry)).toEqual(before);
+    expect((await stat(registry)).mtimeMs).toBe(time);
+    expect([await tree(state), await tree(join(root, "user-home"))]).toEqual(
+      homes
+    );
   }
   const calls = (await readFile(join(root, "calls"), "utf8"))
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
+  expect(calls.length).toBeGreaterThan(0);
   expect(
     calls.every((args: string[]) => ["ps", "inspect"].includes(args[0] ?? ""))
   ).toBe(true);
   expect(await stat(join(root, "forbidden")).catch(() => null)).toBeNull();
-  expect(await stat(join(state, "daemon")).catch(() => null)).toBeNull();
 });
 
 test("observe keeps native rows and unknown Compose services when Docker is unavailable", async () => {
   const before = await readFile(registry);
   const time = (await stat(registry)).mtimeMs;
-  const result = await run(["--json", "--observe"], { OFFLINE: "1" });
+  const result = await run(["--json", "--observe", "--runtime"], {
+    OFFLINE: "1",
+  });
   expect(result.code).toBe(0);
   const payload = JSON.parse(result.stdout);
   expect(payload.runtime_ok).toBe(false);
@@ -203,7 +253,11 @@ test("observe never creates a missing registry or registers the current checkout
 test("observe rejects text and metadata before touching registration", async () => {
   const before = await readFile(registry);
   const time = (await stat(registry)).mtimeMs;
-  for (const args of [["--observe"], ["--observe", "--json", "--meta"]]) {
+  for (const args of [
+    ["--observe"],
+    ["--observe", "--json", "--meta"],
+    ["--runtime", "--json"],
+  ]) {
     expect((await run(args)).code).not.toBe(0);
     expect(await readFile(registry)).toEqual(before);
     expect((await stat(registry)).mtimeMs).toBe(time);

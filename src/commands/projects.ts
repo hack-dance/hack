@@ -133,7 +133,14 @@ const optObserve = defineOption({
   type: "boolean",
   long: "--observe",
   description:
-    "Read projects without registry writes or starting hackd, Docker or a VM (requires --json)",
+    "Read projects without registry writes or engine contact; --runtime opts in to Docker queries (requires --json)",
+} as const);
+const optRuntime = defineOption({
+  name: "runtime",
+  type: "boolean",
+  long: "--runtime",
+  description:
+    "With --observe, query Docker for live state; socket contact can start an on-demand engine",
 } as const);
 const optDryRun = defineOption({
   name: "dryRun",
@@ -150,6 +157,7 @@ const options = [
   optTimings,
   optNoDaemon,
   optObserve,
+  optRuntime,
   optMeta,
   optIncludeGlobal,
   optAll,
@@ -207,6 +215,9 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
   if (args.options.observe && (!args.options.json || args.options.meta)) {
     throw new CliUsageError("--observe requires --json and cannot use --meta.");
   }
+  if (args.options.runtime && !args.options.observe) {
+    throw new CliUsageError("--runtime requires --observe.");
+  }
   if ((args.options.summary || args.options.timings) && !args.options.json) {
     throw new CliUsageError("--summary and --timings require --json.");
   }
@@ -230,6 +241,7 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
     timings: args.options.timings === true,
     noDaemon: args.options.noDaemon === true || args.options.observe === true,
     observe: args.options.observe === true,
+    observeRuntime: args.options.runtime === true,
     selector,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
@@ -577,6 +589,7 @@ async function runProjects(opts: {
   readonly timings?: boolean;
   readonly noDaemon?: boolean;
   readonly observe?: boolean;
+  readonly observeRuntime?: boolean;
 }): Promise<number> {
   const profiler = opts.profiler ?? createOperationTimings();
   const started = opts.started ?? performance.now();
@@ -597,10 +610,7 @@ async function runProjects(opts: {
     return 0;
   }
 
-  const runtime = await readRuntimeProjects({
-    includeGlobal: opts.includeGlobal,
-    profiler,
-  });
+  const runtime = await readListingRuntime(opts, profiler);
 
   if (runtime.ok && !opts.observe) {
     await profiler.measure("auto_register_ms", () =>
@@ -626,6 +636,7 @@ async function runProjects(opts: {
   if (opts.json) {
     outputProjectsJson({
       observe: opts.observe === true,
+      observeRuntime: opts.observeRuntime === true,
       summary: opts.summary === true,
       profiler,
       started,
@@ -695,6 +706,25 @@ async function runProjects(opts: {
   );
 
   return 0;
+}
+
+/** Socket contact can activate a stopped engine; default observation must not dial it. */
+async function readListingRuntime(
+  opts: Parameters<typeof runProjects>[0],
+  profiler: OperationTimings
+): ReturnType<typeof readRuntimeProjects> {
+  if (opts.observe && !opts.observeRuntime) {
+    return {
+      ok: false,
+      runtime: [],
+      error: "Runtime observation was not requested.",
+      checkedAtMs: Date.now(),
+    };
+  }
+  return await readRuntimeProjects({
+    includeGlobal: opts.includeGlobal,
+    profiler,
+  });
 }
 
 async function renderProjectInputDiagnostics(
@@ -774,6 +804,7 @@ type RuntimeRecoveryNotice = {
 
 function outputProjectsJson(opts: {
   readonly observe: boolean;
+  readonly observeRuntime: boolean;
   readonly summary: boolean;
   readonly profiler: OperationTimings;
   readonly started: number;
@@ -791,7 +822,9 @@ function outputProjectsJson(opts: {
 }): void {
   const runtimeMeta = formatRuntimeMeta({ runtime: opts.runtime });
   const payload = {
-    ...(opts.observe ? { observe: true } : {}),
+    ...(opts.observe
+      ? { observe: true, runtime_requested: opts.observeRuntime }
+      : {}),
     ...(opts.summary ? { detail_level: "summary" } : {}),
     generated_at: new Date().toISOString(),
     filter: opts.filterLabel,
@@ -800,8 +833,10 @@ function outputProjectsJson(opts: {
     include_unregistered: opts.includeUnregistered,
     include_meta: opts.includeMeta,
     runtime_ok: runtimeMeta.ok,
-    runtime_error: runtimeMeta.error,
-    runtime_checked_at: runtimeMeta.checkedAt,
+    runtime_error:
+      opts.observe && !opts.observeRuntime ? null : runtimeMeta.error,
+    runtime_checked_at:
+      opts.observe && !opts.observeRuntime ? null : runtimeMeta.checkedAt,
     runtime_last_ok_at: runtimeMeta.lastOkAt,
     runtime_reset_at: runtimeMeta.lastResetAt,
     runtime_reset_count: runtimeMeta.resetCount,
@@ -820,7 +855,8 @@ function outputProjectsJson(opts: {
           ? projectObservation({
               view,
               runtimeOk: opts.runtime.ok,
-              nativeSelected: process.env.HACK_RUNTIME_BACKEND === "native",
+              nativeSelected:
+                process.env.HACK_RUNTIME_BACKEND?.trim() === "native",
             })
           : {}),
         ...(opts.includeMeta

@@ -16,7 +16,7 @@ terminal).
 - `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
 - `hack ps` / `hack status` — project status
 - `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
-- `hack projects --json --observe` — read-only listing: no registration, `lastSeenAt` update, registry creation or write, and no daemon, Docker or VM start. Works with `--summary`, `--project` and `--all`; rejects `--meta`. Ordinary listing retains discovery writes for compatibility.
+- `hack projects --json --observe` — read-only listing: no registration, `lastSeenAt` update, registry creation or write, daemon contact or engine contact. Works with `--summary`, `--project` and `--all`; rejects `--meta`. Add `--runtime` to query Docker explicitly; socket contact can start an on-demand engine. Ordinary listing retains discovery writes for compatibility.
 - `hack env` — env values and local secrets
 - `hack host exec` / `hack host shell` — host commands/shells with Hack-resolved env injected
 - `hack run <service> [cmd...]` — one-off command in a fresh service container
@@ -126,9 +126,15 @@ does not refresh the global project registry. A held registration lock therefore
 does not block their resolution or require a retry just to update last-seen metadata.
 Use a checkout/path directly, or an existing registry entry with `--project`;
 `hack init`, project lifecycle registration and `hack projects` discovery maintain
-registrations. `--json --observe` skips registration entirely. Observe reads
-Docker directly and never contacts hackd, including when a daemon is available.
-It returns the normal listing fields plus `observe: true`, and each full or
+registrations. `--json --observe` skips registration and engine queries entirely.
+Compose state is unknown by default. `--runtime` explicitly opts in to Docker
+ps/inspect reads, which can start a socket-activated engine (for example a
+systemd Docker socket or an on-demand macOS engine). Both modes bypass hackd,
+including when a daemon is available. `--all` discovers runtime-only projects
+only with `--runtime`.
+Observe returns the normal listing fields plus `observe: true` and
+`runtime_requested: false|true`. Without runtime queries, `runtime_error` and
+`runtime_checked_at` are null rather than claiming Docker failed. Each full or
 summary row adds `backend`, `state`, `state_reason`, `started_at` and `services`.
 Each service has `name`, `state`, `ready`, `completed`, `health`, `exit_code` and
 `started_at`. Missing evidence is null or unknown: Docker activity is not a

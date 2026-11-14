@@ -9,7 +9,8 @@ An existing v4 project should follow the upgrade page before these steps.
 
 For a read-only inventory, use `hack projects --json --observe`. It lists
 registered projects even when hackd is off, preserves the registry, and starts
-no services. Unknown runtime state stays unknown; native projects use their
+no services or engine connection. Add `--runtime` only to opt in to Docker
+queries: contacting an on-demand engine can start it. Unknown runtime state stays unknown; native projects use their
 native `ps` observer. See the [listing contract](../cli.md).
 
 ```mermaid

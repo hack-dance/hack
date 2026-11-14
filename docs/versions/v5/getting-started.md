@@ -154,3 +154,5 @@ or sticky socket directories are refused before engine access.
 Writable sticky Docker plugin directories also refuse login startup, including
 empty directories where a plugin could be planted after an audit.
 Direnv files such as `.envrc` are not dotenv overlays and do not block admission.
+Prepare Caddy/CoreDNS images with manual `hack global up`: login routing never
+pulls or builds images and refuses missing local images.

@@ -425,3 +425,8 @@ sticky writable directories are refused even when empty. A missing plugin path
 is refused if its nearest existing parent permits new entries by another account.
 Only `.env` and `.env.*` names are considered dotenv inputs; unrelated names such
 as `.envrc` do not block admission and are not executed by login startup.
+Login routing also requires all Caddy/CoreDNS images to be prepared locally. It
+inspects image IDs before routing startup and runs Compose with `--no-build
+--pull never`, so a missing image causes refusal instead of a registry fetch.
+Manual `hack global up` prepares missing images. Local image contents remain
+trusted engine state; this does not claim registry-tag or image-digest verification.

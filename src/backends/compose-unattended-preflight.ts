@@ -5,6 +5,7 @@ import type { RuntimeUpOptions } from "./runtime-backend.ts";
 
 const IMAGE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._/:@+[\]-]{0,511}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}\s*$/;
+const IMAGE_LIST_SEPARATOR = /\s+/;
 const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$/;
 const VOLUME_FORMAT =
   '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Options":{{json .Options}},"Labels":{{json .Labels}}}';
@@ -194,7 +195,10 @@ function modelSources(
     binds: [...binds.values()],
   };
 }
-function probeFor(opts: RuntimeUpOptions, timeoutMs: number) {
+function probeFor(
+  opts: Pick<RuntimeUpOptions, "cwd" | "env">,
+  timeoutMs: number
+) {
   const deadline = Date.now() + Math.min(timeoutMs, 15_000);
   return async (args: readonly string[], maxStdoutBytes = 65_536) => {
     const remaining = deadline - Date.now();
@@ -253,6 +257,34 @@ async function imagePresent(image: string, probe: Probe): Promise<number> {
     });
   }
   return result.exitCode || 1;
+}
+
+/** Require prepared local images without permitting a registry pull or build. */
+export async function inspectUnattendedImages(opts: {
+  readonly composeArgs: readonly string[];
+  readonly cwd: string;
+  readonly env?: Record<string, string>;
+}): Promise<number> {
+  const probe = probeFor({ cwd: opts.cwd, env: opts.env }, 15_000);
+  const result = await probe([...opts.composeArgs, "config", "--images"]);
+  if (result.exitCode !== 0) {
+    return result.exitCode;
+  }
+  const images = [...new Set(result.stdout.trim().split(IMAGE_LIST_SEPARATOR))];
+  if (
+    images.length === 0 ||
+    images.length > 256 ||
+    images.some((image) => !IMAGE_REFERENCE.test(image))
+  ) {
+    return 1;
+  }
+  for (const image of images) {
+    const code = await imagePresent(image, probe);
+    if (code !== 0) {
+      return code;
+    }
+  }
+  return 0;
 }
 function resolvedModelHasBinds(value: unknown): boolean {
   if (!(isRecord(value) && isRecord(value.services))) {

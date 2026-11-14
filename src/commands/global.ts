@@ -181,6 +181,7 @@ import {
 } from "./global-admin-plan.ts";
 import {
   assertGlobalBackendStartAllowed,
+  assertGlobalLoginRoutingImages,
   globalDnsRecoveryAllowed,
   globalLoggingUpArguments,
   globalRoutingUpArguments,
@@ -1854,6 +1855,10 @@ export async function globalUp(): Promise<number> {
   await secureGlobalLoginRouting({ root: paths.root, login });
 
   await ensureDockerRunning({ login });
+  await assertGlobalLoginRoutingImages({
+    composeFile: paths.caddyCompose,
+    login,
+  });
   if (isMac() && globalDnsRecoveryAllowed({ login })) {
     await ensureMacDnsmasqRunning();
   }

@@ -145,6 +145,10 @@ test("login routing recreates mounts and ignores env files while manual routing 
     login: true,
   });
   expect(login).toContain("--force-recreate");
+  expect(login).toContain("--no-build");
+  expect(
+    login.slice(login.indexOf("--pull"), login.indexOf("--pull") + 2)
+  ).toEqual(["--pull", "never"]);
   expect(login.slice(2, 4)).toEqual(["--env-file", "/dev/null"]);
 });
 

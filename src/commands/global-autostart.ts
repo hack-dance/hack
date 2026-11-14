@@ -1,4 +1,6 @@
 import { homedir } from "node:os";
+import { dirname } from "node:path";
+import { inspectUnattendedImages } from "../backends/compose-unattended-preflight.ts";
 import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";
 import { secureAutostartRoutingAssets } from "../lib/autostart-routing-assets.ts";
 import { HackCliError } from "../lib/cli-result.ts";
@@ -45,9 +47,37 @@ export function globalRoutingUpArguments(opts: {
     opts.composeFile,
     "up",
     "-d",
-    ...(opts.login ? ["--force-recreate"] : []),
+    ...(opts.login
+      ? ["--force-recreate", "--no-build", "--pull", "never"]
+      : []),
     "--remove-orphans",
   ];
+}
+
+/** Routing has the same local-image prerequisite as unattended project starts. */
+export async function assertGlobalLoginRoutingImages(opts: {
+  readonly composeFile: string;
+  readonly login: boolean;
+}): Promise<void> {
+  if (!opts.login) {
+    return;
+  }
+  const code = await inspectUnattendedImages({
+    composeArgs: [
+      "docker",
+      "compose",
+      "--env-file",
+      "/dev/null",
+      "-f",
+      opts.composeFile,
+    ],
+    cwd: dirname(opts.composeFile),
+  });
+  if (code !== 0) {
+    throw new Error(
+      "Automatic routing requires prepared local images; run hack global up manually."
+    );
+  }
 }
 
 /** Unsupported remote bridges are never part of automatic local routing startup. */

@@ -112,3 +112,9 @@ This stops the project. It does not delete its named volumes or stop shared
 routing services. See [Run and inspect](guides/run-project.md) for service selection,
 log history and restarts. When this Compose run works, try native only on a
 [disposable project](native/start.md).
+
+Project JSON rows and hackd project snapshots share `backend`, `state`,
+`started_at` and per-service readiness, completion, health and exit fields.
+Unavailable evidence stays unknown/null. A zero exit is a completed job only
+with a declared completion role. Default `projects --json --observe` still
+contacts no runtime; live observations require `--runtime`.

@@ -43,7 +43,6 @@ import {
   AmbiguousProjectNameError,
   normalizeProjectName,
 } from "../lib/project-name.ts";
-import { projectObservation } from "../lib/project-observation.ts";
 import { assertPruneRuntimeOwnership } from "../lib/project-prune-ownership.ts";
 import {
   findMissingRegistryEntries,
@@ -621,6 +620,7 @@ async function runProjects(opts: {
 
   const views = await profiler.measure("project_views_ms", () =>
     buildProjectViews({
+      observeNative: !opts.observe || opts.observeRuntime === true,
       registryProjects: registry.projects,
       runtime: runtime.runtime,
       runtimeOk: runtime.ok,
@@ -851,14 +851,6 @@ function outputProjectsJson(opts: {
         ...(opts.summary
           ? serializeProjectSummary(view)
           : serializeProjectView(view)),
-        ...(opts.observe
-          ? projectObservation({
-              view,
-              runtimeOk: opts.runtime.ok,
-              nativeSelected:
-                process.env.HACK_RUNTIME_BACKEND?.trim() === "native",
-            })
-          : {}),
         ...(opts.includeMeta
           ? { meta: opts.metaByName.get(view.name) ?? null }
           : {}),

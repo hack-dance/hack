@@ -1,25 +1,13 @@
+import {
+  earliestStart,
+  observedProjectState,
+  observeService,
+  type ProjectState,
+  type ServiceObservation,
+} from "./project-state.ts";
 import type { ProjectView } from "./project-views.ts";
-import type { RuntimeContainer } from "./runtime-projects.ts";
-
-/** Shared vocabulary for the desktop listing; unknown evidence is never a stopped claim. */
-export type ObservedProjectState =
-  | "running"
-  | "degraded"
-  | "starting"
-  | "stopping"
-  | "stopped"
-  | "failed"
-  | "unknown";
-
-export type ObservedService = {
-  readonly name: string;
-  readonly state: ObservedProjectState;
-  readonly ready: boolean | null;
-  readonly completed: boolean | null;
-  readonly health: string | null;
-  readonly exit_code: number | null;
-  readonly started_at: string | null;
-};
+export type ObservedProjectState = ProjectState;
+export type ObservedService = ServiceObservation;
 
 export type ProjectObservation = {
   readonly backend: "compose" | "native" | "unknown";
@@ -27,15 +15,15 @@ export type ProjectObservation = {
   readonly state_reason:
     | "native-observer-required"
     | "observation-unavailable"
+    | "native-runtime-degraded"
     | null;
   readonly started_at: string | null;
   readonly services: readonly ObservedService[];
 };
 
 /**
- * Read-only listing projection. Docker's listing does not carry authenticated
- * exit codes, readiness roles or start times: retain null until the R2 owner
- * supplies them. Native inputs need their own observer, never Docker inference.
+ * Shared listing projection. Fresh inspect data supplies state details; static
+ * cached metadata never supplies current health, exit codes or start time.
  */
 export function projectObservation(input: {
   readonly view: ProjectView;
@@ -66,68 +54,28 @@ export function projectObservation(input: {
     ...(view.definedServices ?? []),
     ...(observable ? (view.runtime?.services.keys() ?? []) : []),
   ]);
-  const services: ObservedService[] = [...names].sort().map((name) => ({
-    name,
-    state: observable
-      ? serviceState(view.runtime?.services.get(name)?.containers ?? [])
-      : "unknown",
-    ready: null,
-    completed: null,
-    health: null,
-    exit_code: null,
-    started_at: null,
-  }));
+  const services: ObservedService[] = [...names].sort().map((name) => {
+    const containers = view.runtime?.services.get(name)?.containers ?? [];
+    return observeService({
+      name,
+      available: observable,
+      readiness: view.serviceReadiness?.[name] ?? null,
+      members: containers.map(
+        (container) =>
+          container.observation ?? {
+            state: container.state,
+            health: null,
+            exitCode: null,
+            startedAt: null,
+          }
+      ),
+    });
+  });
   return {
     backend,
-    state: observable ? projectState(services) : "unknown",
+    state: observable ? observedProjectState(services) : "unknown",
     state_reason: reason,
-    started_at: null,
+    started_at: earliestStart(services.map((service) => service.started_at)),
     services,
   };
-}
-
-function serviceState(
-  containers: readonly RuntimeContainer[]
-): ObservedProjectState {
-  if (containers.length === 0) {
-    return "stopped";
-  }
-  if (containers.every((container) => container.state === "running")) {
-    return "running";
-  }
-  if (containers.some((container) => container.state === "running")) {
-    return "degraded";
-  }
-  if (containers.some((container) => container.state === "restarting")) {
-    return "starting";
-  }
-  if (containers.every((container) => container.state === "created")) {
-    return "stopped";
-  }
-  return "unknown";
-}
-
-function projectState(
-  services: readonly ObservedService[]
-): ObservedProjectState {
-  if (services.length === 0) {
-    return "unknown";
-  }
-  if (services.every((service) => service.state === "running")) {
-    return "running";
-  }
-  if (services.some((service) => service.state === "unknown")) {
-    return "unknown";
-  }
-  if (
-    services.some(
-      (service) => service.state === "running" || service.state === "degraded"
-    )
-  ) {
-    return "degraded";
-  }
-  if (services.some((service) => service.state === "starting")) {
-    return "starting";
-  }
-  return "stopped";
 }

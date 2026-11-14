@@ -2,7 +2,11 @@ import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 
 import { HACK_PROJECT_DIR_PRIMARY } from "../src/constants.ts";
 import type { ProjectMeta } from "../src/lib/project-meta.ts";
-import type { ProjectView } from "../src/lib/project-views.ts";
+import {
+  type ProjectView,
+  serializeProjectSummary,
+  serializeProjectView,
+} from "../src/lib/project-views.ts";
 import type { RegisteredProject } from "../src/lib/projects-registry.ts";
 import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -803,4 +807,68 @@ test("summary payload keeps project identity and omits detailed runtime payloads
   expect(cache.getDiagnostics().lastRefreshPhasesMs).toHaveProperty(
     "auto_register_ms"
   );
+});
+
+test("daemon full and summary preserve the shared backend/service observation", async () => {
+  const observation = {
+    backend: "native",
+    state: "running",
+    state_reason: null,
+    started_at: null,
+    services: [
+      {
+        name: "api",
+        state: "running",
+        ready: true,
+        completed: null,
+        health: "healthy",
+        exit_code: null,
+        started_at: null,
+      },
+    ],
+  } as const;
+  const view: ProjectView = {
+    name: "native-fixture",
+    devHost: null,
+    repoRoot: "/fixture",
+    projectDir: "/fixture/.hack",
+    definedServices: ["api"],
+    extensionsEnabled: null,
+    features: null,
+    serviceHosts: null,
+    runtimeConfigured: true,
+    runtimeStatus: "unknown",
+    runtime: null,
+    branchRuntime: [],
+    sessions: [],
+    lifecycle: null,
+    ownership: null,
+    worktrees: null,
+    kind: "registered",
+    status: "unknown",
+    observation,
+  };
+  const cache = createRuntimeCache({
+    deps: {
+      readProjectsRegistry: async () => ({ version: 1, projects: [] }),
+      buildProjectViews: async (opts) => {
+        expect(opts.observeNative).toBe(true);
+        return [view];
+      },
+    },
+  });
+  for (const summary of [false, true]) {
+    const payload = await cache.getProjectsPayload({
+      filter: null,
+      includeGlobal: false,
+      includeUnregistered: false,
+      includeMeta: false,
+      summary,
+    });
+    const cli = summary
+      ? serializeProjectSummary(view)
+      : serializeProjectView(view);
+    expect(payload.projects[0]).toEqual(cli);
+    expect(payload.projects[0]).toMatchObject(observation);
+  }
 });

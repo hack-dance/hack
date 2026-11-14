@@ -368,7 +368,7 @@ A macOS system prompt could come later for single root-only lines from R11, neve
 Each is small enough for one PR.
 
 1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
-2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
+2. **R2** Exists (see [project state](../../docs/reference/project-state.md)): backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
 3. **R2b** Native lifecycle the app can drive: a `--json` contract for native `restart` and authored `down`/`restart`, and qualification of the existing detached `up --json` for app use.
 4. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
 5. **R4** Logs: document the `--json` ndjson as stable; `--services a,b` honoured by every backend; `--max-line-bytes <n>` setting `entry.truncated`.

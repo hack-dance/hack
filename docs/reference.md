@@ -10,6 +10,7 @@
 
 ## Environment & sessions
 
+- [Project state](./reference/project-state.md) — shared backend-aware CLI and daemon project/service observations
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
 - [Activity log](./reference/activity-log.md) — the `up`/`down`/`restart` history `hack activity` reads: records, origins, concurrency, rotation and what is never recorded

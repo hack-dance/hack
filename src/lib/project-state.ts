@@ -44,10 +44,14 @@ function memberState(member: ServiceMemberEvidence): ProjectState {
   if (member.state === "dead" || member.state === "failed") {
     return "failed";
   }
-  if (member.state === "exited" || member.state === "stopped") {
-    return member.exitCode !== null && member.exitCode !== 0
-      ? "failed"
-      : "stopped";
+  if (member.state === "exited") {
+    if (member.exitCode === null) {
+      return "unknown";
+    }
+    return member.exitCode === 0 ? "stopped" : "failed";
+  }
+  if (member.state === "stopped" || member.state === "absent") {
+    return "stopped";
   }
   return member.state === "created" ? "stopped" : "unknown";
 }
@@ -75,6 +79,11 @@ export function observeService(opts: {
     return { ...unknown, state: "stopped", ready: false, completed: false };
   }
   const states = opts.members.map(memberState);
+  const mixedLive =
+    opts.members.some((member) => member.state === "running") &&
+    opts.members.some((member) =>
+      ["exited", "dead", "stopped", "absent"].includes(member.state)
+    );
   const completed =
     opts.readiness === "completed"
       ? allEvidence(
@@ -83,7 +92,10 @@ export function observeService(opts: {
             if (state === "unknown") {
               return null;
             }
-            if (state !== "stopped" || member.state === "created") {
+            if (
+              state !== "stopped" ||
+              (member.state !== "exited" && member.state !== "stopped")
+            ) {
               return false;
             }
             return member.exitCode === null ? null : member.exitCode === 0;
@@ -114,7 +126,7 @@ export function observeService(opts: {
   const exitCode = sameValue(opts.members.map((member) => member.exitCode));
   return {
     name: opts.name,
-    state: aggregateProjectState(states),
+    state: mixedLive ? "degraded" : aggregateProjectState(states),
     ready,
     completed,
     health,
@@ -123,7 +135,7 @@ export function observeService(opts: {
   };
 }
 
-/** Unknown members prevent a complete claim; observed mixed states are degraded. */
+/** Unknown prevents a complete claim; mixed live replicas are degraded. */
 export function aggregateProjectState(
   states: readonly ProjectState[]
 ): ProjectState {
@@ -134,7 +146,19 @@ export function aggregateProjectState(
   if (first && states.every((state) => state === first)) {
     return first;
   }
-  return "degraded";
+  if (states.includes("running") || states.includes("degraded")) {
+    return "degraded";
+  }
+  if (states.includes("failed")) {
+    return "failed";
+  }
+  if (states.includes("stopping")) {
+    return "stopping";
+  }
+  if (states.includes("starting")) {
+    return "starting";
+  }
+  return "unknown";
 }
 
 function allEvidence(values: readonly (boolean | null)[]): boolean | null {
@@ -162,4 +186,15 @@ export function earliestStart(
   return (
     known.sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null
   );
+}
+
+/** Successful declared jobs do not degrade otherwise-ready long-running services. */
+export function observedProjectState(
+  services: readonly ServiceObservation[]
+): ProjectState {
+  const active = services.filter((service) => service.completed !== true);
+  if (services.length > 0 && active.length === 0) {
+    return "stopped";
+  }
+  return aggregateProjectState(active.map((service) => service.state));
 }

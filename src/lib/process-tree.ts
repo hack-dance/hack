@@ -3,6 +3,8 @@ export type ProcessIdentityRow = {
   readonly pid: number;
   readonly parentPid: number;
   readonly birth: string;
+  /** Kernel process group from the same observation as birth and zombie state. */
+  readonly processGroupId?: number;
   /**
    * The process has exited but its parent has not reaped it yet (`ps` state
    * `Z`). A zombie runs no code and holds no listener; its PID cannot be
@@ -10,7 +12,7 @@ export type ProcessIdentityRow = {
    */
   readonly zombie: boolean;
 };
-const IDENTITY_ROW = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/;
+const IDENTITY_ROW = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/;
 
 /**
  * Capture only process identity and lineage; never command arguments or environment.
@@ -26,13 +28,16 @@ const IDENTITY_ROW = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/;
  */
 export async function readProcessIdentities(): Promise<ProcessIdentityRow[]> {
   try {
-    const proc = Bun.spawn(["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], {
-      env: childEnvironment({ ...process.env, LC_ALL: "C", TZ: "UTC0" }),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-      timeout: 2000,
-    });
+    const proc = Bun.spawn(
+      ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="],
+      {
+        env: childEnvironment({ ...process.env, LC_ALL: "C", TZ: "UTC0" }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "ignore",
+        timeout: 2000,
+      }
+    );
     const output = await new Response(proc.stdout).text();
     if ((await proc.exited) !== 0) {
       return [];
@@ -44,8 +49,9 @@ export async function readProcessIdentities(): Promise<ProcessIdentityRow[]> {
             {
               pid: Number(match[1]),
               parentPid: Number(match[2]),
-              birth: (match[4] ?? "").replace(/\s+/g, " "),
-              zombie: (match[3] ?? "").startsWith("Z"),
+              processGroupId: Number(match[3]),
+              birth: (match[5] ?? "").replace(/\s+/g, " "),
+              zombie: (match[4] ?? "").startsWith("Z"),
             },
           ]
         : [];

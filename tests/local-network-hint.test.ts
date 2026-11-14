@@ -101,10 +101,11 @@ test("host extraction normalizes case and the root dot", () => {
   expect(isLocalSuffixTarget("https://app.local.example.com")).toBe(false);
 });
 
-// Real CLI boundary: isolated HOME/state, no daemon, no Docker.
-const cli = process.env.HACK_NAME_TEST_BINARY
-  ? [resolve(process.env.HACK_NAME_TEST_BINARY)]
-  : [process.execPath, resolve(import.meta.dir, "../index.ts")];
+// Source CLI: isolated HOME/state and substituted resolver transport. Optional
+// compiled qualification observes the platform's actual DNS diagnostics.
+const compiledCli = process.env.HACK_NAME_TEST_BINARY
+  ? resolve(process.env.HACK_NAME_TEST_BINARY)
+  : null;
 let cleanupRoot: string | null = null;
 
 afterEach(async () => {
@@ -117,6 +118,35 @@ afterEach(async () => {
 async function openJson(devHost: string | null) {
   const fixture = await projectNameFixture();
   cleanupRoot = fixture.root;
+  const preload = resolve(fixture.root, "resolver-preload.ts");
+  const shellPath = resolve(import.meta.dir, "../src/lib/shell.ts");
+  // Source CLI tests must not depend on the host's resolver or Docker. This
+  // boundary also catches macOS's absolute /usr/bin/dscacheutil invocation.
+  await writeFile(
+    preload,
+    `import { mock } from "bun:test";
+const shell = { ...await import(${JSON.stringify(shellPath)}) };
+const execute = shell.exec;
+mock.module(${JSON.stringify(shellPath)}, () => ({
+  ...shell,
+  exec: async (command, options) => {
+    if (command[0] === "getent" || command[0] === "/usr/bin/dscacheutil") {
+      return {
+        exitCode: 0,
+        stdout: command[0] === "getent"
+          ? "192.0.2.10 STREAM fixture\\n"
+          : "name: fixture\\nip_address: 192.0.2.10\\n",
+        stderr: "",
+      };
+    }
+    if (command[0] === "docker") {
+      throw new Error("Local Network hint fixture must not read real Docker");
+    }
+    return execute(command, options);
+  },
+}));
+`
+  );
   const target = await fixture.createProject("app", "my-app");
   if (devHost) {
     await writeFile(
@@ -128,7 +158,22 @@ async function openJson(devHost: string | null) {
     devHost ? { ...target.entry, devHost } : target.entry,
   ]);
   const child = Bun.spawn(
-    [...cli, "open", "--json", "--prefer", "dev", "--project", "my-app"],
+    [
+      ...(compiledCli
+        ? [compiledCli]
+        : [
+            process.execPath,
+            "--preload",
+            preload,
+            resolve(import.meta.dir, "../index.ts"),
+          ]),
+      "open",
+      "--json",
+      "--prefer",
+      "dev",
+      "--project",
+      "my-app",
+    ],
     {
       cwd: fixture.root,
       env: fixture.env,
@@ -148,12 +193,58 @@ function countHints(text: string): number {
   return text.split(LOCAL_NETWORK_HINT_MESSAGE).length - 1;
 }
 
+/**
+ * The payload is `{ url }`, plus the documented DNS notice (`dns` and `hint`
+ * together) when the machine running the test has no address for the host.
+ * Whether it does depends on that machine's resolver, so both shapes pass;
+ * any other key fails.
+ */
+function expectOpenPayload(stdout: string, url: string): void {
+  // The Local Network hint belongs on stderr only, never in any payload field.
+  expect(stdout).not.toContain(LOCAL_NETWORK_HINT_MESSAGE);
+  expect(stdout).not.toContain("Local Network");
+  const payload = JSON.parse(stdout) as Record<string, unknown>;
+  expect(payload.url).toBe(url);
+  const extra = Object.keys(payload)
+    .filter((key) => key !== "url")
+    .sort();
+  if (extra.length > 0) {
+    expect(extra).toEqual(["dns", "hint"]);
+    expect(["unresolved", "unconfigured"]).toContain(payload.dns as string);
+    expect(typeof payload.hint).toBe("string");
+  }
+}
+
+test("the open payload check rejects a leaked hint and unknown keys", () => {
+  const url = "https://name-fixture.hack.gy";
+  const rejects = (payload: Record<string, unknown>) => {
+    expect(() => expectOpenPayload(JSON.stringify(payload), url)).toThrow();
+  };
+  rejects({ url, dns: "unresolved", hint: LOCAL_NETWORK_HINT_MESSAGE });
+  rejects({ url, dns: "unresolved" });
+  rejects({ url, hint: "text" });
+  rejects({ url, dns: "other", hint: "text" });
+  rejects({ url, extra: true });
+  rejects({ url: "https://other.example" });
+  expectOpenPayload(JSON.stringify({ url }), url);
+  expectOpenPayload(
+    JSON.stringify({ url, dns: "unresolved", hint: "No address found." }),
+    url
+  );
+});
+
+/** Source transport resolves positively; compiled runs may carry a DNS notice. */
+function expectUrlPayload(stdout: string, url: string): void {
+  expectOpenPayload(stdout, url);
+  if (!compiledCli) {
+    expect(JSON.parse(stdout)).toEqual({ url });
+  }
+}
+
 test("open --json keeps the hint out of the JSON payload", async () => {
   const result = await openJson(null);
   expect(result.code, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({
-    url: "https://name-fixture.hack.local",
-  });
+  expectUrlPayload(result.stdout, "https://name-fixture.hack.local");
   expect(result.stdout).not.toContain("Local Network");
   // Shown once on macOS, never elsewhere.
   expect(countHints(result.stderr)).toBe(process.platform === "darwin" ? 1 : 0);
@@ -162,8 +253,6 @@ test("open --json keeps the hint out of the JSON payload", async () => {
 test("open --json does not hint for a non-.local host", async () => {
   const result = await openJson("name-fixture.hack.gy");
   expect(result.code, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({
-    url: "https://name-fixture.hack.gy",
-  });
+  expectUrlPayload(result.stdout, "https://name-fixture.hack.gy");
   expect(countHints(result.stderr)).toBe(0);
 }, 15_000);

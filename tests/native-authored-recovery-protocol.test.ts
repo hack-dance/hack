@@ -76,6 +76,77 @@ function sessionSelection() {
     host_boot_uuid: "12345678-abcd-abcd-abcd-123456789abc",
   };
 }
+
+test("pre-Ready recovery binds the start review and accepts only settled effect outcomes", () => {
+  const start = parseNativeAuthoredReceipt(receipt()).review;
+  for (const phase of [
+    "ready-observed",
+    "failed-retained",
+    "stop-intent",
+    "stopped",
+    "removal-intent",
+  ] as const) {
+    const value = selection();
+    value.receipt.phase = phase;
+    expect(
+      parseNativeAuthoredRecoverySelection({ value, start }).receipt.phase
+    ).toBe(phase);
+    if (phase !== "ready-observed") {
+      expect(() =>
+        parseNativeAuthoredRecoverySelection({
+          value,
+          admitted: parseNativeAuthoredReceipt(receipt()),
+        })
+      ).toThrow();
+    }
+    for (const pending of [
+      "create-intent",
+      "start-intent",
+      "uncertain",
+      "stop-intent",
+      "remove-intent",
+    ]) {
+      const changed = structuredClone(value);
+      changed.receipt.resources["container:web"].phase = pending;
+      expect(() =>
+        parseNativeAuthoredRecoverySelection({ value: changed, start })
+      ).toThrow();
+    }
+  }
+  const value = selection();
+  const neverCreated = {
+    ...value,
+    receipt: {
+      ...value.receipt,
+      phase: "failed-retained",
+      resources: {
+        ...value.receipt.resources,
+        "container:web": {
+          ...value.receipt.resources["container:web"],
+          id: null,
+          phase: "reserved",
+        },
+      },
+    },
+  };
+  expect(
+    parseNativeAuthoredRecoverySelection({ value: neverCreated, start }).receipt
+      .resources["container:web"]?.id
+  ).toBeNull();
+  expect(() =>
+    parseNativeAuthoredRecoverySelection({
+      value: {
+        ...neverCreated,
+        receipt: { ...neverCreated.receipt, phase: "preparing" },
+      },
+      start,
+    })
+  ).toThrow();
+  const foreign = { ...start, review_id: "0".repeat(64) };
+  expect(() =>
+    parseNativeAuthoredRecoverySelection({ value, start: foreign })
+  ).toThrow();
+});
 function sourceReceipt() {
   const project = "/private/native-source-fixture";
   return {

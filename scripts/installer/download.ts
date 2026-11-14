@@ -1,13 +1,10 @@
-import {
-  closeSync,
-  constants,
-  fchmodSync,
-  fsyncSync,
-  openSync,
-  readFileSync,
-  writeSync,
-} from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  type ReleaseFetch,
+  transferRelease,
+} from "../../src/lib/release-transfer.ts";
+import { TransferBudget } from "../../src/lib/release-transfer-budget.ts";
 import {
   checksums,
   MAX_ARCHIVE,
@@ -16,7 +13,6 @@ import {
   parseJson,
   requireThat,
 } from "./integrity.ts";
-import { TransferBudget } from "./transfer-budget.ts";
 
 const HOSTS = new Set([
   "api.github.com",
@@ -42,128 +38,21 @@ export async function download(
   raw: string,
   target: string,
   limit: number,
-  sharedBudget?: TransferBudget
+  sharedBudget?: TransferBudget,
+  request?: ReleaseFetch
 ) {
   const budget = sharedBudget ?? new TransferBudget();
   try {
-    return await downloadWithinBudget(raw, target, limit, budget);
+    return await transferRelease({
+      url: raw,
+      path: target,
+      maxBytes: limit,
+      budget,
+      request,
+    });
   } finally {
     if (!sharedBudget) {
       budget.close();
-    }
-  }
-}
-async function downloadWithinBudget(
-  raw: string,
-  target: string,
-  limit: number,
-  budget: TransferBudget
-) {
-  let url = secureUrl(raw);
-  let response: Response | undefined;
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  let fd: number | undefined;
-  let primaryFailure: unknown;
-  try {
-    for (let redirects = 0; redirects <= 5; redirects++) {
-      response = await budget.wait(() =>
-        fetch(url, {
-          redirect: "manual",
-          signal: budget.signal,
-          headers: {
-            Accept: "application/vnd.github+json",
-            "User-Agent": "hack-prerelease-installer",
-            "Accept-Encoding": "identity",
-          },
-        })
-      );
-      budget.progress();
-      if (![301, 302, 303, 307, 308].includes(response.status)) {
-        break;
-      }
-      const location = response.headers.get("location");
-      requireThat(
-        location && redirects < 5,
-        "Missing redirect or redirect budget exceeded."
-      );
-      const next = secureUrl(new URL(location, url).href);
-      const body = response.body;
-      response = undefined; // The cancellation below is the sole cleanup attempt for this response.
-      if (body) {
-        await budget.settleCancellation(() => body.cancel());
-      }
-      url = next;
-    }
-    requireThat(response?.ok && response.body, "Release download failed.");
-    const declared = response.headers.get("content-length");
-    requireThat(
-      declared === null || /^[0-9]{1,12}$/.test(declared),
-      "Malformed release download length."
-    );
-    const expected = declared === null ? undefined : Number(declared);
-    requireThat(
-      expected === undefined || expected <= limit,
-      "Release download exceeds its size budget."
-    );
-    fd = openSync(
-      target,
-      constants.O_WRONLY |
-        constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_NOFOLLOW,
-      0o600
-    );
-    reader = response.body.getReader();
-    fchmodSync(fd, 0o600);
-    let size = 0;
-    for (;;) {
-      const activeReader = reader;
-      const incoming = await budget.wait(() => activeReader.read());
-      if (incoming.done) {
-        break;
-      }
-      const chunk = incoming.value;
-      if (chunk.length > 0) {
-        budget.progress();
-      }
-      size += chunk.length;
-      requireThat(
-        size <= limit && (expected === undefined || size <= expected),
-        "Release download exceeds its size budget or declared length."
-      );
-      let offset = 0;
-      while (offset < chunk.length) {
-        offset += writeSync(fd, chunk, offset, chunk.length - offset);
-      }
-    }
-    requireThat(
-      expected === undefined || size === expected,
-      "Release download is incomplete."
-    );
-    fsyncSync(fd);
-  } catch (error) {
-    primaryFailure = error;
-    throw error;
-  } finally {
-    try {
-      if (reader) {
-        const activeReader = reader;
-        await budget.settleCancellation(
-          () => activeReader.cancel(),
-          primaryFailure
-        );
-      } else if (response?.body) {
-        const body = response.body;
-        await budget.settleCancellation(() => body.cancel(), primaryFailure);
-      }
-    } finally {
-      try {
-        reader?.releaseLock();
-      } finally {
-        if (fd !== undefined) {
-          closeSync(fd);
-        }
-      }
     }
   }
 }

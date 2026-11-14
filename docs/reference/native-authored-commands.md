@@ -192,13 +192,19 @@ retained attempt is inspected.
 
 ## Saved-run `ps`
 
-`ps` and `ps --json` issue one authenticated current status request for the exact
+`ps` and `ps --json` issue one authenticated `observe` request for the exact
 saved project and explicit branch selection. Text output lists service, container,
 current state and current health. JSON uses the ordinary result envelope with
 `data.backend: "native"`, `data.status`, `data.run`, historical `data.phase`, and
 `data.items`; each item includes service, container, state, health and exitCode.
 Only fresh runtime observations supply state and health. Stored readiness and phase
 do not prove that a service is still live.
+
+Observation takes no provider lease, executes no source checks or storage-witness
+helpers, and writes no runtime journal. If the journal changes during the read,
+`ps` reports `runtime_busy` with no phase or service rows; retry for a fresh view.
+The owner's separate `status` action retains full locked verification for `up`
+readiness. An `observed` presentation reply cannot satisfy a `status` request.
 
 A project with no saved attempt reports `not_started`; a retained startup intent
 without a Ready mapping reports `pending` with no confirmed service rows. `pending`
@@ -231,8 +237,10 @@ stop; no host declaration, hook permit, new controller or stored-PID signal is
 created. Success requires authenticated Removed, the original child and detached
 group's settlement, and exact endpoint/start/Ready/source retirement. Compute
 shutdown retains persistent data; this command adds no volume deletion authority.
-A missing, changed or dead endpoint refuses. Partial publication or retirement
-keeps startup evidence blocked. Legacy no-host version 1 records remain ineligible for dead-owner recovery.
+A missing, changed or dead endpoint cannot authorize an owner-mediated stop.
+Plain `down` then tries the same independent recovery proof as `down --recover`.
+Partial publication or retirement keeps startup evidence blocked unless that
+exact proof permits monotonic completion. Legacy no-host version 1 records remain ineligible for dead-owner recovery.
 New version 2 records capture the original native child while its foreground
 owns it: PID, birth, executable identities, UID, host boot session, process group
 and session. Recovery uses two bounded complete process-metadata observations. It refuses
@@ -270,12 +278,12 @@ kill/recover/up or retained SQL behavior.
 Portable private-filesystem and stand-in lifecycle controls cover this boundary;
 installed Source4 SQL retention through public down/up remains a separate runtime gate.
 
-`down --recover` explicitly retires a complete stored native generation whose
+`down --recover` explicitly selects recovery of a stored native generation whose
 foreground publisher and frontend admission owner are both dead on the same host
 boot. New version 4 native publications use the kernel boot-session UUID, which
-remains independent of calendar clock correction. Recovery requires the exact stored Ready,
+remains independent of calendar clock correction. Ready recovery requires the exact stored Ready,
 startup intent and private source envelope, and the original guest incarnation.
-Live owners, older version 2 dead publications, partial startup, pending writes,
+The absent-Ready case below has a separate selection. Live owners, older version 2 dead publications, unsettled startup effects, pending writes,
 changed files and rebooted guests refuse. Env/profile changes, service subsets and
 `--json` are unsupported for this operation. It neither recompiles authored input
 nor acquires managed values or starts a provider.
@@ -289,7 +297,7 @@ pending writes, retained owner records and changed history still select recovery
 or refuse; they do not qualify for the no-op.
 
 When the selection has a retained startup intent but no Ready mapping and no
-recovery intent, `down --recover` takes a different path. It handles only an
+recovery intent, both `down` and `down --recover` first try retirement of an
 incomplete startup that never reserved runtime state. One example is an attempt
 retained by an earlier CLI before this retirement existed. The command first
 takes a fresh startup admission. A live or interrupted foreground CLI still holds
@@ -299,7 +307,52 @@ the exact run. It retires the start intent and the validated source envelope onl
 when the native runtime refuses `native_graph_unreserved`. It removes the source
 first, so an interrupted retirement keeps the start intent blocking. Any receipt,
 any other refusal, or a successful inspection retains every file. This path does
-not compile input, acquire values, serve a run or touch guest resources.
+not compile input, acquire values, serve a run or touch guest resources. If it
+refuses because runtime state was reserved, the command independently attempts
+the settled recovery proof below; that refusal grants no authority.
+If inspection refuses because an interrupted removal no longer has an intact
+network, a read-only recovery selection must validate the exact start-bound
+settled journal before choosing recovery. Busy, canceled, unknown and malformed
+results still cannot choose cleanup from the inspection refusal alone.
+
+When Ready was never saved, recovery requires the exact start and private source
+envelope, repeatedly proves Ready absent, and records a distinct version 3
+frontend intent. A live admission refuses. An interrupted admission must name
+the exact dead owner; if none exists, recovery holds a fresh admission before
+taking recovery and mutation leases and saves its full identity. Every intent
+reader blocks new startup until recovery completes. Before releasing a fresh
+admission, recovery commits `admission_releasing`; a second pass requires its
+absence before completing. A crash retains the exact admission for dead-owner
+recovery. A changed lock or unrecorded absence refuses.
+If recovery refuses after committing its intent but before recording release,
+the exact admission remains held on disk. `up` stays blocked until `down`
+finishes that recovery. Older bundles refuse the new runtime v2 and frontend v3
+intent versions rather than interpreting them as Ready recovery.
+
+The native original may be `ready-observed`, `failed-retained`, `stop-intent`,
+`stopped`, `removal-intent` or `removed`. Containers must be `created`, `started`,
+`stopped` or `removed` with their saved IDs, or never-created `reserved` without
+an ID. Networks admit `created`, `remove-intent`, `removed`, or never-created
+`reserved`. `preparing`, per-container intent/uncertain states and pending files
+refuse. A never-created resource is marked removed only after exact name/label
+absence checks; recovery never creates or starts it. Original bytes, phase,
+boot, incarnation and resource identities remain fixed, and cleanup ranks only
+advance. Runtime recovery intents use version 2; legacy version 1 keeps its
+Ready-only admission. Frontend versions 1 and 2 likewise keep their Ready proof.
+Older readers refuse unknown intent versions.
+
+Pre-Ready host processes and hooks must already have settlement proof and no
+live or uncertain owned groups; recovery only observes them before native
+cleanup and retires their records after Removed/null observations. A live-stop
+record in this absent-Ready path refuses. It never signals a stored PID or
+replays startup. Graph2 and fully enrolled Graph4 retain the existing version
+restrictions; source and topology recovery remain unsupported. Named refusals
+retain evidence and direct the operator to `hack ps`.
+
+A crash after taking admission but before creating any native journal still
+refuses: unreserved retirement cannot take that stale admission, and settled
+recovery has no native receipt to prove. No services were admitted in this case;
+the stale admission and start record remain retained for inspection with `hack ps`.
 
 The closed version 3 publication and version 1 recovery selector remain supported
 with their original calendar boot qualifier; clock drift conservatively refuses

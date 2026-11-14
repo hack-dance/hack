@@ -12,9 +12,9 @@ import { constants as osConstants, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import {
-  livePaths,
+  muxRemovalTargets,
+  removalAllowed,
   resolveLiveInputScope,
-  touchesLiveInput,
 } from "../lib/live-inputs.ts";
 import { findProjectContext } from "../lib/project.ts";
 import type { SecretsHygieneScope } from "../lib/secrets-hygiene.ts";
@@ -38,51 +38,71 @@ export const sweepObserver: { onSweep?: (parent: string) => void } = {};
 
 /**
  * Remove this user's staged payloads older than the TTL from `parent`
- * (normally the temp directory), before a new staging. It uses the doctor's
- * own path: {@link findStaleMuxEnvironments} (private `hack-mux-env-*`
- * directories owned by this user) and {@link removeStaleMuxEnvironment} (the
- * directory found, its own `env.json`, then the directory if empty). Before
- * any removal the current configuration is resolved (strictly) and a
- * directory that is, or holds, a file it reads (a configured store or key,
- * the project or shared key, `hack.config.json`, an env layer) is left
- * alone; when the configuration cannot be read nothing is removed
- * (HACK-2181). Failures are skipped: this is cleanup, never a reason to
- * refuse a new session.
+ * (normally the temp directory). Only `hack-mux-env-*` directories owned by
+ * this user with private modes are touched, and only their `env.json` when
+ * it is a regular single-link file of this user. Before each removal the
+ * configuration is resolved (from the current directory, strictly) and the
+ * same live-input check `hack doctor --fix` uses must allow it
+ * (`removalAllowed`, HACK-2181): a payload directory that holds, or is, a
+ * file current resolution reads is kept, and nothing is removed when the
+ * configuration cannot be read. Failures are skipped: this is cleanup, never
+ * a reason to refuse a new session.
  */
 export async function sweepStaleMuxEnvironments(opts: {
   readonly parent?: string;
   readonly now?: number;
-  /** The configuration to respect; default: resolved from the working directory. */
+  /** The configuration to respect; resolved from the current directory by default. */
   readonly scope?: () => Promise<SecretsHygieneScope>;
 }): Promise<void> {
   const parent = opts.parent ?? tmpdir();
   sweepObserver.onSweep?.(parent);
-  const stale = await findStaleMuxEnvironments({
-    tmpDir: parent,
-    now: opts.now,
-  }).catch(() => []);
-  if (stale.length === 0) {
-    return;
-  }
-  const scope = await (
-    opts.scope ??
-    (() =>
-      resolveLiveInputScope({
-        startDir: process.cwd(),
-        strict: true,
-        findProject: findProjectContext,
-      }))
-  )().catch(() => null);
-  if (scope === null) {
-    return;
-  }
-  const live = await livePaths(scope).catch(() => "unknown" as const);
-  for (const entry of stale) {
-    if (await touchesLiveInput({ target: entry.root, live })) {
+  const now = opts.now ?? Date.now();
+  const uid = process.getuid?.();
+  const names = await readdir(parent).catch(() => [] as string[]);
+  for (const name of names) {
+    if (!name.startsWith(PREFIX)) {
       continue;
     }
-    await removeStaleMuxEnvironment(entry).catch(() => false);
+    const root = join(parent, name);
+    try {
+      const info = await lstat(root);
+      if (
+        !info.isDirectory() ||
+        info.uid !== uid ||
+        (info.mode & 0o077) !== 0 ||
+        now - info.mtimeMs < MUX_ENVIRONMENT_TTL_MS
+      ) {
+        continue;
+      }
+      if (
+        !(await removalAllowed({
+          targets: muxRemovalTargets(root),
+          scopes: [opts.scope ?? currentLiveInputScope],
+        }))
+      ) {
+        continue;
+      }
+      const payload = join(root, "env.json");
+      const file = await lstat(payload).catch(() => null);
+      if (file) {
+        if (!file.isFile() || file.uid !== uid || file.nlink !== 1) {
+          continue;
+        }
+        await unlink(payload);
+      }
+      await rmdir(root);
+    } catch {
+      // Another process removed or changed it; leave it.
+    }
   }
+}
+
+function currentLiveInputScope(): Promise<SecretsHygieneScope> {
+  return resolveLiveInputScope({
+    startDir: process.cwd(),
+    strict: true,
+    findProject: findProjectContext,
+  });
 }
 
 function isMissing(error: unknown): boolean {
@@ -102,13 +122,18 @@ export type StaleMuxEnvironment = {
  * The doctor reports these and removes them on `--fix`; staging itself uses
  * {@link sweepStaleMuxEnvironments}. Only
  * private directories with Hack's prefix and owned by this user qualify;
- * nothing is read.
+ * nothing is read. Roots are reported under the resolved `tmpDir`, the same
+ * spelling {@link stageMuxEnvironment} returns.
  */
 export async function findStaleMuxEnvironments(opts?: {
   readonly tmpDir?: string;
   readonly now?: number;
 }): Promise<readonly StaleMuxEnvironment[]> {
-  const base = opts?.tmpDir ?? tmpdir();
+  // Resolved once, as staging resolves the directory it creates, so a
+  // payload has one spelling whichever function names it (macOS keeps the
+  // temporary directory behind /var -> /private/var).
+  const given = opts?.tmpDir ?? tmpdir();
+  const base = await realpath(given).catch(() => given);
   const now = opts?.now ?? Date.now();
   const names = await readdir(base).catch(() => [] as string[]);
   const stale: StaleMuxEnvironment[] = [];

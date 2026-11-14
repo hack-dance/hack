@@ -24,7 +24,13 @@ import {
 } from "./env-layer-modes.ts";
 import { gitignoreLinePattern, writeTextFileAtomicIfChanged } from "./fs.ts";
 import { isKeychainDisabled } from "./keychain.ts";
-import { livePaths, touchesLiveInput } from "./live-inputs.ts";
+import {
+  isLive,
+  livePaths,
+  muxRemovalTargets,
+  realpathOrMissing,
+  removalAllowed,
+} from "./live-inputs.ts";
 import {
   findStagingLeftovers,
   legacyStagingTargetName,
@@ -638,25 +644,6 @@ async function containingWorkTree(
 }
 
 /**
- * `path` resolved, null when it (or a directory on the way) does not exist,
- * or "unknown" for any other failure: only confirmed absence lets a caller
- * look at the parent instead (HACK-2165).
- */
-async function realpathOrMissing(
-  path: string
-): Promise<string | null | "unknown"> {
-  try {
-    return await realpath(path);
-  } catch (error: unknown) {
-    const code =
-      typeof error === "object" && error !== null && "code" in error
-        ? (error as { readonly code?: unknown }).code
-        : undefined;
-    return code === "ENOENT" || code === "ENOTDIR" ? null : "unknown";
-  }
-}
-
-/**
  * The resolved nearest directory of `path` that exists (git runs there); null
  * when a directory on the way cannot be inspected.
  */
@@ -1022,9 +1009,7 @@ export async function inspectSecretsHygiene(
     const fix = finding.fix;
     if (fix?.kind !== "remove_leftover" && fix?.kind !== "remove_mux") {
       kept.push(finding);
-    } else if (
-      !(await touchesLiveInput({ target: removalTarget(fix), live }))
-    ) {
+    } else if (!(await anyLive({ paths: removalTargets(fix), live }))) {
       kept.push({ ...finding, fix: { ...fix, scope } });
     }
   }
@@ -1211,22 +1196,33 @@ export async function applySecretsHygieneFixes(opts: {
   return { applied, skipped };
 }
 
-/**
- * What a removal may delete: the leftover file, or the payload directory
- * (with everything under it, which is why the live check covers what lies
- * beneath; see `touchesLiveInput`).
- */
-function removalTarget(
+/** What a removal can remove (see `muxRemovalTargets`). */
+function removalTargets(
   fix: Extract<SecretsHygieneFix, { kind: "remove_leftover" | "remove_mux" }>
-): string {
-  return fix.kind === "remove_leftover" ? fix.leftover.path : fix.stale.root;
+): readonly string[] {
+  return fix.kind === "remove_leftover"
+    ? [fix.leftover.path]
+    : muxRemovalTargets(fix.stale.root);
+}
+
+async function anyLive(opts: {
+  readonly paths: readonly string[];
+  readonly live: ReadonlySet<string> | "unknown";
+}): Promise<boolean> {
+  for (const path of opts.paths) {
+    if (await isLive({ path, live: opts.live })) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
- * Whether a removal may still go ahead: its target is live in neither the
+ * Whether a removal may still go ahead: its targets are live in neither the
  * inspection's scope nor the current one (resolved again here, so a
  * configuration edit since inspection counts). Any failure to resolve
- * refuses the removal.
+ * refuses the removal. The automatic payload sweep makes the same decision
+ * through the same function (`removalAllowed`, HACK-2181).
  */
 async function removalStillSafe(opts: {
   readonly fix: Extract<
@@ -1235,24 +1231,14 @@ async function removalStillSafe(opts: {
   >;
   readonly currentScope?: () => Promise<SecretsHygieneScope>;
 }): Promise<boolean> {
-  const scopes: SecretsHygieneScope[] = [];
-  if (opts.fix.scope) {
-    scopes.push(opts.fix.scope);
-  }
-  if (opts.currentScope) {
-    const current = await opts.currentScope().catch(() => null);
-    if (current === null) {
-      return false;
-    }
-    scopes.push(current);
-  }
-  const target = removalTarget(opts.fix);
-  for (const scope of scopes) {
-    if (await touchesLiveInput({ target, live: await livePaths(scope) })) {
-      return false;
-    }
-  }
-  return true;
+  const inspected = opts.fix.scope;
+  return await removalAllowed({
+    targets: removalTargets(opts.fix),
+    scopes: [
+      ...(inspected ? [() => Promise.resolve(inspected)] : []),
+      ...(opts.currentScope ? [opts.currentScope] : []),
+    ],
+  });
 }
 
 /** Applies one fix; false when it no longer applies. */

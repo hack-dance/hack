@@ -14,9 +14,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { STAGING_LEFTOVER_MIN_AGE_MS } from "../src/lib/private-staging.ts";
 import { projectEnvLiveInputPaths } from "../src/lib/project-env-config.ts";
+import { retireEncryptedStoreFile } from "../src/lib/secret-store.ts";
 import {
   applySecretsHygieneFixes,
   inspectSecretsHygiene,
@@ -1178,4 +1179,189 @@ test("a project inside a larger repository keeps its own ignore repair", async (
   });
   const key = findings.find((finding) => finding.path === keyPath);
   expect(key?.fix?.kind).toBe("ignore");
+});
+
+test("a configured key in a stale payload reached through a linked temp directory is never removed", async () => {
+  const f = await fixture();
+  // The temporary directory is reached through a link (macOS: /var ->
+  // /private/var); the key is configured by the linked spelling, while
+  // hygiene names payloads by the resolved one.
+  const linked = join(f.root, "tmp-link");
+  await symlink(f.muxDir, linked);
+  const payload = await stageMuxEnvironment(
+    { FAKE_KEY: "synthetic-linked" },
+    { tmpDir: linked }
+  );
+  await backdate(dirname(payload.path));
+  const store = join(f.home, "secrets.enc.json");
+  await writeFile(store, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  const keyByLink = join(linked, basename(dirname(payload.path)), "env.json");
+  const configured = {
+    ...f.scope,
+    tmpDir: linked,
+    stores: [{ storePath: store, keyPath: keyByLink }],
+  };
+  expect(
+    (await inspectSecretsHygiene(configured)).some(
+      (finding) => finding.fix?.kind === "remove_mux"
+    )
+  ).toBe(false);
+  const earlier = await inspectSecretsHygiene({ ...f.scope, tmpDir: linked });
+  expect(
+    earlier
+      .filter((finding) => finding.fix?.kind === "remove_mux")
+      .map((finding) => finding.path)
+  ).toEqual([dirname(payload.path)]);
+  await applySecretsHygieneFixes({
+    findings: earlier,
+    report: () => undefined,
+    currentScope: async () => configured,
+  });
+  expect(await readFile(payload.path, "utf8")).toContain("synthetic-linked");
+  await payload.cleanup();
+});
+
+test("a retired store (HACK-2177) is never removed by hygiene, whatever offers it", async () => {
+  const f = await fixture();
+  const storePath = join(f.home, "secrets.enc.json");
+  const keyPath = join(f.home, "secrets-file.key");
+  await writeFile(storePath, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  const retired = await retireEncryptedStoreFile({ storePath, keyPath });
+  const archive = retired.to;
+  expect(archive).toContain(".retired-");
+  await backdate(archive);
+  // Ordinary inspection and --fix leave it alone.
+  const scope = { ...f.scope, stores: [{ storePath, keyPath }] };
+  const findings = await inspectSecretsHygiene(scope);
+  expect(paths(findings)).not.toContain(archive);
+  await applySecretsHygieneFixes({
+    findings,
+    report: () => undefined,
+    currentScope: async () => scope,
+  });
+  expect(await readFile(archive, "utf8")).toContain(SENTINEL);
+  // A removal offered for it (by any detector, with or without a scope)
+  // is refused at the unlink.
+  const stats = await lstat(archive);
+  // A guard that holds, so only the removal check can refuse it.
+  const directory = await lstat(dirname(archive));
+  const guard = {
+    path: dirname(archive),
+    dev: directory.dev,
+    ino: directory.ino,
+  };
+  for (const withScope of [true, false]) {
+    const result = await applySecretsHygieneFixes({
+      findings: [
+        {
+          status: "warn",
+          path: archive,
+          message: "synthetic",
+          guard,
+          fix: {
+            kind: "remove_leftover",
+            leftover: { path: archive, stats },
+            ...(withScope ? { scope } : {}),
+          },
+        },
+      ],
+      report: () => undefined,
+    });
+    expect(result).toEqual({ applied: 0, skipped: 1 });
+  }
+  expect(await readFile(archive, "utf8")).toContain(SENTINEL);
+});
+
+test("a removal whose target cannot be resolved is refused, even through an alias to a retired store", async () => {
+  const f = await fixture();
+  const storePath = join(f.home, "secrets.enc.json");
+  const keyPath = join(f.home, "secrets-file.key");
+  await writeFile(storePath, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  const archive = (await retireEncryptedStoreFile({ storePath, keyPath })).to;
+  // An alias with no retired marker in its spelling, whose resolution fails
+  // for a reason other than absence.
+  const alias = join(f.root, "alias");
+  await symlink(dirname(archive), alias);
+  const target = join(alias, basename(archive));
+  const stats = await lstat(target);
+  const directory = await fsPromises.stat(alias);
+  const guard = { path: alias, dev: directory.dev, ino: directory.ino };
+  const scope = { ...f.scope, stores: [{ storePath, keyPath }] };
+  const original = fsPromises.realpath;
+  const spy = spyOn(fsPromises, "realpath").mockImplementation((async (
+    path: Parameters<typeof original>[0],
+    ...rest: unknown[]
+  ) => {
+    if (String(path) === target) {
+      throw Object.assign(new Error("synthetic EIO"), { code: "EIO" });
+    }
+    return await Reflect.apply(original, fsPromises, [path, ...rest]);
+  }) as typeof original);
+  try {
+    for (const withScope of [true, false]) {
+      const result = await applySecretsHygieneFixes({
+        findings: [
+          {
+            status: "warn",
+            path: target,
+            message: "synthetic",
+            guard,
+            fix: {
+              kind: "remove_leftover",
+              leftover: { path: target, stats },
+              ...(withScope ? { scope } : {}),
+            },
+          },
+        ],
+        report: () => undefined,
+      });
+      expect(result).toEqual({ applied: 0, skipped: 1 });
+    }
+  } finally {
+    spy.mockRestore();
+  }
+  expect(await readFile(archive, "utf8")).toContain(SENTINEL);
+});
+
+test("a configured input whose alias cannot be resolved makes the live set unknown, not smaller", async () => {
+  const f = await fixture();
+  // The configured key is a leftover-shaped file reached through an alias
+  // directory; resolving that alias spelling fails (an I/O error, say).
+  const real = join(f.projectRoot, `..hack.secret.key.${UUID}.tmp`);
+  await writeFile(real, `${SENTINEL}\n`, { mode: 0o600 });
+  await backdate(real);
+  const alias = join(f.root, "alias");
+  await symlink(f.projectRoot, alias);
+  const keyPath = join(alias, basename(real));
+  const scope = {
+    ...f.scope,
+    stores: [{ storePath: join(f.home, "secrets.enc.json"), keyPath }],
+  };
+  const original = fsPromises.realpath;
+  const spy = spyOn(fsPromises, "realpath").mockImplementation((async (
+    path: Parameters<typeof original>[0],
+    ...rest: unknown[]
+  ) => {
+    if (String(path) === keyPath) {
+      throw Object.assign(new Error("synthetic EIO"), { code: "EIO" });
+    }
+    return await Reflect.apply(original, fsPromises, [path, ...rest]);
+  }) as typeof original);
+  try {
+    const findings = await inspectSecretsHygiene(scope);
+    expect(
+      findings.some(
+        (finding) =>
+          finding.fix?.kind === "remove_leftover" && finding.path === real
+      )
+    ).toBe(false);
+    await applySecretsHygieneFixes({
+      findings,
+      report: () => undefined,
+      currentScope: async () => scope,
+    });
+  } finally {
+    spy.mockRestore();
+  }
+  expect(await readFile(real, "utf8")).toBe(`${SENTINEL}\n`);
 });

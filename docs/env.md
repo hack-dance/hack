@@ -462,7 +462,7 @@ global Hack home, in its "secrets hygiene" section. It names files, never values
 - an encrypted store whose key file is missing: "store present, key missing, cannot be
   read".
 
-`hack doctor --fix` sets the files it reports to mode 0600, adds missing ignore
+`hack doctor --fix` removes group and other permission bits from eligible files it reports, adds missing ignore
 entries, and removes Hack's own leftovers, and prints each change. It never deletes a
 store, a key or a file you wrote, and never untracks a file.
 
@@ -471,7 +471,8 @@ staging copies live in a private directory next to the file, `.hack-staging/`, w
 holds a `.gitignore` of `*`, so git never lists anything in it. `hack doctor --fix`
 removes copies older than 10 minutes, and stale terminal-session payloads, but never a
 file env resolution reads (a configured store or key, the project or shared key,
-`hack.config.json` or a YAML layer, by its own path or where it resolves). Before each
+`hack.config.json` or a YAML layer, by its own path or where it resolves), and never
+anything in a retired store (`<store>.retired-<stamp>/`). Before each
 removal it reads the configuration again, so an edit made since the check counts, and
 it removes nothing it cannot confirm; writes themselves remove nothing there. A machine-local layer that a write changes, or
 leaves unchanged, is set to 0600 if other users could read it. Commands that read env
@@ -1325,7 +1326,18 @@ Older repos may still have:
 - `.hack/.env.<overlay>`
 - configured secret backends via `hack env backend`
 
-Hack still detects and reads that legacy format, but the preferred migration path is:
+**Before migration, preserve a private readable copy of the original project
+key and env files outside the working tree.** On next.16 or an earlier
+prerelease, do not run `doctor --migrate-env-config` without a copy of
+`.hack.secret.key`: explicit cleanup can remove it when a legacy store's
+`keyPath` names the same file (HACK-2172). The merged live-input protection fix,
+intended for next.17, refuses cleanup of current project/shared keys, config and
+YAML inputs, including filesystem aliases. It does not recover keys already removed. Keep the old encrypted
+files until their original key is recovered; creating a replacement key is not
+recovery.
+
+Hack still detects and reads that legacy format. After those backup checks,
+the explicit migration path is:
 
 ```bash
 hack doctor --migrate-env-config
@@ -1655,6 +1667,11 @@ as they are, so set those values again with `hack env set --secret --env <name>`
 `hack doctor` also warns when a repo still depends on the old format. Its `env mode`
 check reports an error, not the legacy format, when a `.hack/hack.env.*.yaml` entry is a
 dangling symlink or another non-file.
+Its `secret integrity` check also fails when an env layer cannot be read or
+parsed, or its encrypted entries cannot be opened with the available original
+key. Correct the reported layer or recover that key before retrying runtime
+commands. A hidden value in `env list` is not proof that it decrypts successfully;
+metadata-only inspection does not replace this check.
 For modern env repos, `hack doctor` also warns when materialized compatibility output in
 `.hack/.env` or `.hack/.env.state.json` is stale and points to `hack env materialize`.
 
@@ -1714,7 +1731,20 @@ Some older surfaces are still compatibility-oriented:
   before it lands, so a concurrent writer's key is kept, never overwritten. The
   process-wide key cache holds only keychain material, so one store's key file never
   stands in for another store's key. `hack doctor` reports an unreadable or refused
-  store, a missing or refused store key, and a key that does not open the store. Explicit key
+  store, a missing or refused store key, and a key that does not open the store.
+  A store whose key is missing or wrong is an error only in a project that reads
+  it (its legacy env contract declares a store-backed value, or plaintext is kept
+  in the backend), and a warning elsewhere. The finding names the registered
+  projects that read the store, and offers two ways forward: restore the key, or
+  run `hack secrets retire-store`. That command moves the store into a new
+  directory `<store>.retired-<UTC time>/` beside it, deletes and prints nothing, and says
+  how to move it back. It needs `--yes` without a terminal. It refuses a store that
+  another registered project's key still opens, and, unless `--allow-unchecked` is
+  passed, a store some registered projects could not be checked for. Because
+  `HACK_SECRETS_FILE_KEY` overrides key files and may be set in another shell for a
+  project that selects the store, the command cannot rule it out and also needs
+  `--allow-unchecked` as confirmation that none does. Doctor then lists
+  retired files as information. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
   key paths or immediate parent directories. A key generated on first use is
   published only when no key file exists, so concurrent first users adopt the key

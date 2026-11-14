@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   symlink,
   unlink,
@@ -213,5 +214,29 @@ test("the next staging sweeps payloads of sessions that never ran; recent ones s
     await next.cleanup();
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale payloads are named by the resolved path staging returns, even through a linked temp directory", async () => {
+  // macOS keeps the temporary directory behind /var -> /private/var; a link
+  // here stands in for it.
+  const real = await mkdtemp(join(tmpdir(), "mux-env-real-"));
+  const linked = `${real}-link`;
+  await symlink(real, linked);
+  try {
+    const staged = await stageMuxEnvironment(
+      { FAKE_KEY: "synthetic-linked" },
+      { tmpDir: linked }
+    );
+    await expire(dirname(staged.path));
+    const found = await findStaleMuxEnvironments({ tmpDir: linked });
+    expect(found.map((entry) => entry.root)).toEqual([dirname(staged.path)]);
+    expect(dirname(staged.path).startsWith(`${await realpath(real)}/`)).toBe(
+      true
+    );
+    expect(await removeStaleMuxEnvironment(found[0]!)).toBe(true);
+  } finally {
+    await rm(linked, { force: true });
+    await rm(real, { recursive: true, force: true });
   }
 });

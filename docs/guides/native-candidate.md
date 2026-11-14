@@ -1816,8 +1816,10 @@ warning `mount_host_hint_ignored`; they tune host file sharing and change nothin
 inside the container. Other mount options, such as `nocopy` or a propagation mode,
 still refuse with `unsupported_mount_option`.
 
-An anonymous volume, such as `- /app/node_modules`, `- /app/.cache:ro` or a long-form
-`type: volume` entry with no `source`, is accepted. Native stores each one as a named
+An anonymous volume, written as one absolute container path (`- /app/node_modules`)
+or as a long-form `type: volume` entry with no `source`, is accepted. Use the long
+form with `read_only: true` for a read-only one; `/data:ro` is a bind of `/data`, as
+in Compose, and is refused. Native stores each one as a named
 volume the project owns, called `hack-anonymous-` plus 16 hexadecimal characters
 derived from the service name and the container path, and reports the warning
 `anonymous_volume_named`. This differs from Compose in two ways:
@@ -1827,9 +1829,13 @@ derived from the service name and the container path, and reports the warning
   not refill it; run `hack down --remove-data` to start it empty again.
 - It counts toward the limit of 16 volumes per project.
 
-Two services that name the same path get separate volumes, as on Compose. Volume
-names that start with `hack-anonymous-` are reserved. A bind mount still needs a
-source, and a `volume.subpath` still needs a named volume.
+Two services that name the same path get separate volumes, as on Compose. A
+top-level volume whose name starts with `hack-anonymous-` refuses with
+`reserved_volume_name`. A bind mount still needs a source, and a `volume.subpath`
+still needs a named volume. A read-only anonymous volume does not cover an
+image-declared `VOLUME` path; that cover must be writable. `hack doctor` gives the
+same retained-data advisories for a service with an anonymous volume as for one
+with a named data volume.
 Because virtiofs preserves host ownership, those services keep `DAC_OVERRIDE`
 (part of the default capability set) even when `cap_drop` removes it. This allows
 root processes to access the explicitly shared tree; it does not bypass a read-only

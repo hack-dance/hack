@@ -112,6 +112,12 @@ pub(super) fn compile(
     if let Some(value) = m.get("volumes") {
         for (name, value) in object(value)? {
             identifier(name)?;
+            if name.starts_with(service::ANONYMOUS_PREFIX) {
+                return Err(problem(
+                    "reserved_volume_name",
+                    "Volume names that start with hack-anonymous- are reserved for anonymous volumes.",
+                ));
+            }
             let field = format!("volumes.{name}");
             let empty = Map::new();
             let v = if value.is_null() {

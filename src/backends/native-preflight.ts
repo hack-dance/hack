@@ -262,9 +262,13 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     fix: "Select at most 64 profiles.",
   },
   invalid_mount: {
+    message: "A mount is not in a form native accepts.",
+    fix: "Write each mount as source:target, or as one absolute container path for an anonymous volume. A bind mount needs a source, and a volume subpath needs a named volume.",
+  },
+  reserved_volume_name: {
     message:
-      "A mount is not in a form native accepts, or a volume name starts with the reserved hack-anonymous- prefix.",
-    fix: "Write each mount as source:target, or as an absolute container path for an anonymous volume. A bind mount needs a source, and a volume subpath needs a named volume.",
+      "A volume name starts with hack-anonymous-, which native reserves for anonymous volumes.",
+    fix: "Rename the volume.",
   },
   reserved_mount_target: {
     message: "A mount replaces a system or runtime directory in the container.",
@@ -511,6 +515,7 @@ export const REVIEW_STOP_CODES: ReadonlySet<string> = new Set([
   "invalid_network",
   "invalid_network_replacement",
   "invalid_port",
+  "reserved_volume_name",
   "invalid_restart",
   "invalid_routing_labels",
   "invalid_stop_signal",

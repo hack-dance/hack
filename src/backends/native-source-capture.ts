@@ -72,16 +72,12 @@ const CACHE_BOOTSTRAP_LABEL = "hack.dependencies.bootstrap";
 function composeMountBindsSource(mount: unknown): boolean {
   if (typeof mount === "string") {
     // Short syntax: a named volume is a bare identifier; a path (`.`/`/`) is a
-    // bind, unless it is an absolute path with no second path after it. That
-    // is an anonymous volume (`/data`, `/data:ro`), which shares no source.
-    const [source = "", second, ...rest] = mount.split(":");
-    if (
-      source.startsWith("/") &&
-      rest.length === 0 &&
-      !second?.startsWith("/")
-    ) {
+    // bind, unless it is one absolute path alone. That is an anonymous volume
+    // (`/data`), which shares no source.
+    if (mount.startsWith("/") && !mount.includes(":")) {
       return false;
     }
+    const source = mount.split(":", 1)[0] ?? "";
     return !(mount.includes(":") && NAMED_VOLUME.test(source));
   }
   if (isRecord(mount)) {

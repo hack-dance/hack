@@ -1522,7 +1522,7 @@ fn host_only_mount_hints_are_accepted_with_a_warning_and_real_modes_still_apply(
 #[test]
 fn anonymous_volumes_become_owned_named_volumes_with_a_warning() {
     let fixture = Fixture::new(&format!(
-        "{BASIC}    volumes:\n      - './src:/app'\n      - /app/node_modules\n      - '/app/.cache:ro'\n      - {{type: volume, target: /data}}\n      - 'kept:/kept'\n  worker:\n    image: alpine:3.21\n    volumes:\n      - /app/node_modules\nvolumes:\n  kept: {{}}\n"
+        "{BASIC}    volumes:\n      - './src:/app'\n      - /app/node_modules/\n      - {{type: volume, target: /app/.cache, read_only: true}}\n      - {{target: /data}}\n      - 'kept:/kept'\n  worker:\n    image: alpine:3.21\n    volumes:\n      - /app/node_modules\nvolumes:\n  kept: {{}}\n"
     ));
     fs::create_dir(fixture.project.join("src")).unwrap();
     let plan = fixture.plan();
@@ -1569,13 +1569,10 @@ fn anonymous_volumes_become_owned_named_volumes_with_a_warning() {
         .collect();
     assert_eq!(warnings.len(), 4);
     assert!(warnings.iter().all(|d| d.severity == "warning"));
-    // Names depend only on the service and target, so a second review of the
-    // same file finds the same storage.
-    let again = fixture.plan();
-    assert_eq!(
-        again.plan.services["web"].mounts[1].source,
-        anonymous[0].source
-    );
+    // The name depends only on the service and the normalised target (the
+    // authored one has a trailing slash), never on the checkout, so every
+    // review of this file in any directory finds the same storage.
+    assert_eq!(anonymous[0].source, "hack-anonymous-86491cc2da428ece");
 }
 
 #[test]
@@ -1583,6 +1580,18 @@ fn anonymous_volume_forms_outside_the_subset_are_still_refused() {
     let refused = [
         // A bare relative word is neither a path nor a source:target pair.
         ("      - data\n", "invalid_mount"),
+        // An authored empty source is not an anonymous volume.
+        ("      - ':/app/node_modules'\n", "invalid_identifier"),
+        (
+            "      - {type: volume, source: '', target: /data}\n",
+            "invalid_identifier",
+        ),
+        (
+            "      - {type: volume, source: '', target: /data, volume: {subpath: cache}}\n",
+            "invalid_identifier",
+        ),
+        // Compose reads this as source /data and target ro, not as a mode.
+        ("      - '/data:ro'\n", "invalid_container_path"),
         ("      - 'a:/b:ro:extra'\n", "invalid_mount"),
         // A bind mount always needs its source.
         ("      - {type: bind, target: /data}\n", "invalid_mount"),
@@ -1598,6 +1607,10 @@ fn anonymous_volume_forms_outside_the_subset_are_still_refused() {
         let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
         assert_eq!(error.code, code, "{mounts}");
     }
+    // The generated prefix cannot be authored, mounted or not.
+    let fixture = Fixture::new(&format!("{BASIC}volumes:\n  hack-anonymous-mine: {{}}\n"));
+    let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
+    assert_eq!(error.code, "reserved_volume_name");
     // A reserved target is reported the same way for an anonymous volume.
     let fixture = Fixture::new(&format!("{BASIC}    volumes: [/proc/sys]\n"));
     let plan = fixture.plan();

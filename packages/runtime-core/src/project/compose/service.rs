@@ -103,9 +103,8 @@ fn host_hint_ignored(field: &str) -> Diagnostic {
     )
 }
 
-/// Stands in for the source of a mount that names none. It is not a valid
-/// identifier, so no authored source can equal it.
-const ANONYMOUS: &str = "";
+/// Volume names with this prefix belong to anonymous mounts and cannot be authored.
+pub(super) const ANONYMOUS_PREFIX: &str = "hack-anonymous-";
 
 /// The owned volume that stores one service's anonymous mount. The name
 /// depends only on the service and the reviewed target, so every review of an
@@ -116,7 +115,7 @@ fn anonymous_volume(service: &str, target: &str) -> String {
     hash.update(service.as_bytes());
     hash.update([0]);
     hash.update(target.as_bytes());
-    format!("hack-anonymous-{:.16}", format!("{:x}", hash.finalize()))
+    format!("{ANONYMOUS_PREFIX}{:.16}", format!("{:x}", hash.finalize()))
 }
 
 fn anonymous_volume_plan() -> VolumePlan {
@@ -150,34 +149,28 @@ fn mounts(
         let (kind, from, to, read_only, subpath) = match value {
             Value::String(s) => {
                 let parts: Vec<_> = s.split(':').collect();
-                // `/target` and `/target:mode` name no source: an anonymous volume.
-                let anonymous = parts[0].starts_with('/')
-                    && (parts.len() == 1 || (parts.len() == 2 && !parts[1].starts_with('/')));
-                if !anonymous && !(2..=3).contains(&parts.len()) {
-                    return Err(problem(
-                        "invalid_mount",
-                        "Use source:target[:ro|rw] or an absolute target for an anonymous volume; colon-bearing paths are outside this subset.",
-                    ));
-                }
-                let mode = if anonymous {
-                    parts.get(1)
+                // A lone absolute path names no source: an anonymous volume,
+                // the only short form Compose reads that way.
+                if parts.len() == 1 && parts[0].starts_with('/') {
+                    ("volume", None, parts[0], false, None)
                 } else {
-                    parts.get(2)
-                };
-                let (readonly, hinted) = short_mount_mode(mode.copied())?;
-                if hinted {
-                    diagnostics.push(host_hint_ignored(field));
-                }
-                if anonymous {
-                    ("volume", ANONYMOUS, parts[0], readonly, None)
-                } else {
+                    if !(2..=3).contains(&parts.len()) {
+                        return Err(problem(
+                            "invalid_mount",
+                            "Use source:target[:ro|rw] or one absolute path for an anonymous volume; colon-bearing paths are outside this subset.",
+                        ));
+                    }
+                    let (readonly, hinted) = short_mount_mode(parts.get(2).copied())?;
+                    if hinted {
+                        diagnostics.push(host_hint_ignored(field));
+                    }
                     (
                         if parts[0].starts_with('.') || parts[0].starts_with('/') {
                             "bind"
                         } else {
                             "volume"
                         },
-                        parts[0],
+                        Some(parts[0]),
                         parts[1],
                         readonly,
                         None,
@@ -232,10 +225,10 @@ fn mounts(
                 }
                 let kind = m.get("type").map(string).transpose()?.unwrap_or("volume");
                 let source = match m.get("source") {
-                    Some(source) => string(source)?,
+                    Some(source) => Some(string(source)?),
                     // A whole volume without a source is an anonymous volume. A
                     // bind has nothing to share, and a subpath has nothing to select.
-                    None if kind == "volume" && subpath.is_none() => ANONYMOUS,
+                    None if kind == "volume" && subpath.is_none() => None,
                     None => return Err(problem("invalid_mount", "Mount source is required.")),
                 };
                 (
@@ -269,7 +262,7 @@ fn mounts(
                 "Mount targets must be unique per service.",
             ));
         }
-        if from.contains('$') || from.starts_with('~') {
+        if from.is_some_and(|from| from.contains('$') || from.starts_with('~')) {
             diagnostics.push(Diagnostic::error("unresolved_mount_source",field,"Interpolated or home-relative mount sources are not resolved from ambient environment. Credential directories require scoped credential delivery; declare ordinary source paths relative to the project."));
             result.push(MountPlan {
                 subpath,
@@ -282,12 +275,14 @@ fn mounts(
             });
             continue;
         }
-        let (source, policy) = match kind {
-            "bind" => (
+        let (source, policy) = match (kind, from) {
+            ("bind", Some(from)) => (
                 relative(project, &source::resolve(project, base, from, false)?),
                 "filtered node-native source; never a direct host mount",
             ),
-            "volume" if from == ANONYMOUS => {
+            // Authored names cannot carry the prefix and targets are unique per
+            // service, so only a hash collision can find the name taken.
+            ("volume", None) => {
                 let name = anonymous_volume(service, &target);
                 if declared
                     .insert(name.clone(), anonymous_volume_plan())
@@ -295,7 +290,7 @@ fn mounts(
                 {
                     return Err(problem(
                         "invalid_mount",
-                        "Volume names that start with hack-anonymous- are reserved for anonymous volumes.",
+                        "Two anonymous volumes resolve to the same owned volume.",
                     ));
                 }
                 diagnostics.push(Diagnostic::warning(
@@ -308,7 +303,7 @@ fn mounts(
                     "candidate-owned volume generated for an anonymous mount",
                 )
             }
-            "volume" => {
+            ("volume", Some(from)) => {
                 identifier(from)?;
                 if !declared.contains_key(from) {
                     diagnostics.push(Diagnostic::error(

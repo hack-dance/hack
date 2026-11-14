@@ -70,9 +70,26 @@ function labelValue(labels: unknown, key: string): string | undefined {
 
 /**
  * Compose named-volume sources: a short-syntax source without a path prefix,
- * or a long-syntax `type: volume` source. Bind paths, anonymous volumes and
- * interpolated values are not named volumes here.
+ * or a long-syntax `type: volume` source. Bind paths and interpolated values
+ * are not named volumes here; anonymous volumes are found separately.
  */
+/**
+ * Whether a service mounts an anonymous volume: one absolute path alone, or a
+ * long-syntax volume without a source. Native stores it as a retained volume
+ * the project owns, so it is data like a declared one.
+ */
+function mountsAnonymousVolume(service: Record<string, unknown>): boolean {
+  const mounts = Array.isArray(service.volumes) ? service.volumes : [];
+  return mounts.some((mount) =>
+    typeof mount === "string"
+      ? mount.startsWith("/") && !mount.includes(":")
+      : isRecord(mount) &&
+        (mount.type === undefined || mount.type === "volume") &&
+        mount.source === undefined &&
+        typeof mount.target === "string"
+  );
+}
+
 function namedVolumeSources(service: Record<string, unknown>): string[] {
   const mounts = Array.isArray(service.volumes) ? service.volumes : [];
   const names: string[] = [];
@@ -213,9 +230,11 @@ export function findNativeDataAdvisories(
     native_retained_data_mutable_image: new Set(),
   };
   for (const [name, service] of entries) {
-    const data = namedVolumeSources(service).some(
-      (source) => Object.hasOwn(declared, source) && !caches.has(source)
-    );
+    const data =
+      mountsAnonymousVolume(service) ||
+      namedVolumeSources(service).some(
+        (source) => Object.hasOwn(declared, source) && !caches.has(source)
+      );
     if (!data) {
       continue;
     }

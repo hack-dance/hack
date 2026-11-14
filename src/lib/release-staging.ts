@@ -14,6 +14,8 @@ const ENTRIES = new Set([
   "stage.json",
   "hack",
   "hack-config-compiler",
+  "hack-lifecycle-supervisor",
+  "rollback-supervisor",
   "rollback",
   "rollback-compiler",
 ]);

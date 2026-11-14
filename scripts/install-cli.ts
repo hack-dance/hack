@@ -62,30 +62,44 @@ async function main(parsed: ParseOk): Promise<number> {
     return 1;
   }
 
-  const current = await readCurrentInstall(targetPath);
-  if (current.status === "present" && isSameInstall({ current, desired })) {
-    printSuccess({
-      mode: parsed.mode,
-      installDir,
-      targetPath,
-      repoRoot,
-      note: "Already installed",
+  const desiredFiles: DesiredInstall[] = [desired];
+  if (desired.kind === "symlink") {
+    const helper = "hack-lifecycle-supervisor";
+    const linkTarget = resolve(repoRoot, "dist", helper);
+    // Keep both symlinks bound to the same checkout's build output.
+    desiredFiles.unshift({
+      ...desired,
+      targetPath: resolve(installDir, helper),
+      linkTarget,
     });
-    return 0;
   }
-
-  if (current.status === "present" && !parsed.force) {
-    process.stderr.write(`Refusing to overwrite existing '${CLI_NAME}' at:\n`);
-    process.stderr.write(`  ${targetPath}\n`);
-    process.stderr.write("Re-run with --force to replace it.\n");
-    return 1;
+  const installs = await Promise.all(
+    desiredFiles.map(async (file) => ({
+      desired: file,
+      current: await readCurrentInstall(file.targetPath),
+    }))
+  );
+  for (const install of installs) {
+    if (
+      install.current.status === "present" &&
+      !isSameInstall(install) &&
+      !parsed.force
+    ) {
+      process.stderr.write(
+        `Refusing to overwrite existing install at ${install.desired.targetPath}. Re-run with --force to replace it.\n`
+      );
+      return 1;
+    }
   }
-
-  if (current.status === "present") {
-    await rm(targetPath, { force: true });
+  for (const install of installs) {
+    if (isSameInstall(install)) {
+      continue;
+    }
+    if (install.current.status === "present") {
+      await rm(install.desired.targetPath, { force: true });
+    }
+    await applyInstall({ desired: install.desired });
   }
-
-  await applyInstall({ desired });
   printSuccess({ mode: parsed.mode, installDir, targetPath, repoRoot });
   return 0;
 }
@@ -194,6 +208,15 @@ async function desiredInstall(opts: {
     };
   }
 
+  if (
+    !(await fileExists(
+      resolve(opts.repoRoot, "dist/hack-lifecycle-supervisor")
+    ))
+  ) {
+    throw new Error(
+      "Missing lifecycle supervisor. Run: bun run build:lifecycle-supervisor"
+    );
+  }
   const linkTarget = resolve(opts.repoRoot, "dist/hack");
   const exists = await fileExists(linkTarget);
   if (!exists) {

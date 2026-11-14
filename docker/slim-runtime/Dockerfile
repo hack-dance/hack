@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
+FROM rust:1.97.1-slim-bookworm AS supervisor-build
+WORKDIR /src
+COPY packages/lifecycle-supervisor ./packages/lifecycle-supervisor
+RUN cargo +1.97.1 build --locked --release --jobs 2 --manifest-path packages/lifecycle-supervisor/Cargo.toml --target-dir /build
+
 FROM oven/bun:1.4.4 AS hack-build
 
 WORKDIR /src
@@ -33,8 +38,9 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=hack-build /out/hack /usr/local/bin/hack
+COPY --from=supervisor-build /build/release/hack-lifecycle-supervisor /usr/local/bin/hack-lifecycle-supervisor
 
-RUN chmod +x /usr/local/bin/hack \
+RUN chmod 755 /usr/local/bin/hack /usr/local/bin/hack-lifecycle-supervisor \
   && mkdir -p /var/lib/hack /workspace
 
 ENV HOME=/var/lib/hack

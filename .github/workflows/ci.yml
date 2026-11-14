@@ -274,12 +274,13 @@ jobs:
           "$RUNNER_TEMP/config-schema/bin/python" scripts/check-config-schema.py
       - name: Test transport, projections and compiled bundle without host toolchains
         run: |
-          bunx ultracite check scripts/build-config-compiler.ts scripts/build-release.ts scripts/check-release-config-compiler.ts scripts/check-config-compiler-cli.ts tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts tests/release-download-installer.test.ts
+          bunx ultracite check scripts/build-lifecycle-supervisor.ts scripts/check-release-lifecycle-supervisor.ts scripts/build-config-compiler.ts scripts/build-release.ts scripts/check-release-config-compiler.ts scripts/check-config-compiler-cli.ts tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts tests/release-download-installer.test.ts
           bun test tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts
           bun run --cwd packages/cli typecheck
           bun test tests/release-download-installer.test.ts
           bun run build:release --skip-tests --out=dist/config-compiler-release
           bun scripts/check-release-config-compiler.ts dist/config-compiler-release
+          bun scripts/check-release-lifecycle-supervisor.ts dist/config-compiler-release
           bun scripts/check-config-compiler-cli.ts
           bunx ultracite check scripts/check-native-env-plan-cli.ts tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts
           bun test tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts tests/project-env-config.test.ts tests/project-env-metadata.test.ts
@@ -597,7 +598,7 @@ jobs:
             --tag hack-runtime-ci:slim
       - name: Smoke slim runtime image defaults
         run: |
-          docker run --rm --entrypoint sh hack-runtime-ci:slim -lc 'command -v bun >/dev/null && command -v hack >/dev/null && test "${HACK_EXECUTION_MODE}" = "codex" && test "${HACK_DAEMON_DISABLE_DOCKER_EVENTS}" = "1" && hack --help >/tmp/hack-help.txt && grep -q "Usage:" /tmp/hack-help.txt'
+          docker run --rm --entrypoint sh hack-runtime-ci:slim -lc 'command -v bun >/dev/null && command -v hack >/dev/null && test -x /usr/local/bin/hack-lifecycle-supervisor && test "${HACK_EXECUTION_MODE}" = "codex" && test "${HACK_DAEMON_DISABLE_DOCKER_EVENTS}" = "1" && hack --help >/tmp/hack-help.txt && grep -q "Usage:" /tmp/hack-help.txt'
       - name: Smoke slim runtime mounted-project env flow
         run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
 

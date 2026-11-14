@@ -5146,6 +5146,38 @@ async function resolveProjectEnvKey(opts: {
 }
 
 /**
+ * Whether the project env key can be read, by the same priority the runtime
+ * uses (checkout-local, shared common-dir, primary checkout, then
+ * `HACK_ENV_SECRET_KEY`).
+ *
+ * - `ok`: a key is present and readable.
+ * - `missing`: no key file and no `HACK_ENV_SECRET_KEY`.
+ * - `unreadable`: a key file exists but is refused (symlink, not a regular
+ *   file, unreadable, empty or oversized), so the runtime cannot use it.
+ *
+ * Read-only: never creates, repairs or rotates a key. The key text stays in
+ * this function; callers receive only the state. It does not check that the
+ * key decrypts existing values; `hack doctor` reports undecryptable layers.
+ */
+export type ProjectEnvKeyState = "ok" | "missing" | "unreadable";
+
+export async function probeProjectEnvKeyState(opts: {
+  readonly projectRoot: string;
+}): Promise<ProjectEnvKeyState> {
+  try {
+    const keyText = await resolveProjectEnvKey({
+      projectRoot: opts.projectRoot,
+      required: false,
+    });
+    return keyText === null ? "missing" : "ok";
+  } catch {
+    // Every refusal and read failure means the runtime cannot use the key.
+    // Listing names must still succeed, so this never throws.
+    return "unreadable";
+  }
+}
+
+/**
  * Next action when a project env key is needed but not found. A key is only
  * needed to decrypt values that are already encrypted, so this never
  * suggests creating one: on a second machine or a fresh checkout a new key

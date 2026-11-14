@@ -137,7 +137,7 @@ Source: `hack env list --json --path <root>`.
 |---|---|
 | Normal | Table: name, layer (`layer` / `resolved_from`), scope, kind (`storage.kind`), set (`has_value` ✓/✗), required. |
 | Missing required | Red rows from `missing_required`, first. |
-| Locked | Env key missing or unreadable: lock icon, "Names are shown; values cannot be resolved", Copy `hack doctor`. Needs R10. |
+| Locked | `key_state` is `missing` or `unreadable`: lock icon, "Names are shown; values cannot be resolved", Copy `hack doctor`. `ok` does not prove the key decrypts the values. |
 | No env config | "This project has no env layers" + docs link. |
 
 Editing is "later". Never a reveal button.
@@ -384,7 +384,7 @@ Each is small enough for one PR.
 11. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
 12. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
 13. **R9** (optional) Push updates: `GET /v1/projects?wait=<generated_at>` long-poll.
-14. **R10** Env key state: `key_state: ok | missing | unreadable` in `hack env list --json` (no values).
+14. **R10 — exists** Env key state: `key_state: ok | missing | unreadable | not_checked` in `hack env list --json` (no values). `not_checked` is the legacy `hack.env.json` contract. The payload keeps its published bare-object shape; no envelope was added.
 15. **R11** Admin argv plan: `hack global install|trust --plan --json` listing the root-only argv lines.
 16. **R12a** Always-on persistence and `hack autostart add|remove|list|pause|resume` ([section 6](#6-always-on-hack-2213-proposed-contract)).
 17. **R12b** Always-on fields in project payloads and `autostart_global`.

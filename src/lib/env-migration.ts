@@ -1261,7 +1261,10 @@ async function cleanupLocked(
     manifestPath: journal.manifestPath,
     files: journal.sources,
   });
-  await assertSources(journal, { allowLayerChanges: true });
+  await assertSources(journal, {
+    allowLayerChanges: true,
+    allowTighterModes: true,
+  });
   const context = await acquireLegacyEnvCleanupContext({
     ...project,
     overlayNames: journal.overlayNames,
@@ -1300,7 +1303,10 @@ async function cleanupLocked(
       },
     };
   }
-  await assertSources(journal, { allowLayerChanges: true });
+  await assertSources(journal, {
+    allowLayerChanges: true,
+    allowTighterModes: true,
+  });
   journal = { ...journal, state: "cleaning" };
   await writeMetadata(path, journal);
   let removed: readonly string[] = [];

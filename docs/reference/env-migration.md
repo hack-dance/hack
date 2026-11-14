@@ -160,6 +160,12 @@ Migration never includes cleanup. A later explicit cleanup requires:
    Current project/shared keys, configuration and YAML layers, including aliases
    and hard links, cannot be removed.
 
+Doctor's permission tightening (for example, a retained dotenv file from 0644
+to 0600) does not invalidate cleanup when its bytes and size are unchanged.
+Both source checks still refuse changed content or wider permissions; original
+snapshot coverage, fresh writer-locked receipts and the live-input guard remain
+required. Rollback retains the original snapshot's bytes and modes.
+
 Legacy stores leave before their keys. Confirmed store removal also repairs its
 config pointer. A partial cleanup preserves confirmed removals in the journal and
 reports every confirmed removal even if pointer repair or snapshot receipt

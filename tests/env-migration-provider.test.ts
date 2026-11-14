@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -14,6 +15,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   applyEnvMigration,
   envMigrationJournalPath,
+  recordEnvMigrationProjectRun,
 } from "../src/lib/env-migration.ts";
 import { bindEnvMigrationSnapshots } from "../src/lib/env-migration-snapshot.ts";
 import { isRecord } from "../src/lib/guards.ts";
@@ -217,6 +219,35 @@ test("production CLI explicitly repairs Compose after implicit env exec, then ro
   expect(await (await resolveSecretStore(project)).get({ key: "SECRET" })).toBe(
     sentinel
   );
+});
+
+test("production cleanup accepts Doctor permission tightening while preserving original rollback bytes", async () => {
+  const project = await fixture();
+  const envPath = join(project.projectDir, ".env");
+  await chmod(envPath, 0o644);
+  expect((await lstat(envPath)).mode & 0o777).toBe(0o644);
+  const migrated = await cli(project.projectRoot, ["--apply"]);
+  expect(migrated.exitCode, migrated.stderr).toBe(0);
+  const doctor = await runCliCommand(project.projectRoot, [
+    "doctor",
+    "--fix",
+    "--path",
+    project.projectRoot,
+  ]);
+  // The fixture intentionally has no Docker or other host tooling; hygiene still runs.
+  expect(doctor.exitCode).toBe(1);
+  expect((await lstat(envPath)).mode & 0o777).toBe(0o600);
+  expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
+  await recordEnvMigrationProjectRun(project);
+  const cleaned = await cli(project.projectRoot, ["--cleanup", "--apply"]);
+  expect(cleaned.exitCode, cleaned.stderr).toBe(0);
+  expect(await Bun.file(envPath).exists()).toBe(false);
+  const rollback = await cli(project.projectRoot, [
+    "--rollback-manifest",
+    pathField(migrated.envelope.data, "manifestPath"),
+  ]);
+  expect(rollback.exitCode, rollback.stderr).toBe(0);
+  expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${sentinel}\n`);
 });
 
 for (const damage of ["manifest", "missing-blob", "changed-blob"] as const) {

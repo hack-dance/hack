@@ -492,6 +492,59 @@ test("cleanup is explicit, rechecks delivery, and requires intact snapshot paylo
   expect(await Bun.file(result.manifestPath).exists()).toBe(true);
 });
 
+for (const change of [
+  "permissions only",
+  "changed bytes",
+  "wider permissions",
+] as const) {
+  test(`cleanup after migration handles ${change} without adopting byte or access drift`, async () => {
+    const envPath = join(project.projectDir, ".env");
+    await chmod(envPath, 0o644);
+    const snapshots = fixtureEnvSnapshots(root);
+    const migrated = await apply({
+      project,
+      snapshots,
+      acceptTrackedChanges: true,
+    });
+    await chmod(envPath, change === "wider permissions" ? 0o666 : 0o600);
+    if (change === "changed bytes") {
+      await writeFile(envPath, "TOKEN=changed-synthetic-value\n");
+    }
+    await recordEnvMigrationProjectRun(project);
+    if (change !== "permissions only") {
+      await expect(
+        cleanupEnvMigration({ project, snapshots, acceptTrackedChanges: true })
+      ).rejects.toThrow("input changed");
+      expect(await Bun.file(envPath).exists()).toBe(true);
+      expect(
+        JSON.parse(await readFile(migrated.journalPath, "utf8")).state
+      ).toBe("complete");
+      return;
+    }
+    const result = await cleanupEnvMigration({
+      project,
+      snapshots,
+      acceptTrackedChanges: true,
+    });
+    expect(result.removed).toContain(envPath);
+    expect(await Bun.file(envPath).exists()).toBe(false);
+    expect(
+      (await resolveProjectEnvConfig({ ...project, envName: null }))?.globalEnv
+        .TOKEN
+    ).toBe(SENTINEL);
+    await rollbackEnvMigration({
+      project,
+      snapshots,
+      manifestPath: migrated.manifestPath,
+    });
+    expect(await readFile(envPath, "utf8")).toBe(`TOKEN=${SENTINEL}\n`);
+    expect((await lstat(envPath)).mode & 0o777).toBe(0o644);
+    expect(await readFile(migrated.journalPath, "utf8")).not.toContain(
+      SENTINEL
+    );
+  });
+}
+
 test("rollback restores original bytes and refuses a later user edit", async () => {
   const before = await projectFiles();
   const snapshots = fixtureEnvSnapshots(root);

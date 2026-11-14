@@ -61,7 +61,7 @@ import {
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
-import { resolveGlobalCaddyIp } from "../lib/caddy-hosts.ts";
+import { observeGlobalCaddyIp } from "../lib/caddy-hosts.ts";
 import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
@@ -90,6 +90,7 @@ import {
   isExplicitlyNonInteractive,
 } from "../lib/interactivity.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
+import { createLinuxDnsHost } from "../lib/linux-dns-host.ts";
 import {
   buildHackHostTrustEnvironment,
   renderHackHostTrustShellExports,
@@ -175,11 +176,7 @@ import {
   configureLinuxTrustFromRuntime,
   type LinuxTrustResult,
 } from "./global-linux-trust.ts";
-import {
-  checkMacDnsmasqConfigForDomain,
-  checkMacDnsmasqPort53,
-  checkMacResolverForDomain,
-} from "./global-mac-dns.ts";
+import { observeMacHostDns } from "./global-mac-dns.ts";
 import {
   inspectProxyNetwork,
   proxyNetworkStatusPayload,
@@ -189,6 +186,13 @@ import {
   DOCKER_PROBE_TIMEOUT_MS,
   observeGlobalStatus,
 } from "./global-status-observe.ts";
+import {
+  DOCKER_READ_TIMEOUT_MS,
+  isServiceRunning,
+  observeComposeStack,
+  observeNetworks,
+  observeProxyNetwork,
+} from "./global-status-observe-host.ts";
 
 /** Regex to split strings on whitespace. */
 const WHITESPACE_PATTERN = /\s+/;
@@ -2553,30 +2557,28 @@ async function globalStatusObserve(): Promise<number> {
         stdin: "ignore",
         timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
       }),
-    readCaddy: async () => await readInstalledComposeStatus(paths.caddyCompose),
+    readCaddy: async () =>
+      await observeComposeStack({ composeFile: paths.caddyCompose }),
     readLogging: async () =>
-      await readInstalledComposeStatus(paths.loggingCompose),
+      await observeComposeStack({ composeFile: paths.loggingCompose }),
     readNetworks: async () =>
-      await readNetworksStatus([
-        DEFAULT_INGRESS_NETWORK,
-        DEFAULT_LOGGING_NETWORK,
-      ]),
+      await observeNetworks({
+        names: [DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK],
+      }),
     readProxyNetwork: async () =>
-      (await pathExists(paths.caddyCompose))
-        ? proxyNetworkStatusPayload(
-            await inspectProxyNetwork({ composeFile: paths.caddyCompose })
-          )
-        : {
-            ok: false,
-            readable: false,
-            issues: [],
-            error: `Missing ${paths.caddyCompose} (run: hack global install)`,
-          },
-    caddyIp: resolveGlobalCaddyIp,
-    inspectLinuxDns: async () => await inspectLinuxGlobalDns(),
-    macResolver: checkMacResolverForDomain,
-    macDnsmasqConfig: checkMacDnsmasqConfigForDomain,
-    macDnsmasqPort53: checkMacDnsmasqPort53,
+      await observeProxyNetwork({ composeFile: paths.caddyCompose }),
+    caddyIp: async () =>
+      await observeGlobalCaddyIp({ timeoutMs: DOCKER_READ_TIMEOUT_MS }),
+    inspectLinuxDns: async () => {
+      const unreadable: string[] = [];
+      const inspection = await inspectLinuxGlobalDns({
+        host: createLinuxDnsHost({
+          onUnreadable: (what) => unreadable.push(what),
+        }),
+      });
+      return { inspection, unreadable };
+    },
+    observeMacDns: observeMacHostDns,
     now: () => new Date(),
   });
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -2673,23 +2675,6 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
   }
 
   return 0;
-}
-
-/**
- * A global Compose group, or a definite "not installed" when its file is
- * missing (Docker is not asked about a stack that was never installed).
- */
-async function readInstalledComposeStatus(
-  composeFile: string
-): Promise<ComposeStatusGroup> {
-  if (!(await pathExists(composeFile))) {
-    return {
-      ok: false,
-      error: `Missing ${composeFile} (run: hack global install)`,
-      services: [],
-    };
-  }
-  return await readComposeStatus(composeFile);
 }
 
 /** Linux host DNS route, or `null` on other platforms. */
@@ -3286,11 +3271,6 @@ function isLoopbackAddress(bind: string): boolean {
     return true;
   }
   return normalized.startsWith("127.");
-}
-
-function isServiceRunning(status: string): boolean {
-  const normalized = status.toLowerCase();
-  return normalized.includes("running") || normalized.includes("up");
 }
 
 async function renderComposeStatusTable(composeFile: string): Promise<void> {

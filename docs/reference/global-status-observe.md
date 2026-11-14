@@ -10,22 +10,27 @@ and accepts in non-interactive runs), so pollers use this mode instead.
 
 ## What it runs
 
-Only these read-only probes, each bounded:
+Only these read-only probes. Each has its own deadline; a probe that misses it is
+stopped (its process group gets a short termination grace) and its part reports
+`"unknown"`.
 
-| Probe | When | Bound |
+| Probe | When | Deadline |
 |---|---|---|
-| `docker info --format {{.ServerVersion}}` | always, if `docker` is on `PATH` | 3 s |
-| `docker compose -f <file> ps --format json` (Caddy, logging) | Docker answered and the stack's file exists | — |
-| `docker network ls --format json` | Docker answered | — |
-| `docker ps …` / `docker inspect …` (proxy network, Caddy address) | Docker answered | — |
-| Linux: `systemctl is-active systemd-resolved`, `systemctl --version`, `systemctl show …`, `ip -j -4 addr show`, `resolvectl <verb> -- <link>` | Linux | 3 s each |
-| macOS: `brew --prefix`; reads `/etc/resolver/<tld>` and `dnsmasq.conf`; one DNS query to `127.0.0.1:53` | macOS | 0.9 s query |
+| `docker info --format {{.ServerVersion}}` | `docker` is on `PATH` | 3 s |
+| `docker compose -f <stack file> ps --format json` (Caddy, logging, proxy) | Docker answered and the stack's file exists | 5 s each |
+| `docker inspect <container ids>` (proxy network) | the proxy stack has containers | 5 s |
+| `docker network ls --format json` | Docker answered | 5 s |
+| `docker ps -q --filter …caddy…`, `docker inspect --format … <id>` (Caddy's address, macOS dnsmasq check) | macOS, Docker answered, and a dnsmasq line names an address other than the static ones | 5 s each |
+| Linux: `systemctl is-active systemd-resolved`, `systemctl --version`, `systemctl show -p NeedDaemonReload -- <unit>`, `ip -j -4 addr show`, `resolvectl {dns,domain,default-route,dnssec,dnsovertls} -- <link>` | Linux | 3 s each |
+| macOS: `brew --prefix`; reads `/etc/resolver/<tld>` and `dnsmasq.conf`; a DNS question to `127.0.0.1:53` (AAAA, then A when AAAA has no answer) | macOS | 3 s; 0.9 s per question |
 
 When `docker info` does not answer, Docker is asked nothing else and every
 Docker-derived part is `"unknown"`. `tests/global-status-observe.test.ts` runs the
-CLI with every child process recorded and fails on any program or argv outside
-this list, including any runtime starter (`open -a Docker`, `colima start`,
-`orb start`, `sudo systemctl start docker`).
+CLI with every child process recorded and fails on any argv outside these exact
+shapes (fixed words exactly; only the file, link, unit and container-id positions
+vary). That includes any runtime starter (`open -a Docker`, `colima start`,
+`sudo systemctl start docker`) and any mutating verb (`resolvectl revert`,
+`docker compose up`).
 
 ## Shape (`hack.global-status.observe.v1`)
 
@@ -60,11 +65,11 @@ could not tell; it is never reported as absent or as a failure of the thing.
 |---|---|
 | `docker.state` | `running`; `not_running` (the CLI could not reach the engine; `detail` holds its first error line); `not_installed` (no `docker` on `PATH`); `unknown` (no answer within 3 s) |
 | `docker_ok` | `true` when running, `false` when not running or not installed, `"unknown"` on timeout |
-| `caddy`, `logging` | Docker's view of the stack (`services[]` as in `hack global status --json`); `ok: false` with `error: "Missing <file> (run: hack global install)"` when the stack was never installed; `ok: "unknown"` with the reason when Docker did not answer or the read failed |
-| `networks` | `missing[]` lists absent Hack networks; unknown as above |
-| `proxy_network` | the proxy containers' network addresses (`issues[]`); unknown as above |
-| `host_dns` (Linux) | `state` from the Linux DNS route check (`configured`, `missing`, `stale`, `bridge_missing`, `not_applied`, `manual`), plus `resolver`, `code`, `link`, `message`, `fix[]`. `ok`: `configured` is `true`, `manual` (a resolver Hack does not manage) is `"unknown"`, every other state is `false` |
-| `host_dns` (macOS) | `state`: `configured`, `not_configured` or `unknown`, and `checks[]`: the `resolver:<tld>`, `dnsmasq.conf:<tld>` and `dnsmasq:53` results `hack doctor` reports. `ok` is `true` when all pass, `"unknown"` when a check could not look (no Homebrew to locate `dnsmasq.conf`) and nothing failed, else `false`. A dynamic Caddy address is only looked up when Docker answered |
+| `caddy`, `logging` | Docker's view of the stack (`services[]` as in `hack global status --json`). `ok: false` with `error: "Missing <file> (run: hack global install)"` only when the stack's file is confirmed missing. `ok: "unknown"` with the reason when the file cannot be read, Docker did not answer, or `compose ps` failed or timed out |
+| `networks` | `missing[]` lists Hack networks Docker confirmed absent; `ok: "unknown"` (and an empty `missing[]`) when `network ls` failed or timed out |
+| `proxy_network` | the proxy containers' network addresses (`issues[]`); `false` only when the Caddy file is confirmed missing; unknown as above |
+| `host_dns` (Linux) | `state` from the Linux DNS route check (`configured`, `missing`, `stale`, `bridge_missing`, `not_applied`, `manual`), plus `resolver`, `code`, `link`, `message`, `fix[]` and `unreadable[]` (each read the answer rested on that failed: a probe that errored or timed out, a file or directory that exists but could not be read). `ok`: `configured` is `true`; `manual` (a resolver Hack does not manage), or any other state with a non-empty `unreadable[]`, is `"unknown"`; every other state is `false` |
+| `host_dns` (macOS) | `state`: `configured`, `not_configured` or `unknown`, and `checks[]` of `{name, outcome, message}` for `resolver:<tld>`, `dnsmasq.conf:<tld>` and `dnsmasq:53`, with `outcome` `ok`, `missing` (confirmed absent or different; for `dnsmasq:53`, no answer) or `unknown` (a file that exists but cannot be read, no Homebrew prefix, or a dnsmasq line whose address only Docker could confirm while Docker did not answer). `ok` is `false` if any check is missing, otherwise `"unknown"` if any is unknown, otherwise `true` |
 | `host_dns` (other) | `state: "unknown"`, `ok: "unknown"` |
 | `summary.ok` | `false` if any part is `false`; otherwise `"unknown"` if any part is; otherwise `true` |
 

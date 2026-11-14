@@ -5,11 +5,12 @@
  *
  * Contract: this module never starts Docker, a container, `hackd`, a VM or a
  * service, and never prompts. It runs only the read-only probes listed in
- * `OBSERVE_PROBES` (docs/global-status-observe.md), each bounded by a
- * timeout. Docker is asked once (`docker info`); when that does not answer,
- * nothing else is asked of Docker and every Docker-derived part is
- * `"unknown"`. "Unknown" is never reported as absent or as a failure of the
- * thing itself.
+ * docs/reference/global-status-observe.md, each bounded by a timeout. Docker
+ * is asked first (`docker info`); when that does not answer, nothing else is
+ * asked of Docker and every Docker-derived part is `"unknown"`. Each
+ * boundary (global-status-observe-host.ts, the macOS and Linux DNS readers)
+ * keeps "could not read" apart from "read and found", so unknown is never
+ * reported as absent or as a failure of the thing.
  */
 import {
   DEFAULT_NEW_PROJECT_TLD,
@@ -18,7 +19,12 @@ import {
 } from "../constants.ts";
 import type { LinuxDnsInspection } from "../lib/linux-dns-setup.ts";
 import type { ExecResult } from "../lib/shell.ts";
-import type { CheckResult } from "./global-mac-dns.ts";
+import type { ObservedCheck } from "./global-mac-dns.ts";
+import type {
+  ComposeObservation,
+  NetworksObservation,
+  ProxyObservation,
+} from "./global-status-observe-host.ts";
 
 export const OBSERVE_STATUS_SCHEMA = "hack.global-status.observe.v1";
 
@@ -28,25 +34,6 @@ export type Tri = true | false | "unknown";
 /** How long Hack waits for `docker info` before calling Docker unknown. */
 export const DOCKER_PROBE_TIMEOUT_MS = 3000;
 
-type ComposeGroup = {
-  readonly ok: boolean;
-  readonly error: string | null;
-  readonly services: readonly unknown[];
-};
-
-type NetworksGroup = {
-  readonly ok: boolean;
-  readonly missing: readonly string[];
-  readonly networks: readonly unknown[];
-};
-
-type ProxyNetworkPayload = {
-  readonly ok: boolean | null;
-  readonly readable: boolean;
-  readonly issues: readonly unknown[];
-  readonly error?: string;
-};
-
 /** Everything the observer reads, injected so tests replace each boundary. */
 export type ObserveDeps = {
   readonly platform: NodeJS.Platform;
@@ -54,18 +41,21 @@ export type ObserveDeps = {
   /** `docker info`, bounded by {@link DOCKER_PROBE_TIMEOUT_MS}. */
   readonly probeDocker: () => Promise<ExecResult>;
   /** Only called when Docker answered. */
-  readonly readCaddy: () => Promise<ComposeGroup>;
-  readonly readLogging: () => Promise<ComposeGroup>;
-  readonly readNetworks: () => Promise<NetworksGroup>;
-  readonly readProxyNetwork: () => Promise<ProxyNetworkPayload>;
-  readonly caddyIp: () => Promise<string | null>;
-  readonly inspectLinuxDns: () => Promise<LinuxDnsInspection>;
-  readonly macResolver: (domain: string) => Promise<CheckResult>;
-  readonly macDnsmasqConfig: (
-    domain: string,
-    opts: { readonly caddyIp: () => Promise<string | null> }
-  ) => Promise<CheckResult>;
-  readonly macDnsmasqPort53: () => Promise<CheckResult>;
+  readonly readCaddy: () => Promise<ComposeObservation>;
+  readonly readLogging: () => Promise<ComposeObservation>;
+  readonly readNetworks: () => Promise<NetworksObservation>;
+  readonly readProxyNetwork: () => Promise<ProxyObservation>;
+  /** Caddy's address; null when Docker confirms none, "unknown" otherwise. */
+  readonly caddyIp: () => Promise<string | null | "unknown">;
+  /** The Linux route, and every read it rested on that failed. */
+  readonly inspectLinuxDns: () => Promise<{
+    readonly inspection: LinuxDnsInspection;
+    readonly unreadable: readonly string[];
+  }>;
+  readonly observeMacDns: (opts: {
+    readonly domains: readonly string[];
+    readonly caddyIp: () => Promise<string | null | "unknown">;
+  }) => Promise<readonly ObservedCheck[]>;
   readonly now: () => Date;
 };
 
@@ -78,28 +68,32 @@ const MAC_DOMAINS = [
   DEFAULT_OAUTH_ALIAS_ROOT,
 ] as const;
 
+/** A read that threw: its part is unknown, never a failure of the thing. */
+const READ_FAILED = "This part could not be read";
+
 export async function observeGlobalStatus(deps: ObserveDeps) {
   const docker = await observeDocker(deps);
   const dockerUp = docker.state === "running";
+  const reason = unknownReason(docker);
   const [caddy, logging, networks, proxyNetwork, hostDns] = await Promise.all([
     dockerUp
-      ? deps.readCaddy().then(composeTri, () => unknownGroup(READ_FAILED))
-      : Promise.resolve(unknownGroup(unknownReason(docker))),
+      ? deps.readCaddy().catch(() => unknownCompose(READ_FAILED))
+      : Promise.resolve(unknownCompose(reason)),
     dockerUp
-      ? deps.readLogging().then(composeTri, () => unknownGroup(READ_FAILED))
-      : Promise.resolve(unknownGroup(unknownReason(docker))),
+      ? deps.readLogging().catch(() => unknownCompose(READ_FAILED))
+      : Promise.resolve(unknownCompose(reason)),
     dockerUp
-      ? deps
-          .readNetworks()
-          .then(networksTri, () => unknownNetworks(READ_FAILED))
-      : Promise.resolve(unknownNetworks(unknownReason(docker))),
+      ? deps.readNetworks().catch(() => unknownNetworks(READ_FAILED))
+      : Promise.resolve(unknownNetworks(reason)),
     dockerUp
-      ? deps.readProxyNetwork().then(proxyTri, () => unknownProxy(READ_FAILED))
-      : Promise.resolve(unknownProxy(unknownReason(docker))),
+      ? deps.readProxyNetwork().catch(() => unknownProxy(READ_FAILED))
+      : Promise.resolve(unknownProxy(reason)),
     observeHostDns({
       deps,
       // A dynamic Caddy address can only come from a running Docker.
-      caddyIp: dockerUp ? deps.caddyIp : async () => null,
+      caddyIp: dockerUp
+        ? async () => await deps.caddyIp().catch(() => "unknown" as const)
+        : async () => await Promise.resolve("unknown" as const),
     }),
   ]);
   const summary = {
@@ -160,9 +154,6 @@ function dockerOk(state: DockerState): Tri {
   return state === "unknown" ? "unknown" : false;
 }
 
-/** A read that threw: its part is unknown, never a failure of the thing. */
-const READ_FAILED = "Docker answered, but this part could not be read";
-
 function unknownReason(docker: { readonly state: DockerState }): string {
   switch (docker.state) {
     case "not_installed":
@@ -174,61 +165,32 @@ function unknownReason(docker: { readonly state: DockerState }): string {
   }
 }
 
-function composeTri(group: ComposeGroup) {
-  return { ...group, ok: group.ok as Tri };
+function unknownCompose(reason: string): ComposeObservation {
+  return { ok: "unknown", error: reason, services: [] };
 }
 
-function unknownGroup(reason: string) {
-  return {
-    ok: "unknown" as Tri,
-    error: reason,
-    services: [] as readonly unknown[],
-  };
+function unknownNetworks(reason: string): NetworksObservation {
+  return { ok: "unknown", error: reason, missing: [], networks: [] };
 }
 
-function networksTri(group: NetworksGroup) {
-  return { ...group, ok: group.ok as Tri };
-}
-
-function unknownNetworks(reason: string) {
-  return {
-    ok: "unknown" as Tri,
-    error: reason,
-    missing: [] as readonly string[],
-    networks: [] as readonly unknown[],
-  };
-}
-
-function proxyTri(payload: ProxyNetworkPayload) {
-  return {
-    ...payload,
-    ok: (payload.ok === null ? "unknown" : payload.ok) as Tri,
-  };
-}
-
-function unknownProxy(reason: string) {
-  return {
-    ok: "unknown" as Tri,
-    readable: false,
-    error: reason,
-    issues: [] as readonly unknown[],
-  };
+function unknownProxy(reason: string): ProxyObservation {
+  return { ok: "unknown", readable: false, error: reason, issues: [] };
 }
 
 /**
  * Host DNS for Hack's routed suffixes. Linux: the systemd-resolved route
- * (`configured` is yes; a state Hack does not manage is unknown). macOS: the
- * resolver files, dnsmasq lines and an answer from 127.0.0.1:53, as `hack
- * doctor` checks them. Elsewhere: unknown.
+ * (`configured` is yes; a resolver Hack does not manage, or an answer that
+ * rests on a failed read, is unknown). macOS: the resolver files, dnsmasq
+ * lines and an answer from 127.0.0.1:53. Elsewhere: unknown.
  */
 async function observeHostDns(opts: {
   readonly deps: ObserveDeps;
-  readonly caddyIp: () => Promise<string | null>;
+  readonly caddyIp: () => Promise<string | null | "unknown">;
 }) {
   const { deps } = opts;
   if (deps.platform === "linux") {
-    const inspection = await deps.inspectLinuxDns().catch(() => null);
-    if (inspection === null) {
+    const read = await deps.inspectLinuxDns().catch(() => null);
+    if (read === null) {
       return {
         platform: "linux",
         state: "unknown",
@@ -236,34 +198,32 @@ async function observeHostDns(opts: {
         message: "The Linux DNS route could not be inspected",
       } as const;
     }
+    const { inspection, unreadable } = read;
     return {
       platform: "linux",
       resolver: inspection.resolver.kind,
       state: inspection.state,
-      ok: linuxDnsOk(inspection.state),
+      ok: linuxDnsOk({ state: inspection.state, unreadable }),
       code: inspection.code,
       link: inspection.link,
       message: inspection.message,
       fix: inspection.fix,
+      unreadable,
     } as const;
   }
   if (deps.platform === "darwin") {
-    const checks = await Promise.all([
-      ...MAC_DOMAINS.map((domain) => deps.macResolver(domain)),
-      ...MAC_DOMAINS.map((domain) =>
-        deps.macDnsmasqConfig(domain, { caddyIp: opts.caddyIp })
-      ),
-      deps.macDnsmasqPort53(),
-    ]).catch(() => null);
+    const checks = await deps
+      .observeMacDns({ domains: MAC_DOMAINS, caddyIp: opts.caddyIp })
+      .catch(() => null);
     if (checks === null) {
       return {
         platform: "darwin",
         state: "unknown",
         ok: "unknown" as Tri,
-        checks: [] as readonly CheckResult[],
+        checks: [] as readonly ObservedCheck[],
       } as const;
     }
-    const ok = macDnsOk(checks);
+    const ok = allOk(checks.map((check) => checkOk(check)));
     return {
       platform: "darwin",
       state: macDnsState(ok),
@@ -281,14 +241,27 @@ async function observeHostDns(opts: {
 
 /**
  * `configured` is yes. `manual` (a resolver Hack does not manage) cannot be
- * judged from here, so unknown; every other state is a route that is not in
- * place.
+ * judged from here, and neither can a state reached through a read that
+ * failed: unknown. Every other state is a route that is not in place.
  */
-function linuxDnsOk(state: LinuxDnsInspection["state"]): Tri {
-  if (state === "configured") {
+function linuxDnsOk(opts: {
+  readonly state: LinuxDnsInspection["state"];
+  readonly unreadable: readonly string[];
+}): Tri {
+  if (opts.state === "configured") {
     return true;
   }
-  return state === "manual" ? "unknown" : false;
+  if (opts.state === "manual" || opts.unreadable.length > 0) {
+    return "unknown";
+  }
+  return false;
+}
+
+function checkOk(check: ObservedCheck): Tri {
+  if (check.outcome === "unknown") {
+    return "unknown";
+  }
+  return check.outcome === "ok";
 }
 
 function macDnsState(ok: Tri): "configured" | "not_configured" | "unknown" {
@@ -296,19 +269,6 @@ function macDnsState(ok: Tri): "configured" | "not_configured" | "unknown" {
     return "unknown";
   }
   return ok ? "configured" : "not_configured";
-}
-
-/** A check that could not look (no Homebrew to locate dnsmasq.conf) is unknown. */
-function macDnsOk(checks: readonly CheckResult[]): Tri {
-  if (checks.every((check) => check.status === "ok")) {
-    return true;
-  }
-  const couldNotLook = (check: CheckResult) =>
-    check.status !== "ok" && check.message.startsWith("Homebrew not found");
-  if (checks.some((check) => check.status !== "ok" && !couldNotLook(check))) {
-    return false;
-  }
-  return "unknown";
 }
 
 /** false if any part is false; otherwise unknown if any is; otherwise true. */

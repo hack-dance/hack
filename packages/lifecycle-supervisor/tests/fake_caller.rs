@@ -805,6 +805,21 @@ fn new_generation_ignores_retained_terminal_receipts() {
 }
 
 #[test]
+fn case_only_rename_accepts_terminal_receipt_with_previous_spelling() {
+    let f = Fixture::new();
+    let (mut first, _) = f.start(vec![f.process("Worker", "hold")]);
+    f.await_log("fixture-ready");
+    f.stop();
+    assert!(wait(&mut first, TIMEOUT).success());
+    // Also emulate the case-insensitive lookup on Linux: the payload retains
+    // its original spelling while the lookup uses the new command name.
+    fs::rename(f.root.join("Worker.json"), f.root.join("worker.json")).unwrap();
+    let (mut next, _) = f.start(vec![f.process("worker", "hold")]);
+    f.stop();
+    assert!(wait(&mut next, TIMEOUT).success());
+}
+
+#[test]
 fn command_joining_guard_group_still_receives_kill() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![f.process("worker", "join-guard-group")]);

@@ -1,6 +1,6 @@
 //! Where the app's data comes from: the live CLI and daemon, or fixtures.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::daemon::DaemonClient;
@@ -307,6 +307,10 @@ impl Source for LiveSource {
         native: bool,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
+        // Actions run checkout-defined lifecycle commands as the user: run
+        // only on a validated root, by its canonical path.
+        let real = trusted_root(repo_root)?;
+        let repo_root = real.as_path();
         let timeout = if action == Action::Start {
             Self::UP
         } else {
@@ -382,6 +386,132 @@ pub fn parse_log_tail(out: &str, err: &str, code: Option<i32>) -> Result<Vec<Log
         return Err(format!("hack logs exited with {code:?}: {}", err.trim()));
     }
     Ok(events.into_iter().filter_map(|e| e.entry).collect())
+}
+
+/// Validate a registry-supplied project root before running an action that
+/// executes checkout-defined lifecycle commands, and return the canonical
+/// path to pass to the CLI.
+///
+/// The projects registry is not ownership-checked by the CLI today, so the
+/// app refuses a root unless:
+/// - it is absolute and canonicalises to an existing directory (the returned
+///   canonical path is what runs, so a symlink cannot be swapped between
+///   this check and the call);
+/// - every ancestor is owned by this user or root and not writable by group
+///   or others, except a root-owned sticky directory such as `/tmp`, where
+///   other users cannot rename entries;
+/// - the root itself is owned by this user and not group/other writable;
+/// - the CLI's own discovery, started at the root, selects exactly the root
+///   (mirrored by `cli_selects_exactly`), so no other project is chosen;
+/// - `.hack/`, `.dev/` and every entry directly in them are plain files or
+///   directories (symlinks are refused), owned by this user and not
+///   group/other writable.
+///
+/// What remains is CLI work: the CLI should verify the registry itself and
+/// bind each action to the registered identity (requested of the lead).
+///
+/// # Errors
+/// `E_APP_UNTRUSTED_ROOT` with the reason.
+pub fn trusted_root(root: &Path) -> Result<PathBuf, SourceError> {
+    use std::os::unix::fs::MetadataExt;
+    let refuse = |why: String| SourceError::Cli {
+        code: "E_APP_UNTRUSTED_ROOT".into(),
+        message: format!("Not running this action: {why}."),
+        failed: vec![],
+    };
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if !root.is_absolute() {
+        return Err(refuse("the project folder is not an absolute path".into()));
+    }
+    let real = std::fs::canonicalize(root)
+        .map_err(|_| refuse("the project folder could not be read".into()))?;
+    let meta = std::fs::metadata(&real)
+        .map_err(|_| refuse("the project folder could not be read".into()))?;
+    if !meta.is_dir() {
+        return Err(refuse("the project folder is not a directory".into()));
+    }
+    if meta.uid() != uid || meta.mode() & 0o022 != 0 {
+        return Err(refuse(
+            "the project folder is not yours alone (owner or write permissions)".into(),
+        ));
+    }
+    for dir in real.ancestors().skip(1) {
+        let m = std::fs::metadata(dir)
+            .map_err(|_| refuse(format!("{} could not be read", dir.display())))?;
+        let owner_ok = m.uid() == uid || m.uid() == 0;
+        let sticky_root = m.uid() == 0 && m.mode() & 0o1000 != 0;
+        if !owner_ok || (m.mode() & 0o022 != 0 && !sticky_root) {
+            return Err(refuse(format!(
+                "{} can be changed by another user",
+                dir.display()
+            )));
+        }
+    }
+    // Config entries must be plain files and directories (no symlinks: a
+    // link target's own path chain could be writable by others), owned by
+    // this user and closed to group and others.
+    let private = |p: &Path| -> Result<(), SourceError> {
+        let m = std::fs::symlink_metadata(p)
+            .map_err(|_| refuse(format!("{} could not be read", p.display())))?;
+        if m.file_type().is_symlink() {
+            return Err(refuse(format!("{} is a symbolic link", p.display())));
+        }
+        if m.uid() != uid || m.mode() & 0o022 != 0 {
+            return Err(refuse(format!(
+                "{} is not yours alone (owner or write permissions)",
+                p.display()
+            )));
+        }
+        Ok(())
+    };
+    // The CLI must select exactly this root (see `discoverProjectInputs`).
+    if !cli_selects_exactly(&real) {
+        return Err(refuse(
+            "the project folder is not the project the CLI would select from it".into(),
+        ));
+    }
+    for d in [real.join(".hack"), real.join(".dev")] {
+        if std::fs::symlink_metadata(&d).is_err() {
+            continue;
+        }
+        private(&d)?;
+        let entries = std::fs::read_dir(&d)
+            .map_err(|_| refuse(format!("{} could not be read", d.display())))?;
+        for e in entries {
+            let e = e.map_err(|_| refuse(format!("{} could not be read", d.display())))?;
+            private(&e.path())?;
+        }
+    }
+    Ok(real)
+}
+
+/// Mirror of the CLI's project discovery from `root` (see
+/// `discoverProjectInputs` in `src/lib/project-input-selection.ts`): `true`
+/// only when discovery starting at `root` selects `root` itself.
+/// - `.hack/hack.project.json` (native) or `.hack/docker-compose.yml` at
+///   `root` selects it;
+/// - `.dev/docker-compose.yml` alone selects it unless an ancestor with
+///   `.hack/docker-compose.yml` is reached before an ancestor native marker.
+fn cli_selects_exactly(root: &Path) -> bool {
+    let native = |d: &Path| d.join(".hack/hack.project.json").exists();
+    let hack_compose = |d: &Path| d.join(".hack/docker-compose.yml").is_file();
+    let dev_compose = |d: &Path| d.join(".dev/docker-compose.yml").is_file();
+    if native(root) || hack_compose(root) {
+        return true;
+    }
+    if !dev_compose(root) {
+        return false;
+    }
+    for a in root.ancestors().skip(1) {
+        if native(a) {
+            return true;
+        }
+        if hack_compose(a) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Canned data for one designed state.
@@ -646,6 +776,156 @@ esac
         let v = crate::doctor::aggregate(&runs);
         assert_eq!(v.attention_count(), 1);
         assert_eq!(v.passed, 1);
+    }
+
+    /// Whether the temp dir's own ancestors are private enough for the
+    /// positive cases. Decided independently of `trusted_root`, so an
+    /// unexpected rejection fails the test instead of skipping it.
+    fn host_temp_is_trustworthy() -> bool {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let Ok(t) = std::fs::canonicalize(std::env::temp_dir()) else {
+            return false;
+        };
+        t.ancestors().all(|a| {
+            std::fs::metadata(a).is_ok_and(|m| {
+                let sticky_root = m.uid() == 0 && m.mode() & 0o1000 != 0;
+                (m.uid() == uid || m.uid() == 0) && (m.mode() & 0o022 == 0 || sticky_root)
+            })
+        })
+    }
+
+    /// A private base dir under the temp dir.
+    fn base(tag: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-trust-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
+    /// A real legacy project: `<dir>/<marker_dir>/docker-compose.yml`.
+    fn make_project(dir: &Path, marker_dir: &str, file: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir.join(marker_dir);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(d.join(file), "services: {}\n").unwrap();
+        std::fs::set_permissions(d.join(file), std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn untrusted(r: Result<PathBuf, SourceError>) -> bool {
+        matches!(r, Err(SourceError::Cli { ref code, .. }) if code == "E_APP_UNTRUSTED_ROOT")
+    }
+
+    #[test]
+    fn trusted_root_accepts_real_projects_and_returns_the_real_path() {
+        if !host_temp_is_trustworthy() {
+            eprintln!("skipped: temp dir ancestors are not private on this host");
+            return;
+        }
+        let b = base("ok");
+        let compose = b.join("compose");
+        make_project(&compose, ".hack", "docker-compose.yml");
+        let native = b.join("native");
+        make_project(&native, ".hack", "hack.project.json");
+        let dev = b.join("dev");
+        make_project(&dev, ".dev", "docker-compose.yml");
+        for p in [&compose, &native] {
+            assert_eq!(
+                trusted_root(p).unwrap(),
+                std::fs::canonicalize(p).unwrap(),
+                "{}",
+                p.display()
+            );
+        }
+        // A `.dev`-only project is selected by the CLI unless an ancestor
+        // `.hack` Compose project comes first; this host may have one above
+        // its temp dir, in which case the right answer is a refusal.
+        let real_dev = std::fs::canonicalize(&dev).unwrap();
+        let ancestor_hack = real_dev
+            .ancestors()
+            .skip(1)
+            .take_while(|a| !a.join(".hack/hack.project.json").exists())
+            .any(|a| a.join(".hack/docker-compose.yml").is_file());
+        if ancestor_hack {
+            assert!(untrusted(trusted_root(&dev)), "CLI would pick the ancestor");
+        } else {
+            assert_eq!(trusted_root(&dev).unwrap(), real_dev);
+        }
+        let link = b.join("link");
+        std::os::unix::fs::symlink(&compose, &link).unwrap();
+        assert_eq!(
+            trusted_root(&link).unwrap(),
+            std::fs::canonicalize(&compose).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn trusted_root_refuses_unsafe_or_ambiguous_roots() {
+        use std::os::unix::fs::PermissionsExt;
+        let set = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        };
+        assert!(untrusted(trusted_root(Path::new("relative/dir"))));
+        if !host_temp_is_trustworthy() {
+            eprintln!("skipped: temp dir ancestors are not private on this host");
+            return;
+        }
+        let b = base("bad");
+        let p = b.join("p");
+        make_project(&p, ".hack", "docker-compose.yml");
+        assert!(trusted_root(&p).is_ok());
+        // World-writable root.
+        set(&p, 0o777);
+        assert!(untrusted(trusted_root(&p)), "0777 root");
+        set(&p, 0o700);
+        // Group-writable config file.
+        set(&p.join(".hack/docker-compose.yml"), 0o664);
+        assert!(untrusted(trusted_root(&p)), "writable config");
+        set(&p.join(".hack/docker-compose.yml"), 0o600);
+        // A config symlink, even to a private file under a writable parent.
+        let open = b.join("open");
+        std::fs::create_dir(&open).unwrap();
+        set(&open, 0o777);
+        std::fs::write(open.join("target.yml"), "x").unwrap();
+        set(&open.join("target.yml"), 0o600);
+        std::os::unix::fs::symlink(open.join("target.yml"), p.join(".hack/hack.config.json"))
+            .unwrap();
+        assert!(untrusted(trusted_root(&p)), "config symlink");
+        std::fs::remove_file(p.join(".hack/hack.config.json")).unwrap();
+        // An empty .hack is not a project for the CLI.
+        let empty = b.join("empty");
+        std::fs::create_dir_all(empty.join(".hack")).unwrap();
+        set(&empty, 0o700);
+        set(&empty.join(".hack"), 0o700);
+        assert!(untrusted(trusted_root(&empty)), "empty .hack");
+        // A .dev project below an ancestor .hack project: the CLI picks the
+        // ancestor, so the nested root is refused.
+        let outer = b.join("outer");
+        make_project(&outer, ".hack", "docker-compose.yml");
+        let inner = outer.join("inner");
+        make_project(&inner, ".dev", "docker-compose.yml");
+        assert!(untrusted(trusted_root(&inner)), "ancestor .hack wins");
+        // A child whose parent is group-writable.
+        let g = b.join("g");
+        std::fs::create_dir(&g).unwrap();
+        let proj = g.join("proj");
+        make_project(&proj, ".hack", "docker-compose.yml");
+        set(&g, 0o775);
+        assert!(untrusted(trusted_root(&proj)), "writable ancestor");
+        set(&open, 0o700);
+        let _ = std::fs::remove_dir_all(&b);
     }
 
     #[test]

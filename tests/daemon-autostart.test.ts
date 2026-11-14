@@ -34,6 +34,21 @@ let events: string[];
 let starts: { id: string; at: number }[];
 let deps: AutostartDependencies;
 
+test("declared replica counts require ordinary up rather than partial adoption", () => {
+  for (const count of [0, 1, 2, "${REPLICAS}"]) {
+    for (const settings of [
+      { scale: count },
+      { deploy: { replicas: count } },
+    ]) {
+      expect(
+        autostartComposeModel({
+          services: { web: { image: "example", ...settings } },
+        })
+      ).toBeNull();
+    }
+  }
+});
+
 test("routing installation probe uses the installed Caddy Compose path", async () => {
   expect(await autostartRoutingInstalled(root)).toBe(false);
   await mkdir(join(root, "caddy"));

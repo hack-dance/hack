@@ -776,7 +776,12 @@ export function autostartComposeModel(
 }
 
 function isDefaultAutostartService(service: unknown): boolean | null {
-  if (!isRecord(service) || service.extends !== undefined) {
+  if (
+    !isRecord(service) ||
+    service.extends !== undefined ||
+    service.scale !== undefined ||
+    (isRecord(service.deploy) && service.deploy.replicas !== undefined)
+  ) {
     return null;
   }
   if (service.profiles === undefined) {

@@ -72,7 +72,8 @@ with `condition: service_completed_successfully`; other stopped services require
 `up`. Adoption also requires every service in the selected default-profile model
 to have a container, including required dependency targets. A missing service
 runs the normal `up` path. This slice reads the primary Compose file; branch
-overrides, explicit Compose file/profile overrides and unsupported composition
+overrides, declared `scale` or `deploy.replicas`, explicit Compose file/profile
+overrides and unsupported composition
 cannot prove adoption, so they run ordinary `up` and may repeat startup hooks.
 
 No terminal or keychain prompt is allowed. Missing keys, required interaction,

@@ -39,6 +39,7 @@ import {
   shouldRefreshForDockerEvent,
   startDockerEventWatcher,
 } from "./docker-events.ts";
+import { gatewayProjectsPayload } from "./gateway-projects-payload.ts";
 import { createDaemonLogger } from "./logger.ts";
 import {
   createLoginAutostart,
@@ -749,18 +750,7 @@ async function handleGatewayRequest(opts: {
       includeUnregistered: false,
       includeMeta,
     });
-    const filtered = payload.projects.filter((project) => {
-      if (!project || typeof project !== "object") {
-        return false;
-      }
-      const id = (project as Record<string, unknown>).project_id;
-      return typeof id === "string" && enabledProjectIds.has(id);
-    });
-    return jsonResponse({
-      ...payload,
-      include_unregistered: false,
-      projects: filtered,
-    });
+    return jsonResponse(gatewayProjectsPayload({ payload, enabledProjectIds }));
   }
 
   const response = await handleRequest({

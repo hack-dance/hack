@@ -430,3 +430,6 @@ inspects image IDs before routing startup and runs Compose with `--no-build
 --pull never`, so a missing image causes refusal instead of a registry fetch.
 Manual `hack global up` prepares missing images. Local image contents remain
 trusted engine state; this does not claim registry-tag or image-digest verification.
+Machine-wide `autostart_global` progress is local-only and is omitted from the
+retained unsupported gateway's project responses. Those responses keep their
+existing enabled-project row filter.

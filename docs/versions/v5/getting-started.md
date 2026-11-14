@@ -156,3 +156,4 @@ empty directories where a plugin could be planted after an audit.
 Direnv files such as `.envrc` are not dotenv overlays and do not block admission.
 Prepare Caddy/CoreDNS images with manual `hack global up`: login routing never
 pulls or builds images and refuses missing local images.
+Machine-wide autostart progress is exposed locally, not through the unsupported gateway.

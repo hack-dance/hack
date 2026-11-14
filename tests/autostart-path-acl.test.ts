@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootCertificates } from "node:tls";
@@ -15,7 +15,7 @@ import { readProjectsRegistry } from "../src/lib/projects-registry.ts";
 let root = "";
 let projectDir = "";
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hack-acl-boundary-"));
+  root = await realpath(await mkdtemp(join(tmpdir(), "hack-acl-boundary-")));
   projectDir = join(root, ".hack");
   await mkdir(projectDir, { mode: 0o700 });
   await writeFile(join(projectDir, "hack.config.json"), '{"name":"fixture"}', {

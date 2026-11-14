@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -16,7 +17,9 @@ let root = "";
 let bin = "";
 let program = "";
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hack-executable-trust-"));
+  root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-executable-trust-"))
+  );
   bin = join(root, "bin");
   program = join(bin, "docker");
   await mkdir(bin, { mode: 0o700 });
@@ -157,6 +160,32 @@ for (const stdout of [
     expect((await Bun.file(program).stat()).mode & 0o777).toBe(0o700);
   });
 }
+
+test("Darwin ACL inventories retain an ancestor symlink and its physical executable chain", async () => {
+  const physical = join(root, "physical");
+  const physicalBin = join(physical, "bin");
+  const alias = join(root, "alias");
+  await mkdir(physicalBin, { recursive: true, mode: 0o700 });
+  const helper = join(physicalBin, "docker");
+  await writeFile(helper, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await symlink(physical, alias);
+  const inspected = new Set<string>();
+  await assertAutostartExecutablePathTrusted(
+    { path: join(alias, "bin") },
+    {
+      platform: "darwin",
+      inspect: async (paths) => {
+        for (const path of paths) {
+          inspected.add(path);
+        }
+        return { exitCode: 0, stdout: "" };
+      },
+    }
+  );
+  for (const path of [root, alias, physical, physicalBin, helper]) {
+    expect(inspected.has(path)).toBe(true);
+  }
+});
 
 test("Darwin ACL probe failures refuse with closed diagnostics", async () => {
   for (const exitCode of [1, 124, 125]) {

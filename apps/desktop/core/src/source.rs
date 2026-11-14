@@ -154,13 +154,18 @@ pub trait Source: Send + Sync {
         crate::setup::fixture(self.snapshot(), &self.doctor_runs(&[]))
     }
 
-    /// Selected executable for an explicit terminal hand-off. Fixtures refuse.
+    /// Discovery only, not checked-version evidence. Fixes must retain the
+    /// checked Report/ExecutionContext instead of rediscovering on click. Fixtures refuse.
     fn cli_program(&self) -> Result<String, String> {
         Err("Fixture: terminal disabled".into())
     }
 
     /// Explicit, fixed non-admin setup action; never inferred from Doctor text.
-    fn setup_action(&self, _action: crate::setup::SafeAction) -> String {
+    fn setup_action(
+        &self,
+        _action: crate::setup::SafeAction,
+        _checked: &crate::setup::Report,
+    ) -> String {
         "Fixture: no action executed".into()
     }
 
@@ -381,8 +386,12 @@ impl Source for LiveSource {
     fn setup(&self) -> crate::setup::Report {
         self.read_setup()
     }
-    fn setup_action(&self, action: crate::setup::SafeAction) -> String {
-        crate::setup_io::run_safe(&self.runner, action)
+    fn setup_action(
+        &self,
+        action: crate::setup::SafeAction,
+        checked: &crate::setup::Report,
+    ) -> String {
+        crate::setup_io::run_safe(action, checked)
     }
 
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {

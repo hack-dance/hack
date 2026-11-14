@@ -84,7 +84,7 @@ fn all_mac_dns_checks_required_including_custom_pairs() {
         missing.remove(i);
         assert_eq!(state(&missing), Status::Unknown, "missing {}", ids[i].0);
     }
-    for status in ["skipped", "warn", "unexpected", ""] {
+    for status in ["skipped", "unexpected", ""] {
         let mut unknown = ids;
         unknown[0].1 = status;
         assert_eq!(state(&unknown), Status::Unknown);
@@ -132,7 +132,7 @@ fn native_only_keeps_unknown_and_never_global_fixes() {
     assert!(!r.cards.iter().any(|c| matches!(c.remedy, Remedy::Admin(_))));
 }
 #[test]
-fn skips_never_pass_cli_is_required_and_new_checks_clear_skips() {
+fn skips_never_pass_cli_is_required_and_checks_preserve_session_skips() {
     let mut p = setup::Pane::default();
     let g = p.begin();
     p.finish(
@@ -145,7 +145,7 @@ fn skips_never_pass_cli_is_required_and_new_checks_clear_skips() {
     assert!(p.report.needed());
     assert!(p.skipped.contains("trust"));
     let g = p.begin();
-    assert!(p.skipped.is_empty());
+    assert!(p.skipped.contains("trust"));
     p.finish(g - 1, Default::default());
     assert!(p.loading);
     p.finish(
@@ -329,4 +329,54 @@ fn missing_native_project_cannot_pass_from_cached_runtime_evidence() {
             .status,
         Status::Unknown
     );
+}
+#[test]
+fn confirmed_warnings_need_attention_and_focus_is_scoped() {
+    let report = derive(
+        &[machine(&[
+            ("linux dns route", "warn"),
+            ("local ca trust", "warn"),
+        ])],
+        Platform::Linux,
+        serde_json::json!({}),
+        None,
+    );
+    for id in ["routing", "trust"] {
+        assert_eq!(
+            report.cards.iter().find(|c| c.id == id).unwrap().status,
+            Status::NeedsAttention
+        );
+    }
+    assert!(!setup::should_recheck_on_focus(false, false, false, false));
+    assert!(setup::should_recheck_on_focus(true, false, false, false));
+    assert!(setup::should_recheck_on_focus(false, true, false, false));
+    assert!(!setup::should_recheck_on_focus(true, true, true, false));
+    assert!(!setup::should_recheck_on_focus(true, true, false, true));
+}
+#[test]
+fn installed_but_disabled_or_drifted_login_is_not_passed() {
+    for service in [
+        serde_json::json!({"installed":true,"enabled":false}),
+        serde_json::json!({"installed":true,"next_step":"hack daemon install"}),
+        serde_json::json!({"installed":true,"severity":"warn"}),
+    ] {
+        let report = derive(
+            &[],
+            Platform::Linux,
+            serde_json::json!({"service":service}),
+            None,
+        );
+        assert_eq!(report.cards.last().unwrap().status, Status::NeedsAttention);
+    }
+}
+#[test]
+fn check_clears_old_output_but_preserves_immediate_action_receipt_and_skips() {
+    let mut p = setup::Pane::default();
+    p.result = Some("old result".into());
+    p.begin();
+    assert!(p.result.is_none());
+    p.result = Some("just finished".into());
+    p.pending_fix = true;
+    p.begin();
+    assert_eq!(p.result.as_deref(), Some("just finished"));
 }

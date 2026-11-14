@@ -177,10 +177,10 @@ check, in order. Every check is read-only; every card offers **Check again**.
 | Routing and DNS (native) | `hack doctor --browser-url <project URL>` → `native host dns` (absent without `--browser-url`) | none from the app: `hack global install` refuses native; link to the native setup doc (HACK-2193) | — | "unknown" |
 | Certificate trust (Compose) | doctor `local ca trust` when available (system and Linux NSS); **Unknown** on older CLIs. `caddy local ca` checks only the exported CA, never trust (R16) | `hack global trust` | **yes** | Lock icon on URLs: "browser may warn" |
 | Certificate trust (native) | doctor `native root trust` | none from the app: `hack global trust` refuses native; doc link | — | "unknown" |
-| Login service | `daemon status` `service.installed` | `hack daemon install` | no | Always-on switch disabled |
+| Login service | `daemon status` `service.installed` | `hack daemon install` only with explicit manager availability, ordinary home and guards permitting it; otherwise docs | no | Always-on switch disabled |
 
-Skips are not stored: the next check finds the step still open and Doctor lists
-it. Non-admin **Run** executes the command and shows its output, then re-checks.
+Skips are memory-only for the app session and survive checks. The next launch
+finds the step still open and Doctor lists it. Non-admin **Run** executes the command and shows its output, then re-checks.
 Admin steps offer **Copy command** and **Open Terminal**; neither is assumed to
 have succeeded until **Check again** (also run when the window regains focus).
 

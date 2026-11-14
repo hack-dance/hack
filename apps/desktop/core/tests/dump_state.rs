@@ -206,7 +206,6 @@ fn setup_fixture_cli_never_resolves_hack() {
         .env("HACK_HOME", &home)
         .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
         .env_remove("HACK_DESKTOP_CLI")
-        .env_remove("HACK_DESKTOP_CLI")
         .output()
         .unwrap();
     let _ = std::fs::remove_dir_all(&home);

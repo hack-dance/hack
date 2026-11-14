@@ -140,7 +140,18 @@ fn enter_required_quoted_argv_and_cleanup_after_command() {
     stdout.read_line(&mut line).unwrap();
     assert!(line.contains("Press Enter"));
     assert!(!marker.exists());
-    child.stdin.take().unwrap().write_all(b"\n").unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"\n").unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    assert!(line.contains("Press Enter to close"));
+    assert!(line.contains("exit 7"));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "output remains visible until close confirmation"
+    );
+    assert!(path.exists());
+    input.write_all(b"\n").unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(7));
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap(),

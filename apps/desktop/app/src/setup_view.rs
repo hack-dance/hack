@@ -101,22 +101,16 @@ pub fn render(pane: &Pane, recovery_busy: bool, cx: &mut Context<HackApp>) -> An
                 }
                 Remedy::Admin(args) => {
                     let args = args.clone();
-                    let command = hack_desktop_core::terminal::CommandSpec {
-                        program: pane
-                            .report
-                            .cli_program
-                            .clone()
-                            .unwrap_or_else(|| "hack".into()),
-                        args: args.clone(),
-                    }
-                    .display()
-                    .unwrap_or_else(|_| "CLI command unavailable".into());
+                    let command = pane.report.command(args.clone()).and_then(|c| c.display());
+                    let handoff_available = command.is_ok();
+                    let command =
+                        command.unwrap_or_else(|_| "Command unavailable; check setup again".into());
                     actions = actions.child(
                         Button::new(("setup-copy", i))
                             .label("Copy command")
                             .small()
                             .ghost()
-                            .disabled(!pane.report.cli_ready())
+                            .disabled(!pane.report.cli_ready() || !handoff_available)
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(command.clone()))
                             }),
@@ -126,7 +120,11 @@ pub fn render(pane: &Pane, recovery_busy: bool, cx: &mut Context<HackApp>) -> An
                             .label("Open Terminal")
                             .small()
                             .outline()
-                            .disabled(busy || pane.loading || !pane.report.cli_ready())
+                            .disabled(
+                                busy || pane.loading
+                                    || !pane.report.cli_ready()
+                                    || !handoff_available,
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_setup_terminal(args.clone(), cx)
                             })),

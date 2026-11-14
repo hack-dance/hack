@@ -299,6 +299,12 @@ impl AppModel {
         }
     }
 
+    /// Machine effects must wait for every project effect to settle.
+    #[must_use]
+    pub fn has_in_flight(&self) -> bool {
+        self.local.values().any(|c| c.in_flight.is_some())
+    }
+
     /// Can `action` start for `project` now?
     #[must_use]
     pub fn can_start(&self, project: &str) -> bool {
@@ -912,6 +918,31 @@ mod tests {
             let d = m.detail().unwrap_or_else(|| panic!("{f:?}"));
             assert_eq!(d.name, "storefront");
             assert_eq!(d.url.as_deref(), Some("https://storefront.hack"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod machine_gate_tests {
+    use super::*;
+    #[test]
+    fn machine_gate_observes_every_project_until_each_action_settles() {
+        let mut model = AppModel::new();
+        assert!(!model.has_in_flight());
+        for project in ["alpha", "beta"] {
+            model.apply(Event::ActionStarted {
+                project: project.into(),
+                action: Action::Stop,
+            });
+        }
+        assert!(model.has_in_flight());
+        for project in ["alpha", "beta"] {
+            model.apply(Event::ActionFinished {
+                project: project.into(),
+                action: Action::Stop,
+                result: Err(SourceError::CliMissing),
+            });
+            assert_eq!(model.has_in_flight(), project == "alpha");
         }
     }
 }

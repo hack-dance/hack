@@ -47,10 +47,28 @@ pub struct Card {
 pub struct Report {
     pub cards: Vec<Card>,
     pub cli_program: Option<String>,
+    pub context: Option<crate::execution::ExecutionContext>,
+    pub force_cli_gate: bool,
 }
 impl Report {
     pub fn needed(&self) -> bool {
         self.cards.is_empty() || self.cards.iter().any(|c| c.status != Status::Passed)
+    }
+    /// Bind authored argv to the executable and non-secret context actually checked.
+    pub fn command(&self, args: Vec<String>) -> Result<crate::terminal::CommandSpec, String> {
+        if !self.cli_ready() {
+            return Err("The CLI has not been checked".into());
+        }
+        self.context
+            .as_ref()
+            .ok_or("Execution context has not been checked")?
+            .bind(&crate::terminal::CommandSpec {
+                program: self
+                    .cli_program
+                    .clone()
+                    .ok_or("CLI executable has not been checked")?,
+                args,
+            })
     }
     pub fn cli_ready(&self) -> bool {
         self.cards
@@ -64,6 +82,7 @@ pub struct Pane {
     pub loading: bool,
     pub action_busy: bool,
     pub refresh_again: bool,
+    pub pending_fix: bool,
     pub result: Option<String>,
     pub skipped: std::collections::BTreeSet<String>,
     generation: u64,
@@ -73,7 +92,9 @@ impl Pane {
     pub fn begin(&mut self) -> u64 {
         self.generation += 1;
         self.loading = true;
-        self.skipped.clear();
+        if !self.pending_fix {
+            self.result = None;
+        }
         self.generation
     }
     pub fn finish(&mut self, generation: u64, report: Report) {
@@ -112,7 +133,7 @@ fn evidence(check: Option<&DoctorCheck>) -> (Status, String) {
         Some(c) => (
             match c.status.as_str() {
                 "ok" => Status::Passed,
-                "error" => Status::NeedsAttention,
+                "warn" | "error" => Status::NeedsAttention,
                 _ => Status::Unknown,
             },
             c.detail.chars().take(2048).collect(),
@@ -135,7 +156,7 @@ fn check(runs: &[DoctorRun], project: Option<&str>, id: &str) -> (Status, String
         (Status::Unknown, format!("{id}: missing or ambiguous check"))
     }
 }
-fn card(id: &str, title: &str, evidence: (Status, String), remedy: Remedy) -> Card {
+pub(crate) fn card(id: &str, title: &str, evidence: (Status, String), remedy: Remedy) -> Card {
     Card {
         id: id.into(),
         title: title.into(),
@@ -144,7 +165,7 @@ fn card(id: &str, title: &str, evidence: (Status, String), remedy: Remedy) -> Ca
         remedy,
     }
 }
-fn boolean(value: Option<bool>, yes: &str, no: &str) -> (Status, String) {
+pub(crate) fn boolean(value: Option<bool>, yes: &str, no: &str) -> (Status, String) {
     match value {
         Some(true) => (Status::Passed, yes.into()),
         Some(false) => (Status::NeedsAttention, no.into()),
@@ -166,7 +187,7 @@ pub fn derive(
         Ok(v) if supported_cli(v) => (Status::Passed, format!("Hack {v}")),
         Err(why) => (
             Status::Unknown,
-            format!("{why}. Install a supported Hack CLI (5.x), then check again"),
+            format!("{why}. Check again to confirm the required Hack CLI (5.x)"),
         ),
         Ok(version) => (
             Status::Unknown,
@@ -310,22 +331,15 @@ pub fn derive(
             Remedy::Doc(NATIVE_DOC.into()),
         ));
     }
-    cards.push(card(
-        "login",
-        "Login service",
-        boolean(
-            daemon
-                .and_then(|d| d.get("service"))
-                .and_then(|s| s.get("installed"))
-                .and_then(serde_json::Value::as_bool),
-            "Login service installed",
-            "Always-on needs the login service",
-        ),
-        Remedy::Run(SafeAction::InstallDaemon),
-    ));
+    cards.push(crate::setup_login::login_card(daemon, None));
     Report {
         cards,
-        cli_program: cli.ok().filter(|v| supported_cli(v)).map(|_| "hack".into()),
+        cli_program: cli
+            .ok()
+            .filter(|v| supported_cli(v))
+            .map(|_| "/usr/local/bin/hack".into()),
+        context: None,
+        force_cli_gate: cli.is_ok_and(|v| !supported_cli(v)),
     }
 }
 fn routing(
@@ -430,3 +444,15 @@ fn supported_cli(version: &str) -> bool {
             .iter()
             .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
+
+/// Focus checks are scoped to visible setup or an outstanding explicit fix.
+pub fn should_recheck_on_focus(
+    setup_shown: bool,
+    pending_fix: bool,
+    loading: bool,
+    busy: bool,
+) -> bool {
+    (setup_shown || pending_fix) && !loading && !busy
+}
+
+pub use crate::setup_login::{installation_refusal, qualify_login};

@@ -105,7 +105,7 @@ requests they need are in `DESIGN.md` (PR #800).
 
 On launch, fresh background checks determine whether setup is needed. The app
 supports Hack CLI 5.x; the CLI card cannot be skipped. Doctor offers **Run setup
-again**. Every card offers **Check again**. Skips last only until the next check
+again**. Every card offers **Check again**. Skips last for this app session, survive rechecks,
 and never count as passed. Continue permits unresolved optional steps once the
 CLI is available; the next launch checks everything again. No first-run flag,
 setup results or command output are saved.
@@ -126,18 +126,25 @@ until R18 because it writes the registry; unavailable project coverage stays Unk
 read); individual commands and Doctor cleanup also have deadlines. Native checks
 not reached within the budget remain Unknown. `running` plus the socket version
 matching the CLI proves hackd; bare status exit zero does not. `service.installed`
-proves login installation separately.
+proves installation only; known disabled/drifted/failed service metadata stays
+Needs attention. Missing service-manager availability never permits Install.
 
-Only the fixed `daemon start` and `daemon install` actions offer **Run**, with
-bounded, memory-only output followed by fresh checks. Admin cards offer **Copy
+Only the fixed `daemon start` and supported `daemon install` actions offer **Run**, with
+bounded, memory-only output followed by fresh checks. Install requires explicit
+`service.available: true`, an ordinary home, and no launchd/systemd-disable guard;
+otherwise the card explains why and links to documentation. Availability is checked
+again immediately before install; an unavailable or unconfirmed manager is refused
+before an install command is submitted. Admin cards offer **Copy
 command** and **Open Terminal**. The private one-use `.command` script quotes every
-argument, prints the command and waits for Enter. macOS requests a new Terminal
+argument, prints the command and waits for Enter. Afterward it shows the exit code
+and waits for Enter to close, preserving output and the command’s exit code. macOS requests a new Terminal
 window through `open -g -a Terminal`; Linux uses `xdg-terminal-exec` when available,
 otherwise Copy. No existing pane is typed into and no password is requested by
 the app. The script removes itself and its private directory after use or
 cancellation; a terminal that never executes the script may leave that private
 temp directory behind. Launching a terminal never proves a fix succeeded.
-GPUI's window activation observer rechecks setup when the window becomes active;
+GPUI's window activation observer rechecks only when Setup is shown or an explicit
+fix is pending;
 visible setup also refreshes every ten minutes. Actual host focus and terminal
 behavior still need macOS/Linux live qualification; tests use injected launchers.
 
@@ -158,7 +165,8 @@ script; `open(Platform, linux_adapter, &dyn Launcher)` transfers cleanup to the
 script after launch. `Launcher::launch(program, args)` is the injected boundary;
 `SystemLauncher` is used only on explicit live clicks. `linux_adapter()` discovers
 an absolute `xdg-terminal-exec`. Build upgrade commands from authored argv, never
-from arbitrary CLI finding text.
+from arbitrary CLI finding text. `Report::command(args)` uses the checked absolute
+CLI and its captured context. It never rediscovers PATH at click time.
 
 The CLI setup card links to [v5 installation](../../docs/versions/v5/install.md),
 not the stable v4 Homebrew command. A terminal shell function does not change the
@@ -177,3 +185,37 @@ relaunch. Follow the installation page's platform limits and existing-v4 migrati
 steps before using a candidate against a shared home.
 On Linux, this preview requires a separately prepared source-built 5.x CLI; the
 Apple Silicon prerelease download is not a Linux installer.
+
+Execution context (`core::execution::ExecutionContext`) reads only the allowlisted
+non-secret HOME, HACK_HOME, PATH, backend, launchd/systemd-disable guards,
+daemon-autostart guard and optional XDG_RUNTIME_DIR. An absent HACK_HOME stays
+absent so a candidate launcher can keep its own private-home default. Context is
+captured before version checking. `runner(checked_program)` pins that absolute
+executable, clears the child environment and applies the context for all reads
+and actions. `bind(&CommandSpec)` wraps authored argv in `/usr/bin/env -i` with
+individually quoted assignments, so a macOS Terminal login environment cannot
+select another home/backend or weaken a guard. Unknown keys, invalid paths,
+control characters and unsupported backends are refused. Wrapper-specific or
+credential environment is never forwarded; such integrations need an explicitly
+supported context or a manual documented workflow. `CommandSpec` and the
+single-command `Script::create` API remain compatible; a sequence consumer can
+bind each authored spec before composing it. Both the script and private directory
+are 0700 because the launch adapter executes the script.
+
+Machine effects share `HackApp::action_busy()` (including
+`AppModel::has_in_flight()` for every project); project effects check
+`machine_action_busy()`. New daemon/upgrade controls must extend that shared gate.
+Checks clear an older action receipt; the immediate post-action check retains its
+receipt once. A transient version timeout remains Unknown and does not force a
+project pane back into setup as though the CLI were missing.
+
+Remaining evidence limits: an installed unit without newer operational metadata
+proves installation, not enabled/healthy service operation. Native DNS remains
+Unknown without a checked browser URL. macOS custom/localhost suffixes without
+matching Doctor resolver evidence remain Unknown, even if OS routing works;
+setup does not infer trust or routing success from absence. These conservative
+limits do not justify offering an unsupported in-app fix. Live macOS Terminal,
+focus, trust and service effects still require host qualification.
+
+The offscreen generator writes every `setup-<fixture>-<theme>.png` and also writes
+`setup-light.png`/`setup-dark.png` aliases for the partial fixture used above.

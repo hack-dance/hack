@@ -82,12 +82,12 @@ impl Script {
             handed_off: false,
         };
         let cleanup = format!(
-            "rm -f -- {}; rmdir -- {}",
+            "/bin/rm -f -- {}; /bin/rmdir -- {}",
             quote(&script.path.to_string_lossy())?,
             quote(&dir.to_string_lossy())?
         );
         let text = format!(
-            "#!/bin/sh\ntrap {} EXIT\ntrap 'exit 130' HUP INT TERM\nprintf '%s\\n' {} 'Press Enter to run this command, or close this window to cancel.'\nIFS= read -r answer || exit 1\n{command}\nresult=$?\nexit \"$result\"\n",
+            "#!/bin/sh\ntrap {} EXIT\ntrap 'exit 130' HUP INT TERM\nprintf '%s\\n' {} 'Press Enter to run this command, or close this window to cancel.'\nIFS= read -r answer || exit 1\n{command}\nresult=$?\nprintf 'Command finished (exit %s). Press Enter to close.\\n' \"$result\"\nIFS= read -r answer || :\nexit \"$result\"\n",
             quote(&cleanup)?,
             quote(&command)?
         );

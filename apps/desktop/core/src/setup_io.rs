@@ -1,6 +1,5 @@
 //! Setup I/O, separate from the pure evidence model. No observer starts a service.
 use crate::{
-    runner::CliRunner,
     setup::{self, Report, SafeAction},
     source::{DoctorTarget, LiveSource},
 };
@@ -20,11 +19,34 @@ impl LiveSource {
                 .saturating_duration_since(Instant::now())
                 .saturating_sub(Duration::from_secs(2))
         };
-        let runner = self
-            .runner
-            .clone()
-            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .with_term_grace(Duration::from_secs(2));
+        let selected = self.runner.resolve_program().and_then(|p| {
+            p.into_os_string()
+                .into_string()
+                .map_err(|_| crate::runner::RunError::Spawn("CLI path is not UTF-8".into()))
+        });
+        let context = crate::execution::ExecutionContext::capture(&self.runner);
+        let runner = match (&selected, &context) {
+            (Ok(program), Ok(context)) => context
+                .runner(program)
+                .map(|r| r.with_term_grace(Duration::from_secs(2))),
+            (Err(e), _) => Err(e.to_string()),
+            (_, Err(e)) => Err(e.clone()),
+        };
+        let runner = match runner {
+            Ok(r) => r,
+            Err(reason) => {
+                let mut report = setup::derive(
+                    Err(&reason),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    setup::Platform::current(),
+                );
+                report.force_cli_gate = matches!(selected, Err(crate::runner::RunError::NotFound));
+                return report;
+            }
+        };
         let cli = if left().is_zero() {
             Err(crate::runner::RunError::Timeout { after: budget })
         } else {
@@ -37,7 +59,7 @@ impl LiveSource {
                 .err()
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            return setup::derive(
+            let mut report = setup::derive(
                 Err(&reason),
                 None,
                 None,
@@ -45,6 +67,8 @@ impl LiveSource {
                 &[],
                 setup::Platform::current(),
             );
+            report.force_cli_gate = matches!(cli, Err(crate::runner::RunError::NotFound));
+            return report;
         }
         // CLI projects writes the registry even with --no-daemon. Until R18,
         // only a matching daemon snapshot is allowed, including during setup.
@@ -104,23 +128,21 @@ impl LiveSource {
             &runs,
             setup::Platform::current(),
         );
-        report.cli_program = observer
-            .runner
-            .resolve_program()
-            .ok()
-            .and_then(|p| p.into_os_string().into_string().ok());
-        if let Some(program) = &report.cli_program {
-            for card in &mut report.cards {
-                if card.remedy == setup::Remedy::Copy("hack daemon restart".into()) {
-                    card.remedy = setup::Remedy::Copy(
-                        crate::terminal::CommandSpec {
-                            program: program.clone(),
-                            args: vec!["daemon".into(), "restart".into()],
-                        }
-                        .display()
-                        .unwrap_or_else(|_| "CLI command unavailable".into()),
-                    );
-                }
+        report.cli_program = selected.ok();
+        report.context = context.ok();
+        setup::qualify_login(&mut report, daemon.as_ref());
+        let restart = report
+            .command(vec!["daemon".into(), "restart".into()])
+            .and_then(|c| c.display())
+            .ok();
+        for card in &mut report.cards {
+            if card.remedy == setup::Remedy::Copy("hack daemon restart".into()) {
+                card.remedy = restart.clone().map(setup::Remedy::Copy).unwrap_or_else(|| {
+                    setup::Remedy::Doc(
+                        "https://github.com/hack-dance/hack/blob/next/docs/architecture.md#daemon"
+                            .into(),
+                    )
+                });
             }
         }
         report
@@ -129,20 +151,55 @@ impl LiveSource {
 
 /// Only these two fixed non-admin actions may run inside setup. Output is bounded
 /// and memory-only. Callers must refresh evidence even after an exit of zero.
-pub fn run_safe(runner: &CliRunner, action: SafeAction) -> String {
-    let mut args = action.args().to_vec();
-    args.push("--no-interactive");
-    match runner
-        .clone()
-        .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-        .run_raw(&args, None, Duration::from_secs(120))
-    {
+pub fn run_safe(action: SafeAction, checked: &Report) -> String {
+    let execute = || -> Result<(String, String, Option<i32>), String> {
+        if !checked.cli_ready()
+            || !checked.cards.iter().any(|c| {
+                c.remedy == setup::Remedy::Run(action) && c.status != setup::Status::Passed
+            })
+        {
+            return Err("Action is not supported by the checked setup report".into());
+        }
+        let context = checked
+            .context
+            .as_ref()
+            .ok_or("Execution context has not been checked")?;
+        if action == SafeAction::InstallDaemon
+            && let Some(why) = context.install_refusal()
+        {
+            return Err(why.into());
+        }
+        let runner = context.runner(
+            checked
+                .cli_program
+                .as_deref()
+                .ok_or("CLI has not been checked")?,
+        )?;
+        if action == SafeAction::InstallDaemon {
+            let status = runner
+                .run_json::<serde_json::Value>(
+                    &["daemon", "status", "--json"],
+                    None,
+                    Duration::from_secs(5),
+                )
+                .map_err(|e| e.to_string())?;
+            if let Some(why) = setup::installation_refusal(Some(&status), Some(context)) {
+                return Err(format!("{why}; no install was attempted"));
+            }
+        }
+        let mut args = action.args().to_vec();
+        args.push("--no-interactive");
+        runner
+            .run_raw(&args, None, Duration::from_secs(120))
+            .map_err(|e| e.to_string())
+    };
+    match execute() {
         Ok((out, err, code)) => format!(
             "Command exit: {code:?}. Checking fresh status.\n{}\n{}",
             bounded(&out),
             bounded(&err)
         ),
-        Err(e) => format!("Command could not finish: {e}. Checking fresh status."),
+        Err(e) => format!("No supported action completed: {e}. Check again."),
     }
 }
 fn bounded(s: &str) -> String {

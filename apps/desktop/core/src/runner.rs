@@ -70,6 +70,7 @@ pub struct CliRunner {
     /// An invalid explicit selection: spawn reports `NotFound`.
     missing: bool,
     path_name: Option<String>,
+    clear_env: bool,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
     term_grace: Duration,
 }
@@ -89,6 +90,7 @@ impl CliRunner {
             cwd: None,
             missing: false,
             path_name: None,
+            clear_env: false,
             term_grace: TERM_GRACE,
         }
     }
@@ -166,9 +168,32 @@ impl CliRunner {
         self
     }
 
+    /// Read one authored non-secret key without enumerating the environment.
+    pub fn effective_env(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into())
+            .or_else(|| {
+                if self.clear_env {
+                    None
+                } else {
+                    std::env::var_os(key)
+                }
+            })
+    }
+    pub fn with_clean_env(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
+
     fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(program);
+        if self.clear_env {
+            cmd.env_clear();
+        }
         cmd.args(args);
         if let Some(p) = path {
             cmd.arg("--path").arg(p);

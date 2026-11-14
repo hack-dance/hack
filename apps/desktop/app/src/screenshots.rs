@@ -59,6 +59,10 @@ pub fn run(dir: &Path) {
             };
             img.save(dir.join(format!("setup-{name}-{suffix}.png")))
                 .expect("save setup");
+            if name == "partial" {
+                img.save(dir.join(format!("setup-{suffix}.png")))
+                    .expect("save documented setup alias");
+            }
             cx.update_window(handle, |_, w, _| w.remove_window()).ok();
         }
         for f in Fixture::ALL {

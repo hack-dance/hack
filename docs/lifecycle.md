@@ -13,6 +13,56 @@ Repeated interrupts during lifecycle cleanup wait for that cleanup to finish.
 An interrupted foreground start reports cancellation rather than a Compose startup
 failure. `hack up --json` uses detached startup.
 
+For attached Compose, `lifecycle.up.after` runs only after `docker compose up`
+returns successfully. Container readiness does not release that wait, so a
+long-running foreground session does not run `up.after` while attached. Ctrl-C
+returns 130 and skips it. Ctrl-C also does not dispatch `lifecycle.down.before`
+or `down.after`; use explicit `hack down` or `hack restart` for those hooks.
+This ordering is inherited from v4.3.0. The native backend has its own documented
+hook contract.
+
+On tmux foreground cleanup, Hack captures the owned lifecycle process groups before
+stopping their mux session. The recorded pane PID and UTC start time must match
+before any descendants are captured, and captured member identities are checked
+again before signalling. The wrapper forwards TERM to its main command group;
+Hack sends TERM to separately grouped descendants that the wrapper does not signal.
+It waits for the detached commands to disappear before
+retiring the FIFO wrapper and its reader. Each phase allows 5 seconds for graceful
+exit, escalates surviving groups once with SIGKILL, then waits up to 2 seconds for
+retirement (at most 14 seconds of group waiting across both phases, plus bounded mux
+and process-identity queries). The capture allows two 1-second group snapshots
+alongside a 2-second identity read; each signal batch checks identities again with
+bounded queries. Explicit `hack down` uses the same command-before-wrapper order
+after interrupting its owned lifecycle panes.
+Commands that finish their TERM handler sooner do not wait out the grace period.
+An unreaped zombie has exited and runs no code: a group containing only zombies
+counts as retired. A live member in the same group still requires shutdown;
+failed process observation remains unconfirmed.
+`hack doctor --fix` also captures groups before mux teardown and waits for
+commands before wrappers when repairing an ownership-proven orphan. An
+unconfirmed retirement keeps that entry and is reported while repair continues
+with other candidates. Repair refreshes pane identities from the owned mux, so
+older records without start-time metadata can also be retired safely.
+Signal delivery and FIFO EOF alone do not confirm group exit. If confirmation
+fails, Hack reports it and retains the ownership record and dependent helpers;
+it does not silently report completed cleanup.
+If both snapshots fail, Hack still attempts the owned mux stop, but retains
+descendant uncertainty. Other process-snapshot callers retain their existing
+timeout policy. For a mux that is already absent, a matching saved group number
+alone does not block cleanup: a matching command leader PID and UTC start time
+keeps the record even after its wrapper exits. Matching wrapper identity plus
+descendant lineage also keeps the record. Older records without that identity do not
+grant signal authority or make an unrelated live group count as retained work.
+
+Zellij does not await process-group retirement; it is scheduled for removal in v5.0.0.
+
+Retrying missing launch-time identity observations during owned foreground cleanup
+remains a follow-up: a missing start time can currently leave cleanup unconfirmed.
+
+![Foreground lifecycle retirement](diagrams/compose-lifecycle-retirement.svg)
+
+[Diagram source](diagrams/compose-lifecycle-retirement.mmd).
+
 You can also use a shorthand `startup` array for common `hack up` startup flows.
 
 For project-wide `up` and `restart`, Hack resolves hook environment and checks registry

@@ -243,7 +243,7 @@ impl CliRunner {
                 }
                 // A record cut at MAX_RAW_LINE is no longer valid JSON: show
                 // a visible marker instead of dropping it silently.
-                let event = if cut {
+                let mut event = if cut {
                     oversized_record_event()
                 } else {
                     serde_json::from_str::<LogEvent>(&line).unwrap_or_else(|_| LogEvent {
@@ -252,6 +252,8 @@ impl CliRunner {
                         ..LogEvent::default()
                     })
                 };
+                // Cap before queueing, so the queue's memory is bounded too.
+                cap_event(&mut event);
                 if tx.send(event).is_err() {
                     break;
                 }
@@ -266,7 +268,34 @@ impl CliRunner {
 }
 
 /// Events queued between the reader thread and the UI.
-pub const STREAM_QUEUE: usize = 4096;
+/// Together with `cap_event`, this bounds queued text at about
+/// `STREAM_QUEUE * 2 * MAX_LINE_BYTES` (64 MiB for message plus notice text).
+pub const STREAM_QUEUE: usize = 1024;
+
+/// Cap an event's text fields at `logs::MAX_LINE_BYTES` (on a character
+/// boundary), marking a capped log entry as truncated.
+fn cap_event(e: &mut LogEvent) {
+    fn cap(s: &mut String) -> bool {
+        let max = crate::logs::MAX_LINE_BYTES;
+        if s.len() <= max {
+            return false;
+        }
+        let mut keep = max;
+        while !s.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        *s = s[..keep].to_owned();
+        true
+    }
+    if let Some(m) = e.message.as_mut() {
+        cap(m);
+    }
+    if let Some(entry) = e.entry.as_mut()
+        && cap(&mut entry.message)
+    {
+        entry.truncated = Some(true);
+    }
+}
 /// Longest raw ndjson line read; the rest of a longer line is skipped.
 pub const MAX_RAW_LINE: usize = 1024 * 1024;
 
@@ -669,6 +698,26 @@ mod tests {
         assert_eq!(marker.truncated, Some(true));
         assert!(marker.message.contains("dropped by the app"));
         assert_eq!(b.entry.unwrap().message, "after");
+    }
+
+    #[test]
+    fn queued_events_are_capped_before_send() {
+        let big = "x".repeat(crate::logs::MAX_LINE_BYTES * 3);
+        let mut e = LogEvent {
+            kind: "log".into(),
+            message: Some(big.clone()),
+            entry: Some(crate::models::LogEntry {
+                message: big,
+                ..Default::default()
+            }),
+            ..LogEvent::default()
+        };
+        cap_event(&mut e);
+        let entry = e.entry.unwrap();
+        assert_eq!(entry.message.len(), crate::logs::MAX_LINE_BYTES);
+        assert!(entry.message.capacity() < crate::logs::MAX_LINE_BYTES + 1024);
+        assert_eq!(entry.truncated, Some(true));
+        assert_eq!(e.message.unwrap().len(), crate::logs::MAX_LINE_BYTES);
     }
 
     #[test]

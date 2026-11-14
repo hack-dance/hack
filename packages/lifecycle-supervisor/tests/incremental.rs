@@ -44,7 +44,13 @@ impl Fixture {
         }
     }
     fn command(&self, operation: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"));
+        self.command_binary(
+            operation,
+            std::path::Path::new(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor")),
+        )
+    }
+    fn command_binary(&self, operation: &str, executable: &std::path::Path) -> Command {
+        let mut command = Command::new(executable);
         command
             .arg(operation)
             .env_clear()
@@ -508,4 +514,46 @@ fn escaped_display_name_cannot_publish_unreadable_state() {
     assert_eq!(receipt["outcome"], "refused");
     assert!(!wait(&mut owner).success());
     assert!(!fixture.root.join("safe-key.json").exists());
+}
+
+#[test]
+fn atomic_executable_replacement_between_serve_and_add_keeps_guard_spawn_usable() {
+    let mut fixture = Fixture::new();
+    let installed = fixture.base.join("installed-supervisor");
+    let replacement = fixture.base.join("replacement-supervisor");
+    fs::copy(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"), &installed).unwrap();
+    let mut owner = fixture.command_binary("serve", &installed).spawn().unwrap();
+    send(
+        owner.stdin.as_mut().unwrap(),
+        &fixture.launch(fixture.process("first", "hold")),
+    );
+    assert_eq!(receive(owner.stdout.as_mut().unwrap())["outcome"], "ready");
+    fixture.owners.push(owner);
+    fs::copy(
+        env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"),
+        &replacement,
+    )
+    .unwrap();
+    fs::rename(replacement, installed).unwrap();
+    let receipt = fixture.add(fixture.process("second", "hold"));
+    assert_eq!(receipt["liveProcessNames"].as_array().unwrap().len(), 2);
+    fixture.control("stop");
+}
+
+#[test]
+fn completed_stop_retires_a_delayed_initial_launch_before_any_authored_effect() {
+    let fixture = Fixture::new();
+    let mut delayed = fixture.command("serve").spawn().unwrap();
+    // Child exists but its launch frame has not arrived: stop must fence this
+    // generation even though no command receipt or guard exists yet.
+    let receipt = fixture.control("stop");
+    assert_eq!(receipt["outcome"], "stopped");
+    send(
+        delayed.stdin.as_mut().unwrap(),
+        &fixture.launch(fixture.process("late", "hold")),
+    );
+    let refused = receive(delayed.stdout.as_mut().unwrap());
+    assert_eq!(refused["outcome"], "refused");
+    assert!(!wait(&mut delayed).success());
+    assert!(!fixture.root.join("late.json").exists());
 }

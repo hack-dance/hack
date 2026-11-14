@@ -105,6 +105,17 @@ test("when the configuration cannot be read, the automatic sweep removes nothing
   expect((await lstat(join(stale, "env.json"))).isFile()).toBe(true);
 });
 
+test("the global configuration itself is a live input when stored in a stale payload", async () => {
+  const parent = join(root, "tmp");
+  await mkdir(parent);
+  const configured = await stalePayload(parent, "global-config");
+  const ordinary = await stalePayload(parent, "ordinary");
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(configured, "env.json");
+  await sweepStaleMuxEnvironments({ parent, scope: scopeFrom(root) });
+  expect(await readFile(join(configured, "env.json"), "utf8")).toBe("{}");
+  expect(await lstat(ordinary).catch(() => null)).toBeNull();
+});
+
 /** A project whose own configuration may name a store key; cwd moves into it. */
 async function inProject<T>(config: string, run: () => Promise<T>): Promise<T> {
   const project = join(root, "project");

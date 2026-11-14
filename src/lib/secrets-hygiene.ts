@@ -141,6 +141,8 @@ export type SecretsHygieneFinding = {
 
 /** One file or directory the inspection covers, labelled for messages. */
 export type SecretsHygieneScope = {
+  /** Global configuration file read while resolving the current inputs. */
+  readonly globalConfigPath?: string;
   /** The project's root and its `.hack` directory, or null for none. */
   readonly project: {
     readonly projectRoot: string;

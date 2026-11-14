@@ -347,7 +347,13 @@ refused by the wrapper, and each new staging sweeps this user's stale private
 payloads (an ownership-aware check, not a blanket temp-directory deletion),
 keeping a payload whose `env.json` or directory is a path current
 configuration reads; if the configuration cannot be read that sweep removes
-nothing (HACK-2181). A payload left by a crash stays until
+nothing (HACK-2181). This includes the global configuration file itself, even
+when `HACK_GLOBAL_CONFIG_PATH` points inside a payload-shaped directory.
+The shared guard's decision is shown below.
+
+![Live-input removal guard](../diagrams/live-input-cleanup.svg)
+
+A payload left by a crash stays until
 the next staging; there is no independent reaper, but `hack doctor` reports it
 and `hack doctor --fix` removes it (HACK-2165).
 

@@ -1,7 +1,10 @@
 import { realpath } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
-import { resolveGlobalHackDir } from "./config-paths.ts";
+import {
+  resolveGlobalConfigPath,
+  resolveGlobalHackDir,
+} from "./config-paths.ts";
 import {
   projectEnvLiveInputPaths,
   resolveProjectEnvSharedKeyPath,
@@ -45,7 +48,8 @@ export function inRetiredStore(path: string): boolean {
 }
 
 /**
- * Every path current resolution reads (HACK-2165): configured stores and
+ * Every path current resolution reads (HACK-2165): the global configuration,
+ * configured stores and
  * keys, the shared key, and the project's env inputs (its key, the primary
  * worktree's key, `hack.config.json` and every YAML layer; see
  * `projectEnvLiveInputPaths`), each as given and resolved. "unknown" when the
@@ -55,6 +59,7 @@ export async function livePaths(
   scope: SecretsHygieneScope
 ): Promise<ReadonlySet<string> | "unknown"> {
   const paths = [
+    ...(scope.globalConfigPath ? [scope.globalConfigPath] : []),
     ...scope.stores.flatMap((store) => [store.storePath, store.keyPath]),
     ...(scope.sharedKeyPath ? [scope.sharedKeyPath] : []),
   ];
@@ -199,6 +204,7 @@ export async function resolveLiveInputScope(opts: {
     );
   }
   return {
+    globalConfigPath: resolve(resolveGlobalConfigPath()),
     project: project
       ? { projectRoot: project.projectRoot, projectDir: project.projectDir }
       : null,

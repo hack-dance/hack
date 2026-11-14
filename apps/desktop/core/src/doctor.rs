@@ -382,6 +382,8 @@ pub struct DoctorView {
     pub projects_total: usize,
     pub projects_checked: usize,
     pub machine_checked: bool,
+    /// The project list could not be read, so no project was checked.
+    pub projects_unread: bool,
 }
 
 impl DoctorView {
@@ -403,7 +405,7 @@ impl DoctorView {
     /// Clean only when every run succeeded and nothing was found.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.failed_runs.is_empty() && self.groups.is_empty()
+        self.failed_runs.is_empty() && self.groups.is_empty() && !self.projects_unread
     }
 
     /// Error red; anything found or unchecked amber; green only when clean.
@@ -421,7 +423,7 @@ impl DoctorView {
     /// "Checked 3 of 5 projects; 2 could not be checked", when not complete.
     #[must_use]
     pub fn coverage_line(&self) -> Option<String> {
-        if self.failed_runs.is_empty() {
+        if self.failed_runs.is_empty() && !self.projects_unread {
             return None;
         }
         let missing = self.projects_total - self.projects_checked;
@@ -434,6 +436,9 @@ impl DoctorView {
             if missing > 0 {
                 parts.push(format!("{missing} could not be checked"));
             }
+        }
+        if self.projects_unread {
+            parts.push("the project list could not be read, so no projects were checked".into());
         }
         if !self.machine_checked {
             parts.push("machine checks did not run".into());
@@ -606,6 +611,7 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
         projects_total,
         projects_checked,
         machine_checked,
+        projects_unread: false,
     }
 }
 
@@ -637,6 +643,14 @@ impl DoctorState {
 
 /// What identifies a doctor target: name, checkout and backend.
 pub type TargetKey = (String, PathBuf, bool);
+
+fn sorted(targets: Option<&[TargetKey]>) -> Option<Vec<TargetKey>> {
+    targets.map(|t| {
+        let mut t = t.to_vec();
+        t.sort();
+        t
+    })
+}
 
 /// Should the app start a doctor run on its own now? Only while the Doctor
 /// pane is shown in a visible window, and only when the result is missing,
@@ -670,8 +684,11 @@ pub enum Finish {
 pub struct DoctorPane {
     pub result: DoctorState,
     generation: u64,
-    in_flight: Option<(u64, Vec<TargetKey>)>,
+    in_flight: Option<(u64, Option<Vec<TargetKey>>)>,
     checked_at: Option<Instant>,
+    /// The targets the shown result checked (`None`: the project list
+    /// could not be read).
+    checked_targets: Option<Vec<TargetKey>>,
     /// The project set changed while the shown result was being made.
     pub stale: bool,
     /// Show only findings for this project (from a project header link).
@@ -679,13 +696,24 @@ pub struct DoctorPane {
 }
 
 impl DoctorPane {
-    /// Start a run for these targets; returns its generation.
-    pub fn begin(&mut self, targets: &[TargetKey]) -> u64 {
+    /// Start a run for these targets (`None`: the project list could not
+    /// be read, so only machine checks run); returns its generation.
+    pub fn begin(&mut self, targets: Option<&[TargetKey]>) -> u64 {
         self.generation += 1;
-        let mut t = targets.to_vec();
-        t.sort();
-        self.in_flight = Some((self.generation, t));
+        self.in_flight = Some((self.generation, sorted(targets)));
         self.generation
+    }
+
+    /// The registered targets changed (or became readable) since the shown
+    /// result was made: mark it stale so it is checked again. A run in
+    /// flight compares its own targets when it finishes.
+    pub fn targets_seen(&mut self, current: Option<&[TargetKey]>) {
+        if self.checked_at.is_some()
+            && !self.is_loading()
+            && sorted(current) != self.checked_targets
+        {
+            self.stale = true;
+        }
     }
 
     #[must_use]
@@ -699,7 +727,7 @@ impl DoctorPane {
         &mut self,
         generation: u64,
         runs: &[DoctorRun],
-        current: &[TargetKey],
+        current: Option<&[TargetKey]>,
         now: Instant,
     ) -> Finish {
         let Some((g, targets)) = self.in_flight.take() else {
@@ -709,11 +737,14 @@ impl DoctorPane {
             self.in_flight = Some((g, targets));
             return Finish::Discarded;
         }
-        let mut now_set = current.to_vec();
-        now_set.sort();
         self.result = DoctorState::from_runs(runs);
+        if let (DoctorState::Loaded(v), None) = (&mut self.result, &targets) {
+            // Machine checks ran, but no project was: never "all clear".
+            v.projects_unread = true;
+        }
         self.checked_at = Some(now);
-        self.stale = now_set != targets;
+        self.stale = sorted(current) != targets;
+        self.checked_targets = targets;
         if self.stale {
             Finish::AppliedStale
         } else {
@@ -1150,11 +1181,11 @@ mod tests {
     #[test]
     fn all_failed_is_an_error_state_and_grey() {
         let mut pane = DoctorPane::default();
-        let g = pane.begin(&[]);
+        let g = pane.begin(Some(&[]));
         pane.finish(
             g,
             &[DoctorRun::machine(Err("hack not found".into()))],
-            &[],
+            Some(&[]),
             Instant::now(),
         );
         assert_eq!(pane.result, DoctorState::Error("hack not found".into()));
@@ -1172,19 +1203,25 @@ mod tests {
         let runs = [machine(vec![check("docker", "ok", "")])];
         let names = vec![key("alpha", "/work/alpha", false)];
         let mut pane = DoctorPane::default();
-        let first = pane.begin(&names);
-        let second = pane.begin(&names);
-        assert_eq!(pane.finish(first, &runs, &names, t0), Finish::Discarded);
+        let first = pane.begin(Some(&names));
+        let second = pane.begin(Some(&names));
+        assert_eq!(
+            pane.finish(first, &runs, Some(&names), t0),
+            Finish::Discarded
+        );
         assert!(pane.is_loading(), "the newer run is still in flight");
-        assert_eq!(pane.finish(second, &runs, &names, t0), Finish::Applied);
+        assert_eq!(
+            pane.finish(second, &runs, Some(&names), t0),
+            Finish::Applied
+        );
         assert!(!pane.stale);
-        let third = pane.begin(&names);
+        let third = pane.begin(Some(&names));
         let changed = vec![
             key("alpha", "/work/alpha", false),
             key("beta", "/work/beta", false),
         ];
         assert_eq!(
-            pane.finish(third, &runs, &changed, t0),
+            pane.finish(third, &runs, Some(&changed), t0),
             Finish::AppliedStale
         );
         assert!(pane.stale);
@@ -1195,9 +1232,9 @@ mod tests {
         let t0 = Instant::now();
         let mut pane = DoctorPane::default();
         assert!(pane.needs_refresh(t0));
-        let g = pane.begin(&[]);
+        let g = pane.begin(Some(&[]));
         assert!(!pane.needs_refresh(t0), "not while loading");
-        pane.finish(g, &[machine(vec![])], &[], t0);
+        pane.finish(g, &[machine(vec![])], Some(&[]), t0);
         assert!(!pane.needs_refresh(t0 + Duration::from_secs(599)));
         assert!(pane.needs_refresh(t0 + REFRESH_EVERY));
         assert_eq!(pane.age_label(t0).as_deref(), Some("Checked just now"));
@@ -1211,7 +1248,7 @@ mod tests {
     #[test]
     fn findings_for_a_project_count_its_cards() {
         let mut pane = DoctorPane::default();
-        let g = pane.begin(&[key("alpha", "/work/alpha", false)]);
+        let g = pane.begin(Some(&[key("alpha", "/work/alpha", false)]));
         pane.finish(
             g,
             &[
@@ -1224,7 +1261,7 @@ mod tests {
                     ],
                 ),
             ],
-            &[key("alpha", "/work/alpha", false)],
+            Some(&[key("alpha", "/work/alpha", false)]),
             Instant::now(),
         );
         assert_eq!(pane.findings_for("alpha"), 2);
@@ -1363,6 +1400,58 @@ mod tests {
     }
 
     #[test]
+    fn unread_project_list_is_incomplete_coverage_never_green() {
+        let t0 = Instant::now();
+        let mut pane = DoctorPane::default();
+        let g = pane.begin(None);
+        let runs = [machine(vec![check("docker", "ok", "")])];
+        assert_eq!(pane.finish(g, &runs, None, t0), Finish::Applied);
+        let DoctorState::Loaded(v) = &pane.result else {
+            panic!("machine checks ran: {:?}", pane.result)
+        };
+        assert!(!v.is_clean());
+        assert_eq!(pane.tone(), Tone::Warn);
+        assert!(
+            v.coverage_line()
+                .unwrap()
+                .contains("project list could not be read")
+        );
+        // Once the list is readable, the result is stale and checked again.
+        pane.targets_seen(Some(&[]));
+        assert!(pane.stale);
+        assert!(pane.needs_refresh(t0));
+    }
+
+    #[test]
+    fn target_changes_after_a_run_mark_it_stale() {
+        let t0 = Instant::now();
+        let alpha = vec![key("alpha", "/work/alpha", false)];
+        let runs = [machine(vec![])];
+        let mut pane = DoctorPane::default();
+        pane.targets_seen(Some(&alpha));
+        assert!(!pane.stale, "never run: nothing to invalidate");
+        let g = pane.begin(Some(&alpha));
+        pane.targets_seen(Some(&[]));
+        assert!(!pane.stale, "a run in flight checks on finish");
+        pane.finish(g, &runs, Some(&alpha), t0);
+        pane.targets_seen(Some(&alpha));
+        assert!(!pane.stale, "same targets stay fresh");
+        for changed in [
+            vec![],
+            vec![
+                key("alpha", "/work/alpha", false),
+                key("beta", "/work/beta", false),
+            ],
+            vec![key("alpha", "/work/alpha", true)],
+        ] {
+            let mut p = pane.clone();
+            p.targets_seen(Some(&changed));
+            assert!(p.stale, "{changed:?}");
+            assert!(p.needs_refresh(t0));
+        }
+    }
+
+    #[test]
     fn same_name_with_new_root_or_backend_is_stale() {
         let t0 = Instant::now();
         let runs = [machine(vec![check("docker", "ok", "")])];
@@ -1372,8 +1461,11 @@ mod tests {
             vec![key("alpha", "/work/alpha", true)],
         ] {
             let mut pane = DoctorPane::default();
-            let g = pane.begin(&before);
-            assert_eq!(pane.finish(g, &runs, &after, t0), Finish::AppliedStale);
+            let g = pane.begin(Some(&before));
+            assert_eq!(
+                pane.finish(g, &runs, Some(&after), t0),
+                Finish::AppliedStale
+            );
             assert!(pane.stale);
             assert!(pane.needs_refresh(t0), "a stale result asks for a refresh");
         }
@@ -1384,8 +1476,8 @@ mod tests {
         let t0 = Instant::now();
         let fresh = {
             let mut p = DoctorPane::default();
-            let g = p.begin(&[]);
-            p.finish(g, &[machine(vec![])], &[], t0);
+            let g = p.begin(Some(&[]));
+            p.finish(g, &[machine(vec![])], Some(&[]), t0);
             p
         };
         let never = DoctorPane::default();

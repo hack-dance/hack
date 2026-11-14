@@ -21,9 +21,9 @@ use gpui_kit::{
     AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, SharedString,
     Styled, Window, div, prelude::*, px,
 };
-use hack_desktop_core::doctor::{DoctorPane, Finish, should_auto_refresh};
+use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
 use hack_desktop_core::models::LogEntry;
-use hack_desktop_core::source::{ActionOutcome, DoctorTarget, Source};
+use hack_desktop_core::source::{ActionOutcome, DoctorTarget, Snapshot, Source, SourceError};
 
 use crate::doctor_view::Pane;
 use hack_desktop_core::doctor::DoctorState as DoctorStateView;
@@ -92,18 +92,29 @@ impl HackApp {
     pub fn show_doctor_now(&mut self) {
         self.pane = Pane::Doctor;
         let targets = self.doctor_targets();
-        let names = target_keys(&targets);
-        let generation = self.doctor.begin(&names);
-        let runs = self.source.doctor_runs(&targets);
-        self.doctor
-            .finish(generation, &runs, &names, std::time::Instant::now());
+        let names = self.doctor_target_keys();
+        let generation = self.doctor.begin(names.as_deref());
+        let runs = self
+            .source
+            .doctor_runs(targets.as_deref().unwrap_or_default());
+        self.doctor.finish(
+            generation,
+            &runs,
+            names.as_deref(),
+            std::time::Instant::now(),
+        );
     }
 
-    fn doctor_targets(&self) -> Vec<DoctorTarget> {
+    /// `None` when the project list has not been read: doctor then runs
+    /// machine checks only and reports the projects as not checked.
+    fn doctor_targets(&self) -> Option<Vec<DoctorTarget>> {
         self.model
             .snapshot()
             .map(|s| DoctorTarget::from_projects(&s.projects))
-            .unwrap_or_default()
+    }
+
+    fn doctor_target_keys(&self) -> Option<Vec<TargetKey>> {
+        self.doctor_targets().map(|t| target_keys(&t))
     }
 
     /// Run doctor (machine run plus one per project) off the UI thread.
@@ -115,9 +126,8 @@ impl HackApp {
             cx.notify();
             return;
         }
-        let targets = self.doctor_targets();
-        let names = target_keys(&targets);
-        let generation = self.doctor.begin(&names);
+        let targets = self.doctor_targets().unwrap_or_default();
+        let generation = self.doctor.begin(self.doctor_target_keys().as_deref());
         cx.notify();
         let source = self.source.clone();
         cx.spawn(async move |this, cx| {
@@ -126,10 +136,13 @@ impl HackApp {
                 .spawn(async move { source.doctor_runs(&targets) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let current = target_keys(&this.doctor_targets());
-                let outcome =
-                    this.doctor
-                        .finish(generation, &runs, &current, std::time::Instant::now());
+                let current = this.doctor_target_keys();
+                let outcome = this.doctor.finish(
+                    generation,
+                    &runs,
+                    current.as_deref(),
+                    std::time::Instant::now(),
+                );
                 if outcome == Finish::AppliedStale {
                     // Re-run now only if someone can see it; otherwise the
                     // stale result re-runs when the window is shown again.
@@ -244,8 +257,7 @@ impl HackApp {
                     .await;
                 let root = this
                     .update(cx, |this, cx| {
-                        this.model.apply(Event::Refreshed(snap));
-                        cx.notify();
+                        this.apply_snapshot(snap, cx);
                         this.follow.then(|| this.selected_root()).flatten()
                     })
                     .ok()
@@ -323,12 +335,20 @@ impl HackApp {
                 .background_executor()
                 .spawn(async move { source.snapshot() })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                this.model.apply(Event::Refreshed(snap));
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.apply_snapshot(snap, cx));
         })
         .detach();
+    }
+
+    /// Apply a polled snapshot. A new, removed or moved project (or a
+    /// project list that becomes readable) makes a shown Doctor result
+    /// stale, so a visible Doctor pane checks again.
+    fn apply_snapshot(&mut self, snap: Result<Snapshot, SourceError>, cx: &mut Context<Self>) {
+        self.model.apply(Event::Refreshed(snap));
+        let current = self.doctor_target_keys();
+        self.doctor.targets_seen(current.as_deref());
+        self.maybe_auto_refresh(cx);
+        cx.notify();
     }
 }
 

@@ -4926,3 +4926,45 @@ linuxTest(
     expect(await Bun.file(marker).exists()).toBe(true);
   }
 );
+
+// Codex finding on PR #854: a home binding carried by a continued line.
+
+linuxTest(
+  "a HACK_HOME carried on a continued line blocks the automatic rewrite, unit byte-identical",
+  async () => {
+    const fake = fakeSystemd();
+    const continued = unitText()
+      .replace(
+        "[Service]\n",
+        `[Service]\nEnvironment=FOO=1 \\\n  HACK_HOME=${join(root, "other", ".hack")}\n`
+      )
+      .replace("RestartSec=2", "RestartSec=9");
+    await installSystemdUnit({
+      unitPath,
+      unitText: continued,
+      deps: fake.deps,
+    });
+    const before = await readFile(unitPath);
+    fake.calls.length = 0;
+    const trace = createDaemonCommandTrace();
+    expect(
+      await startViaSystemdIfInstalled({ ...startHooks(fake), trace })
+    ).toBe(0);
+    expect(trace.blocked).toBe("home-binding");
+    expect(trace.action).toBe("started");
+    expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+
+    // Running and stale the same way: kept, nothing rewritten.
+    const running = fakeSystemd({ active: true, mainPid: 4242 });
+    running.calls.length = 0;
+    const hooks = runningHooks(running, "2.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBeNull();
+    expect(hooks.trace.blocked).toBe("home-binding");
+    expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
+    expect(running.calls).not.toContain("systemctl --user daemon-reload");
+    expect(running.calls).not.toContain(
+      "systemctl --user restart hackd.service"
+    );
+  }
+);

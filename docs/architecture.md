@@ -594,7 +594,10 @@ behaviour: `start` reports the drift with `hack daemon install` as the next step
 and does not rewrite it. A managed unit whose main file sets the service's Hack
 home (`HACK_HOME` or `HOME` in `Environment=`, or any `EnvironmentFile=`) is not
 rewritten either, because the unit Hack renders would drop that binding and move
-the service to the default home. Move the setting into a drop-in
+the service to the default home. Neither is a managed unit with any continued
+line (a line ending in a backslash, which systemd joins with the next one): Hack
+does not re-read the joined setting, so it cannot rule out a binding there. Move
+the setting into a drop-in
 (`systemctl --user edit hackd`), then run `hack daemon install`.
 
 The rewrite keeps the program path as written, so a stable symlink stays a

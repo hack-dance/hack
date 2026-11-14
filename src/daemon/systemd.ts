@@ -506,6 +506,8 @@ export function isHackManagedUnit(opts: {
 const ENVIRONMENT_SETTING =
   /^\s*(Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment)\s*=(.*)$/;
 const HOME_BINDING_KEY = /(^|[\s"'])(HACK_HOME|HOME)(=|\s|"|'|$)/;
+/** A line systemd joins with the next (trailing backslash, maybe spaces). */
+const CONTINUED_LINE = /\\\s*$/;
 
 /**
  * An environment line of the unit's main file that binds the service to a
@@ -513,11 +515,24 @@ const HOME_BINDING_KEY = /(^|[\s"'])(HACK_HOME|HOME)(=|\s|"|'|$)/;
  * contents cannot be read here) and that `rendered` would drop. Rewriting
  * such a unit would silently move the service to another home, so the
  * automatic rewrite is refused; null when there is none (HACK-2216).
+ *
+ * Continued lines: systemd joins a line ending in a backslash with the
+ * next one, so a home binding can sit on a physical line this per-line
+ * check would not read as a setting. The unit Hack renders has no
+ * continuation, so rather than re-implement systemd's joining, any
+ * continued line in the main file is returned as a binding: the automatic
+ * rewrite is refused and `hack daemon install` replaces the unit.
  */
 export function findDroppedHomeBinding(opts: {
   readonly unitText: string;
   readonly rendered: string;
 }): string | null {
+  const continued = opts.unitText
+    .split("\n")
+    .find((line) => CONTINUED_LINE.test(line));
+  if (continued !== undefined) {
+    return continued.trim();
+  }
   const kept = new Set(opts.rendered.split("\n").map((line) => line.trim()));
   for (const line of opts.unitText.split("\n")) {
     const match = ENVIRONMENT_SETTING.exec(line);

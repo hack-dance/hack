@@ -1078,3 +1078,20 @@ test("an unloaded job is this home's only when launchd reported it absent", asyn
     await proveLaunchdJobOwnership({ paths, status: unloaded(undefined) })
   ).toBe(false);
 });
+
+test("any continued line in the main unit file counts as a home binding", () => {
+  const rendered =
+    renderSystemdUnit({ hackBinPath: "/opt/hack/bin/hack" }) ?? "";
+  const carried = rendered.replace(
+    "[Service]\n",
+    "[Service]\nEnvironment=FOO=1 \\\n  HACK_HOME=/srv/other/.hack\n"
+  );
+  expect(findDroppedHomeBinding({ unitText: carried, rendered })).toBe(
+    "Environment=FOO=1 \\"
+  );
+  // Any continuation, even of an unrelated setting (trailing spaces too).
+  const other = rendered.replace("[Service]\n", "[Service]\nNice=5 \\  \n  \n");
+  expect(findDroppedHomeBinding({ unitText: other, rendered })).not.toBeNull();
+  // The rendered unit itself has none.
+  expect(findDroppedHomeBinding({ unitText: rendered, rendered })).toBeNull();
+});

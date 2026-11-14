@@ -1,0 +1,15 @@
+[package]
+name = "hack-desktop-core"
+description = "Models, CLI runner, hackd client and view models for the Hack desktop app (no GUI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+libc = "0.2"
+
+[dev-dependencies]

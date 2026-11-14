@@ -95,6 +95,8 @@ export type RegistryEntryState =
 export type RegisteredCheckout = {
   /** The project name, with ` (worktree <dir>)` for a linked worktree. */
   readonly name: string;
+  /** The registered project's name, the same for all its worktrees. */
+  readonly project: string;
   readonly repoRoot: string;
   readonly projectDir: string;
   readonly projectDirName: string;
@@ -107,12 +109,14 @@ export function registeredCheckouts(
   return [
     {
       name: project.name,
+      project: project.name,
       repoRoot: project.repoRoot,
       projectDir: project.projectDir,
       projectDirName: project.projectDirName,
     },
     ...(project.worktrees ?? []).map((worktree) => ({
       name: `${project.name} (worktree ${basename(worktree.path)})`,
+      project: project.name,
       repoRoot: worktree.path,
       projectDir: resolve(worktree.path, project.projectDirName),
       projectDirName: project.projectDirName,

@@ -169,3 +169,39 @@ the inspected immutable ID. Uncovered: real VM/foreground signals, external Dock
 writers, fsync failures, native publication retirement, boot rollover recovery,
 application flush behavior and live container absence. Linux portable checks do
 not qualify those macOS behaviors.
+
+### Upgrade apply recovery (HACK-2220)
+
+![Upgrade apply recovery](upgrade-apply.svg) ([source](upgrade-apply.mmd))
+
+The apply journal records `planned → started → applied|unchanged|refused|failed`
+per target, with snapshot coverage persisted before the first target starts.
+`--resume` requires an explicit manifest and admits only the original input or
+that run's deterministic ignore-rule output; agent removal rechecks ownership,
+plugin replacement and snapshot coverage. A per-snapshot lock serializes writers.
+
+[Upgrade apply regressions](../../tests/upgrade-apply.test.ts) exercise seven real
+SIGKILL boundaries over two checkouts, plus interruption after a real agent-file
+removal. Each resumes the original snapshot and compares restored file bytes,
+modes and directory entries. The metadata-only manifest checks include encoded
+sentinels. This is implementation evidence, not a maintained finite TLA+ model.
+An injected two-device regression proves default skips before snapshot creation,
+continued same-device work and explicit-root selection refusal when devices still
+differ. CLI rollback shares the apply lock; a live-owner regression proves a
+bounded busy refusal without changing the fixture tree. These checks do not
+qualify real external-volume, network-filesystem or macOS mount semantics.
+Uncovered: power-loss durability, arbitrary filesystem-call interruption,
+unsynchronized external writers, multiple independent snapshots writing the same
+checkout, service-manager changes and env migration's separate journal. No
+whole-machine upgrade or native runtime qualification follows from these tests.
+
+Resume publication retains saved target outcomes until verification, and any
+recorded snapshot after-state remains authoritative after a refused retry. Real
+SIGKILL regressions at both journal publication boundaries preserve a user's
+revert through a subsequent resume. Missing or damaged original agent blobs refuse
+resume even when the removed target is absent; absence alone is not recovery proof.
+Pre-write agent admission enforces the saved after-state; post-write verification
+admits only the owner's authorized removal output before advancing that state.
+An unchanged injected failure followed by a real removal/restore regression
+covers successful retry without `--overwrite`; it does not qualify OS permission
+failures or arbitrary concurrent writers.

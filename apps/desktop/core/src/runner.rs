@@ -807,9 +807,20 @@ mod tests {
             ));
             std::fs::create_dir_all(&dir).unwrap();
             let p = dir.join("hack");
-            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::write(
+                &p,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = __warmup ]; then echo '{{}}'; exit 0; fi\n{body}\n"
+                ),
+            )
+            .unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Self { dir }
+            let fake = Self { dir };
+            // Keep macOS first-launch scanning outside product timeouts.
+            fake.runner()
+                .run_json::<Value>(&["__warmup"], None, Duration::from_secs(60))
+                .expect("fake CLI warmup");
+            fake
         }
         fn runner(&self) -> CliRunner {
             CliRunner::new(self.dir.join("hack"))

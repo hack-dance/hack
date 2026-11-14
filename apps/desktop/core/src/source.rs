@@ -658,6 +658,13 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Finish macOS first-launch scanning before the daemon accept timer.
+        CliRunner::new(&hack)
+            .with_env("HOME", &dir.to_string_lossy())
+            .with_env("HACK_HOME", &dir.to_string_lossy())
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .version(Duration::from_secs(60))
+            .unwrap();
         let (daemon, server) = fake_daemon(
             r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","backend":"native"}]}"#,
         );
@@ -711,9 +718,18 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        CliRunner::new(&hack)
+            .with_env("HOME", &dir.to_string_lossy())
+            .with_env("HACK_HOME", &dir.to_string_lossy())
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .version(Duration::from_secs(60))
+            .unwrap();
         let (daemon, server) = fake_daemon("{}");
         let src = LiveSource {
-            runner: CliRunner::new(&hack),
+            runner: CliRunner::new(&hack)
+                .with_env("HOME", &dir.to_string_lossy())
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
             daemon: Some(daemon),
         };
         let r = src.snapshot();

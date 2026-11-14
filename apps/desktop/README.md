@@ -50,6 +50,9 @@ It applies that to the same view model and prints the list and
 each project's detail as JSON. It runs no action, opens no window and writes
 nothing.
 
+An accepted refresh that changes the selected project root or backend clears the
+previous log tail, including when Follow is off, and replaces any open Logs stream.
+
 Live reads refresh every two seconds with a matching daemon and retry every ten
 seconds when unavailable. Every request has an order token: a read started before
 an action finishes cannot clear its failure, and an older result cannot replace a

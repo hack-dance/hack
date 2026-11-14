@@ -69,7 +69,6 @@ fn dump_state_reads_the_cli_like_the_app_and_prints_view_models() {
     let bin = temp_dir("bin");
     let home = temp_dir("home");
     let hack = bin.join("hack");
-    let server = serve_snapshot(&home);
     std::fs::write(
         &hack,
         r#"#!/bin/sh
@@ -82,6 +81,13 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+    hack_desktop_core::runner::CliRunner::new(&hack)
+        .with_env("HOME", &home.to_string_lossy())
+        .with_env("HACK_HOME", &home.to_string_lossy())
+        .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .version(std::time::Duration::from_secs(60))
+        .unwrap();
+    let server = serve_snapshot(&home);
 
     let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))

@@ -109,14 +109,19 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let before = self.model.selected_row().map(|r| r.name.clone());
+        let previous_root = self.selected_root();
         if !self.model.finish_refresh(token, snap) {
             return false;
         }
         let after = self.model.selected_row().map(|r| r.name.clone());
-        if before != after {
+        let selection_changed = before != after || previous_root != self.selected_root();
+        if selection_changed {
+            // Only accepted snapshots may invalidate a tail or replace a
+            // stream. Root/backend changes also change stream ownership.
+            self.tail = Ok(Vec::new());
             self.logs.model.set_service(None);
         }
-        if self.tab == 1 && before != after {
+        if self.tab == 1 && selection_changed {
             self.open_logs(cx);
         } else if self.tab == 1 {
             // A stopped project's finite read becomes a followed stream once

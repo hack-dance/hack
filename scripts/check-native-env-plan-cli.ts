@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { assertNativePlanHome } from "./lib/native-plan-home.ts";
 
 /** Real compiled CLI/sidecar, isolated HOME and Git worktrees, no source or toolchain on PATH. */
 const root = resolve(import.meta.dir, "..");
@@ -249,8 +250,7 @@ try {
   await Bun.write(join(checkout, ".hack/hack.config.json"), "{}");
   await refused([], "E_NATIVE_PROJECT_CONFLICT", checkout);
   await rm(join(checkout, ".hack/hack.config.json"));
-  require((await readdir(home)).length ===
-    0, "validation and planning leave HOME untouched");
+  await assertNativePlanHome({ home, failedUps: 0 });
   const unsupported = await invoke(
     ["up", "web", "--detach", "--json"],
     checkout,
@@ -278,19 +278,10 @@ try {
     detachedResult.ok === false &&
     record(detachedResult.error).code ===
       "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
-  const homeEntries = await readdir(home);
-  const activityEntries = homeEntries.includes(".hack")
-    ? await readdir(join(home, ".hack"))
-    : [];
-  const generatedEntries = (await readdir(join(checkout, ".hack"))).filter(
+  await assertNativePlanHome({ home, failedUps: 2 });
+  require(!(await readdir(join(checkout, ".hack"))).some(
     (name) => name === ".internal" || name === ".branch"
-  );
-  // Lifecycle refusals record only activity; all other state remains forbidden.
-  // Diagnostics contain relative names inside the synthetic fixture, never contents.
-  require(JSON.stringify(homeEntries) === '[".hack"]' &&
-    JSON.stringify(activityEntries) === '["activity.jsonl"]' &&
-    generatedEntries.length ===
-      0, `no registry or generated runtime state (fixture HOME: ${JSON.stringify(homeEntries)}; activity: ${JSON.stringify(activityEntries)}; generated: ${JSON.stringify(generatedEntries)})`);
+  ), "no registry or generated runtime state");
 
   process.stdout.write(
     "Relocated native env plan acceptance: offline validation, metadata-only output, missing overlays/refs, immutable directives, separate hashes, real linked-worktree layers, CI/slim/opt-out, unsafe-input and runtime refusal passed\n"

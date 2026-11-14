@@ -59,7 +59,6 @@ import {
   parseSessionBase,
 } from "../mux/session-names.ts";
 import { attachTmuxSession } from "../mux/tmux-backend.ts";
-import { attachZellijSession } from "../mux/zellij-backend.ts";
 import { logger } from "../ui/logger.ts";
 import {
   buildSessionPanesEndEvent,
@@ -191,7 +190,7 @@ const attachSpec = defineCommand({
   summary: "Attach to an existing workspace",
   group: "Project",
   description:
-    "Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux, while zellij attaches to the named session directly.",
+    "Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux.",
   options: [],
   positionals: [
     { name: "workspace", description: "Workspace name", required: true },
@@ -204,7 +203,7 @@ const execSpec = defineCommand({
   summary: "Send a command to a running workspace",
   group: "Project",
   description:
-    "Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.",
+    "Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane. This is useful for long-running agents, background checks, or remote follow-up work.",
   options: [optEnv, optService],
   positionals: [
     { name: "workspace", description: "Workspace name", required: true },
@@ -434,7 +433,7 @@ async function handleSelectedSession(opts: {
   if (!resolvedBackend) {
     logger.error({
       message:
-        "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij.",
+        "No session mux backend available. Install tmux, or set sessions.mux to auto|tmux.",
     });
     return 1;
   }
@@ -476,7 +475,7 @@ async function handleSelectedProject(opts: {
   if (!resolvedBackend) {
     logger.error({
       message:
-        "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij.",
+        "No session mux backend available. Install tmux, or set sessions.mux to auto|tmux.",
     });
     return 1;
   }
@@ -656,10 +655,6 @@ function resolveTmuxOnlyWorkspaceError(opts: {
   readonly workspaceName: string;
   readonly sessions: readonly MuxSession[];
 }): string {
-  const backendName = resolveWorkspaceBackendName(opts);
-  if (backendName === "zellij") {
-    return `Workspace '${opts.workspaceName}' is running in zellij. Pane inspection is tmux-only.`;
-  }
   return `Workspace '${opts.workspaceName}' does not support tmux-only pane inspection.`;
 }
 
@@ -1256,7 +1251,7 @@ const handleStart = async ({
   if (!resolvedBackend) {
     logger.error({
       message:
-        "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij.",
+        "No session mux backend available. Install tmux, or set sessions.mux to auto|tmux.",
     });
     return 1;
   }
@@ -1622,7 +1617,7 @@ export const sessionCommand = defineCommand({
   summary: "Manage persistent project workspaces with tmux-first onboarding",
   group: "Project",
   description:
-    "Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work. The guided default is tmux, including `hack setup tmux` for a popup picker. Other mux backends such as zellij still exist through `sessions.mux`, but the interactive session tooling is tmux-first today.",
+    "Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work. The guided default is tmux, including `hack setup tmux` for a popup picker. Interactive workspaces require tmux.",
   options: [],
   positionals: [],
   handler: handleSessionPicker,
@@ -1752,13 +1747,6 @@ async function attachToSession(opts: {
   readonly backend: MuxBackendName;
   readonly name: string;
 }): Promise<number> {
-  if (opts.backend === "zellij") {
-    return await attachZellijSession({
-      name: opts.name,
-      createIfMissing: false,
-      run,
-    });
-  }
   return await attachTmuxSession({
     name: opts.name,
     run,

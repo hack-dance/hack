@@ -111,6 +111,17 @@ export function touchesDocsSite(path: string): boolean {
   return DOCS_SITE_PATHS.some((pattern) => pattern.test(path));
 }
 
+/**
+ * Relocated bundles exercise CLI refusals as well as compiler transports. Any
+ * CLI source may change HOME writes, output or dispatch before the refusal.
+ * Keep this independent of the unit-test import graph and compiler Rust inputs.
+ */
+export function touchesRelocatedCli(path: string): boolean {
+  return /^(?:src\/|index\.ts$|packages\/cli\/|scripts\/check-(?:.+-cli|native-plan-clis)\.ts$)/.test(
+    path
+  );
+}
+
 /** The scope of a pull request that changes `paths`; empty means `full`. */
 export function changeScope(paths: readonly string[]): ChangeScope {
   if (paths.length === 0) {

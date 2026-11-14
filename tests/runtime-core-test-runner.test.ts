@@ -19,6 +19,7 @@ afterEach(async () => {
 });
 async function fixture(
   opts: {
+    crate?: "runtime-core" | "config-compiler";
     nextest?: boolean;
     platform?: string;
     fail?: string;
@@ -34,7 +35,11 @@ async function fixture(
   const tools = join(root, "bin");
   await mkdir(tools);
   await mkdir(join(root, "scripts"));
-  for (const file of ["test-runtime-core.sh", "install-cargo-nextest.sh"]) {
+  for (const file of [
+    "test-runtime-core.sh",
+    "test-rust.sh",
+    "install-cargo-nextest.sh",
+  ]) {
     await copyFile(resolve("scripts", file), join(root, "scripts", file));
   }
   const log = join(root, "commands");
@@ -80,7 +85,10 @@ async function fixture(
       FIXTURE_CARGO_VERSION: opts.version ?? version,
       FIXTURE_DIRECT_LOOKUP: join(root, "direct-lookup"),
       FIXTURE_REPORT: opts.report
-        ? join(root, "packages/runtime-core/target/nextest/ci/junit.xml")
+        ? join(
+            root,
+            `packages/${opts.crate ?? "runtime-core"}/target/nextest/ci/junit.xml`
+          )
         : undefined,
       FIXTURE_FAIL: opts.fail,
       HACK_RUST_TEST_RUNNER: opts.required ? "nextest" : "auto",
@@ -93,7 +101,15 @@ async function fixture(
   });
   const run = async (args: string[] = []) => {
     const child = Bun.spawn(
-      ["/bin/bash", join(root, "scripts/test-runtime-core.sh"), ...args],
+      [
+        "/bin/bash",
+        join(
+          root,
+          opts.crate ? "scripts/test-rust.sh" : "scripts/test-runtime-core.sh"
+        ),
+        ...(opts.crate ? [`--crate=${opts.crate}`] : []),
+        ...args,
+      ],
       { env, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 5000 }
     );
     const [code, stdout, stderr] = await Promise.all([
@@ -204,7 +220,7 @@ for (const platform of ["Linux", "Darwin"]) {
     expect(r.commands[0]).toStartWith("test --locked");
     expect(r.commands[0]).toContain("client_relay");
     expect(r.stderr.trim()).toBe(
-      `cargo nextest ${r.version} unavailable; using cargo test.`
+      `cargo nextest ${r.version} unavailable; using cargo test. Optional install: cargo install --locked --version ${r.version} cargo-nextest`
     );
     expect(r.threads).toBe(platform === "Darwin" ? "1" : "");
   });
@@ -234,7 +250,7 @@ test("another contributor nextest version falls back without replacing it on eit
     expect(r.commands[0]).toStartWith("test --locked");
     expect(r.commands[0]).toEndWith("--lib --all-features");
     expect(r.stderr.trim()).toBe(
-      `cargo nextest ${r.version} unavailable; using cargo test.`
+      `cargo nextest ${r.version} unavailable; using cargo test. Optional install: cargo install --locked --version ${r.version} cargo-nextest`
     );
     expect(r.threads).toBe(platform === "Darwin" ? "1" : "");
   }
@@ -337,3 +353,31 @@ test("the pinned installer refuses corrupt download bytes before extraction or e
   expect(`${stdout}${stderr}`).toContain("FAILED");
   expect(await Bun.file(extracted).exists()).toBe(false);
 });
+
+for (const platform of ["Linux", "Darwin"]) {
+  test(`compiler uses process isolation and its own report store on ${platform}`, async () => {
+    const f = await fixture({
+      crate: "config-compiler",
+      platform,
+      report: true,
+      required: true,
+    });
+    const r = await f.run();
+    expect(r.code, r.stderr).toBe(0);
+    for (const command of r.commands) {
+      expect(command).toContain(
+        "--manifest-path packages/config-compiler/Cargo.toml"
+      );
+      expect(command).not.toContain("packages/runtime-core");
+    }
+    expect(r.commands.filter((c) => c.startsWith("nextest run"))).toHaveLength(
+      1
+    );
+    expect(r.commands.filter((c) => c.startsWith("test --doc"))).toHaveLength(
+      1
+    );
+    expect(await Bun.file(join(f.root, "reports/default-1.xml")).text()).toBe(
+      "<testsuites/>\n"
+    );
+  });
+}

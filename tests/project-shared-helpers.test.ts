@@ -167,7 +167,9 @@ async function readHelperClaim(
 async function ownedIdentity(root: string, helper: ProjectSharedHelperConfig) {
   const claim = await readHelperClaim(root, helper);
   if (claim?.ownership !== "owned") {
-    throw new Error("expected an owned claim");
+    throw new Error(
+      `expected an owned claim; observed ${claim?.ownership ?? "missing"}`
+    );
   }
   return { pid: claim.pid, birth: claim.birth };
 }
@@ -404,8 +406,8 @@ test(
   async () => {
     const root = await scratch();
     const first = helperConfig({ port: freePort() });
-    // Bind the first helper before selecting the second port: released port-0
-    // probes can return the same port, letting the foreign listener satisfy first.
+
+    // Branch A already holds the first helper from an earlier successful up.
     await startProjectSharedHelpers({
       ...context(root),
       helpers: [first],
@@ -413,10 +415,13 @@ test(
     });
     const owned = await ownedIdentity(root, first);
 
+    // Keep the first port bound while selecting the second: two closed bind
+    // probes can return the same port, making the foreign fixture look adoptable.
     const second = helperConfig({
       port: freePort(),
       name: "second-bridge",
     });
+    expect(second.port).not.toBe(first.port);
     // The second port is held by a different helper kind (foreign).
     const other = await startForeign({
       root,

@@ -175,7 +175,7 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
     policy: "base",
     data: "topic",
     ci_evidence: "scoped",
-    compiler_hosts: "[]",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     defer_macos: "true",
@@ -184,6 +184,7 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
   });
 });
 for (const path of [
+  "scripts/lib/native-plan-home.ts",
   "scripts/ci-test-selection.ts",
   "scripts/ci-change-scope.ts",
   "scripts/ci-pr-plan.ts",
@@ -311,6 +312,41 @@ for (const path of [
     expect(mac.defer_macos).toBe("false");
   });
 }
+// Each case owns one repository. Exercise the host-tier variants once rather
+// than rebuilding all six repositories for each variant (18 fixtures in one test).
+test.each([
+  "src/lib/activity-log.ts",
+  "src/commands/project.ts",
+  "src/backends/native-project-start.ts",
+  "src/cli/run.ts",
+  "index.ts",
+  "packages/cli/index.ts",
+])("the inline boundary keeps relocated acceptance with old base policy: %s", async (path) => {
+  expect(await scope({ path, tamper: true })).toMatchObject({
+    policy: "base",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
+    runtime_core: "false",
+    test_shards: "[4,5,6,7,8]",
+    defer_macos: "true",
+    docker_suite: "false",
+  });
+});
+test("the inline boundary retains the HOME-write acceptance leg with ci:mac", async () => {
+  expect(
+    await scope({ path: "src/lib/activity-log.ts", mac: true, tamper: true })
+  ).toMatchObject({
+    policy: "base",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
+    defer_macos: "false",
+  });
+});
+test("the inline boundary keeps HOME-write acceptance deferred for drafts", async () => {
+  expect(
+    await scope({ path: "src/lib/activity-log.ts", draft: true })
+  ).toMatchObject({
+    compiler_hosts: "[]",
+  });
+});
 test("retargeting reclassifies through the ordinary pull_request event", () => {
   expect(workflow.on.pull_request.types).toContain("edited");
 });
@@ -399,8 +435,13 @@ test("manual qualification refuses full=false before launching a suite", async (
 
 test("PR labels opt into independent tiers without widening the other tier", async () => {
   const input = { path: "src/value.ts", tierPlan: true };
-  expect(await scope({ ...input, mac: true })).toMatchObject({
-    compiler_hosts: fullPushPlan({ releaseHosts: false }).compiler_hosts,
+  const mac = await scope({ ...input, mac: true });
+  expect(JSON.parse(mac.compiler_hosts ?? "null")).toEqual(
+    JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts).sort(
+      (a: { os: string }, b: { os: string }) => a.os.localeCompare(b.os)
+    )
+  );
+  expect(mac).toMatchObject({
     runtime_core: "true",
     test_shards: "[1,2,3,4,5,6,7,8]",
     docker_suite: "false",
@@ -408,7 +449,7 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     build_smoke: "false",
   });
   expect(await scope({ ...input, e2e: true })).toMatchObject({
-    compiler_hosts: "[]",
+    compiler_hosts: '[{"os":"ubuntu-latest","platform":"linux","arch":"x64"}]',
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     docker_suite: "true",

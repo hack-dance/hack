@@ -50,18 +50,10 @@ const official =
   "https://github.com/hack-dance/hack/releases/download/v4.3.1/hack-4.3.1-linux-x86_64.tar.gz";
 const sha = (bytes: string | Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
-function serverFixture(handler: (count: number) => Response) {
+/** Faults belong to the caller's response reader, not an HTTP server's event loop. */
+function transferFixture(handler: (count: number) => Response) {
   let count = 0;
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: () => handler(++count),
-  });
-  servers.push(server);
-  // Production still validates every official URL and redirect. Only this
-  // explicit function maps that URL to an ephemeral loopback server.
-  const request: ReleaseFetch = (_url, init) =>
-    fetch(`http://127.0.0.1:${server.port}/asset`, init);
+  const request: ReleaseFetch = async () => handler(++count);
   return { request, calls: () => count };
 }
 async function releaseFixture(
@@ -115,14 +107,15 @@ for (const fault of ["checksum", "version"] as const) {
   test(`stable update refuses a release with wrong ${fault} before publication`, async () => {
     const root = await scratch();
     const f = await releaseFixture(root, "4.3.1", fault);
-    const server = serverFixture(() => new Response(f.bytes));
-    const before = (await readdir(tmpdir()))
-      .filter((name) => name.startsWith("hack-update-"))
-      .sort();
+    const transport = transferFixture(() => new Response(f.bytes));
+    const tempParent = join(root, "downloads");
+    await mkdir(tempParent);
+    expect(await readdir(tempParent)).toEqual([]);
     const result = await downloadAndExtractRelease({
       url: official,
       version: "4.3.1",
-      request: server.request,
+      request: transport.request,
+      tempParent,
     });
     expect(result.ok).toBe(fault === "version");
     if (result.ok) {
@@ -146,40 +139,45 @@ for (const fault of ["checksum", "version"] as const) {
     } else {
       expect(result.error).toContain("checksum mismatch");
     }
-    expect(
-      (await readdir(tmpdir()))
-        .filter((name) => name.startsWith("hack-update-"))
-        .sort()
-    ).toEqual(before);
+    expect(await readdir(tempParent)).toEqual([]);
   });
 }
 for (const native of [false, true]) {
   test(`${native ? "prerelease" : "stable"} download restarts a truncated transfer and retries 503 within one budget`, async () => {
     const root = await scratch();
     const bytes = "complete verified download";
-    const f = serverFixture((count) =>
-      count === 1
-        ? new Response("retry", { status: 503 })
-        : new Response(
-            new ReadableStream({
-              async start(controller) {
-                controller.enqueue(
-                  new TextEncoder().encode(
-                    count === 2 ? bytes.slice(0, 5) : bytes
-                  )
-                );
-                await new Promise((resolve) => setTimeout(resolve, 10));
-                if (count === 2) {
-                  controller.error(new Error("fixture connection interrupted"));
-                } else {
-                  controller.close();
-                }
-              },
-            }),
-            { headers: { "content-length": String(bytes.length) } }
-          )
-    );
     const path = join(root, "download");
+    let interruptedPrefix: string | undefined;
+    const f = transferFixture((count) => {
+      if (count === 1) {
+        return new Response("retry", { status: 503 });
+      }
+      if (count === 3) {
+        return new Response(bytes, {
+          headers: { "content-length": String(bytes.length) },
+        });
+      }
+      let sentPrefix = false;
+      return new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            async pull(controller) {
+              if (!sentPrefix) {
+                sentPrefix = true;
+                controller.enqueue(new TextEncoder().encode(bytes.slice(0, 5)));
+                return;
+              }
+              // With no prefetch, this pull starts after the consumer writes the
+              // prefix. Drive the fault from consumption, without a timed server error.
+              interruptedPrefix = await readFile(path, "utf8");
+              controller.error(new Error("fixture connection interrupted"));
+            },
+          },
+          { highWaterMark: 0 }
+        ),
+        { headers: { "content-length": String(bytes.length) } }
+      );
+    });
     const budget = new TransferBudget({ totalMs: 5000, inactivityMs: 1000 });
     try {
       if (native) {
@@ -195,6 +193,7 @@ for (const native of [false, true]) {
       }
       expect(await readFile(path, "utf8")).toBe(bytes);
       expect(f.calls()).toBe(3);
+      expect(interruptedPrefix).toBe(bytes.slice(0, 5));
       expect(await readdir(root)).toEqual(["download"]);
     } finally {
       budget.close();
@@ -270,7 +269,7 @@ test("existing download and unofficial redirect are never overwritten or followe
   const root = await scratch();
   const path = join(root, "keep");
   await writeFile(path, "existing bytes");
-  const f = serverFixture(() => new Response("other bytes"));
+  const f = transferFixture(() => new Response("other bytes"));
   await expect(
     transferRelease({ url: official, path, request: f.request })
   ).rejects.toThrow();
@@ -291,12 +290,13 @@ test("existing download and unofficial redirect are never overwritten or followe
 test("v4 release layout downloads, verifies every payload and executes the selected version", async () => {
   const root = await scratch();
   const f = await releaseFixture(root);
-  const server = serverFixture(() => new Response(f.bytes));
+  const transport = transferFixture(() => new Response(f.bytes));
   const result = await downloadAndExtractRelease({
     url: official,
     version: "4.3.1",
     sha256: sha(f.bytes),
-    request: server.request,
+    request: transport.request,
+    tempParent: root,
   });
   expect(result.ok).toBe(true);
   if (!result.ok) {
@@ -425,24 +425,21 @@ test("stable uninstall can be repeated and preserves all user state", async () =
   );
 });
 
-test("an offline loopback release server fails clearly without a leftover download", async () => {
+test("an offline release transport fails clearly without a leftover download", async () => {
   const root = await scratch();
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: () => new Response("unused"),
-  });
-  const port = server.port;
-  await server.stop(true);
-  const target = join(root, "release");
+  let calls = 0;
   await expect(
     transferRelease({
       url: official,
-      path: target,
-      request: (_url, init) => fetch(`http://127.0.0.1:${port}/offline`, init),
+      path: join(root, "release"),
+      request: async () => {
+        calls++;
+        throw new TypeError("fixture connection refused");
+      },
       timeoutMs: 3000,
     })
   ).rejects.toThrow("Network unavailable");
+  expect(calls).toBe(3);
   expect(await readdir(root)).toEqual([]);
 });
 
@@ -473,7 +470,7 @@ for (const phase of ["assets-published", "compiler-published"]) {
         process.execPath,
         "--no-env-file",
         "build",
-        "tests/fixtures/update-recovery-cli.ts",
+        join(import.meta.dir, "fixtures/update-recovery-cli.ts"),
         "--compile",
         "--no-compile-autoload-dotenv",
         "--no-compile-autoload-bunfig",
@@ -482,7 +479,7 @@ for (const phase of ["assets-published", "compiler-published"]) {
         "--outfile",
         binary,
       ],
-      { env, stdout: "pipe", stderr: "pipe", timeout: 120_000 }
+      { cwd: root, env, stdout: "pipe", stderr: "pipe", timeout: 120_000 }
     );
     const [buildCode] = await Promise.all([
       build.exited,

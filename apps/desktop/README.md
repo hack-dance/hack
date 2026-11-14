@@ -102,5 +102,10 @@ Each iteration runs all workspace tests in separate processes with zero retries;
 doctests run afterward. Both CI hosts use this same wrapper (one iteration per
 job). Three consecutive green hosted macOS jobs and the lead's 200-run native
 receipt are required for HACK-2243 acceptance; a Linux run or cross-check is not
-that evidence. #843's independent generous retirement deadlines remain necessary
-and should land before the final combined qualification.
+that evidence. The generous retirement deadlines from #843 are integrated in
+this tree for the combined qualification.
+
+Process-cleanup regression tests use a generous 60-second scheduling deadline,
+then check process retirement rather than enforcing a short wall-clock latency.
+The stream-drop test also proves the reader was waiting before Drop and that
+Drop's reader join completes. These test allowances do not change CLI timeouts.

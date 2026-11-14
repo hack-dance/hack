@@ -276,10 +276,14 @@ try {
     detachedResult.ok === false &&
     record(detachedResult.error).code ===
       "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
-  require((await readdir(home)).length === 0 &&
-    !(await readdir(join(checkout, ".hack"))).some(
-      (name) => name === ".internal" || name === ".branch"
-    ), "no registry or generated runtime state");
+  const homeEntries = await readdir(home);
+  const generatedEntries = (await readdir(join(checkout, ".hack"))).filter(
+    (name) => name === ".internal" || name === ".branch"
+  );
+  // Only relative names inside this synthetic fixture cross the diagnostic boundary.
+  require(homeEntries.length === 0 &&
+    generatedEntries.length ===
+      0, `no registry or generated runtime state (fixture HOME: ${JSON.stringify(homeEntries)}; generated: ${JSON.stringify(generatedEntries)})`);
   process.stdout.write(
     "Relocated native env plan acceptance: offline validation, metadata-only output, missing overlays/refs, immutable directives, separate hashes, real linked-worktree layers, CI/slim/opt-out, unsafe-input and runtime refusal passed\n"
   );

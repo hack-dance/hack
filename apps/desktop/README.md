@@ -88,6 +88,7 @@ Missing registry rows remain unchecked and are never probed. Compose coverage
 requires a report identifying that exact checkout's Hack directory; native
 coverage requires a known project-only check. A machine-only or ancestor-project
 report cannot establish Compose project coverage.
+Machine diagnostics remain visible even when a checkout cannot be verified.
 
 Cards group findings by area and offer one copied command or documentation link.
 Project commands include the checkout path. The app never runs a Doctor fix:

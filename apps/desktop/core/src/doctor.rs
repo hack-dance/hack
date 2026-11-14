@@ -622,15 +622,15 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
                 continue;
             }
         };
+        let project_proven = run.project.is_none() || project_evidence(run, report);
         if let Some(name) = &run.project {
-            if project_evidence(run, report) {
+            if project_proven {
                 projects_checked += 1;
             } else {
                 failed_runs.push((
                     name.clone(),
                     "could not check (no exact project evidence)".into(),
                 ));
-                continue;
             }
         } else {
             if report.checks.is_empty() {
@@ -657,6 +657,11 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
             } else {
                 scope
             };
+            // An unproven checkout cannot own project findings, but its
+            // machine diagnostics remain useful (notably native trust).
+            if !project_proven && scope == Scope::Project {
+                continue;
+            }
             // A project check outside any project has no project to name.
             let owner = match (scope, &run.project) {
                 (Scope::Machine, _) => None,
@@ -1428,6 +1433,27 @@ mod tests {
         native.native = true;
         assert_eq!(aggregate(&[machine.clone(), native]).projects_checked, 1);
         assert!(!aggregate(&[DoctorRun::machine(report(vec![]))]).is_clean());
+    }
+
+    #[test]
+    fn unproven_native_report_retains_only_machine_diagnostics() {
+        let mut native = DoctorRun::project(
+            "alpha",
+            "/work/alpha",
+            report(vec![
+                check("native root trust", "error", "untrusted active root"),
+                check("native future project check", "warn", "not attributable"),
+            ]),
+        );
+        native.native = true;
+        let view = aggregate(&[machine(vec![check("docker", "ok", "")]), native]);
+        assert_eq!(view.projects_checked, 0);
+        assert!(!view.is_clean());
+        assert_eq!(view.cards().count(), 1);
+        let card = view.cards().next().unwrap();
+        assert_eq!(card.id, "native root trust");
+        assert_eq!(card.affected, Affected::Machine);
+        assert_eq!(view.tone(), Tone::Error);
     }
 
     #[test]

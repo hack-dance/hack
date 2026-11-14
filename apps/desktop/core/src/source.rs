@@ -260,6 +260,34 @@ fn trusted_probe_path(path: &std::ffi::OsStr) -> std::ffi::OsString {
                 return None;
             }
         }
+        // Closed directories can still contain a writable executable or a
+        // symlink into a writable tree. Validate every executable Git/Docker
+        // or their nested tools could resolve here. Bound directory scans;
+        // oversized or unreadable directories are excluded conservatively.
+        for (index, entry) in std::fs::read_dir(&real).ok()?.enumerate() {
+            if index >= 8192 {
+                return None;
+            }
+            let entry = entry.ok()?;
+            let meta = match std::fs::metadata(entry.path()) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            };
+            if !meta.is_file() || meta.mode() & 0o111 == 0 {
+                continue;
+            }
+            let executable = std::fs::canonicalize(entry.path()).ok()?;
+            for (index, component) in executable.ancestors().enumerate() {
+                let meta = std::fs::metadata(component).ok()?;
+                let sticky_root = index > 0 && meta.uid() == 0 && meta.mode() & 0o1000 != 0;
+                if (meta.uid() != uid && meta.uid() != 0)
+                    || (meta.mode() & 0o022 != 0 && !sticky_root)
+                {
+                    return None;
+                }
+            }
+        }
         Some(real)
     });
     std::env::join_paths(dirs).unwrap_or_default()
@@ -1084,6 +1112,51 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
             .unwrap();
         assert!(!dir.join("executed").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn doctor_nested_tools_reject_writable_files_and_symlink_targets() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let hack = fake_hack(
+            "doctor-tool-file",
+            "git --version >/dev/null || exit 2\necho '{}'",
+        );
+        let dir = hack.parent().unwrap();
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let target = dir.join("writable-tool");
+        let body = "#!/bin/sh\nprintf called > \"$HACK_HOME/executed\"\n";
+        std::fs::write(&target, body).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let git = bin.join("git");
+        let inherited = format!("{}:/usr/bin:/bin", bin.display());
+        let runner = CliRunner::new(&hack).with_env("HACK_HOME", &dir.to_string_lossy());
+        for linked in [false, true] {
+            if linked {
+                symlink(&target, &git).unwrap();
+            } else {
+                std::fs::write(&git, body).unwrap();
+                std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o777)).unwrap();
+            }
+            runner
+                .clone()
+                .with_env("PATH", &inherited)
+                .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
+                .unwrap();
+            assert!(dir.join("executed").exists(), "negative control {linked}");
+            std::fs::remove_file(dir.join("executed")).unwrap();
+            let trusted = trusted_probe_path(std::ffi::OsStr::new(&inherited));
+            assert!(!std::env::split_paths(&trusted).any(|p| p == bin));
+            runner
+                .clone()
+                .with_env("PATH", &trusted.to_string_lossy())
+                .run_json::<serde_json::Value>(&[], None, Duration::from_secs(60))
+                .unwrap();
+            assert!(!dir.join("executed").exists());
+            std::fs::remove_file(&git).unwrap();
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

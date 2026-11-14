@@ -478,18 +478,29 @@ impl HackApp {
                 }
                 cx.notify();
             }));
+        // The header and tabs stay fixed; the tab content scrolls within the
+        // remaining height so every service row and log line is reachable.
         v_flex()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .child(header)
             .child(div().px_5().pt_2().child(tabs))
             .map(|col| {
                 if self.tab == 1 {
+                    // The Logs tab scrolls inside its own virtualized list.
                     let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
                     col.child(self.render_logs(&names, cx))
                 } else {
-                    col.child(services_table(&d.services, cx))
-                        .child(self.log_tail(cx))
+                    col.child(
+                        v_flex()
+                            .id("detail-body")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(services_table(&d.services, cx))
+                            .child(self.log_tail(cx)),
+                    )
                 }
             })
     }

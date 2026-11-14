@@ -159,14 +159,20 @@ pub struct ServiceView {
     /// Exited 0 and not running: never "down", but its completion role is
     /// unknown until the CLI reports it (shown as "exited (0)").
     pub completed: bool,
+    /// A container (or native observation) exists for it. A defined service
+    /// with none may simply be in an inactive Compose profile.
+    pub created: bool,
     pub route: Option<String>,
 }
 
 impl ServiceView {
-    /// A long-running service that should run but does not.
+    /// A service with evidence of being down: it has a container that is
+    /// not running and did not exit 0. A defined service that was never
+    /// created is not counted: it may sit in an inactive profile, and which
+    /// services are expected is only known once the CLI reports it (R2).
     #[must_use]
     pub fn is_down(&self) -> bool {
-        !self.running && !self.completed
+        self.created && !self.running && !self.completed
     }
 }
 
@@ -183,6 +189,7 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
                     None => i.state.clone(),
                 };
                 ServiceView {
+                    created: true,
                     name: i.service.clone(),
                     running,
                     status,
@@ -219,6 +226,7 @@ pub fn services(row: &ProjectRow) -> Vec<ServiceView> {
             let first = containers.first();
             let exit_code = first.and_then(|c| c.exit_code());
             ServiceView {
+                created: first.is_some(),
                 completed: !running && exit_code == Some(0),
                 route: row
                     .service_hosts
@@ -294,7 +302,13 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         .map(|s| s.name.clone())
         .collect();
 
-    if !local.last_failed.is_empty() && svcs.iter().any(ServiceView::is_down) {
+    // The CLI named these as failed: trust that, created or not.
+    if !local.last_failed.is_empty()
+        && local
+            .last_failed
+            .iter()
+            .any(|f| !svcs.iter().any(|s| &s.name == f && s.running))
+    {
         return ProjectState::FailedStart {
             services: local.last_failed.clone(),
         };
@@ -600,6 +614,21 @@ mod tests {
             derive(&row, &LocalContext::default()).label(),
             "Running · migrate exited (0)"
         );
+    }
+
+    #[test]
+    fn inactive_profile_services_are_not_down() {
+        // `toolchain` is defined (another profile) but has no container.
+        let mut r = row("storefront");
+        r.defined_services.push("toolchain".into());
+        let st = derive(&r, &LocalContext::default());
+        assert!(matches!(st, ProjectState::Running { .. }), "{st:?}");
+        let svc = services(&r)
+            .into_iter()
+            .find(|s| s.name == "toolchain")
+            .unwrap();
+        assert!(!svc.created && !svc.is_down());
+        assert_eq!(svc.status, "not created");
     }
 
     #[test]

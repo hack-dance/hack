@@ -23,7 +23,8 @@ pub enum Fixture {
     EngineDown,
     Error,
     CliMissing,
-    /// More projects than fit in the sidebar (scrolling).
+    /// More projects than fit in the sidebar, and more services than fit
+    /// in the detail pane (both scroll).
     ManyProjects,
     // Detail states (selected project).
     Stopped,
@@ -339,6 +340,17 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
         projects.projects.clear();
     }
     if f == Fixture::ManyProjects {
+        // The selected project also has more services than fit (scrolling).
+        if let Some(main) = projects.projects.first_mut() {
+            for i in 1..=24 {
+                let name = format!("job-{i:02}");
+                main.defined_services.push(name.clone());
+                if let Some(rt) = main.runtime.as_mut() {
+                    rt.services
+                        .push(svc(&name, container("running", "Up 2 hours")));
+                }
+            }
+        }
         for i in 1..=40 {
             let status = if i % 3 == 0 { "running" } else { "stopped" };
             projects

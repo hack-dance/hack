@@ -63,6 +63,8 @@ impl std::fmt::Display for RunError {
 pub struct CliRunner {
     program: PathBuf,
     env: Vec<(String, String)>,
+    /// `on_path` found no executable: spawn reports `NotFound`.
+    missing: bool,
 }
 
 impl CliRunner {
@@ -72,6 +74,26 @@ impl CliRunner {
         Self {
             program: program.into(),
             env: vec![("HACK_NO_INTERACTIVE".into(), "1".into())],
+            missing: false,
+        }
+    }
+
+    /// Find `name` on `PATH` and run it by absolute path.
+    ///
+    /// Only absolute `PATH` entries are searched: an empty or relative entry
+    /// (such as `.`) would resolve against the working directory, which
+    /// another local user may control. When nothing is found the runner
+    /// reports `NotFound` without spawning anything.
+    #[must_use]
+    pub fn on_path(name: &str) -> Self {
+        let path = std::env::var_os("PATH");
+        match resolve_on_path(name, path.as_deref()) {
+            Some(p) => Self::new(p),
+            None => {
+                let mut r = Self::new(name);
+                r.missing = true;
+                r
+            }
         }
     }
 
@@ -101,6 +123,9 @@ impl CliRunner {
     }
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
+        if self.missing {
+            return Err(RunError::NotFound);
+        }
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry
         // briefly instead of reporting a spawn failure.
@@ -367,6 +392,22 @@ fn read_all<R: Read + Send + 'static>(r: Option<R>) -> mpsc::Receiver<String> {
         let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
     rx
+}
+
+/// Search absolute `PATH` entries for an executable regular file `name`.
+#[must_use]
+pub fn resolve_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if name.contains('/') {
+        let p = PathBuf::from(name);
+        return p.is_absolute().then_some(p);
+    }
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 fn kill_group(child: &mut Child) {
@@ -643,6 +684,35 @@ mod tests {
             ("next".into(), false)
         );
         assert!(read_bounded_line(&mut r, 10).is_none());
+    }
+
+    #[test]
+    fn path_lookup_ignores_relative_entries() {
+        let f = FakeHack::new("echo '{}'");
+        let dir = f.dir.to_string_lossy().into_owned();
+        let rel = std::ffi::OsString::from(format!(".:{dir}"));
+        assert_eq!(
+            resolve_on_path("hack", Some(&rel)),
+            Some(f.dir.join("hack"))
+        );
+        let only_rel = std::ffi::OsString::from(".:relative/bin:");
+        assert_eq!(resolve_on_path("hack", Some(&only_rel)), None);
+        assert_eq!(resolve_on_path("hack", None), None);
+        assert_eq!(
+            resolve_on_path("./hack", Some(&rel)),
+            None,
+            "relative names refused"
+        );
+    }
+
+    #[test]
+    fn a_runner_that_found_nothing_never_spawns() {
+        let mut r = CliRunner::new("hack");
+        r.missing = true;
+        assert_eq!(
+            r.run_json::<Value>(&["x"], None, T),
+            Err(RunError::NotFound)
+        );
     }
 
     #[test]

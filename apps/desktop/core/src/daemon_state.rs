@@ -40,12 +40,24 @@ pub struct Observation {
 }
 impl Observation {
     #[must_use]
+    pub fn tone(&self) -> crate::state::Tone {
+        use crate::state::Tone;
+        if self.status.as_ref().and_then(|s| s.service.as_ref()).is_some_and(|s| s.unit_stale == Some(true))
+            || matches!((&self.cli_version, &self.socket_version), (Some(c), Some(d)) if c != d) {return Tone::Warn;}
+        match self.status.as_ref().map(|s| s.status.as_str()) {
+            Some("running") if self.error.is_none() => Tone::Ok,
+            Some("starting") => Tone::Busy,
+            Some("incompatible" | "stale") => Tone::Warn,
+            _ => Tone::Idle,
+        }
+    }
+
+    #[must_use]
     pub fn label(&self) -> String {
-        let Some(s) = &self.status else {
-            return "hackd status unknown".into();
-        };
-        if s.service
+        if self
+            .status
             .as_ref()
+            .and_then(|s| s.service.as_ref())
             .is_some_and(|s| s.unit_stale == Some(true))
         {
             return "Login service is out of date".into();
@@ -55,6 +67,9 @@ impl Observation {
         {
             return format!("hackd v{daemon}, CLI v{cli}");
         }
+        let Some(s) = &self.status else {
+            return "hackd status unknown".into();
+        };
         if s.stale == Some(true) {
             return "hackd stopped unexpectedly".into();
         }
@@ -75,16 +90,19 @@ impl Observation {
         if self.cli_missing || self.cli_version.is_none() {
             return vec![];
         }
-        let Some(s) = &self.status else {
-            return vec![];
-        };
         let mut actions = vec![];
+        let mismatch =
+            matches!((&self.cli_version, &self.socket_version), (Some(c), Some(d)) if c != d);
+        if mismatch {
+            actions.push(DaemonAction::Restart);
+        }
+        let Some(s) = &self.status else {
+            return actions;
+        };
         if s.running == Some(false) && matches!(s.status.as_str(), "stopped" | "stale") {
             actions.push(DaemonAction::Start);
         }
-        if s.status == "incompatible"
-            || matches!((&self.cli_version, &self.socket_version), (Some(c), Some(d)) if c != d)
-        {
+        if s.status == "incompatible" && !mismatch {
             actions.push(DaemonAction::Restart);
         }
         if s.service

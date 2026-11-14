@@ -147,7 +147,6 @@ impl HackApp {
                         if !this.model.finish_refresh(token, snap) {
                             cx.notify();
                             return None;
-
                         }
                         cx.notify();
                         this.follow.then(|| this.selected_root()).flatten()
@@ -279,7 +278,8 @@ impl HackApp {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(self.daemon.observed.label())
+                    .child(dot(tone_color(self.daemon.observed.tone(), cx)))
+                    .child(div().text_color(tone_color(self.daemon.observed.tone(), cx)).child(self.daemon.observed.label()))
                     .child(div().flex_1())
                     .child(buttons),
             )
@@ -762,7 +762,7 @@ impl HackApp {
         } else {
             ("Docker ok", t.success)
         };
-        let daemon = (self.daemon.observed.label(), t.muted_foreground);
+        let daemon = (self.daemon.observed.label(), tone_color(self.daemon.observed.tone(), cx));
         h_flex()
             .h(px(26.))
             .px_3()

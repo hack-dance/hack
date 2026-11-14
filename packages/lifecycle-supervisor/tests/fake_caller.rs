@@ -1084,11 +1084,24 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
             .then_some(())
     });
     thread::sleep(delay);
-    let recovery_started = Instant::now();
+    // Freeze the guard before removing it, then prove it has not begun its own
+    // escalation: it persists kill-pending before its first KILL. The child must
+    // still be live, so only the stop's admission snapshot can KILL it.
+    let guard = pid(&state, "guardPid");
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
+    let frozen = f.state("worker");
     assert_eq!(
-        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
-        0
+        frozen["phase"], "stopping",
+        "guard escalated first: {frozen}"
     );
+    assert!(
+        identity(child.pid).is_some_and(|current| current.birth == child.birth)
+            && !process_is_zombie(child.pid),
+        "TERM-ignoring child exited before guard loss"
+    );
+    let recovery_started = Instant::now();
+    // SAFETY: the frozen guard belongs to this fixture.
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
     if !blocked {
         assert!(wait(&mut caller, TIMEOUT).success());
     }
@@ -1099,9 +1112,15 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
         receipt["outcome"],
         if blocked { "unknown" } else { "stopped" }
     );
-    // Scheduling may let the guard itself finish escalation. Either path must
-    // confirm absence; do not mistake test observation latency for grace timing.
-    assert!(recovery_started.elapsed() < TIMEOUT);
+    // Recovery starts its own TERM grace after detecting guard loss, so KILL of
+    // the captured child cannot precede a fresh five-second interval, even when
+    // the original guard deadline had almost expired.
+    let recovered_after = recovery_started.elapsed();
+    assert!(
+        recovered_after >= Duration::from_secs(5),
+        "recovery skipped its fresh grace: {recovered_after:?}"
+    );
+    assert!(recovered_after < TIMEOUT);
     assert!(identity(child.pid).is_none() || process_is_zombie(child.pid));
     if let Some(guard) = blocked_guard {
         assert_eq!(unsafe { libc::kill(guard, libc::SIGCONT) }, 0);

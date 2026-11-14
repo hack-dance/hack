@@ -3,6 +3,10 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { classifyAutostartExit } from "../src/daemon/autostart.ts";
+import {
+  assertAutostartProjectCurrent,
+  withAutostartProjectLock,
+} from "../src/lib/autostart-project-lock.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let root = "";
@@ -72,6 +76,7 @@ async function run(
         env: {
           PATH: join(root, "bin"),
           HACK_AUTOSTART_LOGIN: login ? "1" : "0",
+          HACK_AUTOSTART_PROJECT_ID: login ? "sample" : undefined,
           ...overrides,
         },
       }),
@@ -115,14 +120,15 @@ test("down accepts legacy alias names when deciding whether to pause", async () 
   await run(["down", "--project", "SAMPLE_APP", "--json"]);
   expect((await marker()).paused).toBe(true);
 });
-test("login refuses a pending legacy migration without touching dotenv or clearing pause", async () => {
+test("login refuses a pending legacy migration without touching dotenv or changing intent", async () => {
+  await writeRegistry(false);
   const envFile = join(root, "project", ".hack", ".env");
   await writeFile(envFile, "SAMPLE_VALUE=fixture\n");
   const result = await run(["up", "--json", "-d"], true);
   expect(result.exitCode).not.toBe(0);
   expect(result.stdout + result.stderr).toContain("pending env migration");
   expect(await Bun.file(envFile).text()).toBe("SAMPLE_VALUE=fixture\n");
-  expect((await marker()).paused).toBe(true);
+  expect((await marker()).paused).toBe(false);
   expect(classifyAutostartExit(result)).toEqual({
     status: "skipped",
     reason: "pending_env_migration",
@@ -208,4 +214,121 @@ test("native selection with an existing marker reaches the same dispatch as an u
     expect(marked.stderr).toBe(baseline.stderr);
     expect((await marker()).paused).toBe(action === "down");
   }
+});
+
+async function waitForCondition(
+  check: () => Promise<boolean>,
+  message: string
+) {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (await check()) {
+      return;
+    }
+    await Bun.sleep(10);
+  }
+  throw new Error(message);
+}
+
+test("source down pauses before waiting for a start and holds admission through runtime shutdown", async () => {
+  await writeRegistry(false);
+  const registryPath = join(root, "home", ".hack", "projects.json");
+  const enteredDown = join(root, "down-entered");
+  const releaseDown = join(root, "release-down");
+  await writeFile(
+    join(root, "bin", "docker"),
+    `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args.includes("down")) { await Bun.write(${JSON.stringify(enteredDown)}, "entered"); const deadline=Date.now()+10000; while (!(await Bun.file(${JSON.stringify(releaseDown)}).exists())) { if(Date.now()>deadline) process.exit(99); await Bun.sleep(10); } } else if (args.includes("ps") || args.includes("inspect")) { process.stdout.write("[]"); }\n`,
+    { mode: 0o755 }
+  );
+  const scope = { projectId: "sample", composeProject: "sample", branch: null };
+  const startEntered = Promise.withResolvers<void>();
+  const releaseStart = Promise.withResolvers<void>();
+  let firstStartPublished = false;
+  const firstStart = withAutostartProjectLock({
+    scope,
+    registryPath,
+    run: async () => {
+      startEntered.resolve();
+      await releaseStart.promise;
+      await assertAutostartProjectCurrent({ scope, registryPath });
+      firstStartPublished = true;
+    },
+  }).then(
+    () => ({ refused: false }),
+    (error: unknown) => ({ refused: true, error })
+  );
+  await startEntered.promise;
+  let downFinished = false;
+  const down = run(["down", "--json"]).then((result) => {
+    downFinished = true;
+    return result;
+  });
+  let queuedStartEntered = false;
+  let secondStart: Promise<unknown> | undefined;
+  try {
+    await waitForCondition(
+      async () => (await marker()).paused === true,
+      "source down did not publish its pause before waiting"
+    );
+    expect(downFinished).toBe(false);
+    expect(await Bun.file(enteredDown).exists()).toBe(false);
+    releaseStart.resolve();
+    const firstOutcome = await firstStart;
+    expect(firstOutcome).toMatchObject({
+      refused: true,
+      error: { code: "E_CANCELLED", detail: { reason: "paused" } },
+    });
+    expect(firstStartPublished).toBe(false);
+    await waitForCondition(
+      () => Bun.file(enteredDown).exists(),
+      "source down never reached the fake runtime shutdown"
+    );
+    secondStart = withAutostartProjectLock({
+      scope,
+      registryPath,
+      run: async () => {
+        queuedStartEntered = true;
+        await assertAutostartProjectCurrent({ scope, registryPath });
+      },
+    }).then(
+      () => ({ refused: false }),
+      (error: unknown) => ({ refused: true, error })
+    );
+    await Bun.sleep(75);
+    expect(queuedStartEntered).toBe(false);
+    expect(downFinished).toBe(false);
+    await Bun.write(releaseDown, "release");
+    const result = await down;
+    expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+    expect(await secondStart).toMatchObject({
+      refused: true,
+      error: { code: "E_CANCELLED", detail: { reason: "paused" } },
+    });
+    expect((await marker()).paused).toBe(true);
+  } finally {
+    releaseStart.resolve();
+    await Bun.write(releaseDown, "release");
+    await Promise.allSettled([
+      firstStart,
+      down,
+      ...(secondStart ? [secondStart] : []),
+    ]);
+  }
+}, 20_000);
+
+test("a login child cannot resume a manually paused project or substitute a different registry identity", async () => {
+  const paused = await run(["up", "--json", "-d"], true);
+  expect(paused.exitCode).not.toBe(0);
+  expect(paused.stdout).toContain("E_CANCELLED");
+  expect((await marker()).paused).toBe(true);
+  await writeRegistry(false);
+  const mismatched = await run(
+    ["up", "--json", "-d"],
+    true,
+    join(root, "project"),
+    { HACK_AUTOSTART_PROJECT_ID: "different-project" }
+  );
+  expect(mismatched.exitCode).not.toBe(0);
+  expect(mismatched.stdout).toContain("project path changed");
+  expect((await marker()).paused).toBe(false);
 });

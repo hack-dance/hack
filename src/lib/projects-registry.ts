@@ -75,6 +75,7 @@ export interface AutostartLoginRun {
   readonly runId: string | null;
   readonly bootId: string | null;
   readonly inProgress: boolean;
+  readonly waitingForEngine: boolean;
   readonly startedAt: string | null;
   readonly pending: readonly string[];
   readonly started: readonly string[];
@@ -227,7 +228,8 @@ export function isTrustedAutostartRegistryFile(opts: {
 
 /** No-follow, non-blocking and bounded read from the same descriptor we validate. */
 async function readTrustedAutostartRegistryText(
-  path: string
+  path: string,
+  allowLegacyWritable = false
 ): Promise<string | null> {
   let file: FileHandle;
   try {
@@ -249,7 +251,9 @@ async function readTrustedAutostartRegistryText(
         regular: info.isFile(),
         fileUid: info.uid,
         currentUid: process.getuid?.(),
-        mode: info.mode,
+        // Only explicit first opt-in may rebuild unmarked legacy state. The
+        // descriptor's regular-file, owner and byte bounds still apply.
+        mode: allowLegacyWritable ? info.mode & ~0o022 : info.mode,
         size: info.size,
       })
     ) {
@@ -793,6 +797,7 @@ export function getDefaultAutostartGlobal(): AutostartGlobal {
       runId: null,
       bootId: null,
       inProgress: false,
+      waitingForEngine: false,
       startedAt: null,
       pending: [],
       started: [],
@@ -834,6 +839,7 @@ export async function beginAutostartLoginRun(
     readonly bootId: string;
     readonly startedAt: string;
     readonly pendingIds: readonly string[];
+    readonly waitingForEngine?: boolean;
   }
 ): Promise<AutostartLoginRun | null> {
   if (!(opts.bootId.trim() && Number.isFinite(Date.parse(opts.startedAt)))) {
@@ -860,6 +866,7 @@ export async function beginAutostartLoginRun(
         runId: randomUUID(),
         bootId: opts.bootId,
         inProgress: true,
+        waitingForEngine: opts.waitingForEngine ?? false,
         startedAt: opts.startedAt,
         pending,
         started: [],
@@ -912,9 +919,41 @@ export async function recordAutostartLoginOutcome(
   });
 }
 
-/** Close a run; unfinished or cancelled work has no observed failure outcome. */
+/** Publish engine readiness for the active run without touching project claims or outcomes. */
+export async function setAutostartLoginWaitingForEngine(
+  opts: AutostartRegistryOptions & {
+    readonly runId: string;
+    readonly waitingForEngine: boolean;
+  }
+): Promise<boolean> {
+  return await mutateAutostartRegistry({
+    ...opts,
+    update: (current) => {
+      const global = current.autostartGlobal ?? getDefaultAutostartGlobal();
+      const run = global.loginRun;
+      if (!run.inProgress || run.runId !== opts.runId) {
+        return { next: current, value: false };
+      }
+      return {
+        next: {
+          ...current,
+          autostartGlobal: {
+            ...global,
+            loginRun: { ...run, waitingForEngine: opts.waitingForEngine },
+          },
+        },
+        value: true,
+      };
+    },
+  });
+}
+
+/** Close a run; engine deferral retains unclaimed work for a later readiness pass. */
 export async function finishAutostartLoginRun(
-  opts: AutostartRegistryOptions & { readonly runId: string }
+  opts: AutostartRegistryOptions & {
+    readonly runId: string;
+    readonly waitingForEngine?: boolean;
+  }
 ): Promise<boolean> {
   return await mutateAutostartRegistry({
     ...opts,
@@ -927,7 +966,8 @@ export async function finishAutostartLoginRun(
       const loginRun: AutostartLoginRun = {
         ...run,
         inProgress: false,
-        pending: [],
+        waitingForEngine: opts.waitingForEngine ?? false,
+        pending: opts.waitingForEngine ? run.pending : [],
         failed: run.failed,
       };
       return {
@@ -987,11 +1027,14 @@ export async function setProjectAutostart(
   opts: AutostartRegistryOptions & {
     readonly id: string;
     readonly branch?: string | null;
+    /** Fired only after rebuilding an owned, unmarked legacy registry on a new private inode. */
+    readonly onPermissionsRepaired?: () => void;
   }
 ): Promise<RegisteredProject> {
   let selected: RegisteredProject | undefined;
   await mutateProjectAutostart({
     ...opts,
+    allowLegacyPermissionRepair: true,
     update: (project) => {
       const branch = opts.branch ?? null;
       const old = project.autostart;
@@ -1127,6 +1170,8 @@ async function mutateProjectAutostart(
   opts: AutostartRegistryOptions & {
     readonly id?: string;
     readonly respectGlobalPause?: boolean;
+    readonly allowLegacyPermissionRepair?: boolean;
+    readonly onPermissionsRepaired?: () => void;
     readonly update: (project: RegisteredProject) => RegisteredProject;
   }
 ): Promise<readonly RegisteredProject[]> {
@@ -1136,7 +1181,11 @@ async function mutateProjectAutostart(
     lockPath: `${registryPath}.lock`,
     signal: opts.signal,
     run: async () => {
-      const current = await readTrustedAutostartRegistry({ registryPath });
+      const { registry: current, permissionsRepaired } =
+        await readAutostartMutationRegistry({
+          registryPath,
+          allowLegacyPermissionRepair: opts.allowLegacyPermissionRepair,
+        });
       if (opts.respectGlobalPause && current.autostartGlobal?.paused) {
         return [];
       }
@@ -1172,10 +1221,82 @@ async function mutateProjectAutostart(
           { ...current, projects },
           opts.signal
         );
+        if (permissionsRepaired) {
+          opts.onPermissionsRepaired?.();
+        }
       }
       return selected;
     },
   });
+}
+
+/**
+ * An explicit first opt-in may copy current-user-owned unmarked v4 registrations
+ * to a fresh 0600 inode. Existing automatic-start intent cannot be authenticated
+ * this way: it requires separate preservation and a reviewed rebuild instead.
+ */
+async function readAutostartMutationRegistry(opts: {
+  readonly registryPath: string;
+  readonly allowLegacyPermissionRepair?: boolean;
+}): Promise<{
+  readonly registry: ProjectsRegistry;
+  readonly permissionsRepaired: boolean;
+}> {
+  try {
+    return {
+      registry: await readTrustedAutostartRegistry(opts),
+      permissionsRepaired: false,
+    };
+  } catch (error: unknown) {
+    if (
+      !(
+        opts.allowLegacyPermissionRepair &&
+        error instanceof AutostartRegistryTrustError
+      )
+    ) {
+      throw error;
+    }
+  }
+  const text = await readTrustedAutostartRegistryText(opts.registryPath, true);
+  let value: unknown;
+  try {
+    value =
+      text === null
+        ? { version: REGISTRY_VERSION, projects: [] }
+        : JSON.parse(text);
+  } catch {
+    throw new AutostartRegistryTrustError();
+  }
+  const registry = parseRegistry(value);
+  if (
+    !(registry && isRecord(value) && Array.isArray(value.projects)) ||
+    registry.projects.length !== value.projects.length
+  ) {
+    throw new AutostartRegistryTrustError();
+  }
+  if (
+    value.autostartGlobal !== undefined ||
+    value.projects.some(
+      (project: unknown) => isRecord(project) && project.autostart !== undefined
+    )
+  ) {
+    throw new AutostartRegistryTrustError();
+  }
+  if (
+    value.projects.some((project: unknown, index) => {
+      if (!isRecord(project) || project.worktrees === undefined) {
+        return false;
+      }
+      return (
+        !Array.isArray(project.worktrees) ||
+        project.worktrees.length !==
+          (registry.projects[index]?.worktrees?.length ?? 0)
+      );
+    })
+  ) {
+    throw new AutostartRegistryTrustError();
+  }
+  return { registry, permissionsRepaired: true };
 }
 
 /** Validate every requested ID under ownership before removing any entry. */
@@ -1282,6 +1403,8 @@ function parseAutostartGlobal(value: unknown): AutostartGlobal | undefined {
       (run.runId === null || typeof run.runId === "string") &&
       (run.bootId === null || typeof run.bootId === "string") &&
       typeof run.inProgress === "boolean" &&
+      (run.waitingForEngine === undefined ||
+        typeof run.waitingForEngine === "boolean") &&
       (run.startedAt === null ||
         (typeof run.startedAt === "string" &&
           Number.isFinite(Date.parse(run.startedAt)))) &&
@@ -1300,6 +1423,7 @@ function parseAutostartGlobal(value: unknown): AutostartGlobal | undefined {
           runId: run.runId,
           bootId: run.bootId,
           inProgress: run.inProgress,
+          waitingForEngine: run.waitingForEngine ?? false,
           startedAt: run.startedAt,
           pending: run.pending,
           started: run.started,
@@ -1470,6 +1594,11 @@ function getRegistryPath(): string {
     resolveGlobalRegistryRoot(),
     GLOBAL_PROJECTS_REGISTRY_FILENAME
   );
+}
+
+/** Resolve the machine registry shared by intent, login admission and foreground command locks. */
+export function resolveProjectsRegistryPath(): string {
+  return getRegistryPath();
 }
 
 function getRegistryLockPath(): string {

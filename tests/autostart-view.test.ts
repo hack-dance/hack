@@ -33,6 +33,7 @@ test("desktop policy states distinguish off, starting, global pause and manual s
         runId: "private-run-id",
         bootId: "private-boot-id",
         inProgress: true,
+        waitingForEngine: false,
         startedAt: "2026-01-01T00:00:00Z",
         pending: [project.id],
         started: ["ready-id"],
@@ -53,6 +54,19 @@ test("desktop policy states distinguish off, starting, global pause and manual s
     },
     max_failures: 3,
   });
+  expect(
+    projectAutostartFromGlobal({
+      project,
+      global: {
+        ...global,
+        login_run: {
+          ...global.login_run,
+          in_progress: false,
+          waiting_for_engine: true,
+        },
+      },
+    })
+  ).toMatchObject({ state: "starting" });
   expect(
     projectAutostartFromGlobal({ project, global: { ...global, paused: true } })
   ).toMatchObject({ state: "paused", paused_reason: null });
@@ -77,6 +91,7 @@ test("desktop policy states distinguish off, starting, global pause and manual s
     service_ready: true,
     login_run: {
       in_progress: true,
+      waiting_for_engine: false,
       started_at: "2026-01-01T00:00:00Z",
       pending: ["example-id"],
       started: ["ready-id"],

@@ -1,6 +1,6 @@
 # Always-on projects
 
-Autostart is a choice for this machine. A repository cannot enable it. Install
+Autostart is a choice for this machine. Project configuration cannot enable it. Install
 Hack's per-user login service, then mark a registered project:
 
 ```sh
@@ -18,7 +18,10 @@ a branch instance uses the primary checkout's code, not a different Git checkout
 changes the marker; it does not start anything immediately.
 
 `hack down` pauses autostart for the selected marked instance before attempting to
-stop it. A later `hack up` clears the pause. Pausing does not stop running services:
+stop it. Start and stop serialize on a machine-local instance lock: `down` waits
+for an in-flight login start, then stops it before returning success. The login
+child checks trusted intent under that lock and immediately before starting
+containers. A later `hack up` clears the pause. Pausing does not stop running services:
 
 ```sh
 hack autostart pause --project sample
@@ -39,16 +42,27 @@ projects paused by a manual `down`; start one with `hack up` or explicitly
 
 ![Login startup sequence](diagrams/autostart-login.svg)
 
-The pass runs at the first `hackd` start in each OS boot. The installed service
-normally starts it at login; starting the daemon manually or through a
-daemon-backed CLI command can also trigger it. This slice supports Compose
-projects on Linux and macOS. Native-runtime startup is skipped as
-`native_unsupported` before probing Docker.
+Only a daemon launched by the installed login service runs the automatic pass.
+A daemon started manually or implicitly by another CLI command does not replay
+projects. To run the pass deliberately, use `hack autostart run --no-interactive`
+(optionally `--json`). Both entry points respect the same per-boot claims.
+This slice supports Compose projects on Linux and macOS. Native-runtime startup
+is skipped as `native_unsupported` before probing Docker.
 
-The daemon waits up to 60 seconds for Docker, starts global routing only if it is
-already installed, then considers unpaused projects in name/ID order. Starts are
-at least 500 milliseconds apart, with at most two in progress. Each uses the
-running daemon's CLI executable and the ordinary `up -d --no-interactive` path.
+The daemon waits up to ten minutes for Docker, backing off from two seconds to
+thirty seconds between probes. Configure the service bound with
+`hack config set --global controlPlane.daemon.autostartEngineWaitMs 900000`
+(1–3600000 milliseconds; restart the daemon to apply); an explicit
+run also accepts `--engine-wait-ms`. While waiting, JSON reports
+`login_run.waiting_for_engine: true`. An engine timeout consumes no project
+claims. The service daemon retries when its regular engine observation detects
+Docker later in the same boot. Global routing starts only if already installed,
+then unpaused projects are considered in name/ID order. Starts are at least
+500 milliseconds apart, with at most two in progress. Each uses the running
+daemon's CLI executable and the ordinary `up -d --no-interactive` path.
+Children receive a fixed environment allow-list and fixed executable search
+path; launching-shell `DOCKER_*`, `COMPOSE_*` and `HACK_*` overrides are not copied.
+Hack adds only its explicit internal noninteractive and identity settings.
 Already-running instances are adopted without repeating startup hooks. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
 Adoption requires a running container. An exited-zero container is treated as a
@@ -66,7 +80,11 @@ recorded result. Run `hack up` manually to investigate and recover. The daemon d
 not install routing, start Docker, sign in, or migrate configuration at login.
 Before trusting intent, Hack opens `projects.json` without following links and
 requires a regular file owned by the current user, with no group or other write
-access. That check repeats at every autostart read and mutation. Unsafe registry
+access. On first opt-in, an unmarked legacy registry that is a regular file owned
+by the user is atomically replaced with a fresh `0600` file, with a one-line
+notice. The old inode is never reused, so an already-open writer cannot change
+the replacement. This migration refuses symlinks, foreign ownership, malformed
+registries and preexisting intent in an unsafe file. That check repeats at every autostart read and mutation. Unsafe registry
 permissions refuse startup. Do not repair a formerly writable registry with
 in-place `chmod`: another user's already-open writer descriptor remains writable.
 Preserve the old file outside the active registry, start with a fresh registry,
@@ -81,8 +99,9 @@ the same boot does not repeat starts. A crash after the claim can leave an
 interrupted attempt; its outcome is unknown, so this slice requires manual
 `hack up` recovery. A new boot permits a new attempt. Resume permits the next login
 attempt; use `hack up` to start immediately.
-An engine timeout or routing failure also consumes that boot's attempt. If Docker
-is slow to become ready, start the projects with `hack up` after it is ready.
+A routing failure consumes that boot's attempt; an engine timeout does not.
+A start has a 120-second bound, then receives TERM and a two-second grace before
+KILL. Partial startup remains possible; inspect and recover with `hack up`.
 
 `HACK_DAEMON_AUTOSTART_DISABLE=1` disables this pass as well as implicit daemon
 startup. Test harnesses and the isolated `hack-v5` launcher set it; those runs do
@@ -90,7 +109,11 @@ not start marked projects. Use the installed CLI/service for login startup.
 
 This first slice starts projects once. It does not restart a project after failure
 or replace terminal-based lifecycle supervision. Persistent host helpers retain
-the existing [lifecycle](lifecycle.md) behavior. Linux's systemd user service starts
+the existing [lifecycle](lifecycle.md) behavior. On Linux, service-origin starts
+run in independent transient user scopes, so their host helpers survive daemon
+stop/restart while the daemon retains `KillMode=control-group`. Failure to create
+a scope refuses the start rather than falling back into the daemon cgroup.
+Linux's systemd user service starts
 at login; startup before login requires separately opting into user lingering.
 No system service or `sudo` is needed for Hack's login service.
 
@@ -129,7 +152,8 @@ payloads include the same top-level `autostart_global` object:
       "started_at": null,
       "pending": [],
       "started": [],
-      "failed": []
+      "failed": [],
+      "waiting_for_engine": false
     },
     "service_ready": false
   }
@@ -148,7 +172,8 @@ the same fields for failure counts and `needs_attention` after exhausting retrie
 Global `paused` is an independent machine setting. Login-run arrays contain
 stable project IDs: pending includes queued and active attempts, started includes
 started and already-running projects, and failed includes real startup failures
-and refusals such as an engine timeout or missing key. Manual/global pauses,
+and refusals such as a missing key. Engine waiting and timeout leave the queue
+unclaimed and do not count as failures. Manual/global pauses,
 cancellation and target changes leave the queue without being marked failed.
 An interrupted run is closed before the next daemon startup; it does
 not authorize repeating a claimed start. `started_at` is `null` before the first
@@ -185,3 +210,9 @@ this version rather than enabling startup.
 `hack doctor` warns when a project is marked but no login-service file exists and
 names `hack daemon install`. File presence alone does not prove a real login run
 or that the operating system enabled the service.
+
+Older Hack versions sharing this machine registry can drop markers and global
+policy on their next write. This fails closed but loses opt-ins; avoid mixing
+versions until the upgrade-handling slice supplies compatibility diagnostics.
+The service-presence check also cannot yet prove its executable supports
+autostart; reinstall the service with this CLI after upgrading.

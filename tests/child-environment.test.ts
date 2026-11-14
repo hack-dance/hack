@@ -257,11 +257,24 @@ test.skipIf(!compiledCli)(
   }
 );
 
-test("login replay context stops at tool boundaries and survives only deliberate Hack reexec", () => {
-  expect(childEnvironment({ HACK_AUTOSTART_LOGIN: "1", KEEP: "yes" })).toEqual({
+test("login replay authority stops at tool boundaries and survives only deliberate Hack reexec", () => {
+  const input = {
+    HACK_AUTOSTART_LOGIN: "1",
+    HACK_AUTOSTART_PROJECT_ID: "fixture-project",
+    HACK_DAEMON_LOGIN_SERVICE: "1",
+    KEEP: "yes",
+  };
+  expect(childEnvironment(input)).toEqual({ KEEP: "yes" });
+  expect(hackReexecEnvironment(input)).toEqual({
+    HACK_AUTOSTART_LOGIN: "1",
+    HACK_AUTOSTART_PROJECT_ID: "fixture-project",
     KEEP: "yes",
   });
-  expect(hackReexecEnvironment({ HACK_AUTOSTART_LOGIN: "1" })).toEqual({
-    HACK_AUTOSTART_LOGIN: "1",
-  });
+  expect(
+    hackReexecEnvironment({
+      HACK_AUTOSTART_PROJECT_ID: "fixture-project",
+      HACK_DAEMON_LOGIN_SERVICE: "1",
+    })
+  ).toEqual({});
+  expect(input.HACK_DAEMON_LOGIN_SERVICE).toBe("1");
 });

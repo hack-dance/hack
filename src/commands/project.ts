@@ -426,8 +426,10 @@ import { displayNativePs } from "./native-ps-display.ts";
 import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
 import {
   assertAutostartEnvironment,
+  assertLoginAutostartCurrent,
   findAutostartRegistration,
   updateNativeAutostartIntent,
+  withAutostartCommandLock,
 } from "./project-autostart-intent.ts";
 import {
   prepareDisposableCachePrune,
@@ -6478,7 +6480,14 @@ async function updateAutostartIntent(opts: {
         "Project registration conflicts; inspect hack projects before enabling autostart."
       );
     }
-    await setProjectAutostart({ id: registered.project.id, branch });
+    await setProjectAutostart({
+      id: registered.project.id,
+      branch,
+      onPermissionsRepaired: () =>
+        process.stderr.write(
+          "Repaired this machine's unmarked projects registry permissions to 0600 before enabling autostart.\n"
+        ),
+    });
     return;
   }
   const projectDir = await realpath(project.projectDir).catch(
@@ -6500,7 +6509,35 @@ async function updateAutostartIntent(opts: {
   }
 }
 
-async function handleUp({
+async function handleUp(
+  input: Parameters<typeof handleUpUnlocked>[0]
+): Promise<number> {
+  parseRequestedTarget({ raw: input.args.options.target });
+  const login = process.env.HACK_AUTOSTART_LOGIN === "1";
+  if (!login) {
+    await updateAutostartIntent({ ...input, action: "up" });
+  }
+  const run = async () => {
+    if (login) {
+      await updateAutostartIntent({ ...input, action: "up" });
+    }
+    return await handleUpUnlocked(input);
+  };
+  // Foreground up owns the terminal until shutdown; its existing supervisor
+  // handles stopping. Never hold this startup lock for that whole lifetime.
+  if (!(login || input.args.options.detach || input.args.options.json)) {
+    return await run();
+  }
+  return await withAutostartCommandLock({
+    cwd: input.ctx.cwd,
+    path: input.args.options.path,
+    project: input.args.options.project,
+    branch: input.args.options.branch,
+    run,
+  });
+}
+
+async function handleUpUnlocked({
   ctx,
   args,
 }: {
@@ -6509,7 +6546,6 @@ async function handleUp({
 }): Promise<number> {
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
-  await updateAutostartIntent({ ctx, args, action: "up" });
   if (resolveNativeRuntimeSelection()) {
     // Once per `hack up`, whichever native start path follows (HACK-2026).
     noteNativeBackendBeta({ json: args.options.json === true });
@@ -6943,6 +6979,7 @@ async function runUpCommand({
       up: (beforeStart) =>
         composeRuntimeBackend.up({
           beforeStart: async () => {
+            await assertLoginAutostartCurrent(branch, project.projectRoot);
             await beforeStart?.();
             if (!detach) {
               // Compose owns foreground shutdown. Lifecycle cleanup runs after
@@ -7246,7 +7283,22 @@ function refuseNativeDownOptions(options: DownArgs["options"]): void {
   }
 }
 
-async function handleDown({
+async function handleDown(
+  input: Parameters<typeof handleDownUnlocked>[0]
+): Promise<number> {
+  parseRequestedTarget({ raw: input.args.options.target });
+  // Publish stop intent before waiting for an earlier start to release its lock.
+  await updateAutostartIntent({ ...input, action: "down" });
+  return await withAutostartCommandLock({
+    cwd: input.ctx.cwd,
+    path: input.args.options.path,
+    project: input.args.options.project,
+    branch: input.args.options.branch,
+    run: () => handleDownUnlocked(input),
+  });
+}
+
+async function handleDownUnlocked({
   ctx,
   args,
   deferFinalization,
@@ -7260,7 +7312,6 @@ async function handleDown({
 }): Promise<number> {
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
-  await updateAutostartIntent({ ctx, args, action: "down" });
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,

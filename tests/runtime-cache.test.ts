@@ -830,6 +830,7 @@ test("project polling observes fresh autostart progress without a runtime refres
       runId: "private-run-id",
       bootId: "private-boot-id",
       inProgress: true,
+      waitingForEngine: false,
       startedAt: "2026-01-01T00:00:00Z",
       pending: [project.id],
       started: [],

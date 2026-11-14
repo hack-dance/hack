@@ -496,6 +496,8 @@ linuxTest(
     expect(text).toContain("Restart=on-failure");
     expect(text).toContain("WantedBy=default.target");
     expect(text).toContain("Environment=HACK_NO_INTERACTIVE=1");
+    expect(text).toContain("Environment=HACK_DAEMON_LOGIN_SERVICE=1");
+    expect(text).toContain("KillMode=control-group");
     expect(extractSystemdExecProgram({ unitText: text ?? "" })).toBe(
       "/opt/my tools%/hack"
     );

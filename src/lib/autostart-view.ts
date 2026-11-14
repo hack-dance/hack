@@ -12,6 +12,7 @@ import type {
 
 export interface AutostartLoginRunView {
   readonly in_progress: boolean;
+  readonly waiting_for_engine: boolean;
   readonly started_at: string | null;
   /** Registry project IDs, including active starts until their outcome is recorded. */
   readonly pending: readonly string[];
@@ -126,7 +127,8 @@ export function projectAutostartFromGlobal(opts: {
   return serializeProjectAutostart(opts.project?.autostart, {
     globallyPaused: opts.global.paused,
     starting:
-      opts.global.login_run.in_progress &&
+      (opts.global.login_run.in_progress ||
+        opts.global.login_run.waiting_for_engine) &&
       opts.project !== undefined &&
       opts.global.login_run.pending.includes(opts.project.id),
   });
@@ -141,6 +143,7 @@ export function serializeAutostartGlobal(
     paused: state.paused,
     login_run: {
       in_progress: state.loginRun.inProgress,
+      waiting_for_engine: state.loginRun.waitingForEngine,
       started_at: state.loginRun.startedAt,
       pending: [...state.loginRun.pending],
       started: [...state.loginRun.started],

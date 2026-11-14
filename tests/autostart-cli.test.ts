@@ -29,6 +29,21 @@ const project: RegisteredProject = {
 const mutations: unknown[] = [];
 let reads = 0;
 let globalState = getDefaultAutostartGlobal();
+let explicitRuns = 0;
+let explicitEngineWaitMs: number | undefined;
+const startupMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/daemon/autostart.ts",
+  overrides: {
+    runAutostartAtLogin: async (options: {
+      readonly engineWaitMs?: number;
+    }) => {
+      explicitEngineWaitMs = options.engineWaitMs;
+      explicitRuns += 1;
+      return { waitingForEngine: false };
+    },
+  },
+});
 const viewMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/lib/autostart-view.ts",
@@ -76,6 +91,7 @@ const registryMock = await registerScopedModuleMock({
   },
 });
 beforeAll(() => {
+  startupMock.activate();
   viewMock.activate();
   registryMock.activate();
   gitMock.activate();
@@ -84,10 +100,13 @@ afterAll(() => {
   gitMock.deactivate();
   registryMock.deactivate();
   viewMock.deactivate();
+  startupMock.deactivate();
 });
 beforeEach(() => {
   mutations.length = 0;
   reads = 0;
+  explicitRuns = 0;
+  explicitEngineWaitMs = undefined;
   linkedRoots.clear();
   globalState = getDefaultAutostartGlobal();
 });
@@ -122,7 +141,13 @@ test("autostart add selects current registered project and passes branch without
     })
   );
   expect(result.code).toBe(0);
-  expect(mutations).toEqual([{ id: "example-id", branch: "preview" }]);
+  expect(mutations).toEqual([
+    {
+      id: "example-id",
+      branch: "preview",
+      onPermissionsRepaired: expect.any(Function),
+    },
+  ]);
   expect(result.output).toContain("hack daemon install");
 });
 
@@ -368,4 +393,59 @@ test("explicit --project and positional name refuse before any registry read", a
   expect(result.code).toBe(1);
   expect(reads).toBe(0);
   expect(mutations).toEqual([]);
+});
+
+test("explicit autostart run intentionally invokes the scheduler and emits JSON", async () => {
+  try {
+    const result = await capture(() =>
+      runCli(["autostart", "run", "--json", "--no-interactive"])
+    );
+    expect(result.code).toBe(0);
+    expect(explicitRuns).toBe(1);
+    expect(JSON.parse(result.output)).toMatchObject({
+      ok: true,
+      data: {
+        action: "run",
+        waiting_for_engine: false,
+        autostart_global: { paused: false },
+      },
+    });
+  } finally {
+    resetNoInteractiveFlagForTests();
+  }
+});
+
+test("explicit autostart run validates and forwards a user-supplied engine wait bound", async () => {
+  try {
+    const valid = await capture(() =>
+      runCli([
+        "autostart",
+        "run",
+        "--engine-wait-ms",
+        "5000",
+        "--json",
+        "--no-interactive",
+      ])
+    );
+    expect(valid.code).toBe(0);
+    expect(explicitEngineWaitMs).toBe(5000);
+    expect(explicitRuns).toBe(1);
+    const invalid = await capture(() =>
+      runCli([
+        "autostart",
+        "run",
+        "--engine-wait-ms=0",
+        "--json",
+        "--no-interactive",
+      ])
+    );
+    expect(invalid.code).toBe(1);
+    expect(JSON.parse(invalid.output)).toMatchObject({
+      ok: false,
+      error: { code: "E_USAGE" },
+    });
+    expect(explicitRuns).toBe(1);
+  } finally {
+    resetNoInteractiveFlagForTests();
+  }
 });

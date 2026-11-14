@@ -22,7 +22,9 @@ export function childEnvironment(
     if (
       typeof value === "string" &&
       !unsetKeys.includes(key) &&
-      key !== "HACK_AUTOSTART_LOGIN"
+      key !== "HACK_AUTOSTART_LOGIN" &&
+      key !== "HACK_AUTOSTART_PROJECT_ID" &&
+      key !== "HACK_DAEMON_LOGIN_SERVICE"
     ) {
       env[key] = value;
     }
@@ -47,6 +49,9 @@ export function hackReexecEnvironment(
   const env = childEnvironment(base);
   if (base.HACK_AUTOSTART_LOGIN === "1") {
     env.HACK_AUTOSTART_LOGIN = "1";
+    if (base.HACK_AUTOSTART_PROJECT_ID) {
+      env.HACK_AUTOSTART_PROJECT_ID = base.HACK_AUTOSTART_PROJECT_ID;
+    }
   }
   for (const key of HACK_KEY_MATERIAL_VARIABLES) {
     const value = base[key];

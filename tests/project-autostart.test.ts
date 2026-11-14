@@ -29,6 +29,7 @@ import {
   removeProjectAutostart,
   removeProjectsById,
   setAutostartGlobalPaused,
+  setAutostartLoginWaitingForEngine,
   setProjectAutostart,
   setProjectAutostartPaused,
   touchProjectRegistration,
@@ -881,4 +882,184 @@ test("stored login arrays exceeding the progress bound globally pause automatic 
     paused: true,
     invalid: true,
   });
+});
+
+test("first add rebuilds owned writable legacy registrations on a private inode", async () => {
+  await chmod(registryPath, 0o664);
+  const writer = await open(registryPath, "r+");
+  try {
+    const before = await writer.stat();
+    let receipts = 0;
+    await setProjectAutostart({
+      id: "alpha",
+      registryPath,
+      onPermissionsRepaired: () => {
+        receipts += 1;
+      },
+    });
+    expect(receipts).toBe(1);
+    const published = await stat(registryPath);
+    expect(published.mode & 0o777).toBe(0o600);
+    expect(published.ino).not.toBe(before.ino);
+    const fresh = await readFile(registryPath, "utf8");
+    await writer.write("old descriptor edit", 0, "utf8");
+    expect(await readFile(registryPath, "utf8")).toBe(fresh);
+    expect((await read("beta"))?.name).toBe("beta");
+    expect((await read())?.autostart).toMatchObject({ paused: false });
+    await setProjectAutostart({
+      id: "beta",
+      registryPath,
+      onPermissionsRepaired: () => {
+        receipts += 1;
+      },
+    });
+    expect(receipts).toBe(1);
+  } finally {
+    await writer.close();
+  }
+});
+
+test("first-add repair cannot authorize preexisting marker or global intent", async () => {
+  for (const field of ["project", "global"]) {
+    const registry = {
+      version: 1,
+      projects: [entry("alpha"), entry("beta")],
+      ...(field === "global"
+        ? { autostartGlobal: getDefaultAutostartGlobal() }
+        : {}),
+    };
+    await writeFile(
+      registryPath,
+      JSON.stringify(
+        field === "project"
+          ? {
+              ...registry,
+              projects: [
+                { ...entry("alpha"), autostart: { paused: "unknown" } },
+                entry("beta"),
+              ],
+            }
+          : registry
+      )
+    );
+    await chmod(registryPath, 0o664);
+    const before = await readFile(registryPath, "utf8");
+    let receipt = false;
+    await expect(
+      setProjectAutostart({
+        id: "beta",
+        registryPath,
+        onPermissionsRepaired: () => {
+          receipt = true;
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_PERMISSION" });
+    expect(receipt).toBe(false);
+    expect(await readFile(registryPath, "utf8")).toBe(before);
+    expect((await stat(registryPath)).mode & 0o777).toBe(0o664);
+  }
+});
+
+test("first-add repair still refuses symlinks and partial registrations", async () => {
+  const target = join(root, "legacy-target.json");
+  await rename(registryPath, target);
+  await chmod(target, 0o664);
+  await symlink(target, registryPath);
+  await expect(
+    setProjectAutostart({ id: "alpha", registryPath })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  const invalid = join(root, "partial.json");
+  await writeFile(
+    invalid,
+    JSON.stringify({
+      version: 1,
+      projects: [entry("alpha"), { invalid: true }],
+    }),
+    { mode: 0o664 }
+  );
+  await chmod(invalid, 0o664);
+  await expect(
+    setProjectAutostart({ id: "alpha", registryPath: invalid })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+});
+
+test("engine waiting is visible during the wait and timeout retains unclaimed pending IDs", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  const run = await beginAutostartLoginRun({
+    bootId: "boot-a",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    pendingIds: ["alpha", "beta"],
+    waitingForEngine: true,
+    registryPath,
+  });
+  if (!run?.runId) {
+    throw new Error("Expected a login run");
+  }
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: true,
+    waitingForEngine: true,
+    pending: ["alpha", "beta"],
+  });
+  expect(
+    await setAutostartLoginWaitingForEngine({
+      runId: "stale",
+      waitingForEngine: false,
+      registryPath,
+    })
+  ).toBe(false);
+  await finishAutostartLoginRun({
+    runId: run.runId,
+    waitingForEngine: true,
+    registryPath,
+  });
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: false,
+    waitingForEngine: true,
+    pending: ["alpha", "beta"],
+    failed: [],
+  });
+  expect((await read())?.autostart?.lastAttemptBootId).toBeNull();
+  const resumed = await beginAutostartLoginRun({
+    bootId: "boot-a",
+    startedAt: "2026-01-01T00:10:01.000Z",
+    pendingIds: ["alpha", "beta"],
+    waitingForEngine: true,
+    registryPath,
+  });
+  if (!resumed?.runId) {
+    throw new Error("Expected resumed login run");
+  }
+  expect(
+    await setAutostartLoginWaitingForEngine({
+      runId: resumed.runId,
+      waitingForEngine: false,
+      registryPath,
+    })
+  ).toBe(true);
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: true,
+    waitingForEngine: false,
+  });
+  await finishAutostartLoginRun({ runId: resumed.runId, registryPath });
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: false,
+    waitingForEngine: false,
+    pending: [],
+  });
+});
+
+test("older login progress defaults missing engine-wait state to false", async () => {
+  const global = getDefaultAutostartGlobal();
+  const { waitingForEngine: _absent, ...loginRun } = global.loginRun;
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      version: 1,
+      projects: [],
+      autostartGlobal: { ...global, loginRun },
+    })
+  );
+  expect(
+    (await readAutostartGlobal({ registryPath })).loginRun.waitingForEngine
+  ).toBe(false);
 });

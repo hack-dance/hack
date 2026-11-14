@@ -27,6 +27,7 @@ hack autostart <subcommand> [options]
 | `hack autostart list` | List this machine's always-on projects |
 | `hack autostart pause [project]` | Pause one marked project, or all marked projects |
 | `hack autostart resume [project]` | Resume one marked project, or all marked projects |
+| `hack autostart run` | Intentionally run one non-interactive autostart pass |
 
 ### Options
 
@@ -156,6 +157,26 @@ hack autostart resume [project] [options]
 | --- | --- |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack autostart run`
+
+Intentionally run one non-interactive autostart pass
+
+### Usage
+
+```bash
+hack autostart run [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--engine-wait-ms <ms>` | Engine readiness wait bound (1-3600000 ms; default 600000) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

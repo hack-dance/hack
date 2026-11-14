@@ -6,9 +6,12 @@ import {
   type AutostartDependencies,
   autostartComposeModel,
   autostartRuntimeRefusal,
+  autostartServiceEnvironment,
+  buildAutostartProjectInvocation,
   classifyAutostartContainers,
   classifyAutostartExit,
   completedDependencyServices,
+  resolveAutostartEngineWaitMs,
   runAutostartAtLogin,
   runAutostartSubprocess,
 } from "../src/daemon/autostart.ts";
@@ -90,8 +93,12 @@ async function seed(
   await chmod(registryPath, 0o600);
 }
 
-async function run(signal?: AbortSignal): Promise<void> {
-  await runAutostartAtLogin({ registryPath, dependencies: deps, signal });
+async function run(signal?: AbortSignal) {
+  return await runAutostartAtLogin({
+    registryPath,
+    dependencies: deps,
+    signal,
+  });
 }
 
 async function results() {
@@ -113,9 +120,9 @@ test("login waits for engine, restores installed routing, then starts in stable 
   await run();
   expect(events).toEqual(["routing", "alpha", "bravo", "charlie"]);
   expect(starts).toEqual([
-    { id: "alpha", at: 4000 },
-    { id: "bravo", at: 4500 },
-    { id: "charlie", at: 5000 },
+    { id: "alpha", at: 6000 },
+    { id: "bravo", at: 6500 },
+    { id: "charlie", at: 7000 },
   ]);
   expect(
     (await results()).every((entry) => entry.result?.status === "started")
@@ -184,15 +191,40 @@ test("pause while inspecting prevents dispatch", async () => {
   );
 });
 
-test("engine wait has a finite bound and records a closed skip reason", async () => {
+test("engine wait uses bounded exponential backoff and leaves attempts unclaimed for a later pass", async () => {
   await seed(["alpha"]);
-  deps = { ...deps, engineReady: async () => false };
-  await run();
-  expect(clock).toBe(60_000);
+  const delays: number[] = [];
+  deps = {
+    ...deps,
+    engineReady: async () => false,
+    sleep: async (ms) => {
+      delays.push(ms);
+      clock += ms;
+    },
+  };
+  expect(await run()).toEqual({ waitingForEngine: true });
+  expect(clock).toBe(600_000);
+  expect(delays.slice(0, 5)).toEqual([2000, 4000, 8000, 16_000, 30_000]);
+  expect(Math.max(...delays)).toBe(30_000);
   expect(starts).toEqual([]);
-  expect((await results())[0]?.result).toMatchObject({
-    status: "skipped",
-    reason: "engine_timeout",
+  const project = (await readProjectsRegistry({ registryPath })).projects[0];
+  expect(project?.autostart?.lastAttemptBootId).toBeNull();
+  expect(project?.autostart?.lastResult).toBeNull();
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: false,
+    waitingForEngine: true,
+    pending: ["alpha"],
+    failed: [],
+  });
+  deps = { ...deps, engineReady: async () => true };
+  expect(await run()).toEqual({ waitingForEngine: false });
+  expect(starts.map((start) => start.id)).toEqual(["alpha"]);
+  expect((await readAutostartGlobal({ registryPath })).loginRun).toMatchObject({
+    inProgress: false,
+    waitingForEngine: false,
+    pending: [],
+    started: ["alpha"],
+    failed: [],
   });
 });
 
@@ -733,4 +765,205 @@ test("ambiguous Compose models cannot prove adoption", () => {
   expect(
     autostartComposeModel({ services: { web: { profiles: "debug" } } })
   ).toBeNull();
+});
+
+test("engine wait is explicitly configurable and visible while probing", async () => {
+  await seed(["alpha"]);
+  expect(resolveAutostartEngineWaitMs()).toBe(600_000);
+  expect(() => resolveAutostartEngineWaitMs(0)).toThrow();
+  expect(() => resolveAutostartEngineWaitMs(3_600_001)).toThrow();
+  deps = {
+    ...deps,
+    engineReady: async () => {
+      expect(
+        (await readAutostartGlobal({ registryPath })).loginRun.waitingForEngine
+      ).toBe(true);
+      return false;
+    },
+  };
+  expect(
+    await runAutostartAtLogin({
+      registryPath,
+      dependencies: deps,
+      engineWaitMs: 5000,
+    })
+  ).toEqual({ waitingForEngine: true });
+  expect(clock).toBe(5000);
+});
+
+test("service environment ignores shell Docker Compose and Hack overrides", async () => {
+  const env = autostartServiceEnvironment({
+    home: root,
+    hackHome: join(root, "state"),
+  });
+  expect(Object.keys(env).sort()).toEqual(
+    (process.platform === "linux"
+      ? [
+          "HOME",
+          "HACK_HOME",
+          "USER",
+          "LOGNAME",
+          "TMPDIR",
+          "PATH",
+          "XDG_RUNTIME_DIR",
+        ]
+      : ["HOME", "HACK_HOME", "USER", "LOGNAME", "TMPDIR", "PATH"]
+    ).sort()
+  );
+  const result = await runAutostartSubprocess(
+    [
+      process.execPath,
+      "--eval",
+      'process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("DOCKER_") || key.startsWith("COMPOSE_") || key.startsWith("HACK_")))))',
+    ],
+    {
+      timeoutMs: 5000,
+      env: {
+        ...env,
+        DOCKER_HOST: "invalid://example",
+        COMPOSE_PROFILES: "debug",
+        HACK_GLOBAL_CONFIG_PATH: "/invalid/config",
+        HACK_RUNTIME_BACKEND: "native",
+        HACK_ENV_SECRET_KEY: "synthetic-fixture-key",
+      },
+      projectId: "alpha",
+    }
+  );
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    HACK_HOME: join(root, "state"),
+    HACK_NO_INTERACTIVE: "1",
+    HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+    HACK_DAEMON_AUTOSTART_DISABLE: "1",
+    HACK_AUTOSTART_LOGIN: "1",
+    HACK_AUTOSTART_PROJECT_ID: "alpha",
+  });
+  await expect(runAutostartAtLogin()).rejects.toThrow(
+    "explicit absolute service home paths"
+  );
+});
+
+test("Linux service startup uses an invocation-owned user scope and has no direct fallback", async () => {
+  await seed(["alpha"]);
+  const project = (await readProjectsRegistry({ registryPath })).projects[0];
+  if (!project) {
+    throw new Error("Missing fixture project");
+  }
+  const invocation = ["/fixture/hack"];
+  const args = buildAutostartProjectInvocation({
+    invocation,
+    project,
+    serviceOrigin: true,
+    platform: "linux",
+  });
+  expect(args.slice(0, 4)).toEqual([
+    "systemd-run",
+    "--user",
+    "--scope",
+    "--quiet",
+  ]);
+  expect(args[4]).toMatch(/^--unit=hack-autostart-[a-f0-9-]+$/);
+  expect(args.slice(5)).toEqual([
+    "/fixture/hack",
+    "up",
+    "-d",
+    "--no-interactive",
+    "--json",
+    "--path",
+    project.repoRoot,
+  ]);
+  expect(
+    buildAutostartProjectInvocation({
+      invocation,
+      project,
+      serviceOrigin: false,
+      platform: "linux",
+    })[0]
+  ).toBe("/fixture/hack");
+  expect(
+    buildAutostartProjectInvocation({
+      invocation,
+      project,
+      serviceOrigin: true,
+      platform: "darwin",
+    })[0]
+  ).toBe("/fixture/hack");
+  expect(() =>
+    buildAutostartProjectInvocation({
+      invocation,
+      project,
+      serviceOrigin: true,
+    })
+  ).toThrow();
+});
+
+test("start timeout sends TERM for cleanup before escalating to KILL", async () => {
+  const receipt = join(root, "term-received");
+  const script =
+    'process.on("SIGTERM", async () => { await Bun.write(process.env.HOME + "/term-received", "cleaned"); process.exit(0); }); await Bun.sleep(10000);';
+  const result = await runAutostartSubprocess(
+    [process.execPath, "--eval", script],
+    { timeoutMs: 300, terminationGraceMs: 500, env: { HOME: root } }
+  );
+  expect(result.reason).toBe("start_timeout");
+  expect(await Bun.file(receipt).text()).toBe("cleaned");
+  const startedAt = performance.now();
+  const ignored = await runAutostartSubprocess(
+    [
+      process.execPath,
+      "--eval",
+      'process.on("SIGTERM", () => {}); await Bun.sleep(10000);',
+    ],
+    { timeoutMs: 200, terminationGraceMs: 100, env: { HOME: root } }
+  );
+  expect(ignored.reason).toBe("start_timeout");
+  expect(performance.now() - startedAt).toBeLessThan(2000);
+});
+
+test("login lock cancellations persist only the closed neutral reason vocabulary", () => {
+  for (const reason of ["paused", "global_paused", "target_changed"]) {
+    expect(
+      classifyAutostartExit({
+        exitCode: 1,
+        stdout: JSON.stringify({
+          ok: false,
+          error: {
+            code: "E_CANCELLED",
+            detail: { reason },
+            message: "synthetic omitted details",
+          },
+        }),
+      })
+    ).toEqual({ status: "skipped", reason });
+  }
+  expect(
+    classifyAutostartExit({
+      exitCode: 1,
+      stdout: JSON.stringify({
+        error: {
+          code: "E_CANCELLED",
+          detail: { reason: "synthetic omitted details" },
+        },
+      }),
+    })
+  ).toEqual({ status: "failed", reason: "start_failed" });
+});
+
+test("unrecognized error codes cannot inherit reasons from object prototypes", () => {
+  for (const code of ["constructor", "__proto__", "toString"]) {
+    expect(
+      classifyAutostartExit({
+        exitCode: 1,
+        stdout: JSON.stringify({ error: { code } }),
+      })
+    ).toEqual({ status: "failed", reason: "start_failed" });
+  }
+  expect(
+    classifyAutostartExit({
+      exitCode: 1,
+      stdout: JSON.stringify({
+        error: { code: "E_CANCELLED", detail: { reason: { toString: null } } },
+      }),
+    })
+  ).toEqual({ status: "failed", reason: "start_failed" });
 });

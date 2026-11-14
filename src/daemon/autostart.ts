@@ -1,14 +1,15 @@
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { userInfo } from "node:os";
+import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { YAML } from "bun";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import {
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
+  GLOBAL_PROJECTS_REGISTRY_FILENAME,
 } from "../constants.ts";
-import { childEnvironment } from "../lib/child-environment.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
-import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { findProjectContextAtRoot, readProjectConfig } from "../lib/project.ts";
@@ -21,6 +22,7 @@ import {
   readProjectsRegistry,
   recordAutostartLoginOutcome,
   recordProjectAutostartResult,
+  setAutostartLoginWaitingForEngine,
 } from "../lib/projects-registry.ts";
 
 export type AutostartResult = {
@@ -37,7 +39,10 @@ export type AutostartDependencies = {
   readonly startupRefusal?: () => "native_unsupported" | null;
   readonly now: () => number;
   readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
-  readonly engineReady: () => Promise<boolean>;
+  readonly engineReady: (opts?: {
+    readonly timeoutMs: number;
+    readonly signal?: AbortSignal;
+  }) => Promise<boolean>;
   readonly routingInstalled: () => Promise<boolean>;
   readonly startRouting: (signal?: AbortSignal) => Promise<boolean>;
   readonly inspect: (
@@ -52,10 +57,22 @@ export type AutostartDependencies = {
 
 const MAC_BOOT_TIME_PATTERN = /sec = (\d+), usec = (\d+)/;
 
-const ENGINE_WAIT_MS = 60_000;
+const ENGINE_WAIT_MS = 600_000;
+const ENGINE_POLL_MAX_MS = 30_000;
 const ENGINE_POLL_MS = 2000;
 const START_STAGGER_MS = 500;
 const MAX_CONCURRENT_STARTS = 2;
+
+/** Values come from the owned service's validated paths, never the invoking shell. */
+export type AutostartRuntimeOptions = {
+  readonly home: string;
+  readonly hackHome: string;
+  readonly engineWaitMs?: number;
+  readonly serviceOrigin?: boolean;
+  readonly platform?: NodeJS.Platform;
+};
+
+export type AutostartLoginOutcome = { readonly waitingForEngine: boolean };
 
 /**
  * One replay per OS boot, with a durable claim before each launch. An interrupted
@@ -67,9 +84,31 @@ export async function runAutostartAtLogin(
     readonly signal?: AbortSignal;
     readonly registryPath?: string;
     readonly dependencies?: AutostartDependencies;
+    readonly runtime?: AutostartRuntimeOptions;
+    readonly engineWaitMs?: number;
   } = {}
-): Promise<void> {
-  const deps = opts.dependencies ?? productionDependencies();
+): Promise<AutostartLoginOutcome> {
+  const runtime = opts.runtime;
+  const deps =
+    opts.dependencies ??
+    productionDependencies(requireAutostartRuntime(runtime));
+  const registryPath =
+    opts.registryPath ??
+    (runtime
+      ? resolve(runtime.hackHome, GLOBAL_PROJECTS_REGISTRY_FILENAME)
+      : undefined);
+  const options = { ...opts, registryPath };
+  return await runAutostartLoginPass({ ...options, dependencies: deps });
+}
+
+async function runAutostartLoginPass(opts: {
+  readonly signal?: AbortSignal;
+  readonly registryPath?: string;
+  readonly dependencies: AutostartDependencies;
+  readonly runtime?: AutostartRuntimeOptions;
+  readonly engineWaitMs?: number;
+}): Promise<AutostartLoginOutcome> {
+  const deps = opts.dependencies;
   const prior = await readAutostartGlobal({ registryPath: opts.registryPath });
   if (prior.loginRun.inProgress && prior.loginRun.runId) {
     await finishAutostartLoginRun({
@@ -82,7 +121,7 @@ export async function runAutostartAtLogin(
     requireAutostartTrust: true,
   });
   if (registry.autostartGlobal?.paused) {
-    return;
+    return { waitingForEngine: false };
   }
   const machineBootId = await deps.bootId().catch(() => null);
   const bootId = machineBootId ?? "unavailable";
@@ -99,22 +138,35 @@ export async function runAutostartAtLogin(
         a.name.localeCompare(b.name, "en") || a.id.localeCompare(b.id, "en")
     );
   if (pending.length === 0 || opts.signal?.aborted) {
-    return;
+    return { waitingForEngine: false };
   }
   const loginRun = await beginAutostartLoginRun({
     bootId,
     startedAt: new Date(deps.now()).toISOString(),
     pendingIds: pending.map((project) => project.id),
     registryPath: opts.registryPath,
+    waitingForEngine: true,
   });
   if (!loginRun?.runId) {
-    return;
+    return { waitingForEngine: false };
   }
+  let waitingForEngine = false;
   try {
     const refusal = await prepareAutostartRuntime({
       deps,
       machineBootId,
       signal: opts.signal,
+      registryPath: opts.registryPath,
+      engineWaitMs: opts.engineWaitMs ?? opts.runtime?.engineWaitMs,
+      runId: loginRun.runId,
+    });
+    if (refusal === "engine_timeout" && !opts.signal?.aborted) {
+      waitingForEngine = true;
+      return { waitingForEngine: true };
+    }
+    await setAutostartLoginWaitingForEngine({
+      runId: loginRun.runId,
+      waitingForEngine: false,
       registryPath: opts.registryPath,
     });
     await dispatchAutostartProjects({
@@ -129,8 +181,10 @@ export async function runAutostartAtLogin(
     await finishAutostartLoginRun({
       runId: loginRun.runId,
       registryPath: opts.registryPath,
+      waitingForEngine,
     });
   }
+  return { waitingForEngine: false };
 }
 
 async function dispatchAutostartProjects(opts: {
@@ -206,6 +260,8 @@ async function dispatchAutostartProjects(opts: {
 async function prepareAutostartRuntime(opts: {
   readonly deps: AutostartDependencies;
   readonly machineBootId: string | null;
+  readonly runId: string;
+  readonly engineWaitMs?: number;
   readonly registryPath?: string;
   readonly signal?: AbortSignal;
 }): Promise<string | null> {
@@ -217,19 +273,27 @@ async function prepareAutostartRuntime(opts: {
     return "boot_identity_unavailable";
   }
   const { deps, signal } = opts;
-  const deadline = deps.now() + ENGINE_WAIT_MS;
+  const deadline = deps.now() + resolveAutostartEngineWaitMs(opts.engineWaitMs);
   let ready = false;
+  let delay = ENGINE_POLL_MS;
   while (!signal?.aborted) {
     if (
       (await readAutostartGlobal({ registryPath: opts.registryPath })).paused
     ) {
       return "global_paused";
     }
-    ready = await deps.engineReady().catch(() => false);
+    const remaining = deadline - deps.now();
+    if (remaining <= 0) {
+      break;
+    }
+    ready = await deps
+      .engineReady({ timeoutMs: Math.min(2000, remaining), signal })
+      .catch(() => false);
     if (ready || deps.now() >= deadline) {
       break;
     }
-    await deps.sleep(Math.min(ENGINE_POLL_MS, deadline - deps.now()), signal);
+    await deps.sleep(Math.min(delay, deadline - deps.now()), signal);
+    delay = Math.min(delay * 2, ENGINE_POLL_MAX_MS);
   }
   if (!ready) {
     return "engine_timeout";
@@ -240,6 +304,11 @@ async function prepareAutostartRuntime(opts: {
   ) {
     return "global_paused";
   }
+  await setAutostartLoginWaitingForEngine({
+    runId: opts.runId,
+    waitingForEngine: false,
+    registryPath: opts.registryPath,
+  });
   if (await deps.routingInstalled()) {
     if (
       signal?.aborted ||
@@ -376,6 +445,14 @@ export function classifyAutostartExit(opts: {
     /* A malformed response is a failure, never a reason to retain output. */
   }
   if (
+    code === "E_CANCELLED" &&
+    isRecord(detail) &&
+    typeof detail.reason === "string" &&
+    ["paused", "global_paused", "target_changed"].includes(detail.reason)
+  ) {
+    return { status: "skipped", reason: detail.reason };
+  }
+  if (
     code === "E_CONFIG_INVALID" &&
     isRecord(detail) &&
     (detail.reason === "pending_env_migration" ||
@@ -387,11 +464,11 @@ export function classifyAutostartExit(opts: {
   if (code === "E_PROJECT_NOT_FOUND") {
     return { status: "skipped", reason: "project_unavailable" };
   }
-  const skipReasons: Readonly<Record<string, string>> = {
-    E_INTERACTIVE_REQUIRED: "interactive_required",
-    E_ENV_KEY_MISSING: "env_key_missing",
-  };
-  const reason = typeof code === "string" ? skipReasons[code] : undefined;
+  const skipReasons = new Map([
+    ["E_INTERACTIVE_REQUIRED", "interactive_required"],
+    ["E_ENV_KEY_MISSING", "env_key_missing"],
+  ]);
+  const reason = typeof code === "string" ? skipReasons.get(code) : undefined;
   return reason
     ? { status: "skipped", reason }
     : {
@@ -411,15 +488,21 @@ export function autostartRuntimeRefusal(
   }
 }
 
-function productionDependencies(): AutostartDependencies {
+function productionDependencies(
+  runtime: AutostartRuntimeOptions
+): AutostartDependencies {
+  const env = autostartServiceEnvironment(runtime);
   const invocation = [
     process.execPath,
     ...(Bun.main.startsWith("/$bunfs/")
       ? []
-      : [fileURLToPath(new URL("../../index.ts", import.meta.url))]),
+      : [
+          "--no-env-file",
+          fileURLToPath(new URL("../../index.ts", import.meta.url)),
+        ]),
   ];
   return {
-    startupRefusal: autostartRuntimeRefusal,
+    startupRefusal: () => autostartRuntimeRefusal(env),
     now: Date.now,
     sleep: async (ms, signal) => {
       if (signal?.aborted) {
@@ -435,21 +518,25 @@ function productionDependencies(): AutostartDependencies {
         signal?.addEventListener("abort", finish, { once: true });
       });
     },
-    bootId: readMachineBootId,
-    engineReady: async () =>
+    bootId: () => readMachineBootId(env),
+    engineReady: async (probe) =>
       (
         await runAutostartSubprocess(
           ["docker", "info", "--format", "{{.ID}}"],
           {
-            timeoutMs: 2000,
+            timeoutMs: probe?.timeoutMs ?? 2000,
+            terminationGraceMs: 0,
+            signal: probe?.signal,
+            env,
           }
         )
       ).exitCode === 0,
     routingInstalled: async () =>
       Bun.file(
         resolve(
-          resolveGlobalHackDir(),
+          runtime.hackHome,
           GLOBAL_CADDY_DIR_NAME,
+          GLOBAL_PROJECTS_REGISTRY_FILENAME,
           GLOBAL_CADDY_COMPOSE_FILENAME
         )
       ).exists(),
@@ -460,33 +547,70 @@ function productionDependencies(): AutostartDependencies {
           {
             timeoutMs: 60_000,
             signal,
+            env,
           }
         )
       ).exitCode === 0,
-    inspect: inspectComposeProject,
+    inspect: (project, signal) => inspectComposeProject(project, signal, env),
     start: async (project, signal) => {
-      const args = [
-        ...invocation,
-        "up",
-        "-d",
-        "--no-interactive",
-        "--json",
-        "--path",
-        project.repoRoot,
-      ];
-      if (project.autostart?.branch) {
-        args.push(`--branch=${project.autostart.branch}`);
-      }
+      const args = buildAutostartProjectInvocation({
+        invocation,
+        project,
+        serviceOrigin: runtime.serviceOrigin,
+        platform: runtime.platform,
+      });
       return classifyAutostartExit(
-        await runAutostartSubprocess(args, { timeoutMs: 120_000, signal })
+        await runAutostartSubprocess(args, {
+          timeoutMs: 120_000,
+          signal,
+          env,
+          projectId: project.id,
+        })
       );
     },
   };
 }
 
+/** Linux login-service children own a separate scope so hackd replacement leaves helpers alive. */
+export function buildAutostartProjectInvocation(opts: {
+  readonly invocation: readonly string[];
+  readonly project: RegisteredProject;
+  readonly serviceOrigin?: boolean;
+  readonly platform?: NodeJS.Platform;
+}): readonly string[] {
+  const args = [
+    ...opts.invocation,
+    "up",
+    "-d",
+    "--no-interactive",
+    "--json",
+    "--path",
+    opts.project.repoRoot,
+  ];
+  if (opts.project.autostart?.branch) {
+    args.push(`--branch=${opts.project.autostart.branch}`);
+  }
+  if (opts.serviceOrigin && !opts.platform) {
+    throw new Error(
+      "A service-origin autostart requires its explicit platform."
+    );
+  }
+  return opts.serviceOrigin && opts.platform === "linux"
+    ? [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        `--unit=hack-autostart-${randomUUID()}`,
+        ...args,
+      ]
+    : args;
+}
+
 async function inspectComposeProject(
   project: RegisteredProject,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  env: Readonly<Record<string, string | undefined>> = {}
 ): Promise<"running" | "stopped" | "unknown"> {
   const context = await findProjectContextAtRoot({
     projectRoot: project.repoRoot,
@@ -500,11 +624,7 @@ async function inspectComposeProject(
     return "unknown";
   }
   // An uncertain selected graph must run ordinary up rather than adopt a subset.
-  if (
-    project.autostart?.branch ||
-    process.env.COMPOSE_FILE ||
-    process.env.COMPOSE_PROFILES
-  ) {
+  if (project.autostart?.branch || env.COMPOSE_FILE || env.COMPOSE_PROFILES) {
     return "stopped";
   }
   const model = await readAutostartComposeModel(context.composeFile);
@@ -527,7 +647,7 @@ async function inspectComposeProject(
       "--format",
       "{{.ID}}",
     ],
-    { timeoutMs: 5000, signal }
+    { timeoutMs: 5000, signal, env }
   );
   if (result.exitCode !== 0) {
     return "unknown";
@@ -544,7 +664,7 @@ async function inspectComposeProject(
       '{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Status}}|{{.State.ExitCode}}',
       ...ids,
     ],
-    { timeoutMs: 5000, signal }
+    { timeoutMs: 5000, signal, env }
   );
   if (inspected.exitCode !== 0) {
     return "unknown";
@@ -716,7 +836,9 @@ export function completedDependencyServices(
   return completed;
 }
 
-async function readMachineBootId(): Promise<string | null> {
+async function readMachineBootId(
+  env: Readonly<Record<string, string | undefined>>
+): Promise<string | null> {
   if (process.platform === "linux") {
     try {
       return (
@@ -732,12 +854,51 @@ async function readMachineBootId(): Promise<string | null> {
       ["sysctl", "-n", "kern.boottime"],
       {
         timeoutMs: 2000,
+        env,
       }
     );
     const match = result.stdout.match(MAC_BOOT_TIME_PATTERN);
     return result.exitCode === 0 && match ? `${match[1]}:${match[2]}` : null;
   }
   return null;
+}
+
+function requireAutostartRuntime(
+  runtime: AutostartRuntimeOptions | undefined
+): AutostartRuntimeOptions {
+  if (!(runtime && isAbsolute(runtime.home) && isAbsolute(runtime.hackHome))) {
+    throw new Error("Autostart requires explicit absolute service home paths.");
+  }
+  return runtime;
+}
+
+export function resolveAutostartEngineWaitMs(value?: number): number {
+  const duration = value ?? ENGINE_WAIT_MS;
+  if (!Number.isSafeInteger(duration) || duration < 1 || duration > 3_600_000) {
+    throw new Error(
+      "Autostart engine wait must be from 1 to 3600000 milliseconds."
+    );
+  }
+  return duration;
+}
+
+/** No Docker, Compose, credential or application settings are inherited from a shell. */
+export function autostartServiceEnvironment(
+  runtime: AutostartRuntimeOptions
+): Record<string, string> {
+  requireAutostartRuntime(runtime);
+  const user = userInfo();
+  return {
+    HOME: runtime.home,
+    HACK_HOME: runtime.hackHome,
+    USER: user.username,
+    LOGNAME: user.username,
+    TMPDIR: "/tmp",
+    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    ...(process.platform === "linux"
+      ? { XDG_RUNTIME_DIR: `/run/user/${user.uid}` }
+      : {}),
+  };
 }
 
 /** Own process group, no TTY, no keychain, no recursive daemon startup, bounded output and lifetime. */
@@ -747,6 +908,8 @@ export async function runAutostartSubprocess(
     readonly timeoutMs: number;
     readonly signal?: AbortSignal;
     readonly env?: Readonly<Record<string, string | undefined>>;
+    readonly projectId?: string;
+    readonly terminationGraceMs?: number;
   }
 ): Promise<{
   exitCode: number;
@@ -758,12 +921,12 @@ export async function runAutostartSubprocess(
   }
   const proc = Bun.spawn([...argv], {
     env: {
-      ...childEnvironment(opts.env ?? process.env, {
-        HACK_NO_INTERACTIVE: "1",
-        HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
-        HACK_DAEMON_AUTOSTART_DISABLE: "1",
-      }),
+      ...filterAutostartServiceEnvironment(opts.env ?? {}),
+      HACK_NO_INTERACTIVE: "1",
+      HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+      HACK_DAEMON_AUTOSTART_DISABLE: "1",
       HACK_AUTOSTART_LOGIN: "1",
+      ...(opts.projectId ? { HACK_AUTOSTART_PROJECT_ID: opts.projectId } : {}),
     },
     stdin: "ignore",
     stdout: "pipe",
@@ -771,15 +934,15 @@ export async function runAutostartSubprocess(
     detached: true,
   });
   let reason: "output_limit" | "daemon_stopped" | "start_timeout" | undefined;
+  let stopping: Promise<void> | undefined;
   const stop = (
     failure: "output_limit" | "daemon_stopped" | "start_timeout"
   ) => {
     reason ??= failure;
-    try {
-      process.kill(-proc.pid, "SIGKILL");
-    } catch {
-      /* Own child may already have exited. */
-    }
+    stopping ??= terminateAutostartGroup({
+      pid: proc.pid,
+      graceMs: opts.terminationGraceMs ?? 2000,
+    });
   };
   const timer = setTimeout(() => stop("start_timeout"), opts.timeoutMs);
   const abort = () => stop("daemon_stopped");
@@ -802,6 +965,7 @@ export async function runAutostartSubprocess(
       stdout += decoder.decode(chunk, { stream: true });
     }
     const exitCode = await proc.exited;
+    await stopping;
     return {
       exitCode: reason ? 124 : exitCode,
       stdout: reason ? "" : stdout,
@@ -812,4 +976,52 @@ export async function runAutostartSubprocess(
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", abort);
   }
+}
+
+const AUTOSTART_SERVICE_ENV_KEYS = new Set([
+  "HOME",
+  "HACK_HOME",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "XDG_RUNTIME_DIR",
+  "PATH",
+]);
+
+function filterAutostartServiceEnvironment(
+  env: Readonly<Record<string, string | undefined>>
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const key of AUTOSTART_SERVICE_ENV_KEYS) {
+    const value = env[key];
+    if (value !== undefined) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+async function terminateAutostartGroup(opts: {
+  readonly pid: number;
+  readonly graceMs: number;
+}): Promise<void> {
+  const signal = (value: "SIGTERM" | "SIGKILL") => {
+    try {
+      process.kill(-opts.pid, value);
+    } catch {
+      /* The owned group is already absent. */
+    }
+  };
+  signal("SIGTERM");
+  const deadline =
+    performance.now() + Math.max(0, Math.min(opts.graceMs, 5000));
+  while (performance.now() < deadline) {
+    try {
+      process.kill(-opts.pid, 0);
+    } catch {
+      return;
+    }
+    await Bun.sleep(Math.min(50, Math.max(1, deadline - performance.now())));
+  }
+  signal("SIGKILL");
 }

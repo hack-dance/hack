@@ -4,6 +4,7 @@ import {
   CliUsageError,
   type CommandHandlerFor,
   defineCommand,
+  defineOption,
   withHandler,
 } from "../cli/command.ts";
 import { optBranch, optJson, optProject } from "../cli/options.ts";
@@ -12,12 +13,18 @@ import {
   unknownProjectMessage,
 } from "../cli/project-selector.ts";
 import {
+  resolveAutostartEngineWaitMs,
+  runAutostartAtLogin,
+} from "../daemon/autostart.ts";
+import {
   projectAutostartFromGlobal,
   readAutostartServiceReady,
   serializeAutostartGlobal,
 } from "../lib/autostart-view.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { isLinkedGitWorktree } from "../lib/git-worktree.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import { sanitizeBranchSlug } from "../lib/project.ts";
 import { PROJECT_SELECTOR_PATTERN } from "../lib/project-name.ts";
 import {
@@ -63,6 +70,21 @@ const resumeSpec = defineCommand({
   group: "Project",
   options: [optProject, optJson],
   positionals: projectPositionals,
+  subcommands: [],
+} as const);
+const optEngineWaitMs = defineOption({
+  name: "engineWaitMs",
+  type: "number",
+  long: "--engine-wait-ms",
+  valueHint: "<ms>",
+  description: "Engine readiness wait bound (1-3600000 ms; default 600000)",
+} as const);
+const runSpec = defineCommand({
+  name: "run",
+  summary: "Intentionally run one non-interactive autostart pass",
+  group: "Project",
+  options: [optJson, optEngineWaitMs],
+  positionals: [],
   subcommands: [],
 } as const);
 const listSpec = defineCommand({
@@ -193,7 +215,14 @@ const add: CommandHandlerFor<typeof addSpec> = async ({ ctx, args }) => {
       "Invalid --branch value; use a branch alias containing letters or digits."
     );
   }
-  const updated = await setProjectAutostart({ id: project.id, branch });
+  const updated = await setProjectAutostart({
+    id: project.id,
+    branch,
+    onPermissionsRepaired: () =>
+      process.stderr.write(
+        "Repaired this machine's unmarked projects registry permissions to 0600 before enabling autostart.\n"
+      ),
+  });
   await writeMutation({
     json: args.options.json,
     action: "add",
@@ -322,6 +351,56 @@ const list: CommandHandlerFor<typeof listSpec> = async ({ args }) => {
   return 0;
 };
 
+const run: CommandHandlerFor<typeof runSpec> = async ({ args }) => {
+  let engineWaitMs: number;
+  try {
+    engineWaitMs = resolveAutostartEngineWaitMs(args.options.engineWaitMs);
+  } catch {
+    throw new CliUsageError(
+      "--engine-wait-ms must be an integer from 1 to 3600000."
+    );
+  }
+  const result = await runAutostartAtLogin({
+    engineWaitMs,
+    runtime: {
+      home: resolveUserHomeDir(),
+      hackHome: resolveGlobalHackDir(),
+      serviceOrigin: false,
+      platform: process.platform,
+    },
+  });
+  const registry = await readProjectsRegistry();
+  if (args.options.json) {
+    const global = serializeAutostartGlobal(
+      registry.autostartGlobal ?? getDefaultAutostartGlobal(),
+      await readAutostartServiceReady()
+    );
+    emitCliResult({
+      result: okResult({
+        data: {
+          action: "run",
+          waiting_for_engine: result.waitingForEngine,
+          autostart_global: global,
+          projects: registry.projects
+            .filter((project) => project.autostart)
+            .map((project) => ({
+              project_id: project.id,
+              name: project.name,
+              autostart: projectAutostartFromGlobal({ project, global }),
+            })),
+        },
+      }),
+    });
+  } else {
+    process.stdout.write(
+      result.waitingForEngine
+        ? "Autostart is waiting for the engine; no project start was claimed. Retry with: hack autostart run --no-interactive\n"
+        : "Autostart pass finished. Already attempted projects were not replayed; use hack up -d for manual recovery.\n"
+    );
+  }
+  return 0;
+};
+
 export const autostartCommand = defineCommand({
   name: "autostart",
   summary: "Manage always-on projects on this machine",
@@ -334,5 +413,6 @@ export const autostartCommand = defineCommand({
     withHandler(listSpec, list),
     withHandler(pauseSpec, pause),
     withHandler(resumeSpec, resume),
+    withHandler(runSpec, run),
   ],
 } as const);

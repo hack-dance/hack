@@ -749,7 +749,8 @@ async function runProjects(opts: {
       const autostartState = serializeProjectAutostart(p.autostart, {
         globallyPaused: global.paused,
         starting:
-          global.login_run.in_progress &&
+          (global.login_run.in_progress ||
+            global.login_run.waiting_for_engine) &&
           p.projectId !== undefined &&
           global.login_run.pending.includes(p.projectId),
       }).state;
@@ -954,7 +955,8 @@ function outputProjectsJson(opts: {
         autostart: serializeProjectAutostart(view.autostart, {
           globallyPaused: opts.autostartGlobal.paused,
           starting:
-            opts.autostartGlobal.login_run.in_progress &&
+            (opts.autostartGlobal.login_run.in_progress ||
+              opts.autostartGlobal.login_run.waiting_for_engine) &&
             view.projectId !== undefined &&
             opts.autostartGlobal.login_run.pending.includes(view.projectId),
         }),

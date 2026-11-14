@@ -243,10 +243,17 @@ impl HackApp {
                 .font_weight(FontWeight::BOLD)
                 .child("Hack"),
         );
+        // Project groups scroll; the header above and the machine rows below
+        // stay fixed, so every project stays reachable however many there are.
+        let mut body = v_flex()
+            .id("project-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
         match &list.phase {
             Phase::Loading => {
                 for i in 0..3usize {
-                    col = col.child(
+                    body = body.child(
                         div()
                             .id(("skeleton", i))
                             .mx_3()
@@ -260,21 +267,21 @@ impl HackApp {
             Phase::Empty | Phase::CliMissing | Phase::Error { .. } => {}
             Phase::Ready => {
                 if !list.running.is_empty() {
-                    col = col.child(header("RUNNING"));
+                    body = body.child(header("RUNNING"));
                     for r in &list.running {
-                        col = col.child(self.project_row(r, cx));
+                        body = body.child(self.project_row(r, cx));
                     }
                 }
                 if !list.stopped.is_empty() {
-                    col = col.child(header("STOPPED"));
+                    body = body.child(header("STOPPED"));
                     for r in &list.stopped {
-                        col = col.child(self.project_row(r, cx));
+                        body = body.child(self.project_row(r, cx));
                     }
                 }
             }
         }
         let t = cx.theme().clone();
-        col.child(div().flex_1()).child(
+        col.child(body).child(
             v_flex()
                 .border_t_1()
                 .border_color(t.sidebar_border)

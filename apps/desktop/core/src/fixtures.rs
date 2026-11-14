@@ -23,6 +23,8 @@ pub enum Fixture {
     EngineDown,
     Error,
     CliMissing,
+    /// More projects than fit in the sidebar (scrolling).
+    ManyProjects,
     // Detail states (selected project).
     Stopped,
     Starting,
@@ -34,7 +36,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -42,6 +44,7 @@ impl Fixture {
         Self::EngineDown,
         Self::Error,
         Self::CliMissing,
+        Self::ManyProjects,
         Self::Stopped,
         Self::Starting,
         Self::Running,
@@ -61,6 +64,7 @@ impl Fixture {
             Self::EngineDown => "engine-down",
             Self::Error => "error",
             Self::CliMissing => "cli-missing",
+            Self::ManyProjects => "many-projects",
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
@@ -333,6 +337,14 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
     let mut projects = project(f);
     if f == Fixture::Empty {
         projects.projects.clear();
+    }
+    if f == Fixture::ManyProjects {
+        for i in 1..=40 {
+            let status = if i % 3 == 0 { "running" } else { "stopped" };
+            projects
+                .projects
+                .push(simple(&format!("project-{i:02}"), status, "compose", false));
+        }
     }
     let daemon = match f {
         Fixture::DaemonDown => None,

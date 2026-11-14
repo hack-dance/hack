@@ -1,12 +1,21 @@
-import { describe, expect, test } from "bun:test";
-import { execSync } from "node:child_process";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { once } from "node:events";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
   createConnection,
   createServer,
   type Server,
   type Socket,
 } from "node:net";
+import { join } from "node:path";
 
 import {
   validateControlPlaneRouteTarget,
@@ -14,20 +23,27 @@ import {
 } from "../src/daemon/control-plane-route-validation.ts";
 import { startRequestTargetProxy } from "../src/daemon/request-target-proxy.ts";
 import { handleSessionRoutes } from "../src/daemon/routes/sessions.ts";
+import { exec } from "../src/lib/shell.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
-/**
- * Check if tmux is available (required for session tests).
- */
-function isTmuxAvailable(): boolean {
-  try {
-    execSync("which tmux", { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
+/** Real session-route tests require tmux, always on a task-owned socket. */
+const tmuxPath = Bun.which("tmux");
+const hasTmux = tmuxPath !== null;
+let sessionRoot = "";
+let sessionSocket = "";
+let savedPath: string | undefined;
+
+/** Never address the default server, even when a route case fails after create. */
+function privateTmux(args: readonly string[]) {
+  if (!(tmuxPath && sessionSocket)) {
+    throw new Error("Session route fixture has no private tmux socket.");
   }
+  return exec([tmuxPath, "-f", "/dev/null", "-S", sessionSocket, ...args], {
+    stdin: "ignore",
+    unsetEnvKeys: ["TMUX"],
+    timeoutMs: 3000,
+  });
 }
-
-const hasTmux = isTmuxAvailable();
 
 /**
  * Helper to create a mock Request.
@@ -510,6 +526,41 @@ describe("request target proxy", () => {
 });
 
 describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
+  beforeAll(async () => {
+    // Short path for Darwin's Unix socket limit; each process owns a new server.
+    sessionRoot = await mkdtemp("/tmp/hack-session-routes-");
+    sessionSocket = join(sessionRoot, "tmux.sock");
+    await mkdir(join(sessionRoot, "bin"));
+    // The route executes real tmux through this shim. Never inherit a caller's
+    // socket or config; only the fixture's private server can be created/stopped.
+    const quotedTmux = `'${tmuxPath?.replaceAll("'", "'\\''")}'`;
+    await writeFile(
+      join(sessionRoot, "bin", "tmux"),
+      `#!/bin/sh\nunset TMUX\nif [ "$1" = new-session ]; then\n  exec ${quotedTmux} -f /dev/null -S '${sessionSocket}' "$@" /bin/sleep 300\nfi\nexec ${quotedTmux} -f /dev/null -S '${sessionSocket}' "$@"\n`,
+      { mode: 0o700 }
+    );
+  });
+  beforeEach(() => {
+    savedPath = process.env.PATH;
+    process.env.PATH = `${join(sessionRoot, "bin")}:${savedPath ?? "/usr/bin:/bin"}`;
+  });
+  afterEach(async () => {
+    try {
+      await privateTmux(["kill-server"]);
+      expect((await privateTmux(["list-sessions"])).exitCode).toBe(1);
+    } finally {
+      restoreEnv("PATH", savedPath);
+    }
+  });
+  afterAll(async () => {
+    try {
+      await privateTmux(["kill-server"]);
+    } finally {
+      await rm(sessionRoot, { recursive: true, force: true });
+      sessionRoot = "";
+      sessionSocket = "";
+    }
+  });
   describe("route matching", () => {
     test("returns null for non-session routes", async () => {
       const req = mockRequest({ method: "GET", path: "/v1/status" });
@@ -595,8 +646,10 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       });
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
-      // May fail if tmux isn't available, but should not fail on validation
-      expect(result?.status).not.toBe(400);
+      expect(result?.status).toBe(201);
+      expect(
+        (await privateTmux(["has-session", "-t", "=myproject123"])).exitCode
+      ).toBe(0);
     });
 
     test("accepts names with dashes", async () => {
@@ -607,7 +660,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       });
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
-      expect(result?.status).not.toBe(400);
+      expect(result?.status).toBe(201);
     });
 
     test("accepts names with underscores", async () => {
@@ -618,7 +671,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       });
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
-      expect(result?.status).not.toBe(400);
+      expect(result?.status).toBe(201);
     });
 
     test("rejects names with dots", async () => {

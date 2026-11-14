@@ -167,7 +167,24 @@ export function agentPaths(
 export async function verifyAgentInput(opts: {
   snapshot: UpgradeSnapshot;
   target: Planned;
-  previous?: UpgradeApplyTarget;
+}): Promise<"safe" | "conflict"> {
+  return await verifyAgentState({ ...opts, output: false, removedPaths: [] });
+}
+
+/** Authorized removals may advance an earlier attempt's unchanged after-state. */
+export async function verifyAgentOutput(opts: {
+  snapshot: UpgradeSnapshot;
+  target: Planned;
+  removedPaths: readonly string[];
+}): Promise<"safe" | "conflict"> {
+  return await verifyAgentState({ ...opts, output: true });
+}
+
+async function verifyAgentState(opts: {
+  snapshot: UpgradeSnapshot;
+  target: Planned;
+  output: boolean;
+  removedPaths: readonly string[];
 }): Promise<"safe" | "conflict"> {
   try {
     const paths = agentPaths(opts.snapshot, opts.target);
@@ -185,7 +202,13 @@ export async function verifyAgentInput(opts: {
         return "conflict";
       }
       const current = await readApplyState(path);
-      if (entry.after !== null) {
+      if (opts.output && opts.removedPaths.includes(path)) {
+        if (current.state.kind !== "absent") {
+          return "conflict";
+        }
+        continue;
+      }
+      if (!opts.output && entry.after !== null) {
         if (!sameApplyState(current.state, entry.after)) {
           return "conflict";
         }

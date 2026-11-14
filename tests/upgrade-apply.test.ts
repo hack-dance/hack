@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderCodexSkill } from "../src/agents/codex-skill.ts";
+import { applyPluginMigration } from "../src/agents/plugin-migration.ts";
 import { HACK_PLUGIN_ID } from "../src/agents/plugin-replacement.ts";
 import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import { runUpgradeApply } from "../src/lib/upgrade-apply.ts";
@@ -1417,4 +1418,70 @@ test("an absent agent target cannot resume with a damaged original blob", async 
     "refused"
   );
   expect(await lstat(agent).catch(() => null)).toBeNull();
+}, 60_000);
+
+test("a failed unchanged agent removal can retry successfully and roll back without overwrite", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const agent = await staleHomeAgentFile();
+  const original = renderCodexSkill();
+  await writeFile(agent, original);
+  await chmod(agent, 0o640);
+  await writeFile(
+    join(home, ".codex/config.toml"),
+    `[plugins."${HACK_PLUGIN_ID}"]\nenabled = true\n`
+  );
+  await writeFile(
+    join(a.repoRoot, "AGENTS.md"),
+    "<!-- hack:agent-docs:start -->\nold\n<!-- hack:agent-docs:end -->\n"
+  );
+  const first = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    only: ["agent-integrations"],
+    collect: collectUpgradeSnapshotTargets,
+    applyPluginMigration: async (input) => {
+      if (input.scopes[0]?.scope !== "global") {
+        return await applyPluginMigration(input);
+      }
+      return {
+        status: "applied",
+        plan: { checks: [], entries: [] },
+        manifestPath: input.upgradeSnapshotManifest ?? "",
+        results: [
+          {
+            scope: "global",
+            target: "codex-hack-cli-skill",
+            path: agent,
+            status: "error",
+            message: "Fixture removal refused without changing its input.",
+          },
+        ],
+      };
+    },
+  });
+  expect(first.status).toBe("partial");
+  if (first.status !== "partial") {
+    throw new Error("Expected first-attempt failure");
+  }
+  expect(await readFile(agent, "utf8")).toBe(original);
+  const resumed = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    resumeManifest: first.coverage.manifest_path,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(resumed.status).toBe("applied");
+  expect(await lstat(agent).catch(() => null)).toBeNull();
+  expect(
+    (
+      await restoreUpgradeSnapshot({
+        manifestPath: first.coverage.manifest_path,
+      })
+    ).status
+  ).toBe("restored");
+  expect(await readFile(agent, "utf8")).toBe(original);
+  expect((await stat(agent)).mode & 0o777).toBe(0o640);
 }, 60_000);

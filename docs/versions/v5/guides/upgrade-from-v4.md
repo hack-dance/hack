@@ -137,6 +137,8 @@ and gaps; it cannot be combined with `--only`, `--project` or `--snapshot-root`.
 It rechecks the
 registered checkouts, refuses unexpected file edits, and verifies the snapshot's
 original blobs before writing. It never chooses the latest run automatically.
+If an agent removal failed without changing its file, a later retry can record
+the successful removal while keeping ordinary rollback available.
 Rollback restores ignore rules and removed agent files together, with their exact
 bytes and modes. Files edited after apply require an explicit `--overwrite` to
 restore; their current copies are retained. Service state and installed versions

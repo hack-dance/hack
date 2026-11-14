@@ -199,3 +199,8 @@ recorded snapshot after-state remains authoritative after a refused retry. Real
 SIGKILL regressions at both journal publication boundaries preserve a user's
 revert through a subsequent resume. Missing or damaged original agent blobs refuse
 resume even when the removed target is absent; absence alone is not recovery proof.
+Pre-write agent admission enforces the saved after-state; post-write verification
+admits only the owner's authorized removal output before advancing that state.
+An unchanged injected failure followed by a real removal/restore regression
+covers successful retry without `--overwrite`; it does not qualify OS permission
+failures or arbitrary concurrent writers.

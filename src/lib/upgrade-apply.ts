@@ -68,7 +68,7 @@ import {
   UPGRADE_APPLY_JOURNAL_KIND as JOURNAL_KIND,
   UPGRADE_APPLY_JOURNAL_VERSION as JOURNAL_VERSION,
   loadApplyRecovery,
-  verifyAgentInput,
+  verifyAgentOutput,
   verifyApplyInput,
 } from "./upgrade-apply-recovery.ts";
 
@@ -719,7 +719,19 @@ async function applyTarget(opts: {
   ) {
     const paths = agentPaths(opts.snapshot, target);
     if (
-      (await verifyAgentInput({ snapshot: opts.snapshot, target })) !== "safe"
+      (await verifyAgentOutput({
+        snapshot: opts.snapshot,
+        target,
+        removedPaths:
+          migrated.status === "applied"
+            ? migrated.results
+                .filter(
+                  (entry) =>
+                    entry.status === "removed" || entry.status === "missing"
+                )
+                .map((entry) => entry.path)
+            : [],
+      })) !== "safe"
     ) {
       return { ...result, status: "failed", message: NOT_RECORDED };
     }

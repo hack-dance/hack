@@ -311,7 +311,7 @@ const PROXY_SERVICES = new Set(["caddy", "coredns"]);
 /**
  * Whether an inspect record carries what the proxy assessment reads: its
  * Compose service label and, for a proxy service, its State flags and its
- * network map. A record of another service is complete with its label; one
+ * network map with a string address for every endpoint. A record of another service is complete with its label; one
  * that cannot be classified or assessed is not.
  */
 function isCompleteContainerRecord(record: unknown): boolean {
@@ -337,6 +337,12 @@ function isCompleteContainerRecord(record: unknown): boolean {
     typeof state.Restarting === "boolean" &&
     typeof state.Paused === "boolean" &&
     isRecord(settings) &&
-    isRecord(settings.Networks)
+    isRecord(settings.Networks) &&
+    // Every endpoint the assessment reads must carry a string address
+    // (Docker reports "" for one without an IPv4 address); an empty map is
+    // a confirmed "on no network".
+    Object.values(settings.Networks).every(
+      (endpoint) => isRecord(endpoint) && typeof endpoint.IPAddress === "string"
+    )
   );
 }

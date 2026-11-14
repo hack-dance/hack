@@ -620,6 +620,14 @@ test("proxy inspect records must carry what the assessment reads", async () => {
         { Config: { Labels: { "com.docker.compose.service": "other" } } },
       ])
     ).toBe(true);
+    // An explicitly empty address is an answer Docker gives: readable.
+    expect(
+      await inspect([
+        caddy({
+          NetworkSettings: { Networks: { "hack-dev": { IPAddress: "" } } },
+        }),
+      ])
+    ).not.toBe("unknown");
     // Incomplete: nothing to classify by, a proxy without State, with a
     // partial State, without networks, and a valid record beside one of
     // these.
@@ -630,11 +638,35 @@ test("proxy inspect records must carry what the assessment reads", async () => {
       [caddy({ State: { Running: true } })],
       [caddy({ NetworkSettings: {} })],
       [caddy(), {}],
+      // Endpoints without a readable address.
+      [caddy({ NetworkSettings: { Networks: { "hack-dev": null } } })],
+      [caddy({ NetworkSettings: { Networks: { "hack-dev": {} } } })],
+      [
+        caddy({
+          NetworkSettings: { Networks: { "hack-dev": { IPAddress: 42 } } },
+        }),
+      ],
+      [
+        caddy(),
+        caddy({
+          Name: "/hack-dev-proxy-coredns-1",
+          Config: { Labels: { "com.docker.compose.service": "coredns" } },
+          NetworkSettings: { Networks: { "hack-dev": {} } },
+        }),
+      ],
     ]) {
-      expect({ records, ok: await inspect(records) }).toEqual({
-        records,
-        ok: "unknown",
-      });
+      // In dynamic-IP mode (no reserved addresses) and static-IP mode.
+      for (const compose of [
+        "services: {}\n",
+        "services:\n  caddy:\n    networks:\n      hack-dev:\n        ipv4_address: 172.30.0.2\n",
+      ]) {
+        await writeFile(file, compose);
+        expect({ records, compose, ok: await inspect(records) }).toEqual({
+          records,
+          compose,
+          ok: "unknown",
+        });
+      }
     }
   } finally {
     await rm(dir, { recursive: true, force: true });

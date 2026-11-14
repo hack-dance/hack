@@ -132,6 +132,7 @@ export async function updateNativeAutostartIntent(opts: {
 
 /** Resolve the same registered instance for command serialization without native legacy discovery. */
 export async function withAutostartCommandLock<T>(opts: {
+  readonly action: "up" | "down";
   readonly cwd: string;
   readonly path?: string;
   readonly project?: string;
@@ -139,6 +140,9 @@ export async function withAutostartCommandLock<T>(opts: {
   readonly run: () => Promise<T>;
 }): Promise<T> {
   const login = process.env.HACK_AUTOSTART_LOGIN === "1";
+  if (!login && opts.action === "up") {
+    return await opts.run();
+  }
   const branch = opts.branch?.trim()
     ? sanitizeBranchSlug(opts.branch.trim())
     : null;
@@ -189,22 +193,11 @@ export async function withAutostartCommandLock<T>(opts: {
   const projectId = login
     ? process.env.HACK_AUTOSTART_PROJECT_ID
     : registration?.id;
-  if (login && (!projectId || projectId.length > 128)) {
-    throw new HackCliError({
-      code: "E_CANCELLED",
-      message: "Autostart requires an explicit registered project identity.",
-    });
-  }
-  if (
-    login &&
-    !registry.projects.some(
-      (entry) =>
-        entry.id === projectId && entry.repoRoot === project.projectRoot
-    )
-  ) {
-    throw new HackCliError({
-      code: "E_CANCELLED",
-      message: "Autostart project path changed; no start ran.",
+  if (login) {
+    assertLoginProjectIdentity({
+      projectId,
+      projects: registry.projects,
+      root: project.projectRoot,
     });
   }
   const scope = {
@@ -224,6 +217,29 @@ export async function withAutostartCommandLock<T>(opts: {
       return await opts.run();
     },
   });
+}
+
+function assertLoginProjectIdentity(opts: {
+  readonly projectId?: string;
+  readonly projects: readonly RegisteredProject[];
+  readonly root: string;
+}): void {
+  if (!opts.projectId || opts.projectId.length > 128) {
+    throw new HackCliError({
+      code: "E_CANCELLED",
+      message: "Autostart requires an explicit registered project identity.",
+    });
+  }
+  if (
+    !opts.projects.some(
+      (entry) => entry.id === opts.projectId && entry.repoRoot === opts.root
+    )
+  ) {
+    throw new HackCliError({
+      code: "E_CANCELLED",
+      message: "Autostart project path changed; no start ran.",
+    });
+  }
 }
 
 /** Read the original login identity again at the container publication boundary. */

@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import {
   type CliContext,
@@ -25,7 +26,8 @@ import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { isLinkedGitWorktree } from "../lib/git-worktree.ts";
 import { resolveUserHomeDir } from "../lib/home-dir.ts";
-import { sanitizeBranchSlug } from "../lib/project.ts";
+import { findProjectContext, sanitizeBranchSlug } from "../lib/project.ts";
+import { ProjectInputSelectionError } from "../lib/project-input-selection.ts";
 import { PROJECT_SELECTOR_PATTERN } from "../lib/project-name.ts";
 import {
   getDefaultAutostartGlobal,
@@ -215,9 +217,24 @@ const add: CommandHandlerFor<typeof addSpec> = async ({ ctx, args }) => {
       "Invalid --branch value; use a branch alias containing letters or digits."
     );
   }
+  // Observe only cwd: an unsafe registry must never redirect permission repair
+  // into a named checkout the user has not independently selected here.
+  const observed = await findProjectContext(ctx.cwd).catch((error: unknown) => {
+    if (error instanceof ProjectInputSelectionError) {
+      return null;
+    }
+    throw error;
+  });
+  const observedProject = observed
+    ? {
+        repoRoot: await realpath(observed.projectRoot),
+        projectDir: await realpath(observed.projectDir),
+      }
+    : undefined;
   const updated = await setProjectAutostart({
     id: project.id,
     branch,
+    observedProject,
     onPermissionsRepaired: () =>
       process.stderr.write(
         "Repaired this machine's unmarked projects registry permissions to 0600 before enabling autostart.\n"

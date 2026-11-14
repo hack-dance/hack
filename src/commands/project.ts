@@ -249,7 +249,6 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
-import { isLinkedGitWorktree } from "../lib/git-worktree.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -367,7 +366,6 @@ import {
 } from "../lib/project-shared-helpers.ts";
 import {
   readProjectsRegistry,
-  setProjectAutostart,
   setProjectAutostartPaused,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
@@ -431,6 +429,7 @@ import {
   updateNativeAutostartIntent,
   withAutostartCommandLock,
 } from "./project-autostart-intent.ts";
+import { enableAutostartForUp } from "./project-autostart-opt-in.ts";
 import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
@@ -6469,24 +6468,12 @@ async function updateAutostartIntent(opts: {
   }
   const branch = resolvedBranch.branch;
   if (opts.action === "up" && opts.args.options.always) {
-    if (await isLinkedGitWorktree({ repoRoot: project.projectRoot })) {
-      throw new CliUsageError(
-        "Autostart currently requires the primary checkout. Run hack up --always there with --branch <name>."
-      );
-    }
-    const registered = await upsertProjectRegistration({ project });
-    if (registered.status === "conflict") {
-      throw new CliUsageError(
-        "Project registration conflicts; inspect hack projects before enabling autostart."
-      );
-    }
-    await setProjectAutostart({
-      id: registered.project.id,
+    await enableAutostartForUp({
+      project,
+      startDir: resolveStartDir(opts.ctx, opts.args.options.path),
+      selectorName: selector?.name,
       branch,
-      onPermissionsRepaired: () =>
-        process.stderr.write(
-          "Repaired this machine's unmarked projects registry permissions to 0600 before enabling autostart.\n"
-        ),
+      registry,
     });
     return;
   }
@@ -6529,6 +6516,7 @@ async function handleUp(
     return await run();
   }
   return await withAutostartCommandLock({
+    action: "up",
     cwd: input.ctx.cwd,
     path: input.args.options.path,
     project: input.args.options.project,
@@ -7290,6 +7278,7 @@ async function handleDown(
   // Publish stop intent before waiting for an earlier start to release its lock.
   await updateAutostartIntent({ ...input, action: "down" });
   return await withAutostartCommandLock({
+    action: "down",
     cwd: input.ctx.cwd,
     path: input.args.options.path,
     project: input.args.options.project,

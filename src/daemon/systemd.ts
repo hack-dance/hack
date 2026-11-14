@@ -508,6 +508,7 @@ export function renderSystemdUnit(opts: {
     "%h/.local/bin",
     "%h/.bun/bin",
     "%h/.hack/bin",
+    "%h/.docker/bin",
   ].join(":");
   return [
     "# Managed by hack: written by `hack daemon install`, removed by `hack daemon uninstall`.",
@@ -1983,6 +1984,7 @@ export function renderedServicePathDirectories(opts: {
     resolve(opts.home, ".local/bin"),
     resolve(opts.home, ".bun/bin"),
     resolve(opts.home, ".hack/bin"),
+    resolve(opts.home, ".docker/bin"),
   ];
 }
 

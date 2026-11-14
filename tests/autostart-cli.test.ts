@@ -49,6 +49,11 @@ const viewMock = await registerScopedModuleMock({
   specifier: "../src/lib/autostart-view.ts",
   overrides: { readAutostartServiceReady: async () => false },
 });
+const projectMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/project.ts",
+  overrides: { findProjectContext: async () => null },
+});
 const linkedRoots = new Set<string>();
 const gitMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -91,6 +96,7 @@ const registryMock = await registerScopedModuleMock({
   },
 });
 beforeAll(() => {
+  projectMock.activate();
   startupMock.activate();
   viewMock.activate();
   registryMock.activate();
@@ -101,6 +107,7 @@ afterAll(() => {
   registryMock.deactivate();
   viewMock.deactivate();
   startupMock.deactivate();
+  projectMock.deactivate();
 });
 beforeEach(() => {
   mutations.length = 0;
@@ -145,6 +152,7 @@ test("autostart add selects current registered project and passes branch without
     {
       id: "example-id",
       branch: "preview",
+      observedProject: undefined,
       onPermissionsRepaired: expect.any(Function),
     },
   ]);

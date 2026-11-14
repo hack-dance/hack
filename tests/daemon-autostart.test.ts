@@ -8,6 +8,7 @@ import {
   autostartRoutingInstalled,
   autostartRuntimeRefusal,
   autostartServiceEnvironment,
+  autostartServicePath,
   buildAutostartProjectInvocation,
   classifyAutostartContainers,
   classifyAutostartExit,
@@ -989,4 +990,46 @@ test("unrecognized error codes cannot inherit reasons from object prototypes", (
       }),
     })
   ).toEqual({ status: "failed", reason: "start_failed" });
+});
+
+test("service PATH derives known user install directories from its owned home and ignores hostile shell PATH", () => {
+  const previous = process.env.PATH;
+  try {
+    process.env.PATH = "/hostile/shell/bin";
+    const linux = autostartServiceEnvironment({
+      home: root,
+      hackHome: join(root, "state"),
+      platform: "linux",
+    });
+    expect(linux.PATH).toBe(
+      autostartServicePath({ home: root, platform: "linux" })
+    );
+    expect(linux.PATH?.split(":")).toEqual([
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin",
+      join(root, ".local/bin"),
+      join(root, ".bun/bin"),
+      join(root, ".hack/bin"),
+      join(root, ".docker/bin"),
+    ]);
+    const mac = autostartServicePath({ home: root, platform: "darwin" }).split(
+      ":"
+    );
+    expect(mac).toContain("/opt/homebrew/bin");
+    expect(mac).toContain(join(root, ".bun/bin"));
+    expect(mac).toContain(join(root, ".hack/bin"));
+    expect(mac).toContain(join(root, ".docker/bin"));
+    expect(mac).not.toContain(join(root, ".local/bin"));
+    expect(linux.PATH).not.toContain("/hostile/shell/bin");
+    expect(mac).not.toContain("/hostile/shell/bin");
+  } finally {
+    if (previous === undefined) {
+      process.env.PATH = undefined;
+    } else {
+      process.env.PATH = previous;
+    }
+  }
 });

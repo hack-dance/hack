@@ -550,17 +550,17 @@ test("fresh registry replacement isolates a writer retained on the preserved uns
   }
 });
 
-async function createTrustProject() {
-  const projectDir = join(root, "alpha", ".hack");
+async function createTrustProject(name = "alpha") {
+  const projectDir = join(root, name, ".hack");
   await mkdir(projectDir, { recursive: true });
   const configFile = join(projectDir, "hack.config.json");
   const composeFile = join(projectDir, "docker-compose.yml");
   const envFile = join(projectDir, ".env");
-  await writeFile(configFile, JSON.stringify({ name: "alpha" }));
+  await writeFile(configFile, JSON.stringify({ name }));
   await writeFile(composeFile, "services: {}\n");
   await writeFile(envFile, "");
   return {
-    projectRoot: join(root, "alpha"),
+    projectRoot: join(root, name),
     projectDir,
     projectDirName: ".hack" as const,
     composeFile,
@@ -590,7 +590,15 @@ test("ordinary writes retain trusted intent and can upgrade unmarked legacy perm
   await chmod(registryPath, 0o664);
   expect((await upsertProjectRegistration({ project })).status).toBe("updated");
   expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
-  await setProjectAutostart({ id: "alpha", branch: "preview", registryPath });
+  await setProjectAutostart({
+    id: "alpha",
+    branch: "preview",
+    registryPath,
+    observedProject: {
+      repoRoot: project.projectRoot,
+      projectDir: project.projectDir,
+    },
+  });
   await upsertProjectRegistration({
     project,
     nowIso: "2027-01-01T00:00:00.000Z",
@@ -885,6 +893,7 @@ test("stored login arrays exceeding the progress bound globally pause automatic 
 });
 
 test("first add rebuilds owned writable legacy registrations on a private inode", async () => {
+  const project = await createTrustProject();
   await chmod(registryPath, 0o664);
   const writer = await open(registryPath, "r+");
   try {
@@ -893,6 +902,10 @@ test("first add rebuilds owned writable legacy registrations on a private inode"
     await setProjectAutostart({
       id: "alpha",
       registryPath,
+      observedProject: {
+        repoRoot: project.projectRoot,
+        projectDir: project.projectDir,
+      },
       onPermissionsRepaired: () => {
         receipts += 1;
       },
@@ -906,9 +919,14 @@ test("first add rebuilds owned writable legacy registrations on a private inode"
     expect(await readFile(registryPath, "utf8")).toBe(fresh);
     expect((await read("beta"))?.name).toBe("beta");
     expect((await read())?.autostart).toMatchObject({ paused: false });
+    const other = await createTrustProject("beta");
     await setProjectAutostart({
       id: "beta",
       registryPath,
+      observedProject: {
+        repoRoot: other.projectRoot,
+        projectDir: other.projectDir,
+      },
       onPermissionsRepaired: () => {
         receipts += 1;
       },
@@ -917,6 +935,164 @@ test("first add rebuilds owned writable legacy registrations on a private inode"
   } finally {
     await writer.close();
   }
+});
+
+test("writable legacy first add requires an independent current-checkout observation", async () => {
+  await createTrustProject();
+  await chmod(registryPath, 0o664);
+  const before = await readFile(registryPath, "utf8");
+  await expect(
+    setProjectAutostart({ id: "alpha", registryPath })
+  ).rejects.toThrow("Change into the reviewed project checkout");
+  expect(await readFile(registryPath, "utf8")).toBe(before);
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o664);
+});
+
+test("writable legacy first add refuses tampered root or project directory", async () => {
+  const project = await createTrustProject();
+  const otherRoot = join(root, "other-project");
+  const otherDir = join(otherRoot, ".hack");
+  await mkdir(otherDir, { recursive: true });
+  const observedProject = {
+    repoRoot: project.projectRoot,
+    projectDir: project.projectDir,
+  };
+  for (const tampered of [
+    { ...entry("alpha"), repoRoot: otherRoot, projectDir: otherDir },
+    { ...entry("alpha"), projectDir: otherDir },
+  ]) {
+    await writeFile(
+      registryPath,
+      JSON.stringify({ version: 1, projects: [tampered, entry("beta")] })
+    );
+    await chmod(registryPath, 0o664);
+    const before = await readFile(registryPath, "utf8");
+    let receipt = false;
+    await expect(
+      setProjectAutostart({
+        id: "alpha",
+        registryPath,
+        observedProject,
+        onPermissionsRepaired: () => {
+          receipt = true;
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_PERMISSION" });
+    expect(receipt).toBe(false);
+    expect(await readFile(registryPath, "utf8")).toBe(before);
+    expect((await stat(registryPath)).mode & 0o777).toBe(0o664);
+  }
+});
+
+test("trusted named targets do not require a current-checkout observation", async () => {
+  await setProjectAutostart({ id: "alpha", registryPath });
+  expect((await read())?.autostart?.paused).toBe(false);
+});
+
+test("repair preserves review provenance for every other copied legacy registration", async () => {
+  const first = await createTrustProject();
+  const secondary = await createTrustProject("secondary");
+  await writeFile(secondary.configFile, JSON.stringify({ name: "beta" }));
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      version: 1,
+      projects: [
+        entry("alpha"),
+        {
+          ...entry("beta"),
+          repoRoot: secondary.projectRoot,
+          projectDir: secondary.projectDir,
+        },
+      ],
+    })
+  );
+  await chmod(registryPath, 0o664);
+  await setProjectAutostart({
+    id: "alpha",
+    registryPath,
+    observedProject: {
+      repoRoot: first.projectRoot,
+      projectDir: first.projectDir,
+    },
+  });
+  expect((await read())?.autostartRequiresReview).toBeUndefined();
+  expect((await read("beta"))?.autostartRequiresReview).toBe(true);
+  await upsertProjectRegistration({ project: secondary });
+  await touchProjectRegistration({
+    project: secondary,
+    nowIso: "2027-01-01T00:00:00.000Z",
+  });
+  expect((await read("beta"))?.autostartRequiresReview).toBe(true);
+  const before = await readFile(registryPath, "utf8");
+  await expect(
+    setProjectAutostart({ id: "beta", registryPath })
+  ).rejects.toThrow("Change into the reviewed project checkout");
+  expect(await readFile(registryPath, "utf8")).toBe(before);
+  await setProjectAutostart({
+    id: "beta",
+    registryPath,
+    observedProject: {
+      repoRoot: secondary.projectRoot,
+      projectDir: secondary.projectDir,
+    },
+  });
+  expect((await read("beta"))?.autostartRequiresReview).toBeUndefined();
+  expect((await read("beta"))?.autostart?.paused).toBe(false);
+});
+
+test("ordinary legacy republication records review provenance before later named opt-in", async () => {
+  const project = await createTrustProject();
+  await chmod(registryPath, 0o664);
+  await upsertProjectRegistration({ project });
+  expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+  expect((await read())?.autostartRequiresReview).toBe(true);
+  expect((await read("beta"))?.autostartRequiresReview).toBe(true);
+  await expect(
+    setProjectAutostart({ id: "alpha", registryPath })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await setProjectAutostart({
+    id: "alpha",
+    registryPath,
+    observedProject: {
+      repoRoot: project.projectRoot,
+      projectDir: project.projectDir,
+    },
+  });
+  expect((await read())?.autostartRequiresReview).toBeUndefined();
+  expect((await read("beta"))?.autostartRequiresReview).toBe(true);
+});
+
+test("an existing marker cannot bypass retained checkout-review provenance", async () => {
+  const project = await createTrustProject();
+  await setProjectAutostart({ id: "alpha", registryPath });
+  const registry = await readProjectsRegistry({ registryPath });
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      ...registry,
+      projects: registry.projects.map((entry) =>
+        entry.id === "alpha"
+          ? { ...entry, autostartRequiresReview: true }
+          : entry
+      ),
+    })
+  );
+  await setProjectAutostartPaused({ id: "alpha", paused: false, registryPath });
+  expect(
+    await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).toBeNull();
+  await setProjectAutostart({
+    id: "alpha",
+    registryPath,
+    observedProject: {
+      repoRoot: project.projectRoot,
+      projectDir: project.projectDir,
+    },
+  });
+  expect(
+    await claimProjectAutostart({ id: "alpha", bootId: "boot-a", registryPath })
+  ).not.toBeNull();
 });
 
 test("first-add repair cannot authorize preexisting marker or global intent", async () => {

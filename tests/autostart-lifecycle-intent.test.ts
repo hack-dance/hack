@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { classifyAutostartExit } from "../src/daemon/autostart.ts";
@@ -331,4 +339,170 @@ test("a login child cannot resume a manually paused project or substitute a diff
   expect(mismatched.exitCode).not.toBe(0);
   expect(mismatched.stdout).toContain("project path changed");
   expect((await marker()).paused).toBe(false);
+});
+
+async function legacyWritableRegistry(redirect = false) {
+  await writeRegistry(false);
+  const path = join(root, "home", ".hack", "projects.json");
+  const registry = await Bun.file(path).json();
+  Reflect.deleteProperty(registry.projects[0], "autostart");
+  if (redirect) {
+    const other = join(root, "redirected");
+    await mkdir(join(other, ".hack"), { recursive: true });
+    await writeFile(
+      join(other, ".hack", "hack.config.json"),
+      '{"name":"sample"}'
+    );
+    await writeFile(
+      join(other, ".hack", "docker-compose.yml"),
+      "services:\n  app:\n    image: example.invalid/app\n"
+    );
+    registry.projects[0].repoRoot = other;
+    registry.projects[0].projectDir = join(other, ".hack");
+  }
+  await writeFile(path, JSON.stringify(registry));
+  await chmod(path, 0o664);
+  return { path, before: await Bun.file(path).text() };
+}
+
+test("named add refuses laundering an unsafe legacy registry redirected away from cwd", async () => {
+  const { path, before } = await legacyWritableRegistry(true);
+  const result = await run([
+    "autostart",
+    "add",
+    "--project",
+    "sample",
+    "--json",
+  ]);
+  expect(result.exitCode).not.toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: { code: "E_PERMISSION" },
+  });
+  expect(await Bun.file(path).text()).toBe(before);
+  expect((await stat(path)).mode & 0o777).toBe(0o664);
+  expect(await marker()).toBeUndefined();
+});
+
+test("named add outside a project refuses unsafe first opt-in but preserves trusted named selection", async () => {
+  const { path, before } = await legacyWritableRegistry();
+  const refused = await run(
+    ["autostart", "add", "--project", "sample", "--json"],
+    false,
+    root
+  );
+  expect(refused.exitCode).not.toBe(0);
+  expect(JSON.parse(refused.stdout)).toMatchObject({
+    ok: false,
+    error: { code: "E_PERMISSION" },
+  });
+  expect(await Bun.file(path).text()).toBe(before);
+  await chmod(path, 0o600);
+  const trusted = await run(
+    ["autostart", "add", "--project", "sample", "--json"],
+    false,
+    root
+  );
+  expect(trusted.exitCode, trusted.stdout + trusted.stderr).toBe(0);
+  expect((await marker()).paused).toBe(false);
+});
+
+test("reviewed cwd legacy first opt-in rebuilds a private registry and reports its repair", async () => {
+  const { path } = await legacyWritableRegistry();
+  const result = await run([
+    "autostart",
+    "add",
+    "--project",
+    "sample",
+    "--json",
+  ]);
+  expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: true,
+    data: { action: "add" },
+  });
+  expect((await stat(path)).mode & 0o777).toBe(0o600);
+  expect(result.stderr).toContain("registry permissions to 0600");
+  expect((await marker()).paused).toBe(false);
+});
+
+test("manual up bypasses the auxiliary lock while every legacy down retains serialization", async () => {
+  const locks = join(root, "home", ".hack", "autostart-locks");
+  await mkdir(locks, { mode: 0o777 });
+  await chmod(locks, 0o777);
+  const path = join(root, "home", ".hack", "projects.json");
+  for (const marked of [false, true]) {
+    await writeRegistry(false);
+    if (!marked) {
+      const registry = await Bun.file(path).json();
+      Reflect.deleteProperty(registry.projects[0], "autostart");
+      await writeFile(path, JSON.stringify(registry));
+    }
+    const up = await run(["up", "--json", "-d"]);
+    expect(up.stdout + up.stderr).not.toContain("lock directory is unsafe");
+    const down = await run(["down", "--json"]);
+    expect(down.stdout + down.stderr).toContain("lock directory is unsafe");
+  }
+});
+
+test("up --always cannot launder a redirected unsafe named registration before opt-in", async () => {
+  const { path, before } = await legacyWritableRegistry(true);
+  const result = await run([
+    "up",
+    "--always",
+    "--project",
+    "sample",
+    "--json",
+    "-d",
+  ]);
+  expect(result.exitCode).not.toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: { code: "E_PERMISSION" },
+  });
+  expect(await Bun.file(path).text()).toBe(before);
+  expect((await stat(path)).mode & 0o777).toBe(0o664);
+});
+
+test("down still waits for an admitted login child after its marker is removed", async () => {
+  await writeRegistry(false);
+  const registryPath = join(root, "home", ".hack", "projects.json");
+  const scope = { projectId: "sample", composeProject: "sample", branch: null };
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const start = withAutostartProjectLock({
+    scope,
+    registryPath,
+    run: async () => {
+      entered.resolve();
+      await release.promise;
+      await assertAutostartProjectCurrent({ scope, registryPath });
+    },
+  }).then(
+    () => ({ refused: false }),
+    (error: unknown) => ({ refused: true, error })
+  );
+  await entered.promise;
+  const registry = await Bun.file(registryPath).json();
+  Reflect.deleteProperty(registry.projects[0], "autostart");
+  await writeFile(registryPath, JSON.stringify(registry));
+  let finished = false;
+  const down = run(["down", "--json"]).then((value) => {
+    finished = true;
+    return value;
+  });
+  try {
+    await Bun.sleep(650);
+    expect(finished).toBe(false);
+    release.resolve();
+    expect(await start).toMatchObject({
+      refused: true,
+      error: { code: "E_CANCELLED" },
+    });
+    await down;
+    expect(finished).toBe(true);
+  } finally {
+    release.resolve();
+    await Promise.allSettled([start, down]);
+  }
 });

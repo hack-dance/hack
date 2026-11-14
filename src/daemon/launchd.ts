@@ -200,7 +200,7 @@ export function renderLaunchdPlist(opts: LaunchdPlistOptions): string {
     "    <key>HOME</key>",
     `    <string>${opts.home}</string>`,
     "    <key>PATH</key>",
-    `    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${opts.home}/.bun/bin:${opts.home}/.hack/bin</string>`,
+    `    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${opts.home}/.bun/bin:${opts.home}/.hack/bin:${opts.home}/.docker/bin</string>`,
     "  </dict>",
   ];
 

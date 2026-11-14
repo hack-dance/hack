@@ -900,11 +900,39 @@ export function autostartServiceEnvironment(
     USER: user.username,
     LOGNAME: user.username,
     TMPDIR: "/tmp",
-    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    PATH: autostartServicePath({
+      home: runtime.home,
+      platform: runtime.platform ?? process.platform,
+    }),
     ...(process.platform === "linux"
       ? { XDG_RUNTIME_DIR: `/run/user/${user.uid}` }
       : {}),
   };
+}
+
+/** Service lookup includes known per-user installs without accepting the caller's PATH. */
+export function autostartServicePath(opts: {
+  readonly home: string;
+  readonly platform: NodeJS.Platform;
+}): string {
+  const system =
+    opts.platform === "darwin"
+      ? [
+          "/usr/local/bin",
+          "/opt/homebrew/bin",
+          "/usr/bin",
+          "/bin",
+          "/usr/sbin",
+          "/sbin",
+        ]
+      : ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+  return [
+    ...system,
+    ...(opts.platform === "linux" ? [resolve(opts.home, ".local/bin")] : []),
+    resolve(opts.home, ".bun/bin"),
+    resolve(opts.home, ".hack/bin"),
+    resolve(opts.home, ".docker/bin"),
+  ].join(":");
 }
 
 /** Own process group, no TTY, no keychain, no recursive daemon startup, bounded output and lifetime. */

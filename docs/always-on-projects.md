@@ -21,7 +21,9 @@ changes the marker; it does not start anything immediately.
 stop it. Start and stop serialize on a machine-local instance lock: `down` waits
 for an in-flight login start, then stops it before returning success. The login
 child checks trusted intent under that lock and immediately before starting
-containers. A later `hack up` clears the pause. Pausing does not stop running services:
+containers. This auxiliary lock covers login starts and Compose stops, including a stop
+after a marker was removed while startup was in flight. Ordinary manual starts
+do not hold it, so a long manual image build cannot block `down` on this lock. A later `hack up` clears the pause. Pausing does not stop running services:
 
 ```sh
 hack autostart pause --project sample
@@ -61,8 +63,9 @@ Docker later in the same boot. Global routing starts only if its installed
 then unpaused projects are considered in name/ID order. Starts are at least
 500 milliseconds apart, with at most two in progress. Each uses the running
 daemon's CLI executable and the ordinary `up -d --no-interactive` path.
-Children receive a fixed environment allow-list and fixed executable search
-path; launching-shell `DOCKER_*`, `COMPOSE_*` and `HACK_*` overrides are not copied.
+Children receive a fixed environment allow-list and an executable search
+path built from system directories and known Bun, Hack and Docker directories
+under the owned home (plus Linux `.local/bin`); launching-shell `DOCKER_*`, `COMPOSE_*` and `HACK_*` overrides are not copied.
 Hack adds only its explicit internal noninteractive and identity settings.
 Already-running instances are adopted without repeating startup hooks. An unknown
 runtime state is skipped rather than taken as proof that the instance is down.
@@ -84,7 +87,12 @@ Before trusting intent, Hack opens `projects.json` without following links and
 requires a regular file owned by the current user, with no group or other write
 access. On first opt-in, an unmarked legacy registry that is a regular file owned
 by the user is atomically replaced with a fresh `0600` file, with a one-line
-notice. The old inode is never reused, so an already-open writer cannot change
+notice. The selected checkout must be independently observed from the current
+directory before legacy paths can authorize startup. For first opt-in from a
+legacy registry, change into the reviewed checkout and run `hack autostart add`
+or `hack up -d --always`. Other copied registrations retain a review requirement
+until they are opted in from their own checkout. Trusted named targets continue
+to work from other directories. The old inode is never reused, so an already-open writer cannot change
 the replacement. This migration refuses symlinks, foreign ownership, malformed
 registries and preexisting intent in an unsafe file. That check repeats at every autostart read and mutation. Unsafe registry
 permissions refuse startup. Do not repair a formerly writable registry with
@@ -218,3 +226,16 @@ policy on their next write. This fails closed but loses opt-ins; avoid mixing
 versions until the upgrade-handling slice supplies compatibility diagnostics.
 The service-presence check also cannot yet prove its executable supports
 autostart; reinstall the service with this CLI after upgrading.
+
+The fixed login environment does not support an engine available only through
+a shell `DOCKER_HOST` override (including some rootless setups). Configure a
+working default Docker context for the service account; shell overrides are
+never copied. Avoid explicit `autostart run` while a service pass is active:
+claims prevent duplicate project attempts, but concurrent passes do not share
+one dispatch cap in this slice.
+
+An explicit upgrade snapshot rollback restores the registry at snapshot time.
+With `--overwrite` that can also restore old pauses and boot claims; it does not
+merge newer machine intent. Pause automatic starts before such a rollback and
+review the restored markers before resuming. Upgrade-aware state reconciliation
+is part of HACK-2216.

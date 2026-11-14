@@ -105,6 +105,8 @@ export interface RegisteredProject {
   /** Linked git worktree checkouts of this project seen by the CLI (additive; absent in older registries). */
   readonly worktrees?: readonly RegisteredProjectWorktree[];
   readonly autostart?: ProjectAutostart;
+  /** Legacy paths copied from writable storage still need independent review before first opt-in. */
+  readonly autostartRequiresReview?: true;
 }
 
 export interface ProjectsRegistry {
@@ -403,7 +405,13 @@ async function readProjectsRegistryForMutation(): Promise<ProjectsRegistry> {
   return observed.autostartGlobal ||
     observed.projects.some((project) => project.autostart)
     ? await readProjectsRegistry({ requireAutostartTrust: true })
-    : observed;
+    : (
+        await readAutostartMutationRegistry({
+          registryPath: getRegistryPath(),
+          allowLegacyPermissionRepair: true,
+          requireObservedLegacyProject: false,
+        })
+      ).registry;
 }
 
 type RegistrationUpsertOptions = {
@@ -1027,6 +1035,11 @@ export async function setProjectAutostart(
   opts: AutostartRegistryOptions & {
     readonly id: string;
     readonly branch?: string | null;
+    /** Independently observed current checkout; unsafe legacy paths cannot establish this proof. */
+    readonly observedProject?: {
+      readonly repoRoot: string;
+      readonly projectDir: string;
+    };
     /** Fired only after rebuilding an owned, unmarked legacy registry on a new private inode. */
     readonly onPermissionsRepaired?: () => void;
   }
@@ -1035,6 +1048,7 @@ export async function setProjectAutostart(
   await mutateProjectAutostart({
     ...opts,
     allowLegacyPermissionRepair: true,
+    requireObservedProjectReview: true,
     update: (project) => {
       const branch = opts.branch ?? null;
       const old = project.autostart;
@@ -1052,7 +1066,8 @@ export async function setProjectAutostart(
         lastResult: old?.lastResult ?? null,
         lastAttemptBootId: old?.lastAttemptBootId ?? null,
       };
-      selected = { ...project, autostart };
+      const { autostartRequiresReview: _reviewed, ...reviewed } = project;
+      selected = { ...reviewed, autostart };
       return selected;
     },
   });
@@ -1120,6 +1135,7 @@ export async function claimProjectAutostart(
     update: (project) => {
       const marker = project.autostart;
       if (
+        project.autostartRequiresReview ||
         !marker ||
         marker.invalid ||
         marker.paused ||
@@ -1171,6 +1187,11 @@ async function mutateProjectAutostart(
     readonly id?: string;
     readonly respectGlobalPause?: boolean;
     readonly allowLegacyPermissionRepair?: boolean;
+    readonly requireObservedProjectReview?: boolean;
+    readonly observedProject?: {
+      readonly repoRoot: string;
+      readonly projectDir: string;
+    };
     readonly onPermissionsRepaired?: () => void;
     readonly update: (project: RegisteredProject) => RegisteredProject;
   }
@@ -1184,10 +1205,24 @@ async function mutateProjectAutostart(
       const { registry: current, permissionsRepaired } =
         await readAutostartMutationRegistry({
           registryPath,
+          id: opts.id,
+          observedProject: opts.observedProject,
           allowLegacyPermissionRepair: opts.allowLegacyPermissionRepair,
         });
       if (opts.respectGlobalPause && current.autostartGlobal?.paused) {
         return [];
+      }
+      if (
+        opts.requireObservedProjectReview &&
+        current.projects.some(
+          (project) => project.id === opts.id && project.autostartRequiresReview
+        )
+      ) {
+        await assertObservedLegacyRepairProject({
+          registry: current,
+          id: opts.id,
+          observedProject: opts.observedProject,
+        });
       }
       if (opts.id !== undefined) {
         selectRegisteredProjectById({
@@ -1232,12 +1267,19 @@ async function mutateProjectAutostart(
 
 /**
  * An explicit first opt-in may copy current-user-owned unmarked v4 registrations
- * to a fresh 0600 inode. Existing automatic-start intent cannot be authenticated
+ * to a fresh 0600 inode only after independently observed checkout paths match.
+ * Existing automatic-start intent cannot be authenticated
  * this way: it requires separate preservation and a reviewed rebuild instead.
  */
 async function readAutostartMutationRegistry(opts: {
   readonly registryPath: string;
   readonly allowLegacyPermissionRepair?: boolean;
+  readonly requireObservedLegacyProject?: boolean;
+  readonly id?: string;
+  readonly observedProject?: {
+    readonly repoRoot: string;
+    readonly projectDir: string;
+  };
 }): Promise<{
   readonly registry: ProjectsRegistry;
   readonly permissionsRepaired: boolean;
@@ -1296,7 +1338,60 @@ async function readAutostartMutationRegistry(opts: {
   ) {
     throw new AutostartRegistryTrustError();
   }
-  return { registry, permissionsRepaired: true };
+  if (opts.requireObservedLegacyProject !== false) {
+    await assertObservedLegacyRepairProject({
+      registry,
+      id: opts.id,
+      observedProject: opts.observedProject,
+    });
+  }
+  return {
+    registry: {
+      ...registry,
+      projects: registry.projects.map((project) => ({
+        ...project,
+        autostartRequiresReview: true,
+      })),
+    },
+    permissionsRepaired: true,
+  };
+}
+
+async function assertObservedLegacyRepairProject(opts: {
+  readonly registry: ProjectsRegistry;
+  readonly id?: string;
+  readonly observedProject?: {
+    readonly repoRoot: string;
+    readonly projectDir: string;
+  };
+}): Promise<void> {
+  const refusal = () =>
+    new HackCliError({
+      code: "E_PERMISSION",
+      message:
+        "A writable legacy registry cannot authorize a named target by itself. Change into the reviewed project checkout and run 'hack up --always' or 'hack autostart add' there. No intent was changed. Values omitted.",
+    });
+  const matches = opts.registry.projects.filter(
+    (project) => project.id === opts.id
+  );
+  const selected = matches.length === 1 ? matches[0] : undefined;
+  if (!(selected && opts.observedProject)) {
+    throw refusal();
+  }
+  try {
+    const [observedRoot, observedDir, registeredRoot, registeredDir] =
+      await Promise.all([
+        realpath(opts.observedProject.repoRoot),
+        realpath(opts.observedProject.projectDir),
+        realpath(selected.repoRoot),
+        realpath(selected.projectDir),
+      ]);
+    if (observedRoot !== registeredRoot || observedDir !== registeredDir) {
+      throw refusal();
+    }
+  } catch {
+    throw refusal();
+  }
 }
 
 /** Validate every requested ID under ownership before removing any entry. */
@@ -1490,6 +1585,9 @@ function parseProject(value: unknown): RegisteredProject | null {
     ...(lastSeenAt ? { lastSeenAt } : {}),
     ...(worktrees.length > 0 ? { worktrees } : {}),
     ...(autostart ? { autostart } : {}),
+    ...(value.autostartRequiresReview === true
+      ? { autostartRequiresReview: true }
+      : {}),
   };
 }
 
@@ -1626,7 +1724,9 @@ async function writeRegistryAtomic(
   )}\n`;
   if (
     (registry.autostartGlobal ||
-      registry.projects.some((project) => project.autostart)) &&
+      registry.projects.some(
+        (project) => project.autostart || project.autostartRequiresReview
+      )) &&
     Buffer.byteLength(text) > AUTOSTART_REGISTRY_LIMIT_BYTES
   ) {
     throw new AutostartRegistryTrustError();

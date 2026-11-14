@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { NativePreflightReport } from "../src/backends/native-preflight.ts";
+import { nativePreflightProbeFromReport } from "../src/lib/upgrade-check-probes.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -215,6 +216,27 @@ function codes(report: NativePreflightReport, gate: "cli" | "runtime") {
 
 const GRANT = { HACK_NATIVE_SHARED_SOURCE: "1" };
 
+test(
+  "an unreportable service name retains the foreign-platform refusal",
+  async () => {
+    const f = await fixture({
+      services: {
+        ["s".repeat(129)]: { image: IMAGE, platform: "linux/amd64" },
+      },
+    });
+    await f.review([]);
+    const { report, code } = await preflight(f, { ...f.native, ...GRANT });
+    expect(code).toBe(1);
+    expect(report.ready).toBe(false);
+    expect(
+      report.blockers.some(
+        (item) => item.code === "foreign_platform" && item.service === undefined
+      )
+    ).toBe(true);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
 test("preflight and start share env-file admission and never publish file values", async () => {
   const f = await fixture({
     services: {
@@ -344,6 +366,158 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
+test(
+  "consent never hides per-service configuration findings in text or JSON",
+  async () => {
+    const f = await fixture({
+      services: {
+        api: { image: IMAGE, environment: { PRIVATE } },
+        worker: { image: IMAGE },
+      },
+    });
+    const detail = (service: string, field: string) => ({
+      text_fixed: true,
+      service,
+      field,
+      message: "This service configuration is not supported.",
+      fix: "Remove this field or use a supported declaration.",
+      value: PRIVATE,
+    });
+    await f.review(
+      [
+        {
+          severity: "error",
+          code: "privileged_service",
+          field: "services.api",
+          message: PRIVATE,
+        },
+      ],
+      {},
+      "both",
+      [
+        {
+          code: "graph_incompatible",
+          message_fixed: true,
+          message: "The reviewed graph contains blocking diagnostics.",
+        },
+        {
+          code: "graph_subset",
+          configuration_refusals: [
+            detail("api", "labels"),
+            detail("worker", "platform"),
+          ],
+        },
+        {
+          code: "graph_route_binding",
+          configuration_refusals: [detail("api", "healthcheck.x-hack-http")],
+        },
+      ]
+    );
+    const ungranted = await preflight(f, f.native);
+    const granted = await preflight(f, { ...f.native, ...GRANT });
+    expect(ungranted.code).toBe(1);
+    expect(ungranted.report.blockers).toEqual(granted.report.blockers);
+    expect(ungranted.report.consent_needed.map((item) => item.code)).toEqual([
+      "shared_source_grant_required",
+    ]);
+    expect(granted.report.consent_needed).toEqual([]);
+    expect(
+      ungranted.report.blockers.map((item) => [
+        item.code,
+        item.service,
+        item.field,
+      ])
+    ).toEqual([
+      ["privileged_service", "api", "services.api.privileged"],
+      ["graph_subset", "api", "labels"],
+      ["graph_subset", "worker", "platform"],
+      ["graph_route_binding", "api", "healthcheck.x-hack-http"],
+    ]);
+    const text = await cli(f, ["doctor", "--native-preflight"], f.native);
+    expect(text.output).toContain("Consent needed before native start:");
+    expect(text.output).toContain("4 blockers:");
+    expect(text.output).toContain("healthcheck.x-hack-http");
+    expect(text.output + ungranted.output + granted.output).not.toContain(
+      PRIVATE
+    );
+    expect(
+      (await f.calls()).every((line) => line.includes("project plan"))
+    ).toBe(true);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "cache review errors carry every service and field across the error pipe",
+  async () => {
+    const services = Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [`s${index}`, { image: IMAGE }])
+    );
+    const f = await fixture({ services });
+    const configuration_refusals = Object.keys(services).flatMap((service) =>
+      [
+        "labels.hack.dependencies.lockfiles",
+        "labels.hack.dependencies.runtime-files",
+      ].map((field) => ({
+        text_fixed: true,
+        service,
+        field,
+        message:
+          "The dependency-cache file list is not a bounded list of relative paths.",
+        fix: "Use relative paths without interpolation or parent components.",
+      }))
+    );
+    await f.reply("project-plan.err", {
+      code: "invalid_dependency_cache",
+      message: PRIVATE,
+      configuration_refusals,
+    });
+    const { report, output } = await preflight(f, f.native);
+    expect(report.runtime_review).toEqual({
+      status: "stopped",
+      code: "invalid_dependency_cache",
+    });
+    expect(report.blockers).toHaveLength(128);
+    expect(new Set(report.blockers.map((item) => item.service)).size).toBe(64);
+    expect(report.consent_needed).toHaveLength(1);
+    expect(output).not.toContain(PRIVATE);
+    await f.reply("project-plan.err", {
+      code: "invalid_dependency_cache",
+      configuration_refusals: [
+        { ...configuration_refusals[0], text_fixed: false, message: PRIVATE },
+      ],
+    });
+    const malformed = await preflight(f, f.native);
+    expect(malformed.report.blockers).toHaveLength(1);
+    expect(malformed.output).not.toContain(PRIVATE);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "foreign platform findings name all offending services without platform values",
+  async () => {
+    const f = await fixture({
+      services: {
+        api: { image: IMAGE, platform: `linux/${PRIVATE}` },
+        worker: { image: IMAGE, platform: "linux/amd64" },
+        native: { image: IMAGE, platform: "linux/arm64" },
+      },
+    });
+    await f.review([]);
+    const { report, output } = await preflight(f, { ...f.native, ...GRANT });
+    expect(
+      report.blockers
+        .filter((item) => item.code === "foreign_platform")
+        .map((item) => [item.service, item.field])
+    ).toEqual([
+      ["api", "platform"],
+      ["worker", "platform"],
+    ]);
+    expect(output).not.toContain(PRIVATE);
+  },
+  SPAWN_TIMEOUT_MS
+);
 test("preflight and start refuse ignored root dotenv in a native build before effects", async () => {
   const f = await fixture({ services: { builder: { build: ".." } } });
   await writeFile(join(f.project, ".env"), `TOKEN=${PRIVATE}\n`, {
@@ -486,7 +660,7 @@ test(
     ]);
     const { report, code, output } = await preflight(f, f.native);
     expect(code).toBe(1);
-    expect(report.report_version).toBe(1);
+    expect(report.report_version).toBe(2);
     expect(report.backend).toBe("native");
     expect(report.compose_file).toBe(".hack/docker-compose.yml");
     expect(report.ready).toBe(false);
@@ -498,7 +672,6 @@ test(
       "extra_hosts_without_dependencies:web",
       "invalid_restart:jobs",
       "missing_image:jobs",
-      "shared_source_grant_required",
       "unsupported_label:api",
       "unsupported_logging:db",
     ]);
@@ -761,7 +934,10 @@ test(
     // Without the grant, both name the grant.
     const ungranted = await fixture({ services: { web: { image: IMAGE } } });
     const report = (await preflight(ungranted, ungranted.native)).report;
-    expect(codes(report, "cli")).toEqual(["shared_source_grant_required"]);
+    expect(codes(report, "cli")).toEqual([]);
+    expect(report.consent_needed.map((item) => item.code)).toEqual([
+      "shared_source_grant_required",
+    ]);
     const refused = await cli(ungranted, ["up"], ungranted.native);
     expect(refused.output).toContain("E_PERMISSION");
     // A clean project has no CLI blocker and native up goes on to the runtime.
@@ -1584,6 +1760,29 @@ test(
         });
       }
     }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "file-only upgrade readiness retains outstanding native consent",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    await f.review([]);
+    const ungranted = await preflight(f, f.native);
+    expect(ungranted.code).toBe(1);
+    expect(nativePreflightProbeFromReport(ungranted.report)).toMatchObject({
+      ready: false,
+      blockers: 0,
+      consentNeeded: 1,
+    });
+    const granted = await preflight(f, { ...f.native, ...GRANT });
+    expect(granted.code).toBe(0);
+    expect(nativePreflightProbeFromReport(granted.report)).toMatchObject({
+      ready: true,
+      blockers: 0,
+      consentNeeded: 0,
+    });
   },
   SPAWN_TIMEOUT_MS
 );

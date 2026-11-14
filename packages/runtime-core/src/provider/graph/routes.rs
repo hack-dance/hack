@@ -37,61 +37,120 @@ fn validate_services(
     graph: &Graph,
     enrolled: bool,
 ) -> Result<(), CandidateError> {
-    let mut hosts = BTreeSet::new();
+    let mut hosts = BTreeMap::new();
+    let mut findings = Vec::new();
     let mut count = 0;
     for (name, service) in services.iter().filter(|(_, service)| service.active) {
         let Some(route) = &service.routing else {
             continue;
         };
+        let mut refuse = |field, message, fix| {
+            findings.push(
+                crate::error::ConfigurationRefusal::new(field, message, fix).with_service(name),
+            )
+        };
         count += 1;
         if count > 32 || !enrolled {
-            return Err(refused());
+            refuse(
+                "labels.caddy",
+                "The route has no available enrolled publication.",
+                "Keep at most 32 routed services and start through hack up after configuring native HTTPS.",
+            );
         }
         let health = service
             .healthcheck
             .as_ref()
             .filter(|health| !health.disabled);
         let probe = health.and_then(|health| health.native_http.as_ref());
-        if graph.services.get(name).map(|service| service.ready) != Some(Condition::Healthy)
-            || service.network_mode != "project-networks"
-            || service.networks.is_empty()
-            || !probe.is_some_and(|probe| probe.port == route.port && probe.validate().is_ok())
-            || probe.is_some_and(|probe| {
-                probe.policy.is_some()
-                    && *probe != super::super::http_probe::HttpProbe::inferred_route(route.port)
-            })
-            || !valid_intent(route)
-            || !["caddy", "caddy.reverse_proxy", "caddy.tls"]
-                .iter()
-                .all(|key| {
-                    service.labels.get(*key).is_some_and(|value| {
-                        value.environment_references.is_empty() && value.literal_redacted
-                    })
-                })
-            || service.labels.keys().any(|key| {
-                !recognized(key)
-                    // Plain metadata beside the route is reviewed with a warning
-                    // and never reaches the engine or the router.
-                    && !crate::project::inert_metadata_label(key)
-                    && !(service.dependency_cache.is_some()
-                        && matches!(
-                            key.as_str(),
-                            "hack.dependencies.cache-volume"
-                                | "hack.dependencies.lockfiles"
-                                | "hack.dependencies.runtime-files"
-                                | "hack.dependencies.bootstrap"
-                        ))
-            })
-        {
-            return Err(refused());
+        if graph.services.get(name).map(|service| service.ready) != Some(Condition::Healthy) {
+            refuse(
+                "healthcheck",
+                "The routed service does not have healthy readiness.",
+                "Use a long-running service with an enabled native HTTP healthcheck for route readiness.",
+            );
+        }
+        if service.network_mode != "project-networks" || service.networks.is_empty() {
+            refuse(
+                "networks",
+                "The routed service has no project-network endpoint.",
+                "Remove network_mode and attach the routed service to a declared project network.",
+            );
+        }
+        if !probe.is_some_and(|probe| probe.port == route.port && probe.validate().is_ok()) {
+            refuse(
+                "healthcheck.x-hack-http",
+                "The route needs a valid native HTTP probe on its upstream port.",
+                "Set healthcheck.x-hack-http to the route port and readiness path, or omit the authored healthcheck to use the inferred route probe. A command-only healthcheck cannot establish route readiness.",
+            );
+        }
+        if probe.is_some_and(|probe| {
+            probe.policy.is_some()
+                && *probe != super::super::http_probe::HttpProbe::inferred_route(route.port)
+        }) {
+            refuse(
+                "healthcheck.x-hack-http",
+                "The inferred route probe policy was changed.",
+                "Omit the authored healthcheck to use the default inferred probe, or declare an explicit native HTTP probe without an inferred policy.",
+            );
+        }
+        if !valid_intent(route) {
+            refuse(
+                "labels.caddy",
+                "The route does not have canonical distinct hostnames and a nonzero port.",
+                "Declare one to eight distinct canonical hostnames and a literal upstream port in the supported Caddy labels.",
+            );
+        }
+        for key in ["caddy", "caddy.reverse_proxy", "caddy.tls"] {
+            if !service.labels.get(key).is_some_and(|value| {
+                value.environment_references.is_empty() && value.literal_redacted
+            }) {
+                let field = match key {
+                    "caddy" => "labels.caddy",
+                    "caddy.tls" => "labels.caddy.tls",
+                    _ => "labels.caddy.reverse_proxy",
+                };
+                refuse(
+                    field,
+                    "A required route label is missing or uses an environment reference.",
+                    "Declare literal caddy hostnames, caddy.reverse_proxy with {{upstreams PORT}}, and caddy.tls: internal.",
+                );
+            }
+        }
+        if service.labels.keys().any(|key| {
+            !recognized(key)
+                && !crate::project::inert_metadata_label(key)
+                && !(service.dependency_cache.is_some()
+                    && matches!(
+                        key.as_str(),
+                        "hack.dependencies.cache-volume"
+                            | "hack.dependencies.lockfiles"
+                            | "hack.dependencies.runtime-files"
+                            | "hack.dependencies.bootstrap"
+                    ))
+        }) {
+            refuse(
+                "labels",
+                "The routed service has unsupported semantic labels.",
+                "Remove other router or ownership labels; keep the supported Caddy and dependency-cache labels. Use Compose if another router is required.",
+            );
         }
         for host in &route.hostnames {
-            if !hosts.insert(host) {
-                return Err(refused());
+            if let Some(previous) = hosts.insert(host, name) {
+                let detail = crate::error::ConfigurationRefusal::new(
+                    "labels.caddy",
+                    "Multiple routes claim the same hostname.",
+                    "Assign distinct hostnames to the routed services; one hostname can belong to only one route.",
+                );
+                findings.push(detail.clone().with_service(previous));
+                findings.push(detail.with_service(name));
             }
         }
     }
-    Ok(())
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(refused().with_configuration_refusals(findings))
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +173,40 @@ mod tests {
             )]),
         };
         (plan, graph)
+    }
+
+    #[test]
+    fn reports_each_service_and_independent_route_field_without_values() {
+        let (mut plan, mut graph) = fixture();
+        let service = plan.get_mut("search").unwrap();
+        service.healthcheck = None;
+        service.networks.clear();
+        service.labels.remove("caddy.tls");
+        service.routing.as_mut().unwrap().hostnames = vec!["private-sentinel.example".into()];
+        plan.insert("other".into(), plan["search"].clone());
+        graph
+            .services
+            .insert("other".into(), graph.services["search"].clone());
+        let error = validate_services(&plan, &graph, true).unwrap_err();
+        assert_eq!(error.code, "graph_route_binding");
+        let wire = serde_json::to_value(&error).unwrap();
+        let findings = wire["configuration_refusals"].as_array().unwrap();
+        for service in ["search", "other"] {
+            for field in [
+                "networks",
+                "healthcheck.x-hack-http",
+                "labels.caddy.tls",
+                "labels.caddy",
+            ] {
+                assert!(
+                    findings
+                        .iter()
+                        .any(|item| item["service"] == service && item["field"] == field),
+                    "{wire}"
+                );
+            }
+        }
+        assert!(!wire.to_string().contains("private-sentinel"));
     }
 
     #[test]

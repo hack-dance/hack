@@ -549,7 +549,7 @@ function nativeFinding(
         // Native is optional: a Compose project upgrades without it.
         id: "native-preflight",
         status: "info",
-        summary: `Not ready for the native backend (${probe.blockers} blocker(s)); Compose is unaffected.`,
+        summary: `Not ready for the native backend (${probe.blockers} blocker(s), ${probe.consentNeeded} consent item(s)); Compose is unaffected.`,
         args: null,
         action: null,
       };

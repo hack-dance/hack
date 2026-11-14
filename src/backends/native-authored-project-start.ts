@@ -62,6 +62,10 @@ import {
   resolveNativeAuthoredStorageTool,
 } from "./native-authored-storage-tool.ts";
 import {
+  type NativeConfigurationRefusal,
+  readNativeConfigurationRefusals,
+} from "./native-configuration-refusals.ts";
+import {
   type NativeExitDiagnostic,
   serveNativeAuthoredProjectGraph,
 } from "./native-project-process.ts";
@@ -133,6 +137,7 @@ export class NativeAuthoredProjectStartError extends Error {
   readonly nativeCauseCode?: string;
   readonly stage: Stage;
   readonly compilerCode?: string;
+  readonly nativeConfigurationRefusals?: readonly NativeConfigurationRefusal[];
 
   constructor(opts: {
     readonly outcome: Outcome;
@@ -141,6 +146,7 @@ export class NativeAuthoredProjectStartError extends Error {
     readonly nativeCauseCode?: string;
     readonly stage?: Stage;
     readonly compilerCode?: string;
+    readonly configurationRefusals?: unknown;
   }) {
     const nativeCode =
       opts.nativeCode && CODE.test(opts.nativeCode)
@@ -161,8 +167,17 @@ export class NativeAuthoredProjectStartError extends Error {
       retained:
         "startup evidence is retained; inspect owned state before retrying",
     }[opts.outcome];
+    const configuration = readNativeConfigurationRefusals(
+      opts.configurationRefusals
+    );
+    const findings = configuration
+      ?.map(
+        (item) =>
+          `${item.service ? `Service ${item.service}, ` : ""}${item.field}: ${item.message} ${item.fix}`
+      )
+      .join("\n");
     super(
-      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.`
+      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.${findings ? `\n${findings}` : ""}`
     );
     this.outcome = opts.outcome;
     this.canceled = opts.canceled;
@@ -173,6 +188,7 @@ export class NativeAuthoredProjectStartError extends Error {
         : undefined;
     this.stage = stage;
     this.compilerCode = compilerCode;
+    this.nativeConfigurationRefusals = configuration;
   }
 }
 
@@ -863,6 +879,16 @@ async function failedAdmission(opts: {
     nativeCauseCode,
     stage: opts.stage,
     compilerCode: compilerDiagnostic(error),
+    // These entries have already passed the runtime decoder. Restore only its
+    // literal-text marker for the startup error's independently checked boundary.
+    configurationRefusals:
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCode === nativeCode
+        ? error.nativeConfigurationRefusals?.map((item) => ({
+            ...item,
+            text_fixed: true,
+          }))
+        : undefined,
   });
 }
 

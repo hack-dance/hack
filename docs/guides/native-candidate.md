@@ -178,7 +178,7 @@ hack doctor --native-preflight --profile dev,ops
 hack doctor --native-preflight --json
 ```
 
-It lists the blockers and notes for the project's `.hack/docker-compose.yml`,
+It lists blockers, consent needed and notes for the project's `.hack/docker-compose.yml`,
 each with a plain sentence and a fix. It judges what `hack up` judges: the
 Compose document after the selected native adaptation and the project-wide
 extra hosts are applied, reviewed with the profiles you pass.
@@ -188,6 +188,21 @@ publication is a `graph_port_publication` blocker with the same reason as
 foreground `up`; native publishes TCP only. Graph budgets, readiness, probes
 and restart restrictions use the same admission checks. Inactive profile
 services do not contribute publication blockers.
+
+Graph subset and route refusals identify each affected service and field, with
+a separate reason and fix. Incompatible plans show their underlying field
+diagnostics instead of a second generic refusal. Invalid dependency-cache
+declarations identify the offending labels across services; foreign-platform
+findings name each service. Only names and field paths are shown, never authored
+values. Structural parse errors can still stop review early; fix them and rerun.
+
+Missing shared-source consent appears under **Consent needed**, separately from
+configuration blockers. Review still runs without consent, including in a
+non-interactive terminal, and `--json` retains the full discovered blocker list.
+Reporting consent does not grant it or start the VM. The file-only native check in
+`hack upgrade check` also reports outstanding consent separately and does not call
+the project native-ready until it is granted; native readiness remains informational
+for a Compose upgrade.
 
 The Compose input must be a nonempty regular file of at most 256 KiB, not a
 symbolic link. Unreadable, changing or oversized input is reported as
@@ -225,13 +240,24 @@ service receiving only those adapter credentials can still be refused at serve.
 
 With `--json` the report is the `data` of the standard result envelope:
 
+Report version 2 moves `shared_source_grant_required` from `blockers` into
+`consent_needed`. Consumers should use `ready` for the overall verdict and
+inspect both lists for what remains to do.
+
+Configuration finding `field` paths are relative to the named service (for
+example, `labels.hack.dependencies.lockfiles`); plan diagnostics use absolute
+paths such as `services.api.privileged`. Large configuration refusal batches
+retain their code and service locations during authored startup as well as
+preflight. Raw runtime stderr and startup output are not configuration findings.
+
 ```json
 {
-  "report_version": 1,
+  "report_version": 2,
   "backend": "native",
   "compose_file": ".hack/docker-compose.yml",
   "ready": false,
   "runtime_review": { "status": "completed" },
+  "consent_needed": [],
   "blockers": [
     {
       "severity": "blocker",
@@ -247,12 +273,13 @@ With `--json` the report is the `data` of the standard result envelope:
 }
 ```
 
-- `ready` is true only when there is no blocker and the runtime review
+- `ready` is true only when there is no blocker or missing consent and the runtime review
   completed.
-- The exit status follows the blockers: `0` with none, `1` otherwise. A skipped
+- The exit status is `1` if blockers or missing consent remain, `0` otherwise. A skipped
   or unavailable review is not a blocker, so that run exits `0` with
   `ready: false`. With `--json` the envelope is `ok: true` in both cases; read
-  `ready` and `blockers` for the verdict.
+  `ready`, `blockers` and `consent_needed` for the verdict. `consent_needed`
+  contains findings with severity `consent`, including `shared_source_grant_required`.
 - `gate` is `cli` or `runtime`: which of the two checks reported the finding.
 - `runtime_review.status` is one of:
   - `completed`: the review ran.

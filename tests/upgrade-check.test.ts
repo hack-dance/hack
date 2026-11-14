@@ -1694,3 +1694,25 @@ test("hack upgrade snapshot, then rollback restores exact bytes; a changed file 
   expect(listed.stdout).toContain("Choose a snapshot to restore");
   expect(listed.stdout).toContain(snapshot.manifest_path);
 }, 60_000);
+
+test("native consent is informational for upgrade and remains distinct from blockers", async () => {
+  const project = await liveProject("native-consent");
+  const findings = await inspectUpgradeProject({
+    project: { ...project, project: project.name },
+    homeDir: home,
+    deadline: Date.now() + 30_000,
+    nativePreflight: async () => ({
+      ready: false,
+      blockers: 0,
+      warnings: 0,
+      consentNeeded: 1,
+    }),
+  });
+  expect(
+    findings.find((finding) => finding.id === "native-preflight")
+  ).toMatchObject({
+    status: "info",
+    summary:
+      "Not ready for the native backend (0 blocker(s), 1 consent item(s)); Compose is unaffected.",
+  });
+});

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { NativePreflightReport } from "../backends/native-preflight.ts";
 import { resolveSystemdSummary } from "../commands/daemon-systemd.ts";
 import { collectProjectNativePreflight } from "../commands/doctor-native-preflight.ts";
 import { inspectLinuxGlobalDns } from "../commands/global-linux-dns.ts";
@@ -83,6 +84,7 @@ export type GlobalInfraProbe = {
 
 export type NativePreflightProbe = {
   readonly ready: boolean;
+  readonly consentNeeded: number;
   readonly blockers: number;
   readonly warnings: number;
 };
@@ -257,9 +259,20 @@ async function probeNativePreflight(opts: {
     profiles: [],
     runtimeReview: false,
   });
+  return nativePreflightProbeFromReport(report);
+}
+
+/** File-only upgrade check: consent stays distinct, and skipped runtime review is not a blocker. */
+export function nativePreflightProbeFromReport(
+  report: Pick<
+    NativePreflightReport,
+    "blockers" | "warnings" | "consent_needed"
+  >
+): NativePreflightProbe {
   return {
-    ready: report.blockers.length === 0,
+    ready: report.blockers.length === 0 && report.consent_needed.length === 0,
     blockers: report.blockers.length,
     warnings: report.warnings.length,
+    consentNeeded: report.consent_needed.length,
   };
 }

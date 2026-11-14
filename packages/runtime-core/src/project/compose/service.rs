@@ -743,6 +743,47 @@ pub(super) fn compile(
         ));
     }
     let mut result = BTreeMap::new();
+    let mut first_error = None;
+    let mut findings = Vec::new();
+    for (name, value) in values {
+        let one = Map::from_iter([(name.clone(), value.clone())]);
+        match compile_services(project, base, &one, profiles, volumes, diagnostics) {
+            Ok(services) => result.extend(services),
+            Err(mut error) if error.code == "invalid_dependency_cache" => {
+                if let Some(details) = &mut error.refusals {
+                    findings.extend(
+                        std::mem::take(&mut details.configuration_refusals)
+                            .into_iter()
+                            .map(|item| item.with_service(name)),
+                    );
+                }
+                if first_error.is_none() {
+                    first_error = Some(error.with_service(name));
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) if error.code == "invalid_dependency_cache" => {
+            Err(error.with_configuration_refusals(findings))
+        }
+        Some(error) => Err(error),
+        None => Ok(result),
+    }
+}
+
+fn compile_services(
+    project: &Path,
+    base: &Path,
+    values: &Map<String, Value>,
+    profiles: &[String],
+    volumes: &BTreeMap<String, VolumePlan>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<BTreeMap<String, ServicePlan>, CandidateError> {
+    let mut result = BTreeMap::new();
     for (name, value) in values {
         identifier(name)?;
         let field = format!("services.{name}");
@@ -898,7 +939,7 @@ pub(super) fn compile(
                 return Err(problem(
                     "invalid_dependency_cache",
                     "Dependency cache volume must be declared; values omitted.",
-                ));
+                ).with_configuration_refusals(vec![crate::error::ConfigurationRefusal::new("labels.hack.dependencies.cache-volume", "The dependency-cache volume is not declared.", "Declare the named volume at top level and mount it in the initializer service.")]));
             }
             // A shared dependency cache outlives and is consumed beyond one graph.
             if !volumes[&cache.volume].disposable_caches.is_empty() {
@@ -1120,7 +1161,7 @@ pub(super) fn compile(
             return Err(problem(
                 "invalid_dependency_cache",
                 "Dependency cache volume must be mounted by its declaring service; values omitted.",
-            ));
+            ).with_configuration_refusals(vec![crate::error::ConfigurationRefusal::new("volumes", "The dependency-cache volume is not mounted by its initializer.", "Mount the declared cache volume in the service that declares hack.dependencies.cache-volume.")]));
         }
         let mut healthcheck = health(
             m.get("healthcheck"),

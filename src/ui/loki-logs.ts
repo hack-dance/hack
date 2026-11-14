@@ -238,25 +238,31 @@ async function lokiQueryRange(
     now: new Date(),
   });
 
+  // A failed snapshot is still one framed stream: start, error, end.
+  const failJson = (message: string) => {
+    if (!(opts.json && opts.streamContext)) {
+      return;
+    }
+    writeLogStreamEvent({
+      event: buildLogStreamStartEvent({ context: opts.streamContext }),
+    });
+    writeLogStreamEvent({
+      event: buildLogStreamErrorEvent({ context: opts.streamContext, message }),
+    });
+    writeLogStreamEvent({
+      event: buildLogStreamEndEvent({
+        context: opts.streamContext,
+        reason: "error",
+      }),
+    });
+  };
+
   let res: Response;
   try {
     res = await fetch(url);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    if (opts.json && opts.streamContext) {
-      writeLogStreamEvent({
-        event: buildLogStreamErrorEvent({
-          context: opts.streamContext,
-          message,
-        }),
-      });
-      writeLogStreamEvent({
-        event: buildLogStreamEndEvent({
-          context: opts.streamContext,
-          reason: "error",
-        }),
-      });
-    }
+    failJson(message);
     process.stderr.write(
       `Failed to connect to Loki at ${baseUrl}: ${message}\n`
     );
@@ -266,62 +272,28 @@ async function lokiQueryRange(
     return failed;
   }
   if (!res.ok) {
-    if (opts.json && opts.streamContext) {
-      writeLogStreamEvent({
-        event: buildLogStreamErrorEvent({
-          context: opts.streamContext,
-          message: `Loki HTTP ${res.status}`,
-        }),
-      });
-      writeLogStreamEvent({
-        event: buildLogStreamEndEvent({
-          context: opts.streamContext,
-          reason: "error",
-        }),
-      });
-    }
+    failJson(`Loki HTTP ${res.status}`);
     process.stderr.write(
       `Failed to query Loki (${res.status}): ${await res.text()}\n`
     );
     return failed;
   }
 
-  const json: unknown = await res.json();
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch {
+    json = null;
+  }
   const parsed = parseQueryRangeResponse(json);
   if (!parsed) {
-    if (opts.json && opts.streamContext) {
-      writeLogStreamEvent({
-        event: buildLogStreamErrorEvent({
-          context: opts.streamContext,
-          message: "Failed to parse Loki query response",
-        }),
-      });
-      writeLogStreamEvent({
-        event: buildLogStreamEndEvent({
-          context: opts.streamContext,
-          reason: "error",
-        }),
-      });
-    }
+    failJson("Failed to parse Loki query response");
     process.stderr.write("Failed to parse Loki query response.\n");
     return failed;
   }
 
   if (parsed.status !== "success") {
-    if (opts.json && opts.streamContext) {
-      writeLogStreamEvent({
-        event: buildLogStreamErrorEvent({
-          context: opts.streamContext,
-          message: `Loki error: ${parsed.error ?? "unknown error"}`,
-        }),
-      });
-      writeLogStreamEvent({
-        event: buildLogStreamEndEvent({
-          context: opts.streamContext,
-          reason: "error",
-        }),
-      });
-    }
+    failJson(`Loki error: ${parsed.error ?? "unknown error"}`);
     process.stderr.write(`Loki error: ${parsed.error ?? "unknown error"}\n`);
     return failed;
   }

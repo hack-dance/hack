@@ -107,6 +107,16 @@ Silicon, the native preflight. It changes nothing and prints no secret value.
 
 To run the apply steps:
 
+JSON findings and plan steps include `kind: safe|admin|manual`, separately from
+severity. `safe` means the supplied action can run without an operator decision:
+the snapshot, daemon status, and grouped snapshot-backed apply steps whose
+targets are eligible. `admin` identifies host routing or login-service changes
+that belong in a terminal for review; it does not mean every command needs sudo.
+`manual` covers decisions, broad Doctor repairs and unknown actions. A grouped
+apply step can be safe while its original per-checkout Doctor command remains
+manual. Any blocked or unchecked target keeps its grouped step manual. This
+metadata does not run a command, grant privileges or bypass apply admission.
+
 ```sh
 hack upgrade apply --dry-run      # what would change; changes nothing
 hack upgrade apply --dry-run --verbose  # include every candidate file path

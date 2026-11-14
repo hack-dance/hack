@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -10,6 +10,10 @@ import {
 import { optJson, optProject } from "../cli/options.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { resolveUserHomeDir } from "../lib/home-dir.ts";
+import {
+  ProjectsRegistryLockTimeoutError,
+  withProjectsRegistryLock,
+} from "../lib/projects-registry-lock.ts";
 import { escapeTerminalControls } from "../lib/terminal-text.ts";
 import {
   runUpgradeApply,
@@ -27,6 +31,7 @@ import {
   createUpgradeSnapshot,
   listUpgradeSnapshots,
   type RestoreUpgradeSnapshotResult,
+  readUpgradeSnapshot,
   restoreUpgradeSnapshot,
 } from "../lib/upgrade-snapshot.ts";
 import { collectUpgradeSnapshotTargets } from "../lib/upgrade-snapshot-targets.ts";
@@ -146,11 +151,20 @@ const optResume = defineOption({
   description:
     "Resume the apply journal beside this explicit snapshot manifest",
 } as const);
+const optSnapshotRoot = defineOption({
+  name: "snapshotRoot",
+  type: "string",
+  long: "--snapshot-root",
+  valueHint: "<directory>",
+  description:
+    "Keep recovery bytes in this private directory outside Git, on the selected targets' filesystem",
+} as const);
 const applyOptions = [
   optOnly,
   optProject,
   optDryRun,
   optResume,
+  optSnapshotRoot,
   optJson,
 ] as const;
 
@@ -167,6 +181,8 @@ const applySpec = defineCommand({
     "outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback",
     "command. --dry-run lists what would change. Exits 1 when anything selected was not done.",
     "After interruption, --resume <manifest> reuses that run's selection and snapshot; unexpected edits refuse.",
+    "Other-volume checkouts are skipped before writing. Select one project with --snapshot-root on its volume",
+    "to keep recovery bytes in an explicit private directory outside every Git working tree.",
   ].join("\n"),
   options: applyOptions,
   positionals: [],
@@ -364,16 +380,53 @@ async function handleUpgradeRollback({
     }
     return 1;
   }
-  const result = await restoreUpgradeSnapshot({
-    manifestPath: resolve(ctx.cwd, manifest),
+  const manifestPath = resolve(ctx.cwd, manifest);
+  const result = await restoreWithApplyLock({
+    manifestPath,
     overwrite: args.options.overwrite === true,
   });
+  if (result.status === "busy") {
+    if (json) {
+      emitCliResult({ result: okResult({ data: result }) });
+    } else {
+      process.stdout.write(`${result.message}\n`);
+    }
+    return 1;
+  }
   if (json) {
     emitCliResult({ result: okResult({ data: rollbackJson(result) }) });
   } else {
     process.stdout.write(renderRollback(result));
   }
   return result.status === "restored" ? 0 : 1;
+}
+
+/** CLI writers share one lock; direct snapshot-library callers own their serialization. */
+async function restoreWithApplyLock(opts: {
+  manifestPath: string;
+  overwrite: boolean;
+}) {
+  const loaded = await readUpgradeSnapshot(opts);
+  if (loaded.status !== "ok") {
+    return { status: "invalid-manifest" as const, message: loaded.message };
+  }
+  try {
+    return await withProjectsRegistryLock({
+      lockPath: join(dirname(opts.manifestPath), "apply.lock"),
+      label: "upgrade snapshot",
+      timeoutMs: 1000,
+      run: () => restoreUpgradeSnapshot(opts),
+    });
+  } catch (error) {
+    if (!(error instanceof ProjectsRegistryLockTimeoutError)) {
+      throw error;
+    }
+    return {
+      status: "busy" as const,
+      message:
+        "The snapshot is in use; wait for apply or resume to finish before rolling back.",
+    };
+  }
 }
 
 function rollbackJson(result: RestoreUpgradeSnapshotResult) {
@@ -435,6 +488,12 @@ async function handleUpgradeApply({
   if (args.options.resume !== undefined && !args.options.resume.trim()) {
     throw new CliUsageError("--resume needs a snapshot manifest path.");
   }
+  if (
+    args.options.snapshotRoot !== undefined &&
+    !args.options.snapshotRoot.trim()
+  ) {
+    throw new CliUsageError("--snapshot-root needs a directory path.");
+  }
   const report = await check(ctx);
   const result = await runUpgradeApply({
     report,
@@ -447,6 +506,10 @@ async function handleUpgradeApply({
       args.options.resume === undefined
         ? undefined
         : resolve(ctx.cwd, args.options.resume),
+    snapshotRoot:
+      args.options.snapshotRoot === undefined
+        ? undefined
+        : resolve(ctx.cwd, args.options.snapshotRoot),
   });
   const ran = result.status === "applied" || result.status === "partial";
   // Fresh evidence: what the check finds after the run.
@@ -571,7 +634,7 @@ function outcomeLines(
   }
   if (result.status === "blocked") {
     lines.push(
-      "Nothing ran: every selected checkout has a blocker or a check that could not be performed."
+      "Nothing ran: every selected target was skipped; see the reasons above."
     );
   }
   return [...lines, ...notes];

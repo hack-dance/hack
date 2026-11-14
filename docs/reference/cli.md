@@ -1939,6 +1939,8 @@ snapshot and writes a journal beside it with the snapshot's coverage and gaps an
 outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback
 command. --dry-run lists what would change. Exits 1 when anything selected was not done.
 After interruption, --resume <manifest> reuses that run's selection and snapshot; unexpected edits refuse.
+Other-volume checkouts are skipped before writing. Select one project with --snapshot-root on its volume
+to keep recovery bytes in an explicit private directory outside every Git working tree.
 
 ### Options
 
@@ -1948,6 +1950,7 @@ After interruption, --resume <manifest> reuses that run's selection and snapshot
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--dry-run` | List what would change and change nothing |
 | `--resume <manifest>` | Resume the apply journal beside this explicit snapshot manifest |
+| `--snapshot-root <directory>` | Keep recovery bytes in this private directory outside Git, on the selected targets' filesystem |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

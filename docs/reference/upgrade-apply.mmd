@@ -1,7 +1,9 @@
 stateDiagram-v2
   direction TB
   [*] --> checked: fresh check
-  checked --> planned: snapshot and journal
+  checked --> planned: same filesystem admitted
+  checked --> skipped: other filesystem
+  skipped --> checked: explicit snapshot root
   planned --> started: journal target start
   started --> applied: record output then outcome
   started --> failed: closed failure

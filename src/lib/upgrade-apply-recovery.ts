@@ -57,6 +57,10 @@ const applyJournalSchema = z.object({
       ]),
       message: z.string().nullable(),
       backup_manifest: z.string().nullable(),
+      reason: z
+        .enum(["other-filesystem", "filesystem-unknown"])
+        .nullable()
+        .optional(),
     })
   ),
 });

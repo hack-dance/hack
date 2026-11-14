@@ -265,9 +265,16 @@ function stepLines(step: UpgradePlanStep): string[] {
     step.command === null
       ? `  ${step.order}. ${tag}${what}manual: ${step.action ?? step.why}${scope}`
       : `  ${step.order}. ${tag}${what}${step.command}${scope}`;
+  const skipped = step.applies
+    ? step.targets.filter((target) => !target.apply_eligible).length
+    : 0;
+  const line =
+    skipped === 0
+      ? head
+      : `${head} (${skipped} blocked/unchecked; apply skips them)`;
   return step.count <= 1 && step.command !== null && step.action !== null
-    ? [head, `       ${step.action}`]
-    : [head];
+    ? [line, `       ${step.action}`]
+    : [line];
 }
 
 /** Blockers or unchecked items: a few named (with why for unchecked), the rest counted. */

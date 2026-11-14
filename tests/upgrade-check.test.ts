@@ -296,6 +296,12 @@ test("the plan starts with the snapshot, then blockers, then machine and project
   expect(report.next_command).toBe("hack upgrade snapshot");
   const grouped = report.plan.filter((step) => step.id === "env-format");
   expect(grouped).toHaveLength(1);
+  expect(
+    grouped[0]?.targets.find((target) => target.scope === "app-blocked")?.status
+  ).toBe("blocker");
+  expect(
+    grouped[0]?.targets.find((target) => target.scope === "app-legacy")?.status
+  ).toBe("warn");
   expect(grouped[0]?.targets.map((target) => target.scope).sort()).toEqual([
     "app-blocked",
     "app-legacy",

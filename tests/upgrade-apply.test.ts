@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderCodexSkill } from "../src/agents/codex-skill.ts";
 import { HACK_PLUGIN_ID } from "../src/agents/plugin-replacement.ts";
+import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import { runUpgradeApply } from "../src/lib/upgrade-apply.ts";
 import {
   runUpgradeCheck,
@@ -745,12 +746,9 @@ test("the agent backup manifest is journaled before removal and kept when the mi
       };
       const current = journal.targets.find((t) => t.status === "started");
       seenDuring.push(current?.backup_manifest ?? null);
-      expect(current?.backup_manifest).toBe(
-        join(input.backupDir, `${input.hooks?.id}.json`)
-      );
-      // The migration committed its backup and removed files, then failed.
-      await mkdir(input.backupDir, { recursive: true });
-      await writeFile(join(input.backupDir, `${input.hooks?.id}.json`), "{}\n");
+      expect(current?.backup_manifest).toBe(input.upgradeSnapshotManifest);
+      // Production and injected migrations receive the same snapshot mode.
+      expect(input.upgradeSnapshotManifest).toBe(snapshot?.manifestPath);
       throw Object.assign(new Error("rewrite failed"), { code: "EIO" });
     },
   });
@@ -762,17 +760,17 @@ test("the agent backup manifest is journaled before removal and kept when the mi
   const failed = applied.targets.filter((t) => t.status === "failed");
   expect(failed.length).toBeGreaterThan(0);
   for (const target of failed) {
-    expect(target.backup_manifest).toStartWith(backupDir);
+    expect(target.backup_manifest).toBe(manifestPath);
     expect(target.message).toContain("Failed (EIO)");
   }
-  expect(applied.agent_backups).toHaveLength(failed.length);
+  expect(applied.agent_backups).toEqual([manifestPath]);
   const journal = (await readUpgradeSnapshotJournal({ manifestPath })) as {
     targets: { status: string; backup_manifest: string | null }[];
   };
   expect(
     journal.targets
       .filter((t) => t.status === "failed")
-      .every((t) => t.backup_manifest?.startsWith(backupDir))
+      .every((t) => t.backup_manifest === manifestPath)
   ).toBe(true);
   expect(seenDuring).toEqual(failed.map((t) => t.backup_manifest));
 }, 60_000);
@@ -835,51 +833,44 @@ test("--project is ambiguous when another registration's primary is dead but its
   expect(await tree(root)).toEqual(before);
 }, 60_000);
 
-test("a backup that cannot be inspected after a failed migration keeps its journaled path", async () => {
+test("snapshot-backed failures retain their receipt without using a legacy backup directory", async () => {
   await staleHomeAgentFile();
   const a = await project("app-a");
   await writeRegistry([a]);
   const report = await check();
   const backupDir = join(hackHome, "agent-migrations");
-  try {
-    const applied = await runUpgradeApply({
-      report,
-      dryRun: false,
-      only: ["agent-integrations"],
-      home,
-      collect: collectUpgradeSnapshotTargets,
-      agentBackupDir: backupDir,
-      applyPluginMigration: async (input) => {
-        await mkdir(input.backupDir, { recursive: true });
-        await writeFile(
-          join(input.backupDir, `${input.hooks?.id}.json`),
-          "{}\n"
-        );
-        // The backup directory becomes unreadable: existence is unknown.
-        await chmod(input.backupDir, 0o000);
-        throw Object.assign(new Error("rewrite failed"), { code: "EIO" });
-      },
-    });
-    if (applied.status !== "partial") {
-      throw new Error(`unexpected status ${applied.status}`);
-    }
-    const failed = applied.targets.filter((t) => t.status === "failed");
-    expect(failed.length).toBeGreaterThan(0);
-    expect(failed.every((t) => t.backup_manifest?.startsWith(backupDir))).toBe(
-      true
-    );
-    expect(applied.agent_backups).toHaveLength(failed.length);
-    const journal = (await readUpgradeSnapshotJournal({
-      manifestPath: applied.coverage.manifest_path,
-    })) as { targets: { status: string; backup_manifest: string | null }[] };
-    expect(
-      journal.targets
-        .filter((t) => t.status === "failed")
-        .every((t) => t.backup_manifest?.startsWith(backupDir))
-    ).toBe(true);
-  } finally {
-    await chmod(backupDir, 0o700).catch(() => undefined);
+  await writeFile(backupDir, "not a directory\n");
+  const applied = await runUpgradeApply({
+    report,
+    dryRun: false,
+    only: ["agent-integrations"],
+    home,
+    collect: collectUpgradeSnapshotTargets,
+    agentBackupDir: backupDir,
+    applyPluginMigration: async (input) => {
+      expect(input.upgradeSnapshotManifest).toBeString();
+      expect(await lstat(input.upgradeSnapshotManifest ?? "")).toBeDefined();
+      throw Object.assign(new Error("rewrite failed"), { code: "EIO" });
+    },
+  });
+  if (applied.status !== "partial") {
+    throw new Error(`unexpected status ${applied.status}`);
   }
+  const failed = applied.targets.filter((t) => t.status === "failed");
+  expect(failed.length).toBeGreaterThan(0);
+  expect(
+    failed.every((t) => t.backup_manifest === applied.coverage.manifest_path)
+  ).toBe(true);
+  expect(applied.agent_backups).toEqual([applied.coverage.manifest_path]);
+  const journal = (await readUpgradeSnapshotJournal({
+    manifestPath: applied.coverage.manifest_path,
+  })) as { targets: { status: string; backup_manifest: string | null }[] };
+  expect(
+    journal.targets
+      .filter((t) => t.status === "failed")
+      .every((t) => t.backup_manifest === applied.coverage.manifest_path)
+  ).toBe(true);
+  expect(await readFile(backupDir, "utf8")).toBe("not a directory\n");
 }, 60_000);
 
 test("SIGKILL at every apply boundary resumes the same snapshot and rolls back exact bytes and modes", async () => {
@@ -1128,4 +1119,167 @@ test("resume refuses damaged snapshot originals before applying another fix", as
   });
   expect(resumed.status).toBe("partial");
   expect(await tree(join(root, "repos"))).toEqual(before);
+}, 60_000);
+
+test("other-volume checkouts are skipped before any write with an accurate remedy, while local work applies", async () => {
+  const a = await project("app-a");
+  const b = await project("app-b");
+  await writeRegistry([a, b]);
+  const report = await check();
+  const device = async (path: string) => (path.startsWith(b.repoRoot) ? 2 : 1);
+  const before = await tree(root);
+  const onlyRemote = await runUpgradeApply({
+    report,
+    home,
+    dryRun: false,
+    only: ["ignore-rules"],
+    project: "app-b",
+    filesystemDevice: device,
+    collect: async () => {
+      throw new Error("Blocked planning must not collect or create a snapshot");
+    },
+  });
+  expect(onlyRemote.status).toBe("blocked");
+  if (onlyRemote.status !== "blocked") {
+    throw new Error("Expected skipped layout");
+  }
+  expect(onlyRemote.targets[0]?.reason).toBe("other-filesystem");
+  expect(onlyRemote.targets[0]?.message).toContain("--snapshot-root");
+  expect(onlyRemote.targets[0]?.message).not.toContain("changed outside");
+  expect(await tree(root)).toEqual(before);
+  const remoteBefore = await tree(b.repoRoot);
+  const applied = await runUpgradeApply({
+    report,
+    home,
+    dryRun: false,
+    only: ["ignore-rules"],
+    filesystemDevice: device,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(applied.status).toBe("partial");
+  if (applied.status !== "partial") {
+    throw new Error("Expected partial apply");
+  }
+  expect(
+    applied.targets.find((target) => target.root === a.repoRoot)?.status
+  ).toBe("applied");
+  expect(
+    applied.targets.find((target) => target.root === b.repoRoot)?.reason
+  ).toBe("other-filesystem");
+  expect(await tree(b.repoRoot)).toEqual(remoteBefore);
+  const refused = await runUpgradeApply({
+    report,
+    home,
+    dryRun: false,
+    only: ["ignore-rules"],
+    snapshotRoot: join(root, "chosen-snapshots"),
+    filesystemDevice: device,
+    collect: async () => {
+      throw new Error(
+        "Mixed explicit-root selection must not create a snapshot"
+      );
+    },
+  });
+  expect(refused).toMatchObject({ status: "refused", reason: "filesystem" });
+}, 60_000);
+
+test("an explicitly selected snapshot root admits its volume and is retained by resume", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const chosenRoot = join(root, "chosen-snapshots");
+  const device = async (path: string) =>
+    path.startsWith(a.repoRoot) || path.startsWith(chosenRoot) ? 2 : 1;
+  const result = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    only: ["ignore-rules"],
+    project: "app-a",
+    snapshotRoot: chosenRoot,
+    filesystemDevice: device,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(result.status).toBe("applied");
+  if (result.status !== "applied") {
+    throw new Error("Expected apply");
+  }
+  expect(result.coverage.manifest_path).toStartWith(chosenRoot);
+  const blockedReport = await check();
+  const target = blockedReport.projects[0];
+  if (target === undefined) {
+    throw new Error("Missing checkout");
+  }
+  const report = {
+    ...blockedReport,
+    projects: [
+      {
+        ...target,
+        findings: [
+          ...target.findings,
+          {
+            id: "fixture-blocker",
+            status: "blocker" as const,
+            summary: "Blocked fixture",
+            command: null,
+            args: null,
+            action: null,
+          },
+        ],
+      },
+    ],
+  };
+  const before = await tree(root);
+  const blocked = await runUpgradeApply({
+    report,
+    home,
+    dryRun: false,
+    resumeManifest: result.coverage.manifest_path,
+    filesystemDevice: device,
+    collect: collectUpgradeSnapshotTargets,
+  });
+  expect(blocked.status).toBe("blocked");
+  expect(await tree(root)).toEqual(before);
+  expect(
+    (
+      await restoreUpgradeSnapshot({
+        manifestPath: result.coverage.manifest_path,
+      })
+    ).status
+  ).toBe("restored");
+}, 60_000);
+
+test("CLI rollback refuses a snapshot held by apply's lock without touching files", async () => {
+  const a = await project("app-a");
+  await writeRegistry([a]);
+  const applied = await runUpgradeApply({
+    report: await check(),
+    home,
+    dryRun: false,
+    only: ["ignore-rules"],
+    collect: collectUpgradeSnapshotTargets,
+  });
+  if (applied.status !== "applied") {
+    throw new Error("Expected apply");
+  }
+  // Prepare the harness-owned Docker config and HOME mode before the oracle.
+  privateCliEnv({ root, home });
+  await withProjectsRegistryLock({
+    lockPath: join(applied.coverage.manifest_path, "..", "apply.lock"),
+    run: async () => {
+      const before = await tree(root);
+      const started = Date.now();
+      const result = await cli([
+        "upgrade",
+        "rollback",
+        "--rollback-manifest",
+        applied.coverage.manifest_path,
+        "--json",
+      ]);
+      expect(result.code).toBe(1);
+      expect(JSON.parse(result.stdout).data.status).toBe("busy");
+      expect(result.output).not.toContain(SENTINEL);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(await tree(root)).toEqual(before);
+    },
+  });
 }, 60_000);

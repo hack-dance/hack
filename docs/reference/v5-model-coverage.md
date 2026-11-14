@@ -184,6 +184,11 @@ SIGKILL boundaries over two checkouts, plus interruption after a real agent-file
 removal. Each resumes the original snapshot and compares restored file bytes,
 modes and directory entries. The metadata-only manifest checks include encoded
 sentinels. This is implementation evidence, not a maintained finite TLA+ model.
+An injected two-device regression proves default skips before snapshot creation,
+continued same-device work and explicit-root selection refusal when devices still
+differ. CLI rollback shares the apply lock; a live-owner regression proves a
+bounded busy refusal without changing the fixture tree. These checks do not
+qualify real external-volume, network-filesystem or macOS mount semantics.
 Uncovered: power-loss durability, arbitrary filesystem-call interruption,
 unsynchronized external writers, multiple independent snapshots writing the same
 checkout, service-manager changes and env migration's separate journal. No

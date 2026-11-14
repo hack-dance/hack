@@ -111,6 +111,7 @@ To run the apply steps:
 hack upgrade apply --dry-run      # what would change; changes nothing
 hack upgrade apply                # every apply step, every checkout
 hack upgrade apply --only ignore-rules --project my-app
+hack upgrade apply --only ignore-rules --project my-app --snapshot-root /path/on/project-volume/private-snapshots
 ```
 
 Apply checks first and skips any checkout with a blocker or a check that could
@@ -132,13 +133,31 @@ hack upgrade rollback --rollback-manifest <snapshot-manifest>
 ```
 
 Resume uses the journal's selection and original snapshot, including its coverage
-and gaps; it cannot be combined with `--only` or `--project`. It rechecks the
+and gaps; it cannot be combined with `--only`, `--project` or `--snapshot-root`.
+It rechecks the
 registered checkouts, refuses unexpected file edits, and verifies the snapshot's
 original blobs before writing. It never chooses the latest run automatically.
 Rollback restores ignore rules and removed agent files together, with their exact
 bytes and modes. Files edited after apply require an explicit `--overwrite` to
 restore; their current copies are retained. Service state and installed versions
 are outside this file rollback.
+
+The snapshot and changed files must share a filesystem: rollback uses atomic
+rename and hard-link publication. Checkouts on another volume are skipped during
+planning, before any snapshot or journal is written, with `other-filesystem` and
+the `--snapshot-root` remedy. Other eligible checkouts still run. An explicit root
+must be private, owned by you, outside every Git working tree and on the selected
+targets' volume; a selection that still spans filesystems is refused. Hack does
+not discover or create snapshot roots on external volumes automatically. The
+chosen directory holds original file bytes, including the broader upgrade
+snapshot set; choose its storage and backup policy accordingly.
+
+The apply JSON field `agent_backups` lists recovery manifests and can equal
+`coverage.manifest_path`: it no longer implies a separate plugin backup. A grouped
+plan target keeps its own `status` and `apply_eligible`; the text plan counts
+blocked or unchecked checkouts that apply will skip. `--dry-run` lists candidate
+paths and can be longer than the one-screen check summary. Rollback returns
+`busy` without restoring anything while apply or resume holds that snapshot's lock.
 
 Env migration remains a separate grouped command until its journal owner is
 integrated. Apply does not perform env cleanup or accept tracked-file edits on

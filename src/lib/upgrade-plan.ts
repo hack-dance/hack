@@ -7,7 +7,7 @@ import type { UpgradeFindingStatus } from "./upgrade-check-project.ts";
 /**
  * The upgrade plan (HACK-2188, HACK-2220): one step per kind of change, not
  * one per checkout. A machine finding is its own step. Checkout findings of
- * the same id and status are one step that lists every checkout it covers
+ * the same id are one step that lists every checkout it covers
  * (`targets`, each with its own command), so a machine with 170 checkouts
  * gets a plan of about ten steps.
  *
@@ -38,6 +38,10 @@ export type UpgradePlanTarget = {
   /** The registered project it belongs to. */
   readonly project: string;
   readonly root: string;
+  /** This checkout's finding severity, before group escalation. */
+  readonly status: UpgradeFindingStatus;
+  /** False when any required checkout check is blocked or incomplete. */
+  readonly apply_eligible: boolean;
   /** This checkout's own command line; null when only `action` applies. */
   readonly command: string | null;
   readonly args: readonly string[] | null;
@@ -180,6 +184,10 @@ export function buildUpgradePlan(opts: {
           scope: project.name,
           project: project.project,
           root: project.root,
+          status: finding.status,
+          apply_eligible: !project.findings.some(
+            (f) => f.status === "blocker" || f.status === "incomplete"
+          ),
           command: finding.command,
           args: finding.args,
           action: finding.action,

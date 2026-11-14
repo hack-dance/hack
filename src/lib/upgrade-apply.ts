@@ -10,6 +10,10 @@ import { MIGRATION_CLIENTS } from "../agents/plugin-replacement.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureHackDirGitignore } from "./project-env-config.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
+import {
+  hasOtherFilesystem,
+  planUpgradeFilesystems,
+} from "./upgrade-apply-filesystems.ts";
 import type { UpgradeCheckReport } from "./upgrade-check.ts";
 import {
   isUpgradeApplyFix,
@@ -18,6 +22,7 @@ import {
 } from "./upgrade-plan.ts";
 import {
   createUpgradeSnapshot,
+  defaultUpgradeSnapshotRoot,
   recordUpgradeSnapshotAfter,
   type UpgradeSnapshot,
   type UpgradeSnapshotTarget,
@@ -99,6 +104,7 @@ export type UpgradeApplyTarget = {
   readonly backup_manifest: string | null;
   /** Candidate file paths, supplied by read-only dry-run previews. */
   readonly files?: readonly string[];
+  readonly reason?: "other-filesystem" | "filesystem-unknown" | null;
 };
 
 export type UpgradeApplyCoverage = {
@@ -134,6 +140,7 @@ export type UpgradeApplyResult =
         | "unknown-project"
         | "ambiguous-project"
         | "unknown-fix"
+        | "filesystem"
         | "snapshot";
       readonly message: string;
     }
@@ -154,6 +161,7 @@ export type UpgradeApplyResult =
       readonly notes: readonly string[];
       readonly coverage: UpgradeApplyCoverage;
       readonly journal_path: string;
+      /** Agent recovery manifests; may equal coverage.manifest_path. No file content. */
       readonly agent_backups: readonly string[];
     };
 
@@ -171,6 +179,7 @@ export type Planned = {
   /** The checkout's Hack directory; null for machine-wide agent files. */
   readonly projectDir: string | null;
   readonly skip: string | null;
+  readonly skipReason?: "other-filesystem" | "filesystem-unknown";
 };
 
 const ERROR_CODE = /^[A-Z0-9_]{1,40}$/;
@@ -197,6 +206,8 @@ export type RunUpgradeApplyInput = {
   readonly collect: () => Promise<UpgradeApplySnapshotSet>;
   /** Test seams. */
   readonly snapshotRoot?: string;
+  /** Read-only device probe seam for portable multi-filesystem regressions. */
+  readonly filesystemDevice?: (path: string) => Promise<number>;
   readonly agentBackupDir?: string;
   readonly now?: () => Date;
   readonly applyPluginMigration?: typeof applyPluginMigration;
@@ -221,15 +232,12 @@ export async function runUpgradeApply(
       message: "The apply journal or snapshot is invalid; nothing was changed.",
     };
   }
-  if (
-    recovery !== null &&
-    (input.only !== undefined || input.project !== undefined)
-  ) {
+  if (recovery !== null && hasResumeOverrides(input)) {
     return {
       status: "refused",
       reason: "snapshot",
       message:
-        "Resume uses the saved selection; do not combine --resume with --only or --project.",
+        "Resume uses the saved selection and snapshot; do not combine --resume with --only, --project or --snapshot-root.",
     };
   }
   const only = recovery?.journal.filters.only ?? input.only ?? [];
@@ -249,7 +257,7 @@ export async function runUpgradeApply(
     home: input.home,
   });
   const notes = recovery?.journal.notes ?? fresh.notes;
-  const planned: Planned[] =
+  const selected: Planned[] =
     recovery === null
       ? fresh.planned
       : recovery.journal.targets.map((target) =>
@@ -259,6 +267,20 @@ export async function runUpgradeApply(
             home: input.home,
           })
         );
+  const planned = await planUpgradeFilesystems({
+    targets: selected,
+    snapshotRoot: selectedSnapshotRoot(input, recovery),
+    files: (target) => previewTargetFiles(target, input.home),
+    device: input.filesystemDevice,
+  });
+  if (input.snapshotRoot !== undefined && hasOtherFilesystem(planned)) {
+    return {
+      status: "refused",
+      reason: "filesystem",
+      message:
+        "The selected targets span filesystems or do not share the chosen snapshot root's filesystem. Select one project on that volume; nothing was written.",
+    };
+  }
   const runnable = planned.filter((target) => target.skip === null);
   const skipped = planned
     .filter((target) => target.skip !== null)
@@ -269,7 +291,7 @@ export async function runUpgradeApply(
     skipped,
     notes,
   });
-  if (early !== null && shouldReturnEarly(recovery, input.dryRun)) {
+  if (early !== null) {
     return await previewEarlyResult({
       result: early,
       planned,
@@ -329,6 +351,23 @@ export async function runUpgradeApply(
         coverage,
       }),
   });
+}
+
+function hasResumeOverrides(input: RunUpgradeApplyInput): boolean {
+  return (
+    input.only !== undefined ||
+    input.project !== undefined ||
+    input.snapshotRoot !== undefined
+  );
+}
+
+function selectedSnapshotRoot(
+  input: RunUpgradeApplyInput,
+  recovery: Awaited<ReturnType<typeof loadApplyRecovery>>
+): string {
+  return (
+    recovery?.snapshot.dir ?? input.snapshotRoot ?? defaultUpgradeSnapshotRoot()
+  );
 }
 
 async function executeApplyRun(opts: {
@@ -392,10 +431,7 @@ async function executeApplyRun(opts: {
       target.fix === "agent-integrations"
         ? {
             id: `upgrade-apply-${snapshot.id}-${index}`,
-            path:
-              input.applyPluginMigration === undefined
-                ? snapshot.manifestPath
-                : join(backupDir, `upgrade-apply-${snapshot.id}-${index}.json`),
+            path: snapshot.manifestPath,
           }
         : null;
     // Before anything can change: this target started, with its backup.
@@ -416,7 +452,7 @@ async function executeApplyRun(opts: {
         outcome(
           target,
           "refused",
-          "The target changed outside this run; restore or review it before resuming."
+          "Not changed: target identity or recoverable snapshot coverage could not be verified; inspect the target and snapshot before retrying."
         )
       );
     } else if (
@@ -839,6 +875,7 @@ function outcome(
     status,
     message,
     backup_manifest: null,
+    reason: target.skipReason ?? null,
   };
 }
 
@@ -936,7 +973,7 @@ function recoverPlannedTarget(opts: {
   );
   let skip: string | null = null;
   if (target.project === null) {
-    skip = target.root === home ? null : SKIP_BLOCKED;
+    skip = normalize(target.root) === normalize(home) ? null : SKIP_BLOCKED;
   } else if (
     checkout === undefined ||
     unsafeRoots(report).has(normalize(target.root))
@@ -951,10 +988,6 @@ function recoverPlannedTarget(opts: {
     projectDir: checkout?.project_dir ?? null,
     skip,
   };
-}
-
-function shouldReturnEarly(recovery: unknown, dryRun: boolean): boolean {
-  return recovery === null || dryRun;
 }
 
 async function previewTargetFiles(

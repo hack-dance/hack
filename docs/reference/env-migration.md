@@ -71,6 +71,8 @@ prepares and checks its own immutable plan against the inputs before publication
 The exact plan requires reading legacy values and checking delivery in memory.
 A configured native credential backend can request its ordinary authorization;
 Hack does not bypass that prompt or include the values in the preview.
+Delivery checks, including deferred Compose repair, read existing backend keys
+without generating them or copying a keychain key to an absent key file.
 
 ## Apply and recovery
 

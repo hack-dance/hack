@@ -377,6 +377,72 @@ test("deferred repair preview and Doctor plan report unavailable legacy drift wi
   expect(await readFile(path, "utf8")).toBe(journal);
 });
 
+test("deferred repair preview reads a keychain-backed store without copying its absent backend key or invalidating apply", async () => {
+  await writeFile(
+    join(project.projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.22\n    env_file: .env\n"
+  );
+  await writeFile(
+    join(project.projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [
+        { key: "TOKEN", source: "plain_env" },
+        { key: "SEC", source: "keychain", services: ["api"] },
+      ],
+    })
+  );
+  await writeFile(
+    join(project.projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "journal",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: {
+            path: join(project.projectRoot, "legacy-store.json"),
+            keyPath: join(project.projectRoot, "legacy-backend.key"),
+          },
+        },
+      },
+    })
+  );
+  const result = await commands.run({
+    cmd: [
+      process.execPath,
+      "--no-env-file",
+      join(import.meta.dir, "fixtures", "env-migration-keychain-worker.ts"),
+    ],
+    cwd: project.projectRoot,
+    env: privateCliEnv({
+      root,
+      env: {
+        HACK_HOME: join(root, "state"),
+        HACK_NO_INTERACTIVE: "1",
+        HACK_TEST_PROJECT_ROOT: project.projectRoot,
+        HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: undefined,
+        PATH: "/nonexistent",
+      },
+    }),
+  });
+  expect(result.stdout + result.stderr).not.toContain(SENTINEL);
+  expect(result.stdout + result.stderr).not.toContain(
+    "synthetic-deferred-repair-keychain"
+  );
+  expect(result.stderr).toBe("");
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    previewStatus: "ready",
+    unchangedAfterPreview: true,
+    absentAfterPreview: true,
+    absentAfterApply: true,
+    applied: true,
+    preserved: true,
+    calls: { get: expect.any(Number), set: 0, delete: 0 },
+  });
+  expect(JSON.parse(result.stdout).calls.get).toBeGreaterThan(0);
+});
+
 test("explicit no-op clears deferred Compose repair after manual removal of references", async () => {
   const composePath = join(project.projectDir, "docker-compose.yml");
   await writeFile(

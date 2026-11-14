@@ -10439,7 +10439,7 @@ async function assertLegacyCleanupReceipts(opts: {
   }
 }
 
-/** Re-evaluate delivery and Compose references after prompts, while writer locks are held. */
+/** Re-evaluate delivery without provisioning keys, including during read-only previews. */
 async function assertLegacyCleanupDelivery(opts: {
   readonly projectRoot: string;
   readonly paths: readonly string[];
@@ -10510,7 +10510,11 @@ async function assertLegacyCleanupDelivery(opts: {
       }
     }
     if (contractSelected || (envName === null && opts.paths.includes(path))) {
-      const legacy = await resolveHackEnv({ ...context, envName });
+      const legacy = await resolveHackEnv({
+        ...context,
+        envName,
+        allowKeyProvisioning: false,
+      });
       if (contractSelected) {
         for (const entry of legacy.values) {
           if (entry.value !== null) {

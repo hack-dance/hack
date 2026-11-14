@@ -155,3 +155,88 @@ test("machine mode refuses path selection and every mutating mode before tools r
     await rm(f.root, { recursive: true, force: true });
   }
 }, 30_000);
+
+test("machine audit excludes gateway probes even with enabled and malformed registered projects", async () => {
+  const f = await fixture();
+  try {
+    const enabled = join(f.root, "registered-enabled/.hack");
+    const malformed = join(f.root, "registered-malformed/.hack");
+    await mkdir(enabled, { recursive: true });
+    await mkdir(malformed, { recursive: true });
+    await mkdir(join(f.root, "state"));
+    await Bun.write(
+      join(enabled, "hack.config.json"),
+      JSON.stringify({ controlPlane: { gateway: { enabled: true } } })
+    );
+    await Bun.write(
+      join(malformed, "hack.config.json"),
+      "{invalid REGISTERED_PROJECT_CANARY"
+    );
+    const registry = join(f.root, "state/projects.json");
+    await Bun.write(
+      registry,
+      JSON.stringify({
+        version: 1,
+        projects: [enabled, malformed].map((projectDir, index) => ({
+          id: `fixture-${index}`,
+          name: `registered-fixture-${index}`,
+          projectDir,
+          projectDirName: ".hack",
+          repoRoot: resolve(projectDir, ".."),
+          createdAt: "2026-01-01T00:00:00.000Z",
+        })),
+      })
+    );
+    const before = await readFile(registry);
+    // Positive control: the real resolver sees both registered checkouts and the parse warning.
+    const modulePath = resolve(
+      import.meta.dir,
+      "../src/control-plane/extensions/gateway/config.ts"
+    );
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--eval",
+        `
+      import {resolveGatewayConfig} from ${JSON.stringify(modulePath)};
+      const result = await resolveGatewayConfig();
+      process.stdout.write(JSON.stringify({enabled:result.config.enabled,warning:result.warnings.some(w=>w.includes("registered-fixture-1"))}));
+    `,
+      ],
+      {
+        cwd: f.root,
+        env: privateCliEnv({
+          root: f.root,
+          env: {
+            HACK_HOME: join(f.root, "state"),
+            HACK_GLOBAL_CONFIG_PATH: join(f.root, "state/hack.config.json"),
+          },
+        }),
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual({ enabled: true, warning: true });
+    const result = await f.invoke(["--machine", "--json"]);
+    expect(result.json).toMatchObject({ ok: true, data: { schema: 1 } });
+    const ids = result.json.data.checks.map(
+      (check: { id: string }) => check.id
+    );
+    expect(ids).not.toContain("gateway config");
+    expect(ids).not.toContain("gateway tokens");
+    expect(result.stdout).not.toContain("registered-fixture");
+    expect(result.stdout).not.toContain("REGISTERED_PROJECT_CANARY");
+    expect(await readFile(registry)).toEqual(before);
+    expect(await Bun.file(f.forbidden).exists()).toBe(false);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+}, 30_000);

@@ -946,8 +946,12 @@ async function runDoctorAudit(
       results.push(await runCheck(s, DAEMON_SERVICE_CHECK, () => serviceCheck));
     }
   }
-  results.push(await runCheck(s, "gateway config", () => checkGatewayConfig()));
-  results.push(await runCheck(s, "gateway tokens", () => checkGatewayTokens()));
+  results.push(
+    ...(await collectGatewayDoctorChecks({
+      progress: s,
+      machine: args.options.machine === true,
+    }))
+  );
 
   if (isMac()) {
     results.push(
@@ -2129,6 +2133,20 @@ async function checkDaemonStatus(): Promise<CheckResult> {
   });
 
   return buildDoctorDaemonCheck({ report, candidate: isCandidateRun() });
+}
+
+/** Retained gateway checks scan registered project configs, so a machine-only audit omits them. */
+async function collectGatewayDoctorChecks(opts: {
+  readonly progress: DoctorProgress;
+  readonly machine: boolean;
+}): Promise<TimedCheckResult[]> {
+  if (opts.machine) {
+    return [];
+  }
+  return [
+    await runCheck(opts.progress, "gateway config", checkGatewayConfig),
+    await runCheck(opts.progress, "gateway tokens", checkGatewayTokens),
+  ];
 }
 
 async function checkGatewayConfig(): Promise<CheckResult> {

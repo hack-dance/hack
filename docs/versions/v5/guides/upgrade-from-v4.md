@@ -12,6 +12,10 @@ project, the v4.2.1 path, env migration, data recovery or rollback. Those remain
 steps are **to be confirmed in the dogfood run**. Native setup and log following
 remain **under verification**.
 
+The next.17 additions below were checked against candidate source `5002cf87bb`.
+They do not change the next.16 trial record. The assistant now handles checks and
+selected file repairs; env migration and the runtime trial remain separate.
+
 ```mermaid
 ---
 title: Choose an upgrade path
@@ -63,6 +67,24 @@ Sources: [candidate channel contract](https://github.com/hack-dance/hack/blob/26
 [application qualification](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-dogfooding.md).
 
 ## 2. Before you start
+
+### Breaking change: zellij workspaces removed
+
+Next.17 requires tmux for interactive workspaces. Project/global
+`sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij` fail with migration guidance.
+Install tmux, then remove the setting and override or set the mode to `tmux`;
+`auto` detects tmux only. Existing zellij sessions are not stopped or migrated.
+
+After backing up, **before switching a project that used zellij lifecycle
+processes**, keep zellij installed and use the retained v4 CLI to run `hack down`
+for that project. Confirm its lifecycle processes stopped. If already upgraded,
+use the retained v4 CLI for that stop first. Then take a fresh private backup
+using the procedure below, keeping the earlier copy. Use the stopped-state copy
+for rollback so it does not restore live zellij state. Saved zellij lifecycle state blocks
+v5 start, restart and down: v5 cannot verify or stop it. Changing the setting
+alone does not clear saved state. Do not delete or edit managed state files.
+A leftover zellij setting also makes `hack global install` fail; fix it before
+retrying. A stale-state migration path remains separate lifecycle work.
 
 ### Check first
 
@@ -487,7 +509,7 @@ not prove the key survived. Implicit migration cleanup removes only migrated
 dotenv files, not the store's `keyPath`, but it still writes project state: keep
 the backup before env-consuming commands that can migrate automatically too.
 The section 2 template already saves the key privately as
-`$BACKUP/project-.hack.secret.key`, outside the working tree. A published fix
+`$BACKUP/project-.hack.secret.key`, outside the working tree. A fix
 for explicit Doctor cleanup is merged in
 [#769](https://github.com/hack-dance/hack/pull/769), intended for next.17.
 In a build containing that fix, project/shared env keys and current config/YAML
@@ -979,11 +1001,3 @@ Keep the printed resume and rollback commands for a custom `--snapshot-root`:
 ordinary snapshot listings scan only the default root. Resume preserves completed
 outcomes across interruption and refuses a damaged original blob even when its
 agent file has already been removed.
-
-## Breaking change: zellij workspaces removed
-
-v5 supports tmux for interactive workspaces. `sessions.mux=zellij` and `HACK_SESSIONS_MUX=zellij` now fail with migration guidance. Install tmux, then remove the setting or set it to `tmux`; `auto` detects tmux only. Existing zellij sessions are not stopped or migrated by Hack.
-
-**Before upgrading a project that used zellij for lifecycle processes:** with zellij installed, use the v4 CLI to run `hack down` for that project and confirm its lifecycle processes have stopped. Then switch to v5 and change the mux setting. Saved zellij lifecycle state blocks v5 start, restart and down because v5 cannot verify or stop that session. If already upgraded, use the retained v4 CLI to stop the affected project first; do not delete or edit managed state files. Removing a workspace setting alone does not clear saved lifecycle state. A stale-state migration path remains part of the lifecycle supervisor work.
-
-A leftover zellij setting also makes `hack global install` fail with the same migration guidance. Fix the setting before retrying.

@@ -16,6 +16,10 @@ case "$(uname -s)-$(uname -m)" in
     target=x86_64-unknown-linux-gnu
     checksum=1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4
     ;;
+  Linux-aarch64|Linux-arm64)
+    target=aarch64-unknown-linux-gnu
+    checksum=3e35e8f6913af92558ba09d7155f74e35dd1f0024ef3cd891637433ae4eacbdd
+    ;;
   Darwin-arm64|Darwin-x86_64)
     target=universal-apple-darwin
     checksum=d1d7d025d4bfc9fb154cd76aea3949bd78534829a0589abefa6e5dd4edb135dd

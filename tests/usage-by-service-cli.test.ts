@@ -149,3 +149,98 @@ test("--by-service without --json and --path without --by-service are usage erro
     },
   });
 }, 60_000);
+
+test("--project resolves the registered project and its Compose name, with branch instances", async () => {
+  // Registered as "shop"; Compose runs it as "shop-runtime". A different
+  // project that happens to be named "shop" must not be measured.
+  const shopRoot = join(root, "shop");
+  await mkdir(join(shopRoot, ".hack"), { recursive: true });
+  await writeFile(
+    join(shopRoot, ".hack", "docker-compose.yml"),
+    "name: shop-runtime\nservices:\n  api:\n    image: alpine:3.22\n"
+  );
+  await writeFile(
+    join(shopRoot, ".hack", "hack.config.json"),
+    `${JSON.stringify({ name: "shop", dev_host: "shop.hack" })}\n`
+  );
+  const state = join(root, "state");
+  await mkdir(state);
+  await writeFile(
+    join(state, "projects.json"),
+    `${JSON.stringify({
+      version: 1,
+      projects: [
+        {
+          id: "shop-identity",
+          name: "shop",
+          repoRoot: shopRoot,
+          projectDir: join(shopRoot, ".hack"),
+          projectDirName: ".hack",
+          devHost: "shop.hack",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+    })}\n`
+  );
+  const row = (id: string, project: string, service: string) =>
+    JSON.stringify({
+      ID: id,
+      State: "running",
+      Status: "Up",
+      Names: id,
+      Labels: `com.docker.compose.project=${project},com.docker.compose.service=${service}`,
+    });
+  const stat = (id: string, cpu: string, mem: string) =>
+    JSON.stringify({ ID: id, CPUPerc: cpu, MemUsage: `${mem} / 1GiB` });
+  await writeFile(
+    join(root, "ps.out"),
+    [
+      row("c1", "shop-runtime", "api"),
+      row("c2", "shop-runtime", "api"),
+      row("c3", "shop-runtime--feat", "api"),
+      row("c4", "shop", "api"),
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    join(root, "stats.out"),
+    [
+      stat("c1", "1.00%", "10MiB"),
+      stat("c2", "2.00%", "20MiB"),
+      stat("c3", "4.00%", "40MiB"),
+      stat("c4", "50.00%", "500MiB"),
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    join(root, "bin", "docker"),
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      `  ps) cat "${join(root, "ps.out")}" ;;`,
+      '  inspect) echo "[]" ;;',
+      `  stats) cat "${join(root, "stats.out")}" ;;`,
+      "esac",
+      "exit 0",
+      "",
+    ].join("\n")
+  );
+
+  const result = await runUsage(
+    ["--json", "--by-service", "--project", "shop"],
+    {
+      HACK_HOME: state,
+      HACK_GLOBAL_CONFIG_PATH: join(state, "hack.config.json"),
+    }
+  );
+
+  expect(result.exitCode).toBe(0);
+  const data = JSON.parse(result.stdout).data;
+  expect(data.project).toBe("shop-runtime");
+  expect(
+    data.services.map(
+      (service: Record<string, unknown>) =>
+        `${service.composeProject}/${service.service}/${service.containers}/${service.cpuPercent}`
+    )
+  ).toEqual(["shop-runtime/api/2/3", "shop-runtime--feat/api/1/4"]);
+}, 60_000);

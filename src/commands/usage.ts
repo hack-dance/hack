@@ -7,6 +7,7 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optJson, optPath, optProject } from "../cli/options.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { GLOBAL_CLOUDFLARE_DIR_NAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
@@ -1585,11 +1586,12 @@ async function resolveByServiceProject(opts: {
   readonly path: string | undefined;
   readonly project: string | undefined;
 }): Promise<string> {
-  if (opts.project !== undefined) {
-    return sanitizeProjectSlug(opts.project);
-  }
-  const startDir = resolve(opts.cwd, opts.path ?? ".");
-  const context = await findProjectContext(startDir);
+  // Same selection and Compose-name precedence as `hack up`: a registered
+  // project for --project, otherwise the project at --path or the cwd.
+  const context =
+    opts.project === undefined
+      ? await findProjectContext(resolve(opts.cwd, opts.path ?? "."))
+      : await resolveRegisteredProjectOption({ projectOpt: opts.project });
   if (!context) {
     throw new HackCliError({
       code: "E_PROJECT_NOT_FOUND",

@@ -8,8 +8,11 @@ hack usage --json --by-service --path <project root>
 hack usage --json --by-service --project <name>
 ```
 
-With neither `--path` nor `--project`, the project is found from the current
-directory. `--by-service` requires `--json` and does not combine with
+`--project` selects a registered project, as `hack up --project` does. With
+neither `--path` nor `--project`, the project is found from the current
+directory. Either way `project` is the Compose project name that `hack up`
+uses: the Compose file's `name:`, else the project config `name`, else the
+directory slug. `--by-service` requires `--json` and does not combine with
 `--details`, `--include-global`, `--no-host` or `--watch`.
 
 ## Output
@@ -56,7 +59,9 @@ Version 1 may add fields; it does not remove or rename them.
 - `E_DOCKER_UNAVAILABLE`: Docker is not installed or not responding, or
   `docker stats` failed.
 - `E_PROJECT_NOT_FOUND`: no Hack project at the path.
-- `E_USAGE`: an invalid option combination.
+- `E_NATIVE_PROJECT_UNSUPPORTED`, `E_NATIVE_PROJECT_CONFLICT`: the path holds
+  a native-authored project, which this report does not cover.
+- `E_USAGE`: an invalid option combination or an unknown `--project` name.
 
 ## Limits
 

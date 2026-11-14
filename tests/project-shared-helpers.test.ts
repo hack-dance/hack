@@ -167,7 +167,9 @@ async function readHelperClaim(
 async function ownedIdentity(root: string, helper: ProjectSharedHelperConfig) {
   const claim = await readHelperClaim(root, helper);
   if (claim?.ownership !== "owned") {
-    throw new Error("expected an owned claim");
+    throw new Error(
+      `expected an owned claim; observed ${claim?.ownership ?? "missing"}`
+    );
   }
   return { pid: claim.pid, birth: claim.birth };
 }

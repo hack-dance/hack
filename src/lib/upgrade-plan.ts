@@ -3,6 +3,7 @@ import type {
   UpgradeReportFinding,
 } from "./upgrade-check.ts";
 import type { UpgradeFindingStatus } from "./upgrade-check-project.ts";
+import { UPGRADE_REVIEW_REASONS } from "./upgrade-review-reasons.ts";
 
 /**
  * The upgrade plan (HACK-2188, HACK-2220): one step per kind of change, not
@@ -23,6 +24,7 @@ import type { UpgradeFindingStatus } from "./upgrade-check-project.ts";
 export const UPGRADE_APPLY_FIXES = [
   "ignore-rules",
   "agent-integrations",
+  "env-key-permissions",
 ] as const;
 
 export type UpgradeApplyFix = (typeof UPGRADE_APPLY_FIXES)[number];
@@ -96,6 +98,7 @@ const PROJECT_ORDER = [
   "env-secrets",
   "env-format",
   "env-key",
+  "env-key-permissions",
   "tracked-files",
   "ignore-rules",
   "agent-integrations",
@@ -103,6 +106,8 @@ const PROJECT_ORDER = [
 
 /** What a step covering several checkouts is about (no counts, no values). */
 const GROUP_WHY: Readonly<Record<string, string>> = {
+  "env-key-permissions":
+    "Make verified owner-held, untracked env keys private (0600); keep their exact bytes and snapshot the original mode.",
   "project-config": "These live checkouts cannot be read.",
   "project-store": "The project's own secret store or its key needs attention.",
   "env-secrets": "Env layer secrets must open under the project env key.",
@@ -169,9 +174,9 @@ export function buildUpgradePlan(opts: {
       if (!actionable(finding)) {
         continue;
       }
-      const key = finding.id;
+      const key = finding.apply_fix ?? finding.id;
       const group = groups.get(key) ?? {
-        id: finding.id,
+        id: key,
         status: finding.status,
         findings: [],
       };
@@ -268,6 +273,19 @@ function groupStep(opts: {
       action: null,
       why: GROUP_WHY[id] ?? findings[0]?.summary ?? id,
       applies: true,
+    };
+  }
+  if (id in UPGRADE_REVIEW_REASONS) {
+    const args = ["upgrade", "review", "--only", id];
+    return {
+      ...base,
+      scope:
+        targets.length === 1 ? (targets[0]?.scope ?? "projects") : "projects",
+      command: opts.render(args),
+      args,
+      action: UPGRADE_REVIEW_REASONS[id] ?? null,
+      why: GROUP_WHY[id] ?? id,
+      applies: false,
     };
   }
   const only = findings.length === 1 ? findings[0] : undefined;

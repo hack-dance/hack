@@ -1883,6 +1883,7 @@ hack upgrade <subcommand> [options]
 | --- | --- |
 | `hack upgrade check` | Check this machine and every registered project for the upgrade (read-only) |
 | `hack upgrade apply` | Run the plan's apply steps for every checkout (snapshot and journal first) |
+| `hack upgrade review` | Walk affected checkouts and explain decisions that cannot be applied safely |
 | `hack upgrade snapshot` | Keep a private copy of the files the upgrade changes |
 | `hack upgrade rollback` | Put back the files kept by an upgrade snapshot |
 
@@ -1933,11 +1934,12 @@ hack upgrade apply [options]
 ```
 
 Checks first, then runs the plan steps marked (apply) for every checkout they cover: refreshing
-outdated .hack/.gitignore files and removing stale standalone agent files the hack plugin replaces
+outdated .hack/.gitignore files, tightening verified permission-only key findings to 0600,
+and removing stale standalone agent files the hack plugin replaces
 (each removal covered by the same snapshot). Before changing anything it keeps an upgrade
 snapshot and writes a journal beside it with the snapshot's coverage and gaps and each checkout's
 outcome. Checkouts with a blocker or a check that could not run are skipped. Prints the rollback
-command. --dry-run lists what would change. Exits 1 when anything selected was not done.
+command. --dry-run summarizes what would change; --verbose includes file paths. Exits 1 when anything selected was not done.
 After interruption, --resume <manifest> reuses that run's selection and snapshot; unexpected edits refuse.
 Other-volume checkouts are skipped before writing. Select one project with --snapshot-root on its volume
 to keep recovery bytes in an explicit private directory outside every Git working tree.
@@ -1946,12 +1948,35 @@ to keep recovery bytes in an explicit private directory outside every Git workin
 
 | Option | Description |
 | --- | --- |
-| `--only <fix>` | Run only this plan step: ignore-rules or agent-integrations (comma-separated for both) |
+| `--only <fix>` | Run selected plan steps: ignore-rules, agent-integrations or env-key-permissions (comma-separated) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--dry-run` | List what would change and change nothing |
 | `--resume <manifest>` | Resume the apply journal beside this explicit snapshot manifest |
 | `--snapshot-root <directory>` | Keep recovery bytes in this private directory outside Git, on the selected targets' filesystem |
 | `--verbose` | Also list every checkout's findings and the dead registry entries (--json always has everything) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack upgrade review`
+
+Walk affected checkouts and explain decisions that cannot be applied safely
+
+### Usage
+
+```bash
+hack upgrade review [options]
+```
+
+Runs a fresh read-only check, then walks the selected env/key/tracked-file findings with their reasons and checkout-specific diagnostics. Executes no fixes or printed commands.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--only <finding>` | Review env-secrets, env-format, env-key or tracked-files (comma-separated) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

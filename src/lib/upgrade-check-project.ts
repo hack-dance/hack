@@ -70,6 +70,8 @@ export type UpgradeFinding = {
   readonly args: readonly string[] | null;
   /** A manual action, when no command fixes it or as its alternative. Never run. */
   readonly action: string | null;
+  /** A narrower automatic fix when this finding is safe to repair without a key decision. */
+  readonly apply_fix?: "env-key-permissions";
 };
 
 /** Checks the upgrade's safety depends on; a failure there is `incomplete`. */
@@ -347,6 +349,10 @@ async function envKeyFinding(opts: {
   return {
     id: "env-key",
     status: inspection.status === "error" ? "blocker" : "warn",
+    ...(codes.length > 0 &&
+    codes.every((code) => code === "env-key-weak-permissions")
+      ? { apply_fix: "env-key-permissions" as const }
+      : {}),
     summary: `Env key: ${codes.join(", ")}.`,
     args: ["doctor", "--path", opts.root],
     action: worst.remedy ? `In the project root: ${worst.remedy}` : null,

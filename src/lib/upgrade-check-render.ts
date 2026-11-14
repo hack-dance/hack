@@ -42,6 +42,7 @@ const LABEL: Readonly<Record<string, string>> = {
   "env-secrets": "env secrets",
   "env-format": "legacy env format",
   "env-key": "env key",
+  "env-key-permissions": "env key permissions",
   "tracked-files": "tracked machine-local files",
   "ignore-rules": "outdated .hack/.gitignore",
   "agent-integrations": "stale agent files",
@@ -282,9 +283,11 @@ function stepLines(step: UpgradePlanStep): string[] {
     skipped === 0
       ? head
       : `${head} (${skipped} blocked/unchecked; apply skips them)`;
-  return step.count <= 1 && step.command !== null && step.action !== null
-    ? [line, `       ${step.action}`]
-    : [line];
+  return [
+    step.command !== null && step.action !== null
+      ? `${line} — ${step.action}`
+      : line,
+  ];
 }
 
 function machineStepPurpose(step: UpgradePlanStep): string {

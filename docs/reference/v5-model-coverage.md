@@ -204,3 +204,11 @@ admits only the owner's authorized removal output before advancing that state.
 An unchanged injected failure followed by a real removal/restore regression
 covers successful retry without `--overwrite`; it does not qualify OS permission
 failures or arbitrary concurrent writers.
+
+Permission-only key repair freezes its write-set paths in the journal, verifies
+snapshot bytes and owner identity, then uses an open descriptor to tighten mode
+to 0600. Four real SIGKILL boundaries cover journal creation, target start,
+chmod-before-after-state recording and completion. Resume followed by rollback
+restores original bytes and mode. A linked-worktree regression covers two targets
+sharing one primary key. This adds implementation evidence, not finite-model
+coverage or protection against arbitrary concurrent filesystem writers.

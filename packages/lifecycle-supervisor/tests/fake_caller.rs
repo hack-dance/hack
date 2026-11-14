@@ -1434,6 +1434,12 @@ fn fixture_process() {
             out.flush().unwrap();
             std::process::exit(0);
         }
+        #[cfg(target_os = "linux")]
+        "non-dumpable" => {
+            // SAFETY: affects only this owned fixture's dumpability, not its UID.
+            assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) }, 0);
+            println!("non-dumpable-ready");
+        }
         "signal-default" => {
             let mut disposition: libc::sigaction = unsafe { std::mem::zeroed() };
             assert_eq!(
@@ -1480,4 +1486,36 @@ fn completed_stop_fences_a_run_whose_frame_arrives_after_retirement() {
     );
     assert!(!wait(&mut delayed, TIMEOUT).success());
     assert!(!f.root.join("late.json").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_dumpable_command_keeps_its_process_uid_for_orphan_recovery() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "non-dumpable")]);
+    f.await_log("non-dumpable-ready");
+    let state = f.state("worker");
+    let command = pid(&state, "commandPid");
+    // On an unprivileged runner the inode owner changes to root, while the
+    // process UID stays ours. The recovery path must use the latter.
+    if unsafe { libc::geteuid() } != 0 {
+        assert_eq!(
+            fs::metadata(format!("/proc/{command}/stat")).unwrap().uid(),
+            0
+        );
+    }
+    // SAFETY: this fixture owns the still-running guard recorded at launch.
+    assert_eq!(
+        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+        0
+    );
+    f.stop();
+    let _ = wait(&mut caller, TIMEOUT);
+    let live = fs::read_to_string(format!("/proc/{command}/stat"))
+        .ok()
+        .is_some_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, fields)| !fields.starts_with("Z ") && !fields.starts_with("X "))
+        });
+    assert!(!live);
 }

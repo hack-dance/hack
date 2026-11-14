@@ -65,7 +65,6 @@ pub struct Identity {
 
 #[cfg(target_os = "linux")]
 pub fn inspect(pid: i32) -> Result<Option<Identity>> {
-    use std::os::unix::fs::MetadataExt;
     let path = format!("/proc/{pid}/stat");
     let bytes = match fs::read(&path) {
         Ok(value) => value,
@@ -86,19 +85,38 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
         .get(3)
         .and_then(|v| v.parse().ok())
         .ok_or_else(refused)?;
-    let metadata = match fs::metadata(&path) {
-        Ok(value) => value,
-        Err(error) if absent_error(&error) => return Ok(None),
-        Err(error) => return Err(error),
+    let uid = match linux_uid(pid)? {
+        Some(uid) => uid,
+        None => return Ok(None),
     };
     Ok(Some(Identity {
         pid,
         group,
         session,
         start,
-        uid: metadata.uid(),
+        uid,
         zombie: fields.first() == Some(&"Z") || fields.first() == Some(&"X"),
     }))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_uid(pid: i32) -> Result<Option<u32>> {
+    let status = match fs::read(format!("/proc/{pid}/status")) {
+        Ok(status) => status,
+        Err(error) if absent_error(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let line = status
+        .split(|byte| *byte == b'\n')
+        .find_map(|line| line.strip_prefix(b"Uid:"))
+        .ok_or_else(refused)?;
+    let uid = std::str::from_utf8(line)
+        .map_err(|_| refused())?
+        .split_ascii_whitespace()
+        .nth(1)
+        .and_then(|uid| uid.parse().ok())
+        .ok_or_else(refused)?;
+    Ok(Some(uid))
 }
 
 #[cfg(target_os = "linux")]
@@ -124,11 +142,10 @@ pub fn census() -> Result<Vec<Identity>> {
                 Err(error)
                     if matches!(error.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES)) =>
                 {
-                    use std::os::unix::fs::MetadataExt;
-                    match entry.metadata() {
+                    match linux_uid(pid)? {
                         // SAFETY: geteuid is an observation with no preconditions.
-                        Ok(metadata) if metadata.uid() != unsafe { libc::geteuid() } => (),
-                        Err(error) if absent_error(&error) => (),
+                        Some(uid) if uid != unsafe { libc::geteuid() } => (),
+                        None => (),
                         _ => return Err(error),
                     }
                 }

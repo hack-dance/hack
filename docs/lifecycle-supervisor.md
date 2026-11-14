@@ -200,3 +200,7 @@ before spawning. New generations must use fresh owner tokens; markers persist in
 the private root and contain no command environment. Retired-but-live work remains
 unconfirmed. Linux guard spawning uses `/proc/self/exe`, preserving an executable
 reference even after atomic helper replacement.
+
+Linux ownership checks read the process's effective UID from `/proc/<pid>/status`.
+They do not infer UID from proc-file ownership, which changes when a command
+disables dumpability. Such a command remains recoverable after guard loss.

@@ -218,6 +218,9 @@ impl HackApp {
     }
 
     fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
+        if self.recovery_busy {
+            return;
+        }
         let Some(row) = self.model.selected_row() else {
             return;
         };
@@ -520,7 +523,7 @@ impl HackApp {
             let mut b = Button::new(a.label())
                 .label(a.label())
                 .small()
-                .disabled(d.busy);
+                .disabled(d.busy || self.recovery_busy);
             b = match a {
                 Action::Start => b.primary(),
                 Action::Stop => b.outline(),

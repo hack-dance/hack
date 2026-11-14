@@ -179,6 +179,10 @@ pub struct LiveSource {
     pub daemon: Option<DaemonClient>,
 }
 
+/// SIGTERM grace for doctor reads: they only read, so they own no builds
+/// to retire, and a short grace keeps a refresh within its budget.
+pub const DOCTOR_TERM_GRACE: Duration = Duration::from_secs(2);
+
 impl LiveSource {
     /// Doctor runs under one overall `budget`: each call gets the smaller of
     /// `per_call` and the time left, and projects not started before the
@@ -190,7 +194,13 @@ impl LiveSource {
         per_call: Duration,
     ) -> Vec<DoctorRun> {
         let deadline = std::time::Instant::now() + budget;
-        let left = || deadline.saturating_duration_since(std::time::Instant::now());
+        // Each call's timeout leaves room for its SIGTERM grace, so stopping
+        // a slow check also finishes within the overall budget.
+        let left = || {
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .saturating_sub(DOCTOR_TERM_GRACE)
+        };
         let read = |runner: &CliRunner, root: Option<&Path>, timeout: Duration| {
             read_doctor(runner, root, timeout)
         };
@@ -206,11 +216,16 @@ impl LiveSource {
         }
         candidates.extend([std::env::temp_dir(), std::path::PathBuf::from("/")]);
         let machine = match crate::doctor::neutral_dir(&candidates) {
-            Some(dir) => read(
-                &self.runner.clone().with_cwd(dir),
+            Some(dir) if !left().is_zero() => read(
+                &self
+                    .runner
+                    .clone()
+                    .with_cwd(dir)
+                    .with_term_grace(DOCTOR_TERM_GRACE),
                 None,
                 per_call.min(left()),
             ),
+            Some(_) => Err(NOT_CHECKED_BUDGET.to_owned()),
             None => Err("machine checks could not run outside a project".into()),
         };
         let mut runs = vec![DoctorRun::machine(machine)];
@@ -219,7 +234,7 @@ impl LiveSource {
                 let handles: Vec<_> = chunk
                     .iter()
                     .map(|t| {
-                        let runner = self.runner_for(t.native);
+                        let runner = self.runner_for(t.native).with_term_grace(DOCTOR_TERM_GRACE);
                         let timeout = per_call.min(left());
                         s.spawn(move || {
                             let result = if timeout.is_zero() {
@@ -705,6 +720,29 @@ esac
             crate::doctor::DoctorState::from_runs(&runs),
             crate::doctor::DoctorState::Error(_)
         ));
+    }
+
+    #[test]
+    fn doctor_budget_holds_even_when_checks_ignore_sigterm() {
+        // Every call ignores SIGTERM, so each stop costs the full grace.
+        let hack = fake_hack(
+            "doctor-stubborn",
+            "trap '' TERM\nwhile :; do sleep 0.05; done",
+        );
+        let src = LiveSource {
+            runner: CliRunner::new(&hack),
+            daemon: None,
+        };
+        let budget = Duration::from_secs(4);
+        let started = std::time::Instant::now();
+        let runs = src.doctor_runs_within(&targets(6), budget, Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(hack.parent().unwrap());
+        assert!(
+            started.elapsed() < budget + Duration::from_millis(800),
+            "took {:?} for a {budget:?} budget",
+            started.elapsed()
+        );
+        assert!(runs.iter().all(|r| r.result.is_err()));
     }
 
     #[test]

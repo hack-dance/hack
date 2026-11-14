@@ -97,8 +97,9 @@ Implicit commands refuse an unfinished apply or rollback journal before using
 partially published layers. Resume the explicit apply or rollback command first.
 
 Migration refuses a Git-tracked project key path even when its file is absent
-from the worktree. Tracked-change consent does not allow publishing key bytes at
-that path. Git tracking is checked again under the key lock before publication;
+from the worktree, including case-folded aliases such as `.Hack.Secret.Key`.
+Tracked-change consent does not allow publishing key bytes at that path.
+Git tracking is checked again under the key lock before publication;
 keep the key out of the index before resuming a refused migration.
 
 Completed publication payloads are removed; retries also sweep receipted orphan

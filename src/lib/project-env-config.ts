@@ -5309,13 +5309,14 @@ function projectEnvTrackedKeyError(): ProjectEnvKeyRefusalError {
  * stays allowed for v4 compatibility; `hack doctor` reports the tracked key.
  * An undeterminable status (git unavailable, path outside a work tree) is not
  * treated as tracked.
- * The index is checked even if the path is absent. Key publishers must call
- * this again under the key owner lock immediately before publication.
+ * The index is checked ignoring filename case even if the path is absent,
+ * protecting portable checkouts whose filesystem folds case. Key publishers
+ * must call this again under the key owner lock before publication.
  */
 export async function assertProjectEnvKeyUntracked(opts: {
   readonly keyPath: string;
 }): Promise<void> {
-  const tracked = await isGitTrackedProjectEnvPath({
+  const tracked = await isGitTrackedProjectEnvPathAnyCase({
     projectRoot: dirname(opts.keyPath),
     path: opts.keyPath,
   });

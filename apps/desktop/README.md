@@ -122,3 +122,6 @@ hide its observed status. Automatic daemon reads run at most every ten seconds;
 post-action reads are immediate. Existing project polling remains unchanged.
 R8 and R12 remain CLI/daemon work outside this desktop-only slice. This Linux
 preview does not qualify native macOS service behavior or a shipped artifact.
+
+Fixture views: [daemon repair (light)](screenshots/daemon-stale-unit-light.png)
+and [always-on needs attention (dark)](screenshots/always-attention-dark.png).

@@ -400,10 +400,9 @@ impl DaemonStatus {
         if status.status.is_empty() || status.running.is_none() {
             return Err("daemon status requires status and running".into());
         }
-        if (status.status == "running" && status.running != Some(true))
-            || (matches!(status.status.as_str(), "stopped" | "stale")
-                && status.running != Some(false))
-        {
+        // `running` is tracked-PID liveness; `status: running` is API
+        // reachability. The API can run with a missing/stale PID file.
+        if matches!(status.status.as_str(), "stopped" | "stale") && status.running != Some(false) {
             return Err("contradictory daemon observation".into());
         }
         Ok(status)

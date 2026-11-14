@@ -335,6 +335,29 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn reachable_api_without_tracked_pid_keeps_service_evidence() {
+        let status = DaemonStatus::from_value(json!({"status":"running", "running":false, "api_ok":true, "service":{"installed":true}})).unwrap();
+        let o = Observation {
+            cli_version: Some("5.0.0".into()),
+            socket_version: Some("5.0.0".into()),
+            status: Some(status),
+            ..Default::default()
+        };
+        assert_eq!(o.label(), "hackd running");
+        assert_eq!(
+            o.status
+                .as_ref()
+                .unwrap()
+                .service
+                .as_ref()
+                .unwrap()
+                .installed,
+            Some(true)
+        );
+        assert!(o.actions().is_empty());
+    }
+
+    #[test]
     fn recovery_and_machine_card_share_one_gate() {
         use crate::source::DaemonRecovery;
         let mut model = DaemonModel::default();

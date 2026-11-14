@@ -206,7 +206,10 @@ fn with_path(cmd: &str, root: &Path) -> String {
 /// The one exact command for a card, or `None` when only a doc applies.
 fn command_for(id: &str, area: Area, detail: &str, affected: &Affected) -> Option<String> {
     if matches!(id, "daemon" | "daemon service") {
-        return daemon_command(id, detail);
+        // The CLI's own named remedy wins: it knows cases the status words
+        // do not show (an incompatible systemd hackd needs `install`, and
+        // `restart` refuses it).
+        return remedy_in_detail(detail).or_else(|| daemon_command(id, detail));
     }
     match affected {
         Affected::Machine if !id.starts_with("native ") && remedy_in_detail(detail).is_some() => {
@@ -953,6 +956,17 @@ mod tests {
         assert_eq!(
             cmd("hackd not running (run: hack daemon start)"),
             CardAction::Copy("hack daemon start".into())
+        );
+        // Incompatible under systemd from another binary: the CLI names
+        // `install`, and that wins over the status-based `restart`.
+        assert_eq!(
+            cmd("hackd is running but incompatible (run: hack daemon install)"),
+            CardAction::Copy("hack daemon install".into())
+        );
+        // No named remedy: fall back to the status-based command.
+        assert_eq!(
+            cmd("hackd is running but incompatible"),
+            CardAction::Copy("hack daemon restart".into())
         );
         assert!(matches!(
             cmd("hackd starting (pid 1): API not responding"),

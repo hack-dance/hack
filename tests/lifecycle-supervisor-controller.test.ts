@@ -555,3 +555,23 @@ nativeTest(
     }),
   30_000
 );
+
+nativeTest(
+  "definition replacement waits for the previous project owner to retire",
+  () =>
+    fixture(async (project) => {
+      for (const hash of [
+        "synthetic-first",
+        "synthetic-second",
+        "synthetic-third",
+      ]) {
+        const owner = controller(project, hash);
+        await owner.startMany({ processes: [{ name: "worker", command }] });
+        await owner.finalize();
+        expect((await readLifecycleState(project))[0]?.definitionHash).toBe(
+          hash
+        );
+      }
+    }),
+  30_000
+);

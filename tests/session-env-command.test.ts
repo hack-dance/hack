@@ -125,14 +125,6 @@ const tmuxBackendMock = await registerScopedModuleMock({
   },
 });
 
-const zellijBackendMock = await registerScopedModuleMock({
-  importerPath: import.meta.path,
-  specifier: "../src/mux/zellij-backend.ts",
-  overrides: {
-    attachZellijSession: async () => 0,
-  },
-});
-
 const shellMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/lib/shell.ts",
@@ -152,7 +144,6 @@ beforeAll(() => {
   projectsRegistryMock.activate();
   muxResolverMock.activate();
   tmuxBackendMock.activate();
-  zellijBackendMock.activate();
   shellMock.activate();
 });
 
@@ -172,7 +163,6 @@ afterAll(() => {
   projectsRegistryMock.deactivate();
   muxResolverMock.deactivate();
   tmuxBackendMock.deactivate();
-  zellijBackendMock.deactivate();
   shellMock.deactivate();
 });
 

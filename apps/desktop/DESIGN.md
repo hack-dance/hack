@@ -42,8 +42,8 @@ detail pane, status bar. Light and dark follow the system
 | Loading | First read in flight | Three skeleton rows | none |
 | Loaded | `projects[]` non-empty | Groups Running / Stopped; dot per row (green running, amber degraded, grey stopped, red failed or needs attention, grey "?" unknown); "always on" mark | Select row |
 | Empty | Registry has no projects | "No projects yet" + `cd your-repo && hack init` | Copy command, open docs |
-| Daemon not running | `/v1/status` unreachable | List loads through the CLI; banner "hackd is off: status refreshes slowly" | Start hackd |
-| Daemon other version | `/v1/status.version` ≠ CLI version | CLI fallback; banner "hackd vX, CLI vY" | Restart hackd |
+| Daemon not running | `/v1/status` unreachable | Unknown; last good list kept stale. Fallback needs R18: today's CLI listing writes the registry. Retry every 10 s. | Start hackd |
+| Daemon other version | `/v1/status.version` ≠ CLI version | Unknown; fallback needs R18. Last good list kept stale. Retry every 10 s. | Restart hackd |
 | Docker not reachable | `runtime_ok: false` (Docker observation only) | Compose rows keep names, dots "?"; native rows keep their own state from native `ps`; banner with `runtime_error` | Open Docker help |
 | CLI missing or too old | `hack` not on PATH, or outside the supported range | Full-pane card instead of the list; status bar shows no engine/hackd state | Copy install command |
 | Error | CLI exit ≠ 0 or bad JSON | Banner with `code` and `message`; last good list kept, marked stale with its age | Retry, copy error |
@@ -83,7 +83,7 @@ Header: name, state pill (+ uptime when known), backend pill, URL, buttons,
 | Starting | this app's `up` in flight, or native `pending` | blue "Starting…" | none (no cancel in v0) |
 | Running | every defined service has a running container | green "Running · 2 hours" (from Docker status text) | Open, Restart, Stop |
 | Running, some exited (0) | the rest run; some exited 0 and their completion role is unknown | green "Running · migrate exited (0)" with tooltip "completion role unknown" | Open, Restart, Stop |
-| Degraded | some running; a long-running service down, exited ≠ 0, or `(unhealthy)` | amber "Degraded · worker down" | Open, Restart, Stop |
+| Degraded | some running; a service with a container that is down, exited ≠ 0, or `(unhealthy)`. A defined service with no container is not counted: it may be in an inactive Compose profile (expected services need R2) | amber "Degraded · worker down" | Open, Restart, Stop |
 | Stopping | this app's `down` in flight | grey "Stopping…" | none |
 | Failed start | last `up` reported `services.failed`, or nothing runs and a service exited ≠ 0 | red "Failed to start: api, worker" | Start (retry), Stop, logs filtered to those services |
 | Needs attention | always-on gave up (R12b), `status: missing`, or an `input_diagnostic` that is not the native one | red "Needs attention" + one line why | the one fix |
@@ -281,7 +281,7 @@ Fields and commands needed from the CLI side:
 ## 7. Data contract
 
 Polling stops while the window is hidden. Every CLI call has a timeout and is
-killed with its process group on expiry; a timeout makes the screen Unknown.
+stopped on expiry: SIGTERM to its process group (the CLI forwards it to the subprocesses it owns), then SIGKILL after 15 s; a timeout makes the screen Unknown.
 
 Exit codes: a valid JSON payload is parsed even when the exit code is not 0,
 because the unhealthy states live there.
@@ -298,7 +298,7 @@ because the unhealthy states live there.
 
 | Screen | Reads | How often | Timeout |
 |---|---|---|---|
-| Sidebar, header | `GET /v1/projects` if `/v1/status.version` matches the CLI, else `hack projects --json --no-daemon`; native rows add `HACK_RUNTIME_BACKEND=native hack ps --json --path` | 2 s with hackd, 10 s without; and after every action | 3 s / 15 s |
+| Sidebar, header | `GET /v1/projects` if `/v1/status.version` matches the CLI; otherwise Unknown until R18 provides observe-only CLI listing. Native rows add `HACK_RUNTIME_BACKEND=native hack ps --json --path` | 2 s with hackd, 10 s without; and after every action | 3 s / 15 s |
 | Services CPU/memory | `hack usage --json --details` (until R3) | 5 s while visible | 10 s |
 | Logs | `hack logs --json --path <root> [<service>] --tail 500` (one long-running child) | stream | killed on tab change |
 | Env | `hack env list --json --path <root>` | on tab open, after env actions | 10 s |
@@ -306,9 +306,9 @@ because the unhealthy states live there.
 | Doctor, onboarding | `hack doctor --json` (per project and once outside), `hack daemon status --json` | on open; every 10 min | 60 s |
 | Daemon | `GET /v1/status` | 10 s | 1 s |
 | Upgrades | R14 daily; `hack upgrade check --json` on Review | daily / on demand | 30 s / 60 s |
-| Actions | `hack up -d --json`, `down --json`, `restart --json`, `open --json`, `daemon start\|restart\|install` (exit code), `autostart …` | on click | 10 min for `up`, 2 min others |
+| Actions | `hack up -d --json`, `down --json`, `restart --json`, `open --json`, `daemon start\|restart\|install` (exit code), `autostart …` | on click | `up`/`down`/`restart`: none; the app waits for the CLI, which owns their timeouts (after 6 h it only shows a warning), 2 min others |
 
-The 23 numbered requests (R1–R17) this design needs from the CLI and daemon are in
+The 24 numbered requests (R1–R18) this design needs from the CLI and daemon are in
 [Appendix C](#appendix-c-requests-to-the-cli-and-daemon).
 
 ## 8. Scope
@@ -367,7 +367,7 @@ A macOS system prompt could come later for single root-only lines from R11, neve
 
 Each is small enough for one PR.
 
-1. **R1** `hack version --json`: `{version, channel, install_kind, binary_path}`.
+1. **R1** Exists: `hack version --json`: `{version, channel, install_kind, binary_path}`; see [Version identity](../../docs/reference/version.md).
 2. **R2** Backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
 3. **R2b** Native lifecycle the app can drive: a `--json` contract for native `restart` and authored `down`/`restart`, and qualification of the existing detached `up --json` for app use.
 4. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
@@ -390,3 +390,4 @@ Each is small enough for one PR.
 21. **R15** `--json` for `hack daemon start|stop|restart|install`.
 22. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
 23. **R17** `kind: safe | admin | manual` on #790's findings and plan steps, so the app knows which to offer as Run.
+24. **R18 — exists** `hack projects --json --observe` (also `--summary`, `--project`, `--all`): no auto-registration, `lastSeenAt` update, registry write, daemon contact or engine contact. Includes registered native rows. Compose state defaults to unknown; `--runtime` explicitly opts in to Docker reads that can start a socket-activated engine. Rows add the R2 field vocabulary with null/unknown for unavailable evidence; native state still comes from native `ps` until R2 integrates that observer. Always-on fields follow their persistence owner. Desktop fallback can use the default non-contact command when a matching hackd snapshot is unavailable; adopting it in the app is separate work. The daemon-off screen still offers Start hackd.

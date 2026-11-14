@@ -16,13 +16,14 @@ terminal).
 - `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
 - `hack ps` / `hack status` — project status
 - `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
+- `hack projects --json --observe` — read-only listing: no registration, `lastSeenAt` update, registry creation or write, daemon contact or engine contact. Works with `--summary`, `--project` and `--all`; rejects `--meta`. Add `--runtime` to query Docker explicitly; socket contact can start an on-demand engine. Ordinary listing retains discovery writes for compatibility.
 - `hack env` — env values and local secrets
 - `hack host exec` / `hack host shell` — host commands/shells with Hack-resolved env injected
 - `hack run <service> [cmd...]` — one-off command in a fresh service container
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack upgrade check` — read-only upgrade check of this machine and every registered project, ending in an ordered plan and the next command; `hack upgrade snapshot` and `hack upgrade rollback --rollback-manifest <manifest>` keep and restore the files the upgrade changes
+- `hack upgrade check` — read-only upgrade check of this machine and every registered project: a one-screen summary, the projects with findings (worktrees folded; `--verbose` for every checkout), and a plan with one step per kind of change, then the next command; `hack upgrade apply [--only <fix>] [--project <name>] [--dry-run]` runs the plan's apply steps (`.hack/.gitignore` refresh, stale agent files) for every checkout after keeping a snapshot and a journal; `hack upgrade snapshot` and `hack upgrade rollback --rollback-manifest <manifest>` keep and restore the files the upgrade changes
 - `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
 
 Candidate `hack-next doctor` and `hack-v5 doctor` report a missing hackd as optional
@@ -125,7 +126,29 @@ does not refresh the global project registry. A held registration lock therefore
 does not block their resolution or require a retry just to update last-seen metadata.
 Use a checkout/path directly, or an existing registry entry with `--project`;
 `hack init`, project lifecycle registration and `hack projects` discovery maintain
-registrations. Optional `hack projects` discovery coalesces unchanged observations
+registrations. `--json --observe` skips registration and engine queries entirely.
+Compose state is unknown by default. `--runtime` explicitly opts in to Docker
+ps/inspect reads, which can start a socket-activated engine (for example a
+systemd Docker socket or an on-demand macOS engine). Both modes bypass hackd,
+including when a daemon is available. `--all` discovers runtime-only projects
+only with `--runtime`.
+Observe returns the normal listing fields plus `observe: true` and
+`runtime_requested: false|true`. Without runtime queries, `runtime_error` and
+`runtime_checked_at` are null rather than claiming Docker failed. Each full or
+summary row adds `backend`, `state`, `state_reason`, `started_at` and `services`.
+Each service has `name`, `state`, `ready`, `completed`, `health`, `exit_code` and
+`started_at`. Missing evidence is null or unknown: Docker activity is not a
+readiness/completion guarantee, and an exited container without an observed
+exit code is unknown. Mixed running and non-running replicas make their service
+and project degraded. Registered native rows remain visible with
+`backend: native`, `state: unknown`, and `state_reason: native-observer-required`;
+use the native `ps` observer for their current state. R2 will complete the shared
+backend-aware projection. Always-on fields will be supplied when their owner
+exists; absence of `autostart` is not an off-state claim.
+
+![Observe-only listing](reference/projects-observe.svg) ([source](reference/projects-observe.mmd))
+
+Ordinary listing coalesces unchanged observations
 for one minute and defers refresh when the registry lock is busy. Stale optional
 upserts check before Git and configuration discovery, then again before staging
 an owner, so an observed busy lock avoids work that would be discarded. These
@@ -217,6 +240,9 @@ Historical remote guides are excluded from the supported documentation.
   such a flag decline or refuse; they never proceed on their own.
   Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
+- `HACK_ORIGIN` (`cli`, `app`, `autostart` or `agent`) names who started an `up`, `down` or
+  `restart` in the [activity log](./reference/activity-log.md) that `hack activity` reads; unset or
+  any other value records `cli`.
 
 Automatic agent instruction management is retired in v5. `hack setup sync`, the standalone
 `hack setup cursor|claude|agents` exports and `hack agent prime` refuse with a retirement notice,

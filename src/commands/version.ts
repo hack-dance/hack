@@ -1,25 +1,33 @@
-import type { CliContext, CommandArgs } from "../cli/command.ts";
+import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, withHandler } from "../cli/command.ts";
 
-type VersionArgs = CommandArgs<readonly [], readonly []>;
+import { optJson } from "../cli/options.ts";
+import { buildVersionReport } from "../lib/version-report.ts";
 
 const versionSpec = defineCommand({
   name: "version",
   summary: "Print version",
   group: "Diagnostics",
-  options: [],
+  options: [optJson],
   positionals: [],
   subcommands: [],
 } as const);
 
-function handleVersion({
+const handleVersion: CommandHandlerFor<typeof versionSpec> = async ({
   ctx,
-}: {
-  readonly ctx: CliContext;
-  readonly args: VersionArgs;
-}): Promise<number> {
+  args,
+}) => {
+  if (args.options.json) {
+    const report = await buildVersionReport({
+      version: ctx.cli.version,
+      executable: process.execPath,
+      compiled: Bun.main.startsWith("/$bunfs/"),
+    });
+    console.log(JSON.stringify(report));
+    return 0;
+  }
   console.log(`${ctx.cli.name} v${ctx.cli.version}`);
-  return Promise.resolve(0);
-}
+  return 0;
+};
 
 export const versionCommand = withHandler(versionSpec, handleVersion);

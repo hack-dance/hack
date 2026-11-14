@@ -185,6 +185,7 @@ for (const scope of scopes) {
           command: "hack",
           args: ["mcp", "serve"],
           ...(file.target === "claude" ? { type: "stdio" } : {}),
+          ...(file.target === "codex" ? { tool_timeout_sec: 660 } : {}),
         };
         expect(parseConfig(file.target, file.text)).toEqual(
           file.target === "codex"

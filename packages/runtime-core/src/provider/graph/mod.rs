@@ -764,7 +764,7 @@ struct Session<'a, 's> {
     root: PathBuf,
     receipt: Receipt,
     configs: BTreeMap<String, Value>,
-    expected_environment: BTreeMap<String, BTreeMap<String, String>>,
+    expected_environment: BTreeMap<String, image_environment::Expected>,
     restarting: bool,
     fresh_cache_completion: bool,
     cache_initializers: BTreeMap<String, String>,
@@ -802,12 +802,16 @@ impl Session<'_, '_> {
     fn fault_pause(&self, point: &str) -> Result<(), CandidateError> {
         fault_pause(&self.root, &self.receipt.run, point)
     }
-    fn verify_config(&self, service: &str, inspected: &Value) -> Result<(), CandidateError> {
-        image_environment::verify(
-            &self.expected_environment[service],
-            &inspected["Config"]["Env"],
-        )?;
-        let expected = &self.configs[service];
+    // Pure create/inspect gate: explicit compiled inputs keep it testable without
+    // constructing a provider lease or a live guest engine.
+    fn verify_config(
+        receipt: &Receipt,
+        service: &str,
+        expected: &Value,
+        environment: &image_environment::Expected,
+        inspected: &Value,
+    ) -> Result<(), CandidateError> {
+        image_environment::verify(environment, &inspected["Config"]["Env"])?;
         for (key, value) in expected.as_object().expect("compiled config") {
             if key == "Env" {
                 continue;
@@ -842,8 +846,7 @@ impl Session<'_, '_> {
                 ));
             }
             for network in networks.keys() {
-                let resource = self
-                    .receipt
+                let resource = receipt
                     .resources
                     .values()
                     .find(|resource| resource.kind == Kind::Network && resource.name == *network)
@@ -1074,7 +1077,13 @@ impl Driver for Session<'_, '_> {
             self.prepare_probe(service)?;
             let inspected = inspect_resource(&self.engine, &self.receipt, &resource)?
                 .ok_or_else(|| error("graph_resource_missing", "Restart resource is missing."))?;
-            self.verify_config(service, &inspected)?;
+            Self::verify_config(
+                &self.receipt,
+                service,
+                &self.configs[service],
+                &self.expected_environment[service],
+                &inspected,
+            )?;
             let id = resource.id.as_deref().ok_or_else(|| {
                 error(
                     "graph_replay_refused",
@@ -1160,7 +1169,13 @@ impl Driver for Session<'_, '_> {
         let inspected =
             inspect_resource(&self.engine, &self.receipt, &self.receipt.resources[&key])?
                 .ok_or_else(|| error("graph_resource_missing", "Created container is missing."))?;
-        self.verify_config(service, &inspected)?;
+        Self::verify_config(
+            &self.receipt,
+            service,
+            &self.configs[service],
+            &self.expected_environment[service],
+            &inspected,
+        )?;
         self.reserve(&key, "start-intent")?;
         if let Some(lease) = self.leases.get(service) {
             lease.verified_path_with_guest(self.engine.guest(), service)?;
@@ -1192,7 +1207,13 @@ impl Driver for Session<'_, '_> {
         let resource = &self.receipt.resources[&format!("container:{service}")];
         let value = inspect_resource(&self.engine, &self.receipt, resource)?
             .ok_or_else(|| error("graph_resource_missing", "Owned service disappeared."))?;
-        self.verify_config(service, &value)?;
+        Self::verify_config(
+            &self.receipt,
+            service,
+            &self.configs[service],
+            &self.expected_environment[service],
+            &value,
+        )?;
         probes::observe(&self.engine, &self.receipt, service, &value)
     }
 }
@@ -2650,7 +2671,7 @@ fn verify_images(
     configs: &mut BTreeMap<String, Value>,
     private_services: &BTreeSet<String>,
     file_owners: &BTreeSet<String>,
-) -> Result<BTreeMap<String, BTreeMap<String, String>>, CandidateError> {
+) -> Result<BTreeMap<String, image_environment::Expected>, CandidateError> {
     let mut expected = BTreeMap::new();
     let mut refusals = process_refusals::Collector::default();
     for resource in resources.values().filter(|r| r.kind == Kind::Container) {

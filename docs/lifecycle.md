@@ -613,6 +613,14 @@ without retrying it as a missing service.
 Lifecycle failures are one of the primary consumers of the `--json` error envelope,
 since hook and process startup are common failure points around `hack up`.
 
+### Activity log
+
+Every `hack up`, `hack down` and `hack restart`, on either backend, appends one
+names-only record (time, project, branch, action, origin, outcome, failed
+services, duration) to `<hack home>/activity.jsonl`; `hack activity --json`
+reads it newest first. `HACK_ORIGIN` (`cli`, `app`, `autostart`, `agent`) names
+who asked. See the [activity log reference](./reference/activity-log.md).
+
 ## Sessions backend
 
 Lifecycle processes run inside the configured mux backend (tmux or zellij), using the same selection rules as `hack session`.

@@ -9,7 +9,7 @@ import {
 
 const roots: string[] = [];
 const sentinel = "synthetic-native-plan-private-value";
-const record = { v: 1, action: "up", outcome: "failed" };
+const record = { v: 1, action: "up", outcome: "failed", project: null };
 
 afterEach(async () => {
   for (const root of roots.splice(0)) {
@@ -70,6 +70,8 @@ for (const change of [
   "mode",
   "extra-record",
   "outcome",
+  "registered-project",
+  "torn-record",
   "value",
   "path",
   "malformed",
@@ -97,6 +99,15 @@ for (const change of [
           state.activity,
           JSON.stringify({ ...record, outcome: "ok" })
         );
+        break;
+      case "registered-project":
+        await writeFile(
+          state.activity,
+          `${JSON.stringify({ ...record, project: "registered" })}\n`
+        );
+        break;
+      case "torn-record":
+        await writeFile(state.activity, JSON.stringify(record));
         break;
       case "value":
       case "path":

@@ -1,6 +1,7 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
+import { assertNativePlanHome } from "./native-plan-home.ts";
 
 const ACTIVITY_FIELDS = new Set([
   "v",
@@ -85,4 +86,12 @@ export async function assertNativePlanRefusalActivity(opts: {
       "Native plan startup refusal changed HOME beyond private value-free failure activity"
     );
   }
+  // Retain the shared offline gates' complete, unregistered-record contract too.
+  await assertNativePlanHome({
+    home: opts.home,
+    failedUps: opts.attempts,
+    preparedHackFiles: opts.before.has(".hack/hack.config.json")
+      ? ["hack.config.json"]
+      : [],
+  });
 }

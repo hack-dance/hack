@@ -365,6 +365,86 @@ test("the whole inspection has one budget: no query starts after it, and the rep
   expect(report.state).toBe("unknown");
 });
 
+test("an operation still pending at the deadline settles as unknown, and its late result starts nothing", async () => {
+  const never = <T>() => new Promise<T>(() => undefined);
+  const release: (() => void)[] = [];
+  const late = <T>(value: T) =>
+    new Promise<T>((resolve) => release.push(() => resolve(value)));
+  const base = deps({
+    platform: "linux",
+    files: {
+      [CA_PATH]: CURRENT_CA_PEM,
+      "/etc/os-release": DEBIAN,
+      [BUNDLE]: CURRENT_CA_PEM,
+    },
+    dirs: profileDirs(["abc.default"]),
+    exists: { [`${FIREFOX}/abc.default/cert9.db`]: true },
+    linuxHost: fakeHost({
+      profiles: ["abc.default"],
+      certutil: "/usr/bin/certutil",
+    }),
+    answer: () => ({ exitCode: 0, stdout: "Hack Caddy Local CA    C,,\n" }),
+  });
+  const realClock = { now: () => Date.now(), budgetMs: 50 };
+  const within = async (run: Promise<unknown>) => {
+    const started = Date.now();
+    const result = await run;
+    expect(Date.now() - started).toBeLessThan(2000);
+    return result;
+  };
+
+  // The CA read never finishes.
+  const ca = (await within(
+    inspectCaTrust({
+      ...base.deps,
+      ...realClock,
+      readText: async (path) =>
+        path === CA_PATH ? await never() : await base.deps.readText(path),
+    })
+  )) as Awaited<ReturnType<typeof inspectCaTrust>>;
+  expect(ca.ca.state).toBe("unreadable");
+  expect(ca.state).toBe("unknown");
+
+  // NSS discovery stalls: the root it was listing is unknown, and when the
+  // listing finally arrives no query starts.
+  const queriesBefore = base.queries.length;
+  const listing = (await within(
+    inspectCaTrust({
+      ...base.deps,
+      ...realClock,
+      listDir: async (path) =>
+        path === FIREFOX
+          ? await late<readonly string[]>(["abc.default"])
+          : await base.deps.listDir(path),
+    })
+  )) as Awaited<ReturnType<typeof inspectCaTrust>>;
+  expect(listing.nss).toContainEqual(
+    expect.objectContaining({ db: FIREFOX, state: "unknown" })
+  );
+  for (const resolve of release) {
+    resolve();
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(base.queries.length).toBe(queriesBefore);
+
+  // Locating certutil stalls: each database is unknown, nothing is queried.
+  const host = fakeHost({
+    profiles: ["abc.default"],
+    certutil: "/usr/bin/certutil",
+  });
+  const tool = (await within(
+    inspectCaTrust({
+      ...base.deps,
+      ...realClock,
+      linuxHost: { ...host, resolveCommand: async () => await never() },
+    })
+  )) as Awaited<ReturnType<typeof inspectCaTrust>>;
+  expect(tool.nss).toContainEqual(
+    expect.objectContaining({ db: `${FIREFOX}/abc.default`, state: "unknown" })
+  );
+  expect(base.queries.length).toBe(queriesBefore);
+});
+
 test("other platforms are unknown", async () => {
   const report = await inspectCaTrust(
     deps({ platform: "win32", files: { [CA_PATH]: CURRENT_CA_PEM } }).deps

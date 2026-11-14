@@ -21,9 +21,12 @@ administrator password, and never changes a trust store or NSS database.
 Hack's fixed helper environment. `certutil -L` opens databases read-only.
 
 The whole check has a 20 s budget (doctor's own timeout for it is 30 s): no read or
-query starts after it, each query's 5 s deadline is cut to what is left, at most 16
-NSS databases are queried, and files over 32 MiB are not read. Whatever was not
-reached is reported `unknown`, so the report is always complete.
+query starts after it, each query's 5 s deadline is cut to what is left (a stopped
+query's process group also gets a short termination grace), at most 16 NSS
+databases are queried, and files over 32 MiB are not read. A read, directory
+listing or tool lookup still pending at the deadline answers `unknown` then, and
+its late result is dropped. Whatever was not reached is reported `unknown`, so the
+check returns a complete report by the budget.
 
 ## Result
 

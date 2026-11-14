@@ -395,7 +395,8 @@ async function linuxNssTrust(opts: {
       results.push({
         db: dbDir,
         state: "unknown",
-        detail: "certutil is not installed, so this database cannot be read",
+        detail:
+          "certutil was not found (or could not be located in time), so this database cannot be read",
       });
       continue;
     }
@@ -462,22 +463,57 @@ async function nssDbTrust(opts: {
 function withBudget(deps: CaTrustDeps): CaTrustDeps {
   const deadline = deps.now() + (deps.budgetMs ?? TRUST_INSPECTION_BUDGET_MS);
   const left = () => deadline - deps.now();
+  /**
+   * Admit `run` only while budget is left, and settle by the deadline: an
+   * operation still pending then (a stalled read, say) answers `fallback`.
+   * Its late result is dropped; every boundary here only reads, so nothing
+   * it does after the deadline matters to the report.
+   */
+  const bounded = async <T>(run: () => Promise<T>, fallback: T): Promise<T> => {
+    const remaining = left();
+    if (remaining <= 0) {
+      return fallback;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), remaining);
+    });
+    try {
+      return await Promise.race([run().catch(() => fallback), expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const host = deps.linuxHost;
   return {
     ...deps,
     readText: async (path) =>
-      left() > 0 ? await deps.readText(path) : "unreadable",
-    exists: async (path) => (left() > 0 ? await deps.exists(path) : "unknown"),
+      await bounded(async () => await deps.readText(path), "unreadable"),
+    exists: async (path) =>
+      await bounded(async () => await deps.exists(path), "unknown"),
     listDir: async (path) =>
-      left() > 0 ? await deps.listDir(path) : "unknown",
+      await bounded(async () => await deps.listDir(path), "unknown"),
     query: async (argv, opts) => {
       const remaining = left();
-      if (remaining <= 0) {
-        return { exitCode: NOT_STARTED, stdout: "", stderr: "" };
-      }
-      return await deps.query(argv, {
-        timeoutMs: Math.min(opts.timeoutMs, remaining),
-      });
+      // The query's own deadline also stops its process; the race covers a
+      // runner that does not return.
+      return await bounded(
+        async () =>
+          await deps.query(argv, {
+            timeoutMs: Math.min(opts.timeoutMs, remaining),
+          }),
+        { exitCode: NOT_STARTED, stdout: "", stderr: "" }
+      );
     },
+    ...(host
+      ? {
+          linuxHost: {
+            ...host,
+            resolveCommand: async (name) =>
+              await bounded(async () => await host.resolveCommand(name), null),
+          },
+        }
+      : {}),
   };
 }
 

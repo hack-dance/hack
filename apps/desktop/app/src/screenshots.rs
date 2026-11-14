@@ -42,6 +42,9 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture();
                             }
+                            if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
+                                app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
+                            }
                             if let Some(a) = fixtures::local(f).in_flight {
                                 app.simulate_in_flight(a);
                             }

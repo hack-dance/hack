@@ -8,6 +8,10 @@ Native setup and live log following are available in next.16 **under verificatio
 Real-VM acceptance remains pending; start with disposable projects and synthetic data.
 See [Prepare the runtime](setup.md) and [Follow service logs](log-follow.md).
 
+Next.17 source adds interactive exec, guarded Compose env-file reads and
+retirement fixes. These do not change an installed next.16 bundle; see
+[what changed and what to do](https://github.com/hack-dance/hack/blob/5002cf87bb50686b17ceae8a4c835f524ee1b3a5/docs/guides/v5-release-notes.md#next17-what-changed-and-what-to-do).
+
 ## What it is
 
 Hack needs something to run your services in. Today that is Docker Compose, which
@@ -99,7 +103,10 @@ What you give up today:
 - Following logs live as a verified native capability. `hack logs --follow` is
   available for testing; real-VM acceptance for authored and adopted projects
   is still pending.
-- Interactive shells in a container.
+- Interactive shells on next.16. Next.17 supports foreground terminal
+  `hack exec SERVICE -- /bin/sh`; redirects and `HACK_NO_INTERACTIVE=1` keep
+  finite exec. Use the matching runtime and follow its retained-session
+  recovery instructions after an uncertain outcome.
 - UDP ports.
 - Automatic restart for services that publish a port.
 

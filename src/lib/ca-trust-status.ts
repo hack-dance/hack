@@ -12,6 +12,7 @@
  * times out is unknown, never "not trusted".
  */
 import type { X509Certificate } from "node:crypto";
+import { constants } from "node:fs";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -81,7 +82,7 @@ export type CaTrustDeps = {
   /** Text, or "missing" (ENOENT/ENOTDIR), or "unreadable". */
   readonly readText: (
     path: string,
-    opts?: { readonly maxBytes?: number }
+    opts?: { readonly maxBytes?: number; readonly noFollow?: boolean }
   ) => Promise<{ readonly text: string } | "missing" | "unreadable">;
   /**
    * A read-only query, stopped after `timeoutMs` (exit 124 on timeout, 127
@@ -373,14 +374,25 @@ async function linuxNssTrust(opts: {
   }
   const dbs: string[] = [];
   for (const dir of candidates) {
+    if (unlisted.some((path) => dir === path || dir.startsWith(`${path}/`))) {
+      if (!results.some((entry) => entry.db === dir)) {
+        results.push({
+          db: dir,
+          state: "unknown",
+          detail: "NSS discovery could not be completed within its read limits",
+        });
+      }
+      continue;
+    }
     const present = await opts.deps.exists(join(dir, "cert9.db"));
     if (present !== true) {
       results.push({
         db: dir,
         state: "unknown",
-        detail: "The database is missing or could not be inspected",
+        detail:
+          "NSS database missing or unreadable; review the selected browser profile and trust setup, then rerun Doctor",
       });
-    } else if (present) {
+    } else {
       dbs.push(dir);
     }
   }
@@ -566,6 +578,24 @@ function withBudget(deps: CaTrustDeps): CaTrustDeps {
             ...host,
             inspectPath: async (path) =>
               await bounded(async () => await host.inspectPath(path), null),
+            ...(host.inspectEntry
+              ? {
+                  inspectEntry: async (path: string) =>
+                    await bounded(
+                      async () => (await host.inspectEntry?.(path)) ?? null,
+                      null
+                    ),
+                }
+              : {}),
+            ...(host.readLink
+              ? {
+                  readLink: async (path: string) =>
+                    await bounded(
+                      async () => (await host.readLink?.(path)) ?? null,
+                      null
+                    ),
+                }
+              : {}),
             resolveCommand: async (name) =>
               await bounded(async () => await host.resolveCommand(name), null),
           },
@@ -577,7 +607,7 @@ function withBudget(deps: CaTrustDeps): CaTrustDeps {
 /** Strict reads for the real boundary: only a missing path is "missing". */
 export async function readTextOutcome(
   path: string,
-  opts?: { readonly maxBytes?: number }
+  opts?: { readonly maxBytes?: number; readonly noFollow?: boolean }
 ): Promise<{ readonly text: string } | "missing" | "unreadable"> {
   const maxBytes = Math.min(
     opts?.maxBytes ?? MAX_TRUST_FILE_BYTES,
@@ -587,7 +617,11 @@ export async function readTextOutcome(
     return "unreadable";
   }
   try {
-    const file = await open(path, "r");
+    const flags =
+      constants.O_RDONLY |
+      constants.O_NONBLOCK |
+      (opts?.noFollow ? constants.O_NOFOLLOW : 0);
+    const file = await open(path, flags);
     try {
       const info = await file.stat();
       if (!info.isFile() || info.size > maxBytes) {

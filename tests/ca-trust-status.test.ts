@@ -8,6 +8,7 @@ import {
   MAC_SYSTEM_KEYCHAIN,
 } from "../src/lib/ca-trust-status.ts";
 import type { LinuxTrustHost } from "../src/lib/linux-trust-setup.ts";
+import internalModuleFixture from "./fixtures/nss-read/upstream-internal.pkcs11.json";
 import {
   CURRENT_CA_PEM,
   EXPIRED_SAME_SUBJECT_CA_PEM,
@@ -17,6 +18,8 @@ import {
 // R16 (HACK-2218): whether the system trust store, and NSS on Linux,
 // trusts the local CA, or "unknown". Read-only and bounded: only the
 // queries below are issued, and a failed read is never "not trusted".
+
+const UPSTREAM_MODULE = internalModuleFixture.text;
 
 const CA_PATH = "/fixture-home/.hack/caddy/pki/caddy-local-authority.crt";
 const NOW = Date.parse("2027-01-01T00:00:00Z");
@@ -49,7 +52,7 @@ function deps(opts: {
         const value =
           opts.files[path] ??
           (path.endsWith("/pkcs11.txt") && opts.linuxHost
-            ? `library=\nname=NSS Internal PKCS #11 Module\nparameters=configdir='sql:${dirname(path)}' certPrefix='' keyPrefix='' secmod='secmod.db' flags=\nNSS=Flags=internal,critical trustOrder=75 cipherOrder=100 slotParams=(1={slotFlags=[RSA,DSA,DH,RC2,RC4,DES,AES,SHA1,MD5,MD2,SSL,TLS,RANDOM] askpw=any timeout=30})\n`
+            ? UPSTREAM_MODULE.replace("@DATABASE_DIR@", dirname(path))
             : "missing");
         return await Promise.resolve(
           value === "missing" || value === "unreadable"

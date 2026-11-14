@@ -1,0 +1,5 @@
+{
+  "upstreamCommit": "8c60e757c30b1b239bae46532b4f6d4ebb1e1cad",
+  "upstreamPath": "tests/dbtests/bigdb/pkcs11.txt",
+  "text": "library=\nname=NSS Internal PKCS #11 Module\nparameters=configdir='sql:@DATABASE_DIR@' certPrefix='' keyPrefix='' secmod='secmod.db' flags= updatedir='' updateCertPrefix='' updateKeyPrefix='' updateid='' updateTokenDescription='' \nNSS=trustOrder=75 cipherOrder=100 slotParams={0x00000001=[slotFlags=RSA,RC4,RC2,DES,DH,SHA1,MD5,MD2,SSL,TLS,AES,SHA256,SHA512,Camellia,SEED,ECC,RANDOM askpw=any timeout=30 ] }  Flags=internal,critical\n\n"
+}

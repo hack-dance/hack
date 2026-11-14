@@ -86,16 +86,22 @@ ancestors must be owned by the user or root and not writable by another user;
 `cert9.db`, `key4.db` and `pkcs11.txt` must be private regular files owned by the
 current user. Database and metadata file links, including dangling links, are
 refused. Profile-directory aliases contained within the selected roots remain
-supported. Missing or unreadable required files are Unknown, never proof that
+supported only when every intermediate symlink hop and its traversed ancestor
+chain can be checked, with at most 40 link expansions and 256 visited entries.
+A safe final target does not excuse a shared writable directory on the route.
+Missing or unreadable required files are Unknown, never proof that
 trust is absent or healthy.
 
 Module discovery is deliberately conservative. `pkcs11.txt` is limited to 16 KiB
 and must exactly match a supported single built-in `NSS Internal PKCS #11 Module`
 template: empty `library`, the selected SQL configuration directory, empty
-certificate/key prefixes and flags, the literal `secmod.db` parameter, and absent
+certificate/key prefixes, empty or `optimizeSpace` storage flags, the literal `secmod.db` parameter, and absent
 or empty update parameters. The internal module flags are exactly
-`internal,critical`, trust/cipher ordering is 75/100, and the default slot list
-(with or without ECC) uses `askpw=any timeout=30`. Escapes, comments, alternate
+`internal,critical`. Supported layouts come from a pinned upstream NSS golden
+fixture and default-module producer definitions, including the serialized
+`slotParams` form, its trailing spaces and final blank line. The exact source
+and variants are recorded in `tests/fixtures/nss-read/README.md`; these are not
+newly captured distribution or browser profiles. Escapes, comments, unsupported
 quoting/case/order, duplicate keys, extra records and other configurations are
 unsupported. Doctor does not run NSS to interpret them. All external module
 libraries, including apparently owned ones, are refused. A legacy `secmod.db`,
@@ -105,7 +111,7 @@ recovery during observation. The metadata parameter `secmod='secmod.db'` is
 allowed only while that legacy file is provably absent.
 
 Immediately before and after each query, Doctor rechecks the pinned database,
-directory and ancestor identities, module-file identity and metadata digest,
+directory, ancestor and complete symlink-traversal identities, module-file identity and metadata digest,
 and the absence of legacy/sidecar files. It discards results if a check fails
 and starts no later query for that database. Queries use the vetted absolute
 `certutil`, explicit `-d sql:<selected database>` and the existing fixed helper
@@ -122,3 +128,9 @@ from a hostile process with the same user identity. Unknown does not prove the
 browser distrusts the CA: external modules such as p11-kit may provide trust that
 this observer deliberately refuses to load. A completed negative result concerns
 Hack's entry in that admitted user database, not every browser trust source.
+
+If the system bundle is trusted but the selected shared NSS database has never
+been created, NSS and the overall report are Unknown rather than an all-clear.
+Review the selected browser profile and intended trust setup, then rerun Doctor.
+`hack global trust` is a separate, explicitly changing setup operation; Doctor
+does not run it or create the missing database.

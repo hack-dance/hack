@@ -54,6 +54,16 @@ export type LinuxTrustHost = {
   readonly listDir: (path: string) => Promise<readonly string[]>;
   /** realpath + stat, or `null` when the path does not exist. */
   readonly inspectPath: (path: string) => Promise<ResolvedPathInfo | null>;
+  /** lstat facts before following a link; paired with readLink for read admission. */
+  readonly inspectEntry?: (path: string) => Promise<{
+    readonly uid: number;
+    readonly mode: number;
+    readonly identity: string;
+    readonly isDirectory: boolean;
+    readonly isSymbolicLink: boolean;
+  } | null>;
+  /** Raw link target; null for a failed or non-link read. */
+  readonly readLink?: (path: string) => Promise<string | null>;
   /** Create a directory and its parents (mode 0700); false on failure. */
   readonly makeDir: (path: string) => Promise<boolean>;
   /** Vetted root-owned executable from fixed system bin/sbin paths, or `null`. */

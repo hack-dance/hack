@@ -1,9 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
   readdir,
+  readlink,
   realpath,
   rename,
   rm,
@@ -29,6 +31,7 @@ import {
   MAX_NSS_MODULE_BYTES,
 } from "../src/lib/nss-read-safety.ts";
 import { vettedHelperEnv } from "../src/lib/vetted-env.ts";
+import internalModuleFixture from "./fixtures/nss-read/upstream-internal.pkcs11.json";
 import { CURRENT_CA_PEM } from "./helpers/ca-certificates.ts";
 
 const roots: string[] = [];
@@ -38,17 +41,16 @@ afterEach(async () => {
   }
 });
 
+const UPSTREAM_MODULE = internalModuleFixture.text;
+
 function moduleText(dbDir: string, updates = true): string {
-  const suffix = updates
-    ? " updatedir='' updateCertPrefix='' updateKeyPrefix='' updateid='' updateTokenDescription=''"
-    : "";
-  return [
-    "library=",
-    "name=NSS Internal PKCS #11 Module",
-    `parameters=configdir='sql:${dbDir}' certPrefix='' keyPrefix='' secmod='secmod.db' flags=${suffix}`,
-    "NSS=Flags=internal,critical trustOrder=75 cipherOrder=100 slotParams=(1={slotFlags=[RSA,DSA,DH,RC2,RC4,DES,AES,SHA1,MD5,MD2,SSL,TLS,RANDOM] askpw=any timeout=30})",
-    "",
-  ].join("\n");
+  const text = UPSTREAM_MODULE.replace("@DATABASE_DIR@", dbDir);
+  return updates
+    ? text
+    : text.replace(
+        " updatedir='' updateCertPrefix='' updateKeyPrefix='' updateid='' updateTokenDescription=''",
+        ""
+      );
 }
 
 /** Placeholder files only; no NSS binary, SQL database or module is loaded. */
@@ -123,6 +125,39 @@ async function fixture() {
         info = mutation(path, info);
       }
       return info;
+    },
+    inspectEntry: async (path) => {
+      if (!(path === root || path.startsWith(`${root}/`))) {
+        return {
+          uid: 0,
+          mode: 0o4_0755,
+          isDirectory: true,
+          isSymbolicLink: false,
+          identity: path,
+        };
+      }
+      try {
+        const info = await lstat(path);
+        return {
+          uid: info.uid,
+          mode: info.mode,
+          isDirectory: info.isDirectory(),
+          isSymbolicLink: info.isSymbolicLink(),
+          identity: `${info.dev}:${info.ino}`,
+        };
+      } catch {
+        return null;
+      }
+    },
+    readLink: async (path) => {
+      if (!path.startsWith(`${root}/`)) {
+        return null;
+      }
+      try {
+        return await readlink(path);
+      } catch {
+        return null;
+      }
     },
     makeDir: never,
     resolveSudo: never,
@@ -535,5 +570,123 @@ test("legacy files without SQL databases remain unknown and are never migrated",
     mode: 0o600,
   });
   await writeFile(join(f.db, "key3.db"), "legacy placeholder", { mode: 0o600 });
+  await expectRefused(f);
+});
+
+test("an unlistable selected database is unknown without a query", async () => {
+  const f = await fixture();
+  await expectRefused(f, {
+    ...f.deps,
+    listDir: async (path) =>
+      path === f.db ? "unknown" : await f.deps.listDir(path),
+  });
+});
+
+test("the upstream golden and optimizeSpace producer variants remain readable", async () => {
+  for (const optimize of [false, true]) {
+    const f = await fixture();
+    const text = optimize
+      ? moduleText(f.db).replace("flags= ", "flags=optimizeSpace ")
+      : moduleText(f.db);
+    await writeFile(join(f.db, "pkcs11.txt"), text);
+    const report = await inspectCaTrust(f.deps);
+    expect(report.state).toBe("trusted");
+    expect(f.queries).toHaveLength(2);
+  }
+});
+
+test("nonblocking strict reads reject a FIFO without a writer, and no-follow refuses links", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const f = await fixture();
+  const pipe = join(f.root, "fifo-placeholder");
+  const created = Bun.spawnSync(["mkfifo", pipe]);
+  expect(created.exitCode).toBe(0);
+  const started = Date.now();
+  expect(await readTextOutcome(pipe, { maxBytes: 32 })).toBe("unreadable");
+  expect(Date.now() - started).toBeLessThan(1000);
+  const alias = join(f.root, "metadata-link-placeholder");
+  await symlink(join(f.db, "pkcs11.txt"), alias);
+  expect(
+    await readTextOutcome(alias, {
+      maxBytes: MAX_NSS_MODULE_BYTES,
+      noFollow: true,
+    })
+  ).toBe("unreadable");
+  expect(
+    await readTextOutcome(alias, { maxBytes: MAX_NSS_MODULE_BYTES })
+  ).toEqual({ text: moduleText(f.db) });
+});
+
+test("the pinned NSS default internal-module source layout is admitted", async () => {
+  const f = await fixture();
+  // SECMOD_INT_FLAGS from the pinned upstream secmodt.h, not the guard's constants.
+  const nss =
+    "NSS=Flags=internal,critical slotparams=(1={slotFlags=[RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,SHA256,SHA512]})";
+  const lines = moduleText(f.db).split("\n");
+  lines[3] = nss;
+  await writeFile(join(f.db, "pkcs11.txt"), lines.join("\n"));
+  expect((await inspectCaTrust(f.deps)).state).toBe("trusted");
+  expect(f.queries).toHaveLength(2);
+});
+
+test.each([
+  false,
+  true,
+])("every intermediate symlink target is checked (writable: %s)", async (writable) => {
+  const f = await fixture();
+  const actual = join(f.home, "private-profile");
+  await rename(f.db, actual);
+  await writeFile(join(actual, "pkcs11.txt"), moduleText(actual));
+  const shared = join(f.root, "bridge-parent-placeholder");
+  await mkdir(shared, { mode: 0o700 });
+  await symlink(actual, join(shared, "bridge"));
+  await symlink(join(shared, "bridge"), f.db);
+  if (writable) {
+    await chmod(shared, 0o777);
+  }
+  const report = await inspectCaTrust(f.deps);
+  expect(report.nss.find((entry) => entry.db === f.db)?.state).toBe(
+    writable ? "unknown" : "trusted"
+  );
+  expect(f.queries).toHaveLength(writable ? 0 : 2);
+});
+
+test("changing an intermediate link identity prevents the next query", async () => {
+  const f = await fixture();
+  const actual = join(f.home, "private-profile");
+  await rename(f.db, actual);
+  await writeFile(join(actual, "pkcs11.txt"), moduleText(actual));
+  const intermediate = join(f.root, "bridge-placeholder");
+  await symlink(actual, intermediate);
+  await symlink(intermediate, f.db);
+  let reads = 0;
+  const inspectEntry = f.host.inspectEntry;
+  if (!inspectEntry) {
+    throw new Error("fixture traversal seam missing");
+  }
+  await expectRefused(f, {
+    ...f.deps,
+    linuxHost: {
+      ...f.host,
+      inspectEntry: async (path) => {
+        const info = await inspectEntry(path);
+        return path === intermediate && info && ++reads > 1
+          ? { ...info, identity: "replaced-intermediate-placeholder" }
+          : info;
+      },
+    },
+  });
+});
+
+test("a link loop is unknown and cannot start a query", async () => {
+  const f = await fixture();
+  // Discovery itself can no longer follow the selected db, but must still
+  // report it unknown rather than infer that the selected store is healthy.
+  await rm(f.db, { recursive: true });
+  const bridge = join(f.root, "loop-placeholder");
+  await symlink(f.db, bridge);
+  await symlink(bridge, f.db);
   await expectRefused(f);
 });

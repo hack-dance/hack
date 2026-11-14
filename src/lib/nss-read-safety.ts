@@ -12,6 +12,8 @@ import {
   type LinuxTrustHost,
 } from "./linux-trust-setup.ts";
 
+import { inspectNssReadPath } from "./nss-read-path.ts";
+
 export const MAX_NSS_MODULE_BYTES = 16 * 1024;
 const UNSUPPORTED_TEXT = /[^\x20-\x7e\n]/;
 const MODULE_FILE = "pkcs11.txt";
@@ -25,16 +27,17 @@ const SIDECARS = [
 ] as const;
 /** SQL NSS can fall back to legacy module discovery; never admit that path. */
 const LEGACY_FILES = ["secmod.db", "cert8.db", "key3.db"] as const;
-const INTERNAL_SLOT_LISTS = [
-  "RSA,DSA,DH,RC2,RC4,DES,AES,SHA1,MD5,MD2,SSL,TLS,RANDOM",
-  "RSA,DSA,DH,RC2,RC4,DES,AES,SHA1,MD5,MD2,SSL,TLS,RANDOM,ECC",
+/** Pinned upstream producer/fixture evidence: tests/fixtures/nss-read/README.md. */
+const INTERNAL_NSS_LINES = [
+  "NSS=trustOrder=75 cipherOrder=100 slotParams={0x00000001=[slotFlags=RSA,RC4,RC2,DES,DH,SHA1,MD5,MD2,SSL,TLS,AES,SHA256,SHA512,Camellia,SEED,ECC,RANDOM askpw=any timeout=30 ] }  Flags=internal,critical",
+  "NSS=Flags=internal,critical slotparams=(1={slotFlags=[RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,SHA256,SHA512]})",
 ] as const;
 const EMPTY_UPDATE_PARAMETERS =
   " updatedir='' updateCertPrefix='' updateKeyPrefix='' updateid='' updateTokenDescription=''";
 
 type ReadText = (
   path: string,
-  opts?: { readonly maxBytes?: number }
+  opts?: { readonly maxBytes?: number; readonly noFollow?: boolean }
 ) => Promise<{ readonly text: string } | "missing" | "unreadable">;
 
 type DbSnapshot = Extract<
@@ -80,21 +83,38 @@ export function hasOnlyInternalNssModule(opts: {
     ) {
       continue;
     }
+    if (
+      internalNssTemplates(path).some(
+        (expected) =>
+          text === expected ||
+          text === `${expected}\n` ||
+          text === `${expected}\n\n`
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function internalNssTemplates(path: string): readonly string[] {
+  const templates: string[] = [];
+  for (const flags of ["", "optimizeSpace"]) {
     for (const updates of ["", EMPTY_UPDATE_PARAMETERS]) {
-      for (const slots of INTERNAL_SLOT_LISTS) {
-        const expected = [
-          "library=",
-          "name=NSS Internal PKCS #11 Module",
-          `parameters=configdir='sql:${path}' certPrefix='' keyPrefix='' secmod='secmod.db' flags=${updates}`,
-          `NSS=Flags=internal,critical trustOrder=75 cipherOrder=100 slotParams=(1={slotFlags=[${slots}] askpw=any timeout=30})`,
-        ].join("\n");
-        if (text === expected || text === `${expected}\n`) {
-          return true;
+      for (const nss of INTERNAL_NSS_LINES) {
+        for (const trailingSpace of ["", " "]) {
+          const expected = [
+            "library=",
+            "name=NSS Internal PKCS #11 Module",
+            `parameters=configdir='sql:${path}' certPrefix='' keyPrefix='' secmod='secmod.db' flags=${flags}${updates}${trailingSpace}`,
+            nss,
+          ].join("\n");
+          templates.push(expected);
         }
       }
     }
   }
-  return false;
+  return templates;
 }
 
 /**
@@ -110,6 +130,13 @@ export async function checkNssReadSafety(opts: {
   readonly exists: (path: string) => Promise<boolean | "unknown">;
 }): Promise<NssReadCheck> {
   try {
+    const traversal = await inspectNssReadPath({
+      host: opts.host,
+      path: opts.dbDir,
+    });
+    if (traversal === null) {
+      return { ok: false };
+    }
     const checked = await checkNssDbOwnership({
       ...opts,
       requireDb: true,
@@ -145,6 +172,7 @@ export async function checkNssReadSafety(opts: {
     }
     const read = await opts.readText(modulePath, {
       maxBytes: MAX_NSS_MODULE_BYTES,
+      noFollow: true,
     });
     if (
       typeof read === "string" ||
@@ -171,6 +199,7 @@ export async function checkNssReadSafety(opts: {
         database: checked.snapshot,
         metadata: JSON.stringify([
           dir.realPath,
+          traversal,
           file.identity,
           createHash("sha256").update(read.text).digest("hex"),
         ]),

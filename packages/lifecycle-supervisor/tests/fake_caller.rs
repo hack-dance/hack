@@ -1100,11 +1100,15 @@ fn process_is_zombie(pid: i32) -> bool {
 #[test]
 fn unreaped_matching_guard_proves_legacy_session_ownership() {
     let f = Fixture::new();
-    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    let (caller, _) = f.start(vec![f.process("worker", "hold")]);
+    let mut caller = ForeignChild(caller);
     f.await_log("fixture-ready");
     let mut state = f.state("worker");
     // Keep the parent from reaping its guard, then exercise legacy birth absence.
-    assert_eq!(unsafe { libc::kill(caller.id() as i32, libc::SIGSTOP) }, 0);
+    assert_eq!(
+        unsafe { libc::kill(caller.0.id() as i32, libc::SIGSTOP) },
+        0
+    );
     assert_eq!(
         unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
         0
@@ -1117,8 +1121,11 @@ fn unreaped_matching_guard_proves_legacy_session_ownership() {
     )
     .unwrap();
     f.stop();
-    assert_eq!(unsafe { libc::kill(caller.id() as i32, libc::SIGCONT) }, 0);
-    assert!(wait(&mut caller, TIMEOUT).success());
+    assert_eq!(
+        unsafe { libc::kill(caller.0.id() as i32, libc::SIGCONT) },
+        0
+    );
+    assert!(wait(&mut caller.0, TIMEOUT).success());
 }
 
 #[test]

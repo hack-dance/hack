@@ -74,3 +74,19 @@ for the stages and what they do not cover.
 `bun install --frozen-lockfile` before installing the source wrapper. A failure
 stops the operation. Correct the dependency or tool-version mismatch explicitly;
 do not retry with an unlocked install that can rewrite the project's lockfile.
+
+## Failure diagnostics
+
+Failures exit nonzero and emit only fixed labels, for example
+`Portable bootstrap failed: step=http reason=invalid_json`. Steps distinguish
+`setup`, `identity`, `env`, `http`, `dev-write`, `restart`, and `cleanup`.
+Reasons distinguish failed assertions, deadlines, invalid JSON, selected transport
+and filesystem errors, and `unexpected_error`. Raw child output, exception text,
+paths, keys, and application values are never included. A cleanup failure reports
+`step=cleanup`; `owned_cleanup_failed` means the fixture was retained for diagnosis.
+
+The fixture publishes its readiness document by writing a sibling temporary file
+and renaming it after the write completes. The polling reader sees either no
+readiness document or the complete document, including during restart. A pass
+still requires a valid owned HTTP response and all workflow checks; malformed
+readiness is a failure, not a reason to retry or skip a check.

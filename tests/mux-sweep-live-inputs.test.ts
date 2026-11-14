@@ -104,3 +104,55 @@ test("when the configuration cannot be read, the automatic sweep removes nothing
   });
   expect((await lstat(join(stale, "env.json"))).isFile()).toBe(true);
 });
+
+/** A project whose own configuration may name a store key; cwd moves into it. */
+async function inProject<T>(config: string, run: () => Promise<T>): Promise<T> {
+  const project = join(root, "project");
+  await mkdir(join(project, ".hack"), { recursive: true });
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    "services: {}\n"
+  );
+  await writeFile(join(project, ".hack", "hack.config.json"), config);
+  const cwd = process.cwd();
+  process.chdir(project);
+  try {
+    return await run();
+  } finally {
+    process.chdir(cwd);
+  }
+}
+
+test("by default the sweep resolves the configuration from the current directory", async () => {
+  const parent = join(root, "tmp");
+  await mkdir(parent);
+  const holdsKey = await stalePayload(parent, "configured");
+  const ordinary = await stalePayload(parent, "ordinary");
+  // Only the project's own configuration (found from the current directory)
+  // names the key: no injected scope, no global setting.
+  await inProject(
+    JSON.stringify({
+      name: "sweepdefault",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: {
+            path: join(root, "store.json"),
+            keyPath: join(holdsKey, "env.json"),
+          },
+        },
+      },
+    }),
+    () => sweepStaleMuxEnvironments({ parent })
+  );
+  expect(await readFile(join(holdsKey, "env.json"), "utf8")).toBe("{}");
+  expect(await lstat(ordinary).catch(() => null)).toBeNull();
+});
+
+test("by default an unparsable project configuration removes nothing", async () => {
+  const parent = join(root, "tmp");
+  await mkdir(parent);
+  const stale = await stalePayload(parent, "kept");
+  await inProject("{ not json", () => sweepStaleMuxEnvironments({ parent }));
+  expect((await lstat(join(stale, "env.json"))).isFile()).toBe(true);
+});

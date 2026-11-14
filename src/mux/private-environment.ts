@@ -43,10 +43,12 @@ export const sweepObserver: { onSweep?: (parent: string) => void } = {};
  * it is a regular single-link file of this user. Before each removal the
  * configuration is resolved (from the current directory, strictly) and the
  * same live-input check `hack doctor --fix` uses must allow it
- * (`removalAllowed`, HACK-2181): a payload directory that holds, or is, a
- * file current resolution reads is kept, and nothing is removed when the
- * configuration cannot be read. Failures are skipped: this is cleanup, never
- * a reason to refuse a new session.
+ * (`removalAllowed`, HACK-2181) for the exact targets, the payload's
+ * `env.json` and the directory: a payload is kept when either is a path
+ * current resolution reads, and nothing is removed when the configuration
+ * cannot be read. Any other file inside keeps the directory, since only an
+ * empty one is removed. Failures are skipped: this is cleanup, never a
+ * reason to refuse a new session.
  */
 export async function sweepStaleMuxEnvironments(opts: {
   readonly parent?: string;

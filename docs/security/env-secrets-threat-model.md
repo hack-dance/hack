@@ -43,7 +43,7 @@ such a process racing its checks.
 | `keychain` store | macOS keychain through `Bun.secrets`, one service per project | Legacy backend values. |
 | Values from an external manager (for example 1Password) | The manager's vault, until the user pipes a value into Hack or injects `HACK_ENV_SECRET_KEY` into a process | Hack has no first-party 1Password integration. Custody passes to Hack's stores at the moment of the pipe or injection. |
 | Local YAML layers | `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` | May hold plaintext; these are local-only, not safe to commit. New local files use 0600; an existing file keeps its mode. |
-| Multiplexer input | `$TMPDIR/hack-mux-env-*/env.json` (the OS temp directory when TMPDIR is unset) | A private plaintext env payload, consumed and removed by the pane wrapper or owned cleanup; it exists on disk before that cleanup. A payload older than 10 minutes is refused and removed by the next staging unless the configuration names a file inside it or cannot be read (HACK-2170, HACK-2181). |
+| Multiplexer input | `$TMPDIR/hack-mux-env-*/env.json` (the OS temp directory when TMPDIR is unset) | A private plaintext env payload, consumed and removed by the pane wrapper or owned cleanup; it exists on disk before that cleanup. A payload older than 10 minutes is refused and removed by the next staging unless its `env.json` or directory is a path current configuration reads, or that configuration cannot be read; a directory still holding any other file is not removed (HACK-2170, HACK-2181). |
 | Background command output | `<HACK_HOME>/commands/<id>/stdout` and `stderr` | Output can contain injected values. Redaction is partial and delayed; withholding a read does not erase disk bytes. |
 | Background command arguments | `<HACK_HOME>/commands/<id>/meta.json` and `launch.json` | Automatic env maps are omitted, but caller argv is retained, including with metadata-only capture. Expanded values in argv are not redacted. |
 | Lifecycle output | `.hack/.internal/lifecycle/<project>.log` (and `<log>.before-private-*` kept history), and a FIFO in a private `${TMPDIR:-/tmp}/hack-lifecycle.*` directory | Hooks and persistent processes can emit injected values, stored verbatim. The log is private and owner-checked; remaining gaps are listed in gap 16 (HACK-2170). |
@@ -344,9 +344,10 @@ with mode 0600; the pane wrapper consumes and removes that payload
 (`src/mux/private-environment.ts`). During its lifetime, the same user and a
 backup or temp-file collector can read it. A payload older than 10 minutes is
 refused by the wrapper, and each new staging sweeps this user's stale private
-payloads (an ownership-aware check, not a blanket temp-directory deletion) that
-hold no file current configuration reads; if the configuration cannot be read
-that sweep removes nothing (HACK-2181). A payload left by a crash stays until
+payloads (an ownership-aware check, not a blanket temp-directory deletion),
+keeping a payload whose `env.json` or directory is a path current
+configuration reads; if the configuration cannot be read that sweep removes
+nothing (HACK-2181). A payload left by a crash stays until
 the next staging; there is no independent reaper, but `hack doctor` reports it
 and `hack doctor --fix` removes it (HACK-2165).
 

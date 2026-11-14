@@ -482,6 +482,8 @@ export async function checkNssDbOwnership(opts: {
   readonly host: LinuxTrustHost;
   readonly dbDir: string;
   readonly requireDb: boolean;
+  /** Read admission also checks traversed path ancestors before symlink resolution. */
+  readonly includePathAncestors?: boolean;
 }): Promise<OwnershipCheck> {
   const { host, dbDir } = opts;
   const roots = (
@@ -510,21 +512,22 @@ export async function checkNssDbOwnership(opts: {
     };
   }
   const ancestors: string[] = [];
-  for (let path = dir.realPath; ; path = dirname(path)) {
-    const info = await host.inspectPath(path);
-    if (
-      !(info?.isDirectory && [host.uid, 0].includes(info.uid)) ||
-      (info.mode & 0o022) !== 0
-    ) {
+  const starts = opts.includePathAncestors
+    ? [dbDir, dir.realPath]
+    : [dir.realPath];
+  for (const start of starts) {
+    const identities = await nssAncestorIdentities({
+      host,
+      start,
+      includeResolvedPath: opts.includePathAncestors ?? false,
+    });
+    if (!identities) {
       return {
         ok: false,
         reason: "database ancestor is missing or writable by another user",
       };
     }
-    ancestors.push(`${path}:${info.identity}`);
-    if (path === "/") {
-      break;
-    }
+    ancestors.push(...identities);
   }
   // The database files must live in that directory themselves: a cert9.db
   // or key4.db link that resolves elsewhere would let a write escape the
@@ -555,6 +558,31 @@ export async function checkNssDbOwnership(opts: {
     files[name] = file.identity;
   }
   return { ok: true, snapshot: { dirs: ancestors.join("\n"), files } };
+}
+
+async function nssAncestorIdentities(opts: {
+  readonly host: LinuxTrustHost;
+  readonly start: string;
+  readonly includeResolvedPath: boolean;
+}): Promise<readonly string[] | null> {
+  const identities: string[] = [];
+  for (let path = opts.start; ; path = dirname(path)) {
+    const info = await opts.host.inspectPath(path);
+    if (
+      !(info?.isDirectory && [opts.host.uid, 0].includes(info.uid)) ||
+      (info.mode & 0o022) !== 0
+    ) {
+      return null;
+    }
+    identities.push(
+      opts.includeResolvedPath
+        ? `${path}:${info.realPath}:${info.identity}`
+        : `${path}:${info.identity}`
+    );
+    if (path === "/") {
+      return identities;
+    }
+  }
 }
 
 /** NSS sql database files Hack writes through certutil. */

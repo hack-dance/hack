@@ -10533,13 +10533,8 @@ export async function emitOpenOrigin(opts: {
     process.stdout.write(
       `${JSON.stringify(
         unresolved
-          ? {
-              url: opts.url,
-              dns: unresolved.dns,
-              hint: unresolved.hint,
-              ci_contract_negative_control: true,
-            }
-          : { url: opts.url, ci_contract_negative_control: true },
+          ? { url: opts.url, dns: unresolved.dns, hint: unresolved.hint }
+          : { url: opts.url },
         null,
         2
       )}\n`

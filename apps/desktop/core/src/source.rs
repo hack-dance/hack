@@ -1782,12 +1782,21 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
 
     #[test]
     fn path_caps_keep_checked_tools_and_report_unsearched_coverage() {
-        let hack = fake_hack("doctor-path-bounds", "echo '{}'");
-        let root = hack.parent().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let hack = std::fs::canonicalize(fake_hack("doctor-path-bounds", "echo '{}'")).unwrap();
+        // Keep every input in this owned tree and use its canonical spelling
+        // (macOS temp roots may have /var-style aliases). This test qualifies
+        // PATH coverage, not absent-helper/plugin discovery on a host image.
+        let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let root = root.as_path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let first = root.join("first");
         let second = root.join("second");
         std::fs::create_dir(&first).unwrap();
         std::fs::create_dir(&second).unwrap();
+        for dir in [&first, &second] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         std::os::unix::fs::symlink(&hack, first.join("git")).unwrap();
         std::os::unix::fs::symlink(&hack, second.join("docker")).unwrap();
         let repeated = std::env::join_paths(std::iter::repeat_n(&first, 69)).unwrap();
@@ -1805,6 +1814,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         for index in 1..65 {
             let dir = root.join(format!("path-{index}"));
             std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
             dirs.push(dir);
         }
         let ordinary =
@@ -1822,21 +1832,87 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
 "#,
         )
         .unwrap();
+        let client = root.join("client");
+        let system_plugins = root.join("system-plugins");
+        std::fs::create_dir_all(client.join("cli-plugins")).unwrap();
+        std::fs::create_dir(&system_plugins).unwrap();
+        std::fs::write(client.join("config.json"), "{}").unwrap();
+        for dir in [&client, &client.join("cli-plugins"), &system_plugins] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let discovery = crate::doctor_plugins::Discovery {
+            config_dir: Some(client),
+            unsupported_extra_selector: false,
+            system_dirs: vec![system_plugins],
+        };
         let source = LiveSource {
-            runner: fixture_runner(&hack).with_env("PATH", over.to_str().unwrap()),
+            runner: fixture_runner(&hack)
+                .with_env("HOME", root.to_str().unwrap())
+                .with_env("HACK_HOME", root.to_str().unwrap())
+                .with_env("HACK_MUTAGEN_PATH", hack.to_str().unwrap())
+                .with_env("PATH", over.to_str().unwrap()),
             daemon: None,
         };
-        let runs = source.fixture_doctor_runs(&[]);
+        assert_eq!(
+            crate::doctor_plugins::validate_helpers(&source.runner),
+            Ok(()),
+            "stage=helper-preflight"
+        );
+        assert_eq!(
+            crate::doctor_plugins::validate(&discovery),
+            Ok(()),
+            "stage=plugin-preflight"
+        );
+        let runs =
+            source.doctor_runs_with_discovery(&[], DOCTOR_BUDGET, DOCTOR_TIMEOUT, &discovery);
+        // A synthetic preflight card is also Ok/Unknown, but proves nothing
+        // about the bounded scan. Fail at the actual stage with static reasons.
+        assert!(
+            runs[0].probe_started,
+            "stage=preflight-refused reason={}",
+            runs[0].result.as_ref().unwrap().checks[0].detail
+        );
         let report = runs[0]
             .result
             .as_ref()
             .expect("bounded scan still runs Doctor");
-        assert!(report.checks.iter().all(|c| c.status == "unknown"));
+        assert_eq!(report.checks.len(), 1, "stage=fake-report-count");
+        assert_eq!(report.checks[0].id, "docker", "stage=fake-cli-not-run");
+        assert!(
+            report.checks.iter().all(|c| c.status == "unknown"),
+            "stage=coverage-not-applied"
+        );
         let view = crate::doctor::aggregate(&runs);
         assert!(!view.is_clean());
         assert!(
             view.cards()
-                .any(|card| card.detail.contains("bounded PATH scan"))
+                .any(|card| card.detail.contains("bounded PATH scan")),
+            "stage=coverage-card-missing"
+        );
+        assert_eq!(
+            view.cards()
+                .filter(|card| card.id == "desktop tool coverage")
+                .count(),
+            1,
+            "stage=coverage-card-count"
+        );
+        let refused = crate::doctor_plugins::Discovery {
+            unsupported_extra_selector: true,
+            ..discovery
+        };
+        let refused_runs =
+            source.doctor_runs_with_discovery(&[], DOCTOR_BUDGET, DOCTOR_TIMEOUT, &refused);
+        assert!(
+            !refused_runs[0].probe_started,
+            "stage=negative-preflight-control"
+        );
+        let refused_view = crate::doctor::aggregate(&refused_runs);
+        assert!(!refused_view.machine_checked);
+        assert!(
+            !refused_view
+                .cards()
+                .any(|card| card.id == "desktop tool coverage"),
+            "stage=preflight-must-not-masquerade-as-scan"
         );
         let _ = std::fs::remove_dir_all(root);
     }

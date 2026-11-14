@@ -774,6 +774,17 @@ pub fn inside_project(dir: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
+/// An absolute directory owned by this user and closed to group and
+/// others (for example `XDG_RUNTIME_DIR`).
+#[must_use]
+pub fn is_private_dir(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    p.is_absolute()
+        && std::fs::metadata(p).is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0)
+}
+
 /// The first candidate directory provably outside every Hack project, for
 /// the machine-level doctor run. A candidate that cannot be inspected is
 /// skipped; `None` when no candidate qualifies.
@@ -1144,6 +1155,26 @@ mod tests {
     /// a checkout); only then is "outside" not provable.
     fn tree_base_is_clean(t: &Tree) -> bool {
         matches!(inside_project(&t.0), Ok(false))
+    }
+
+    #[test]
+    fn private_dir_requires_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!(
+            "hack-desktop-private-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(is_private_dir(&d));
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!is_private_dir(&d));
+        assert!(!is_private_dir(std::path::Path::new("relative")));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

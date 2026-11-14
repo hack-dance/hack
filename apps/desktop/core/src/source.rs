@@ -196,7 +196,15 @@ impl LiveSource {
         };
         // The machine run must happen outside every checkout, or doctor
         // would report that checkout's project checks as machine checks.
-        let candidates = [std::env::temp_dir(), std::path::PathBuf::from("/")];
+        // Prefer a user-private directory; the shared temp dir is a last
+        // resort (children get an all-absolute PATH either way).
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
+            && crate::doctor::is_private_dir(&run)
+        {
+            candidates.push(run);
+        }
+        candidates.extend([std::env::temp_dir(), std::path::PathBuf::from("/")]);
         let machine = match crate::doctor::neutral_dir(&candidates) {
             Some(dir) => read(
                 &self.runner.clone().with_cwd(dir),

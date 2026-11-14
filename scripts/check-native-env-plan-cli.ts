@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readFile,
   rm,
   symlink,
 } from "node:fs/promises";
@@ -249,6 +250,8 @@ try {
   await Bun.write(join(checkout, ".hack/hack.config.json"), "{}");
   await refused([], "E_NATIVE_PROJECT_CONFLICT", checkout);
   await rm(join(checkout, ".hack/hack.config.json"));
+  require((await readdir(home)).length ===
+    0, "validation and planning write no home state");
   const unsupported = await invoke(
     ["up", "web", "--detach", "--json"],
     checkout,
@@ -264,8 +267,6 @@ try {
     ), "native detached service selection refuses before input or runtime work");
   // Whole-project detach is admitted. Invalid input keeps this relocated-bundle
   // check offline on supported hosts; unsupported hosts also fail before ready.
-  require((await readdir(home)).length ===
-    0, "validation and refused service selection write no home state");
   await Bun.write(join(checkout, ".hack/hack.project.json"), "{");
   const detached = await invoke(["up", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
@@ -287,6 +288,31 @@ try {
     !(await readdir(join(checkout, ".hack"))).some(
       (name) => name === ".internal" || name === ".branch"
     ), "no registry or generated runtime state");
+  if (homeEntries.length > 0) {
+    const entries = (await readFile(join(home, ".hack/activity.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => record(JSON.parse(line)));
+    require(entries.length === 2 &&
+      entries.every(
+        (entry) =>
+          entry.action === "up" &&
+          entry.outcome === "failed" &&
+          JSON.stringify(Object.keys(entry).sort()) ===
+            JSON.stringify([
+              "action",
+              "branch",
+              "duration_ms",
+              "failed_services",
+              "origin",
+              "outcome",
+              "project",
+              "ts",
+              "v",
+            ]) &&
+          !JSON.stringify(entry).includes(directory)
+      ), "only the two failed lifecycle actions are recorded without private paths");
+  }
   process.stdout.write(
     "Relocated native env plan acceptance: offline validation, metadata-only output, missing overlays/refs, immutable directives, separate hashes, real linked-worktree layers, CI/slim/opt-out, unsafe-input and runtime refusal passed\n"
   );

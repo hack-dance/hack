@@ -66,7 +66,14 @@ pub struct CliRunner {
     cwd: Option<PathBuf>,
     /// `on_path` found no executable: spawn reports `NotFound`.
     missing: bool,
+    /// How long a timed-out command gets after SIGTERM before SIGKILL.
+    term_grace: Duration,
 }
+
+/// Default grace after SIGTERM. The CLI forwards SIGTERM to the detached
+/// subprocess groups it owns (for example a Compose build) and waits for
+/// them; SIGKILL alone would orphan those and kill the CLI's own timer.
+pub const TERM_GRACE: Duration = Duration::from_secs(15);
 
 impl CliRunner {
     /// Run `program` (normally `hack`, resolved through PATH).
@@ -77,7 +84,15 @@ impl CliRunner {
             env: vec![("HACK_NO_INTERACTIVE".into(), "1".into())],
             cwd: None,
             missing: false,
+            term_grace: TERM_GRACE,
         }
+    }
+
+    /// Change the SIGTERM-to-SIGKILL grace for timed-out commands.
+    #[must_use]
+    pub fn with_term_grace(mut self, grace: Duration) -> Self {
+        self.term_grace = grace;
+        self
     }
 
     /// Find `name` on `PATH` and run it by absolute path.
@@ -183,7 +198,7 @@ impl CliRunner {
             match child.try_wait() {
                 Ok(Some(s)) => break s,
                 Ok(None) if Instant::now() >= deadline => {
-                    kill_group(&mut child);
+                    terminate_group(&mut child, self.term_grace);
                     return Err(RunError::Timeout { after: timeout });
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(10)),
@@ -192,10 +207,11 @@ impl CliRunner {
         };
         // The deadline also covers draining: a descendant that keeps a pipe
         // open after `hack` exits must not hold the caller past the timeout.
+        let grace = self.term_grace;
         let drain = |rx: &mpsc::Receiver<String>, child: &mut Child| {
             let left = deadline.saturating_duration_since(Instant::now());
             rx.recv_timeout(left).map_err(|_| {
-                kill_group(child);
+                terminate_group(child, grace);
                 RunError::Timeout { after: timeout }
             })
         };
@@ -348,6 +364,26 @@ pub fn resolve_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<Pat
         .find(|p| {
             std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
+}
+
+/// Ask the process group to stop (SIGTERM), give the CLI `grace` to retire
+/// the subprocesses it owns, then SIGKILL whatever is left of the group and
+/// reap. Returns only once the direct child has exited.
+fn terminate_group(child: &mut Child, grace: Duration) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: plain syscall on the group we created with process_group(0).
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+    }
+    let until = Instant::now() + grace;
+    while Instant::now() < until {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    kill_group(child);
 }
 
 fn kill_group(child: &mut Child) {
@@ -605,6 +641,37 @@ mod tests {
             r.run_json::<Value>(&["x"], None, T),
             Err(RunError::NotFound)
         );
+    }
+
+    #[test]
+    fn timeout_sends_sigterm_first_so_the_cli_can_retire_its_children() {
+        let f = FakeHack::new(
+            r#"trap 'echo term > "$HACK_HOME/got"; exit 0' TERM
+while :; do sleep 0.05; done"#,
+        );
+        let started = Instant::now();
+        let r = f
+            .runner()
+            .with_term_grace(Duration::from_secs(3))
+            .run_json::<Value>(&["up"], None, Duration::from_millis(300));
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(f.dir.join("got").exists(), "SIGTERM reached the CLI");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "exited on TERM, no full grace"
+        );
+    }
+
+    #[test]
+    fn a_cli_ignoring_sigterm_is_killed_after_the_grace() {
+        let f = FakeHack::new("trap '' TERM\nwhile :; do sleep 0.05; done");
+        let started = Instant::now();
+        let r = f
+            .runner()
+            .with_term_grace(Duration::from_millis(300))
+            .run_json::<Value>(&["up"], None, Duration::from_millis(200));
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

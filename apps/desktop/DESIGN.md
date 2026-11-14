@@ -281,7 +281,7 @@ Fields and commands needed from the CLI side:
 ## 7. Data contract
 
 Polling stops while the window is hidden. Every CLI call has a timeout and is
-killed with its process group on expiry; a timeout makes the screen Unknown.
+stopped on expiry: SIGTERM to its process group (the CLI forwards it to the subprocesses it owns), then SIGKILL after 15 s; a timeout makes the screen Unknown.
 
 Exit codes: a valid JSON payload is parsed even when the exit code is not 0,
 because the unhealthy states live there.

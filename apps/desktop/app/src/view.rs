@@ -111,13 +111,17 @@ impl HackApp {
                     .ok()
                     .flatten();
                 if let Some((root, native)) = root {
+                    let requested = root.clone();
                     let tail = cx
                         .background_executor()
                         .spawn(async move { source.log_tail(&root, native, TAIL_LINES) })
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        this.tail = tail;
-                        cx.notify();
+                        // Drop a tail fetched for a project no longer selected.
+                        if this.selected_root().is_some_and(|(r, _)| r == requested) {
+                            this.tail = tail;
+                            cx.notify();
+                        }
                     });
                 }
                 cx.background_executor().timer(POLL).await;

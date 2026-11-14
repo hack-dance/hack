@@ -6,7 +6,18 @@
 //! cannot interpret stay as strings, so "unknown" is never turned into
 //! "stopped".
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Treat an explicit JSON `null` like a missing field. The CLI emits `null`
+/// for collections of projects it could not read (missing Compose file,
+/// input diagnostic); one such row must not fail the whole payload.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
 
 /// `GET /v1/projects` and `hack projects --json` (same shape).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -17,6 +28,7 @@ pub struct ProjectsPayload {
     /// `false` when the container runtime could not be read.
     pub runtime_ok: Option<bool>,
     pub runtime_error: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub projects: Vec<ProjectRow>,
 }
 
@@ -33,15 +45,19 @@ impl ProjectsPayload {
 #[serde(default)]
 pub struct ProjectRow {
     pub project_id: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub name: String,
     pub dev_host: Option<String>,
     pub repo_root: Option<String>,
     /// `running | stopped | missing | unregistered | unavailable | unknown`.
+    #[serde(deserialize_with = "null_default")]
     pub status: String,
     /// Adds `not_configured` to the `status` values.
     pub runtime_status: Option<String>,
     pub kind: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub defined_services: Vec<String>,
+    #[serde(deserialize_with = "null_default")]
     pub service_hosts: std::collections::BTreeMap<String, Vec<String>>,
     pub input_diagnostic: Option<InputDiagnostic>,
     pub runtime: Option<ProjectRuntime>,
@@ -80,14 +96,18 @@ impl ProjectRow {
 pub struct NativePs {
     /// `not_started | pending | runtime_not_running | runtime_busy |
     /// provider_pin_changed | observed | owner_unconfirmed | runtime_degraded`.
+    #[serde(deserialize_with = "null_default")]
     pub status: String,
+    #[serde(deserialize_with = "null_default")]
     pub items: Vec<NativePsItem>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct NativePsItem {
+    #[serde(deserialize_with = "null_default")]
     pub service: String,
+    #[serde(deserialize_with = "null_default")]
     pub state: String,
     pub health: Option<String>,
     #[serde(rename = "exitCode")]
@@ -107,13 +127,16 @@ pub struct InputDiagnostic {
 #[serde(default)]
 pub struct ProjectRuntime {
     pub project: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub services: Vec<RuntimeService>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RuntimeService {
+    #[serde(deserialize_with = "null_default")]
     pub service: String,
+    #[serde(deserialize_with = "null_default")]
     pub containers: Vec<Container>,
 }
 
@@ -123,8 +146,10 @@ pub struct Container {
     pub id: Option<String>,
     pub name: Option<String>,
     /// Docker state: `running`, `exited`, `created`, `restarting`, ...
+    #[serde(deserialize_with = "null_default")]
     pub state: String,
     /// Docker status text, for example `Up 5 minutes (healthy)`.
+    #[serde(deserialize_with = "null_default")]
     pub status: String,
 }
 
@@ -160,6 +185,7 @@ impl Container {
 pub struct Autostart {
     pub enabled: bool,
     /// `off | on | paused | starting | needs_attention`.
+    #[serde(deserialize_with = "null_default")]
     pub state: String,
     pub paused_reason: Option<String>,
     pub failures: AutostartFailures,
@@ -178,6 +204,7 @@ pub struct AutostartFailures {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DaemonApiStatus {
+    #[serde(deserialize_with = "null_default")]
     pub status: String,
     pub version: String,
     pub pid: Option<u32>,
@@ -190,6 +217,7 @@ pub struct DaemonApiStatus {
 #[serde(default)]
 pub struct DaemonStatus {
     /// `running | starting | incompatible | stale | stopped`.
+    #[serde(deserialize_with = "null_default")]
     pub status: String,
     pub running: bool,
     pub api_ok: bool,
@@ -219,7 +247,9 @@ pub struct DaemonService {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DoctorReport {
+    #[serde(deserialize_with = "null_default")]
     pub checks: Vec<DoctorCheck>,
+    #[serde(deserialize_with = "null_default")]
     pub summary: Vec<String>,
 }
 
@@ -228,6 +258,7 @@ pub struct DoctorReport {
 pub struct DoctorCheck {
     pub id: String,
     /// `ok | warn | error`.
+    #[serde(deserialize_with = "null_default")]
     pub status: String,
     pub detail: String,
 }
@@ -334,6 +365,19 @@ mod tests {
         assert_eq!(p.projects[0].name, "alpha");
         assert!(p.projects[0].defined_services.is_empty());
         assert!(!p.engine_down());
+    }
+
+    #[test]
+    fn explicit_nulls_do_not_fail_the_payload() {
+        // Shape of an unreadable row from serializeProjectView().
+        let raw = r#"{"projects":[{"name":"broken","status":"unavailable",
+          "defined_services":null,"service_hosts":null,"runtime":null,
+          "input_diagnostic":{"code":"E_CONFIG_INVALID","message":"bad"}},
+          {"name":"ok","status":"running","defined_services":["api"]}]}"#;
+        let p: ProjectsPayload = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.projects.len(), 2);
+        assert!(p.projects[0].defined_services.is_empty());
+        assert!(p.projects[0].service_hosts.is_empty());
     }
 
     #[test]

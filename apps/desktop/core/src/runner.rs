@@ -135,8 +135,17 @@ impl CliRunner {
                 Err(e) => return Err(RunError::Spawn(e.to_string())),
             }
         };
-        let stdout = out.join().unwrap_or_default();
-        let mut stderr = err.join().unwrap_or_default();
+        // The deadline also covers draining: a descendant that keeps a pipe
+        // open after `hack` exits must not hold the caller past the timeout.
+        let drain = |rx: &mpsc::Receiver<String>, child: &mut Child| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            rx.recv_timeout(left).map_err(|_| {
+                kill_group(child);
+                RunError::Timeout { after: timeout }
+            })
+        };
+        let stdout = drain(&out, &mut child)?;
+        let mut stderr = drain(&err, &mut child)?;
         if stderr.len() > STDERR_KEEP {
             let cut = stderr.len() - STDERR_KEEP;
             let cut = (cut..stderr.len())
@@ -241,16 +250,17 @@ impl Drop for LogStream {
     }
 }
 
-fn read_all<R: Read + Send + 'static>(r: Option<R>) -> thread::JoinHandle<String> {
+/// Read a pipe to EOF on a thread; the result arrives on the channel.
+fn read_all<R: Read + Send + 'static>(r: Option<R>) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut s = String::new();
+        let mut buf = Vec::new();
         if let Some(mut r) = r {
-            let mut buf = Vec::new();
             let _ = r.read_to_end(&mut buf);
-            s = String::from_utf8_lossy(&buf).into_owned();
         }
-        s
-    })
+        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+    });
+    rx
 }
 
 fn kill_group(child: &mut Child) {
@@ -441,6 +451,18 @@ mod tests {
                     .unwrap_or(true)
         });
         assert!(gone, "grandchild {pid} survived the timeout");
+    }
+
+    #[test]
+    fn timeout_covers_a_descendant_holding_the_pipe() {
+        // `hack` exits at once, but a background child keeps stdout open.
+        let f = FakeHack::new("sleep 30 &\necho '{}'");
+        let started = Instant::now();
+        let r = f
+            .runner()
+            .run_json::<Value>(&["x"], None, Duration::from_millis(300));
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

@@ -12,6 +12,7 @@
 
 pub mod daemon;
 pub mod doctor;
+mod doctor_acl;
 mod doctor_plugins;
 pub mod fixtures;
 pub mod models;

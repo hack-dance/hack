@@ -56,7 +56,12 @@ struct PluginConfig {
 // Unlike private PATH wrappers, Docker later resolves the original names.
 // Check original prefixes AND every lexical link target, not only realpath:
 // an attacker must not be able to replace an intermediate alias afterward.
-fn guarded_names(path: &Path, uid: u32, links_left: &mut usize, as_ancestor: bool) -> bool {
+pub(crate) fn guarded_names(
+    path: &Path,
+    uid: u32,
+    links_left: &mut usize,
+    as_ancestor: bool,
+) -> bool {
     if !path.is_absolute() {
         return false;
     }
@@ -64,7 +69,7 @@ fn guarded_names(path: &Path, uid: u32, links_left: &mut usize, as_ancestor: boo
         let Ok(meta) = std::fs::symlink_metadata(component) else {
             return false;
         };
-        if meta.uid() != uid && meta.uid() != 0 {
+        if (meta.uid() != uid && meta.uid() != 0) || !crate::doctor_acl::controlled(component) {
             return false;
         }
         if meta.file_type().is_symlink() {
@@ -223,7 +228,7 @@ mod tests {
     #[test]
     fn selectors_follow_effective_runner_context_without_reading_actual_config() {
         let runner = CliRunner::new("unused-fixture-cli")
-            .with_env("HOME", "/fixture/home")
+            .with_env("HOME", "/fixture/user-root")
             .with_env("DOCKER_CONFIG", "/fixture/selected-client")
             .with_env("DOCKER_CONTEXT", "fixture-selected-context")
             .with_env("DOCKER_CLI_PLUGIN_EXTRA_DIRS", "");
@@ -234,7 +239,7 @@ mod tests {
         let empty = runner.clone().with_env("DOCKER_CONFIG", "");
         assert_eq!(
             Discovery::from_runner(&empty).config_dir,
-            Some("/fixture/home/.docker".into())
+            Some("/fixture/user-root/.docker".into())
         );
         let opaque = runner
             .clone()

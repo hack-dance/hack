@@ -239,11 +239,15 @@ fn read_doctor(
 /// A root-owned sticky ancestor (such as /tmp) may contain a private entry.
 pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
+    if !crate::doctor_plugins::guarded_names(path, uid, &mut 64, false) {
+        return None;
+    }
     let real = std::fs::canonicalize(path).ok()?;
     for (index, component) in real.ancestors().enumerate() {
         let meta = std::fs::metadata(component).ok()?;
         let sticky_root = index > 0 && meta.uid() == 0 && meta.mode() & 0o1000 != 0;
-        if (index > 0 || directory) && !meta.is_dir()
+        if !crate::doctor_acl::controlled(component)
+            || (index > 0 || directory) && !meta.is_dir()
             || (index == 0 && !directory && (!meta.is_file() || meta.mode() & 0o111 == 0))
             || (meta.uid() != uid && meta.uid() != 0)
             || (meta.mode() & 0o022 != 0 && !sticky_root)
@@ -1334,6 +1338,78 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             assert!(!dir.join("executed").exists());
             std::fs::remove_file(&git).unwrap();
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tools_and_plugins_reject_acl_mutation_grants() {
+        let hack = fake_hack("doctor-tool-acl", "echo '{}'");
+        let dir = hack.parent().unwrap();
+        let uid = unsafe { libc::getuid() };
+        for rule in ["everyone deny delete", "everyone allow read"] {
+            assert!(
+                std::process::Command::new("/bin/chmod")
+                    .args(["+a", rule])
+                    .arg(&hack)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(trusted_tool_path(&hack, uid, false).is_some());
+            assert!(
+                std::process::Command::new("/bin/chmod")
+                    .arg("-N")
+                    .arg(&hack)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        for path in [&hack, dir] {
+            assert!(
+                std::process::Command::new("/bin/chmod")
+                    .args(["+a", "everyone allow write,delete"])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(trusted_tool_path(&hack, uid, false).is_none());
+            assert!(!crate::doctor_plugins::guarded_names(
+                &hack, uid, &mut 64, false
+            ));
+            assert!(
+                std::process::Command::new("/bin/chmod")
+                    .arg("-N")
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tool_links_reject_writable_intermediate_alias() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let hack = fake_hack("doctor-tool-hop", "echo '{}'");
+        let dir = hack.parent().unwrap();
+        let bin = dir.join("bin");
+        let shared = dir.join("shared");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&shared).unwrap();
+        let hop = shared.join("current");
+        symlink(&hack, &hop).unwrap();
+        let tool = bin.join("git");
+        symlink(&hop, &tool).unwrap();
+        let uid = unsafe { libc::getuid() };
+        assert!(trusted_tool_path(&tool, uid, false).is_some());
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(trusted_tool_path(&tool, uid, false).is_none());
+        let tools = trusted_probe_path(bin.as_os_str()).unwrap();
+        assert!(!Path::new(tools.path()).join("git").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

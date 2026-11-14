@@ -108,11 +108,17 @@ no permission to run a fix, and Doctor has no dependency on Setup's context type
 
 Doctor accepts owner-writable tool directories, including a normal user-owned
 `/opt/homebrew/bin` with mode `0755`. A PATH directory, each selected executable,
-its resolved symlink target and canonical ancestors must be owned by this user
+every intermediate symlink target and canonical ancestor must be owned by this user
 or root, with no group/other-write bits. A root-owned sticky ancestor such as
 `/tmp` is allowed above a private entry; a shared writable PATH entry itself is
 not. An unsafe executable is excluded individually, so it does not hide safe
-siblings such as Git. Foreign-owned executable targets are excluded too.
+siblings such as Git. Foreign-owned executable targets are excluded too. macOS ACL mutation grants
+(write/append/delete, child deletion, attributes, security or owner changes) are
+refused for any principal; deny/read-only entries remain supported. Linux access
+ACLs are conservatively refused. Unreadable ACL metadata is untrusted. The same
+ACL policy covers Docker discovery/config paths and their link targets. This
+may refuse owner-only ACL grants; it never attempts to infer group membership
+or effective ACL ordering. Native ACL fixtures need hosted macOS qualification.
 
 Each refresh creates one private temporary PATH of wrappers that exec the checked
 absolute tool paths, preserving normal shim script locations and nested lookup.

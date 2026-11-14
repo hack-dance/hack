@@ -1611,6 +1611,7 @@ async function verifyMacRootControlledPaths(
     readonly allowMissingPaths?: readonly string[];
     readonly timeoutMs?: number;
     readonly onUnreadable?: () => void;
+    readonly quiet?: boolean;
   }
 ): Promise<boolean> {
   const allowMissingPaths = new Set(options?.allowMissingPaths ?? []);
@@ -1620,21 +1621,27 @@ async function verifyMacRootControlledPaths(
       if (allowMissingPaths.has(path)) {
         continue;
       }
-      logger.error({
-        message: `Unable to inspect ownership for ${path}.`,
-      });
+      if (!options?.quiet) {
+        logger.error({
+          message: `Unable to inspect ownership for ${path}.`,
+        });
+      }
       return false;
     }
     if (metadata.uid !== ROOT_UID || metadata.gid !== WHEEL_GID) {
-      logger.error({
-        message: `${path} must be owned by root:wheel before enabling passwordless sudo.`,
-      });
+      if (!options?.quiet) {
+        logger.error({
+          message: `${path} must be owned by root:wheel before enabling passwordless sudo.`,
+        });
+      }
       return false;
     }
     if ((metadata.mode & 0o022) !== 0) {
-      logger.error({
-        message: `${path} must not be writable by group or others before enabling passwordless sudo.`,
-      });
+      if (!options?.quiet) {
+        logger.error({
+          message: `${path} must not be writable by group or others before enabling passwordless sudo.`,
+        });
+      }
       return false;
     }
   }
@@ -3551,6 +3558,7 @@ async function readMacAuthorizationSnapshot(
         {
           allowMissingPaths: [dirname(MAC_DNS_RECOVERY_HELPER_PATH)],
           timeoutMs: DOCKER_PROBE_TIMEOUT_MS,
+          quiet: true,
           onUnreadable: () => {
             authorizationUnknown = true;
           },

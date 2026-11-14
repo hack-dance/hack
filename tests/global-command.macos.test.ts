@@ -460,6 +460,32 @@ test("global install plan root argv equals the command's fake-root execution, in
   );
 });
 
+test("global install plan keeps JSON stdout pure when helper ownership refuses recovery", async () => {
+  process.env.HACK_LOGGER = "clack";
+  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+  statMetadataByPath.set("/usr/local", "1000:0:755");
+  const chunks: string[] = [];
+  const stdout = spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  });
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    await runCli(["global", "install", "--plan", "--json"]);
+  } finally {
+    stdout.mockRestore();
+  }
+  const planned: unknown = JSON.parse(chunks.join(""));
+  expect(planned).toMatchObject({
+    command: "install",
+    steps: expect.arrayContaining([
+      expect.objectContaining({ id: "recovery-unavailable" }),
+    ]),
+  });
+  expect(runCalls).toEqual([]);
+  expect(confirmCalls).toBe(0);
+});
+
 test("global install keeps container ip host dns when bridge ip is reachable", async () => {
   await prepareManagedTools(tempDir!);
   reachabilityByHost = {

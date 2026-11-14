@@ -237,6 +237,20 @@ test("install refuses before probing, and unknown network, bridge, resolver or s
   );
   expect(noBackend.refused).toContain("Install or start Docker");
   expect(noBackend).toMatchObject({ complete: false, blocked: [], steps: [] });
+  for (const platform of ["linux", "freebsd"] as const) {
+    const startupUnknown = await planGlobalInstall(
+      deps({
+        platform,
+        dockerStartup: () =>
+          Promise.resolve({ reachable: "unknown", backend: null }),
+        useStaticIps: () => Promise.resolve(false),
+      })
+    );
+    expect(startupUnknown.complete).toBe(false);
+    expect(startupUnknown.blocked).toContainEqual(
+      expect.objectContaining({ phase: "Docker startup" })
+    );
+  }
 });
 
 test("macOS install plans terminal retry alternatives even with non-TTY planning stdin", async () => {

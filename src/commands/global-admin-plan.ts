@@ -384,7 +384,7 @@ async function finishLinuxInstallPlan(
         "after stack startup"
       )
     );
-    return plan({ ...base, steps });
+    return plan({ ...base, steps, blocked });
   }
   const staticIps = await deps.useStaticIps();
   if (staticIps === "unknown") {
@@ -403,7 +403,7 @@ async function finishLinuxInstallPlan(
         "after stack startup"
       )
     );
-    return plan({ ...base, steps });
+    return plan({ ...base, steps, blocked });
   }
   const dns = await applyLinuxDns({
     host: deps.linuxHost,

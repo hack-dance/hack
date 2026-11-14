@@ -247,7 +247,13 @@ impl Session<'_, '_> {
         let resource = self.receipt.resources[&format!("container:{service}")].clone();
         let value =
             inspect_resource(&self.engine, &self.receipt, &resource)?.ok_or_else(refused)?;
-        self.verify_config(service, &value)?;
+        Self::verify_config(
+            &self.receipt,
+            service,
+            &self.configs[service],
+            &self.expected_environment[service],
+            &value,
+        )?;
         for key in keys {
             let volume = &self.receipt.resources[&key];
             verify(&self.engine, &self.receipt, volume)?;

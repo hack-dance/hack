@@ -83,7 +83,7 @@ pub(crate) fn source_for(fixture: Option<Fixture>) -> Arc<dyn Source> {
                 std::env::var("HOME").ok().as_deref(),
             );
             Arc::new(LiveSource {
-                runner: CliRunner::new("hack"),
+                runner: CliRunner::on_path("hack"),
                 daemon: socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
             })
         }

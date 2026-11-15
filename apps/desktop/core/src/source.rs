@@ -1629,6 +1629,43 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn docker_context_metadata_rejects_acl_write_grants() {
+        let hack = fake_hack("doctor-context-acl", "echo '{}'");
+        let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let client = root.join("client");
+        let meta = client.join("contexts/meta").join(context_dir("selected"));
+        std::fs::create_dir_all(&meta).unwrap();
+        let file = meta.join("meta.json");
+        std::fs::write(
+            &file,
+            r#"{"Name":"selected","Endpoints":{"docker":{"Host":"unix:///example/docker.sock"}}}"#,
+        )
+        .unwrap();
+        let discovery = crate::doctor_plugins::Discovery {
+            config_dir: Some(client.clone()),
+            unsupported_extra_selector: false,
+            system_dirs: vec![],
+            docker_host: None,
+            context: Some("selected".into()),
+        };
+        assert!(
+            crate::doctor_plugins::validate(&discovery).is_ok(),
+            "positive control"
+        );
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow write"])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(crate::doctor_plugins::validate(&discovery).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn tools_and_plugins_reject_acl_mutation_grants() {
         let hack = fake_hack("doctor-tool-acl", "echo '{}'");
         let dir = hack.parent().unwrap();

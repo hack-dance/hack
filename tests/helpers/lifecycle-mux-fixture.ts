@@ -1,5 +1,6 @@
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { spawnSyncBounded } from "./bounded-spawn-sync.ts";
 
 /** A closed tmux transport stand-in. It starts the shipping wrapper/client, not
  * a second controller. Only test-owned session metadata and captured children exist.
@@ -41,7 +42,7 @@ case "list-windows":
 case "new-window": {
  if(!state)process.exit(91);
  const child=Bun.spawn(["/bin/sh","-c",args.at(-1)],{cwd:selected("-c"),detached:true,stdin:"ignore",stdout:"ignore",stderr:"ignore"});
- child.unref();const started=Bun.spawnSync(["/bin/ps","-o","lstart=","-p",String(child.pid)],{env:{LC_ALL:"C",TZ:"UTC"}}).stdout.toString().trim();state.windows[selected("-n")]={pid:child.pid,started};await writeFile(file,JSON.stringify(state));break;
+ child.unref();const started=Bun.spawnSync(["/bin/ps","-o","lstart=","-p",String(child.pid)],{env:{LC_ALL:"C",TZ:"UTC"},timeout:10000,killSignal:"SIGKILL"}).stdout.toString().trim();state.windows[selected("-n")]={pid:child.pid,started};await writeFile(file,JSON.stringify(state));break;
 }
 case "list-panes": {
  if(!state)process.exit(91);const name=selected("-t").split(":").at(-1);if(state.windows[name])console.log(state.windows[name].pid);break;
@@ -61,10 +62,11 @@ default:process.exit(93);
 
 /** A process's start time as the stand-in records it; null when it has exited. */
 function leaderStartedAt(pid: number): string | null {
-  const started = Bun.spawnSync(
+  const started = spawnSyncBounded(
     ["/bin/ps", "-o", "lstart=", "-p", String(pid)],
     {
       env: { LC_ALL: "C", TZ: "UTC" },
+      timeout: 10_000,
     }
   )
     .stdout.toString()

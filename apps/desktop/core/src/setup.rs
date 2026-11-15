@@ -70,16 +70,26 @@ impl Report {
         } else {
             None
         };
-        compose
+        let program = self
+            .cli_program
+            .clone()
+            .ok_or("CLI executable has not been checked")?;
+        let mut spec = compose
             .as_ref()
             .unwrap_or(context)
             .bind(&crate::terminal::CommandSpec {
-                program: self
-                    .cli_program
-                    .clone()
-                    .ok_or("CLI executable has not been checked")?,
+                program: program.clone(),
                 args,
-            })
+            })?;
+        // The CLI restarts or starts the daemon by invoking itself and would
+        // otherwise prefer whatever `hack` is first on PATH: pin the checked one.
+        let at = spec
+            .args
+            .iter()
+            .position(|a| *a == program)
+            .ok_or("Bound command lost its executable")?;
+        spec.args.insert(at, format!("HACK_MCP_COMMAND={program}"));
+        Ok(spec)
     }
     pub fn cli_ready(&self) -> bool {
         self.cards

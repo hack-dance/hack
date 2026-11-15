@@ -199,13 +199,54 @@ impl Drop for Script {
     }
 }
 /// Discover only the Linux adapter; never fall back to typing into a pane.
+/// It runs as this user before any confirmation, so it must pass the same
+/// ownership, write and `#!` interpreter rules as the CLI (no env form);
+/// otherwise the app offers Copy only.
 pub fn linux_adapter() -> Option<PathBuf> {
-    crate::runner::resolve_on_path("xdg-terminal-exec", std::env::var_os("PATH").as_deref())
+    adapter_on(std::env::var_os("PATH").as_deref())
+}
+
+fn adapter_on(path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let found = crate::runner::resolve_on_path("xdg-terminal-exec", path)?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    crate::source::trusted_tool_path(&found, uid, false)
+        .filter(|real| crate::source::trusted_interpreter(real, uid, 4, false))
+        .map(|_| found)
 }
 
 #[cfg(test)]
 mod launch_tests {
     use super::*;
+    #[test]
+    fn linux_adapter_must_be_in_a_trusted_location() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "terminal-adapter-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let adapter = bin.join("xdg-terminal-exec");
+        std::fs::write(&adapter, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(adapter_on(Some(bin.as_os_str())), Some(adapter.clone()));
+        std::fs::write(&adapter, "#!/usr/bin/env sh\n").unwrap();
+        assert_eq!(adapter_on(Some(bin.as_os_str())), None, "env form refused");
+        std::fs::write(&adapter, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            adapter_on(Some(bin.as_os_str())),
+            None,
+            "writable directory refused"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
     #[test]
     fn launcher_reads_only_authored_ui_metadata_without_forwarding_app_environment() {
         let queried = std::cell::RefCell::new(Vec::new());

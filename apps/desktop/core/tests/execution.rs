@@ -74,3 +74,43 @@ fn absolute_xdg_config_home_is_kept_and_relative_is_ignored_like_the_cli() {
         Some(std::ffi::OsStr::new("/work/user/cfg"))
     );
 }
+#[test]
+fn docker_selectors_are_kept_when_supported_and_refused_otherwise() {
+    let with = |extra: &[(&str, &str)]| {
+        let mut values = vec![
+            ("HOME".to_owned(), "/work/user".to_owned()),
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+        ];
+        values.extend(
+            extra
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
+        ExecutionContext::from_values(&values)
+    };
+    let context = with(&[
+        ("DOCKER_CONTEXT", "fixture-context"),
+        ("DOCKER_CONFIG", "/work/user/docker"),
+        ("DOCKER_HOST", "unix:///work/user/docker.sock"),
+    ])
+    .unwrap();
+    assert_eq!(context.value("DOCKER_CONTEXT"), Some("fixture-context"));
+    assert_eq!(context.value("DOCKER_CONFIG"), Some("/work/user/docker"));
+    assert_eq!(
+        context.value("DOCKER_HOST"),
+        Some("unix:///work/user/docker.sock")
+    );
+    let runner = context.runner("/checked/hack").unwrap();
+    assert_eq!(
+        runner.effective_env("DOCKER_CONTEXT").as_deref(),
+        Some(std::ffi::OsStr::new("fixture-context"))
+    );
+    for bad in [
+        ("DOCKER_CONTEXT", "bad context"),
+        ("DOCKER_CONFIG", "relative/docker"),
+        ("DOCKER_HOST", "unix://relative.sock"),
+        ("DOCKER_HOST", "fd://"),
+    ] {
+        assert!(with(&[bad]).is_err(), "{bad:?}");
+    }
+}

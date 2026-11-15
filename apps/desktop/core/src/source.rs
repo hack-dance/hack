@@ -585,6 +585,21 @@ impl LiveSource {
                 .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
                 .collect();
         }
+        // Keep the CLI pinned by setup: bind its absolute path before the
+        // private tool PATH replaces PATH, which would otherwise rediscover.
+        let pinned = match self.runner.fixed() {
+            Ok(runner) => LiveSource {
+                runner,
+                daemon: self.daemon.clone(),
+            },
+            Err(e) => {
+                let why = e.to_string();
+                return std::iter::once(DoctorRun::machine(Err(why.clone())))
+                    .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
+                    .collect();
+            }
+        };
+        let pinned = &pinned;
         // Resolve once per refresh, not once per project. The private PATH
         // stays alive until every bounded child has completed.
         let tools = match trusted_probe_path(
@@ -629,7 +644,7 @@ impl LiveSource {
         candidates.push(std::path::PathBuf::from("/"));
         let machine = match crate::doctor::neutral_dir(&candidates) {
             Some(dir) if !left().is_zero() => read(
-                &self
+                &pinned
                     .runner
                     .clone()
                     .with_env("PATH", tool_path)
@@ -647,7 +662,7 @@ impl LiveSource {
                 let handles: Vec<_> = chunk
                     .iter()
                     .map(|t| {
-                        let runner = self
+                        let runner = pinned
                             .runner_for(t.native)
                             .with_env("PATH", tool_path)
                             .with_term_grace(DOCTOR_TERM_GRACE);
@@ -678,7 +693,7 @@ impl LiveSource {
                             {
                                 let timeout = per_call.min(left());
                                 if !timeout.is_zero() {
-                                    let compose = self
+                                    let compose = pinned
                                         .runner_for(false)
                                         .with_env("PATH", tool_path)
                                         .with_term_grace(DOCTOR_TERM_GRACE);

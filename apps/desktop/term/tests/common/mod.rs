@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use hack_desktop_term::pty::{Pty, PtyOptions};
-use hack_desktop_term::session::{is_alive, members};
+use hack_desktop_term::session::is_alive;
+#[cfg(target_os = "linux")]
+use hack_desktop_term::session::members;
 use hack_desktop_term::stream::{ProcessSpec, StreamSource};
 
 /// A generous scheduling bound, not a latency claim.
@@ -69,6 +71,68 @@ pub fn sh_source(script: &str, home: &TempHome) -> StreamSource {
     })
 }
 
+/// A stand-in for the `hack` CLI, written into `home`. It checks the argv
+/// the app passes and then starts a plain shell, so tests need no Docker,
+/// daemon or project:
+///
+/// - `exec <service> -- <shell>` prints `container:<service>:<shell>` and
+///   runs `/bin/sh`. With `FAKE_HACK_NO_BASH` set, `bash` fails the way a
+///   container without it does: a message and exit status 127.
+/// - `host shell --env <overlay> --scope <scope>` prints
+///   `host-shell env=<overlay> scope=<scope>` and runs `$SHELL -l`, as the
+///   real command does.
+pub fn fake_hack(home: &TempHome) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = r#"#!/bin/sh
+case "$1" in
+  exec)
+    [ "$#" -eq 4 ] && [ "$3" = "--" ] || { echo "fake hack: bad exec argv: $*" >&2; exit 2; }
+    if [ "$4" = bash ] && [ -n "$FAKE_HACK_NO_BASH" ]; then
+      echo 'exec: "bash": executable file not found in $PATH' >&2
+      exit 127
+    fi
+    echo "container:$2:$4"
+    PS1='container$ ' exec /bin/sh
+    ;;
+  host)
+    [ "$#" -eq 6 ] && [ "$2" = shell ] && [ "$3" = --env ] && [ "$5" = --scope ] \
+      || { echo "fake hack: bad host argv: $*" >&2; exit 2; }
+    echo "host-shell env=$4 scope=$6"
+    exec "${SHELL:-/bin/sh}" -l
+    ;;
+  *) echo "fake hack: unknown command: $*" >&2; exit 2 ;;
+esac
+"#;
+    // Write, close, mark executable, then rename into place, so nothing can
+    // try to run a file that is still open for writing.
+    let pending = home.path().join("hack.pending");
+    std::fs::write(&pending, script).expect("write fake hack");
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let path = home.path().join("hack");
+    std::fs::rename(&pending, &path).expect("rename");
+    path
+}
+
+/// Make a session plan hermetic: an emptied environment with a fixed
+/// `PATH`, the private `HOME`, `SHELL=/bin/sh`, the plan's own terminal
+/// identity variables, and `extra`.
+pub fn hermetic(
+    plan: &mut hack_desktop_term::launch::SessionPlan,
+    home: &TempHome,
+    extra: &[(&str, &str)],
+) {
+    for attempt in &mut plan.attempts {
+        let o = &mut attempt.options;
+        o.env_clear = true;
+        o.env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        o.env.push(("HOME".into(), home.path().into()));
+        o.env.push(("SHELL".into(), "/bin/sh".into()));
+        for (k, v) in extra {
+            o.env.push(((*k).into(), (*v).into()));
+        }
+    }
+}
+
 /// Collect PTY output until `done` accepts it, the end, or the deadline.
 pub fn read_until(pty: &Pty, done: impl Fn(&str) -> bool) -> String {
     let start = Instant::now();
@@ -107,7 +171,10 @@ pub fn wait_gone(pids: &[libc::pid_t]) -> Vec<libc::pid_t> {
 }
 
 /// A session this test started. If the test fails before its own teardown,
-/// dropping this kills what is left of that session, and only that session.
+/// dropping this kills what is left of that session, through pidfds only,
+/// after checking each one is still in that session. No pid is signalled by
+/// number. Where there is no pidfd (macOS) nothing is signalled: the
+/// fixtures sleep for at most two minutes and end by themselves.
 pub struct Recorded {
     sid: libc::pid_t,
     done: bool,
@@ -128,16 +195,51 @@ impl Recorded {
 
 impl Drop for Recorded {
     fn drop(&mut self) {
-        if self.done {
-            return;
-        }
-        // The session id stays reserved while any member is alive, so these
-        // pids are members of the session this test started.
-        for pid in members(self.sid) {
-            // SAFETY: SIGKILL to a process of this test's own session.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
+        #[cfg(target_os = "linux")]
+        if !self.done {
+            for pid in members(self.sid) {
+                kill_through_pidfd(pid, self.sid);
             }
+        }
+        // Elsewhere there is no race-free handle, so nothing is signalled.
+        #[cfg(not(target_os = "linux"))]
+        let _ = (self.sid, self.done);
+    }
+}
+
+/// SIGKILL `pid` through a pidfd, only if that pidfd's process is still in
+/// session `sid`.
+#[cfg(target_os = "linux")]
+fn kill_through_pidfd(pid: libc::pid_t, sid: libc::pid_t) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // SAFETY: pidfd_open returns a new descriptor or -1.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0 as libc::c_uint) };
+    if raw < 0 {
+        return;
+    }
+    // SAFETY: a fresh descriptor this function owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw as libc::c_int) };
+    // The pidfd pins one process; check what the pid names now.
+    let in_session = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|t| {
+            let rest = t[t.rfind(')')? + 1..].to_owned();
+            rest.split_ascii_whitespace()
+                .nth(3)?
+                .parse::<libc::pid_t>()
+                .ok()
+        })
+        == Some(sid);
+    if in_session {
+        // SAFETY: a valid pidfd; a null siginfo means a kill-style signal.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0 as libc::c_uint,
+            );
         }
     }
 }

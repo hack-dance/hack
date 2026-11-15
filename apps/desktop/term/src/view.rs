@@ -29,15 +29,48 @@ use gpui_kit::{
     canvas, div, fill, point, px, size,
 };
 
-use crate::emulator::{Emulator, Frame, KeyInput, Rgb, SearchState, TermTheme};
+use crate::actions::Find;
+use crate::emulator::{CursorShape, Emulator, Frame, KeyInput, Rgb, SearchState, TermTheme};
+use crate::ghostty_config::GhosttyLook;
+use crate::launch::{SessionKind, SessionPlan};
 use crate::pty::{PtyOptions, QUIT_GRACE};
 use crate::stream::StreamSource;
 pub use crate::terminal::Status;
 use crate::terminal::TerminalCore;
 
-const PAD: f32 = 8.0;
+/// Padding around the grid when the user's config sets none.
+const DEFAULT_PAD: f32 = 8.0;
 /// GPUI gives quit handlers 200 ms in total.
 const QUIT_DEADLINE: Duration = Duration::from_millis(180);
+
+/// Ghostty counts font size and padding in points. On macOS a point is a
+/// logical pixel; elsewhere Ghostty assumes 96 DPI, so 72 points are 96 px.
+fn points(pt: f32) -> f32 {
+    if cfg!(target_os = "macos") {
+        pt
+    } else {
+        pt * 96.0 / 72.0
+    }
+}
+
+/// Padding in logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pad {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+/// What the last `render` drew, for hosts and tests that need to know a
+/// state change reached the screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rendered {
+    /// How many times the view has rendered.
+    pub count: u64,
+    /// The notice shown in that render, if any.
+    pub notice: Option<String>,
+}
 
 /// Font settings. Defaults to the theme's monospace family.
 #[derive(Clone, Debug)]
@@ -70,6 +103,10 @@ pub struct TerminalView {
     query: String,
     search: SearchState,
     applied_theme: Option<TermTheme>,
+    /// The user's terminal look, and whether it still has to be applied.
+    look: GhosttyLook,
+    look_pending: bool,
+    rendered: Rendered,
 }
 
 impl TerminalView {
@@ -87,24 +124,38 @@ impl TerminalView {
 
     /// An interactive view over a program on an app-owned PTY.
     pub fn new_pty(opts: &PtyOptions, cx: &mut Context<Self>) -> std::io::Result<Self> {
-        let core = TerminalCore::pty(opts)?;
+        Ok(Self::with_core(TerminalCore::pty(opts)?, cx))
+    }
+
+    /// An interactive view for a session plan: a container shell, a host
+    /// shell, or a host shell with env. See [`crate::launch`].
+    pub fn new_session(plan: SessionPlan, cx: &mut Context<Self>) -> std::io::Result<Self> {
+        Ok(Self::with_core(TerminalCore::session(plan)?, cx))
+    }
+
+    /// A view over a core built beforehand. Starting a session can fail, and
+    /// GPUI builds entities infallibly, so build the core first:
+    /// `let core = TerminalCore::session(plan)?;` then
+    /// `cx.new(|cx| TerminalView::from_core(core, cx))`.
+    pub fn from_core(core: TerminalCore, cx: &mut Context<Self>) -> Self {
+        Self::with_core(core, cx)
+    }
+
+    fn with_core(core: TerminalCore, cx: &mut Context<Self>) -> Self {
         // End the session before the process exits; Drop alone may not run
-        // when the app quits. The signalling and the wait run on the
-        // background executor, never on the UI thread.
+        // when the app quits. This covers both kinds of backend: a PTY and
+        // a process-backed stream. The signalling and the wait run on the
+        // background executor, never on the UI thread, and GPUI awaits the
+        // returned task inside its shutdown window.
         cx.on_app_quit(|this, cx| {
-            let pty = this.core.take_pty();
-            // GPUI awaits the returned task inside its shutdown window.
+            let shutdown = this.core.take_shutdown();
             cx.background_executor().spawn(async move {
-                if let Some(pty) = pty {
-                    pty.terminate_blocking_with(QUIT_GRACE, QUIT_DEADLINE);
+                if let Some(shutdown) = shutdown {
+                    shutdown.terminate_blocking_with(QUIT_GRACE, QUIT_DEADLINE);
                 }
             })
         })
         .detach();
-        Ok(Self::with_core(core, cx))
-    }
-
-    fn with_core(core: TerminalCore, cx: &mut Context<Self>) -> Self {
         cx.spawn(async move |this, cx| {
             loop {
                 let Ok(busy) = this.update(cx, |v, cx| v.pump(cx)) else {
@@ -129,7 +180,52 @@ impl TerminalView {
             query: String::new(),
             search: SearchState::default(),
             applied_theme: None,
+            look: GhosttyLook::default(),
+            look_pending: false,
+            rendered: Rendered::default(),
         }
+    }
+
+    /// What this tab is; its label and badge come from the kind.
+    pub fn kind(&self) -> &SessionKind {
+        self.core.kind()
+    }
+
+    /// Apply the user's terminal look (font, colours, cursor, padding).
+    /// Anything it leaves unset keeps following the app's theme.
+    pub fn set_look(&mut self, look: GhosttyLook, cx: &mut Context<Self>) {
+        self.look = look;
+        self.look_pending = true;
+        cx.notify();
+    }
+
+    /// The notice currently set, whether or not it has been drawn yet.
+    pub fn notice(&self) -> Option<&str> {
+        self.core.notice()
+    }
+
+    /// Give up the session's process side so the caller can end it and
+    /// get the result (closing a tab). The view stays, showing what it has.
+    pub fn take_shutdown(&mut self) -> Option<crate::terminal::Shutdown> {
+        self.core.take_shutdown()
+    }
+
+    /// What the last render drew.
+    pub fn rendered(&self) -> &Rendered {
+        &self.rendered
+    }
+
+    /// Open the find field.
+    pub fn open_find(&mut self, cx: &mut Context<Self>) {
+        self.search_open = true;
+        cx.notify();
+    }
+
+    /// Paste text into the PTY as the user would (bracketed when the
+    /// program asked for it). No-op for a stream view.
+    pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let bytes = self.core.emu().encode_paste(text);
+        self.send(&bytes, cx);
     }
 
     pub fn set_font(&mut self, font: TermFont) {
@@ -173,8 +269,8 @@ impl TerminalView {
     }
 
     /// Queue input for the PTY as if typed (no-op for a stream view).
-    pub fn type_text(&mut self, text: &str) {
-        self.core.send(text.as_bytes());
+    pub fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.send(text.as_bytes(), cx);
     }
 
     /// The emulator, for hosts that need more than the hooks above.
@@ -194,8 +290,12 @@ impl TerminalView {
         busy
     }
 
-    fn send(&mut self, bytes: &[u8]) {
+    /// Queue input. Always notifies: sending can set or clear the notice
+    /// about undelivered input, and that has to reach the next frame even
+    /// when the child prints nothing in response.
+    fn send(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         self.core.send(bytes);
+        cx.notify();
     }
 
     fn cell_at(&self, pos: gpui_kit::Point<Pixels>) -> (u16, u16) {
@@ -223,14 +323,12 @@ impl TerminalView {
         }
         if chord && k.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                let bytes = self.core.emulator().encode_paste(&text);
-                self.send(&bytes);
+                self.paste_text(&text, cx);
             }
             return;
         }
         if chord && k.key == "f" {
-            self.search_open = true;
-            cx.notify();
+            self.open_find(cx);
             return;
         }
         if self.search_open {
@@ -282,7 +380,7 @@ impl TerminalView {
                     });
                     self.core.emulator().clear_selection();
                     self.core.emulator().set_follow(true);
-                    self.send(&bytes);
+                    self.send(&bytes, cx);
                 }
             }
         }
@@ -333,9 +431,11 @@ impl TerminalView {
         }
     }
 
+    /// Colours: the user's terminal config where it sets them, the app's
+    /// theme for the rest.
     fn sync_theme(&mut self, cx: &App) {
         let t = cx.theme();
-        let theme = TermTheme {
+        let mut theme = TermTheme {
             foreground: rgb_of(t.foreground),
             background: rgb_of(t.background),
             cursor: rgb_of(t.foreground),
@@ -346,20 +446,61 @@ impl TerminalView {
                 TermTheme::LIGHT
             }
         };
-        if self.applied_theme != Some(theme) {
-            let _ = self.core.emulator().set_theme(theme);
+        if let Some(fg) = self.look.foreground {
+            theme.foreground = fg;
+            theme.cursor = fg;
+        }
+        if let Some(bg) = self.look.background {
+            theme.background = bg;
+        }
+        for (index, color) in self.look.palette.range(..16) {
+            theme.ansi[usize::from(*index)] = *color;
+        }
+        if self.applied_theme != Some(theme) || self.look_pending {
+            let extra: Vec<(u8, Rgb)> = self
+                .look
+                .palette
+                .range(16..)
+                .map(|(i, c)| (*i, *c))
+                .collect();
+            let emu = self.core.emulator();
+            let _ = emu.set_theme(theme);
+            let _ = emu.set_palette_entries(&extra);
+            let _ = emu.set_default_cursor(self.look.cursor_style);
             self.applied_theme = Some(theme);
+            self.look_pending = false;
+        }
+    }
+
+    fn pad(&self) -> Pad {
+        let (left, right) = self
+            .look
+            .padding_x
+            .map_or((DEFAULT_PAD, DEFAULT_PAD), |(l, r)| (points(l), points(r)));
+        let (top, bottom) = self
+            .look
+            .padding_y
+            .map_or((DEFAULT_PAD, DEFAULT_PAD), |(t, b)| (points(t), points(b)));
+        Pad {
+            left,
+            right,
+            top,
+            bottom,
         }
     }
 
     /// Size the grid to the canvas (and tell the PTY), then build the frame.
     fn layout(&mut self, bounds: Bounds<Pixels>, cell: (Pixels, Pixels)) -> Option<Frame> {
         self.cell = cell;
-        self.origin = point(bounds.origin.x + px(PAD), bounds.origin.y + px(PAD));
-        let cols = ((bounds.size.width - px(2. * PAD)) / cell.0)
+        let pad = self.pad();
+        self.origin = point(
+            bounds.origin.x + px(pad.left),
+            bounds.origin.y + px(pad.top),
+        );
+        let cols = ((bounds.size.width - px(pad.left + pad.right)) / cell.0)
             .floor()
             .max(1.) as u16;
-        let rows = ((bounds.size.height - px(2. * PAD)) / cell.1)
+        let rows = ((bounds.size.height - px(pad.top + pad.bottom)) / cell.1)
             .floor()
             .max(1.) as u16;
         let (cw, ch) = (
@@ -390,13 +531,29 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_theme(cx);
-        let family = self
-            .font
-            .family
-            .clone()
+        // Font: the user's terminal config, then an explicit `set_font`,
+        // then the app's monospace family. Later families in the config are
+        // fallbacks for glyphs the first one lacks (prompt symbols).
+        let mut families = self
+            .look
+            .font_families
+            .iter()
+            .cloned()
+            .map(SharedString::from);
+        let family = families
+            .next()
+            .or_else(|| self.font.family.clone())
             .unwrap_or_else(|| cx.theme().mono_font_family.clone());
-        let base_font = gpui_kit::font(family);
-        let font_size = self.font.size;
+        let mut base_font = gpui_kit::font(family);
+        let fallbacks: Vec<String> = self.look.font_families.iter().skip(1).cloned().collect();
+        if !fallbacks.is_empty() {
+            base_font.fallbacks = Some(gpui_kit::FontFallbacks::from_fonts(fallbacks));
+        }
+        let font_size = self
+            .look
+            .font_size_pt
+            .map_or(self.font.size, |pt| px(points(pt)));
+        let pad = self.pad();
         let ts = window.text_system();
         let font_id = ts.resolve_font(&base_font);
         let cell_w = ts
@@ -424,6 +581,7 @@ impl Render for TerminalView {
                         focused,
                         show_cursor,
                         theme,
+                        pad,
                     },
                     window,
                     cx,
@@ -466,9 +624,14 @@ impl Render for TerminalView {
             }
             _ => None,
         };
+        self.rendered = Rendered {
+            count: self.rendered.count + 1,
+            notice: self.core.notice().map(str::to_owned),
+        };
         let status = status.map(|s| {
             let t = cx.theme();
             div()
+                .id("terminal-status")
                 .absolute()
                 .bottom(px(6.))
                 .right(px(14.))
@@ -489,6 +652,7 @@ impl Render for TerminalView {
             .size_full()
             .overflow_hidden()
             .bg(hsla(theme.background))
+            .on_action(cx.listener(|this, _: &Find, _, cx| this.open_find(cx)))
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -509,6 +673,7 @@ struct PaintArgs<'a> {
     focused: bool,
     show_cursor: bool,
     theme: TermTheme,
+    pad: Pad,
 }
 
 /// Paint backgrounds, highlights, the cursor, then text. Text is shaped in
@@ -516,8 +681,8 @@ struct PaintArgs<'a> {
 /// grid stays exact; wide characters are placed on their own two cells.
 fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
     let (cw, ch) = a.cell;
-    let ox = a.bounds.origin.x + px(PAD);
-    let oy = a.bounds.origin.y + px(PAD);
+    let ox = a.bounds.origin.x + px(a.pad.left);
+    let oy = a.bounds.origin.y + px(a.pad.top);
     let at = |col: u16, row: usize| point(ox + cw * f32::from(col), oy + ch * row as f32);
     let rect = |col: u16, row: usize, n: u16| Bounds {
         origin: at(col, row),
@@ -556,13 +721,33 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
             hsla(c).opacity(0.9),
         ));
     }
+    // A block cursor covers its cell, so the glyph under it is drawn in the
+    // background colour. Bar, underline and hollow cursors leave it as is.
+    let shape = a.frame.cursor_shape.unwrap_or(CursorShape::Block);
+    let block_cursor = a.show_cursor && a.focused && shape == CursorShape::Block;
     if let Some((cx_, cy)) = a.frame.cursor.filter(|_| a.show_cursor) {
         let r = rect(cx_, usize::from(cy), 1);
         let c = hsla(a.frame.cursor_color);
-        if a.focused {
-            window.paint_quad(fill(r, c));
-        } else {
-            window.paint_quad(gpui_kit::outline(r, c, gpui_kit::BorderStyle::Solid));
+        let thin = px(2.);
+        match (a.focused, shape) {
+            (false, _) | (true, CursorShape::BlockHollow) => {
+                window.paint_quad(gpui_kit::outline(r, c, gpui_kit::BorderStyle::Solid));
+            }
+            (true, CursorShape::Block) => window.paint_quad(fill(r, c)),
+            (true, CursorShape::Bar) => window.paint_quad(fill(
+                Bounds {
+                    origin: r.origin,
+                    size: size(thin, ch),
+                },
+                c,
+            )),
+            (true, CursorShape::Underline) => window.paint_quad(fill(
+                Bounds {
+                    origin: point(r.origin.x, r.origin.y + ch - thin),
+                    size: size(cw, thin),
+                },
+                c,
+            )),
         }
     }
 
@@ -585,8 +770,7 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
                 } else {
                     c.text.as_str()
                 };
-                let on_cursor =
-                    a.show_cursor && a.focused && a.frame.cursor == Some((x as u16, y as u16));
+                let on_cursor = block_cursor && a.frame.cursor == Some((x as u16, y as u16));
                 let fg = if on_cursor { a.frame.background } else { c.fg };
                 let mut color = hsla(fg);
                 if c.faint {

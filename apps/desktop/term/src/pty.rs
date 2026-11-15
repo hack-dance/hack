@@ -38,7 +38,9 @@ use std::time::Duration;
 
 use crate::fdio::{self, Cancel, CancelWatch, Wait};
 use crate::queue::ByteQueue;
-use crate::session::{ExitInfo, LastResort, OwnedSession, SYNC_DEADLINE, Teardown, ThreadSpawner};
+use crate::session::{
+    ExitInfo, LastResort, OwnedSession, PendingTeardown, SYNC_DEADLINE, Teardown, ThreadSpawner,
+};
 
 /// How long a dropped session has after SIGHUP before SIGKILL.
 pub const TERMINATE_GRACE: Duration = Duration::from_millis(300);
@@ -86,6 +88,9 @@ impl PtySize {
 #[derive(Clone, Debug)]
 pub struct PtyOptions {
     pub program: PathBuf,
+    /// The child's `argv[0]` when it must differ from the program path. A
+    /// leading `-` is how a shell is told it is a login shell.
+    pub arg0: Option<OsString>,
     pub args: Vec<OsString>,
     pub cwd: Option<PathBuf>,
     pub env: Vec<(OsString, OsString)>,
@@ -98,6 +103,7 @@ impl PtyOptions {
     pub fn new(program: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
+            arg0: None,
             args: Vec::new(),
             cwd: None,
             env: vec![("TERM".into(), "xterm-256color".into())],
@@ -252,6 +258,9 @@ impl Pty {
         let writer = File::from(master.try_clone().map_err(early)?);
 
         let mut cmd = Command::new(&opts.program);
+        if let Some(arg0) = &opts.arg0 {
+            cmd.arg0(arg0);
+        }
         cmd.args(&opts.args);
         if let Some(cwd) = &opts.cwd {
             cmd.current_dir(cwd);
@@ -391,10 +400,7 @@ impl Pty {
     /// [`Self::terminate_blocking`] with the SIGKILL grace chosen by the caller.
     pub fn terminate_blocking_with(mut self, grace: Duration, deadline: Duration) -> Teardown {
         let Some(session) = self.session.take() else {
-            return Teardown {
-                gone: true,
-                escalated: false,
-            };
+            return Teardown::nothing();
         };
         hang_up(&session);
         let threads = self.stop_io();
@@ -404,6 +410,28 @@ impl Pty {
             move || join_all(threads),
             LastResort::GiveUp,
         )
+    }
+
+    /// End the session on a reaper thread and get a handle to the result,
+    /// so the caller can report [`Teardown::survivors`] without waiting.
+    pub fn terminate_in_background(mut self) -> PendingTeardown {
+        let (tx, rx) = std::sync::mpsc::channel();
+        match self.session.take() {
+            None => {
+                let _ = tx.send(Teardown::nothing());
+            }
+            Some(session) => {
+                hang_up(&session);
+                let threads = self.stop_io();
+                session.retire_in_background(
+                    &self.spawner,
+                    TERMINATE_GRACE,
+                    Box::new(move || join_all(threads)),
+                    Some(tx),
+                );
+            }
+        }
+        PendingTeardown(rx)
     }
 
     /// Kill the session now and reap it, on this thread.
@@ -447,11 +475,13 @@ impl Drop for Pty {
             &self.spawner,
             TERMINATE_GRACE,
             Box::new(move || join_all(threads)),
+            None,
         );
     }
 }
 
-/// SIGHUP + SIGCONT to the group and every verified session member.
+/// SIGHUP + SIGCONT to the leader's group and to every other session member
+/// that has a race-free handle.
 fn hang_up(session: &OwnedSession) {
     session.signal(libc::SIGHUP);
     session.signal(libc::SIGCONT);
@@ -549,7 +579,7 @@ fn open_pty(size: PtySize) -> io::Result<(OwnedFd, OwnedFd)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{exists, is_alive, members};
+    use crate::session::{Open, OsTable, ProcTable, exists, is_alive, members};
     use crate::testutil::{DEADLINE, Recorded, assert_no_trace, sh, tagged, wait_gone};
     use std::time::Instant;
 
@@ -571,7 +601,7 @@ mod tests {
     fn a_large_paste_to_a_child_that_never_reads_does_not_block_the_caller() {
         // Raw mode: unread input is kept, so the terminal fills and a
         // blocking write would hang. The child never reads stdin.
-        let (opts, _home) = sh("stty raw -echo; echo ready; exec sleep 300");
+        let (opts, _home) = sh("stty raw -echo; echo ready; exec sleep 120");
         let pty = Pty::spawn(&opts).expect("spawn");
         let mut rec = Recorded::session(pty.pid());
         assert!(read_until(&pty, |t| t.contains("ready")).contains("ready"));
@@ -631,7 +661,7 @@ mod tests {
     fn a_thread_spawn_failure_at_start_leaves_no_child_and_no_zombie() {
         // Fail the reader (0 successes), then the writer (1 success).
         for ok in 0..2 {
-            let (opts, _home) = sh("exec sleep 300");
+            let (opts, _home) = sh("exec sleep 120");
             let failure = Pty::spawn_with(&opts, ThreadSpawner::failing_after(ok))
                 .expect_err("spawn must fail");
             let leader = failure.leader.expect("the child had started");
@@ -647,7 +677,7 @@ mod tests {
 
     #[test]
     fn a_reaper_spawn_failure_still_ends_and_reaps_the_session() {
-        let (opts, _home) = sh("sleep 300 & echo \"kid=$!\"; wait");
+        let (opts, _home) = sh("sleep 120 & echo \"kid=$!\"; wait");
         let mut pty = Pty::spawn(&opts).expect("spawn");
         let mut rec = Recorded::session(pty.pid());
         let kid = tagged(&read_until(&pty, |t| t.contains("kid=")), "kid").expect("kid");
@@ -663,19 +693,42 @@ mod tests {
         rec.done();
     }
 
+    /// The real process table with the scan result, and what happens at
+    /// the verification boundary, chosen by the test.
+    struct Staged<'a> {
+        scan: Vec<libc::pid_t>,
+        at_boundary: Box<dyn Fn(libc::pid_t) + 'a>,
+    }
+
+    impl ProcTable for Staged<'_> {
+        fn scan(&self, _leader: libc::pid_t) -> Vec<libc::pid_t> {
+            self.scan.clone()
+        }
+        fn open(&self, pid: libc::pid_t) -> Open {
+            OsTable.open(pid)
+        }
+        fn identity(&self, pid: libc::pid_t) -> Option<crate::session::Identity> {
+            OsTable.identity(pid)
+        }
+        fn verified(&self, pid: libc::pid_t) {
+            (self.at_boundary)(pid);
+        }
+    }
+
+    const JOB_AND_SAME: &str =
+        "set -m; sleep 120 & echo \"job=$!\"; set +m; sleep 121 & echo \"same=$!\"; wait";
+
     #[test]
     fn a_scanned_pid_that_is_no_longer_in_the_session_is_not_signalled() {
-        // `job` is in its own process group (signalled one by one), `same`
-        // in the leader's group (signalled by killpg).
-        let (opts, _home) =
-            sh("set -m; sleep 300 & echo \"job=$!\"; set +m; sleep 301 & echo \"same=$!\"; wait");
+        // `job` is in its own process group, `same` in the leader's group.
+        let (opts, _home) = sh(JOB_AND_SAME);
         let pty = Pty::spawn(&opts).expect("spawn");
         let mut rec = Recorded::session(pty.pid());
         let out = read_until(&pty, |t| t.contains("same="));
         let job = tagged(&out, "job").expect("job");
         let same = tagged(&out, "same").expect("same");
         // A process in a different session: what a recycled pid would be.
-        let (other_opts, _home2) = sh("exec sleep 300");
+        let (other_opts, _home2) = sh("exec sleep 120");
         let other = Pty::spawn(&other_opts).expect("spawn other");
         let mut rec2 = Recorded::session(other.pid());
         let stranger = other.leader;
@@ -683,24 +736,131 @@ mod tests {
         const NOBODY: libc::pid_t = 0x3fff_fff0;
         assert!(!exists(NOBODY));
 
-        let stale_scan = move |_| vec![job, same, stranger, NOBODY];
+        let table = Staged {
+            scan: vec![job, same, stranger, NOBODY],
+            at_boundary: Box::new(|_| {}),
+        };
         let session = pty.session.as_ref().expect("session");
-        let report = session.signal_with(libc::SIGTERM, &stale_scan);
-        assert_eq!(report.signalled, vec![job, same], "{report:?}");
+        let report = session.signal_with(libc::SIGTERM, &table);
         assert_eq!(report.skipped, vec![stranger, NOBODY], "{report:?}");
-        assert!(wait_gone(&[job, same]).is_empty(), "members were signalled");
+        assert!(
+            wait_gone(&[same]).is_empty(),
+            "the leader's group was signalled"
+        );
+        if cfg!(target_os = "linux") {
+            // A pidfd reaches the job in its own group.
+            assert_eq!(report.signalled, vec![job, same], "{report:?}");
+            assert!(report.unreachable.is_empty());
+            assert!(wait_gone(&[job]).is_empty());
+        } else {
+            // No race-free handle here: the job is reported, never signalled
+            // by number.
+            assert_eq!(report.signalled, vec![same], "{report:?}");
+            assert_eq!(report.unreachable, vec![job], "{report:?}");
+        }
         assert!(is_alive(stranger), "the other session was not touched");
 
         assert!(other.terminate_blocking(DEADLINE).gone);
-        assert!(pty.terminate_blocking(DEADLINE).gone);
+        let t = pty.terminate_blocking(DEADLINE);
+        if cfg!(target_os = "linux") {
+            assert!(t.gone, "{t:?}");
+        }
         rec.done();
         rec2.done();
+    }
+
+    /// The reuse window for real: the verified member dies and is reaped
+    /// between verification and signalling. Its pidfd then names nobody.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_member_that_exits_at_the_boundary_is_not_signalled_by_number() {
+        let (opts, _home) = sh(JOB_AND_SAME);
+        let pty = Pty::spawn(&opts).expect("spawn");
+        let mut rec = Recorded::session(pty.pid());
+        let out = read_until(&pty, |t| t.contains("same="));
+        let job = tagged(&out, "job").expect("job");
+        // The test's own handle to the job, taken while it is known to be it.
+        let Open::Handle(own) = OsTable.open(job) else {
+            panic!("pidfd for the job");
+        };
+        let table = Staged {
+            scan: vec![job],
+            at_boundary: Box::new(|pid| {
+                assert_eq!(pid, job);
+                assert!(own.send(libc::SIGKILL));
+                // The shell's `wait` reaps it; then the number is free.
+                let start = Instant::now();
+                while exists(job) && start.elapsed() < DEADLINE {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(!exists(job), "the job was not reaped");
+            }),
+        };
+        let session = pty.session.as_ref().expect("session");
+        let report = session.signal_with(libc::SIGTERM, &table);
+        // The send went to the pinned, now dead, process: nobody got it.
+        assert_eq!(report.skipped, vec![job], "{report:?}");
+        assert!(report.signalled.is_empty() && report.unreachable.is_empty());
+        assert!(pty.terminate_blocking(DEADLINE).gone);
+        rec.done();
+    }
+
+    /// The OS process table, minus race-free handles: what teardown has to
+    /// work with on macOS and on Linux kernels without pidfd.
+    struct NoHandles;
+
+    impl ProcTable for NoHandles {
+        fn scan(&self, leader: libc::pid_t) -> Vec<libc::pid_t> {
+            OsTable.scan(leader)
+        }
+        fn open(&self, _pid: libc::pid_t) -> Open {
+            Open::Unsupported
+        }
+        fn identity(&self, pid: libc::pid_t) -> Option<crate::session::Identity> {
+            OsTable.identity(pid)
+        }
+    }
+
+    #[test]
+    fn without_a_race_free_handle_a_job_in_another_group_is_left_alone_and_reported() {
+        // The job ignores nothing; it simply never receives a signal,
+        // because a non-interactive shell does not pass SIGHUP to its jobs
+        // and we refuse to signal it by number. It ends by itself.
+        let (opts, _home) =
+            sh("set -m; sleep 4 & echo \"job=$!\"; set +m; sleep 120 & echo \"same=$!\"; wait");
+        let mut pty = Pty::spawn(&opts).expect("spawn");
+        let mut rec = Recorded::session(pty.pid());
+        let leader = pty.leader;
+        let out = read_until(&pty, |t| t.contains("same="));
+        let job = tagged(&out, "job").expect("job");
+        let same = tagged(&out, "same").expect("same");
+        pty.session
+            .as_mut()
+            .expect("session")
+            .set_table(std::sync::Arc::new(NoHandles));
+
+        let start = Instant::now();
+        let t = pty.terminate_blocking(DEADLINE);
+        let took = start.elapsed();
+        assert!(!t.gone, "{t:?}");
+        assert_eq!(t.survivors, vec![job], "the survivor is named");
+        assert!(is_alive(job), "and it was not signalled");
+        assert!(
+            !is_alive(same) && !exists(leader),
+            "the anchored group is gone"
+        );
+        assert!(
+            took < Duration::from_secs(3),
+            "teardown stops once nothing more can be reached, took {took:?}"
+        );
+        assert!(wait_gone(&[job]).is_empty(), "it ends by itself");
+        rec.done();
     }
 
     #[test]
     fn the_leader_stays_unreaped_until_signalling_is_done() {
         // The shell exits at once and leaves a job in another process group.
-        let (opts, _home) = sh("set -m; sleep 300 & echo \"job=$!\"; exit 0");
+        let (opts, _home) = sh("set -m; sleep 3 & echo \"job=$!\"; exit 0");
         let pty = Pty::spawn(&opts).expect("spawn");
         let mut rec = Recorded::session(pty.pid());
         let leader = pty.leader;
@@ -716,15 +876,26 @@ mod tests {
         assert!(!is_alive(leader));
         assert_eq!(members(leader), vec![job]);
         let t = pty.terminate_blocking(DEADLINE);
-        assert!(t.gone, "{t:?}");
         assert!(!exists(leader), "reaped after the last signal");
+        if cfg!(target_os = "linux") {
+            assert!(t.gone && t.survivors.is_empty(), "{t:?}");
+        } else {
+            // The job is in another group and gets no SIGHUP from a
+            // non-interactive shell. Without a race-free handle it is left
+            // alone and reported; it ends by itself after three seconds.
+            assert_eq!(
+                (t.gone, t.survivors.as_slice()),
+                (false, &[job][..]),
+                "{t:?}"
+            );
+        }
         assert!(wait_gone(&[job]).is_empty());
         rec.done();
     }
 
     #[test]
     fn sigkill_escalation_happens_only_for_a_session_that_ignores_hangup() {
-        let (opts, _home) = sh("sleep 300 & echo \"kid=$!\"; wait");
+        let (opts, _home) = sh("sleep 120 & echo \"kid=$!\"; wait");
         let pty = Pty::spawn(&opts).expect("spawn");
         let mut rec = Recorded::session(pty.pid());
         read_until(&pty, |t| t.contains("kid="));
@@ -733,14 +904,15 @@ mod tests {
             t,
             Teardown {
                 gone: true,
-                escalated: false
+                escalated: false,
+                survivors: Vec::new()
             },
             "SIGHUP is enough for a cooperative session"
         );
         rec.done();
 
         let (opts, _home) =
-            sh("trap '' HUP TERM; ( trap '' HUP TERM; exec sleep 300 ) & echo \"deaf=$!\"; wait");
+            sh("trap '' HUP TERM; ( trap '' HUP TERM; exec sleep 120 ) & echo \"deaf=$!\"; wait");
         let pty = Pty::spawn(&opts).expect("spawn");
         let mut rec = Recorded::session(pty.pid());
         let deaf = tagged(&read_until(&pty, |t| t.contains("deaf=")), "deaf").expect("deaf");
@@ -750,7 +922,8 @@ mod tests {
             t,
             Teardown {
                 gone: true,
-                escalated: true
+                escalated: true,
+                survivors: Vec::new()
             }
         );
         assert!(

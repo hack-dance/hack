@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 use crate::fdio::{self, Cancel, CancelWatch, Wait};
 use crate::pty::TERMINATE_GRACE;
 use crate::queue::ByteQueue;
-use crate::session::{LastResort, OwnedSession, SYNC_DEADLINE, ThreadSpawner};
+use crate::session::{
+    LastResort, OwnedSession, PendingTeardown, SYNC_DEADLINE, Teardown, ThreadSpawner,
+};
 
 /// Most stream bytes held in memory before the reader stops reading.
 pub const STREAM_QUEUE_BYTES: usize = 1 << 20;
@@ -215,6 +217,52 @@ impl ByteStream {
         std::mem::take(&mut self.threads)
     }
 
+    /// End a process source on this thread: SIGTERM and SIGCONT, SIGKILL
+    /// after `grace`, and wait until the session is reaped or `deadline`
+    /// passes. A file source has nothing to end.
+    pub fn terminate_blocking_with(mut self, grace: Duration, deadline: Duration) -> Teardown {
+        let threads = self.stop_io();
+        let Some(session) = self.session.take() else {
+            join_all(threads);
+            return Teardown::nothing();
+        };
+        session.signal(libc::SIGTERM);
+        session.signal(libc::SIGCONT);
+        session.retire(
+            grace,
+            deadline,
+            move || join_all(threads),
+            LastResort::GiveUp,
+        )
+    }
+
+    /// [`Self::terminate_blocking_with`] with the default grace.
+    pub fn terminate_blocking(self, deadline: Duration) -> Teardown {
+        self.terminate_blocking_with(TERMINATE_GRACE, deadline)
+    }
+
+    /// End a process source on a reaper thread and get a handle to the result.
+    pub fn terminate_in_background(mut self) -> PendingTeardown {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let threads = self.stop_io();
+        match self.session.take() {
+            None => {
+                let _ = tx.send(Teardown::nothing());
+            }
+            Some(session) => {
+                session.signal(libc::SIGTERM);
+                session.signal(libc::SIGCONT);
+                session.retire_in_background(
+                    &self.spawner,
+                    TERMINATE_GRACE,
+                    Box::new(move || join_all(threads)),
+                    Some(tx),
+                );
+            }
+        }
+        PendingTeardown(rx)
+    }
+
     /// Kill the process now and reap it, on this thread.
     fn abort(mut self) {
         let threads = self.stop_io();
@@ -246,6 +294,7 @@ impl Drop for ByteStream {
             &self.spawner,
             TERMINATE_GRACE,
             Box::new(move || join_all(threads)),
+            None,
         );
     }
 }
@@ -302,7 +351,7 @@ mod tests {
     fn a_reader_spawn_failure_leaves_no_child_and_no_zombie() {
         let home = TempHome::new();
         let failure = ByteStream::open_with(
-            &sh_source("exec sleep 300", &home),
+            &sh_source("exec sleep 120", &home),
             ThreadSpawner::failing_after(0),
         )
         .expect_err("open must fail");
@@ -315,7 +364,7 @@ mod tests {
     fn a_reaper_spawn_failure_still_ends_and_reaps_the_process() {
         let home = TempHome::new();
         let mut stream =
-            ByteStream::open(&sh_source("sleep 300 & echo \"kid=$!\"; wait", &home)).expect("open");
+            ByteStream::open(&sh_source("sleep 120 & echo \"kid=$!\"; wait", &home)).expect("open");
         let leader = libc::pid_t::try_from(stream.pid().unwrap()).unwrap();
         let mut rec = Recorded::session(leader.unsigned_abs());
         let mut out = String::new();

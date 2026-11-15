@@ -11,12 +11,18 @@
 //! exited but something else still holds the terminal open (a background
 //! job), the core waits [`EXIT_DRAIN_QUIET`] without new output, at most
 //! [`EXIT_DRAIN_CAP`], then takes what has arrived and closes.
+//!
+//! A session started from a [`SessionPlan`] with several attempts (a
+//! container shell: `bash`, then `sh`) moves to the next attempt when the
+//! current one could not start its program: it ended with exit status 126
+//! or 127 within [`FALLBACK_WINDOW`], before the user typed anything.
 
 use std::time::{Duration, Instant};
 
 use crate::emulator::{Emulator, EmulatorOptions};
+use crate::launch::{Launch, SessionKind, SessionPlan};
 use crate::pty::{Pty, PtyOptions, PtySize, WriteOutcome};
-use crate::session::ExitInfo;
+use crate::session::{ExitInfo, PendingTeardown, Teardown};
 use crate::stream::{ByteStream, StreamSource};
 
 /// Most bytes fed per pump, so a flood cannot starve input or painting.
@@ -25,6 +31,8 @@ pub const MAX_BYTES_PER_PUMP: usize = 1 << 20;
 pub const EXIT_DRAIN_QUIET: Duration = Duration::from_millis(500);
 /// After the child exits: the longest wait for end of output.
 pub const EXIT_DRAIN_CAP: Duration = Duration::from_secs(5);
+/// How soon a "command not found" exit must come to try the next attempt.
+pub const FALLBACK_WINDOW: Duration = Duration::from_secs(10);
 
 enum Backend {
     Stream(ByteStream),
@@ -40,15 +48,45 @@ pub enum Status {
     Ended(String),
 }
 
+/// A session's process side, taken out of the core so the caller can end it
+/// (on app quit) and wait for that off the UI thread.
+pub enum Shutdown {
+    Pty(Pty),
+    Stream(ByteStream),
+}
+
+impl Shutdown {
+    /// End the session on this thread. Blocks up to `deadline`.
+    pub fn terminate_blocking_with(self, grace: Duration, deadline: Duration) -> Teardown {
+        match self {
+            Self::Pty(pty) => pty.terminate_blocking_with(grace, deadline),
+            Self::Stream(stream) => stream.terminate_blocking_with(grace, deadline),
+        }
+    }
+
+    /// End the session on a reaper thread and get a handle to the result.
+    pub fn terminate_in_background(self) -> PendingTeardown {
+        match self {
+            Self::Pty(pty) => pty.terminate_in_background(),
+            Self::Stream(stream) => stream.terminate_in_background(),
+        }
+    }
+}
+
 pub struct TerminalCore {
     emu: Emulator,
     backend: Backend,
+    kind: SessionKind,
     status: Status,
     notice: Option<String>,
-    read_only: bool,
     /// When the child's exit was first seen, and the last output after it.
     exit_seen: Option<(ExitInfo, Instant)>,
     last_output: Instant,
+    /// Attempts not yet tried, the current start time, and whether the user
+    /// has typed: what decides a fallback.
+    remaining: Vec<Launch>,
+    started: Instant,
+    input_sent: bool,
 }
 
 impl TerminalCore {
@@ -61,30 +99,63 @@ impl TerminalCore {
             ..EmulatorOptions::default()
         })
         .map_err(std::io::Error::other)?;
-        Ok(Self::with(emu, Backend::Stream(stream), true))
+        Ok(Self::with(
+            emu,
+            Backend::Stream(stream),
+            SessionKind::Logs,
+            Vec::new(),
+        ))
     }
 
-    /// An interactive terminal over a program on an app-owned PTY.
-    pub fn pty(opts: &PtyOptions) -> std::io::Result<Self> {
+    /// An interactive terminal for a session plan: a container shell, a
+    /// host shell, or a host shell with env. See [`crate::launch`].
+    pub fn session(plan: SessionPlan) -> std::io::Result<Self> {
+        let mut attempts = plan.attempts.into_iter();
+        let first = attempts
+            .next()
+            .ok_or_else(|| std::io::Error::other("a session plan needs one attempt"))?;
         let emu = Emulator::new(EmulatorOptions {
-            cols: opts.size.cols,
-            rows: opts.size.rows,
+            cols: first.options.size.cols,
+            rows: first.options.size.rows,
             ..EmulatorOptions::default()
         })
         .map_err(std::io::Error::other)?;
-        let pty = Pty::spawn(opts)?;
-        Ok(Self::with(emu, Backend::Pty(pty), false))
+        let pty = Pty::spawn(&first.options)?;
+        Ok(Self::with(
+            emu,
+            Backend::Pty(pty),
+            first.kind,
+            attempts.collect(),
+        ))
     }
 
-    fn with(emu: Emulator, backend: Backend, read_only: bool) -> Self {
+    /// An interactive terminal over one program on an app-owned PTY, shown
+    /// as a host shell named after the program.
+    pub fn pty(opts: &PtyOptions) -> std::io::Result<Self> {
+        let shell = opts
+            .program
+            .file_name()
+            .map_or_else(|| "sh".into(), |n| n.to_string_lossy().into_owned());
+        Self::session(SessionPlan {
+            attempts: vec![Launch {
+                kind: SessionKind::HostShell { shell },
+                options: opts.clone(),
+            }],
+        })
+    }
+
+    fn with(emu: Emulator, backend: Backend, kind: SessionKind, remaining: Vec<Launch>) -> Self {
         Self {
             emu,
             backend,
+            kind,
             status: Status::Running,
             notice: None,
-            read_only,
             exit_seen: None,
             last_output: Instant::now(),
+            remaining,
+            started: Instant::now(),
+            input_sent: false,
         }
     }
 
@@ -94,6 +165,12 @@ impl TerminalCore {
 
     pub fn emu(&self) -> &Emulator {
         &self.emu
+    }
+
+    /// What this tab is: its label and badge come from here. A container
+    /// shell's kind changes if `bash` was missing and `sh` was started.
+    pub fn kind(&self) -> &SessionKind {
+        &self.kind
     }
 
     pub fn status(&self) -> &Status {
@@ -106,7 +183,7 @@ impl TerminalCore {
     }
 
     pub fn read_only(&self) -> bool {
-        self.read_only
+        !self.kind.is_interactive()
     }
 
     /// Move pending output into the emulator. Returns whether anything
@@ -152,19 +229,49 @@ impl TerminalCore {
                     )
                 });
                 if read.eof || quiet || capped {
-                    self.status =
-                        Status::Ended(match self.exit_seen.map(|(info, _)| info).or(exit) {
+                    let info = self.exit_seen.map(|(info, _)| info).or(exit);
+                    busy = true;
+                    if !self.try_next_attempt(info) {
+                        self.status = Status::Ended(match info {
                             Some(info) => format!("process ended ({info})"),
                             None => "terminal closed".into(),
                         });
-                    // Dropping the PTY ends whatever is left of the session.
-                    self.backend = Backend::Closed;
-                    busy = true;
+                        // Dropping the PTY ends whatever is left of the session.
+                        self.backend = Backend::Closed;
+                    }
                 }
             }
             Backend::Closed => {}
         }
         busy
+    }
+
+    /// Start the next attempt of the plan if the current one could not
+    /// start its program. Returns whether a new attempt is now running.
+    fn try_next_attempt(&mut self, exit: Option<ExitInfo>) -> bool {
+        let could_not_start = matches!(exit, Some(ExitInfo::Exited(126 | 127)))
+            && !self.input_sent
+            && self.started.elapsed() < FALLBACK_WINDOW;
+        if !could_not_start || self.remaining.is_empty() {
+            return false;
+        }
+        let next = self.remaining.remove(0);
+        let mut options = next.options;
+        options.size = PtySize::cells(self.emu.cols(), self.emu.rows());
+        match Pty::spawn(&options) {
+            Ok(pty) => {
+                // A full reset: the failed attempt's error text is not part
+                // of the session the user asked for.
+                self.emu.feed(b"\x1bc");
+                self.backend = Backend::Pty(pty);
+                self.kind = next.kind;
+                self.exit_seen = None;
+                self.last_output = Instant::now();
+                self.started = Instant::now();
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Queue input for the PTY (no-op for a stream). Input that cannot be
@@ -173,8 +280,14 @@ impl TerminalCore {
         let Backend::Pty(pty) = &self.backend else {
             return;
         };
+        if bytes.is_empty() {
+            return;
+        }
         match pty.write(bytes) {
-            WriteOutcome::Queued => self.notice = None,
+            WriteOutcome::Queued => {
+                self.notice = None;
+                self.input_sent = true;
+            }
             WriteOutcome::Dropped { bytes } => {
                 self.notice = Some(format!(
                     "input not sent: {bytes} bytes (the program is not reading)"
@@ -201,14 +314,15 @@ impl TerminalCore {
         }
     }
 
-    /// Give up the PTY, for a caller that ends the session itself (app quit).
-    pub fn take_pty(&mut self) -> Option<Pty> {
+    /// Give up the process side, for a caller that ends the session itself
+    /// and wants the result (app quit, or closing a tab and reporting
+    /// survivors). `None` for a file stream's core once it has ended, or
+    /// when already taken.
+    pub fn take_shutdown(&mut self) -> Option<Shutdown> {
         match std::mem::replace(&mut self.backend, Backend::Closed) {
-            Backend::Pty(pty) => Some(pty),
-            other => {
-                self.backend = other;
-                None
-            }
+            Backend::Pty(pty) => Some(Shutdown::Pty(pty)),
+            Backend::Stream(stream) => Some(Shutdown::Stream(stream)),
+            Backend::Closed => None,
         }
     }
 

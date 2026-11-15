@@ -233,3 +233,39 @@ fn paste_is_bracketed_when_asked_and_cannot_escape_the_bracket() {
         b"\x1b[200~x[201~rm\x1b[201~"
     );
 }
+
+#[test]
+fn the_users_palette_and_cursor_style_apply_until_a_program_overrides_them() {
+    use hack_desktop_term::emulator::{CursorShape, KeyInput};
+    let mut e = emu(20, 3, true);
+    // Index 1 is an ANSI colour, 208 is in the 256-colour cube.
+    e.set_palette_entries(&[(1, Rgb::new(250, 1, 2)), (208, Rgb::new(3, 4, 5))])
+        .unwrap();
+    e.set_default_cursor(Some(CursorShape::Bar)).unwrap();
+    e.feed(b"\x1b[31mr\x1b[38;5;208mo\x1b[0m");
+    let f = e.frame().unwrap();
+    assert_eq!(f.rows[0][0].fg, Rgb::new(250, 1, 2));
+    assert_eq!(f.rows[0][1].fg, Rgb::new(3, 4, 5));
+    assert_eq!(
+        f.cursor_shape,
+        Some(CursorShape::Bar),
+        "the configured default"
+    );
+    // A program asks for an underline cursor (DECSCUSR 4), then resets it.
+    e.feed(b"\x1b[4 q");
+    assert_eq!(
+        e.frame().unwrap().cursor_shape,
+        Some(CursorShape::Underline)
+    );
+    e.feed(b"\x1b[0 q");
+    assert_eq!(e.frame().unwrap().cursor_shape, Some(CursorShape::Bar));
+    // Unrelated: keys still encode.
+    assert_eq!(
+        e.encode_key(KeyInput {
+            key: "a",
+            text: Some("a"),
+            ..KeyInput::default()
+        }),
+        b"a"
+    );
+}

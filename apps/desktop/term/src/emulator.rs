@@ -20,24 +20,8 @@ use ghostty_vt::{RenderState, Terminal, TerminalOptions};
 
 pub use ghostty_vt::Error as VtError;
 
-/// An sRGB colour.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl Rgb {
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
-    /// `0xRRGGBB`.
-    pub fn to_u32(self) -> u32 {
-        (u32::from(self.r) << 16) | (u32::from(self.g) << 8) | u32::from(self.b)
-    }
-}
+pub use crate::color::Rgb;
+pub use crate::ghostty_config::CursorShape;
 
 impl From<RgbColor> for Rgb {
     fn from(c: RgbColor) -> Self {
@@ -181,6 +165,8 @@ pub struct Frame {
     pub background: Rgb,
     /// (col, row) in the viewport when the cursor is visible there.
     pub cursor: Option<(u16, u16)>,
+    /// The shape the program asked for, or the configured default.
+    pub cursor_shape: Option<CursorShape>,
     pub cursor_color: Rgb,
     /// Selected columns per row, inclusive.
     pub selection: Vec<Option<(u16, u16)>>,
@@ -381,6 +367,33 @@ impl Emulator {
             *slot = c.into();
         }
         self.term.set_default_color_palette(Some(palette))?;
+        Ok(())
+    }
+
+    /// Set palette entries beyond the theme's sixteen ANSI colours (from the
+    /// user's terminal config). Programs can still override them.
+    pub fn set_palette_entries(&mut self, entries: &[(u8, Rgb)]) -> Result<(), VtError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut palette = self.term.default_color_palette()?;
+        for (index, color) in entries {
+            palette.0[usize::from(*index)] = (*color).into();
+        }
+        self.term.set_default_color_palette(Some(palette))?;
+        Ok(())
+    }
+
+    /// The cursor shape used until a program asks for another.
+    pub fn set_default_cursor(&mut self, shape: Option<CursorShape>) -> Result<(), VtError> {
+        use ghostty_vt::terminal::CursorStyle;
+        let style = shape.map(|s| match s {
+            CursorShape::Block => CursorStyle::Block,
+            CursorShape::Bar => CursorStyle::Bar,
+            CursorShape::Underline => CursorStyle::Underline,
+            CursorShape::BlockHollow => CursorStyle::BlockHollow,
+        });
+        self.term.set_default_cursor_style(style)?;
         Ok(())
     }
 
@@ -648,6 +661,12 @@ impl Emulator {
                 .filter(|_| cursor.visible)
                 .map(|v| (v.x, v.y)),
             cursor_color: colors.cursor.map_or(self.theme.cursor, Into::into),
+            cursor_shape: Some(match cursor.visual_style {
+                ghostty_vt::render::CursorVisualStyle::Bar => CursorShape::Bar,
+                ghostty_vt::render::CursorVisualStyle::Underline => CursorShape::Underline,
+                ghostty_vt::render::CursorVisualStyle::BlockHollow => CursorShape::BlockHollow,
+                _ => CursorShape::Block,
+            }),
             matches,
             scroll,
             ..Frame::default()

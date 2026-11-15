@@ -23,6 +23,8 @@ export HOME="$owned/home" HACK_HOME="$owned/hack"
 cargo build --locked --offline -p hack-desktop-term --features ghostty --all-targets
 cargo clippy --locked --offline -p hack-desktop-term --all-targets --features ghostty -- -D warnings
 cargo clippy --locked --offline -p hack-desktop-term --all-targets --features screenshots -- -D warnings
-cargo nextest run --locked --offline -p hack-desktop-term --features ghostty \
+# The `screenshots` feature adds GPUI's test support, which the headless
+# view tests need. They open no window and need no display or GPU.
+cargo nextest run --locked --offline -p hack-desktop-term --features screenshots \
   --build-jobs 2 --config-file "$root/.config/nextest.toml" --profile ci
-cargo test --locked --offline -p hack-desktop-term --features ghostty --doc --jobs 2
+cargo test --locked --offline -p hack-desktop-term --features screenshots --doc --jobs 2

@@ -78,20 +78,26 @@ pub fn wait_gone(pids: &[libc::pid_t]) -> Vec<libc::pid_t> {
 }
 
 /// Assert that `pid`, a child this test recorded, is gone without leaving a
-/// zombie. On failure the recorded pid is killed first, so a failing test
-/// leaves nothing running.
+/// zombie. On failure the child is killed first, but only if it is provably
+/// still ours: an unreaped child of this process, whose pid is anchored.
 pub fn assert_no_trace(pid: libc::pid_t, what: &str) {
     if crate::session::exists(pid) {
-        // SAFETY: SIGKILL to a pid this test recorded as its own child.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
+        if crate::session::is_own_child(pid) {
+            // SAFETY: an unreaped child of this process; its pid cannot have
+            // been reused.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
         }
         panic!("{what}: pid {pid} was left behind");
     }
 }
 
 /// A session this test started. If the test fails before its own teardown,
-/// dropping this kills what is left of that session, and only that session.
+/// dropping this kills what is left of that session through pidfds, after
+/// checking each one is still in that session. Where there is no pidfd
+/// (macOS) nothing is signalled: the fixtures there sleep for at most two
+/// minutes and end by themselves.
 pub struct Recorded {
     sid: libc::pid_t,
     done: bool,
@@ -115,12 +121,14 @@ impl Drop for Recorded {
         if self.done {
             return;
         }
-        // The session id stays reserved while any member is alive, so these
-        // pids are members of the session this test started.
+        use crate::session::{Open, OsTable, ProcTable};
         for pid in members(self.sid) {
-            // SAFETY: SIGKILL to a process of this test's own session.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
+            if let Open::Handle(handle) = OsTable.open(pid)
+                && OsTable
+                    .identity(pid)
+                    .is_some_and(|i| i.sid == self.sid && i.live)
+            {
+                handle.send(libc::SIGKILL);
             }
         }
     }

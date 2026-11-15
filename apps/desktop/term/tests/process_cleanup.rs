@@ -18,14 +18,13 @@ use hack_desktop_term::session::{ExitInfo, exists, is_alive};
 use hack_desktop_term::stream::{ByteStream, STREAM_QUEUE_BYTES, StreamSource};
 
 #[test]
-fn dropping_a_pty_ends_the_shell_its_children_and_its_job_groups() {
-    // A grandchild in the shell's group, one in its own job group (set -m),
-    // and one that ignores SIGHUP and SIGTERM, so SIGKILL escalation runs.
+fn dropping_a_pty_ends_the_shell_and_everything_in_its_group() {
+    // A grandchild in the shell's group, and one that ignores SIGHUP and
+    // SIGTERM, so SIGKILL escalation has to run. Both are reached by the
+    // group signal on every platform.
     let script = r#"
-        sleep 300 & echo "same=$!"
-        ( trap '' HUP TERM; exec sleep 300 ) & echo "deaf=$!"
-        set -m
-        sleep 300 & echo "job=$!"
+        sleep 120 & echo "same=$!"
+        ( trap '' HUP TERM; exec sleep 120 ) & echo "deaf=$!"
         echo "shell=$$"
         wait
     "#;
@@ -34,19 +33,14 @@ fn dropping_a_pty_ends_the_shell_its_children_and_its_job_groups() {
     let mut rec = Recorded::session(pty.pid());
     let leader = libc::pid_t::try_from(pty.pid()).unwrap();
     let out = read_until(&pty, |t| t.contains("shell="));
-    let pids: Vec<libc::pid_t> = ["same", "deaf", "job", "shell"]
+    let pids: Vec<libc::pid_t> = ["same", "deaf", "shell"]
         .iter()
         .map(|t| tagged(&out, t).unwrap_or_else(|| panic!("no {t}= in {out:?}")))
         .collect();
-    assert_eq!(pids[3], leader, "the shell is the session leader");
+    assert_eq!(pids[2], leader, "the shell is the session leader");
     for &p in &pids {
         assert!(is_alive(p), "pid {p} should be running before drop");
     }
-    // The job really is in another process group of the same session.
-    let job_pgid = unsafe { libc::getpgid(pids[2]) };
-    assert_ne!(job_pgid, leader, "set -m job has its own process group");
-    assert_eq!(unsafe { libc::getsid(pids[2]) }, leader);
-
     drop(pty);
     let alive = wait_gone(&pids);
     assert!(alive.is_empty(), "still running after drop: {alive:?}");
@@ -60,9 +54,53 @@ fn dropping_a_pty_ends_the_shell_its_children_and_its_job_groups() {
 }
 
 #[test]
+fn a_job_in_another_process_group_is_ended_or_reported() {
+    // `set -m` puts the job in its own process group inside the session. A
+    // non-interactive shell does not pass SIGHUP on to it.
+    //
+    // Linux reaches it through a pidfd. macOS has no race-free handle for
+    // it, so it is left alone and named in `survivors`; there the job
+    // sleeps only a few seconds and ends by itself.
+    let job_seconds = if cfg!(target_os = "linux") { 120 } else { 4 };
+    let script = format!(
+        "set -m; sleep {job_seconds} & echo \"job=$!\"; set +m; sleep 120 & echo \"same=$!\"; wait"
+    );
+    let home = TempHome::new();
+    let pty = Pty::spawn(&sh(&script, &home)).expect("spawn");
+    let mut rec = Recorded::session(pty.pid());
+    let leader = libc::pid_t::try_from(pty.pid()).unwrap();
+    let out = read_until(&pty, |t| t.contains("same="));
+    let job = tagged(&out, "job").expect("job");
+    let same = tagged(&out, "same").expect("same");
+    assert!(is_alive(job) && is_alive(same));
+    assert_ne!(
+        unsafe { libc::getpgid(job) },
+        leader,
+        "its own process group"
+    );
+    assert_eq!(unsafe { libc::getsid(job) }, leader, "the same session");
+
+    let done = pty
+        .terminate_in_background()
+        .wait(DEADLINE)
+        .expect("teardown result");
+    assert!(wait_gone(&[same, leader]).is_empty());
+    if cfg!(target_os = "linux") {
+        assert!(done.gone && done.survivors.is_empty(), "{done:?}");
+        assert!(!is_alive(job));
+    } else {
+        assert!(!done.gone, "{done:?}");
+        assert_eq!(done.survivors, vec![job], "reported, not signalled");
+        assert!(wait_gone(&[job]).is_empty(), "it ends by itself");
+    }
+    assert!(!exists(leader));
+    rec.done();
+}
+
+#[test]
 fn terminate_blocking_reports_the_session_gone() {
     let home = TempHome::new();
-    let pty = Pty::spawn(&sh("sleep 300 & echo \"kid=$!\"; wait", &home)).expect("spawn");
+    let pty = Pty::spawn(&sh("sleep 120 & echo \"kid=$!\"; wait", &home)).expect("spawn");
     let mut rec = Recorded::session(pty.pid());
     let out = read_until(&pty, |t| t.contains("kid="));
     let kid = tagged(&out, "kid").expect("kid pid");
@@ -214,7 +252,7 @@ fn a_fast_stream_with_a_stalled_consumer_stays_under_the_byte_bound() {
 #[test]
 fn dropping_a_process_stream_ends_its_session() {
     let home = TempHome::new();
-    let source = sh_source("sleep 300 & echo \"kid=$!\"; echo \"sh=$$\"; wait", &home);
+    let source = sh_source("sleep 120 & echo \"kid=$!\"; echo \"sh=$$\"; wait", &home);
     let mut stream = ByteStream::open(&source).expect("open");
     let mut rec = Recorded::session(stream.pid().unwrap());
     let mut out = String::new();

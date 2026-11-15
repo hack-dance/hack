@@ -89,6 +89,29 @@ test.each([
   expect(result.exitCode).toBe(7);
 });
 
+test.each([
+  ["unset (a direct run)", undefined, "hack-v5"],
+  ["empty", "", "hack-v5"],
+  ["the channel manager's hack-next", "hack-next", "hack-next"],
+  ["hack-next with padding", " hack-next", "hack-v5"],
+  ["any other value", "custom-launcher", "hack-v5"],
+  ["hack-v5 itself", "hack-v5", "hack-v5"],
+])("entrypoint keeps exactly hack-next and marks every other run hack-v5: %s", async (_label, inherited, expected) => {
+  // HACK-2251: hack-next runs this script on native; printed commands must
+  // name ~/.hack-next/bin/hack-next, not the bundle-internal hack-v5.
+  for (const backend of ["native", "compose"]) {
+    const result = await launch(
+      { HACK_RUNTIME_BACKEND: backend, HACK_CANDIDATE_ENTRYPOINT: inherited },
+      ["ps"]
+    );
+    expect(result.exitCode).toBe(7);
+    const printed = result.stdout.split("\n");
+    expect(printed[4]).toBe(expected);
+    // Candidate runs never autostart hackd, whichever launcher is named.
+    expect(printed[5]).toBe("1");
+  }
+});
+
 test("explicit Compose selection is respected with the caller's Hack home and no native selectors", async () => {
   // An inherited opt-in cannot re-enable hackd autostart for a candidate run.
   const result = await launch({

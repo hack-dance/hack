@@ -1,9 +1,11 @@
-# Lifecycle supervisor: standalone contract
+# Lifecycle supervisor contract
 
-This first slice builds a standalone Rust supervisor with a fake caller. It does
-not change `hack up`, configuration, or the default runner. CLI integration follows
-lifecycle retirement changes; packaging is a separate change. The current default
-continues to use the lifecycle mux session described in [lifecycle](./lifecycle.md).
+The built-in Rust supervisor is an experimental opt-in for host lifecycle
+processes. `lifecycle.runner: "supervisor"` selects it; omission keeps the mux
+runner described in [lifecycle](./lifecycle.md). Its standalone process contracts
+and CLI integration are tested separately. Distribution packaging is a separate
+change: opt-in requires a matching supervisor executable alongside Hack or an
+explicit test executable path.
 
 ## Artifact choice
 
@@ -19,7 +21,7 @@ The supported build targets are `aarch64-apple-darwin`, `x86_64-apple-darwin`, a
 
 ## Protocol and private state
 
-The binary accepts `run`, `stop`, and `status`. Input and output are one four-byte
+The binary accepts `run`, `serve`, `add`, `stop`, and `status`. Input and output are one four-byte
 big-endian length followed by that many JSON bytes. Frames are bounded to 1 MiB;
 each frame read or write has one 10-second deadline. A complete frame, rather than descriptor close,
 commits delivery. Environment values travel only in the input frame and process
@@ -33,6 +35,11 @@ absolute `cwd`, and `env`. Names are safe file identifiers and must also be uniq
 without regard to ASCII case, including on case-sensitive filesystems. Commands execute argv
 directly. A shell-authored command can explicitly use `sh -c`; the supervisor adds
 no shell wrapper. The full environment is explicit, with no ambient inheritance.
+An optional `displayName` retains the user's service label while `name` stays a
+safe native file key. CLI callers use stable hashed keys so labels containing
+spaces or separators cannot change the native directory layout. Optional
+`logPath` selects the existing private lifecycle log; its parent and file must
+pass the same owner, mode and no-alias checks as the native root.
 
 `stop` and `status` accept `{version: 1, root, ownerToken}`. Read-only `status`
 returns saved phases plus kernel-verified `liveProcessNames` and
@@ -82,8 +89,9 @@ timers, which is why an expired wait still returns its own receipt.
 the supervisor calls `setsid` itself. A caller using `detached: true` or
 `setpgid(0, 0)` is refused before authored code starts.
 
-The root contains per-command state and lock files, an instance lock and
-`lifecycle.log`. Directories are mode 0700; files are mode 0600. Symlinks,
+The root contains per-command state and lock files, an instance lock and,
+for incremental launches, `control.sock`. The default log is `lifecycle.log`.
+Directories are mode 0700; files and the control socket are mode 0600. Symlinks,
 hard-linked files, foreign owners and broad permissions are refused. State contains
 name, ownership token, guard PID, process group, OS start identity, boot identity,
 UID, command PID and start identity when known, phase, and the direct command's exit code or signal
@@ -116,12 +124,12 @@ The bounds below limit each wait, not the total duration of a request:
 
 | Lock | Held by | Held across a blocking call? | Who waits, and the bound |
 |---|---|---|---|
-| `.instance.lock` | The project supervisor (`run`), for its lifetime | Yes, its whole run | Another `run` for the root: retries 1 s, then refused. Guards, `stop` and `status` never take it. |
-| `.stop.lock` | `run` from admission until its ready receipt; each new guard (inherited on fd 2) until it publishes and detaches; `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. A launch (`run`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` waits up to 10 s for each guard's receipt, then rolls back. |
+| `.instance.lock` | The project supervisor (`run` or `serve`), for its lifetime | Yes, its whole run | Another `run` or `serve` for the root: up to 10 s, then refused. Guards, `add`, `stop` and `status` never take it. |
+| `.stop.lock` | `run` or `serve` from admission until its ready receipt; `add` while it admits one command; each new guard (inherited on fd 2) until it publishes and detaches; `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. `status` waits up to 16 s only when the lock file exists (it never creates it), with the same framed answer on expiry. `add` waits up to 16 s; its forwarder reads the reply for up to 26 s. A launch (`run`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` waits up to 10 s for each guard's receipt, then rolls back. |
 | `<name>.lock` | The guard of that command, for its lifetime | Yes | Only a new guard for the same command name: up to 10 s, then refused. Never a sibling, `stop` or `status`. |
 | Receipts, retirement marker, `lifecycle.log` | No lock | No | Receipts are replaced atomically; a reader that races a replacement reopens the name. Log records are single appends (above). |
 
-`status` takes no lock. `stop` handles each target separately: a frozen live guard costs
+`status` takes only the bounded stop-lock wait above. `stop` handles each target separately: a frozen live guard costs
 its own target the five-second grace plus the two-second confirmation bound (and the
 same again if the guard is lost), then that target reports `unknown` while the others
 complete.
@@ -212,7 +220,7 @@ Neither feature is part of this unit; interactive workspaces keep tmux by defaul
 
 ## Delivery gates
 
-The CLI opt-in is planned as `lifecycle.runner = "mux" | "supervisor"`, default
+The CLI opt-in is `lifecycle.runner = "mux" | "supervisor"`, default
 `mux`, plus a test environment override. Both runners must pass existing lifecycle
 unit and e2e scenarios before that integration is ready. Packaging must include the
 binary wherever the Compose CLI installs: stable archives, prerelease bundles,
@@ -242,6 +250,97 @@ POSIX `sh -c` intentionally. Interactive tmux environment delivery stays separat
 Zellij removal, its breaking-change notice, and the workspace-only `MuxBackend`
 contract belong to the third unit.
 
+## Opt-in CLI integration
+
+![Launch receipt and adoption state model](./diagrams/lifecycle-controller.svg)
+
+The [controller model coverage](../tests/models/tla/lifecycle-controller/COVERAGE.md)
+maps the finite ownership model to implementation tests, separately from the
+physical-process model above.
+
+The integration slice adds `lifecycle.runner: "supervisor"`; omission remains
+`"mux"`. `HACK_LIFECYCLE_RUNNER=mux|supervisor` overrides the project setting for
+verification. Invalid values fail before hooks or runtime effects. The executable
+must be installed beside Hack, or selected by an absolute
+`HACK_LIFECYCLE_SUPERVISOR_BINARY` test path. An unavailable executable is a refusal,
+not a fallback to another runner. Packaging remains a separate delivery gate.
+
+Persistent before hooks start immediately, in their configured order between
+blocking hooks. The native `serve` operation starts the first command and listens
+on a private Unix socket. Finite `add` clients forward later framed launch requests
+to that same project owner. Environment stays in the frame and process memory.
+The socket uses a relative address under an opened private directory, avoiding
+macOS pathname-length limits. Every handoff has an explicit deadline.
+
+The common lifecycle state records the native owner token and command identities;
+logs remain at the existing per-instance log path, so `hack logs -f <name>` watches
+them. Processes do not appear in tmux. Interactive `hack session` behavior is
+unchanged. Stop uses the persisted backend even if configuration changes later.
+Both runners use a five-second TERM grace, KILL escalation, and a bounded
+confirmation window; zombies do not count as running. Unknown outcomes keep
+ownership and shared helper holders for another `hack down` attempt.
+
+A healthy matching definition can be adopted. A definition whose recorded command
+has exited is replaced as a whole, including live siblings, matching the mux
+controller's healthy-window requirement. Adoption records a new cleanup generation
+without changing the native token, so an earlier start's rollback cannot stop
+adopted work. CLI publication and native effects share an instance lock; the common
+state file has a separate project-wide writer lock and atomic private publication.
+
+A failed incremental handoff is reconciled with native status. If the requested
+command became live after the reply was lost, its verified receipt is published
+and the failure remains explicit. It is never launched a second time. A new owner
+is retried only after native status proves the earlier commands absent. A missing
+native root with no possible state is absent; unreadable, malformed or unverifiable
+state remains unknown. Native status reports live and unknown names using kernel
+identity, not a persisted `running` string. Doctor and host status use those fields;
+missing tools and unknown identities cannot authorize repair or state removal.
+
+Sending TERM to the project owner invokes its owned rollback path; this is not a
+finite protocol request and has no response frame. Use the finite `stop` operation
+when a confirmation receipt is needed. Logs currently have no automatic rotation.
+
+The CLI keeps native receipts, owner capabilities and `control.sock` in the
+host's Hack home under `lifecycle-supervisors/<instance-hash>`, outside the
+checkout. The shared log stays in the existing project log location. Do not bind
+mount the host Hack home into containers. A Hack home inside the checkout is
+refused for this runner. Linux incremental launch peers must have the same UID
+and PID, user and mount namespaces; macOS peers must have the same UID (Compose
+runs in a separate VM). Same-user host code is trusted. Earlier experimental
+checkout-local owners must be stopped with their original CLI before upgrading;
+leftover native roots are never treated as proof of absence.
+
+Doctor holds the same instance controller lock as `up` throughout final
+inspection, generation validation, native stop and conditional state removal.
+Adoption cannot interleave between validation and the stop effect.
+
+Before creating ownership or running hooks, Hack checks the sibling executable's
+permissions and exact version/capability handshake. Compiled installations ignore
+`HACK_LIFECYCLE_SUPERVISOR_BINARY`; that override is for source development and
+tests only. `hack doctor` reports the resolved executable and its version.
+A missing or incompatible executable fails before publication. An entry durably
+marked as never having attempted launch, with no recorded PID or process, can be
+retired by `down` or doctor without that executable. An interrupted launch with
+an uncertain result retains ownership.
+
+The native root is keyed on the checkout's real path and its absolute location
+is recorded with ownership. Changing HOME or HACK_HOME does not relocate a
+running instance. Losing that recorded directory after a launch attempt is an
+unconfirmed outcome, never proof of stopped processes; down and doctor retain
+ownership. Restore access to the recorded host state before retrying retirement.
+
+Run `hack down` before downgrading or switching CLI builds. Older CLIs cannot
+preserve supervisor entries when rewriting shared project state and may start
+mux duplicates. After the project owner is killed, existing guards keep working
+and `down` can recover them; adding a new persistent hook may refuse until `down`
+retires the old owner. Stop and retry rather than removing its socket or state.
+
+Adoption requires a verified live command in the `running` phase. Commands in
+`stopping` or `kill-pending` finish retirement before replacement; they are never
+adopted as healthy. Native status waits for an existing launch/stop admission
+lock before reading receipts, so an in-flight stop cannot expose a pre-TERM
+snapshot as adoptable work. This observation creates no lock file in an unused
+root and times out conservatively if admission cannot settle.
 ## Resource and qualification boundaries
 
 A live direct child proves its guard is needed without a full-system census.
@@ -267,19 +366,26 @@ startup descriptor leases or signal errors. Some safety predicates hold by
 construction. Native regressions, rather than that model, are the evidence for
 those boundaries; see the model coverage document for the reduced claims.
 
-Stop durably retires its owner generation before confirming teardown, even if no
-command receipt exists. A delayed run checks that fence under the admission lock
-before spawning. New generations must use fresh owner tokens; markers persist in
-the private root and contain no command environment. Retired-but-live work remains
-unconfirmed. Linux guard spawning uses `/proc/self/exe`, preserving an executable
-reference even after atomic helper replacement.
+Stop durably retires the owner generation before confirming teardown, even when
+no command receipt exists yet. A delayed `run`, `serve` or `add` checks that fence
+under the same admission lock before spawning. A new run after a completed stop
+must use a fresh owner token; adoption keeps its existing token. Retirement
+markers persist in the private native root and contain no command environment.
+Status of retired-but-live work is unconfirmed, so it cannot be adopted.
+
+On Linux, guard spawning uses the kernel's executable reference under
+`/proc/self/exe`, which remains usable when an installer atomically replaces the
+running helper. A rebuild between the first command and a later add therefore
+does not depend on the deleted executable pathname.
 
 Linux ownership checks read the process's effective UID from `/proc/<pid>/status`.
 They do not infer UID from proc-file ownership, which changes when a command
 disables dumpability. Such a command remains recoverable after guard loss.
 
-Restart policy and restart backoff belong to the CLI integration in #811, not
-this binary's command ownership loop. This crate does not restart commands.
+This crate does not restart commands, and the CLI opt-in does not add a restart
+policy either: a persistent command that exits stays down under both runners
+until `hack restart` or `hack up`. Automatic restart with crash-loop backoff is
+deferred to a later slice and would belong to the CLI, not this ownership loop.
 
 Logs are append-only and have no automatic rotation. Stop all generations and
 confirm native absence before archiving the private root/log and starting with
@@ -289,11 +395,14 @@ arbitrarily delayed frames. Retire the entire quiescent root only after all old
 callers and guards have exited. These files have no automatic size/count bound;
 long-running installations must arrange a maintenance window and offline rotation.
 
-Native crash tests currently cover prepublication command-lock blocking, incomplete
-guard launch frames, and blocked ready delivery. Deterministic tests at the two
-smaller instruction windows (starting-state save to spawn, and spawn to running-state
-save) remain unqualified; polling a receipt cannot reliably stop a process in either
-window. They require a dedicated synchronization seam, not a timing-only test.
+Native crash tests cover prepublication command-lock blocking, incomplete launch
+frames, and blocked ready delivery. The opt-in integration also adds deterministic
+SIGKILL tests at both smaller instruction windows: after saving starting but before
+spawn, and after spawn but before saving running. Only a build with the test-hooks
+feature contains these checkpoints; normal and release builds omit them. Before
+spawn the session is absent; after an unrecorded spawn it is unknown and stop sends
+no signal without a birth witness. CI runs the two checkpoint tests separately from
+the default suite and builds the release executable without this feature.
 
 ## Manual recovery after an unknown stop
 

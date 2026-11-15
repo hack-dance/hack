@@ -10,6 +10,11 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
+import {
+  type CandidateLauncher,
+  currentCandidateLauncher,
+  launcherCommand,
+} from "../lib/candidate-launcher.ts";
 import { emitCliResult } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { canPrompt } from "../lib/interactivity.ts";
@@ -86,6 +91,18 @@ const spec = defineCommand({
 
 type Spec = typeof spec;
 
+/**
+ * The refusal names how this install kind is updated (HACK-2251): `hack-next`
+ * through its channel manager; a bundle run directly, by installing a newer
+ * reviewed bundle (there is no command for that).
+ */
+export function candidateUpdateRefusal(launcher: CandidateLauncher): string {
+  if (launcher.kind === "hack-next") {
+    return `Refusing to self-update the opt-in native candidate. Upgrade it through its channel manager: ${launcherCommand(launcher, ["--manager", "upgrade", "--version"])} <newer prerelease> (${launcherCommand(launcher, ["--manager", "status"])} shows the selected version).`;
+  }
+  return "Refusing to self-update the opt-in native candidate. Install a separately reviewed candidate bundle to update it.";
+}
+
 const handleUpdate: CommandHandlerFor<Spec> = async ({
   ctx,
   args,
@@ -104,8 +121,7 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
       json: args.options.json === true,
       result: {
         ok: false,
-        error:
-          "Refusing to self-update the opt-in native candidate. Install a separately reviewed candidate bundle to update it.",
+        error: candidateUpdateRefusal(currentCandidateLauncher()),
       },
     });
   }

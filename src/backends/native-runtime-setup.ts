@@ -1,5 +1,11 @@
 import { constants as osConstants } from "node:os";
 import { basename, join } from "node:path";
+import {
+  type CandidateLauncher,
+  currentCandidateLauncher,
+  freshNativeHomeSetupCommand,
+  launcherCommand,
+} from "../lib/candidate-launcher.ts";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -46,21 +52,37 @@ const CODES: Readonly<Record<NativeSetupState, string>> = {
   unavailable: "native_setup_unavailable",
   unsupported_host: "unsupported_host",
 };
-const GUIDANCE: Readonly<Record<NativeSetupState, string>> = {
-  not_set_up: "Native runtime is not set up; run hack native setup.",
-  partial_resumable:
-    "Native runtime setup is incomplete; run hack native setup to resume.",
-  ready: "Native runtime is set up.",
-  invalid_preserved:
-    "Native runtime files are incomplete or invalid; preserve this home and select a fresh private HACK_NATIVE_HOME with the bundle's hack-v5 launcher before running hack native setup.",
-  pin_mismatch:
-    "Native runtime pins differ from this release; preserve this home for its matching release and select a fresh private HACK_NATIVE_HOME with the bundle's hack-v5 launcher.",
-  unsafe_home:
-    "Native runtime home is unsafe; select an owned mode-0700 home without symlink components using HACK_NATIVE_HOME.",
-  unavailable:
-    "Native runtime installation could not be inspected; check the selected home's access and retry.",
-  unsupported_host: "Native runtime requires Apple Silicon macOS.",
-};
+/**
+ * What to do next, naming the command for this install kind: `hack`,
+ * `~/.hack-next/bin/hack-next`, or the bundle's `hack-v5` by path (HACK-2251).
+ */
+function guidance(
+  state: NativeSetupState,
+  launcher: CandidateLauncher
+): string {
+  const setup = launcherCommand(launcher, ["native", "setup"]);
+  const fresh = freshNativeHomeSetupCommand(launcher);
+  switch (state) {
+    case "not_set_up":
+      return `Native runtime is not set up; run ${setup}.`;
+    case "partial_resumable":
+      return `Native runtime setup is incomplete; run ${setup} to resume.`;
+    case "ready":
+      return "Native runtime is set up.";
+    case "invalid_preserved":
+      return `Native runtime files are incomplete or invalid; preserve this home and set up a fresh private one with the bundle's launcher: ${fresh}.`;
+    case "pin_mismatch":
+      return `Native runtime pins differ from this release; preserve this home for its matching release and set up a fresh private one with the bundle's launcher: ${fresh}.`;
+    case "unsafe_home":
+      return "Native runtime home is unsafe; select an owned mode-0700 home without symlink components using HACK_NATIVE_HOME.";
+    case "unavailable":
+      return "Native runtime installation could not be inspected; check the selected home's access and retry.";
+    case "unsupported_host":
+      return "Native runtime requires Apple Silicon macOS.";
+    default:
+      return state satisfies never;
+  }
+}
 
 function state(value: unknown): NativeSetupState | undefined {
   return STATES.find((candidate) => candidate === value);
@@ -157,9 +179,10 @@ export async function inspectNativeSetup(opts: {
 }
 
 export function nativeSetupGuidance(
-  inspection: Pick<NativeSetupInspection, "state">
+  inspection: Pick<NativeSetupInspection, "state">,
+  launcher: CandidateLauncher = currentCandidateLauncher()
 ): string {
-  return GUIDANCE[inspection.state];
+  return guidance(inspection.state, launcher);
 }
 
 export function nativeSetupCanResume(
@@ -302,7 +325,7 @@ export async function requireNativeSetup(opts: {
   });
   if (exit !== 0) {
     process.stderr.write(
-      "Native runtime setup did not complete; run hack native setup to resume.\n"
+      `Native runtime setup did not complete; run ${launcherCommand(currentCandidateLauncher(), ["native", "setup"])} to resume.\n`
     );
     return exit;
   }

@@ -164,8 +164,9 @@ alias; expected shim paths come from the fixture's canonical root, never from
 the runner's real Homebrew installation or filesystem modes.
 
 The fixed absolute Mutagen override (`HACK_MUTAGEN_PATH`) or managed
-`HACK_HOME/bin/mutagen` candidate is checked before Doctor too, including the
-same `#!` interpreter rule; missing candidates
+`HACK_HOME/bin/mutagen` candidate, an absolute `HACK_NATIVE_BINARY` and every
+discovered Docker plugin are checked before Doctor too, including the same `#!`
+interpreter rule (the native runtime does not get the `env` form); missing candidates
 require protected ancestry, and relative/unprovable selections are refused.
 Docker plugin preflight preserves HOME, DOCKER_CONFIG and DOCKER_CONTEXT. It
 checks the selected config/plugin directories, configured `cliPluginsExtraDirs`,
@@ -230,7 +231,8 @@ command** and **Open Terminal**. The private one-use `.command` script quotes ev
 argument, prints the command and waits for Enter. Afterward it shows the exit code
 and waits for Enter to close, preserving output and the command’s exit code. macOS requests a new Terminal
 window through `open -g -a Terminal`; Linux uses `xdg-terminal-exec` when available,
-otherwise Copy. No existing pane is typed into and no password is requested by
+otherwise Copy. The adapter must pass the same ownership, write and `#!` rules
+as the CLI before it runs. No existing pane is typed into and no password is requested by
 the app. The script removes itself and its private directory after use or
 cancellation; a terminal that never executes the script may leave that private
 temp directory behind. Launching a terminal never proves a fix succeeded.
@@ -285,7 +287,11 @@ Apple Silicon prerelease download is not a Linux installer.
 Execution context (`core::execution::ExecutionContext`) reads only the allowlisted
 non-secret HOME, HACK_HOME, PATH, backend, launchd/systemd-disable guards,
 daemon-autostart guard, optional XDG_RUNTIME_DIR and an absolute XDG_CONFIG_HOME
-(which selects the systemd user unit; a relative one is ignored, as the CLI does). An absent HACK_HOME stays
+(which selects the systemd user unit; a relative one is ignored, as the CLI does). Docker
+selectors are kept when supported (`DOCKER_CONTEXT` as a plain name, an absolute
+`DOCKER_CONFIG`, and a `unix://` absolute, `tcp://` or `ssh://` `DOCKER_HOST`);
+any other value refuses the checked context rather than silently addressing a
+different Docker engine. An absent HACK_HOME stays
 absent so a candidate launcher can keep its own private-home default. Context is
 captured before version checking. `runner(checked_program)` pins that absolute
 executable, clears the child environment and applies the context for all reads

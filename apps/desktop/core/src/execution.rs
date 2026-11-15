@@ -13,6 +13,9 @@ const KEYS: &[&str] = &[
     "HACK_DAEMON_AUTOSTART_DISABLE",
     "XDG_RUNTIME_DIR",
     "XDG_CONFIG_HOME",
+    "DOCKER_CONTEXT",
+    "DOCKER_HOST",
+    "DOCKER_CONFIG",
 ];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionContext {
@@ -99,6 +102,38 @@ impl ExecutionContext {
                 "XDG_CONFIG_HOME".into(),
                 normalized(Path::new(dir)).to_string_lossy().into_owned(),
             ));
+        }
+        // Docker selectors decide which engine Compose checks and repairs
+        // address. Keep validated ones; refuse anything else rather than
+        // silently falling back to the default engine.
+        if let Some(context) = get("DOCKER_CONTEXT") {
+            if !context
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            {
+                return Err("Unsupported DOCKER_CONTEXT; hand-off refused".into());
+            }
+            entries.push(("DOCKER_CONTEXT".into(), context.into()));
+        }
+        if let Some(config) = get("DOCKER_CONFIG") {
+            if !Path::new(config).is_absolute() {
+                return Err("DOCKER_CONFIG must be absolute; hand-off refused".into());
+            }
+            entries.push((
+                "DOCKER_CONFIG".into(),
+                normalized(Path::new(config)).to_string_lossy().into_owned(),
+            ));
+        }
+        if let Some(host) = get("DOCKER_HOST") {
+            let supported = match host.split_once("://") {
+                Some(("unix", path)) => Path::new(path).is_absolute(),
+                Some(("tcp" | "ssh", rest)) => !rest.is_empty(),
+                _ => false,
+            };
+            if !supported || host.chars().any(char::is_whitespace) {
+                return Err("Unsupported DOCKER_HOST; hand-off refused".into());
+            }
+            entries.push(("DOCKER_HOST".into(), host.into()));
         }
         Ok(Self { entries })
     }

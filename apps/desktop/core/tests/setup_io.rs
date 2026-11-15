@@ -405,7 +405,7 @@ fn daemon_card_actions_use_only_the_checked_cli_and_context() {
 [ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 99
 printf '%s unlisted=%s\n' "$*" "${UNLISTED-unset}" >> "$HOME/calls"
 case "$*" in
---version) printf '5.0.0\n';;
+'version --json') printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}\n';;
 'daemon status --json') printf '{"running":false,"service":{"installed":false}}';;
 'doctor --json') printf '{"ok":true,"data":{"checks":[{"id":"linux dns route","status":"ok"}]}}'; exit 1;;
 'daemon start --no-interactive') printf 'accepted';;

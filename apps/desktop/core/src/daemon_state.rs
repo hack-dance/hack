@@ -520,7 +520,7 @@ mod tests {
 [ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 9
 [ "$HOME" = "$HACK_HOME" ] || exit 9
 case "$1 $2" in
-  '--version ') echo 'hack v5.0.0' ;;
+  'version --json') echo '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}' ;;
   'daemon status')
     if [ -f "$HACK_HOME/started" ]; then
       echo '{"status":"running","running":true,"service":{"installed":true}}'

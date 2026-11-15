@@ -384,9 +384,20 @@ set falls back to the app's tokens. Rules follow Ghostty's documentation:
   theme cannot set `theme` or `config-file`, and a name containing a path
   separator is refused.
 
+An empty value resets a key; `palette =` drops every palette entry set so
+far, the theme's included, and entries after it apply.
+
 Only those keys are parsed; every other line is skipped without being
 kept, nothing from the file is logged, and a missing, oversized or
-malformed file is treated as empty. Sizes are points as Ghostty counts
+malformed file is treated as empty.
+
+Reading is bounded end to end. A file is identified by its canonical path
+before it is opened, and is never read twice, however often it is included.
+It is opened once (without blocking on a FIFO or device, and only if the
+opened handle is a regular file) and read through a 1 MiB limit on that
+handle, so a file that grows or is replaced after any earlier look cannot
+exceed it. One load reads at most 4 MiB and 64 files in total across the
+config files, every include and the theme; includes nest at most 8 deep. Sizes are points as Ghostty counts
 them: a logical pixel on macOS, 96/72 of one elsewhere. Colours accept hex;
 X11 colour names are accepted when libghostty is linked in.
 
@@ -396,8 +407,11 @@ italic font overrides, `adjust-cell-height`, `background-opacity`.
 ### Keyboard actions
 
 `actions.rs` defines the actions in the `hack_term` namespace and the
-components handle them. The crate binds no keys; bindings are listed in the
-app's spec.
+components handle them. **The crate binds no keys.** The only keys it
+interprets itself are the ones it forwards to the program on the PTY
+(encoded by libghostty for the program's modes) and text typed into the
+find field while it is open. A key the app has bound to an action never
+reaches the terminal.
 
 | Action | Handled by | Effect |
 |---|---|---|
@@ -406,11 +420,34 @@ app's spec.
 | `CloseTab` | panel | Closes the active tab and ends its session |
 | `NextTab` / `PrevTab` | panel | Move through the tabs, wrapping |
 | `ToggleMaximize` | panel | Sets `is_maximized()`; the app's layout gives it the room |
+| `Copy` / `Paste` | view | Selection to the clipboard; clipboard into the program (bracketed when it asked) |
 | `Find` | view (and panel, for the active tab) | Opens find |
+| `FindOlder` / `FindNewer` / `CloseFind` | view | Step through matches; close find |
+| `ScrollPageUp` / `ScrollPageDown` / `ScrollToTop` / `ScrollToBottom` / `ToggleFollow` | view | Scrollback and follow |
 
-The panel handles these when focus is inside it. For keys that must work
-when focus is elsewhere (toggling a hidden panel), the app calls the same
-public methods from its own handlers; the example shows both.
+Each action is also a public method, so the app can call it from its own
+handlers for keys that must work when focus is elsewhere (toggling a hidden
+panel). Key contexts for binding predicates: `Terminal` on every terminal,
+`TerminalLogs` on a read-only stream, `TerminalFind` while the find field
+is open, `TerminalPanel` on the panel.
+
+The bindings live in the app's keymap and in `examples/term_spike.rs`, from
+the app's design:
+
+| Action | macOS | Linux |
+|---|---|---|
+| Toggle panel | ⌘J | Ctrl-Shift-J |
+| New tab | ⌘T | Ctrl-Shift-T |
+| Close tab | ⌘W | Ctrl-Shift-W |
+| Next / previous tab | ⌘⇧] / ⌘⇧[ | Ctrl-Shift-PageDown / Ctrl-Shift-PageUp |
+| Maximize | ⌘⇧↩ | Ctrl-Shift-Enter |
+| Find | ⌘F | Ctrl-Shift-F |
+| Copy / paste | ⌘C / ⌘V | Ctrl-Shift-C / Ctrl-Shift-V |
+
+The example also binds keys the design does not list yet, as its own
+choice: Enter, Shift-Enter and Escape in the find field (`FindOlder`,
+`FindNewer`, `CloseFind`), Shift-PageUp and Shift-PageDown for scrollback,
+and PageUp, PageDown, Home, End and `f` in a log view.
 
 ### What the renders and tests show
 
@@ -463,7 +500,9 @@ identity cannot be recycled:
   `pidfd_send_signal`. The pidfd names one process for life.
 - Where there is no such handle (macOS, and Linux kernels before 5.3),
   members outside the leader's group are **never signalled by number**. No
-  `kill(pid)` after a check is used anywhere, test cleanup included.
+  `kill(pid)` after a check is used anywhere. Test helpers follow the same
+  rule: an assertion that a process is gone only reports, and cleanup of a
+  leftover goes through a pidfd held for that session.
 
 The cost, on macOS: a process that is in another process group of the
 session and ignores or never receives SIGHUP can outlive the tab, as it
@@ -548,13 +587,18 @@ Default build (both CI hosts run these):
   validation, login shell resolution, terminfo detection; a real login
   shell loading its profile; the CLI-backed kinds through a stand-in.
 - Ghostty config: fixture files in a temporary home (keys, malformed
-  values, resets, load order, macOS location, includes and cycles, themes).
+  values, resets, load order, macOS location, includes and cycles, themes);
+  a fanned-out include tree is read once per file and no byte twice; the
+  limit holds on the open handle for a reader that never ends; a FIFO in
+  place of the config is not read and does not block; the total byte and
+  file budgets; `palette =` after earlier entries and after a theme's.
 - Also: resize reaching the child, session leadership with a controlling
   tty, the child's environment, a 10,000-line file stream.
 
 Checked to fail when the fix they cover is removed (mutations run by hand,
 sources restored): the identity, anchor, queue-bound, final-output-in-grid,
-thread-spawn-failure, notice and stream-quit tests. The spawn-failure tests
+thread-spawn-failure, notice, stream-quit, include fan-out, read-limit,
+budget and palette-reset tests. The spawn-failure tests
 only fail when both cleanup layers are removed, because either one alone
 still kills and reaps the child.
 
@@ -571,7 +615,9 @@ Feature `screenshots` (GPUI test support; no display or GPU needed),
 `tests/view.rs`: a rejected paste to a quiet child shows its notice in
 exactly one new frame with no other event; quitting the app ends a stream
 process that ignores SIGTERM, with its descendant, and a PTY session that
-ignores SIGHUP.
+ignores SIGHUP; with no bindings the usual chords are not shortcuts, the
+`Find`, `CloseFind`, `Paste` and `Copy` actions do their work, and a chord
+becomes a shortcut only once the app binds it.
 
 ### Performance
 

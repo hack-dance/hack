@@ -92,7 +92,7 @@ test("composeLogBackend routes plain output to docker compose logs", async () =>
     follow: true,
     tail: 10,
     format: "plain",
-    service: "api",
+    services: ["api", "worker"],
     composeProject: "proj",
     profiles: ["ops"],
   });
@@ -102,7 +102,7 @@ test("composeLogBackend routes plain output to docker compose logs", async () =>
     composeFile: "docker-compose.yml",
     follow: true,
     tail: 10,
-    service: "api",
+    services: ["api", "worker"],
     composeProject: "proj",
     profiles: ["ops"],
   });

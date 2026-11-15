@@ -7,6 +7,7 @@ import {
   HackCliError,
 } from "../lib/cli-result.ts";
 import { setNoInteractiveFlag } from "../lib/interactivity.ts";
+import { closeLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { nativeDetachedUpFailure } from "../lib/native-detached-up.ts";
 import { logger } from "../ui/logger.ts";
 import {
@@ -165,6 +166,19 @@ function resolveSensitiveOutputError(
 }
 
 /**
+ * A started `--progress` stream must still end with one compact envelope
+ * line; the global pretty envelope would break the ndjson stream.
+ */
+function closeProgressStreamOnError(error: unknown): boolean {
+  return closeLifecycleProgress({
+    result:
+      error instanceof CliUsageError
+        ? errorResult({ code: "E_USAGE", message: error.message })
+        : errorResultFromUnknown({ error }),
+  });
+}
+
+/**
  * Maps a top-level CLI failure to its exit path. Under `--json`, stdout
  * stays a single parseable envelope for every error class (usage errors
  * included — they emit E_USAGE and skip the printed help); the human-readable
@@ -195,6 +209,9 @@ export async function handleRunCliError(opts: {
         ? errorResult({ code: "E_USAGE", message: error.message })
         : errorResultFromUnknown({ error });
     process.stderr.write(`${JSON.stringify(result)}\n`);
+    return 1;
+  }
+  if (jsonRequested && closeProgressStreamOnError(error)) {
     return 1;
   }
   if (error instanceof CliUsageError) {

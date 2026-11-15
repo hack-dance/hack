@@ -1515,6 +1515,126 @@ fn host_only_mount_hints_are_accepted_with_a_warning_and_real_modes_still_apply(
     assert!(ignored.iter().all(|d| d.severity == "warning"));
 }
 
+/// `- /app/node_modules` is the usual way to keep a container's installed
+/// dependencies when the source directory is bind-mounted over them. Native
+/// never asks the engine for anonymous storage, so the review turns each one
+/// into a named volume this project owns, and says so.
+#[test]
+fn anonymous_volumes_become_owned_named_volumes_with_a_warning() {
+    let fixture = Fixture::new(&format!(
+        "{BASIC}    volumes:\n      - './src:/app'\n      - /app/node_modules/\n      - {{type: volume, target: /app/.cache, read_only: true}}\n      - {{target: /data}}\n      - 'kept:/kept'\n  worker:\n    image: alpine:3.21\n    volumes:\n      - /app/node_modules\nvolumes:\n  kept: {{}}\n"
+    ));
+    fs::create_dir(fixture.project.join("src")).unwrap();
+    let plan = fixture.plan();
+    assert!(
+        plan.plan.diagnostics.iter().all(|d| d.severity != "error"),
+        "{:?}",
+        plan.plan.diagnostics
+    );
+    let web = &plan.plan.services["web"].mounts;
+    let anonymous: Vec<_> = web
+        .iter()
+        .filter(|mount| mount.source.starts_with("hack-anonymous-"))
+        .collect();
+    assert_eq!(
+        anonymous
+            .iter()
+            .map(|mount| (mount.target.as_str(), mount.kind.as_str(), mount.read_only))
+            .collect::<Vec<_>>(),
+        vec![
+            ("/app/node_modules", "volume", false),
+            ("/app/.cache", "volume", true),
+            ("/data", "volume", false),
+        ]
+    );
+    // Every generated volume is declared in the plan like an authored one, and
+    // the same target on another service gets its own volume, as on Compose.
+    let worker = &plan.plan.services["worker"].mounts[0];
+    assert_ne!(worker.source, anonymous[0].source);
+    for mount in anonymous.iter().copied().chain([worker]) {
+        assert_eq!(mount.source.len(), "hack-anonymous-".len() + 16);
+        assert_eq!(plan.plan.volumes[&mount.source].driver, "local");
+        assert!(
+            plan.plan.volumes[&mount.source]
+                .disposable_caches
+                .is_empty()
+        );
+    }
+    assert_eq!(plan.plan.volumes.len(), 5);
+    let warnings: Vec<_> = plan
+        .plan
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "anonymous_volume_named")
+        .collect();
+    assert_eq!(warnings.len(), 4);
+    assert!(warnings.iter().all(|d| d.severity == "warning"));
+    // The name depends only on the service and the normalised target (the
+    // authored one has a trailing slash), never on the checkout, so every
+    // review of this file in any directory finds the same storage.
+    assert_eq!(anonymous[0].source, "hack-anonymous-86491cc2da428ece");
+}
+
+#[test]
+fn anonymous_volume_forms_outside_the_subset_are_still_refused() {
+    let refused = [
+        // A bare relative word is neither a path nor a source:target pair.
+        ("      - data\n", "invalid_mount"),
+        // An authored empty source is not an anonymous volume.
+        ("      - ':/app/node_modules'\n", "invalid_identifier"),
+        (
+            "      - {type: volume, source: '', target: /data}\n",
+            "invalid_identifier",
+        ),
+        (
+            "      - {type: volume, source: '', target: /data, volume: {subpath: cache}}\n",
+            "invalid_identifier",
+        ),
+        // Compose reads this as source /data and target ro, not as a mode.
+        ("      - '/data:ro'\n", "invalid_container_path"),
+        ("      - 'a:/b:ro:extra'\n", "invalid_mount"),
+        // A bind mount always needs its source.
+        ("      - {type: bind, target: /data}\n", "invalid_mount"),
+        // A subpath selects a directory of a named volume.
+        (
+            "      - {type: volume, target: /data, volume: {subpath: cache}}\n",
+            "invalid_mount",
+        ),
+        ("      - /data\n      - /data\n", "duplicate_mount_target"),
+    ];
+    for (mounts, code) in refused {
+        let fixture = Fixture::new(&format!("{BASIC}    volumes:\n{mounts}"));
+        let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
+        assert_eq!(error.code, code, "{mounts}");
+    }
+    // The generated prefix cannot be authored: not as a declared volume, not
+    // as a mount source that would share another service's anonymous volume,
+    // and not as a dependency cache.
+    let generated = "hack-anonymous-86491cc2da428ece";
+    for document in [
+        format!("{BASIC}volumes:\n  hack-anonymous-mine: {{}}\n"),
+        format!(
+            "{BASIC}    volumes: [/app/node_modules]\n  worker:\n    image: alpine:3.21\n    volumes: ['{generated}:/shared']\n"
+        ),
+        format!(
+            "{BASIC}    volumes: [/app/node_modules]\n    labels:\n      hack.dependencies.cache-volume: {generated}\n"
+        ),
+    ] {
+        let fixture = Fixture::new(&document);
+        let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
+        assert_eq!(error.code, "reserved_volume_name", "{document}");
+    }
+    // A reserved target is reported the same way for an anonymous volume.
+    let fixture = Fixture::new(&format!("{BASIC}    volumes: [/proc/sys]\n"));
+    let plan = fixture.plan();
+    assert!(
+        plan.plan
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "reserved_mount_target" && d.severity == "error")
+    );
+}
+
 #[test]
 fn mount_options_that_change_container_behaviour_are_still_refused() {
     for option in ["nocopy", "rshared", "ro,rw", "cached,", "exec", "CACHED"] {

@@ -99,3 +99,11 @@ test("rejects private paths in known activity fields", async () => {
   await writeActivity([{ ...failedUp, branch: home }]);
   await expect(assertNativePlanHome({ home, failedUps: 1 })).rejects.toThrow();
 });
+
+test("rejects private fixture inputs in otherwise valid activity", async () => {
+  const privateInput = "synthetic-private-plan-home-value";
+  await writeActivity([{ ...failedUp, unexpected: privateInput }]);
+  await expect(
+    assertNativePlanHome({ home, failedUps: 1, privateInputs: [privateInput] })
+  ).rejects.toThrow("Unexpected private input in lifecycle activity");
+});

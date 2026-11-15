@@ -20,7 +20,8 @@ export interface ComposeLogOptions {
   readonly cwd: string;
   readonly follow: boolean;
   readonly tail: number;
-  readonly service?: string;
+  /** Compose services to read; empty or absent reads every service. */
+  readonly services?: readonly string[];
   readonly projectName?: string;
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
@@ -28,7 +29,7 @@ export interface ComposeLogOptions {
   readonly streamContext?: LogStreamContext;
   readonly lifecycle?: {
     readonly logPath: string;
-    readonly service?: string;
+    readonly services?: readonly string[];
     readonly composeDisabled?: boolean;
   };
 }
@@ -77,7 +78,7 @@ export const composeLogBackend: ComposeLogBackend = {
         cwd: opts.cwd,
         follow: opts.follow,
         tail: opts.tail,
-        service: opts.service,
+        services: opts.services,
         projectName: opts.projectName,
         composeProject: opts.composeProject,
         profiles: opts.profiles,
@@ -92,7 +93,7 @@ export const composeLogBackend: ComposeLogBackend = {
         cwd: opts.cwd,
         follow: opts.follow,
         tail: opts.tail,
-        service: opts.service,
+        services: opts.services,
         projectName: opts.projectName,
         composeProject: opts.composeProject,
         profiles: opts.profiles,
@@ -105,7 +106,7 @@ export const composeLogBackend: ComposeLogBackend = {
       cwd: opts.cwd,
       follow: opts.follow,
       tail: opts.tail,
-      service: opts.service,
+      services: opts.services,
       projectName: opts.projectName,
       composeProject: opts.composeProject,
       profiles: opts.profiles,

@@ -177,8 +177,9 @@ and every discovered Docker plugin are checked before Doctor too, including the 
 interpreter rule (the native runtime does not get the `env` form); Doctor's
 runs also remove inherited interpreter startup and preload variables
 (`BASH_ENV`, `ENV`, `SHELLOPTS`, `PS4`, exported Bash functions, Perl, Python,
-Ruby and Node options and paths, and every `LD_*` and `DYLD_*` loader
-variable), so a checked tool script cannot be made to load code from the
+Ruby and Node options and paths, the Bun runtime's `BUN_OPTIONS`, `BUN_BE_BUN`,
+`BUN_CONFIG_*` and `BUN_INSPECT*` (the CLI is a Bun-compiled binary), and every
+`LD_*` and `DYLD_*` loader variable), so a checked tool script cannot be made to load code from the
 environment; missing candidates
 require protected ancestry, and relative/unprovable selections are refused.
 Doctor's runs pin the checked native runtime through `HACK_NATIVE_BINARY`. When the

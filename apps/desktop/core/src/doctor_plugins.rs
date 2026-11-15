@@ -298,46 +298,66 @@ pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<NativePin, &'static
     }
     // A native candidate runtime is spawned by absolute path with a narrowed
     // environment (not the wrapper PATH), so the env #! form is refused.
-    let native_ok = |native: &Path| -> Result<bool, &'static str> {
-        if present(native, uid)? {
-            if trusted_tool_path(native, uid, false)
+    // Companions are spawned by absolute path with a narrowed environment
+    // (not the wrapper PATH), so the env #! form is refused.
+    let companion_ok = |path: &Path, why: &'static str| -> Result<bool, &'static str> {
+        if present(path, uid)? {
+            if trusted_tool_path(path, uid, false)
                 .is_none_or(|real| !crate::source::trusted_interpreter(&real, uid, 4, false))
             {
-                return Err("Native runtime binary or its ancestors/ACLs are untrusted");
+                return Err(why);
             }
             return Ok(true);
         }
         Ok(false)
     };
+    const NATIVE_UNTRUSTED: &str = "Native runtime binary or its ancestors/ACLs are untrusted";
+    const SUPERVISOR_UNTRUSTED: &str =
+        "Lifecycle supervisor binary or its ancestors/ACLs are untrusted";
+    // Companions the CLI takes from beside its own executable
+    // (`process.execPath`). For a compiled CLI that is the CLI's directory,
+    // canonical or as given. A `#!` launcher's eventual executable is not
+    // knowable here (see the README's Doctor limits).
+    let compiled_dirs: Vec<PathBuf> = runner
+        .program_path()
+        .and_then(|program| {
+            let real = std::fs::canonicalize(&program).ok()?;
+            let mut head = [0_u8; 2];
+            let launcher = std::fs::File::open(&real)
+                .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
+                .map_or(true, |()| head == *b"#!");
+            (!launcher).then(|| {
+                [real.parent(), program.parent()]
+                    .into_iter()
+                    .flatten()
+                    .map(Path::to_path_buf)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    // The lifecycle supervisor is run by Doctor's project checks for projects
+    // using the supervisor runner; a compiled CLI ignores any selector for it.
+    for dir in &compiled_dirs {
+        companion_ok(&dir.join("hack-lifecycle-supervisor"), SUPERVISOR_UNTRUSTED)?;
+    }
     if let Some(native) = selector("HACK_NATIVE_BINARY")? {
         let native = PathBuf::from(native);
         if !native.is_absolute() {
             return Err("relative native runtime selection is unsupported");
         }
-        native_ok(&native)?;
+        companion_ok(&native, NATIVE_UNTRUSTED)?;
         return Ok(NativePin::Selected);
     }
-    // Unset: the CLI falls back to `hack-native` beside its own executable
-    // (`process.execPath`). For a compiled CLI that is the CLI's directory; a
-    // `#!` launcher's eventual executable is not knowable here, so Doctor
-    // pins an absent private path instead of letting the CLI search.
-    let Some(program) = runner.program_path() else {
-        return Ok(NativePin::Unavailable);
-    };
-    let Ok(real) = std::fs::canonicalize(&program) else {
-        return Ok(NativePin::Unavailable);
-    };
-    let mut head = [0_u8; 2];
-    let launcher = std::fs::File::open(&real)
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
-        .map_or(true, |()| head == *b"#!");
-    if launcher {
+    // Unset: the CLI falls back to `hack-native` beside its own executable.
+    // A `#!` launcher or unresolvable program gets an absent private pin
+    // instead of letting the CLI search.
+    if compiled_dirs.is_empty() {
         return Ok(NativePin::Unavailable);
     }
     let mut found = None;
-    for dir in [real.parent(), program.parent()].into_iter().flatten() {
+    for dir in &compiled_dirs {
         let candidate = dir.join("hack-native");
-        if native_ok(&candidate)? && found.is_none() {
+        if companion_ok(&candidate, NATIVE_UNTRUSTED)? && found.is_none() {
             found = Some(candidate);
         }
     }

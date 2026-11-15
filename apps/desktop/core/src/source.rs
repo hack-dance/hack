@@ -1976,6 +1976,18 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(&native, "#!/usr/bin/env sh\n").unwrap();
         assert!(validate_helpers(&base(&hack)).is_err());
+        // The lifecycle supervisor beside a compiled CLI is checked too; a
+        // compiled CLI ignores any selector for it.
+        std::fs::remove_file(&native).unwrap();
+        let supervisor = compiled.join("hack-lifecycle-supervisor");
+        std::fs::write(&supervisor, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&supervisor, std::fs::Permissions::from_mode(0o722)).unwrap();
+        assert!(validate_helpers(&base(&hack)).is_err());
+        std::fs::set_permissions(&supervisor, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(validate_helpers(&base(&hack)), Ok(NativePin::Absent));
+        std::fs::write(&supervisor, "#!/usr/bin/env sh\n").unwrap();
+        assert!(validate_helpers(&base(&hack)).is_err());
+        std::fs::remove_file(&supervisor).unwrap();
         // An explicit selection is checked and left as the CLI's choice.
         let selected = base(&hack).with_env("HACK_NATIVE_BINARY", "/example/absent/hack-native");
         assert_eq!(validate_helpers(&selected), Ok(NativePin::Selected));

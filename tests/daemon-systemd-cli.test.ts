@@ -15,6 +15,7 @@ import {
   RENDERED_SYSTEM_PATH_DIRECTORIES,
   UNSET_PATH_LOOKUP_DIRS,
 } from "../src/daemon/systemd.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -149,11 +150,13 @@ async function writeExecutable(path: string, text: string): Promise<void> {
 
 /**
  * Replaces the fixture's source shim with a compiled hack binary. The build
- * runs with the fixture's private env, so it never sees the runner's HOME.
+ * runs with the fixture's private env, so it never sees the runner's HOME,
+ * and is bounded below the calling test's 90 s timeout so a stuck compiler
+ * fails with its command named.
  */
 async function compileHack(f: Fixture): Promise<void> {
   const outfile = f.hackBin;
-  const build = Bun.spawn(
+  const build = spawnSyncBounded(
     [
       process.execPath,
       "build",
@@ -172,14 +175,11 @@ async function compileHack(f: Fixture): Promise<void> {
       stdin: "ignore",
       stdout: "ignore",
       stderr: "pipe",
+      timeout: 60_000,
     }
   );
-  const [code, stderr] = await Promise.all([
-    build.exited,
-    new Response(build.stderr).text(),
-  ]);
-  if (code !== 0) {
-    throw new Error(`compiling hack failed: ${stderr}`);
+  if (build.exitCode !== 0) {
+    throw new Error(`compiling hack failed: ${build.stderr.toString()}`);
   }
   await chmod(outfile, 0o755);
 }

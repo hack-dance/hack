@@ -14,6 +14,27 @@ beta. `hack dev`, added in 4.3.0, is part of the core.
 This page is the readable summary. The generated
 [CHANGELOG](../../CHANGELOG.md) lists every change by commit.
 
+## next.18: what changed and what to do
+
+These are source changes intended for `5.0.0-next.18`, not a claim that the
+release is published. An installed next.17 bundle keeps its original behavior.
+
+### Breaking change: env migration keeps legacy files until an explicit cleanup
+
+Env migration (HACK-2191) can now be previewed, resumed and rolled back, and it
+no longer removes legacy inputs in the same step.
+
+| Change | What to do |
+| --- | --- |
+| **Migration keeps every legacy copy.** `hack env migrate --apply`, `hack doctor --migrate-env-config` and implicit migration now keep `.hack/hack.env.json`, legacy dotenv files and other legacy inputs. Implicit migration also keeps Compose `env_file` references. | Do not expect the old files to be gone after migration. Scripts that checked for their removal must run the separate cleanup below. |
+| **Preview first.** `hack env migrate --json` is read-only and reports file actions, paths, key names and tracked status, never values (versioned contract in the [env migration protocol](../reference/env-migration.md)). | Review the preview before `--apply`. Add `--accept-tracked-env-changes` only to consent to the previewed tracked edits. |
+| **Apply is journalled and resumable.** `--apply` snapshots originals outside the working tree and records each step. Repeating the same command after an interruption resumes; a completed migration is a no-op. Snapshot storage must be on the same filesystem as the project files. | After an interruption, rerun the same `--apply` command. Keep the snapshot and journal until the upgrade is accepted. |
+| **Cleanup is a separate, later command.** `--cleanup --apply` runs only after a completed migration and a successful complete-project `hack up`. It rechecks delivery, the original snapshot and live inputs before each removal. | Run `hack up`, check the project, then `hack env migrate --cleanup --json` and `--cleanup --apply`. |
+| **Rollback.** `--rollback-manifest <path>` restores originals and refuses when files changed later. `--preserve-changes` restores anyway and keeps those later edits privately for recovery. Project and shared keys are kept. | Keep a private key backup as before. Run `hack doctor` after a rollback to review the restored file modes. |
+| **Compose repair refuses when existing layers would not deliver the values.** A checkout that already has env layers must deliver every contract value before Hack removes legacy Compose references. | Add the missing values to the layer, or keep the legacy references (implicit migration keeps them). |
+
+The full upgrade steps are in [Upgrade to v5](upgrade-to-v5.md#preview-resume-and-undo-env-migration).
+
 ## next.17: what changed and what to do
 
 These are source changes intended for `5.0.0-next.17`, not a claim that the
@@ -260,6 +281,9 @@ move to the layered YAML format with:
 ```bash
 hack doctor --migrate-env-config
 ```
+
+From next.18, prefer `hack env migrate` to preview, apply, clean up and roll back
+in separate steps; see [next.18](#next18-what-changed-and-what-to-do).
 
 Back up the project, env files and original project key before migration. On
 next.16 or earlier prereleases, explicit Doctor cleanup can remove the project

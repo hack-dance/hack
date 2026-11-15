@@ -12,6 +12,10 @@ import {
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
 import {
+  type NativeConfigurationRefusal,
+  readNativeConfigurationRefusals,
+} from "./native-configuration-refusals.ts";
+import {
   type NativePlanChange,
   nativePlanChangeGuidance,
   readNativePlanChange,
@@ -33,6 +37,7 @@ const NATIVE_TAIL = /^[1-9][0-9]{0,3}$/;
 const NATIVE_RUN = /^[a-f0-9]{32}$/;
 const NATIVE_HASH = /^[a-f0-9]{64}$/;
 interface NativeFailure {
+  readonly configurationRefusals?: readonly NativeConfigurationRefusal[];
   readonly code: string;
   readonly logPhase?: NativeLogFailurePhase;
   readonly causeCode?: string;
@@ -182,6 +187,9 @@ export class NativeRuntimeRequestError extends ClosedCliError {
   readonly nativeMessage: string | undefined;
   readonly nativeService: string | undefined;
   readonly nativeStopFailures: readonly NativeStopFailure[] | undefined;
+  readonly nativeConfigurationRefusals:
+    | readonly NativeConfigurationRefusal[]
+    | undefined;
 
   constructor(opts: {
     readonly stopSignal?: "SIGINT" | "SIGTERM";
@@ -192,6 +200,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     readonly nativeMessage?: string;
     readonly nativeService?: string;
     readonly nativeStopFailures?: readonly NativeStopFailure[];
+    readonly nativeConfigurationRefusals?: readonly NativeConfigurationRefusal[];
     readonly nativeStartupPhase?: "static-preflight";
   }) {
     super(opts.message);
@@ -201,6 +210,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     this.nativeMessage = opts.nativeMessage;
     this.nativeService = opts.nativeService;
     this.nativeStopFailures = opts.nativeStopFailures;
+    this.nativeConfigurationRefusals = opts.nativeConfigurationRefusals;
     if (opts.nativeCode && ERROR_CODE.test(opts.nativeCode)) {
       retainedFailures.set(
         this,
@@ -289,6 +299,10 @@ export interface NativeRuntimeSelection {
 
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_PRIVATE_INPUT_BYTES = 256 * 1024;
+// Configuration refusals can originate during planning or startup, including
+// authored graph native plan/frontend-plan. Keep the same bounded envelope for
+// every structured error; startup output still requires its explicit decoder.
+const MAX_NATIVE_FAILURE_BYTES = 1024 * 1024;
 
 /**
  * Exit-relative bound on draining an owned native child's stdout and stderr.
@@ -760,6 +774,9 @@ function completionResponse(
       nativeMessage: timedOut ? undefined : failure?.message,
       nativeService: timedOut ? undefined : failure?.service,
       nativeStopFailures: timedOut ? undefined : failure?.stopFailures,
+      nativeConfigurationRefusals: timedOut
+        ? undefined
+        : failure?.configurationRefusals,
     });
   }
   try {
@@ -894,6 +911,9 @@ function nativeFailureFromReply(
     ...(logPhase ? { logPhase } : {}),
     ...(causeCode ? { causeCode } : {}),
     ...nativeFailureDetail(value),
+    configurationRefusals: readNativeConfigurationRefusals(
+      value.configuration_refusals
+    ),
     ...(planChange ? { planChange } : {}),
     ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
       value.code === "graph_owner_recovery" &&
@@ -921,7 +941,8 @@ function processRefusalsOf(value: unknown): {
 async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
-  limit = 8192
+  limit = MAX_NATIVE_FAILURE_BYTES,
+  startupLogs = false
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -950,7 +971,7 @@ async function readNativeFailure(
     }
     return nativeFailureFromReply(
       JSON.parse(text + decoder.decode()),
-      limit > 8192
+      startupLogs
     );
   } catch {
     return;
@@ -1018,7 +1039,8 @@ export async function readNativeStartupFailure(
   const failure = await readNativeFailure(
     stream,
     signal,
-    NATIVE_STARTUP_FAILURE_REPLY_BYTES
+    Math.max(NATIVE_STARTUP_FAILURE_REPLY_BYTES, MAX_NATIVE_FAILURE_BYTES),
+    true
   );
   return failure === undefined
     ? undefined

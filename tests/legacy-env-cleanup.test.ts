@@ -99,7 +99,7 @@ test("unchanged sources are removed only after current delivery and Compose refe
   expect(await Bun.file(options.path).exists()).toBe(false);
 });
 
-test("implicit cleanup reports a real writer lock timeout without failing the command", async () => {
+test("implicit migration defers cleanup without waiting on a legacy writer lock", async () => {
   const options = await fixture();
   await writeFile(
     join(options.projectDir, "docker-compose.yml"),
@@ -133,7 +133,9 @@ test("implicit cleanup reports a real writer lock timeout without failing the co
       migrated,
     });
     expect(report.removed).toEqual([]);
-    expect(report.lines.join("\n")).toContain("writer may still hold a lock");
+    expect(report.lines.join("\n")).toContain(
+      "preview the separate cleanup step"
+    );
     expect(report.lines.join("\n")).not.toContain(SENTINEL);
     expect(await Bun.file(options.path).exists()).toBe(true);
   } finally {
@@ -402,7 +404,7 @@ test("an equal-content replacement has a new identity and is kept", async () => 
   expect(await readFile(options.path, "utf8")).toBe(current);
 });
 
-test("implicit migration also carries the source receipt into cleanup", async () => {
+test("implicit migration retains a source changed after publication", async () => {
   const options = await fixture();
   await writeFile(
     join(options.projectDir, "docker-compose.yml"),
@@ -426,7 +428,7 @@ test("implicit migration also carries the source receipt into cleanup", async ()
     migrated,
   });
   expect(report.removed).toEqual([]);
-  expect(report.lines.join("\n")).toContain("kept remaining legacy env files");
+  expect(report.lines.join("\n")).toContain("Legacy env files were kept.");
   expect(report.lines.join("\n")).not.toContain(SENTINEL);
   expect(await readFile(options.path, "utf8")).toBe(`TOKEN=${SENTINEL}-new\n`);
 });

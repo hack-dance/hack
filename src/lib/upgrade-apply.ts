@@ -189,14 +189,18 @@ export type Planned = {
 };
 
 const ERROR_CODE = /^[A-Z0-9_]{1,40}$/;
-const SKIP_BLOCKED =
-  "Not run: this checkout has a blocker or a check that could not be performed; fix that first (hack upgrade check lists it).";
-const NOTE_HOME_WITH_PROJECT =
-  "Agent files under HOME serve every project and are left out with --project; run hack upgrade apply --only agent-integrations without --project for them.";
+/*
+ * Messages that name a command take `cli`, the report's `cli.command`: the
+ * launcher the check ran through, never a bare `hack` (HACK-2251).
+ */
+const skipBlocked = (cli: string) =>
+  `Not run: this checkout has a blocker or a check that could not be performed; fix that first (${cli} upgrade check lists it).`;
+const noteHomeWithProject = (cli: string) =>
+  `Agent files under HOME serve every project and are left out with --project; run ${cli} upgrade apply --only agent-integrations without --project for them.`;
 const NOT_IN_SNAPSHOT =
   "Not changed: the file is not in this run's snapshot, so a rollback could not restore it.";
-const NOT_RECORDED =
-  "Changed, but the snapshot could not record what was written; hack upgrade rollback needs --overwrite for this file.";
+const notRecorded = (cli: string) =>
+  `Changed, but the snapshot could not record what was written; ${cli} upgrade rollback needs --overwrite for this file.`;
 
 /**
  * Runs (or with `dryRun` lists) the apply steps of `report`. `collect`
@@ -485,6 +489,7 @@ async function executeApplyRun(opts: {
     } else {
       results.push(
         await applyTarget({
+          cli: input.report.cli.command,
           target,
           snapshot: currentSnapshot,
           inSnapshot,
@@ -657,7 +662,7 @@ function planTargets(opts: {
           skip: null,
         });
       } else {
-        notes.push(NOTE_HOME_WITH_PROJECT);
+        notes.push(noteHomeWithProject(opts.report.cli.command));
       }
     }
     const seen = new Set<string>();
@@ -676,7 +681,7 @@ function planTargets(opts: {
         project: target.project,
         root: target.root,
         projectDir: byRoot.get(root)?.project_dir ?? null,
-        skip: unsafe.has(root) ? SKIP_BLOCKED : null,
+        skip: unsafe.has(root) ? skipBlocked(opts.report.cli.command) : null,
       });
     }
   }
@@ -697,6 +702,8 @@ function unsafeRoots(report: UpgradeCheckReport): ReadonlySet<string> {
 }
 
 async function applyTarget(opts: {
+  /** How printed commands run this CLI (the report's `cli.command`). */
+  readonly cli: string;
   readonly target: Planned;
   readonly snapshot: UpgradeSnapshot;
   readonly inSnapshot: ReadonlySet<string>;
@@ -765,7 +772,7 @@ async function applyTarget(opts: {
             : [],
       })) !== "safe"
     ) {
-      return { ...result, status: "failed", message: NOT_RECORDED };
+      return { ...result, status: "failed", message: notRecorded(opts.cli) };
     }
     let recorded = false;
     try {
@@ -780,13 +787,14 @@ async function applyTarget(opts: {
       recorded = false;
     }
     if (!recorded) {
-      return { ...result, status: "failed", message: NOT_RECORDED };
+      return { ...result, status: "failed", message: notRecorded(opts.cli) };
     }
   }
   return result;
 }
 
 async function applyIgnoreRules(opts: {
+  readonly cli: string;
   readonly target: Planned;
   readonly snapshot: UpgradeSnapshot;
   readonly inSnapshot: ReadonlySet<string>;
@@ -855,11 +863,11 @@ async function applyIgnoreRules(opts: {
     return outcome(
       target,
       "failed",
-      `${closedError(failure)}${recorded ? "" : ` ${NOT_RECORDED}`}`
+      `${closedError(failure)}${recorded ? "" : ` ${notRecorded(opts.cli)}`}`
     );
   }
   if (!recorded) {
-    return outcome(target, "failed", NOT_RECORDED);
+    return outcome(target, "failed", notRecorded(opts.cli));
   }
   if (result.readOnly) {
     return outcome(
@@ -1044,12 +1052,15 @@ function recoverPlannedTarget(opts: {
   );
   let skip: string | null = null;
   if (target.project === null) {
-    skip = normalize(target.root) === normalize(home) ? null : SKIP_BLOCKED;
+    skip =
+      normalize(target.root) === normalize(home)
+        ? null
+        : skipBlocked(report.cli.command);
   } else if (
     checkout === undefined ||
     unsafeRoots(report).has(normalize(target.root))
   ) {
-    skip = SKIP_BLOCKED;
+    skip = skipBlocked(report.cli.command);
   }
   return {
     fix: target.fix,

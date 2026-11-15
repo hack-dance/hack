@@ -532,7 +532,8 @@ async function agentFinding(opts: {
 }
 
 function nativeFinding(
-  probe: NativePreflightProbe | null
+  probe: NativePreflightProbe | null,
+  command: (args: readonly string[]) => string
 ): UpgradeFinding | null {
   if (probe === null) {
     return null;
@@ -541,7 +542,7 @@ function nativeFinding(
     ? {
         id: "native-preflight",
         status: "ok",
-        summary: `No native configuration blockers (${probe.warnings} warning(s)); runtime setup and runtime review were not checked. Run hack native setup, then hack doctor --native-preflight.`,
+        summary: `No native configuration blockers (${probe.warnings} warning(s)); runtime setup and runtime review were not checked. Run ${command(["native", "setup"])}, then ${command(["doctor", "--native-preflight"])}.`,
         args: null,
         action: null,
       }
@@ -799,6 +800,11 @@ export async function inspectUpgradeProject(opts: {
   readonly deadline: number;
   /** Per-check limit; defaults to 8 s. */
   readonly checkTimeoutMs?: number;
+  /**
+   * Renders a command line for text that names one, through the launcher the
+   * check ran through (HACK-2251); defaults to `hack`.
+   */
+  readonly command?: (args: readonly string[]) => string;
 }): Promise<readonly UpgradeFinding[]> {
   const root = opts.project.repoRoot;
   const projectDir = opts.project.projectDir;
@@ -835,7 +841,10 @@ export async function inspectUpgradeProject(opts: {
       projectStoreFinding({ root, projectDir })
     ),
     guarded("native-preflight", limits, async () =>
-      nativeFinding(await opts.nativePreflight({ projectRoot: root }))
+      nativeFinding(
+        await opts.nativePreflight({ projectRoot: root }),
+        opts.command ?? ((args) => ["hack", ...args].join(" "))
+      )
     ),
   ]);
   return results.filter((finding) => finding !== null);

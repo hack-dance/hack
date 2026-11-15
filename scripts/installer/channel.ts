@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { quoteShellWord } from "../../src/lib/logs.ts";
 import {
   extractArchive,
   sameJson,
@@ -1039,7 +1040,7 @@ export class Channel {
       requireThat(
         !override || override === this.path(`versions/${version}/native-home`),
         // Name the selected bundle's script by path: it is not on PATH (HACK-2251).
-        `hack-next uses its receipt-owned native home for safe upgrades; for a custom HACK_NATIVE_HOME run the bundle's launcher directly: ${this.path(`versions/${version}/bundle/hack-v5`)}`
+        `hack-next uses its receipt-owned native home for safe upgrades; for a custom HACK_NATIVE_HOME run the bundle's launcher directly: ${quoteShellWord(this.path(`versions/${version}/bundle/hack-v5`))}`
       );
     }
     const checksum = this.state.installed[version];

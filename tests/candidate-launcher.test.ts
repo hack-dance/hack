@@ -9,7 +9,10 @@ import {
   freshNativeHomeSetupCommand,
   resolveCandidateLauncher,
 } from "../src/lib/candidate-launcher.ts";
-import { composeBackendCommand } from "../src/lib/native-compose-backend-features.ts";
+import {
+  basicBuildNextStep,
+  composeBackendCommand,
+} from "../src/lib/native-compose-backend-features.ts";
 import {
   renderUpgradeCommand,
   upgradeCommandPrefix,
@@ -95,11 +98,11 @@ test("upgrade check and apply print the hack-next launcher on either backend", (
   );
 });
 
-const kinds = (): readonly CandidateLauncher[] => [
-  resolve(undefined),
-  resolve("hack-next"),
-  resolve("hack-v5"),
-];
+const kinds = (): readonly [
+  CandidateLauncher,
+  CandidateLauncher,
+  CandidateLauncher,
+] => [resolve(undefined), resolve("hack-next"), resolve("hack-v5")];
 
 test("native setup guidance names setup through the user's launcher", () => {
   const [stable, next, direct] = kinds();
@@ -141,6 +144,16 @@ test("the Compose-backend hint is a command for the user's launcher", () => {
   );
   expect(composeBackendCommand(["up"], direct)).toBe(
     `HACK_RUNTIME_BACKEND=compose ${join(bundle, "hack-v5")} up`
+  );
+});
+
+test("the basic-build hint previews config import through the user's launcher", () => {
+  const [stable, next] = kinds();
+  expect(basicBuildNextStep(stable)).toContain(
+    "`hack config import --dry-run --path <project root>`"
+  );
+  expect(basicBuildNextStep(next)).toContain(
+    `\`${join(home, ".hack-next", "bin", "hack-next")} config import --dry-run --path <project root>\``
   );
 });
 

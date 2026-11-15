@@ -1,5 +1,5 @@
 import {
-  BASIC_BUILD_NEXT_STEP,
+  basicBuildNextStep,
   type ComposeBackendFeature,
   type ComposeBackendFeatureOptions,
   composeBackendCommand,
@@ -59,14 +59,14 @@ export function composeBackendCheckResult(
     ? ` ${ISOLATED_NETWORKS_SELECTION}.`
     : "";
   const build = basicBuild
-    ? ` Its basic Compose build is also refused by native image-project up. ${BASIC_BUILD_NEXT_STEP}.`
+    ? ` Its basic Compose build is also refused by native image-project up. ${basicBuildNextStep()}.`
     : "";
   if (opts.features.length === 0) {
     if (basicBuild && opts.backend === "native") {
       return {
         name: COMPOSE_BACKEND_CHECK,
         status: "warn",
-        message: `No Compose-only features found, but native image-project up refuses this project's basic Compose build while HACK_NATIVE_BUILDS is not set. ${BASIC_BUILD_NEXT_STEP}, or run it on the Compose backend: ${composeBackendCommand(["up"])}.`,
+        message: `No Compose-only features found, but native image-project up refuses this project's basic Compose build while HACK_NATIVE_BUILDS is not set. ${basicBuildNextStep()}, or run it on the Compose backend: ${composeBackendCommand(["up"])}.`,
         composeBackend,
       };
     }
@@ -74,7 +74,7 @@ export function composeBackendCheckResult(
       return {
         name: COMPOSE_BACKEND_CHECK,
         status: "ok",
-        message: `No Compose-only features found; the basic Compose build runs on the Compose backend. Native image-project up refuses it while HACK_NATIVE_BUILDS is not set: ${BASIC_BUILD_NEXT_STEP}.`,
+        message: `No Compose-only features found; the basic Compose build runs on the Compose backend. Native image-project up refuses it while HACK_NATIVE_BUILDS is not set: ${basicBuildNextStep()}.`,
         composeBackend,
       };
     }

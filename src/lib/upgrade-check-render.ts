@@ -241,7 +241,8 @@ function planLines(report: UpgradeCheckReport): string[] {
       : ["Plan", ...report.plan.flatMap(stepLines)];
   if (report.plan.some((step) => step.applies)) {
     lines.push(
-      "  Steps marked (apply) run for all their checkouts with hack upgrade apply (--dry-run to preview, --project <name> for one project)."
+      // The launcher this check ran through, never a bare `hack` (HACK-2251).
+      `  Steps marked (apply) run for all their checkouts with ${report.cli.command} upgrade apply (--dry-run to preview, --project <name> for one project).`
     );
   }
   lines.push("");

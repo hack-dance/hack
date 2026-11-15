@@ -630,9 +630,15 @@ export function composeBackendCommand(
 export const ISOLATED_NETWORKS_SELECTION =
   "An external network can stay on native instead: list it by name in `isolatedNetworks` of the `HACK_NATIVE_ADAPTATION` selection, and native start replaces it with an owned isolated network that does not join the external one";
 
-/** The next step for a basic build, which native image-project `up` refuses without native builds. */
-export const BASIC_BUILD_NEXT_STEP =
-  "Set HACK_NATIVE_BUILDS=1 to build it in the native runtime, or preview the authored native conversion with `hack config import --dry-run --path <project root>`";
+/**
+ * The next step for a basic build, which native image-project `up` refuses
+ * without native builds. The preview command names the user's launcher.
+ */
+export function basicBuildNextStep(
+  launcher: CandidateLauncher = currentCandidateLauncher()
+): string {
+  return `Set HACK_NATIVE_BUILDS=1 to build it in the native runtime, or preview the authored native conversion with \`${launcherCommand(launcher, ["config", "import", "--dry-run", "--path"])} <project root>\``;
+}
 
 /**
  * The closed refusal for a project that needs the Compose backend: stable code

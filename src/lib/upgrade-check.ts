@@ -251,6 +251,7 @@ export async function runUpgradeCheck(opts: {
           nativePreflight: opts.probes.nativePreflight,
           deadline,
           checkTimeoutMs: opts.checkTimeoutMs,
+          command: (args) => renderUpgradeCommand(prefix, args),
         })
       ).map(render),
     })

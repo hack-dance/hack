@@ -26,7 +26,9 @@ import {
   type UpgradeCheckProbes,
 } from "../src/lib/upgrade-check-probes.ts";
 import { inspectUpgradeProject } from "../src/lib/upgrade-check-project.ts";
+import { renderUpgradeCheck } from "../src/lib/upgrade-check-render.ts";
 import { collectUpgradeSnapshotTargets } from "../src/lib/upgrade-snapshot-targets.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -731,6 +733,51 @@ test("printed commands run the candidate launcher when the check ran through it"
       true
     );
   }
+});
+
+test("a native hack-next check prints only hack-next commands, in every hint (HACK-2251)", async () => {
+  // The bundle entrypoint keeps the manager's hack-next marker on native, so
+  // the CLI sees HACK_CANDIDATE_ENTRYPOINT=hack-next with no Compose selection.
+  const legacy = await liveProject("app-native-next");
+  await writeFile(join(legacy.projectDir, "hack.env.json"), "{}\n");
+  // A Git checkout without Hack's ignore rules makes an applicable step.
+  const git = spawnSyncBounded(["git", "-C", legacy.repoRoot, "init", "-q"], {
+    env: fixtureGitEnv(),
+    timeout: 10_000,
+  });
+  expect(git.exitCode).toBe(0);
+  await writeRegistry([legacy]);
+  const report = await runUpgradeCheck({
+    cliVersion: "5.0.0-next.18",
+    homeDir: home,
+    probes: healthyProbes({
+      nativePreflight: async () => ({
+        ready: true,
+        blockers: 0,
+        warnings: 0,
+        consentNeeded: 0,
+      }),
+    }),
+    env: {
+      HACK_CANDIDATE_ENTRYPOINT: "hack-next",
+      HACK_RUNTIME_BACKEND: "native",
+    },
+  });
+  const launcher = join(home, ".hack-next", "bin", "hack-next");
+  expect(report.cli.command).toBe(launcher);
+  expect(report.next_command?.startsWith(`${launcher} `)).toBe(true);
+  const native = report.projects
+    .flatMap((project) => project.findings)
+    .find((finding) => finding.id === "native-preflight");
+  expect(native?.summary).toContain(
+    `Run ${launcher} native setup, then ${launcher} doctor --native-preflight.`
+  );
+  const text = renderUpgradeCheck(report, { verbose: true });
+  expect(report.plan.some((step) => step.applies)).toBe(true);
+  expect(text).toContain(`with ${launcher} upgrade apply (--dry-run`);
+  // No printed hint sends a candidate user to stable `hack` or bare hack-v5.
+  expect(text).not.toMatch(/(^|[\s(`])hack (upgrade|native|doctor) /m);
+  expect(text).not.toContain("hack-v5");
 });
 
 /** A global encrypted_file store with one entry, and its key file. */

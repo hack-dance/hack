@@ -116,10 +116,11 @@ siblings such as Git. Foreign-owned executable targets are excluded too. A
 script tool's `#!` interpreter must pass the same rules (recursively); a script
 whose interpreter lives in a shared writable directory is excluded and its
 checks become Unknown. `#!` arguments must be plain words (letters, digits,
-`.`, `_`, `+`, `-`) or trusted absolute programs. With `env`, the only option
-allowed is `-S` and the command must be a plain name, which resolves only
-through the private wrapper PATH; variables, assignments and other options
-are refused. macOS ACL mutation grants
+`.`, `_`, `+`, `-`) or trusted absolute programs. With `/usr/bin/env`
+(identified by its real path, not its name), the only option allowed is `-S`
+and the command must be a plain name, which resolves only through the private
+wrapper PATH. Other interpreters accept only the shell flags `-e`, `-u`, `-x`,
+`-eu` and `-ex`. Variables, assignments and any other option are refused. macOS ACL mutation grants
 (write/append/delete, child deletion, attributes, security or owner changes) are
 refused for any principal; deny/read-only entries remain supported. Linux access
 ACLs are conservatively refused. Unreadable ACL metadata is untrusted. The same

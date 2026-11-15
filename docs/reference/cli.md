@@ -1498,6 +1498,8 @@ hack usage [options]
 | Option | Description |
 | --- | --- |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--by-service` | With --json, report one project's usage per service (use --path or --project) |
 | `--details` | Show per-container usage and mount types |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--watch` | Refresh usage continuously |

@@ -714,7 +714,7 @@ test("macOS restart with a loaded job bound to another HACK_HOME stops nothing",
     expect(envelope.ok).toBe(false);
     expect(envelope.error.code).toBe("E_DAEMON_SERVICE");
     expect(envelope.error.detail).toMatchObject({
-      schema: "hack.daemon-restart/v1",
+      schema: "hack.daemon-restart.v1",
       manager: "launchd",
     });
     // This CLI runs from source here, so it is not the plist's program
@@ -974,7 +974,7 @@ test("macOS restart --json refuses a launchd service running another hack, befor
   expect(envelope.error.code).toBe("E_DAEMON_SERVICE");
   expect(envelope.error.message).toContain("hack daemon install");
   expect(envelope.error.detail).toMatchObject({
-    schema: "hack.daemon-restart/v1",
+    schema: "hack.daemon-restart.v1",
     manager: "launchd",
     action: "none",
     blocked: "other-program",

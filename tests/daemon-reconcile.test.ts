@@ -246,7 +246,7 @@ test("the --json data is closed and schema-tagged", () => {
       cliVersion: "2.0.0",
     })
   ).toEqual({
-    schema: "hack.daemon-start/v1",
+    schema: "hack.daemon-start.v1",
     manager: "systemd",
     action: "reinstalled",
     stale: true,
@@ -264,7 +264,7 @@ test("the --json data is closed and schema-tagged", () => {
       cliVersion: "2.0.0",
     })
   ).toMatchObject({
-    schema: "hack.daemon-stop/v1",
+    schema: "hack.daemon-stop.v1",
     stale: false,
     stale_reasons: [],
     daemon: { running: false, pid: null, compatible: false },
@@ -335,7 +335,7 @@ test("after an update, the new executable's start --json reconciles the service"
         stdout: JSON.stringify({
           ok: true,
           data: {
-            schema: "hack.daemon-start/v1",
+            schema: "hack.daemon-start.v1",
             manager: "systemd",
             action: "restarted",
             stale_reasons: ["version-mismatch"],
@@ -829,7 +829,7 @@ test("after an update, a daemon that stopped before the child ran is not started
         stdout: JSON.stringify({
           ok: true,
           data: {
-            schema: "hack.daemon-start/v1",
+            schema: "hack.daemon-start.v1",
             manager: "none",
             action: "none",
             stale_reasons: [],

@@ -32,6 +32,7 @@ import type { LinuxDnsInspection } from "../src/lib/linux-dns-setup.ts";
 import * as shell from "../src/lib/shell.ts";
 import { isolatedDockerClientEnv } from "./helpers/docker-client.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { machineData } from "./helpers/machine-output.ts";
 
 // `hack global status --json --observe` (HACK-2218, R13): never starts
 // anything, and never reports what it could not read as absent or failed.
@@ -1137,7 +1138,10 @@ test(
     // Nothing outside the listed read-only probes, checked first.
     expect(result.spawned.filter((argv) => !allowed(argv))).toEqual([]);
     expect(result.exitCode).toBe(0);
-    const payload = JSON.parse(result.stdout) as {
+    const payload = machineData(
+      result.stdout,
+      "hack.global-status.observe.v1"
+    ) as {
       readonly docker: { readonly state: string };
       readonly summary: Record<string, unknown>;
     };
@@ -1173,7 +1177,10 @@ test(
     // Nothing outside the listed read-only probes, checked first.
     expect(result.spawned.filter((argv) => !allowed(argv))).toEqual([]);
     expect(result.exitCode).toBe(0);
-    const payload = JSON.parse(result.stdout) as {
+    const payload = machineData(
+      result.stdout,
+      "hack.global-status.observe.v1"
+    ) as {
       readonly docker: { readonly state: string };
       readonly networks: { readonly ok: unknown };
     };
@@ -1201,7 +1208,10 @@ test(
     const result = await runObserve(base);
     expect(result.spawned.filter((argv) => !allowed(argv))).toEqual([]);
     expect(result.exitCode).toBe(0);
-    const payload = JSON.parse(result.stdout) as {
+    const payload = machineData(
+      result.stdout,
+      "hack.global-status.observe.v1"
+    ) as {
       readonly host_dns: { readonly ok: unknown };
       readonly summary: { readonly host_dns_ok: unknown };
     };
@@ -1211,7 +1221,10 @@ test(
       // state.
       await writeFile(join(hackHome, "hack.config.json"), "{}\n");
       const control = await runObserve(base);
-      const known = JSON.parse(control.stdout) as {
+      const known = machineData(
+        control.stdout,
+        "hack.global-status.observe.v1"
+      ) as {
         readonly summary: { readonly host_dns_ok: unknown };
       };
       expect(known.summary.host_dns_ok).not.toBe("unknown");

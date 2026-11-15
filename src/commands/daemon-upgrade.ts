@@ -2,6 +2,7 @@ import { probeDaemonApi } from "../daemon/client.ts";
 import { getLaunchdServiceStatus } from "../daemon/launchd.ts";
 import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import {
+  DAEMON_COMMAND_SCHEMAS,
   DAEMON_RECONCILE_ONLY_ENV,
   type DaemonCommandAction,
   type DaemonServiceManager,
@@ -93,7 +94,7 @@ export async function reconcileDaemonAfterUpdate(opts: {
 
 /**
  * Reads `hack daemon start --json` output. Anything off the
- * `hack.daemon-start/v1` contract is a failure, never a success.
+ * `hack.daemon-start.v1` contract is a failure, never a success.
  */
 export function parseStartEnvelope(opts: {
   readonly exitCode: number;
@@ -112,7 +113,7 @@ export function parseStartEnvelope(opts: {
   }
   if (parsed.ok === true && isRecord(parsed.data)) {
     const data = parsed.data;
-    if (data.schema !== "hack.daemon-start/v1" || opts.exitCode !== 0) {
+    if (data.schema !== DAEMON_COMMAND_SCHEMAS.start || opts.exitCode !== 0) {
       return failed("hack daemon start printed an unexpected result");
     }
     return {

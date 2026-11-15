@@ -11,7 +11,6 @@ import type {
   CommandHandlerFor,
 } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-
 import {
   optFollow,
   optJson,
@@ -67,6 +66,7 @@ import {
   inspectCaddyCaIdentity,
 } from "../lib/caddy-ca-identity.ts";
 import { observeGlobalCaddyIp } from "../lib/caddy-hosts.ts";
+import { emitCliResult, errorResult } from "../lib/cli-result.ts";
 import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
@@ -107,6 +107,7 @@ import {
   resolveHackLocalCaCertPath,
 } from "../lib/local-ca.ts";
 import { inspectMacCaEligibility } from "../lib/mac-ca-trust.ts";
+import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
@@ -483,8 +484,12 @@ export const globalCommand = defineCommand({
   subcommands: [
     withHandler(globalInstallSpec, async ({ args }) => {
       if (args.options.json === true && args.options.plan !== true) {
-        logger.error({
-          message: "Use --json with --plan: hack global install --plan --json",
+        emitCliResult({
+          result: errorResult({
+            code: "E_USAGE",
+            message:
+              "Use --json with --plan: hack global install --plan --json",
+          }),
         });
         return 2;
       }
@@ -505,8 +510,11 @@ export const globalCommand = defineCommand({
     withHandler(globalCertSpec, handleGlobalCert),
     withHandler(globalTrustSpec, async ({ args }) => {
       if (args.options.json === true && args.options.plan !== true) {
-        logger.error({
-          message: "Use --json with --plan: hack global trust --plan --json",
+        emitCliResult({
+          result: errorResult({
+            code: "E_USAGE",
+            message: "Use --json with --plan: hack global trust --plan --json",
+          }),
         });
         return 2;
       }
@@ -2572,7 +2580,12 @@ async function globalStatusObserve(): Promise<number> {
     observeMacDns: observeMacHostDns,
     now: () => new Date(),
   });
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  emitCliResult({
+    result: machineSuccess({
+      schema: MACHINE_SCHEMAS.globalStatusObserve,
+      data: payload,
+    }),
+  });
   return 0;
 }
 
@@ -3382,11 +3395,34 @@ async function printAdminPlan(opts: {
     return 2;
   }
   const result = await opts.build();
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (result.refused !== null) {
+    emitCliResult({
+      result: errorResult({
+        code: "E_PLAN_REFUSED",
+        message: result.refused,
+        detail: { plan: result },
+      }),
+    });
     return 1;
   }
-  return result.complete ? 0 : 3;
+  if (!result.complete) {
+    emitCliResult({
+      result: errorResult({
+        code: "E_PLAN_INCOMPLETE",
+        message:
+          "Administrator plan is incomplete; inspect error.detail.plan.blocked before proceeding.",
+        detail: { plan: result },
+      }),
+    });
+    return 3;
+  }
+  emitCliResult({
+    result: machineSuccess({
+      schema: MACHINE_SCHEMAS.globalAdminPlan,
+      data: result,
+    }),
+  });
+  return 0;
 }
 
 /** Install's read-only snapshot. Never enter the mutating install handler. */

@@ -867,12 +867,14 @@ reported in the update result (`daemon.status: "failed"`) with
 version at its next `hack daemon start`.
 
 `hack daemon start|stop|restart|install --json` print one envelope and nothing
-else on stdout (human lines go to stderr). Success is
-`{"ok": true, "data": {...}}` with:
+else on stdout (human lines go to stderr). They follow the shared rule in
+[Machine-readable output](reference/machine-readable-output.md): exactly `ok`
+and `data` at the top level, with the versioned schema inside `data`. Success
+is `{"ok": true, "data": {...}}` with:
 
 | Field | Meaning |
 | --- | --- |
-| `schema` | `hack.daemon-<command>/v1` |
+| `schema` | `hack.daemon-<command>.v1` |
 | `manager` | `systemd`, `launchd` or `none` (hackd runs directly) |
 | `action` | `none`, `started`, `restarted`, `reinstalled`, `stopped` or `installed` |
 | `stale`, `stale_reasons` | whether the service or daemon was stale, and why: `content`, `program-missing`, `version-mismatch` |

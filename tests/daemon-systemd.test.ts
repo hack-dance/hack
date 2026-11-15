@@ -5613,7 +5613,7 @@ linuxTest(
       })
     ).toBe(1);
     expect(startData(foreign)).toMatchObject({
-      schema: "hack.daemon-start/v1",
+      schema: "hack.daemon-start.v1",
       manager: "systemd",
       action: "none",
       blocked: "untrusted-unit",

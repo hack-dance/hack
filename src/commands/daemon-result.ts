@@ -17,7 +17,7 @@ import {
 /**
  * Runs one `hack daemon start|stop|restart|install` step and, with
  * `--json`, prints its single envelope (HACK-2216, HACK-2238):
- * `{ok: true, data: {schema: "hack.daemon-<command>/v1", ...}}`, or on a
+ * `{ok: true, data: {schema: "hack.daemon-<command>.v1", ...}}`, or on a
  * nonzero exit `{ok: false, error: {code: "E_DAEMON_SERVICE", message,
  * detail}}` whose message is the last warning or error the step logged and
  * whose detail is the same data. Human lines go to stderr meanwhile, so

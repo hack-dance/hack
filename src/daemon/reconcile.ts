@@ -6,6 +6,8 @@
  * {@link planDaemonReconcile} and carry the plan out.
  */
 
+import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
+
 /**
  * Set to `1` by `hack update` for the new executable's
  * `hack daemon start --json`: reconcile a running hackd only. When no hackd
@@ -348,6 +350,17 @@ export function sortedStaleReasons(
 /** The `hack daemon` commands that report a `--json` result. */
 export type DaemonCommandName = "start" | "stop" | "restart" | "install";
 
+/**
+ * The versioned `data.schema` of each command's `--json` envelope, from
+ * the shared machine-output registry (docs/reference/machine-readable-output.md).
+ */
+export const DAEMON_COMMAND_SCHEMAS = {
+  start: MACHINE_SCHEMAS.daemonStart,
+  stop: MACHINE_SCHEMAS.daemonStop,
+  restart: MACHINE_SCHEMAS.daemonRestart,
+  install: MACHINE_SCHEMAS.daemonInstall,
+} as const satisfies Record<DaemonCommandName, string>;
+
 /** The daemon as observed after the command. */
 export interface DaemonObservation {
   readonly running: boolean;
@@ -357,9 +370,9 @@ export interface DaemonObservation {
 }
 
 /**
- * `data` of the `--json` envelope for `hack daemon <command>`:
- * `hack.daemon-<command>/v1`. Closed enums only; no paths and no values
- * from the environment.
+ * `data` of the `--json` envelope for `hack daemon <command>`, with the
+ * schema `hack.daemon-<command>.v1` ({@link DAEMON_COMMAND_SCHEMAS}).
+ * Closed enums only; no paths and no values from the environment.
  */
 export function buildDaemonCommandData(opts: {
   readonly command: DaemonCommandName;
@@ -384,7 +397,7 @@ export function buildDaemonCommandData(opts: {
 } {
   const reasons = sortedStaleReasons(opts.trace.stale);
   return {
-    schema: `hack.daemon-${opts.command}/v1`,
+    schema: DAEMON_COMMAND_SCHEMAS[opts.command],
     manager: opts.trace.manager,
     action: opts.trace.action,
     stale: reasons.length > 0,

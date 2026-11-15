@@ -529,7 +529,7 @@ installFlowTest(
       error: {
         code: "E_DAEMON_SERVICE",
         detail: {
-          schema: "hack.daemon-restart/v1",
+          schema: "hack.daemon-restart.v1",
           manager: "systemd",
           blocked: "untrusted-unit",
         },
@@ -575,7 +575,7 @@ installFlowTest(
     };
     expect(envelope.ok).toBe(true);
     expect(envelope.data).toMatchObject({
-      schema: "hack.daemon-start/v1",
+      schema: "hack.daemon-start.v1",
       manager: "systemd",
       action: "reinstalled",
       stale: true,
@@ -601,7 +601,7 @@ installFlowTest(
     expect(JSON.parse(stop.stdout)).toMatchObject({
       ok: true,
       data: {
-        schema: "hack.daemon-stop/v1",
+        schema: "hack.daemon-stop.v1",
         manager: "systemd",
         action: "stopped",
       },
@@ -681,7 +681,7 @@ test.skipIf(process.platform !== "linux")(
     expect(JSON.parse(stop.stdout)).toEqual({
       ok: true,
       data: {
-        schema: "hack.daemon-stop/v1",
+        schema: "hack.daemon-stop.v1",
         manager: "none",
         action: "none",
         stale: false,

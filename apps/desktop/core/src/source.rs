@@ -145,6 +145,11 @@ impl LogFeed for FixtureFeed {
 }
 
 pub trait Source: Send + Sync {
+    /// Read names-only env metadata; diagnostics must never contain CLI output.
+    fn env(&self, _root: &Path, _native: bool) -> crate::env::EnvView {
+        crate::env::EnvView::Unreadable
+    }
+
     /// Explicit user recovery only; never called by a poll.
     /// # Errors
     /// Failed or unavailable daemon command.
@@ -246,6 +251,34 @@ impl Source for LiveSource {
             .stream_logs(&args, Some(repo_root))
             .map(|s| Box::new(s) as Box<dyn LogFeed>)
             .map_err(|e| e.to_string())
+    }
+
+    fn env(&self, root: &Path, native: bool) -> crate::env::EnvView {
+        // env list walks ancestors. Refuse missing or shadowed project markers
+        // instead of attributing an ancestor's names to the selected project.
+        if !root.is_absolute() {
+            return crate::env::EnvView::Unreadable;
+        }
+        let Ok(root) = std::fs::canonicalize(root) else {
+            return crate::env::EnvView::Unreadable;
+        };
+        if !root.is_dir() || !cli_selects_exactly(&root) {
+            return crate::env::EnvView::Unreadable;
+        }
+        match self
+            .runner_for(native)
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_raw(
+                &["env", "list", "--json"],
+                Some(&root),
+                Duration::from_secs(10),
+            ) {
+            Ok((out, _, code)) if cli_selects_exactly(&root) => {
+                crate::env::EnvView::parse(&out, code)
+            }
+            Ok(_) => crate::env::EnvView::Unreadable,
+            Err(_) => crate::env::EnvView::Unreadable,
+        }
     }
 
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
@@ -544,6 +577,10 @@ impl Source for FixtureSource {
             })
             .collect();
         Ok(Box::new(FixtureFeed(events)))
+    }
+
+    fn env(&self, _root: &Path, _native: bool) -> crate::env::EnvView {
+        crate::env::fixture(self.0.name())
     }
 
     fn snapshot(&self) -> Result<Snapshot, SourceError> {

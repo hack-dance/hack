@@ -15,7 +15,7 @@ use hack_desktop_core::logs::fixtures::LogsFixture;
 
 use crate::view::HackApp;
 
-pub fn run(dir: &Path) {
+pub fn run(dir: &Path, fixture: Option<Fixture>) {
     std::fs::create_dir_all(dir).expect("create screenshot dir");
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
@@ -35,7 +35,10 @@ pub fn run(dir: &Path) {
         shots.push((l.name(), base, Some(l)));
     }
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
-        for &(name, f, logs) in &shots {
+        for &(name, f, logs) in shots
+            .iter()
+            .filter(|(_, f, logs)| fixture.is_none_or(|selected| selected == *f && logs.is_none()))
+        {
             cx.update(|cx| Theme::change(mode, None, cx));
             let opts = WindowOptions {
                 focus: false,
@@ -49,6 +52,9 @@ pub fn run(dir: &Path) {
                             let mut app =
                                 HackApp::new(crate::source_for(Some(f)), false, window, cx);
                             app.select(fixtures::selected(f));
+                            if f.name().starts_with("env-") {
+                                app.show_env_fixture();
+                            }
                             if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
                                 app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
                             }

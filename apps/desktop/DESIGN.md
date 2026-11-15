@@ -391,7 +391,7 @@ Each is small enough for one PR.
 17. **R12b** Always-on fields in project payloads and `autostart_global`.
 18. **R12c** Login run: hackd starts always-on projects at service start, retries up to `max_failures`, and honours pause.
 19. **R13** Observe-only `hack global status --json --observe` that never starts Docker; reports `host_dns_ok` on both platforms.
-20. **R14** Read-only update check for any install kind: `hack update --check --json --observe` → `{current, latest, available, install_kind, upgrade_command}`.
+20. **R14 — exists** Read-only update check for any install kind: `hack update --check --json --observe` → `{current, channel, latest, available, install_kind, upgrade_command, reason}` in the envelope with `schema: "hack.update-check.v1"` ([update check](../../docs/reference/update-check.md)). One bounded GitHub read; unknown is `null` with a closed `reason`; `install_kind` adds `candidate`; `upgrade_command` is argv or `null`.
 21. **R15** `--json` for `hack daemon start|stop|restart|install`.
 22. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
 23. **R17 — exists** `kind: safe | admin | manual` on upgrade report findings and plan steps (additive version-2 fields), independent of severity. Only explicitly allowed diagnostic/snapshot commands and fully eligible guarded apply groups are safe; host routing/login-service changes are admin; decisions and unknown actions are manual. The supplied per-checkout command can remain manual while its guarded grouped apply step is safe. Consumers must treat absent or unrecognized kinds as manual and still require an executable command before offering Run. App adoption is separate.

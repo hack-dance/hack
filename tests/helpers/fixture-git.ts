@@ -1,3 +1,5 @@
+import { spawnSyncBounded } from "./bounded-spawn-sync.ts";
+
 /**
  * The one environment every test-fixture `git` command runs with (HACK-1459).
  *
@@ -208,9 +210,13 @@ function spawnOptions(opts: FixtureGitOptions) {
   } as const;
 }
 
-/** Runs one fixture `git` command synchronously. It does not throw on failure. */
+/**
+ * Runs one fixture `git` command synchronously. It does not throw on failure,
+ * except when git does not finish within the bound (HACK-2247): then it throws
+ * naming the command.
+ */
 export function runFixtureGitSync(opts: FixtureGitOptions): FixtureGitResult {
-  const result = Bun.spawnSync(["git", ...opts.args], spawnOptions(opts));
+  const result = spawnSyncBounded(["git", ...opts.args], spawnOptions(opts));
   return {
     exitCode: result.exitCode,
     stdout: result.stdout.toString(),

@@ -673,7 +673,7 @@ function outcomeLines(
 ): string[] {
   const notes = result.notes.map((note) => `Note: ${note}`);
   if (result.targets.length === 0) {
-    return ["Nothing for hack upgrade apply to do.", ...notes];
+    return ["Nothing for upgrade apply to do.", ...notes];
   }
   const groups = new Map<string, (typeof result.targets)[number][]>();
   for (const target of result.targets) {

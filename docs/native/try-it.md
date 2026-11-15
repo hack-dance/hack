@@ -134,7 +134,8 @@ Ask Hack whether the project can run on native before you start it:
 
 `hack-next` selects the native backend by default. If the project uses a Compose
 feature that native does not support, `doctor` names it. Starting the project would
-refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and change nothing. See
+refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and change nothing. Both print the
+command that runs it on Compose instead, with the full `hack-next` path. See
 [Compose features that stay on Compose](limits.md#compose-features-that-stay-on-compose).
 
 ## 4. Run it

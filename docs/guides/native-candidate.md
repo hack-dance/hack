@@ -221,8 +221,8 @@ The runtime review half needs a native runtime, so run the preflight from the
 `hack-next` launcher for the full list. Without native selection only the CLI's
 checks run and the review is reported as `skipped`. The review needs no running
 VM. A selected runtime also receives a read-only setup inspection. Incomplete or
-unavailable setup is a `native_runtime_setup` blocker; run `hack native setup`
-before retrying. Without native selection, setup is reported as unavailable.
+unavailable setup is a `native_runtime_setup` blocker; run the `native setup`
+command its fix prints (it names the launcher you used) before retrying. Without native selection, setup is reported as unavailable.
 
 Use a matching updated CLI and runtime. A runtime without start-admission review
 is reported as `unavailable` with an update hint and cannot produce `ready: true`.

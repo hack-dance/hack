@@ -1,8 +1,8 @@
 import {
   BASIC_BUILD_NEXT_STEP,
-  COMPOSE_BACKEND_SELECTION,
   type ComposeBackendFeature,
   type ComposeBackendFeatureOptions,
+  composeBackendCommand,
   describeComposeBackendFeatures,
   ISOLATED_NETWORKS_SELECTION,
 } from "./native-compose-backend-features.ts";
@@ -66,7 +66,7 @@ export function composeBackendCheckResult(
       return {
         name: COMPOSE_BACKEND_CHECK,
         status: "warn",
-        message: `No Compose-only features found, but native image-project up refuses this project's basic Compose build while HACK_NATIVE_BUILDS is not set. ${BASIC_BUILD_NEXT_STEP}, or ${COMPOSE_BACKEND_SELECTION} to run it on the Compose backend.`,
+        message: `No Compose-only features found, but native image-project up refuses this project's basic Compose build while HACK_NATIVE_BUILDS is not set. ${BASIC_BUILD_NEXT_STEP}, or run it on the Compose backend: ${composeBackendCommand(["up"])}.`,
         composeBackend,
       };
     }
@@ -91,7 +91,7 @@ export function composeBackendCheckResult(
     return {
       name: COMPOSE_BACKEND_CHECK,
       status: "warn",
-      message: `${uses}, so native up refuses it and the project runs on the Compose backend. ${COMPOSE_BACKEND_SELECTION} to run it there.${network}${build}`,
+      message: `${uses}, so native up refuses it and the project runs on the Compose backend. To run it there: ${composeBackendCommand(["up"])}.${network}${build}`,
       composeBackend,
     };
   }

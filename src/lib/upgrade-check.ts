@@ -1,6 +1,7 @@
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { isCandidateRun } from "../daemon/client.ts";
+import { resolveCandidateLauncher } from "./candidate-launcher.ts";
 import { quoteShellWord } from "./logs.ts";
 import { withProcessDeadline } from "./process-deadline.ts";
 import {
@@ -78,28 +79,28 @@ export type UpgradeCommandPrefix = {
 
 /**
  * During the prerelease, v5 runs through a candidate launcher while stable
- * v4 stays `hack` on PATH, so a bare `hack` would run the old CLI. The
- * `hack-next` launcher lives at `~/.hack-next/bin/hack-next` (not on PATH);
- * a Compose candidate run also needs `HACK_RUNTIME_BACKEND=compose`.
+ * v4 stays `hack` on PATH, so a bare `hack` would run the old CLI. Printed
+ * commands use the launcher this run came through (see
+ * {@link resolveCandidateLauncher}): `~/.hack-next/bin/hack-next`, or the
+ * bundle's `hack-v5` by path. A Compose candidate run also needs
+ * `HACK_RUNTIME_BACKEND=compose`.
  */
 export function upgradeCommandPrefix(opts: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly homeDir: string;
+  /** The running executable (default `process.execPath`). */
+  readonly execPath?: string;
 }): UpgradeCommandPrefix {
-  const entry = (opts.env.HACK_CANDIDATE_ENTRYPOINT ?? "").trim();
-  if (entry === "") {
+  const launcher = resolveCandidateLauncher(opts);
+  if (launcher.kind === "stable") {
     return { env: {}, argv: ["hack"] };
   }
-  const launcher =
-    entry === "hack-next"
-      ? join(opts.homeDir, ".hack-next", "bin", "hack-next")
-      : entry;
   return {
     env:
       (opts.env.HACK_RUNTIME_BACKEND ?? "").trim() === "compose"
         ? { HACK_RUNTIME_BACKEND: "compose" }
         : {},
-    argv: [launcher],
+    argv: [launcher.command],
   };
 }
 

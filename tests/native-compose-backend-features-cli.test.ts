@@ -43,8 +43,10 @@ const ADMITTED_START_REQUESTS = [
   "runtime check-project-share",
   "runtime up",
 ];
-const SELECTION =
-  "this project runs on the Compose backend. Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too) and run the command again. Nothing was started or stopped.";
+/** The refusal's next step names the refused command through the launcher (`hack` here). */
+const selection = (command = "hack up") =>
+  `this project runs on the Compose backend. To run it there: HACK_RUNTIME_BACKEND=compose ${command}. Nothing was started or stopped.`;
+const SELECTION = selection();
 
 afterEach(async () => {
   for (const root of roots.splice(0)) {
@@ -219,7 +221,7 @@ async function expectComposeBackendRefusal(opts: {
   const result = await cli(f, opts.args ?? ["up"], opts.env);
   expectOneClosedLine(
     result,
-    `E_NATIVE_PROJECT_UNSUPPORTED: Native \`${opts.command ?? "hack up"}\` does not support ${opts.phrase}; ${SELECTION}${networkDetail}`
+    `E_NATIVE_PROJECT_UNSUPPORTED: Native \`${opts.command ?? "hack up"}\` does not support ${opts.phrase}; ${selection(opts.command)}${networkDetail}`
   );
   for (const secret of opts.secrets ?? []) {
     expect(result.output).not.toContain(secret);

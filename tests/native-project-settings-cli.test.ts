@@ -33,7 +33,7 @@ const SPAWN_TIMEOUT_MS = 60_000;
 const IMAGE = `sha256:${"e".repeat(64)}`;
 const PROJECT = "settings-cli-fixture";
 const SELECTION =
-  "this project runs on the Compose backend. Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too) and run the command again. Nothing was started or stopped.";
+  "this project runs on the Compose backend. To run it there: HACK_RUNTIME_BACKEND=compose hack up. Nothing was started or stopped.";
 const EXTERNAL_COMPOSE = {
   services: { web: { image: IMAGE, networks: ["shared-dev"] } },
   networks: { "shared-dev": { external: true } },

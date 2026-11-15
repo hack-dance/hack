@@ -6,6 +6,11 @@ import {
   selectNativePlatformModes,
 } from "../backends/native-project-platform.ts";
 import { readNativeSelection } from "../backends/native-project-selection.ts";
+import {
+  type CandidateLauncher,
+  currentCandidateLauncher,
+  launcherCommand,
+} from "./candidate-launcher.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "./hack-ownership-labels.ts";
@@ -582,9 +587,17 @@ export function describeComposeBackendFeatures(
   return `${phrases.slice(0, -1).join(", ")} and ${phrases.at(-1)}`;
 }
 
-/** The selection that runs this project on the Compose backend. */
-export const COMPOSE_BACKEND_SELECTION =
-  "Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too)";
+/**
+ * The command that runs `args` on the Compose backend, through the launcher
+ * the user has (`hack`, `~/.hack-next/bin/hack-next` or the bundle's
+ * `hack-v5`; HACK-2251).
+ */
+export function composeBackendCommand(
+  args: readonly string[],
+  launcher: CandidateLauncher = currentCandidateLauncher()
+): string {
+  return launcherCommand(launcher, args, { HACK_RUNTIME_BACKEND: "compose" });
+}
 
 /**
  * The documented selection that keeps a project with an external network on
@@ -615,7 +628,7 @@ export function composeBackendRefusal(
     : "";
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. ${COMPOSE_BACKEND_SELECTION} and run the command again. Nothing was started or stopped.${names}`,
+    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. To run it there: ${composeBackendCommand([opts.restart ? "restart" : "up"])}. Nothing was started or stopped.${names}`,
     detail: { backend: "compose", features: [...opts.features] },
   });
 }

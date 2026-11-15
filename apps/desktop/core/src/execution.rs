@@ -173,6 +173,21 @@ impl ExecutionContext {
         values.push(("HACK_RUNTIME_BACKEND".into(), backend.into()));
         Self::from_values(&values)
     }
+    /// The same context with `PATH` reduced to directories no other user can
+    /// change; with none left, `PATH` is omitted (the shell's default search
+    /// covers only system directories).
+    pub fn with_controlled_path(&self) -> Result<Self, String> {
+        let kept = self
+            .value("PATH")
+            .map(|p| crate::doctor_plugins::controlled_path_entries(p).join(":"))
+            .unwrap_or_default();
+        let mut values = self.entries.clone();
+        values.retain(|(key, _)| key != "PATH");
+        if !kept.is_empty() {
+            values.push(("PATH".into(), kept));
+        }
+        Self::from_values(&values)
+    }
     pub fn value(&self, key: &str) -> Option<&str> {
         self.entries
             .iter()

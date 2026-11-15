@@ -142,8 +142,10 @@ pub fn check(source: &LiveSource) -> Result<Observation, String> {
         // infer Homebrew ownership from PATH/current version. No daily poll.
         app: None,
         report: Some(report),
-        // Copied commands carry the same home, backend and guards as this read.
-        context: Some(checked.context),
+        // Copied commands carry the same home, backend and guards as this
+        // read. They run later without the private wrapper PATH, so only PATH
+        // directories no other user can change are kept.
+        context: Some(checked.context.with_controlled_path()?),
     })
 }
 pub fn snapshot(source: &LiveSource) -> Result<Snapshot, String> {

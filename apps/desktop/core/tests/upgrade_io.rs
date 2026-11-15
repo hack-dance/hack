@@ -400,6 +400,39 @@ fn upgrade_runs_keep_git_overrides_and_the_host_probe_guard() {
     let guards = std::fs::read_to_string(t.0.join("guards")).unwrap();
     assert!(guards.lines().all(|l| l.split('|').nth(3) == Some("unset")));
 }
+/// A copied fix runs later, after the private wrapper PATH is gone: a PATH
+/// directory another user can write (empty at review time, so the review
+/// itself was safe) is dropped from the copied command's PATH.
+#[test]
+fn copied_commands_keep_only_controlled_path_directories() {
+    let t = Tree::new();
+    let shared = t.0.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let bin = t.0.join("bin");
+    let path = format!("{}:{}", shared.display(), bin.display());
+    let source = LiveSource {
+        runner: t.runner(REPORT, 1).with_env("PATH", &path),
+        daemon: None,
+    };
+    let observation = source.upgrade_check().unwrap();
+    let context = observation.context.as_ref().expect("checked context");
+    assert_eq!(context.value("PATH"), bin.to_str());
+    let copied = observation
+        .copy_command(&["upgrade".into(), "snapshot".into()])
+        .expect("copied command");
+    assert!(!copied.contains(shared.to_str().unwrap()), "{copied}");
+    // With no controlled directory left, PATH is omitted entirely.
+    let source = LiveSource {
+        runner: t
+            .runner(REPORT, 1)
+            .with_env("PATH", shared.to_str().unwrap()),
+        daemon: None,
+    };
+    let observation = source.upgrade_check().unwrap();
+    assert_eq!(observation.context.as_ref().unwrap().value("PATH"), None);
+}
+
 #[test]
 fn an_unsafe_tool_on_path_fails_every_upgrade_operation_closed() {
     let t = Tree::new();

@@ -12,6 +12,9 @@ pub(crate) struct Discovery {
     pub config_dir: Option<PathBuf>,
     pub unsupported_extra_selector: bool,
     pub system_dirs: Vec<PathBuf>,
+    /// `DOCKER_HOST` and `DOCKER_CONTEXT` as the runner passes them on.
+    pub docker_host: Option<String>,
+    pub context: Option<String>,
 }
 
 impl Discovery {
@@ -26,7 +29,15 @@ impl Discovery {
                     .filter(|p| !p.is_empty())
                     .map(|p| PathBuf::from(p).join(".docker"))
             });
+        let text = |key| {
+            runner
+                .env_value(key)
+                .and_then(|v| v.into_string().ok())
+                .filter(|v| !v.is_empty())
+        };
         Self {
+            docker_host: text("DOCKER_HOST"),
+            context: text("DOCKER_CONTEXT"),
             config_dir,
             // This selector's encoding/precedence is not part of the Unix
             // configfile contract below. Do not guess or silently ignore it.
@@ -51,6 +62,69 @@ impl Discovery {
 struct PluginConfig {
     #[serde(default, rename = "cliPluginsExtraDirs")]
     extra_dirs: Option<Vec<PathBuf>>,
+    #[serde(default, rename = "currentContext")]
+    current_context: Option<String>,
+}
+
+/// Doctor's automatic `docker info` must reach only a local Unix socket: an
+/// SSH or TCP endpoint makes Docker start other programs (for example `ssh`
+/// and its configured helpers) that these checks do not inspect.
+fn local_endpoint(
+    discovery: &Discovery,
+    config: &Path,
+    configured: Option<&str>,
+) -> Result<(), &'static str> {
+    const REMOTE: &str =
+        "Docker is set to a remote endpoint; Doctor's automatic checks only use a local socket";
+    if let Some(host) = &discovery.docker_host
+        && !host.starts_with("unix://")
+    {
+        return Err(REMOTE);
+    }
+    let Some(name) = discovery
+        .context
+        .as_deref()
+        .or(configured)
+        .filter(|name| *name != "default")
+    else {
+        return Ok(());
+    };
+    #[derive(serde::Deserialize)]
+    struct Meta {
+        #[serde(rename = "Name")]
+        name: String,
+        #[serde(rename = "Endpoints", default)]
+        endpoints: std::collections::BTreeMap<String, Endpoint>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Endpoint {
+        #[serde(rename = "Host", default)]
+        host: Option<String>,
+    }
+    const UNKNOWN: &str =
+        "The selected Docker context's endpoint is unknown; Docker was not invoked";
+    let entries = std::fs::read_dir(config.join("contexts/meta")).map_err(|_| UNKNOWN)?;
+    for entry in entries.take(256) {
+        let Ok(entry) = entry else {
+            return Err(UNKNOWN);
+        };
+        let Ok(file) = std::fs::File::open(entry.path().join("meta.json")) else {
+            continue;
+        };
+        let Ok(meta) =
+            serde_json::from_reader::<_, Meta>(std::io::BufReader::new(file).take(64 * 1024))
+        else {
+            continue;
+        };
+        if meta.name == name {
+            return match meta.endpoints.get("docker").and_then(|e| e.host.as_deref()) {
+                Some(host) if host.starts_with("unix://") => Ok(()),
+                Some(_) => Err(REMOTE),
+                None => Err(UNKNOWN),
+            };
+        }
+    }
+    Err(UNKNOWN)
 }
 
 // Unlike private PATH wrappers, Docker later resolves the original names.
@@ -237,6 +311,7 @@ pub(crate) fn validate(discovery: &Discovery) -> Result<(), &'static str> {
         return Err("Docker config directory is not owner-controlled");
     }
     let parsed = config_file(&config.join("config.json"), uid)?;
+    local_endpoint(discovery, config, parsed.current_context.as_deref())?;
     let mut dirs = vec![config.join("cli-plugins")];
     dirs.extend(parsed.extra_dirs.unwrap_or_default());
     dirs.extend(discovery.system_dirs.iter().cloned());

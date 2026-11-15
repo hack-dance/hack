@@ -172,7 +172,11 @@ Ruby and Node options and paths, and every `LD_*` and `DYLD_*` loader
 variable), so a checked tool script cannot be made to load code from the
 environment; missing candidates
 require protected ancestry, and relative/unprovable selections are refused.
-Docker plugin preflight preserves HOME, DOCKER_CONFIG and DOCKER_CONTEXT. It
+Docker plugin preflight preserves HOME, DOCKER_CONFIG and DOCKER_CONTEXT. Doctor's
+automatic checks only use a local Docker socket: a non-`unix://` `DOCKER_HOST`,
+or a selected context whose endpoint is remote (for example `ssh://`) or cannot
+be found, refuses the probe, because Docker would start programs such as `ssh`
+and its configured helpers that Doctor does not inspect. It
 checks the selected config/plugin directories, configured `cliPluginsExtraDirs`,
 the four standard Unix system plugin directories and plugin executable/symlink
 targets with the same owner/mode/ancestor rule. It streams only the public extra

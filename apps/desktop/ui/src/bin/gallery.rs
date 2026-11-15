@@ -113,6 +113,22 @@ pub fn scenes() -> Vec<Scene> {
             true,
         ),
         (
+            "panel-running-max-menu",
+            Fixture::Running,
+            PanelState::Maximized,
+            &running_tabs,
+            0,
+            true,
+        ),
+        (
+            "panel-many-menu",
+            Fixture::ManyProjects,
+            PanelState::half(),
+            &running_tabs,
+            0,
+            true,
+        ),
+        (
             "panel-failed-collapsed",
             Fixture::FailedStart,
             PanelState::Collapsed,

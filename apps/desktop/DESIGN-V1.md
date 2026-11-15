@@ -166,7 +166,10 @@ Machine section at the bottom.
   has a dot (a ring while routing status is not read). Doctor has an amber
   count pill when it reports findings, a green dot when clean, a ring when
   unknown. Routing and DNS shows a solid state dot whenever its state is
-  known (from Doctor's routing checks: proxy, local CA, DNS; worst wins:
+  known (from Doctor's routing checks, listed by name in `ui/src/window.rs`:
+  caddy hosts and local CA, CoreDNS forwarding, local CA trust, native
+  hack.local / HTTPS route and owner, host DNS, root trust, CA repair, proxy
+  ports, and `dns:` / `resolver:` checks; optional tool probes excluded; worst wins:
   green ok, amber warn, red error) and a ring only when nothing has reported.
   The live app needs the core to expose this; the gallery derives it from the
   fixture's Doctor checks.
@@ -258,17 +261,27 @@ is shown exactly as printed (ANSI kept, never stripped or re-coloured).
 New-tab menu (`+`): "Shell in <service>" for each running service, a
 separator, "Host shell", "Host shell with env…" (then pick overlay and scope
 from names read with `hack env list --json`). 220 wide, `surface`,
-`border_strong` hairline, shadow, 28 pt rows, opens above the strip from the
-`+` button.
+`border_strong` hairline, shadow, 28 pt rows, at most 300 tall (longer
+service lists scroll). It opens from the `+` button toward the larger space:
+above the strip when the panel is docked, below it when maximized.
 
 Closing a tab, or the window, ends that tab's whole process session.
 
 Terminal look: the user's Ghostty config when it exists (font family and
 size, theme or palette, cursor style, padding), mapped onto the component.
-Without one, the fallback terminal theme (`TermPalette::fallback`): dark in
-both app modes, as in the approved mockup (`#1C1C1A` background, `#E8E6DC`
-text, strip `#2A2A28`, separators `#3A3A37`), 12.5 / 19 in the app's mono
-font. Prompt themes (zsh, oh-my-zsh, starship) come from the real shell in a
+Without one, the fallback terminal theme (`TermPalette::fallback`), dark in
+both app modes as in the approved mockup, 12.5 / 19 in the app's mono font:
+
+| Token | Value | | Token | Value |
+|---|---|---|---|---|
+| `bg` | `#1C1C1A` | | `green` | `#5DCAA5` |
+| `fg`, `cursor` | `#E8E6DC` | | `bright_green` | `#97C459` |
+| `dim` | `#8B8A85` | | `blue` | `#85B7EB` |
+| `strip` | `#2A2A28` | | `magenta` | `#AFA9EC` |
+| `strip_border` | `#3A3A37` | | `yellow` | `#EF9F27` |
+| `tab_fg` | `#B4B2A9` | | `red` | `#F07B7A` |
+| `badge_warn_bg` / `_fg` | `#633806` / `#FAC775` | | `cyan` | `#6CCFD9` |
+| `badge_bg` / `_fg` | `#3A3A37` / `#D3D1C7` | | | | Prompt themes (zsh, oh-my-zsh, starship) come from the real shell in a
 real PTY (`TERM`, `COLORTERM=truecolor`); tmux is not involved.
 
 Keyboard (shortcuts that would reach the shell are never taken; on Linux the
@@ -279,7 +292,7 @@ app uses Ctrl-Shift chords, as terminals do):
 | Toggle panel | ⌘J | Ctrl-Shift-J |
 | New tab (opens the menu) | ⌘T | Ctrl-Shift-T |
 | Close tab | ⌘W | Ctrl-Shift-W |
-| Next / previous tab | ⌘⇧] / ⌘⇧[ | Ctrl-PageDown / Ctrl-PageUp |
+| Next / previous tab | ⌘⇧] / ⌘⇧[ | Ctrl-Shift-PageDown / Ctrl-Shift-PageUp |
 | Maximize / restore | ⌘⇧↩ | Ctrl-Shift-Enter |
 | Find in tab | ⌘F | Ctrl-Shift-F |
 | Copy / paste | ⌘C / ⌘V | Ctrl-Shift-C / Ctrl-Shift-V |

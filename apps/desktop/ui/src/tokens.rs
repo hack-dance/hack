@@ -316,4 +316,6 @@ pub mod panel {
     /// Fallback terminal font size and line height.
     pub const FONT: Pixels = px(12.5);
     pub const LINE: Pixels = px(19.);
+    /// New-tab menu: longer service lists scroll.
+    pub const MENU_MAX_H: Pixels = px(300.);
 }

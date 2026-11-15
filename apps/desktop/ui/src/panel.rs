@@ -234,13 +234,17 @@ fn strip(v: &PanelView, ui: &Ui) -> Div {
         .child(icon(Glyph::Plus, size::ICON, t.tab_fg))
         .child(icon(Glyph::ChevronDown, px(12.), t.tab_fg))
         .when_some(v.menu.as_ref(), |d, items| {
-            d.child(
-                div()
-                    .absolute()
-                    .bottom(panel::STRIP + px(4.))
-                    .left(px(0.))
-                    .child(menu(items, ui)),
-            )
+            // Opens toward the larger space: above the strip when the panel
+            // is docked low, below it when the panel is maximized (the strip
+            // is then near the top of the window).
+            let anchor = div().absolute().left(px(0.));
+            let anchor = if v.state == PanelState::Maximized {
+                anchor.top(panel::STRIP + px(4.))
+            } else {
+                anchor.bottom(panel::STRIP + px(4.))
+            };
+            // Deferred so it paints above the terminal surface drawn after it.
+            d.child(gpui_kit::deferred(anchor.child(menu(items, ui))).with_priority(1))
         });
     let (size_glyph, find) = match v.state {
         PanelState::Collapsed => (Glyph::ChevronUp, false),
@@ -303,10 +307,13 @@ fn surface(v: &PanelView) -> Div {
     div().flex_1().min_h_0().flex().flex_col().child(body)
 }
 
-fn menu(items: &[String], ui: &Ui) -> Div {
+fn menu(items: &[String], ui: &Ui) -> gpui_kit::Stateful<Div> {
     let p = ui.p;
     let mut m = div()
+        .id("term-menu")
         .w(px(220.))
+        .max_h(panel::MENU_MAX_H)
+        .overflow_y_scroll()
         .py(space::S2)
         .rounded(radius::PANEL)
         .bg(p.surface)

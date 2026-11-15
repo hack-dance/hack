@@ -95,18 +95,46 @@ impl WindowData {
     }
 }
 
-/// Routing and DNS state from Doctor's routing checks (proxy, local CA,
-/// DNS). `None` when Doctor has not reported any: the row shows a ring.
-/// The live app needs the core to expose this (follow-up).
+/// Doctor check names that describe routing and DNS (`src/commands/doctor.ts`,
+/// `src/commands/global-mac-dns.ts`, `src/lib/proxy-loopback.ts`). Optional
+/// tool probes such as "caddy (optional)" are not routing state.
+const ROUTING_CHECKS: [&str; 11] = [
+    "caddy hosts",
+    "caddy local ca",
+    "coredns forwarding",
+    "local ca trust",
+    "native hack.local route",
+    "native https route",
+    "native https owner",
+    "native host dns",
+    "native root trust",
+    "native ca repair",
+    "proxy ports",
+];
+const ROUTING_PREFIXES: [&str; 3] = ["dns:", "resolver:", "dnsmasq.conf:"];
+
+fn is_routing_check(id: &str) -> bool {
+    let id = id.trim().to_ascii_lowercase();
+    ROUTING_CHECKS.contains(&id.as_str())
+        || id == "dnsmasq:53"
+        || ROUTING_PREFIXES.iter().any(|p| id.starts_with(p))
+}
+
+/// Routing and DNS state from Doctor's routing checks (worst wins). `None`
+/// when Doctor has reported none of them: the row shows a ring. The live app
+/// needs the core to expose this (follow-up); a structured category from
+/// Doctor would replace the name list.
 #[must_use]
 pub fn routing_status<'a>(checks: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Status> {
+    let rank = |s: Status| match s {
+        Status::Failed => 3,
+        Status::Degraded => 2,
+        Status::Unknown => 1,
+        _ => 0,
+    };
     let mut worst: Option<Status> = None;
     for (id, status) in checks {
-        let id = id.to_ascii_lowercase();
-        if !["caddy", "dns", "routing", "proxy", "tls"]
-            .iter()
-            .any(|k| id.contains(k))
-        {
+        if !is_routing_check(id) {
             continue;
         }
         let s = match status {
@@ -114,12 +142,6 @@ pub fn routing_status<'a>(checks: impl Iterator<Item = (&'a str, &'a str)>) -> O
             "warn" => Status::Degraded,
             "error" => Status::Failed,
             _ => Status::Unknown,
-        };
-        let rank = |s: Status| match s {
-            Status::Failed => 3,
-            Status::Degraded => 2,
-            Status::Unknown => 1,
-            _ => 0,
         };
         if worst.is_none_or(|w| rank(s) > rank(w)) {
             worst = Some(s);
@@ -742,15 +764,30 @@ mod tests {
     fn routing_dot_is_known_only_from_routing_checks() {
         assert_eq!(routing_status([("docker daemon", "ok")].into_iter()), None);
         assert_eq!(
-            routing_status([("caddy local ca", "warn"), ("dns", "ok")].into_iter()),
+            routing_status([("caddy (optional)", "warn")].into_iter()),
+            None,
+            "optional tool probes are not routing state"
+        );
+        assert_eq!(
+            routing_status([("caddy local ca", "warn"), ("dns:hack", "ok")].into_iter()),
             Some(Status::Degraded)
         );
         assert_eq!(
-            routing_status([("dns", "ok")].into_iter()),
+            routing_status([("dns:hack", "ok")].into_iter()),
             Some(Status::Running)
         );
         assert_eq!(
-            routing_status([("dns", "ok"), ("caddy proxy", "error")].into_iter()),
+            routing_status([("dns:hack", "ok"), ("local ca trust", "error")].into_iter()),
+            Some(Status::Failed)
+        );
+        assert_eq!(
+            routing_status(
+                [("resolver:hack", "ok"), ("native hack.local route", "warn")].into_iter()
+            ),
+            Some(Status::Degraded)
+        );
+        assert_eq!(
+            routing_status([("proxy ports", "error"), ("coredns forwarding", "ok")].into_iter()),
             Some(Status::Failed)
         );
     }

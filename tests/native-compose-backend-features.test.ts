@@ -291,7 +291,7 @@ test("the refusal is one coded line with closed detail and no values", async () 
   const error = await expectCodedRefusal(
     refuseNativeComposeBackendFeatures({ composeFile: file, restart: false }),
     "E_NATIVE_PROJECT_UNSUPPORTED",
-    "Native `hack up` does not support an external Compose network and a service platform other than linux/arm64; this project runs on the Compose backend. Set HACK_RUNTIME_BACKEND=compose"
+    "Native `hack up` does not support an external Compose network and a service platform other than linux/arm64; this project runs on the Compose backend. To run it there: HACK_RUNTIME_BACKEND=compose hack up."
   );
   expect(error.message).not.toContain("\n");
   expect(error.message).toContain("Foreign external networks: private-net.");

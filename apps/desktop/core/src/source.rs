@@ -268,8 +268,9 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
 /// pass the same ownership and write rules as the script (recursively, for
 /// interpreters that are scripts themselves). `#!/usr/bin/env name` is safe
 /// once env is trusted: Doctor children see only the private wrapper PATH.
-/// A file this user cannot read cannot be interpreted, so it is treated as a
-/// binary; any other read failure or unparsable line refuses the tool.
+/// A file this user cannot read is refused: the kernel still follows the `#!`
+/// line of an execute-only script, so its interpreter could not be checked.
+/// Any other read failure or unparsable line refuses the tool too.
 /// `wrapper_path`: the program's children see only Doctor's private wrapper
 /// PATH, so `#!/usr/bin/env <name>` resolves to a checked tool. Callers whose
 /// children use an ordinary PATH must pass false, which refuses the env form.
@@ -278,7 +279,7 @@ pub(crate) fn trusted_interpreter(real: &Path, uid: u32, depth: u8, wrapper_path
     use std::os::unix::ffi::OsStrExt;
     let mut file = match std::fs::File::open(real) {
         Ok(file) => file,
-        Err(e) => return e.kind() == std::io::ErrorKind::PermissionDenied,
+        Err(_) => return false,
     };
     let mut head = [0_u8; 512];
     let Ok(read) = file.read(&mut head) else {
@@ -2088,6 +2089,17 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             let tools = trusted_probe_path(bin.as_os_str()).unwrap();
             assert_eq!(tools.dir.join("docker").exists(), trusted, "{shebang}");
             assert_eq!(tools.unchecked.contains("docker"), !trusted);
+        }
+        // An execute-only script cannot be read here, yet the kernel would
+        // still follow its #! line: it is refused, never assumed a binary.
+        // SAFETY: getuid has no preconditions and cannot fail.
+        if unsafe { libc::getuid() } != 0 {
+            write(&docker, Path::new("/bin/sh"));
+            std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o111)).unwrap();
+            let tools = trusted_probe_path(bin.as_os_str()).unwrap();
+            assert!(!tools.dir.join("docker").exists());
+            assert!(tools.unchecked.contains("docker"));
+            std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let _ = std::fs::remove_dir_all(root);
     }

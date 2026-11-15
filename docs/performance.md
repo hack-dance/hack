@@ -47,6 +47,7 @@ container command arguments are not fetched for listing.
 hack host ps --json
 hack usage --project my-project --details --json
 hack usage --project my-project --details --watch
+hack usage --json --by-service --path /path/to/my-project
 ```
 
 Host tracking, timeout and persistence semantics are described in [env.md](env.md).
@@ -57,6 +58,9 @@ and synthetic lifecycle entries. Verified tracked host command trees also appear
 in host usage groups. The project filter also scopes these command groups and
 their totals, including branch instances. Shared host infrastructure remains
 visible; reporting does not transfer ownership of other processes.
+`usage --json --by-service` reports one project's running Compose services, each
+summed over its containers, in the standard envelope; see
+[Usage by service](reference/usage-by-service.md).
 
 For a deeper, explicit read-only probe from this checkout:
 

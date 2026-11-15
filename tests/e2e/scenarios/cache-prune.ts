@@ -167,6 +167,10 @@ function renderCacheCompose(opts: { readonly name: string }): string {
     "  web:",
     "    image: oven/bun:1",
     "    command: bun -e 'setInterval(() => {}, 60000)'",
+    // An absent State.Health must not make the runtime inspect template lose
+    // mount/ownership evidence required by the cache-pruning assertions.
+    "    healthcheck:",
+    "      disable: true",
     "    volumes:",
     `      - ${DISPOSABLE_VOLUME}:/app/.turbo`,
     `      - ${DURABLE_VOLUME}:/app/data`,

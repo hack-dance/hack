@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import {
   existsSync,
   mkdtempSync,
@@ -18,6 +18,9 @@ import {
 
 const roots: string[] = [];
 afterEach(() => {
+  // A test that fails or times out before its own finally must not leave
+  // fetch spied for the next one (HACK-2250).
+  mock.restore();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -212,11 +215,21 @@ class FixtureClock {
   now = 0;
   private readonly jobs: {
     due: number;
+    delay: number;
     callback: () => void;
     active: boolean;
   }[] = [];
+  /** Whether a timer of exactly this delay is armed and has not fired. */
+  isArmed(milliseconds: number) {
+    return this.jobs.some((job) => job.active && job.delay === milliseconds);
+  }
   schedule = (callback: () => void, milliseconds: number) => {
-    const job = { due: this.now + milliseconds, callback, active: true };
+    const job = {
+      due: this.now + milliseconds,
+      delay: milliseconds,
+      callback,
+      active: true,
+    };
     this.jobs.push(job);
     return () => {
       job.active = false;
@@ -241,6 +254,47 @@ class FixtureClock {
 const drain = async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
+/** Real-time bound for a fixture step; well under Bun's 5 s default test timeout. */
+const STEP_BOUND_MS = 2000;
+/**
+ * Drains until `ready` holds, bounded in real time. One drain is not enough
+ * when the code under test does real I/O first (the download opens its target
+ * file before it reads), and advancing the fixture clock before a timer is
+ * armed leaves that timer unfired for good (HACK-2250).
+ */
+async function until(ready: () => boolean, what: string): Promise<void> {
+  const deadline = performance.now() + STEP_BOUND_MS;
+  while (!ready()) {
+    if (performance.now() >= deadline) {
+      throw new Error(
+        `Fixture step did not happen within ${STEP_BOUND_MS} ms: ${what}.`
+      );
+    }
+    await drain();
+  }
+}
+/** Awaits `promise`, failing with `what` after the step bound instead of hanging. */
+async function within<T>(promise: Promise<T>, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Fixture step did not happen within ${STEP_BOUND_MS} ms: ${what}.`
+              )
+            ),
+          STEP_BOUND_MS
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 for (const scenario of ["progress", "stall", "total"] as const) {
   test(`HTTP transfer budget deterministically distinguishes ${scenario}`, async () => {
@@ -252,11 +306,24 @@ for (const scenario of ["progress", "stall", "total"] as const) {
       schedule: clock.schedule,
     });
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-    const stream = new ReadableStream<Uint8Array>({
-      start(value) {
-        controller = value;
+    // With no prefetch (highWaterMark 0), pull runs only while the download
+    // has a read pending: the handshake each clock tick waits for (HACK-2250).
+    let readPending = false;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        start(value) {
+          controller = value;
+        },
+        pull() {
+          readPending = true;
+        },
       },
-    });
+      { highWaterMark: 0 }
+    );
+    const nextRead = async () => {
+      await until(() => readPending, "download read pending");
+      readPending = false;
+    };
     const mock = spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(stream)
     );
@@ -272,22 +339,25 @@ for (const scenario of ["progress", "stall", "total"] as const) {
         () => ({ ok: true, error: "" }),
         (error) => ({ ok: false, error: String(error) })
       );
-      await drain();
+      // Each tick waits until the download is reading: it opens and writes
+      // its file with real I/O, and a tick before the read is a false stall.
       if (scenario === "stall") {
+        await nextRead();
         clock.advance(31);
       } else {
         for (let i = 0; i < (scenario === "progress" ? 3 : 4); i++) {
+          await nextRead();
           clock.advance(20);
           controller?.enqueue(Uint8Array.of(65));
-          await drain();
         }
+        await nextRead();
         if (scenario === "progress") {
           controller?.close();
         } else {
           clock.advance(21);
         }
       }
-      const result = await settled;
+      const result = await within(settled, "download settled");
       expect(result.ok).toBe(scenario === "progress");
       if (scenario !== "progress") {
         expect(result.error).toContain(
@@ -381,22 +451,30 @@ for (const scenario of [
     });
     let cancellations = 0;
     let rejectLate: ((reason: unknown) => void) | undefined;
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        if (scenario === "read-error" || scenario === "cleanup-rejection") {
-          controller.enqueue(Uint8Array.of(1, 2));
-        }
+    // With no prefetch, pull runs only while the download has a read pending.
+    let readPending = false;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        start(controller) {
+          if (scenario === "read-error" || scenario === "cleanup-rejection") {
+            controller.enqueue(Uint8Array.of(1, 2));
+          }
+        },
+        pull() {
+          readPending = true;
+        },
+        cancel() {
+          cancellations++;
+          if (scenario === "cleanup-rejection") {
+            return Promise.reject(new Error("fixture cancellation rejection"));
+          }
+          return new Promise<void>((_resolve, reject) => {
+            rejectLate = reject;
+          });
+        },
       },
-      cancel() {
-        cancellations++;
-        if (scenario === "cleanup-rejection") {
-          return Promise.reject(new Error("fixture cancellation rejection"));
-        }
-        return new Promise<void>((_resolve, reject) => {
-          rejectLate = reject;
-        });
-      },
-    });
+      { highWaterMark: 0 }
+    );
     const response =
       scenario === "redirect"
         ? new Response(stream, {
@@ -415,15 +493,19 @@ for (const scenario of [
         () => ({ error: undefined as unknown }),
         (error) => ({ error })
       );
-      await drain();
       if (scenario === "stalled-read") {
+        // The read must be pending before the inactivity budget expires: the
+        // download opens its target (real I/O) first.
+        await until(() => readPending, "download read pending");
         clock.advance(31);
-        await drain();
       }
       if (scenario !== "cleanup-rejection") {
+        // Advance only once the 5 ms cleanup grace is armed; earlier, the
+        // advance fires nothing and the grace never expires.
+        await until(() => clock.isArmed(5), "cleanup grace armed");
         clock.advance(5);
       }
-      const { error } = await settled;
+      const { error } = await within(settled, "download settled");
       expect(error).toBeInstanceOf(TransferCleanupUncertain);
       expect(String(error)).toContain("settlement is uncertain");
       expect(cancellations).toBe(1);
@@ -597,14 +679,10 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
       if (scenario === "stall" || scenario === "cleanup") {
         // With no stream prefetch, the next pull proves the archive write was
         // awaited. Fetch starting alone does not prove even open() has finished.
-        for (
-          let spin = 0;
-          spin < 100 &&
-          (scenario === "cleanup" ? !archiveReadPending : calls < 2);
-          spin++
-        ) {
-          await drain();
-        }
+        await until(
+          () => (scenario === "cleanup" ? archiveReadPending : calls >= 2),
+          scenario === "cleanup" ? "archive read pending" : "second fetch"
+        );
         expect(calls).toBe(scenario === "stall" ? 2 : 5);
         if (scenario === "cleanup") {
           expect(archiveReadPending).toBe(true);
@@ -615,14 +693,12 @@ for (const scenario of ["success", "total", "stall", "cleanup"] as const) {
         clock.advance(31);
         await drain();
         if (scenario === "cleanup") {
-          for (let spin = 0; spin < 100 && cancellations === 0; spin++) {
-            await drain();
-          }
+          await until(() => cancellations > 0, "archive cancellation");
           expect(cancellations).toBe(1);
           clock.advance(5);
         }
       }
-      const result = await settled;
+      const result = await within(settled, "download settled");
       expect(new Set(signals).size).toBe(1);
       if (scenario === "success") {
         expect(result.error).toBeUndefined();

@@ -259,3 +259,25 @@ fn system_launcher_drains_launcher_output_and_passes_only_listed_environment() {
     }
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "unset");
 }
+
+#[test]
+fn script_temp_root_writable_by_others_is_refused() {
+    let tree = Tree::new();
+    let spec = CommandSpec {
+        program: "/usr/bin/true".into(),
+        args: vec![],
+    };
+    let shared = tree.0.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    // Writable by others without the sticky bit: the private script directory
+    // could be renamed away and replaced before the terminal reads it.
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(Script::create(&shared, &spec).is_err());
+    assert_eq!(
+        std::fs::read_dir(&shared).unwrap().count(),
+        0,
+        "nothing created"
+    );
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(Script::create(&shared, &spec).is_ok());
+}

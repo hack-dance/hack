@@ -232,7 +232,9 @@ argument, prints the command and waits for Enter. Afterward it shows the exit co
 and waits for Enter to close, preserving output and the command’s exit code. macOS requests a new Terminal
 window through `open -g -a Terminal`; Linux uses `xdg-terminal-exec` when available,
 otherwise Copy. The adapter must pass the same ownership, write and `#!` rules
-as the CLI before it runs. No existing pane is typed into and no password is requested by
+as the CLI before it runs. The script's temporary directory must not be changeable by
+another user (owned by this user, or by root and sticky like `/tmp`, with the
+same rule for every directory above it); otherwise the hand-off is refused. No existing pane is typed into and no password is requested by
 the app. The script removes itself and its private directory after use or
 cancellation; a terminal that never executes the script may leave that private
 temp directory behind. Launching a terminal never proves a fix succeeded.

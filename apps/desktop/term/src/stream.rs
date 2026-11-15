@@ -1,21 +1,71 @@
 //! Read-only byte sources for the terminal surface: a file or a process.
 //!
-//! A process source runs in its own process group with stdin closed and
-//! stdout and stderr merged into one pipe, in the order the process wrote
-//! them. Dropping the [`ByteStream`] signals the group (SIGTERM, then
-//! SIGKILL after [`crate::pty::TERMINATE_GRACE`]) and reaps the child on a
-//! background thread; it never blocks the caller.
+//! A process source runs in its own session (`setsid`, no controlling
+//! terminal) with stdin closed and stdout and stderr merged into one pipe,
+//! in the order the process wrote them. It is owned the same way a PTY
+//! child is ([`crate::session`]): dropping the [`ByteStream`] sends SIGTERM
+//! and SIGCONT to the session, then SIGKILL after
+//! [`crate::pty::TERMINATE_GRACE`], and reaps on a background thread.
+//!
+//! Bytes go through a queue bounded at [`STREAM_QUEUE_BYTES`]. When the
+//! consumer stalls, the reader stops reading and the process blocks on its
+//! pipe. Dropping the stream cancels the reader.
 //!
 //! Bytes are passed through as printed. Nothing here logs them.
 
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use crate::fdio::{self, Cancel, CancelWatch, Wait};
+use crate::pty::TERMINATE_GRACE;
+use crate::queue::ByteQueue;
+use crate::session::{LastResort, OwnedSession, SYNC_DEADLINE, ThreadSpawner};
+
+/// Most stream bytes held in memory before the reader stops reading.
+pub const STREAM_QUEUE_BYTES: usize = 1 << 20;
+
+/// A program to run as a byte source.
+///
+/// `env` entries are added to the inherited environment, or to an empty one
+/// when `env_clear` is set. Values are never logged.
+#[derive(Clone, Debug)]
+pub struct ProcessSpec {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    pub cwd: Option<PathBuf>,
+    pub env: Vec<(OsString, OsString)>,
+    pub env_clear: bool,
+}
+
+impl ProcessSpec {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            env_clear: false,
+        }
+    }
+
+    pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+}
 
 /// Where the bytes come from.
 #[derive(Clone, Debug)]
@@ -23,83 +73,109 @@ pub enum StreamSource {
     /// Read the file to its end.
     File(PathBuf),
     /// Run a program and read its merged stdout/stderr until it closes them.
-    Process {
-        program: PathBuf,
-        args: Vec<OsString>,
-        cwd: Option<PathBuf>,
-    },
+    Process(ProcessSpec),
 }
 
-/// One item from a stream.
+/// Why opening a stream failed, with the child's pid when one had started.
 #[derive(Debug)]
-pub enum StreamEvent {
-    Data(Vec<u8>),
-    /// The source finished (EOF) or failed to read.
-    End(Result<(), String>),
+pub(crate) struct OpenFailure {
+    pub error: io::Error,
+    #[cfg_attr(not(test), allow(dead_code, reason = "read by tests"))]
+    pub leader: Option<libc::pid_t>,
 }
 
 /// A running byte source. Poll it with [`ByteStream::drain`].
 #[derive(Debug)]
 pub struct ByteStream {
-    rx: Receiver<StreamEvent>,
-    child: Option<Child>,
+    queue: Arc<ByteQueue>,
+    session: Option<OwnedSession>,
+    cancel: Option<Cancel>,
+    threads: Vec<JoinHandle<()>>,
+    spawner: ThreadSpawner,
     ended: bool,
 }
 
 impl ByteStream {
     pub fn open(source: &StreamSource) -> io::Result<Self> {
-        let (reader, child): (Box<dyn Read + Send>, Option<Child>) = match source {
-            StreamSource::File(path) => (Box::new(File::open(path)?), None),
-            StreamSource::Process { program, args, cwd } => {
-                let (r, w) = io::pipe()?;
-                let mut cmd = Command::new(program);
-                cmd.args(args)
-                    .stdin(Stdio::null())
-                    .stdout(w.try_clone()?)
-                    .stderr(w)
-                    .process_group(0);
-                if let Some(cwd) = cwd {
-                    cmd.current_dir(cwd);
-                }
-                let child = cmd.spawn()?;
-                // `cmd` holds the parent's copies of the write end; drop them
-                // so EOF arrives when the child closes its side.
-                drop(cmd);
-                (Box::new(r), Some(child))
-            }
-        };
-        let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("hack-term-stream-read".into())
-            .spawn(move || read_into(reader, &tx))?;
-        Ok(Self {
-            rx,
-            child,
-            ended: false,
-        })
+        Self::open_with(source, ThreadSpawner::os()).map_err(|f| f.error)
     }
 
-    /// Everything received so far, without blocking. `max_bytes` bounds one
-    /// drain so a fast producer cannot starve the UI thread; the rest stays
-    /// queued for the next call.
-    pub fn drain(&mut self, max_bytes: usize) -> (Vec<u8>, Option<Result<(), String>>) {
-        let mut out = Vec::new();
-        let mut end = None;
-        while out.len() < max_bytes && !self.ended {
-            match self.rx.try_recv() {
-                Ok(StreamEvent::Data(d)) => out.extend_from_slice(&d),
-                Ok(StreamEvent::End(r)) => {
-                    self.ended = true;
-                    end = Some(r);
+    pub(crate) fn open_with(
+        source: &StreamSource,
+        spawner: ThreadSpawner,
+    ) -> Result<Self, OpenFailure> {
+        let early = |error| OpenFailure {
+            error,
+            leader: None,
+        };
+        let (cancel, watch) = fdio::cancel_pair().map_err(early)?;
+        let (reader, session): (File, Option<OwnedSession>) = match source {
+            StreamSource::File(path) => (File::open(path).map_err(early)?, None),
+            StreamSource::Process(spec) => {
+                let (r, w) = io::pipe().map_err(early)?;
+                let mut cmd = Command::new(&spec.program);
+                cmd.args(&spec.args)
+                    .stdin(Stdio::null())
+                    .stdout(w.try_clone().map_err(early)?)
+                    .stderr(w);
+                if let Some(cwd) = &spec.cwd {
+                    cmd.current_dir(cwd);
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.ended = true;
-                    end = Some(Ok(()));
+                if spec.env_clear {
+                    cmd.env_clear();
                 }
+                for (k, v) in &spec.env {
+                    cmd.env(k, v);
+                }
+                // SAFETY: only async-signal-safe calls run between fork and exec.
+                unsafe {
+                    cmd.pre_exec(|| {
+                        if libc::setsid() == -1 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        fdio::mark_inherited_fds_cloexec();
+                        Ok(())
+                    });
+                }
+                let child = cmd.spawn().map_err(early)?;
+                // `cmd` holds the parent's copies of the write end; drop them
+                // so end of file arrives when the session closes its side.
+                drop(cmd);
+                // From here the child is owned: an early return ends and reaps it.
+                let session = OwnedSession::new(child).map_err(early)?;
+                (File::from(OwnedFd::from(r)), Some(session))
+            }
+        };
+        let leader = session.as_ref().map(OwnedSession::leader);
+        let mut stream = Self {
+            queue: ByteQueue::new(STREAM_QUEUE_BYTES),
+            session,
+            cancel: Some(cancel),
+            threads: Vec::new(),
+            spawner,
+            ended: false,
+        };
+        let queue = stream.queue.clone();
+        let job = Box::new(move || read_loop(reader, &watch, &queue));
+        match stream.spawner.spawn("hack-term-stream-read", job) {
+            Ok(handle) => stream.threads.push(handle),
+            Err(error) => {
+                stream.abort();
+                return Err(OpenFailure { error, leader });
             }
         }
-        (out, end)
+        Ok(stream)
+    }
+
+    /// Everything received so far, without blocking: whole chunks until at
+    /// least `max_bytes`. The second value is set once, at the end.
+    pub fn drain(&mut self, max_bytes: usize) -> (Vec<u8>, Option<Result<(), String>>) {
+        if self.ended {
+            return (Vec::new(), None);
+        }
+        let d = self.queue.drain(max_bytes);
+        self.ended = d.end.is_some();
+        (d.bytes, d.end)
     }
 
     /// Block until `n` bytes or the end arrive, or `deadline` passes. For tests.
@@ -107,70 +183,92 @@ impl ByteStream {
         let start = Instant::now();
         let mut out = Vec::new();
         while out.len() < n && !self.ended && start.elapsed() < deadline {
-            let left = deadline.saturating_sub(start.elapsed());
-            match self.rx.recv_timeout(left) {
-                Ok(StreamEvent::Data(d)) => out.extend_from_slice(&d),
-                Ok(StreamEvent::End(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.ended = true;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-            }
+            self.queue.wait(deadline.saturating_sub(start.elapsed()));
+            out.extend_from_slice(&self.drain(n - out.len()).0);
         }
         out
     }
 
-    /// The process group id of a process source.
+    /// Whether the end of the source has been drained.
+    pub fn is_ended(&self) -> bool {
+        self.ended
+    }
+
+    /// Bytes read from the source and not yet drained.
+    pub fn pending_bytes(&self) -> usize {
+        self.queue.pending_bytes()
+    }
+
+    /// The most bytes ever pending at once.
+    pub fn high_water_bytes(&self) -> usize {
+        self.queue.high_water()
+    }
+
+    /// The session (and process group) id of a process source.
     pub fn pid(&self) -> Option<u32> {
-        self.child.as_ref().map(Child::id)
+        self.session.as_ref().map(|s| s.leader().unsigned_abs())
+    }
+
+    fn stop_io(&mut self) -> Vec<JoinHandle<()>> {
+        self.queue.close();
+        self.cancel.take();
+        std::mem::take(&mut self.threads)
+    }
+
+    /// Kill the process now and reap it, on this thread.
+    fn abort(mut self) {
+        let threads = self.stop_io();
+        if let Some(session) = self.session.take() {
+            session.retire(
+                Duration::ZERO,
+                SYNC_DEADLINE,
+                move || join_all(threads),
+                LastResort::GiveUp,
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_spawner(&mut self, spawner: ThreadSpawner) {
+        self.spawner = spawner;
     }
 }
 
 impl Drop for ByteStream {
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
+        let threads = self.stop_io();
+        let Some(session) = self.session.take() else {
             return;
         };
-        let Ok(pgid) = libc::pid_t::try_from(child.id()) else {
-            return;
-        };
-        // SAFETY: signalling our own child's process group.
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-            libc::kill(-pgid, libc::SIGCONT);
-        }
-        let _ = std::thread::Builder::new()
-            .name("hack-term-stream-reaper".into())
-            .spawn(move || {
-                let start = Instant::now();
-                let mut killed = false;
-                loop {
-                    let group_alive = unsafe { libc::kill(-pgid, 0) } == 0;
-                    let reaped = matches!(child.try_wait(), Ok(Some(_)) | Err(_));
-                    if reaped && !group_alive {
-                        return;
-                    }
-                    if !killed && start.elapsed() >= crate::pty::TERMINATE_GRACE {
-                        unsafe {
-                            libc::kill(-pgid, libc::SIGKILL);
-                        }
-                        killed = true;
-                    }
-                    if start.elapsed() >= Duration::from_secs(10) {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            });
+        session.signal(libc::SIGTERM);
+        session.signal(libc::SIGCONT);
+        session.retire_in_background(
+            &self.spawner,
+            TERMINATE_GRACE,
+            Box::new(move || join_all(threads)),
+        );
     }
 }
 
-fn read_into(mut reader: Box<dyn Read + Send>, tx: &mpsc::Sender<StreamEvent>) {
+fn join_all(threads: Vec<JoinHandle<()>>) {
+    for t in threads {
+        let _ = t.join();
+    }
+}
+
+fn read_loop(mut reader: File, cancel: &CancelWatch, queue: &ByteQueue) {
     let mut buf = vec![0u8; 64 * 1024];
     let end = loop {
+        match fdio::wait_fd(reader.as_raw_fd(), libc::POLLIN, cancel, -1) {
+            Ok(Wait::Cancelled) => return,
+            Ok(Wait::Ready | Wait::TimedOut) => {}
+            Err(e) => break Err(e.kind().to_string()),
+        }
         match reader.read(&mut buf) {
             Ok(0) => break Ok(()),
             Ok(n) => {
-                if tx.send(StreamEvent::Data(buf[..n].to_vec())).is_err() {
+                // Blocks while the queue is full; false once the consumer left.
+                if !queue.push(buf[..n].to_vec()) {
                     return;
                 }
             }
@@ -178,5 +276,62 @@ fn read_into(mut reader: Box<dyn Read + Send>, tx: &mpsc::Sender<StreamEvent>) {
             Err(e) => break Err(e.kind().to_string()),
         }
     };
-    let _ = tx.send(StreamEvent::End(end));
+    queue.finish(end);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{is_alive, members};
+    use crate::testutil::{DEADLINE, Recorded, TempHome, assert_no_trace, tagged, wait_gone};
+
+    fn sh_source(script: &str, home: &TempHome) -> StreamSource {
+        StreamSource::Process(ProcessSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: Some(home.path().to_owned()),
+            env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("HOME".into(), home.path().into()),
+            ],
+            env_clear: true,
+        })
+    }
+
+    #[test]
+    fn a_reader_spawn_failure_leaves_no_child_and_no_zombie() {
+        let home = TempHome::new();
+        let failure = ByteStream::open_with(
+            &sh_source("exec sleep 300", &home),
+            ThreadSpawner::failing_after(0),
+        )
+        .expect_err("open must fail");
+        let leader = failure.leader.expect("the child had started");
+        assert!(failure.error.to_string().contains("injected"));
+        assert_no_trace(leader, "reader spawn failure");
+    }
+
+    #[test]
+    fn a_reaper_spawn_failure_still_ends_and_reaps_the_process() {
+        let home = TempHome::new();
+        let mut stream =
+            ByteStream::open(&sh_source("sleep 300 & echo \"kid=$!\"; wait", &home)).expect("open");
+        let leader = libc::pid_t::try_from(stream.pid().unwrap()).unwrap();
+        let mut rec = Recorded::session(leader.unsigned_abs());
+        let mut out = String::new();
+        let start = Instant::now();
+        while !out.contains("kid=") && start.elapsed() < DEADLINE {
+            out.push_str(&String::from_utf8_lossy(
+                &stream.read_blocking(1, Duration::from_millis(200)),
+            ));
+        }
+        let kid = tagged(&out, "kid").expect("kid");
+        assert!(is_alive(kid) && is_alive(leader));
+        stream.set_spawner(ThreadSpawner::failing_after(0));
+        drop(stream);
+        assert!(members(leader).is_empty());
+        assert_no_trace(leader, "the leader was not reaped");
+        assert!(wait_gone(&[kid]).is_empty());
+        rec.done();
+    }
 }

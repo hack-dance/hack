@@ -2,11 +2,15 @@
 //! shaped text, so it composes like any other element (clipping, z-order,
 //! focus, overlays such as the search bar drawn above it).
 //!
-//! A [`TerminalView`] is fed by either a read-only [`ByteStream`] (logs) or
-//! an app-owned [`Pty`] (an interactive shell or `hack exec`). Dropping the
-//! view drops its backend, which ends the stream's process group or the
-//! PTY's session; [`TerminalView::new_pty`] also ends the session before the
-//! app quits.
+//! A [`TerminalView`] wraps a [`TerminalCore`]: a read-only stream (logs) or
+//! an app-owned PTY (an interactive shell or `hack exec`). Dropping the view
+//! drops the core, which ends the stream's or the PTY's session. On app quit
+//! the PTY session is ended on the background executor, with a grace short
+//! enough to finish inside GPUI's shutdown window.
+//!
+//! Nothing here blocks the UI thread on the child: output arrives through a
+//! bounded queue, input is queued for a writer thread, and input that cannot
+//! be queued is dropped whole and shown as a notice.
 //!
 //! Keys (PTY): typed text and keys are encoded by libghostty for the
 //! program's modes. Copy: Cmd-C (macOS) or Ctrl-Shift-C. Paste: Cmd-V or
@@ -14,7 +18,6 @@
 //! newer, Escape closes. Stream views also scroll with PageUp/PageDown,
 //! Home/End, and toggle follow with `f`.
 
-use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use gpui_kit::component::ActiveTheme as _;
@@ -26,27 +29,15 @@ use gpui_kit::{
     canvas, div, fill, point, px, size,
 };
 
-use crate::emulator::{Emulator, EmulatorOptions, Frame, KeyInput, Rgb, SearchState, TermTheme};
-use crate::pty::{self, Pty, PtyOptions, PtySize};
-use crate::stream::{ByteStream, StreamSource};
+use crate::emulator::{Emulator, Frame, KeyInput, Rgb, SearchState, TermTheme};
+use crate::pty::{PtyOptions, QUIT_GRACE};
+use crate::stream::StreamSource;
+pub use crate::terminal::Status;
+use crate::terminal::TerminalCore;
 
-/// Most bytes fed per tick, so a flood cannot starve input or painting.
-const MAX_BYTES_PER_TICK: usize = 1 << 20;
 const PAD: f32 = 8.0;
-
-enum Backend {
-    Stream(ByteStream),
-    Pty { pty: Pty, rx: Receiver<Vec<u8>> },
-    Closed,
-}
-
-/// Where the view's status line comes from.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Status {
-    #[default]
-    Running,
-    Ended(String),
-}
+/// GPUI gives quit handlers 200 ms in total.
+const QUIT_DEADLINE: Duration = Duration::from_millis(180);
 
 /// Font settings. Defaults to the theme's monospace family.
 #[derive(Clone, Debug)]
@@ -67,8 +58,7 @@ impl Default for TermFont {
 }
 
 pub struct TerminalView {
-    emu: Emulator,
-    backend: Backend,
+    core: TerminalCore,
     focus: FocusHandle,
     font: TermFont,
     /// Cell size and canvas origin from the last layout.
@@ -76,12 +66,10 @@ pub struct TerminalView {
     origin: gpui_kit::Point<Pixels>,
     selecting: bool,
     scroll_carry: f32,
-    status: Status,
     search_open: bool,
     query: String,
     search: SearchState,
     applied_theme: Option<TermTheme>,
-    read_only: bool,
 }
 
 impl TerminalView {
@@ -91,46 +79,32 @@ impl TerminalView {
         scrollback_lines: usize,
         cx: &mut Context<Self>,
     ) -> std::io::Result<Self> {
-        let stream = ByteStream::open(source)?;
-        let emu = Emulator::new(EmulatorOptions {
-            scrollback_lines,
-            newline_is_crlf: true,
-            ..EmulatorOptions::default()
-        })
-        .map_err(std::io::Error::other)?;
-        Ok(Self::with_backend(emu, Backend::Stream(stream), true, cx))
+        Ok(Self::with_core(
+            TerminalCore::stream(source, scrollback_lines)?,
+            cx,
+        ))
     }
 
     /// An interactive view over a program on an app-owned PTY.
     pub fn new_pty(opts: &PtyOptions, cx: &mut Context<Self>) -> std::io::Result<Self> {
-        let pty = Pty::spawn(opts)?;
-        let (tx, rx) = mpsc::channel();
-        pty::spawn_reader(pty.reader()?, move |b| tx.send(b).is_ok())?;
-        let emu = Emulator::new(EmulatorOptions {
-            cols: opts.size.cols,
-            rows: opts.size.rows,
-            ..EmulatorOptions::default()
-        })
-        .map_err(std::io::Error::other)?;
+        let core = TerminalCore::pty(opts)?;
         // End the session before the process exits; Drop alone may not run
-        // when the app quits.
-        cx.on_app_quit(|this, _| {
-            if let Backend::Pty { pty, .. } = std::mem::replace(&mut this.backend, Backend::Closed)
-            {
-                pty.terminate_blocking(Duration::from_secs(2));
-            }
-            async {}
+        // when the app quits. The signalling and the wait run on the
+        // background executor, never on the UI thread.
+        cx.on_app_quit(|this, cx| {
+            let pty = this.core.take_pty();
+            // GPUI awaits the returned task inside its shutdown window.
+            cx.background_executor().spawn(async move {
+                if let Some(pty) = pty {
+                    pty.terminate_blocking_with(QUIT_GRACE, QUIT_DEADLINE);
+                }
+            })
         })
         .detach();
-        Ok(Self::with_backend(emu, Backend::Pty { pty, rx }, false, cx))
+        Ok(Self::with_core(core, cx))
     }
 
-    fn with_backend(
-        emu: Emulator,
-        backend: Backend,
-        read_only: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn with_core(core: TerminalCore, cx: &mut Context<Self>) -> Self {
         cx.spawn(async move |this, cx| {
             loop {
                 let Ok(busy) = this.update(cx, |v, cx| v.pump(cx)) else {
@@ -144,20 +118,17 @@ impl TerminalView {
         })
         .detach();
         Self {
-            emu,
-            backend,
+            core,
             focus: cx.focus_handle(),
             font: TermFont::default(),
             cell: (px(8.), px(17.)),
             origin: point(px(0.), px(0.)),
             selecting: false,
             scroll_carry: 0.,
-            status: Status::Running,
             search_open: false,
             query: String::new(),
             search: SearchState::default(),
             applied_theme: None,
-            read_only,
         }
     }
 
@@ -166,15 +137,15 @@ impl TerminalView {
     }
 
     pub fn status(&self) -> &Status {
-        &self.status
+        self.core.status()
     }
 
     pub fn follow(&self) -> bool {
-        self.emu.follow()
+        self.core.emu().follow()
     }
 
     pub fn set_follow(&mut self, follow: bool, cx: &mut Context<Self>) {
-        self.emu.set_follow(follow);
+        self.core.emulator().set_follow(follow);
         cx.notify();
     }
 
@@ -182,14 +153,14 @@ impl TerminalView {
     pub fn search(&mut self, query: &str, cx: &mut Context<Self>) -> SearchState {
         self.query = query.to_owned();
         self.search_open = !query.is_empty();
-        self.search = self.emu.search(Some(query));
+        self.search = self.core.emulator().search(Some(query));
         cx.notify();
         self.search
     }
 
     /// Search hook: step to an older or newer match.
     pub fn search_step(&mut self, older: bool, cx: &mut Context<Self>) -> SearchState {
-        self.search = self.emu.search_step(older);
+        self.search = self.core.emulator().search_step(older);
         cx.notify();
         self.search
     }
@@ -197,72 +168,26 @@ impl TerminalView {
     /// Pump synchronously until nothing arrives for `quiet` or `deadline`
     /// passes. For headless capture and tests; the window uses its timer.
     pub fn settle(&mut self, quiet: Duration, deadline: Duration, cx: &mut Context<Self>) {
-        let start = std::time::Instant::now();
-        let mut last = std::time::Instant::now();
-        while start.elapsed() < deadline && last.elapsed() < quiet {
-            if self.pump(cx) {
-                last = std::time::Instant::now();
-            } else {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+        self.core.settle(quiet, deadline);
+        cx.notify();
     }
 
-    /// Write input to the PTY as if typed (no-op for a stream view).
+    /// Queue input for the PTY as if typed (no-op for a stream view).
     pub fn type_text(&mut self, text: &str) {
-        self.send(text.as_bytes());
+        self.core.send(text.as_bytes());
     }
 
     /// The emulator, for hosts that need more than the hooks above.
     pub fn emulator(&mut self) -> &mut Emulator {
-        &mut self.emu
+        self.core.emulator()
     }
 
-    /// Process pending input. Returns whether anything arrived.
+    /// Process pending output. Returns whether anything arrived.
     fn pump(&mut self, cx: &mut Context<Self>) -> bool {
-        let mut busy = false;
-        match &mut self.backend {
-            Backend::Stream(s) => {
-                let (bytes, end) = s.drain(MAX_BYTES_PER_TICK);
-                if !bytes.is_empty() {
-                    self.emu.feed(&bytes);
-                    busy = true;
-                }
-                if let Some(end) = end {
-                    self.status = Status::Ended(match end {
-                        Ok(()) => "end of stream".into(),
-                        Err(e) => format!("read failed: {e}"),
-                    });
-                    self.backend = Backend::Closed;
-                    busy = true;
-                }
-            }
-            Backend::Pty { pty, rx } => {
-                let mut n = 0;
-                while n < MAX_BYTES_PER_TICK {
-                    let Ok(b) = rx.try_recv() else { break };
-                    n += b.len();
-                    let reply = self.emu.feed(&b);
-                    if !reply.is_empty() {
-                        let _ = pty.write_all(&reply);
-                    }
-                }
-                busy = n > 0;
-                if let Ok(Some(st)) = pty.try_wait() {
-                    // Drain what the reader still holds, then close.
-                    while let Ok(b) = rx.try_recv() {
-                        self.emu.feed(&b);
-                    }
-                    self.status = Status::Ended(format!("process exited ({st})"));
-                    self.backend = Backend::Closed;
-                    busy = true;
-                }
-            }
-            Backend::Closed => {}
-        }
+        let busy = self.core.pump();
         if busy {
             if self.search_open {
-                self.search = self.emu.search_state();
+                self.search = self.core.emu().search_state();
             }
             cx.notify();
         }
@@ -270,24 +195,20 @@ impl TerminalView {
     }
 
     fn send(&mut self, bytes: &[u8]) {
-        if let Backend::Pty { pty, .. } = &self.backend
-            && !bytes.is_empty()
-        {
-            let _ = pty.write_all(bytes);
-        }
+        self.core.send(bytes);
     }
 
     fn cell_at(&self, pos: gpui_kit::Point<Pixels>) -> (u16, u16) {
         let x = ((pos.x - self.origin.x) / self.cell.0).max(0.) as u16;
         let y = ((pos.y - self.origin.y) / self.cell.1).max(0.) as u16;
         (
-            x.min(self.emu.cols().saturating_sub(1)),
-            y.min(self.emu.rows().saturating_sub(1)),
+            x.min(self.core.emu().cols().saturating_sub(1)),
+            y.min(self.core.emu().rows().saturating_sub(1)),
         )
     }
 
     fn copy(&self, cx: &mut App) {
-        if let Some(text) = self.emu.selection_text() {
+        if let Some(text) = self.core.emu().selection_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -302,7 +223,7 @@ impl TerminalView {
         }
         if chord && k.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                let bytes = self.emu.encode_paste(&text);
+                let bytes = self.core.emulator().encode_paste(&text);
                 self.send(&bytes);
             }
             return;
@@ -317,37 +238,41 @@ impl TerminalView {
                 "escape" => {
                     self.search_open = false;
                     self.query.clear();
-                    self.search = self.emu.search(None);
+                    self.search = self.core.emulator().search(None);
                 }
-                "enter" => self.search = self.emu.search_step(!m.shift),
+                "enter" => self.search = self.core.emulator().search_step(!m.shift),
                 "backspace" => {
                     self.query.pop();
-                    self.search = self.emu.search(Some(&self.query));
+                    self.search = self.core.emulator().search(Some(&self.query));
                 }
                 _ => {
                     if let Some(t) = k.key_char.as_deref().filter(|_| !m.control && !m.platform) {
                         self.query.push_str(t);
-                        self.search = self.emu.search(Some(&self.query));
+                        self.search = self.core.emulator().search(Some(&self.query));
                     }
                 }
             }
             cx.notify();
             return;
         }
-        let rows = self.emu.rows() as isize;
-        match (self.read_only, k.key.as_str()) {
-            (true, "pageup") => self.emu.scroll(-rows),
-            (true, "pagedown") => self.emu.scroll(rows),
-            (true, "home") => self.emu.scroll(isize::MIN / 2),
-            (true, "end") => self.emu.set_follow(true),
-            (true, "f") => self.emu.set_follow(!self.emu.follow()),
+        let rows = self.core.emu().rows() as isize;
+        match (self.core.read_only(), k.key.as_str()) {
+            (true, "pageup") => self.core.emulator().scroll(-rows),
+            (true, "pagedown") => self.core.emulator().scroll(rows),
+            (true, "home") => self.core.emulator().scroll(isize::MIN / 2),
+            (true, "end") => self.core.emulator().set_follow(true),
+            (true, "f") => {
+                let follow = !self.core.emu().follow();
+                self.core.emulator().set_follow(follow);
+            }
             (true, _) => return,
             (false, _) => {
                 if m.shift && matches!(k.key.as_str(), "pageup" | "pagedown") {
-                    self.emu
+                    self.core
+                        .emulator()
                         .scroll(if k.key == "pageup" { -rows } else { rows });
                 } else {
-                    let bytes = self.emu.encode_key(KeyInput {
+                    let bytes = self.core.emulator().encode_key(KeyInput {
                         key: &k.key,
                         text: k.key_char.as_deref(),
                         shift: m.shift,
@@ -355,8 +280,8 @@ impl TerminalView {
                         alt: m.alt,
                         meta: m.platform,
                     });
-                    self.emu.clear_selection();
-                    self.emu.set_follow(true);
+                    self.core.emulator().clear_selection();
+                    self.core.emulator().set_follow(true);
                     self.send(&bytes);
                 }
             }
@@ -368,15 +293,15 @@ impl TerminalView {
         window.focus(&self.focus, cx);
         let (c, r) = self.cell_at(ev.position);
         if (ev.modifiers.platform || ev.modifiers.control)
-            && let Some(url) = self.emu.link_at(c, r)
+            && let Some(url) = self.core.emulator().link_at(c, r)
         {
             cx.open_url(&url);
             return;
         }
         if ev.click_count >= 3 {
-            self.emu.select_all();
+            self.core.emulator().select_all();
         } else {
-            self.emu.select_start(c, r);
+            self.core.emulator().select_start(c, r);
             self.selecting = true;
         }
         cx.notify();
@@ -385,7 +310,7 @@ impl TerminalView {
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.selecting && ev.pressed_button == Some(MouseButton::Left) {
             let (c, r) = self.cell_at(ev.position);
-            self.emu.select_to(c, r);
+            self.core.emulator().select_to(c, r);
             cx.notify();
         }
     }
@@ -403,7 +328,7 @@ impl TerminalView {
         let whole = self.scroll_carry.trunc();
         if whole != 0. {
             self.scroll_carry -= whole;
-            self.emu.scroll(whole as isize);
+            self.core.emulator().scroll(whole as isize);
             cx.notify();
         }
     }
@@ -422,7 +347,7 @@ impl TerminalView {
             }
         };
         if self.applied_theme != Some(theme) {
-            let _ = self.emu.set_theme(theme);
+            let _ = self.core.emulator().set_theme(theme);
             self.applied_theme = Some(theme);
         }
     }
@@ -441,18 +366,8 @@ impl TerminalView {
             f32::from(cell.0).round() as u16,
             f32::from(cell.1).round() as u16,
         );
-        if cols != self.emu.cols() || rows != self.emu.rows() {
-            self.emu.resize(cols, rows, u32::from(cw), u32::from(ch));
-            if let Backend::Pty { pty, .. } = &self.backend {
-                let _ = pty.resize(PtySize {
-                    cols,
-                    rows,
-                    pixel_width: cols.saturating_mul(cw),
-                    pixel_height: rows.saturating_mul(ch),
-                });
-            }
-        }
-        self.emu.frame().ok()
+        self.core.resize(cols, rows, cw, ch);
+        self.core.emulator().frame().ok()
     }
 }
 
@@ -493,7 +408,7 @@ impl Render for TerminalView {
         let theme = self.applied_theme.unwrap_or(TermTheme::DARK);
         let entity = cx.entity();
         // A log stream has no input, so it has no cursor.
-        let show_cursor = !self.read_only;
+        let show_cursor = !self.core.read_only();
 
         let surface = canvas(
             move |bounds, _window, cx| entity.update(cx, |v, _| v.layout(bounds, (cell_w, cell_h))),
@@ -542,9 +457,13 @@ impl Render for TerminalView {
                 .child(div().text_color(t.muted_foreground).child(count))
         });
 
-        let status = match (&self.status, self.read_only) {
-            (Status::Ended(s), _) => Some(s.clone()),
-            (Status::Running, true) if !self.emu.follow() => Some("paused (End to follow)".into()),
+        // A notice about undelivered input outranks the status line.
+        let status = match (self.core.notice(), self.core.status()) {
+            (Some(notice), _) => Some(notice.to_owned()),
+            (None, Status::Ended(s)) => Some(s.clone()),
+            (None, Status::Running) if self.core.read_only() && !self.core.emu().follow() => {
+                Some("paused (End to follow)".into())
+            }
             _ => None,
         };
         let status = status.map(|s| {

@@ -19,7 +19,7 @@ use gpui_kit::{
     Render, Styled as _, Window, WindowBounds, WindowOptions, div, px, size,
 };
 use hack_desktop_term::pty::{PtyOptions, PtySize};
-use hack_desktop_term::stream::StreamSource;
+use hack_desktop_term::stream::{ProcessSpec, StreamSource};
 use hack_desktop_term::view::TerminalView;
 
 struct Args {
@@ -51,11 +51,9 @@ fn parse_args() -> Args {
             }
             "--cmd" => {
                 let program = it.next().unwrap_or_else(|| usage());
-                a.source = Some(StreamSource::Process {
-                    program: program.into(),
-                    args: it.by_ref().map(Into::into).collect(),
-                    cwd: None,
-                });
+                let mut spec = ProcessSpec::new(program);
+                spec.args = it.by_ref().map(Into::into).collect();
+                a.source = Some(StreamSource::Process(spec));
             }
             "--theme" => {
                 a.theme = Some(match it.next().as_deref() {

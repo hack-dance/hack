@@ -93,31 +93,41 @@ impl Root {
 
     pub fn file(&self, name: &str, flags: i32) -> Result<File> {
         let name = std::ffi::CString::new(name).map_err(|_| refused())?;
-        // SAFETY: directory descriptor is live; name is NUL-terminated; returned
-        // descriptor is newly owned and immediately wrapped in RAII.
-        let fd = unsafe {
-            libc::openat(
-                self.directory.as_raw_fd(),
-                name.as_ptr(),
-                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
+        // A receipt is replaced atomically (temporary file, then rename). An open
+        // that races that rename can return the replaced inode, which is already
+        // unlinked (nlink 0). Reopen the name to read its current inode; any
+        // other link count is still refused. The bound only stops a livelock.
+        for _ in 0..64 {
+            // SAFETY: directory descriptor is live; name is NUL-terminated;
+            // returned descriptor is newly owned and immediately wrapped in RAII.
+            let fd = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: fd was just returned by openat and has no other owner.
+            let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+            let metadata = file.metadata()?;
+            if metadata.nlink() == 0 {
+                continue;
+            }
+            // SAFETY: geteuid has no preconditions.
+            if !metadata.is_file()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o777 != 0o600
+            {
+                return Err(refused());
+            }
+            return Ok(file);
         }
-        // SAFETY: fd was just returned by openat and has no other owner.
-        let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-        let metadata = file.metadata()?;
-        // SAFETY: geteuid has no preconditions.
-        if !metadata.is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o777 != 0o600
-        {
-            return Err(refused());
-        }
-        Ok(file)
+        Err(refused())
     }
 
     pub fn lock(&self, name: &str) -> Result<File> {
@@ -273,5 +283,81 @@ impl Root {
             }
         }
         Ok(states)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Root, State};
+    use std::os::unix::fs::DirBuilderExt;
+
+    fn state(phase: &str) -> State {
+        State {
+            version: 1,
+            name: "worker".into(),
+            owner_token: "synthetic".into(),
+            guard_pid: 44,
+            process_group_id: 44,
+            guard_start_time: 100,
+            boot_id: String::new(),
+            uid: 501,
+            command_pid: None,
+            command_start_time: None,
+            phase: phase.into(),
+            exit_code: None,
+            signal: None,
+        }
+    }
+
+    /// A guard atomically replaces its receipt while a stop or status lists
+    /// receipts. A reader that opened the old inode just before the rename sees
+    /// it unlinked; that must read as the current receipt, never as a refusal.
+    #[test]
+    fn receipt_reads_survive_concurrent_atomic_replacement() {
+        let base = std::env::temp_dir().join(format!(
+            "storage-replace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&base)
+            .unwrap();
+        let root = Root::open(&base).unwrap();
+        root.save(&state("running")).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let base = base.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let root = Root::open(&base).unwrap();
+                let mut flip = false;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    flip = !flip;
+                    root.save(&state(if flip { "stopping" } else { "running" }))
+                        .unwrap();
+                }
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut reads = 0u64;
+        let mut failure = None;
+        while std::time::Instant::now() < deadline {
+            match root.states() {
+                Ok(states) => assert_eq!(states.len(), 1),
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+            reads += 1;
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(failure.is_none(), "read {reads} failed: {failure:?}");
     }
 }

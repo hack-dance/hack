@@ -72,7 +72,7 @@ fn dump_state_reads_the_cli_like_the_app_and_prints_view_models() {
         &hack,
         r#"#!/bin/sh
 case "$1" in
-  --version) echo "hack v5.0.0" ;;
+  version) echo '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}'  ;;
   projects) echo called > "$HACK_HOME/unsafe-listing"; exit 2 ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
@@ -147,7 +147,7 @@ fn missing_daemon_never_runs_the_registry_writing_cli_listing() {
     let hack = home.join("hack");
     test_support::script(
         &hack,
-        "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0';; *) echo called > \"$HACK_HOME/unexpected\"; exit 1;; esac\n",
+        "#!/bin/sh\ncase \"$1\" in version) echo '{\"ok\":true,\"data\":{\"schema\":\"hack.version.v1\",\"version\":\"5.0.0\"}}';; *) echo called > \"$HACK_HOME/unexpected\"; exit 1;; esac\n",
     );
     let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
         .env("PATH", &home)

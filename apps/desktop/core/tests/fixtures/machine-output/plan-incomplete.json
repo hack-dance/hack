@@ -1,0 +1,18 @@
+{
+  "ok": false,
+  "error": {
+    "code": "E_PLAN_INCOMPLETE",
+    "message": "Administrator plan is incomplete.",
+    "detail": {
+      "plan": {
+        "command": "install",
+        "platform": "linux",
+        "refused": null,
+        "complete": false,
+        "blocked": [],
+        "steps": [],
+        "schema": "hack.global-admin-plan.v1"
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildVersionReport } from "../src/lib/version-report.ts";
+import { machineData } from "./helpers/machine-output.ts";
 
 const owned: string[] = [];
 afterEach(async () => {
@@ -74,11 +75,12 @@ test("source CLI JSON is pure, local and leaves a private home unchanged", async
   const stderr = await new Response(child.stderr).text();
   expect(await child.exited).toBe(0);
   expect(stderr).toBe("");
-  const report = JSON.parse(stdout);
+  const report = machineData(stdout, "hack.version.v1");
   expect(Object.keys(report).sort()).toEqual([
     "binary_path",
     "channel",
     "install_kind",
+    "schema",
     "version",
   ]);
   expect(report.install_kind).toBe("source");

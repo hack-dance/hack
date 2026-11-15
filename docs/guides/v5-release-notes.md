@@ -35,6 +35,17 @@ no longer removes legacy inputs in the same step.
 
 The full upgrade steps are in [Upgrade to v5](upgrade-to-v5.md#preview-resume-and-undo-env-migration).
 
+### Breaking change: next.17 machine output moves into the JSON envelope
+
+Five `--json` outputs that first shipped in next.17 now use the documented
+envelope (HACK-2238). Plain `hack projects --json` and other older outputs keep
+their shapes. See [machine-readable output](../reference/machine-readable-output.md).
+
+| Change | What to do |
+| --- | --- |
+| **`hack version --json`, `hack activity --json`, `hack projects --json --observe`, `hack global status --json --observe` and `hack global install\|trust --plan --json` print `{"ok":true,"data":{...}}`.** The payload is under `data` and carries a string `data.schema` (for example `hack.version.v1`). | Read the payload from `data` and check `data.schema` before using it. |
+| **Their failures print `{"ok":false,"error":{"code":"E_...","message":"..."}}` and exit nonzero.** A refused or incomplete administrator plan is `E_PLAN_REFUSED` (exit 1) or `E_PLAN_INCOMPLETE` (exit 3), with the partial plan at `error.detail.plan`. | Branch on `ok` and `error.code`, not on top-level payload fields. |
+
 ## next.17: what changed and what to do
 
 These are source changes intended for `5.0.0-next.17`, not a claim that the

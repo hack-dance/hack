@@ -75,13 +75,7 @@ impl LiveSource {
         let daemon = if left().is_zero() {
             None
         } else {
-            runner
-                .run_json::<serde_json::Value>(
-                    &["daemon", "status", "--json"],
-                    None,
-                    Duration::from_secs(5).min(left()),
-                )
-                .ok()
+            crate::source::read_daemon_status(&runner, Duration::from_secs(5).min(left())).ok()
         };
         // CLI projects writes the registry even with --no-daemon. Until R18,
         // only a matching daemon snapshot is allowed, including during setup.
@@ -184,13 +178,7 @@ pub fn run_safe(action: SafeAction, checked: &Report) -> String {
             .runner(program)?
             .with_env("HACK_MCP_COMMAND", program);
         if action == SafeAction::InstallDaemon {
-            let status = runner
-                .run_json::<serde_json::Value>(
-                    &["daemon", "status", "--json"],
-                    None,
-                    Duration::from_secs(5),
-                )
-                .map_err(|e| e.to_string())?;
+            let status = crate::source::read_daemon_status(&runner, Duration::from_secs(5))?;
             if let Some(why) = setup::installation_refusal(Some(&status), Some(context)) {
                 return Err(format!("{why}; no install was attempted"));
             }

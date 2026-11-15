@@ -125,10 +125,11 @@ app, for five reasons:
   CI runs of the default-feature tests show. On macOS a job in another
   process group that ignores SIGHUP survives a closed tab and is reported,
   not ended (see "PTY ownership").
-- **Polish we have to build ourselves**: cursor shapes and blink, IME,
-  mouse reporting to programs, plain-URL detection, ligature policy,
-  per-row caching keyed on libghostty's row ids, waking on output instead
-  of the spike's timer.
+- **Polish we have to build ourselves**: cursor blink, IME, mouse
+  reporting to programs, plain-URL detection, ligature policy, per-row
+  caching keyed on libghostty's row ids, waking on output instead of the
+  spike's timer. Done so far: cursor shapes, and prompt glyphs (see
+  "Glyphs").
 
 ### Optional: a spike of (a)
 
@@ -167,7 +168,8 @@ release archives when `GHOSTTY_RELEASE_DIR` is unset. Three things stop it:
 1. `term/scripts/provision-ghostty.sh` is the one step that uses the
    network. It fetches the pinned inputs into a cache directory, verifies
    each against a sha256 committed in the script, and prints the
-   environment to export (`GHOSTTY_RELEASE_DIR`, and `ZIG` on Linux).
+   environment to export (`GHOSTTY_RELEASE_DIR`, `HACK_TERM_SYMBOLS_FONT`,
+   and `ZIG` on Linux).
    Re-running it verifies the cache; `--offline` only verifies.
 2. `apps/desktop/.cargo/config.toml` sets the build script's download base
    (`GHOSTTY_RELEASE_URL`) to a URL with a scheme that cannot be fetched.
@@ -189,9 +191,13 @@ its own lock file, so a file changed after provisioning fails the build.
 | `ghostty-vt-1.0.1.xcframework.zip` (macOS) | `c0f9631277f726154c8f521954d17cdc41aac4626fc0df8cf925a19ee58e829b` |
 | `zig-x86_64-linux-0.17.1.tar.xz` | `3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a` |
 | `zig-aarch64-linux-0.17.1.tar.xz` | `a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795` |
+| `NerdFontsSymbolsOnly.tar.xz` (Nerd Fonts v3.5.1) | `01172f37db8543edb102e5cb5c64101c9f4686630804d49b419aa07b23a69996` |
+| `SymbolsNerdFontMono-Regular.ttf`, from that archive | `fe471e538392f51910faab985fa8e192a39dd3426125edd15b71b3680df0e749` |
 
-Sources: `release.files.ghostty.org/libghostty-vt/1.0.1/SHA256SUMS` and
-`ziglang.org/download/index.json`.
+Sources: `release.files.ghostty.org/libghostty-vt/1.0.1/SHA256SUMS`,
+`ziglang.org/download/index.json`, and the Nerd Fonts release's
+`SHA-256.txt`. The font file's checksum is pinned in the provisioning
+script and in `term/build.rs`, which refuses to embed any other file.
 
 ```sh
 cd apps/desktop
@@ -449,6 +455,127 @@ choice: Enter, Shift-Enter and Escape in the find field (`FindOlder`,
 `FindNewer`, `CloseFind`), Shift-PageUp and Shift-PageDown for scrollback,
 and PageUp, PageDown, Home, End and `f` in a log view.
 
+### Glyphs: prompt symbols, powerline and box drawing
+
+The owner's goal is that starship and oh-my-zsh themes look right. Those
+prompts print three kinds of glyph that an ordinary font does not have, or
+does not draw to fit the cell. On a Mac with no Nerd Font installed, the
+first Mac run of this crate drew them as boxed question marks.
+
+**What libghostty-vt gives.** The code points and how many cells each one
+takes. Nothing about drawing them: its headers export no font, glyph or
+sprite API. That is Ghostty's renderer, which is not part of the library.
+
+**What Ghostty does** (read from the source tarball that ships with
+libghostty-vt 1.0.1; MIT):
+
+- It embeds a symbols-only Nerd Font (`SymbolsNerdFont-Regular.ttf`, pinned
+  at Nerd Fonts 3.4.0 in that source) as a fallback, with a generated table
+  of per-glyph size and alignment rules.
+- It draws box drawing, block elements, braille, the geometric powerline
+  glyphs (U+E0B0..U+E0BF and two more) and some legacy-computing symbols
+  itself, in `src/font/sprite/draw/*.zig`, so they meet the cell's edges.
+  It does not draw the pictographs U+E0A0..U+E0A3 (branch, line, lock,
+  column); those come from the symbols font.
+
+That code is Zig inside the renderer and is not exported by libghostty-vt.
+The licence would allow porting it with attribution. It was not ported:
+the geometry here is written for this crate, and the box-drawing table is
+derived from the Unicode character names.
+
+**What this crate does.**
+
+1. **Drawn as geometry** (`sprite.rs`): box drawing U+2500..U+257F (light,
+   heavy, double, mixed, dashed, arcs, diagonals), block elements
+   U+2580..U+259F, and the powerline separators U+E0B0..U+E0BF. Every
+   rectangle is in whole device pixels and cell edges are snapped to the
+   pixel grid, for backgrounds too, so lines continue across cells and
+   prompt segments meet without seams at any font size, with any font.
+2. **A bundled symbols font** (`glyphs.rs`): Symbols Nerd Font Mono from
+   Nerd Fonts **v3.5.1**, for the rest of the Nerd Font ranges (about
+   10,600 glyphs, the pictographs U+E0A0..U+E0A3 included). It is fetched
+   by the provisioning script, checked against a pinned sha256 there and
+   again by `build.rs`, and embedded in the binary: **2.6 MB**.
+
+**Which font a symbol comes from.** A private-use code point the bundled
+font has is drawn from the bundled font, unless the terminal's font is
+itself a Nerd Font (by its family name) and has the glyph; then the user's
+patched font is used, as in their own terminal. An ordinary Unicode
+character the bundled font also has (the heavy angle bracket `❯`, the power
+symbols) comes from it only when the terminal's font has no glyph for it.
+
+**Departures from the suggested default, and why.**
+
+- *The bundled font is not loaded with `add_fonts`; its outlines are drawn
+  as vector paths.* GPUI's Linux text system refuses to load any family
+  that has no glyph for the letter "m", as a font or as a fallback, so a
+  symbols-only font can never be selected there. What gets drawn instead is
+  whatever installed font happens to define that code point: on the
+  development machine a system UI font has an unrelated glyph at U+E0A0,
+  and the branch symbol came out as a small division-like sign. Reading the
+  outlines with `ttf-parser` (already in the lockfile) and filling them as
+  paths is the same on Linux and macOS and does not depend on installed
+  fonts or on either platform's fallback rules.
+- *U+E0A0..U+E0A3 come from the bundled font, not from hand-drawn paths.*
+  They are pictographs, not cell geometry. Ghostty makes the same split.
+
+**Size of a symbol.** Each glyph in the bundled font sits in a box one em
+wide. Fitted to one narrow cell it would be about 60% of the text's size.
+So a symbol followed by a blank cell uses that cell too (prompt themes put
+a space after their icons, and Ghostty and other terminals treat that space
+the same way): the box is as wide as the room, never taller than the cell,
+and centred. A symbol with no blank cell after it is fitted to one cell.
+
+**Licence and size.** The archive's licence file is MIT (Nerd Fonts). The
+font is a collection, and the archive's README lists each icon set's own
+licence:
+
+| Icon set | Licence |
+|---|---|
+| Codicons, Font Awesome | CC BY 4.0 |
+| Material Design | Apache 2.0 |
+| Pomicons | OFL 1.1 (reserved font name) |
+| Weather Icons | OFL 1.1 |
+| Font Logos | "unlicensed", as the README words it; its upstream licence was not checked |
+| Devicons, Octicons, Seti, Powerline, Powerline Extra, IEC power symbols, Font Awesome Extension, extra glyphs from Hack | MIT |
+
+The named licences are all permissive and none is copyleft, so embedding
+is allowed; the one entry without a named licence (Font Logos) should be
+confirmed before the app ships. CC BY 4.0 and the OFL require attribution: a shipped app must carry the Nerd Fonts
+licence and that list, as it must carry Ghostty's notice. Ghostty ships the
+same collection. 2.6 MB in the binary is acceptable for a desktop app (the
+window toolkit alone is far larger); it is the same order as what Ghostty
+embeds. **Both points are flagged for the owner.**
+
+**Limits.**
+
+- Symbol outlines are tessellated as paths each frame and are not hinted.
+  Fine for a prompt or a file listing; a screen full of thousands of icons
+  has not been measured.
+- Icons taken from a user's own Nerd Font are drawn by the text system at
+  that font's natural width, not fitted to the cell.
+- Braille and the legacy-computing symbols are not drawn as geometry.
+- The app's default monospace font on the capture machine has no italic
+  face, so italics show only with a font that has one.
+
+**The render test** (`tests/render.rs`) draws a row offscreen: the two
+solid powerline arrows, branch U+E0A0, three icons (U+F418, U+E718,
+U+F07B), four box-drawing characters and two blocks, plus U+E050, a
+private-use code point no font has, as this machine's missing-glyph
+reference. It fails if any glyph is blank, matches the missing-glyph
+rendering, is identical to another icon (missing-glyph boxes all look
+alike), or is a speck less than half the cell tall. It also fails if the
+view did not take the four icons from the bundled font, or if an icon's
+ink is not as wide for its height as that font's outline (within a
+quarter); without these two checks the test passed on a machine whose
+own fonts cover the same code points. It also checks the
+geometry in pixels: the full block fills its cell, the half block fills
+exactly the lower half, lines reach the edges their arms point at and no
+others, and each arrow is flat and full height on one side and comes to a
+point on the other. It caught the wrong-font branch glyph described above.
+It needs an offscreen renderer; CI installs Mesa's software Vulkan driver
+for it and requires it there.
+
 ### What the renders and tests show
 
 All in the same component, in the same panel:
@@ -470,10 +597,10 @@ The prompt in the renders is `/bin/sh` with a fixture profile that draws a
 themed prompt, so the capture is deterministic. In the live example the tab
 runs the user's own login shell.
 
-Two things the renders make visible and that are not fixed: the app's
-default monospace font on the capture machine has no italic face, so
-italics only show with a font that has one; and wide icon glyphs are drawn
-at their natural width, where Ghostty fits them to the cell.
+In the renders, the prompt's separators are drawn as geometry and its
+icons come from the bundled symbols font, except in the Ghostty-look
+render, where the configured font is itself a Nerd Font and supplies them.
+See "Glyphs" above for what is not fixed.
 
 ### PTY ownership
 
@@ -586,6 +713,11 @@ Default build (both CI hosts run these):
 - Sessions: labels and badges, argv and environment for each kind, name
   validation, login shell resolution, terminfo detection; a real login
   shell loading its profile; the CLI-backed kinds through a stand-in.
+- Glyph geometry (`sprite.rs`), with a small rasteriser: every box-drawing
+  character reaches exactly the edges its arms point at; an arm of each
+  weight meets the cell edge the same way in every character, so neighbours
+  join; corners are closed and double crossings hollow; dashes, blocks and
+  shades have the right coverage; powerline separators span the cell.
 - Ghostty config: fixture files in a temporary home (keys, malformed
   values, resets, load order, macOS location, includes and cycles, themes);
   a fanned-out include tree is read once per file and no byte twice; the
@@ -610,6 +742,13 @@ hardening, theme, the user's palette and cursor style), `tests/terminal.rs`
 holding the terminal does not keep it open; a stream's last line; the
 bash-to-sh fallback and its label; an exit 127 after input is not a
 fallback; logs keep ANSI and prompt glyphs) and the panel's tab logic.
+
+Feature `ghostty`, `glyphs.rs`: the embedded font is the pinned file; the
+table of its code points matches the font; outlines are closed contours
+inside the font's box; Nerd Font family names are recognised.
+
+Feature `screenshots`, `tests/render.rs`: the pixel test described under
+"Glyphs". It needs an offscreen renderer (a GPU, or software Vulkan).
 
 Feature `screenshots` (GPUI test support; no display or GPU needed),
 `tests/view.rs`: a rejected paste to a quiet child shows its notice in
@@ -695,8 +834,18 @@ crate.
 ## Licences of new dependencies
 
 Pinned in `Cargo.toml`: `ghostty-vt =0.9.0` (lock: `0.9.0+ghostty-vt.1.0.1`),
-`libc =0.2.191`, `image =0.25.10` (screenshots feature only). Every package
-this branch adds to `Cargo.lock`:
+`libc =0.2.191`, `image =0.25.10` (screenshots feature only),
+`ttf-parser =0.25.1` (MIT OR Apache-2.0; reads the symbols font's outlines)
+and, for the build script, `sha2 =0.10.9` (MIT OR Apache-2.0; verifies the
+embedded font). The last two were already in the lockfile through GPUI and
+`ghostty-vt-sys`; they are now direct dependencies of this crate.
+
+Embedded, not a crate: **Symbols Nerd Font Mono**, Nerd Fonts v3.5.1,
+2.6 MB. MIT for the collection, with the icon-set licences listed under
+"Glyphs" (CC BY 4.0, Apache 2.0, OFL 1.1, MIT, and one set listed as
+"unlicensed").
+
+Every package this branch adds to `Cargo.lock`:
 
 | Package | Version | Licence | Role |
 |---|---|---|---|
@@ -730,5 +879,6 @@ this branch adds to `Cargo.lock`:
 Already in the lockfile and reused: bitflags, dirs 6 (MIT OR Apache-2.0)
 with `option-ext` (MPL-2.0, already present through gpui), flate2, sha2,
 rustls/ring (build script TLS). There is no cargo-deny or licence config
-for this workspace. A shipped app must carry Ghostty's MIT notice and the
-third-party notices above.
+for this workspace. A shipped app must carry Ghostty's MIT notice, the
+third-party notices above, and the Nerd Fonts licence with its icon-set
+attributions.

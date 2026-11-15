@@ -300,8 +300,10 @@ again immediately before install; an unavailable or unconfirmed manager is refus
 before an install command is submitted. Admin cards offer **Copy
 command** and **Open Terminal**. The private one-use `.command` script quotes every
 argument, prints the command and waits for Enter. Afterward it shows the exit code
-and waits for Enter to close, preserving output and the command’s exit code. macOS requests a new Terminal
-window through `open -g -a Terminal`; Linux uses `xdg-terminal-exec` when available,
+and waits for Enter to close, preserving output and the command’s exit code. macOS requests a new window
+of the system Terminal through `open -g -a /System/Applications/Utilities/Terminal.app`
+(by path, not by application name; the bundle and every directory above it must be
+root-owned and not group- or other-writable, otherwise Copy only); Linux uses `xdg-terminal-exec` when available,
 otherwise Copy. The adapter must pass the same ownership, write and `#!` rules
 as the CLI before it runs. The script's temporary directory must not be changeable by
 another user (owned by this user, or by root and sticky like `/tmp`, with the

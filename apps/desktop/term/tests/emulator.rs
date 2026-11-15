@@ -61,6 +61,16 @@ fn scrollback_is_bounded_and_follow_tracks_the_newest_line() {
 }
 
 #[test]
+fn the_line_bound_holds_on_a_wide_grid() {
+    // libghostty's default byte limit would keep only about 5,500 lines at
+    // this width; the line bound is the one that must apply.
+    let mut e = emu(200, 60, true);
+    e.feed(&lines(0..30_000));
+    let held = e.scrollback_rows();
+    assert!((9_000..=12_000).contains(&held), "scrollback rows: {held}");
+}
+
+#[test]
 fn ten_thousand_lines_with_follow_off_keep_the_viewport_still() {
     let mut e = emu(40, 10, true);
     e.feed(&lines(0..10_000));

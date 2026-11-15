@@ -130,6 +130,11 @@ pub struct EmulatorOptions {
     pub rows: u16,
     /// Scrollback bound in lines (pruned at page granularity by libghostty).
     pub scrollback_lines: usize,
+    /// A memory ceiling for scrollback, in bytes. The line bound is the
+    /// intended limit; this only stops a very wide grid from growing without
+    /// limit. libghostty applies whichever is reached first, and its own
+    /// default (10 MB) would cut a 200-column grid to about 5,500 lines.
+    pub scrollback_max_bytes: usize,
     /// Treat a bare LF as CR+LF (ANSI mode 20). On for log streams whose
     /// lines end in `\n` only; off for a PTY, whose line discipline adds CR.
     pub newline_is_crlf: bool,
@@ -142,6 +147,7 @@ impl Default for EmulatorOptions {
             cols: 80,
             rows: 24,
             scrollback_lines: 10_000,
+            scrollback_max_bytes: 256 << 20,
             newline_is_crlf: false,
             theme: TermTheme::DARK,
         }
@@ -307,7 +313,8 @@ impl Emulator {
             rows: opts.rows.max(1),
             ..TerminalOptions::default()
         })?;
-        term.set_scrollback_max_lines(Some(opts.scrollback_lines))?;
+        term.set_scrollback_max_bytes(Some(opts.scrollback_max_bytes))?
+            .set_scrollback_max_lines(Some(opts.scrollback_lines))?;
         if opts.newline_is_crlf {
             term.set_mode(Mode::LINEFEED, true)?;
         }

@@ -18,6 +18,7 @@ const KEYS: &[&str] = &[
     "DOCKER_CONFIG",
     "HACK_NATIVE_HOME",
     "HACK_NATIVE_BINARY",
+    "HACK_GLOBAL_CONFIG_PATH",
 ];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionContext {
@@ -107,7 +108,13 @@ impl ExecutionContext {
         }
         // Native runtime selectors decide which runtime native reads and
         // actions address; the CLI requires absolute paths.
-        for key in ["HACK_NATIVE_HOME", "HACK_NATIVE_BINARY"] {
+        // HACK_GLOBAL_CONFIG_PATH selects managed DNS domains and the proxy
+        // bind address for checks and repairs alike.
+        for key in [
+            "HACK_NATIVE_HOME",
+            "HACK_NATIVE_BINARY",
+            "HACK_GLOBAL_CONFIG_PATH",
+        ] {
             if let Some(path) = get(key) {
                 if !Path::new(path).is_absolute() {
                     return Err(format!("{key} must be absolute; hand-off refused"));

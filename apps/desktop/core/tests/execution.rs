@@ -125,7 +125,11 @@ fn native_runtime_selectors_are_kept_when_absolute() {
             (key.to_owned(), value.to_owned()),
         ])
     };
-    for key in ["HACK_NATIVE_HOME", "HACK_NATIVE_BINARY"] {
+    for key in [
+        "HACK_NATIVE_HOME",
+        "HACK_NATIVE_BINARY",
+        "HACK_GLOBAL_CONFIG_PATH",
+    ] {
         let context = with(key, "/work/user/native").unwrap();
         assert_eq!(context.value(key), Some("/work/user/native"));
         assert!(with(key, "relative/native").is_err(), "{key}");

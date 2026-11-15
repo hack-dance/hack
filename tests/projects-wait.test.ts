@@ -6,6 +6,7 @@ import {
   projectsStateToken,
   projectsWaiterCount,
   resolveProjectsPayload,
+  stableContainerStatus,
 } from "../src/daemon/projects-wait.ts";
 
 const TOKEN = "0123456789abcdef0123456789abcdef";
@@ -37,6 +38,17 @@ test("wait parameters are closed: a 32-hex token and a bounded timeout", () => {
   }
 });
 
+test("container status keeps its word, health and exit code, not elapsed time", () => {
+  expect(stableContainerStatus("Up 12 seconds (healthy)")).toBe("Up (healthy)");
+  expect(stableContainerStatus("Up About an hour (health: starting)")).toBe(
+    "Up (health: starting)"
+  );
+  expect(stableContainerStatus("Exited (137) 2 days ago")).toBe("Exited (137)");
+  expect(stableContainerStatus("Up 2 hours (Paused)")).toBe("Up (Paused)");
+  expect(stableContainerStatus("Created")).toBe("Created");
+  expect(stableContainerStatus("")).toBe("");
+});
+
 test("the token ignores per-response fields and changes with content", () => {
   const a = { generated_at: "t1", profiling: { x: 1 }, projects: [1] };
   const b = { generated_at: "t2", projects: [1] };
@@ -59,6 +71,19 @@ test("the token ignores per-response fields and changes with content", () => {
   );
   expect(projectsStateToken(container("Up 1 second"))).not.toBe(
     projectsStateToken(container("Exited (0)", "exited"))
+  );
+  // Health and exit code in the status text are state (a branch container
+  // carries health nowhere else); only the elapsed time is ignored.
+  expect(projectsStateToken(container("Up 5 seconds (healthy)"))).toBe(
+    projectsStateToken(container("Up About a minute (healthy)"))
+  );
+  expect(projectsStateToken(container("Up 5 seconds (healthy)"))).not.toBe(
+    projectsStateToken(container("Up 5 seconds (unhealthy)"))
+  );
+  expect(
+    projectsStateToken(container("Exited (0) 3 minutes ago", "exited"))
+  ).not.toBe(
+    projectsStateToken(container("Exited (1) 3 minutes ago", "exited"))
   );
   // A `status` field elsewhere (not a container entry) still counts.
   expect(projectsStateToken({ projects: [{ status: "running" }] })).not.toBe(

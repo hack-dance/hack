@@ -94,9 +94,11 @@ native runtime selection is configured; those reads do not start a VM or graph.
 hackd's `GET /v1/projects` response also carries `state_token`, an opaque
 32-character digest of its content. It leaves out values that change without a
 state change: `generated_at`, `profiling`, `runtime_checked_at`,
-`runtime_last_ok_at` and Docker's humanized container `status` text (container
-`state` and the service state and health fields above still count). The CLI's
-`hack projects --json` output does not include it.
+`runtime_last_ok_at` and the elapsed time in Docker's container `status` text.
+The status's leading word, health and exit code still count ("Up 12 seconds
+(healthy)" is digested as "Up (healthy)"), as do container `state` and the
+service state and health fields above. The CLI's `hack projects --json` output
+does not include it.
 
 A client can send the token back to wait for a change:
 

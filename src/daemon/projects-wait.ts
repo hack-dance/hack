@@ -33,11 +33,21 @@ const VOLATILE_FIELDS = new Set([
   "runtime_last_ok_at",
 ]);
 
+const PARENTHESIZED = /\([^)]*\)/g;
+const WHITESPACE = /\s+/;
+
 /**
- * Docker's container `status` is humanized text ("Up 12 seconds") that changes
- * on every refresh. The container's `state` and the shared service state and
- * health fields still count.
+ * Docker's container `status` mixes elapsed time, which changes on every
+ * refresh, with health and exit code, which are state: "Up 12 seconds
+ * (healthy)", "Exited (0) 3 minutes ago". Keep the leading word and every
+ * parenthesized part ("Up (healthy)", "Exited (0)"), so a health change still
+ * changes the token. Branch containers carry health only in this text.
  */
+export function stableContainerStatus(status: string): string {
+  const head = status.trim().split(WHITESPACE, 1)[0] ?? "";
+  return [head, ...(status.match(PARENTHESIZED) ?? [])].join(" ");
+}
+
 function stableValue(_key: string, value: unknown): unknown {
   if (
     value !== null &&
@@ -47,8 +57,10 @@ function stableValue(_key: string, value: unknown): unknown {
     "state" in value &&
     "status" in value
   ) {
-    const { status: _status, ...rest } = value as Record<string, unknown>;
-    return rest;
+    const container = value as Record<string, unknown>;
+    return typeof container.status === "string"
+      ? { ...container, status: stableContainerStatus(container.status) }
+      : container;
   }
   return value;
 }

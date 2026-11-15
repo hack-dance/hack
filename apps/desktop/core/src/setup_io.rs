@@ -174,12 +174,15 @@ pub fn run_safe(action: SafeAction, checked: &Report) -> String {
         {
             return Err(why.into());
         }
-        let runner = context.runner(
-            checked
-                .cli_program
-                .as_deref()
-                .ok_or("CLI has not been checked")?,
-        )?;
+        let program = checked
+            .cli_program
+            .as_deref()
+            .ok_or("CLI has not been checked")?;
+        // The CLI starts or installs the daemon by invoking itself; without
+        // this selector it would prefer whatever `hack` is first on PATH.
+        let runner = context
+            .runner(program)?
+            .with_env("HACK_MCP_COMMAND", program);
         if action == SafeAction::InstallDaemon {
             let status = runner
                 .run_json::<serde_json::Value>(

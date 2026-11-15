@@ -229,7 +229,9 @@ matching the CLI proves hackd; bare status exit zero does not. `service.installe
 proves installation only; known disabled/drifted/failed service metadata stays
 Needs attention. Missing service-manager availability never permits Install.
 
-Only the fixed `daemon start` and supported `daemon install` actions offer **Run**, with
+Start and Install pass the checked CLI as the CLI's self-invocation selector
+(`HACK_MCP_COMMAND`), so the daemon they start or install runs that CLI, not
+whatever `hack` is first on PATH. Only the fixed `daemon start` and supported `daemon install` actions offer **Run**, with
 bounded, memory-only output followed by fresh checks. Install requires explicit
 `service.available: true`, an ordinary home, and no launchd/systemd-disable guard;
 otherwise the card explains why and links to documentation. Availability is checked
@@ -302,7 +304,7 @@ daemon-autostart guard, optional XDG_RUNTIME_DIR and an absolute XDG_CONFIG_HOME
 selectors are kept when supported (`DOCKER_CONTEXT` as a plain name, an absolute
 `DOCKER_CONFIG`, and a `unix://` absolute, `tcp://` or `ssh://` `DOCKER_HOST`);
 any other value refuses the checked context rather than silently addressing a
-different Docker engine. Absolute `HACK_NATIVE_HOME` and `HACK_NATIVE_BINARY` are kept
+different Docker engine. Absolute `HACK_NATIVE_HOME`, `HACK_NATIVE_BINARY` and `HACK_GLOBAL_CONFIG_PATH` are kept
 the same way (relative values refuse), so native reads and actions address one
 runtime. An absent HACK_HOME stays
 absent so a candidate launcher can keep its own private-home default. Context is

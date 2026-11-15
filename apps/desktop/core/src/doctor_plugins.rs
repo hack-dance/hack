@@ -103,28 +103,42 @@ fn local_endpoint(
     }
     const UNKNOWN: &str =
         "The selected Docker context's endpoint is unknown; Docker was not invoked";
-    let entries = std::fs::read_dir(config.join("contexts/meta")).map_err(|_| UNKNOWN)?;
-    for entry in entries.take(256) {
-        let Ok(entry) = entry else {
-            return Err(UNKNOWN);
-        };
-        let Ok(file) = std::fs::File::open(entry.path().join("meta.json")) else {
-            continue;
-        };
-        let Ok(meta) =
-            serde_json::from_reader::<_, Meta>(std::io::BufReader::new(file).take(64 * 1024))
-        else {
-            continue;
-        };
-        if meta.name == name {
-            return match meta.endpoints.get("docker").and_then(|e| e.host.as_deref()) {
-                Some(host) if host.starts_with("unix://") => Ok(()),
-                Some(_) => Err(REMOTE),
-                None => Err(UNKNOWN),
-            };
-        }
+    // Docker loads exactly contexts/meta/<sha256(name)>/meta.json.
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(name.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = config.join("contexts/meta").join(hex);
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if trusted_tool_path(&dir, uid, true).is_none() {
+        return Err(UNKNOWN);
     }
-    Err(UNKNOWN)
+    // No symlink and no blocking open: a FIFO or device must not hang Doctor.
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(dir.join("meta.json"))
+            .map_err(|_| UNKNOWN)?
+    };
+    let meta = file.metadata().map_err(|_| UNKNOWN)?;
+    if !meta.is_file()
+        || (meta.uid() != uid && meta.uid() != 0)
+        || meta.mode() & 0o022 != 0
+        || meta.len() > 64 * 1024
+    {
+        return Err(UNKNOWN);
+    }
+    let meta: Meta = serde_json::from_reader(std::io::BufReader::new(file).take(64 * 1024))
+        .map_err(|_| UNKNOWN)?;
+    if meta.name != name {
+        return Err(UNKNOWN);
+    }
+    match meta.endpoints.get("docker").and_then(|e| e.host.as_deref()) {
+        Some(host) if host.starts_with("unix://") => Ok(()),
+        Some(_) => Err(REMOTE),
+        None => Err(UNKNOWN),
+    }
 }
 
 // Unlike private PATH wrappers, Docker later resolves the original names.

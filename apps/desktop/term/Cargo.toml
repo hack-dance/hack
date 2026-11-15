@@ -1,0 +1,26 @@
+[package]
+name = "hack-desktop-term"
+description = "Terminal surface for the Hack desktop app: app-owned PTY, read-only byte streams, libghostty-vt emulation drawn with GPUI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# libghostty-vt emulation and the GPUI terminal view. Off by default until
+# desktop CI provides Zig 0.17.1 on Linux (see DECISION.md, "Build and CI").
+ghostty = ["dep:ghostty-vt", "dep:gpui-kit"]
+# Offscreen PNG capture of the spike window (GPUI test-support).
+screenshots = ["ghostty", "gpui-kit/test-support", "dep:image"]
+
+[dependencies]
+libc.workspace = true
+ghostty-vt = { workspace = true, optional = true }
+gpui-kit = { workspace = true, optional = true }
+image = { version = "=0.25.10", optional = true, default-features = false, features = ["png"] }
+
+[[example]]
+name = "term_spike"
+required-features = ["ghostty"]

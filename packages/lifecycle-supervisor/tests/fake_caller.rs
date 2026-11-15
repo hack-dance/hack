@@ -55,6 +55,7 @@ impl Fixture {
         json!({"version":1,"root":self.root,"ownerToken":token})
     }
 
+    #[track_caller]
     fn request(&self, action: &str, request: &Value) -> (Child, Value) {
         let mut child = command(&self.root, action).spawn().unwrap();
         send(child.stdin.as_mut().unwrap(), request);
@@ -124,6 +125,7 @@ impl Fixture {
         lock
     }
 
+    #[track_caller]
     fn state(&self, name: &str) -> Value {
         eventually(|| {
             fs::read(self.root.join(format!("{name}.json")))
@@ -408,6 +410,18 @@ impl Drop for ForeignChild {
     }
 }
 
+/// A refused `stop` or `status`: exits nonzero and still answers with one
+/// framed receipt carrying the expected outcome and reason.
+#[track_caller]
+fn refused_framed(fixture: &Fixture, action: &str, request: Value, reason: &str) -> Value {
+    let (mut child, receipt) = fixture.request(action, &request);
+    assert!(!wait(&mut child, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "unknown", "{receipt}");
+    assert_eq!(receipt["reason"], reason, "{receipt}");
+    receipt
+}
+
+#[track_caller]
 fn refused(fixture: &Fixture, action: &str, request: Value) {
     let mut child = command(&fixture.root, action).spawn().unwrap();
     send(child.stdin.as_mut().unwrap(), &request);
@@ -487,7 +501,12 @@ fn foreign_owner_cannot_stop() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
     f.await_log("fixture-ready");
-    refused(&f, "stop", f.control("different-owner"));
+    refused_framed(
+        &f,
+        "stop",
+        f.control("different-owner"),
+        "foreign-live-process",
+    );
     let state = f.state("worker");
     // SAFETY: signal zero observes this fixture's process without delivering a signal.
     assert_eq!(unsafe { libc::kill(pid(&state, "commandPid"), 0) }, 0);
@@ -530,21 +549,43 @@ fn output_bursts_and_long_lines_include_partial_tail() {
     }
 }
 
-/// Without a log lock, each record is one O_APPEND write. Two guards bursting
-/// at once, including 64 KiB records far above PIPE_BUF, must still leave only
-/// whole records: every line parses, belongs to one guard and is not mixed.
+/// Without a log lock, each record is one O_APPEND write. Two guards burst at
+/// the same moment (both commands wait for one start file), including 64 KiB
+/// records far above PIPE_BUF. The bursts must overlap, and every line must be
+/// one whole record of one guard: a split anywhere, also inside the timestamp,
+/// fails a field check.
 #[test]
 fn concurrent_guards_append_whole_records_without_a_lock() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![
-        f.process("alpha", "burst"),
-        f.process("beta", "burst"),
+        f.process("alpha", "burst-after-start"),
+        f.process("beta", "burst-after-start"),
     ]);
+    fs::write(f.root.join("burst-start"), b"").unwrap();
     assert!(wait(&mut caller, TIMEOUT).success());
     let text = f.log();
+    let lines: Vec<_> = text.lines().collect();
+    for line in &lines {
+        let fields: Vec<_> = line.splitn(4, '\t').collect();
+        assert_eq!(fields.len(), 4, "split record: {line:.80}");
+        assert_eq!(fields[0].len(), 20, "split timestamp: {line:.80}");
+        assert!(fields[0].ends_with('Z'), "{line:.80}");
+        assert!(matches!(fields[1], "alpha" | "beta"), "{line:.80}");
+        assert!(matches!(fields[2], "stdout" | "stderr"), "{line:.80}");
+    }
+    let first_beta = lines
+        .iter()
+        .position(|line| line.split('\t').nth(1) == Some("beta"))
+        .expect("beta logged nothing");
+    assert!(
+        lines[first_beta..]
+            .iter()
+            .any(|line| line.split('\t').nth(1) == Some("alpha")),
+        "bursts did not overlap"
+    );
     for name in ["alpha", "beta"] {
-        let own: Vec<_> = text
-            .lines()
+        let own: Vec<_> = lines
+            .iter()
             .filter(|line| line.split('\t').nth(1) == Some(name))
             .collect();
         assert_eq!(
@@ -561,12 +602,6 @@ fn concurrent_guards_append_whole_records_without_a_lock() {
             })
             .sum();
         assert_eq!(xs, 300_000);
-    }
-    for line in text.lines() {
-        let fields: Vec<_> = line.splitn(4, '\t').collect();
-        assert_eq!(fields.len(), 4, "split record: {line:.80}");
-        assert!(matches!(fields[1], "alpha" | "beta"), "{line:.80}");
-        assert!(fields[0].ends_with('Z'));
     }
 }
 
@@ -1547,6 +1582,43 @@ fn unverifiable_receipt_does_not_block_healthy_targets() {
     let _ = wait(&mut caller, TIMEOUT);
 }
 
+/// Another owner's receipt whose live members no witness ties to it (guard
+/// gone, recorded command birth wrong) refuses with `foreign-unknown-process`
+/// and signals nothing.
+#[test]
+fn unverifiable_foreign_receipt_refuses_with_its_own_reason() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    f.await_log("fixture-ready");
+    let mut state = f.state("worker");
+    let command = identity(pid(&state, "commandPid")).expect("command identity");
+    let guard = pid(&state, "guardPid");
+    // SAFETY: the guard belongs to this fixture; its command survives it.
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
+    eventually(|| identity(guard).is_none().then_some(()));
+    state["commandStartTime"] = json!(state["commandStartTime"].as_u64().unwrap() + 1);
+    fs::write(
+        f.root.join("worker.json"),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    refused_framed(
+        &f,
+        "stop",
+        f.control("different-owner"),
+        "foreign-unknown-process",
+    );
+    assert!(
+        identity(command.pid).as_ref() == Some(&command),
+        "command was signalled"
+    );
+    // SAFETY: this fixture's own command, identity checked just above.
+    unsafe {
+        libc::kill(command.pid, libc::SIGKILL);
+    }
+    let _ = wait(&mut caller, TIMEOUT);
+}
+
 fn process_is_zombie(pid: i32) -> bool {
     process_state(pid) == Some(b'Z')
 }
@@ -1901,8 +1973,11 @@ fn unresponsive_guard_stop_remains_unknown() {
     assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
     let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
     assert_eq!(receipt["outcome"], "unknown");
+    assert_eq!(receipt["reason"], "stop-incomplete");
     assert!(!wait(&mut stop, TIMEOUT).success());
     assert_eq!(unsafe { libc::kill(pid(&state, "commandPid"), 0) }, 0);
+    // The owner is retired but its member is not proven absent.
+    refused_framed(&f, "status", f.control(TOKEN), "retired-owner-live");
     refused(&f, "run", f.launch(vec![f.process("worker", "hold")]));
     assert_eq!(unsafe { libc::kill(guard, libc::SIGCONT) }, 0);
     f.stop();
@@ -2077,7 +2152,13 @@ fn fixture_process() {
         "command inherited caller environment"
     );
     match mode.as_str() {
-        "burst" => {
+        "burst" | "burst-after-start" => {
+            if mode == "burst-after-start" {
+                // Start together with the sibling guard's burst, so appends overlap.
+                while !std::path::Path::new("burst-start").exists() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
             let mut out = std::io::stdout().lock();
             for i in 0..2000 {
                 writeln!(out, "burst-record-{i}").unwrap();

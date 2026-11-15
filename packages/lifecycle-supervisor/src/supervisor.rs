@@ -96,7 +96,7 @@ fn control(action: &str) -> Result<()> {
     let mut result = control_effects(action, &request, &root, &mut reason);
     // Receipts are atomically replaced files, so this read is safe without the
     // lock, also after a lock wait expired. A failed read never reports
-    // success: it keeps an earlier error, or becomes `io-error` itself.
+    // success: it keeps an earlier error, or becomes `receipt-read-failed`.
     let processes = match root.states() {
         Ok(states) => states
             .into_iter()
@@ -151,12 +151,22 @@ fn control_effects(
         *reason = "io-error";
         if state.owner_token == request.owner_token {
             states.push(state);
-        } else if os::recorded_live(&state, false)? {
-            // Old terminal receipts survive renames and new generations.
-            // Guard-written terminal phases prove completed retirement;
-            // non-terminal receipts require native identity evidence.
-            *reason = "foreign-live-process";
-            return Err(refused());
+            continue;
+        }
+        // Old terminal receipts survive renames and new generations.
+        // Guard-written terminal phases prove completed retirement;
+        // non-terminal receipts require native identity evidence.
+        match os::recorded_live(&state, false) {
+            Ok(false) => (),
+            Ok(true) => {
+                *reason = "foreign-live-process";
+                return Err(refused());
+            }
+            Err(error) => {
+                // Live members that no witness ties to that receipt.
+                *reason = "foreign-unknown-process";
+                return Err(error);
+            }
         }
     }
     *reason = "io-error";

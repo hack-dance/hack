@@ -2425,11 +2425,16 @@ fn fixture_process() {
                                     libc::pause();
                                 }
                             }
-                            // Outlive the parent's KILL at five seconds, then
-                            // exit before the seven-second recovery deadline.
-                            for _ in 0..12 {
-                                libc::usleep(500_000);
+                            // Outlive the parent's recovery KILL (at five
+                            // seconds), then exit well before the seven-second
+                            // deadline. Tie the exit to the parent's death, not
+                            // to a fixed time, so a slow host cannot push it
+                            // past the deadline.
+                            let parent = libc::getppid();
+                            while libc::getppid() == parent {
+                                libc::usleep(10_000);
                             }
+                            libc::usleep(500_000);
                             libc::_exit(0);
                         }
                     }

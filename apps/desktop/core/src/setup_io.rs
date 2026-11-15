@@ -1,5 +1,6 @@
 //! Setup I/O, separate from the pure evidence model. No observer starts a service.
 use crate::{
+    runner::RunError,
     setup::{self, Report, SafeAction},
     source::{DoctorTarget, LiveSource},
 };
@@ -163,33 +164,7 @@ pub fn run_safe(action: SafeAction, checked: &Report) -> String {
         {
             return Err("Action is not supported by the checked setup report".into());
         }
-        let context = checked
-            .context
-            .as_ref()
-            .ok_or("Execution context has not been checked")?;
-        if action == SafeAction::InstallDaemon
-            && let Some(why) = context.install_refusal()
-        {
-            return Err(why.into());
-        }
-        let runner = context.runner(
-            checked
-                .cli_program
-                .as_deref()
-                .ok_or("CLI has not been checked")?,
-        )?;
-        if action == SafeAction::InstallDaemon {
-            let status = runner
-                .run_json::<serde_json::Value>(
-                    &["daemon", "status", "--json"],
-                    None,
-                    Duration::from_secs(5),
-                )
-                .map_err(|e| e.to_string())?;
-            if let Some(why) = setup::installation_refusal(Some(&status), Some(context)) {
-                return Err(format!("{why}; no install was attempted"));
-            }
-        }
+        let runner = checked_runner(checked, action == SafeAction::InstallDaemon)?;
         let mut args = action.args().to_vec();
         args.push("--no-interactive");
         runner
@@ -205,6 +180,58 @@ pub fn run_safe(action: SafeAction, checked: &Report) -> String {
         Err(e) => format!("No supported action completed: {e}. Check again."),
     }
 }
+/// The checked report's pinned CLI under its allowlisted execution context.
+/// For install, the context's guards and a fresh `daemon status` must still
+/// allow installation at effect time.
+fn checked_runner(checked: &Report, install: bool) -> Result<crate::runner::CliRunner, String> {
+    let context = checked
+        .context
+        .as_ref()
+        .ok_or("Execution context has not been checked")?;
+    if install && let Some(why) = context.install_refusal() {
+        return Err(why.into());
+    }
+    let runner = context.runner(
+        checked
+            .cli_program
+            .as_deref()
+            .ok_or("CLI has not been checked")?,
+    )?;
+    if install {
+        let status = runner
+            .run_json::<serde_json::Value>(
+                &["daemon", "status", "--json"],
+                None,
+                Duration::from_secs(5),
+            )
+            .map_err(|e| e.to_string())?;
+        if let Some(why) = setup::installation_refusal(Some(&status), Some(context)) {
+            return Err(format!("{why}; no install was attempted"));
+        }
+    }
+    Ok(runner)
+}
+
+/// Daemon card and Setup Run actions: the same checked CLI and context as
+/// setup checks, never the app's own runner or inherited environment.
+///
+/// # Errors
+/// No checked context or CLI, a refused install, or the command's failure.
+pub fn run_daemon_checked(
+    action: crate::daemon_state::DaemonAction,
+    checked: &Report,
+) -> Result<(), RunError> {
+    if !checked.cli_ready() {
+        return Err(RunError::Spawn("Setup has not checked the CLI".into()));
+    }
+    let runner = checked_runner(
+        checked,
+        action == crate::daemon_state::DaemonAction::Install,
+    )
+    .map_err(RunError::Spawn)?;
+    crate::daemon_state::act(&runner, action)
+}
+
 fn bounded(s: &str) -> String {
     s.chars().take(2048).collect()
 }

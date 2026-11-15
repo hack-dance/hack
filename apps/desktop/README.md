@@ -184,12 +184,18 @@ requests they need are in `DESIGN.md` (PR #800).
 The daemon card observes `hack daemon status --json`, retaining a valid raw report
 on exit 1. Missing or malformed status is **unknown**; an omitted
 `service.installed` is not evidence that the login service is absent. Version
-mismatch comes from the read-only socket `/v1/status`, compared with the CLI.
+mismatch comes from the read-only socket `/v1/status`, compared with the CLI;
+the socket is the absolute `socket_path` in the CLI's own status answer, never a
+guessed path. Daemon reads use the same pinned CLI and allowlisted environment
+as project reads.
 Explicit R8 `service.unit_stale: true` shows an outdated login service; missing
 R8 metadata never triggers that diagnosis.
 
 Start, Restart and Install login service run today's `hack daemon
-start|restart|install --no-interactive` as the current user. They require no
+start|restart|install --no-interactive` as the current user, through setup's
+checked CLI and execution context (never the app's own environment). Install
+re-checks its guards and a fresh `daemon status` immediately before running.
+Without a checked setup report no daemon action runs. They require no
 terminal adapter and never request a password. Only one daemon action runs at a
 time, including its fresh read after command exit. Exit 0 alone does not mean
 running or installed. Failure keeps observed state and an error; timeout shows

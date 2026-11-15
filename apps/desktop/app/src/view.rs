@@ -449,11 +449,13 @@ impl HackApp {
         self.model.begin_refresh();
         cx.notify();
         let source = self.source.clone();
+        // Card and Setup Run actions use setup's checked CLI and context.
+        let checked = self.setup.report.clone();
         cx.spawn(async move |this, cx| {
             let action_source = source.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { action_source.daemon_action(action) })
+                .spawn(async move { action_source.daemon_action(action, &checked) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon.finished(&result);

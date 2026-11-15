@@ -394,3 +394,48 @@ fn version_timeout_is_unknown_without_forcing_a_missing_cli_gate() {
         "--version"
     );
 }
+#[test]
+fn daemon_card_actions_use_only_the_checked_cli_and_context() {
+    use hack_desktop_core::{
+        daemon_state::DaemonAction, setup::Report, setup_io::run_daemon_checked,
+    };
+    let t = Tree::new();
+    let program = t.0.join("fake-hack");
+    std::fs::write(&program, r#"#!/bin/sh
+[ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 99
+printf '%s unlisted=%s\n' "$*" "${UNLISTED-unset}" >> "$HOME/calls"
+case "$*" in
+--version) printf '5.0.0\n';;
+'daemon status --json') printf '{"running":false,"service":{"installed":false}}';;
+'doctor --json') printf '{"ok":true,"data":{"checks":[{"id":"linux dns route","status":"ok"}]}}'; exit 1;;
+'daemon start --no-interactive') printf 'accepted';;
+*) exit 98;;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    warm_version(&program, &t.0);
+    let _ = std::fs::remove_file(t.0.join("calls"));
+    // Without a checked report nothing runs.
+    assert!(run_daemon_checked(DaemonAction::Start, &Report::default()).is_err());
+    assert!(!t.0.join("calls").exists());
+    let source = LiveSource {
+        runner: CliRunner::new(&program)
+            .with_env("UNLISTED", "app-only")
+            .with_env("HOME", t.0.to_str().unwrap())
+            .with_env("HACK_HOME", t.0.join("hack").to_str().unwrap())
+            .with_term_grace(Duration::from_millis(20)),
+        daemon: None,
+    };
+    let checked = source.setup();
+    assert!(checked.cli_ready());
+    run_daemon_checked(DaemonAction::Start, &checked).unwrap();
+    let calls = std::fs::read_to_string(t.0.join("calls")).unwrap();
+    assert!(
+        calls.contains("daemon start --no-interactive unlisted=unset"),
+        "{calls}"
+    );
+    assert!(
+        !calls.contains("app-only"),
+        "inherited variables never reach the CLI"
+    );
+}

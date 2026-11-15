@@ -140,9 +140,25 @@ impl Observation {
     }
 }
 
-/// Read raw JSON even on exit 1: an unhealthy report is still evidence.
+/// The daemon client named by a CLI `daemon status --json` answer: only an
+/// absolute `socket_path` counts; nothing is guessed from the environment.
 #[must_use]
-pub fn observe(runner: &CliRunner, socket: Option<&DaemonClient>) -> Observation {
+pub fn socket_from_status(status: &serde_json::Value) -> Option<DaemonClient> {
+    let path = std::path::Path::new(status.get("socket_path")?.as_str()?);
+    path.is_absolute()
+        .then(|| DaemonClient::new(path.to_path_buf(), Duration::from_secs(3)))
+}
+
+/// Read raw JSON even on exit 1: an unhealthy report is still evidence.
+/// `socket` is an injected client; otherwise `discover` derives one from the
+/// CLI's own `daemon status --json` answer (its absolute `socket_path`).
+#[must_use]
+pub fn observe(
+    runner: &CliRunner,
+    socket: Option<&DaemonClient>,
+    discover: impl Fn(&serde_json::Value) -> Option<DaemonClient>,
+) -> Observation {
+    let mut discovered = None;
     let mut o = Observation::default();
     match runner.version(Duration::from_secs(5)) {
         Ok(v) => o.cli_version = Some(v),
@@ -157,10 +173,12 @@ pub fn observe(runner: &CliRunner, socket: Option<&DaemonClient>) -> Observation
         None,
         Duration::from_secs(15),
     ) {
-        Ok((out, _, Some(0 | 1))) => match serde_json::from_str(&out)
+        Ok((out, _, Some(0 | 1))) => match serde_json::from_str::<serde_json::Value>(&out)
             .map_err(|e| e.to_string())
-            .and_then(DaemonStatus::from_value)
-        {
+            .and_then(|value| {
+                discovered = discover(&value);
+                DaemonStatus::from_value(value)
+            }) {
             Ok(s) => o.status = Some(s),
             Err(e) => o.error = Some(e),
         },
@@ -173,7 +191,7 @@ pub fn observe(runner: &CliRunner, socket: Option<&DaemonClient>) -> Observation
             o.error = Some(e.to_string());
         }
     }
-    if let Some(socket) = socket {
+    if let Some(socket) = socket.or(discovered.as_ref()) {
         match socket.status() {
             Ok(s) if !s.version.is_empty() => o.socket_version = Some(s.version),
             Ok(_) => o.error = Some("socket status has no version".into()),
@@ -507,7 +525,7 @@ case "$1 $2" in
     if [ -f "$HACK_HOME/started" ]; then
       echo '{"status":"running","running":true,"service":{"installed":true}}'
     else
-      echo '{"status":"stopped","running":false,"service":{}}'; exit 1
+      printf '{"status":"stopped","running":false,"service":{},"socket_path":"%s"}\n' "$HACK_TEST_SOCKET"; exit 1
     fi ;;
   'daemon start') [ "$3" = --no-interactive ] || exit 8; : > "$HACK_HOME/started" ;;
   *) exit 7 ;;
@@ -555,14 +573,23 @@ esac
             )
             .unwrap();
         });
+        // No injected client: the socket comes from the CLI's socket_path.
         let mismatched = observe(
-            &runner,
-            Some(&DaemonClient::new(&sock, Duration::from_secs(1))),
+            &runner
+                .clone()
+                .with_env("HACK_TEST_SOCKET", &sock.to_string_lossy()),
+            None,
+            socket_from_status,
         );
+        assert_eq!(mismatched.socket_version.as_deref(), Some("4.3.0"));
         assert!(mismatched.actions().contains(&DaemonAction::Restart));
         server.join().unwrap();
         std::fs::remove_dir_all(socket_dir).unwrap();
-        let initial = observe(&runner, None);
+        let initial = observe(&runner, None, socket_from_status);
+        assert!(
+            initial.socket_version.is_none(),
+            "relative socket_path is ignored"
+        );
         assert_eq!(initial.status.as_ref().unwrap().running, Some(false));
         assert_eq!(
             initial
@@ -584,7 +611,7 @@ esac
         assert_eq!(result, Ok(()));
         m.finished(&result);
         assert_eq!(m.observed.status.as_ref().unwrap().running, Some(false));
-        m.refreshed(observe(&runner, None));
+        m.refreshed(observe(&runner, None, socket_from_status));
         assert_eq!(m.observed.status.as_ref().unwrap().running, Some(true));
         assert!(m.busy.is_none());
         std::fs::remove_dir_all(dir).unwrap();

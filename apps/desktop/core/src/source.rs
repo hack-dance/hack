@@ -151,10 +151,15 @@ pub trait Source: Send + Sync {
     fn daemon_observation(&self) -> crate::daemon_state::Observation {
         crate::daemon_state::Observation::default()
     }
-    /// Explicit non-admin action; no terminal adapter is involved.
+    /// Explicit non-admin action; no terminal adapter is involved. Runs only
+    /// through `checked`'s pinned CLI and allowlisted execution context.
     /// # Errors
-    /// CLI missing or command failure.
-    fn daemon_action(&self, _action: crate::daemon_state::DaemonAction) -> Result<(), RunError> {
+    /// CLI missing, no checked context, refused install or command failure.
+    fn daemon_action(
+        &self,
+        _action: crate::daemon_state::DaemonAction,
+        _checked: &crate::setup::Report,
+    ) -> Result<(), RunError> {
         Err(RunError::NotFound)
     }
 
@@ -741,16 +746,24 @@ impl LiveSource {
         &self,
         status: Option<&serde_json::Value>,
     ) -> Option<DaemonClient> {
-        self.daemon.clone().or_else(|| {
-            let path = Path::new(status?.get("socket_path")?.as_str()?);
-            if !path.is_absolute() {
-                return None;
-            }
-            Some(DaemonClient::new(
-                path.to_path_buf(),
-                Duration::from_secs(3),
-            ))
-        })
+        self.daemon
+            .clone()
+            .or_else(|| crate::daemon_state::socket_from_status(status?))
+    }
+
+    /// Reads use the resolved CLI pinned by absolute path under the
+    /// allowlisted execution context, never the app's whole environment.
+    fn read_runner(&self) -> Result<CliRunner, RunError> {
+        let program = self.runner.resolve_program()?;
+        let context =
+            crate::execution::ExecutionContext::capture(&self.runner).map_err(RunError::Spawn)?;
+        context
+            .runner(
+                program
+                    .to_str()
+                    .ok_or_else(|| RunError::Spawn("CLI path is not UTF-8".into()))?,
+            )
+            .map_err(RunError::Spawn)
     }
 
     fn runner_for(&self, native: bool) -> CliRunner {
@@ -807,16 +820,7 @@ impl Source for LiveSource {
         )
     }
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
-        let program = self.runner.resolve_program()?;
-        let context =
-            crate::execution::ExecutionContext::capture(&self.runner).map_err(RunError::Spawn)?;
-        let runner = context
-            .runner(
-                program
-                    .to_str()
-                    .ok_or_else(|| RunError::Spawn("CLI path is not UTF-8".into()))?,
-            )
-            .map_err(RunError::Spawn)?;
+        let runner = self.read_runner()?;
         let cli_version = runner.version(Duration::from_secs(5))?;
         let raw = if self.daemon.is_none() {
             runner
@@ -868,18 +872,29 @@ impl Source for LiveSource {
     }
 
     fn daemon_observation(&self) -> crate::daemon_state::Observation {
-        crate::daemon_state::observe(&self.runner, self.daemon.as_ref())
+        // The same pinned CLI and allowlisted context as `snapshot`. Without
+        // an injected test client, the socket comes from the CLI's own
+        // `daemon status` answer.
+        let runner = match self.read_runner() {
+            Ok(runner) => runner,
+            Err(e) => {
+                return crate::daemon_state::Observation {
+                    cli_missing: e == RunError::NotFound,
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                };
+            }
+        };
+        crate::daemon_state::observe(&runner, self.daemon.as_ref(), |status| {
+            self.effective_daemon(Some(status))
+        })
     }
-    fn daemon_action(&self, action: crate::daemon_state::DaemonAction) -> Result<(), RunError> {
-        match action {
-            crate::daemon_state::DaemonAction::Start => self.recover_daemon(DaemonRecovery::Start),
-            crate::daemon_state::DaemonAction::Restart => {
-                self.recover_daemon(DaemonRecovery::Restart)
-            }
-            crate::daemon_state::DaemonAction::Install => {
-                crate::daemon_state::act(&self.runner, action)
-            }
-        }
+    fn daemon_action(
+        &self,
+        action: crate::daemon_state::DaemonAction,
+        checked: &crate::setup::Report,
+    ) -> Result<(), RunError> {
+        crate::setup_io::run_daemon_checked(action, checked)
     }
 
     fn act(

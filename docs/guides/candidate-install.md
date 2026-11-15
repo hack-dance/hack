@@ -131,7 +131,8 @@ also available; see [provider setup](native-candidate.md).
 
 Preflight reports runtime installation separately from project review, in text
 and in the JSON `runtime_setup` item. A fresh or interrupted home blocks startup
-with `hack native setup` as its fix. Noninteractive `up` refuses before starting
+with `native setup` as its fix, printed for the launcher you ran (see
+[Printed commands name your launcher](#printed-commands-name-your-launcher)). Noninteractive `up` refuses before starting
 an owner; interactive `up` offers the same pinned setup and continues only after
 successful setup and a fresh readiness check. Record readiness is a quick check;
 startup still verifies prepared content before executing it.
@@ -143,7 +144,8 @@ Diagram [source](native-first-use.mmd); rendered with Pele 1.9.0.
 Managed `hack-next` keeps its version's receipt-owned `native-home` so upgrades
 can find and stop its runtime. It refuses a differing `HACK_NATIVE_HOME` rather
 than silently ignoring it. Use that version's bundle `hack-v5` launcher for a
-custom home. To move a manual bundle's home, stop its projects and runtime using
+custom home; the refusal prints its path,
+`$HOME/.hack-next/versions/<version>/bundle/hack-v5`. To move a manual bundle's home, stop its projects and runtime using
 the old home and matching executor, preserve the old home for retained data, then
 select a fresh absolute `HACK_NATIVE_HOME` and run `native setup` again. Setup
 does not migrate live receipts, disks or project data. The machine home is
@@ -234,6 +236,23 @@ run stable `hack doctor` in the project. Its generated-files check lists any
 tracked `.hack/.internal/` paths. `hack doctor --fix` removes them from the Git
 index with `git rm --cached` and keeps the files on disk; commit that removal.
 See [ignore rules](../env.md#ignore-rules-committed-hackgitignore).
+
+### Printed commands name your launcher
+
+Stable v4 stays `hack` on your PATH, so a prerelease never tells you to run a
+bare `hack`. Commands it prints, such as the next steps of `upgrade check` and
+`upgrade apply`, the `native setup` fix and the Compose-backend hint, name the
+launcher the command ran through:
+
+| You ran | Printed commands start with |
+| --- | --- |
+| `hack-next` | your channel's launcher by full path, `$HOME/.hack-next/bin/hack-next` by default or `<root>/bin/hack-next` for a `--root` install (it is not on PATH) |
+| a bundle's `hack-v5` | that bundle's `hack-v5`, by its full path |
+| stable `hack` | `hack` |
+
+A Compose run also prints `HACK_RUNTIME_BACKEND=compose` in front. A custom
+`HACK_NATIVE_HOME` is the one exception: `hack-next` refuses it, so that fix
+names the selected bundle's `hack-v5` instead.
 
 ## Upgrade, roll back and return to stable
 

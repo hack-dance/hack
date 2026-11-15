@@ -15,6 +15,8 @@ use std::{
 pub struct State {
     pub version: u32,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub owner_token: String,
     pub guard_pid: i32,
     pub process_group_id: i32,
@@ -40,7 +42,8 @@ pub struct Root {
 
 impl Root {
     fn retirement_key(token: &str) -> String {
-        // Stable non-authentication index. A collision can only refuse launch.
+        // Stable non-authentication index. A hash collision only refuses a
+        // launch; it can never permit a retired generation to run again.
         let hash = token.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
@@ -60,6 +63,15 @@ impl Root {
         }
     }
 
+    /// Fresh internal binaries may use a descriptor-relative cwd to keep Unix
+    /// socket addresses below Darwin's 104-byte limit. Caller cwd is untouched.
+    pub fn enter(&self) -> Result<()> {
+        // SAFETY: the owned descriptor refers to the admitted private directory.
+        if unsafe { libc::fchdir(self.directory.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let directory = OpenOptions::new()
             .read(true)
@@ -129,6 +141,23 @@ impl Root {
 
     pub fn lock_wait(&self, name: &str, wait: std::time::Duration) -> Result<File> {
         let file = self.file(name, libc::O_RDWR | libc::O_CREAT)?;
+        Self::wait_for_lock(file, wait)
+    }
+
+    pub fn existing_lock_wait(
+        &self,
+        name: &str,
+        wait: std::time::Duration,
+    ) -> Result<Option<File>> {
+        let file = match self.file(name, libc::O_RDWR) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Self::wait_for_lock(file, wait).map(Some)
+    }
+
+    fn wait_for_lock(file: File, wait: std::time::Duration) -> Result<File> {
         let deadline = std::time::Instant::now() + wait;
         loop {
             // SAFETY: flock only borrows the live owned descriptor.
@@ -153,6 +182,12 @@ impl Root {
     }
 
     pub fn save(&self, state: &State) -> Result<()> {
+        let bytes = serde_json::to_vec(state).map_err(|_| refused())?;
+        // Match the bounded read contract before publishing or spawning. Human
+        // labels can expand when JSON escapes control characters.
+        if bytes.len() > 8192 {
+            return Err(refused());
+        }
         let final_name = format!("{}.json", state.name);
         // Refuse unsafe pre-existing targets before atomically replacing an owned
         // regular receipt. Never truncate through a link.
@@ -184,7 +219,6 @@ impl Root {
                 Err(error) => return Err(error),
             }
         };
-        let bytes = serde_json::to_vec(state).map_err(|_| refused())?;
         temporary.write_all(&bytes)?;
         temporary.sync_all()?;
         let temporary_name = std::ffi::CString::new(temporary_name).map_err(|_| refused())?;
@@ -261,6 +295,7 @@ mod tests {
         State {
             version: 1,
             name: "worker".into(),
+            display_name: None,
             owner_token: "synthetic".into(),
             guard_pid: 44,
             process_group_id: 44,

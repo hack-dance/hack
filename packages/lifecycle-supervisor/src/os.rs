@@ -901,6 +901,19 @@ mod tests {
             .and_then(|(target, errno)| (target == pid).then_some(errno))
     }
 
+    /// A member process that is killed and reaped when dropped, so a failed
+    /// assertion or spawn cannot leak it.
+    #[cfg(target_os = "linux")]
+    struct Member(std::process::Child);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for Member {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     /// Two real members: the first reports `errno` from its pidfd open, the
     /// second is an ordinary survivor. Returns the recovery KILL result and
     /// whether each member was killed.
@@ -908,14 +921,17 @@ mod tests {
     fn kill_with_failed_first_open(errno: i32) -> (std::io::Result<()>, bool, bool) {
         use std::os::unix::process::ExitStatusExt;
         let spawn = || {
-            std::process::Command::new("/bin/sleep")
-                .arg("60")
-                .spawn()
-                .expect("spawn member")
+            Member(
+                std::process::Command::new("/bin/sleep")
+                    .arg("60")
+                    .spawn()
+                    .expect("spawn member"),
+            )
         };
-        let (mut first, mut second) = (spawn(), spawn());
-        let identity = |child: &std::process::Child| {
-            super::inspect(child.id() as i32)
+        let mut first = spawn();
+        let mut second = spawn();
+        let identity = |member: &Member| {
+            super::inspect(member.0.id() as i32)
                 .unwrap()
                 .expect("member identity")
         };
@@ -923,13 +939,13 @@ mod tests {
             session: 0,
             members: vec![identity(&first), identity(&second)],
         };
-        PIDFD_OPEN_ERROR.with(|cell| cell.set(Some((first.id() as i32, errno))));
+        PIDFD_OPEN_ERROR.with(|cell| cell.set(Some((first.0.id() as i32, errno))));
         let result = recovery.signal(libc::SIGKILL);
         PIDFD_OPEN_ERROR.with(|cell| cell.set(None));
-        let killed = |child: &mut std::process::Child| {
+        let killed = |member: &mut Member| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             loop {
-                if let Some(status) = child.try_wait().unwrap() {
+                if let Some(status) = member.0.try_wait().unwrap() {
                     return status.signal() == Some(libc::SIGKILL);
                 }
                 if std::time::Instant::now() >= deadline {
@@ -939,11 +955,7 @@ mod tests {
             }
         };
         let second_killed = killed(&mut second);
-        let first_killed = first.try_wait().unwrap().is_some();
-        let _ = first.kill();
-        let _ = first.wait();
-        let _ = second.kill();
-        let _ = second.wait();
+        let first_killed = first.0.try_wait().unwrap().is_some();
         (result, first_killed, second_killed)
     }
 

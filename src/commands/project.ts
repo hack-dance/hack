@@ -6,6 +6,8 @@ import {
   migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
   recordEnvMigrationProjectRun,
 } from "../lib/env-migration.ts";
+import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
+import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -2160,11 +2162,15 @@ function sharedHelperControls(
  * runs. Exported for tests.
  */
 export async function assertSharedHelperSessionMuxSupported(opts: {
+  readonly runner?: "mux" | "supervisor";
   readonly sharedHelpersConfigured: boolean;
   readonly needsSession: boolean;
   readonly mux: () => Promise<ResolvedMux>;
 }): Promise<void> {
-  if (!(opts.sharedHelpersConfigured && opts.needsSession)) {
+  if (
+    opts.runner === "supervisor" ||
+    !(opts.sharedHelpersConfigured && opts.needsSession)
+  ) {
     return;
   }
   const mux = await opts.mux();
@@ -2194,6 +2200,9 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   readonly effectiveEnvName: string | null;
   readonly composeProject: string;
 }): Promise<LifecycleUpResult> {
+  if (opts.cfg.lifecycleRunnerError) {
+    throw new Error(opts.cfg.lifecycleRunnerError);
+  }
   if (opts.cfg.sharedHelpersError) {
     // Fail closed before any hook runs: starting without the configured
     // helpers would launch services that depend on them.
@@ -2212,6 +2221,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
       (opts.cfg.lifecycle?.processes?.length ?? 0) > 0,
   });
   await assertSharedHelperSessionMuxSupported({
+    runner: resolveLifecycleRunner({ runner: opts.cfg.lifecycle?.runner }),
     sharedHelpersConfigured: sharedHelperConfigs.length > 0,
     needsSession:
       (opts.cfg.lifecycle?.processes ?? []).length > 0 ||
@@ -2295,6 +2305,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   }
 
   const starter = createLifecycleProcessController({
+    runner: resolveLifecycleRunner({ runner: opts.cfg.lifecycle?.runner }),
     mux: () => resolveMux({ project: opts.project }),
     project: opts.project,
     projectName: opts.projectName,
@@ -2848,6 +2859,7 @@ export async function startLifecycleProcesses(opts: {
   }
 
   const starter = createLifecycleProcessController({
+    runner: resolveLifecycleRunner({ runner: opts.cfg.lifecycle?.runner }),
     mux: opts.mux ?? (() => resolveMux({ project: opts.project })),
     project: opts.project,
     projectName: opts.projectName,
@@ -6155,6 +6167,11 @@ async function handleNativeUp({
     }),
     restart,
     buildsEnabled: nativeBuildsEnabled(),
+    // The printed Compose fallback selects the same project and branch.
+    projectRoot: project.projectRoot,
+    branch:
+      typeof args.options.branch === "string" ? args.options.branch : undefined,
+    env: typeof args.options.env === "string" ? args.options.env : undefined,
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,
@@ -6868,6 +6885,11 @@ async function runUpCommand({
   const sharedHelperRefusal = refuseInvalidSharedHelpers({ cfg, json });
   if (sharedHelperRefusal !== null) {
     return sharedHelperRefusal;
+  }
+  if (
+    resolveLifecycleRunner({ runner: cfg.lifecycle?.runner }) === "supervisor"
+  ) {
+    await preflightLifecycleSupervisor();
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
@@ -8192,10 +8214,18 @@ function refuseInvalidSharedHelpers(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly json: boolean;
 }): number | null {
-  if (!opts.cfg.sharedHelpersError) {
+  let runnerError = opts.cfg.lifecycleRunnerError;
+  try {
+    resolveLifecycleRunner({ runner: opts.cfg.lifecycle?.runner });
+  } catch {
+    runnerError = "Invalid lifecycle runner; use mux or supervisor.";
+  }
+  if (!(opts.cfg.sharedHelpersError || runnerError)) {
     return null;
   }
-  const message = `Invalid lifecycle.sharedHelpers; nothing was changed: ${opts.cfg.sharedHelpersError}`;
+  const message =
+    runnerError ??
+    `Invalid lifecycle.sharedHelpers; nothing was changed: ${opts.cfg.sharedHelpersError}`;
   if (opts.json) {
     return emitLifecycleResult({
       result: errorResult({ code: "E_LIFECYCLE_FAILED", message }),
@@ -8894,6 +8924,11 @@ async function runRestartCommand({
   }
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
+  if (
+    resolveLifecycleRunner({ runner: cfg.lifecycle?.runner }) === "supervisor"
+  ) {
+    await preflightLifecycleSupervisor();
+  }
   const { composeProjectName, lifecycleComposeProject } = resolveRestartTarget({
     baseProjectName,
     branch,

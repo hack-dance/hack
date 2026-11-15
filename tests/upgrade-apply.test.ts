@@ -194,6 +194,12 @@ function healthyProbes(): UpgradeCheckProbes {
   };
 }
 
+/** A launcher path standing in for the hack-next launcher. */
+const LAUNCHER = "/fixture/launcher/hack-next";
+function withLauncher(report: UpgradeCheckReport): UpgradeCheckReport {
+  return { ...report, cli: { ...report.cli, command: LAUNCHER } };
+}
+
 async function check(): Promise<UpgradeCheckReport> {
   return await runUpgradeCheck({
     cliVersion: "5.0.0-next.17",
@@ -400,6 +406,18 @@ test("apply --dry-run changes nothing; apply snapshots, journals, refreshes .git
       collect: collectUpgradeSnapshotTargets,
     })
   ).toMatchObject({ status: "refused", reason: "unknown-project" });
+  // The refusal points at the launcher the check ran through (HACK-2251).
+  expect(
+    await runUpgradeApply({
+      report: withLauncher(report),
+      dryRun: true,
+      project: "nope",
+      home,
+      collect: collectUpgradeSnapshotTargets,
+    })
+  ).toMatchObject({
+    message: expect.stringContaining(`${LAUNCHER} upgrade check lists them.`),
+  });
   expect(await tree(root)).toEqual(before);
 
   const applied = await runUpgradeApply({
@@ -687,7 +705,8 @@ test("--project leaves HOME agent files out without counting them as unfinished"
   const agentFile = await staleHomeAgentFile();
   const a = await project("app-a");
   await writeRegistry([a]);
-  const report = await check();
+  // Printed commands use the launcher the check ran through (HACK-2251).
+  const report = withLauncher(await check());
   const scopes: string[] = [];
   const applied = await runUpgradeApply({
     report,
@@ -711,13 +730,16 @@ test("--project leaves HOME agent files out without counting them as unfinished"
   }
   expect(applied.targets.map((t) => t.scope)).toEqual(["app-a"]);
   expect(applied.notes[0]).toContain("left out with --project");
+  expect(applied.notes[0]).toContain(
+    `run ${LAUNCHER} upgrade apply --only agent-integrations without --project`
+  );
   expect(await readFile(agentFile, "utf8")).toContain("old standalone");
 }, 60_000);
 
 test("a write whose after state cannot be recorded is failed, not applied", async () => {
   const a = await project("app-a");
   await writeRegistry([a]);
-  const report = await check();
+  const report = withLauncher(await check());
   for (const record of [
     async () => ({ status: "refused" as const, paths: [] }),
     async () => ({ status: "invalid-manifest" as const, message: "x" }),
@@ -738,7 +760,9 @@ test("a write whose after state cannot be recorded is failed, not applied", asyn
       throw new Error(`unexpected status ${applied.status}`);
     }
     expect(applied.targets[0]?.status).toBe("failed");
-    expect(applied.targets[0]?.message).toContain("needs --overwrite");
+    expect(applied.targets[0]?.message).toContain(
+      `${LAUNCHER} upgrade rollback needs --overwrite`
+    );
     const journal = (await readUpgradeSnapshotJournal({
       manifestPath: applied.coverage.manifest_path,
     })) as { state: string };

@@ -1683,6 +1683,96 @@ fn preexisting_broad_log_is_refused_before_launch() {
     assert_eq!(fs::read(f.root.join("lifecycle.log")).unwrap(), b"sentinel");
 }
 
+#[cfg(feature = "test-hooks")]
+fn stopped(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.rsplit_once(") ").map(|(_, rest)| rest.starts_with('T')))
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: writable native buffer lives through this synchronous call.
+        let size = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        size as usize == std::mem::size_of::<libc::proc_bsdinfo>()
+            && unsafe { info.assume_init() }.pbi_status == libc::SSTOP
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn kill_guard_at_launch_checkpoint(checkpoint: &str) {
+    let f = Fixture::new();
+    let mut process = f.process("worker", "hold-checkpoint");
+    process["env"]["SUPERVISOR_TEST_CHECKPOINT"] = json!(checkpoint);
+    let mut caller = command(&f.root, "run").spawn().unwrap();
+    send(caller.stdin.as_mut().unwrap(), &f.launch(vec![process]));
+    let state = f.state("worker");
+    let guard = pid(&state, "guardPid");
+    eventually(|| stopped(guard).then_some(()));
+    f.remember(&json!({"processes":[state.clone()]}));
+    assert_eq!(f.state("worker")["phase"], "starting");
+    let children: Vec<_> = census()
+        .into_iter()
+        .filter(|p| parent_pid(p.pid) == Some(guard))
+        .collect();
+    assert_eq!(children.len(), usize::from(checkpoint == "after-spawn"));
+    for child in &children {
+        f.owned.borrow_mut().push(child.clone());
+    }
+    if checkpoint == "after-spawn" {
+        // The paused guard cannot drain output. Wait until the command has
+        // finished its initial writes so killing the reader cannot race SIGPIPE.
+        eventually(|| {
+            f.root
+                .join("checkpoint-command-ready")
+                .exists()
+                .then_some(())
+        });
+        assert!(identity(children[0].pid).as_ref() == Some(&children[0]));
+    }
+    // SAFETY: exact stopped guard and session belong to this fixture.
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
+    let _ = wait(&mut caller, TIMEOUT);
+    let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    if checkpoint == "before-spawn" {
+        assert_eq!(receipt["outcome"], "stopped");
+        assert!(wait(&mut stop, TIMEOUT).success());
+    } else {
+        // No running receipt/birth witness was published. Safety requires
+        // uncertainty without signals, rather than guessing session ownership.
+        assert_eq!(receipt["outcome"], "unknown");
+        assert!(!wait(&mut stop, TIMEOUT).success());
+        assert!(identity(children[0].pid).as_ref() == Some(&children[0]));
+        let (mut status, observed) = f.request("status", &f.control(TOKEN));
+        assert!(!wait(&mut status, TIMEOUT).success());
+        assert_eq!(observed["unknownProcessNames"], json!(["worker"]));
+        refused(&f, "run", f.launch(vec![f.process("worker", "hold")]));
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn guard_killed_after_starting_save_before_spawn_starts_nothing() {
+    kill_guard_at_launch_checkpoint("before-spawn");
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn guard_killed_after_spawn_before_running_save_retains_unknown() {
+    kill_guard_at_launch_checkpoint("after-spawn");
+}
+
 #[test]
 fn incomplete_frame_has_one_whole_handoff_deadline() {
     let f = Fixture::new();
@@ -2147,17 +2237,41 @@ fn fixture_process() {
             }
             println!("pthread-child {child}");
         }
-        "hold" => (),
+        "hold" | "hold-checkpoint" => (),
         _ => std::process::exit(99),
     }
     println!("fixture-ready");
     std::io::stdout().flush().unwrap();
+    if mode == "hold-checkpoint" {
+        fs::write("checkpoint-command-ready", b"ready").unwrap();
+    }
     loop {
         thread::sleep(Duration::from_secs(1));
     }
 }
 
 use std::os::unix::fs::DirBuilderExt;
+
+#[test]
+fn status_waits_for_inflight_stop_before_reporting_adoptable_liveness() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "ignore-term")]);
+    f.await_log("fixture-ready");
+    let mut stopping = command(&f.root, "stop").spawn().unwrap();
+    send(stopping.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    eventually(|| (f.state("worker")["phase"] == "stopping").then_some(()));
+    let (mut observer, receipt) = f.request("status", &f.control(TOKEN));
+    assert!(receipt["liveProcessNames"].as_array().unwrap().is_empty());
+    assert!(
+        receipt["unknownProcessNames"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(wait(&mut observer, TIMEOUT).success());
+    assert!(wait(&mut stopping, TIMEOUT).success());
+    assert!(wait(&mut caller, TIMEOUT).success());
+}
 
 #[test]
 fn completed_stop_fences_a_run_whose_frame_arrives_after_retirement() {

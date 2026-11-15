@@ -376,6 +376,9 @@ async function stopKnown(opts: {
   };
   await current();
   if (opts.savedEntry) {
+    if (opts.savedEntry.backend === "supervisor") {
+      return refuse();
+    }
     const backend = getMuxBackends().get(opts.savedEntry.backend) ?? refuse();
     const inspected = await inspectLifecycleSession({
       backend,
@@ -779,6 +782,9 @@ export async function createNativeAuthoredHostProcesses(input: {
         return refuse();
       }
       if (savedEntry) {
+        if (savedEntry.backend === "supervisor") {
+          return refuse();
+        }
         const backend = getMuxBackends().get(savedEntry.backend) ?? refuse();
         const inspection = await inspectLifecycleSession({
           backend,

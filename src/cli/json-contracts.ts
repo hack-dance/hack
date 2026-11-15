@@ -116,6 +116,11 @@ export const SCHEMA_JSON_VARIANTS = [
     flags: ["--by-service"],
     schema: "hack.usage.by-service.v1",
   },
+  {
+    command: "update",
+    flags: ["--check", "--observe"],
+    schema: "hack.update-check.v1",
+  },
   { command: "daemon start", flags: [], schema: "hack.daemon-start.v1" },
   { command: "daemon stop", flags: [], schema: "hack.daemon-stop.v1" },
   { command: "daemon restart", flags: [], schema: "hack.daemon-restart.v1" },

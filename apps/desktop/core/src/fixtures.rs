@@ -15,6 +15,12 @@ use crate::state::{Action, LocalContext};
 /// Every designed state that can be shown with `--fixtures <name>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fixture {
+    EnvLoading,
+    EnvError,
+    EnvNormal,
+    EnvMissing,
+    EnvLocked,
+    EnvEmpty,
     // List states.
     Loading,
     Empty,
@@ -37,7 +43,13 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 21] = [
+        Self::EnvLoading,
+        Self::EnvError,
+        Self::EnvNormal,
+        Self::EnvMissing,
+        Self::EnvLocked,
+        Self::EnvEmpty,
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -58,6 +70,12 @@ impl Fixture {
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
+            Self::EnvLoading => "env-loading",
+            Self::EnvError => "env-error",
+            Self::EnvNormal => "env-normal",
+            Self::EnvMissing => "env-missing",
+            Self::EnvLocked => "env-locked",
+            Self::EnvEmpty => "env-empty",
             Self::Loading => "loading",
             Self::Empty => "empty",
             Self::DaemonDown => "daemon-down",

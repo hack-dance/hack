@@ -3,10 +3,17 @@ import { basename, resolve } from "node:path";
 
 import { confirm, isCancel } from "@clack/prompts";
 import type { CommandHandlerFor } from "../cli/command.ts";
-import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import {
+  CliUsageError,
+  defineCommand,
+  defineOption,
+  withHandler,
+} from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
+import { emitCliResult } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { canPrompt } from "../lib/interactivity.ts";
+import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
@@ -20,6 +27,7 @@ import {
   resolveUpdateTarget,
   selectCliTarballAsset,
 } from "../lib/self-update.ts";
+import { observeUpdate } from "../lib/update-observe.ts";
 import {
   type PostUpdateDaemonResult,
   reconcileDaemonAfterUpdate,
@@ -47,7 +55,15 @@ const optTag = defineOption({
   description: "Update to a specific release tag (e.g. v1.4.0)",
 } as const);
 
-const options = [optCheck, optYes, optTag, optJson] as const;
+const optObserve = defineOption({
+  name: "observe",
+  type: "boolean",
+  long: "--observe",
+  description:
+    "With --check --json, report updates for any install kind without installing or refusing (one release read)",
+} as const);
+
+const options = [optCheck, optYes, optTag, optObserve, optJson] as const;
 const positionals = [] as const;
 
 const spec = defineCommand({
@@ -60,6 +76,7 @@ const spec = defineCommand({
     "Notes:",
     "- Refuses to self-update when running from a Homebrew install, local dev wrapper, or symlink install.",
     "- Updates the current hack binary and refreshes assets.",
+    "- `--check --json --observe` only reports: current, latest, availability, install kind and the upgrade command for this install.",
   ].join("\n"),
   options,
   positionals,
@@ -72,6 +89,9 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  if (args.options.observe === true) {
+    return await handleObserve({ ctx, args });
+  }
   // Candidate launchers run hack-cli; PATH fallback can select the stable install.
   // `hack-next` and `hack-v5` mark their children on both backends, because an
   // explicit Compose selection no longer carries the native backend marker.
@@ -292,6 +312,32 @@ function describePostUpdateDaemon(result: PostUpdateDaemonResult): string[] {
     ? []
     : [`hackd ${result.action} (${result.manager}) on the new version.`];
 }
+
+/**
+ * Read-only report for every install kind, including Homebrew and candidate
+ * launchers that `hack update` refuses to modify (HACK-2218 R14).
+ */
+const handleObserve: CommandHandlerFor<Spec> = async ({ ctx, args }) => {
+  if (!(args.options.check === true && args.options.json === true)) {
+    throw new CliUsageError("--observe requires --check and --json.");
+  }
+  if (args.options.yes === true || typeof args.options.tag === "string") {
+    throw new CliUsageError("--observe cannot use --yes or --tag.");
+  }
+  const report = await observeUpdate({
+    version: ctx.cli.version,
+    executable: process.execPath,
+    compiled: Bun.main.startsWith("/$bunfs/"),
+    env: process.env,
+  });
+  emitCliResult({
+    result: machineSuccess({
+      schema: MACHINE_SCHEMAS.updateCheck,
+      data: report,
+    }),
+  });
+  return 0;
+};
 
 async function confirmInstall(opts: {
   readonly yes: boolean;

@@ -50,7 +50,7 @@ impl Drop for Tree {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-const REPORT: &str = r#"{"ok":true,"data":{"report_version":1,"host_probes":"enabled","ready":false,"machine":[],"projects":[],"registry":{"state":"absent","total":0,"live":0,"missing":[],"unreadable":[],"unchecked":[],"rejected":0},"blockers":[{"scope":"machine","id":"docker","summary":"Docker could not be checked"}],"incomplete":[],"plan":[]}}"#;
+const REPORT: &str = r#"{"ok":true,"data":{"report_version":2,"host_probes":"enabled","ready":false,"machine":[],"projects":[],"registry":{"state":"absent","total":0,"live":0,"missing":[],"unreadable":[],"unchecked":[],"rejected":0},"blockers":[{"scope":"machine","id":"docker","summary":"Docker could not be checked"}],"incomplete":[],"plan":[]}}"#;
 #[test]
 fn nonzero_valid_check_envelope_is_retained_without_update_or_other_effects() {
     let t = Tree::new();
@@ -85,14 +85,77 @@ fn malformed_envelopes_missing_required_fields_and_unsupported_version_are_refus
                 .unwrap_err();
         assert!(!error.contains("private output"));
     }
+    // Version 1 never shipped in a release; 3 is not yet defined.
+    for version in ["1", "3"] {
+        let source = LiveSource {
+            runner: t.runner(
+                &REPORT.replace(
+                    "\"report_version\":2",
+                    &format!("\"report_version\":{version}"),
+                ),
+                0,
+            ),
+            daemon: None,
+        };
+        assert!(source.upgrade_check().is_err());
+    }
+    // A version 2 plan step without its grouped fields is not an observation.
+    let stepless = REPORT.replace(
+        "\"plan\":[]",
+        r#""plan":[{"id":"snapshot","scope":"machine","why":"Save files","args":["upgrade","snapshot"],"action":null}]"#,
+    );
+    assert!(
+        upgrade_io::read::<Report>(&t.runner(&stepless, 0), &["upgrade", "check", "--json"])
+            .is_err()
+    );
+}
+/// Produced by the CLI's own `runUpgradeCheck` (three checkouts, two legacy
+/// env configs), with scratch paths replaced by `/example`.
+const CHECK_V2: &str = include_str!("fixtures/upgrade/check-v2.json");
+#[test]
+fn current_cli_v2_report_is_read_with_grouped_plan_targets() {
+    let t = Tree::new();
     let source = LiveSource {
-        runner: t.runner(
-            &REPORT.replace("\"report_version\":1", "\"report_version\":2"),
-            0,
-        ),
+        runner: t.runner(CHECK_V2, 0),
         daemon: None,
     };
-    assert!(source.upgrade_check().is_err());
+    let observation = source.upgrade_check().unwrap();
+    let report = observation.report.unwrap();
+    assert_eq!(report.report_version, REPORT_VERSION);
+    assert!(report.readable());
+    assert!(report.ready());
+    let steps: Vec<_> = report
+        .plan
+        .iter()
+        .map(|s| (s.id.as_str(), s.scope.as_str(), s.count))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            ("snapshot", "machine", 0),
+            ("env-format", "projects", 2),
+            ("ignore-rules", "projects", 3)
+        ]
+    );
+    let ignore = &report.plan[2];
+    assert_eq!(
+        ignore
+            .targets
+            .iter()
+            .map(|t| t.scope.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "beta", "gamma"]
+    );
+    // Plan argv is only ever displayed quoted.
+    assert_eq!(
+        display_step("/example/bin/hack", ignore.args.as_ref().unwrap()).unwrap(),
+        "'/example/bin/hack' 'upgrade' 'apply' '--only' 'ignore-rules'"
+    );
+    let calls = std::fs::read_to_string(t.0.join("calls")).unwrap();
+    assert_eq!(
+        calls,
+        "upgrade check --json\nversion --json\ndaemon status --json\n"
+    );
 }
 #[test]
 fn snapshots_and_rollback_are_explicit_and_use_exact_manifest_without_overwrite() {

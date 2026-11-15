@@ -155,3 +155,110 @@ fn unreadable_or_relative_cli_never_admits_snapshot_or_upgrade() {
     assert!(!flow.can_snapshot());
     assert!(!flow.can_upgrade());
 }
+
+/// The CLI's own v2 output: grouped steps cover several checkouts.
+fn v2() -> Report {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        data: Report,
+    }
+    serde_json::from_str::<Envelope>(include_str!("fixtures/upgrade/check-v2.json"))
+        .unwrap()
+        .data
+}
+fn resolved(before: &Report) -> Report {
+    let mut after = before.clone();
+    after.plan.clear();
+    for p in &mut after.projects {
+        for f in &mut p.findings {
+            f.status = "ok".into();
+        }
+    }
+    after
+}
+#[test]
+fn grouped_steps_confirm_only_when_every_covered_checkout_is_explicitly_ok() {
+    let before = v2();
+    assert!(before.ready());
+    let after = resolved(&before);
+    for step in &before.plan {
+        assert!(after.confirms(step, &before), "{}", step.id);
+    }
+    let step = &before.plan[2];
+    for kind in 0..6 {
+        let mut after = resolved(&before);
+        match kind {
+            0 => after.projects[1]
+                .findings
+                .retain(|f| f.id != "ignore-rules"),
+            1 => after.projects[2].state = "unreadable".into(),
+            2 => after.projects[0].root = "/example/moved".into(),
+            3 => after.incomplete.push(ScopedFinding {
+                scope: "beta".into(),
+                id: "env-key".into(),
+                summary: "not checked".into(),
+            }),
+            4 => {
+                let f = after.projects[2].findings[3].clone();
+                after.projects[2].findings.push(f);
+            }
+            5 => after.projects[1].findings[3].status = "warn".into(),
+            _ => unreachable!(),
+        }
+        assert!(!after.confirms(step, &before), "case {kind}");
+    }
+    // A missing target in the earlier report is never evidence either.
+    let mut short = before.clone();
+    short.projects.retain(|p| p.name != "gamma");
+    assert!(!after.confirms(step, &short));
+}
+#[test]
+fn grouped_fix_confirms_the_finding_it_was_built_from() {
+    let mut before = v2();
+    let key = before.projects[0]
+        .findings
+        .iter_mut()
+        .find(|f| f.id == "env-key")
+        .unwrap();
+    key.status = "warn".into();
+    key.apply_fix = Some("env-key-permissions".into());
+    let mut step = before.plan[2].clone();
+    step.id = "env-key-permissions".into();
+    step.scope = "alpha".into();
+    step.count = 1;
+    step.targets.truncate(1);
+    before.plan.push(step.clone());
+    assert!(before.readable());
+    let after = resolved(&before);
+    assert!(after.confirms(&step, &before));
+    let mut still_weak = after.clone();
+    still_weak.projects[0]
+        .findings
+        .iter_mut()
+        .find(|f| f.id == "env-key")
+        .unwrap()
+        .status = "warn".into();
+    assert!(!still_weak.confirms(&step, &before));
+}
+#[test]
+fn contradictory_grouped_plan_steps_make_the_report_unreadable() {
+    let good = v2();
+    for kind in 0..6 {
+        let mut r = good.clone();
+        let step = &mut r.plan[1];
+        match kind {
+            0 => step.count = 3,
+            1 => step.scope = "alpha".into(),
+            2 => step.targets[1] = step.targets[0].clone(),
+            3 => step.targets[0].root = "/example/elsewhere".into(),
+            4 => step.targets[0].scope = "delta".into(),
+            5 => {
+                step.targets.clear();
+                step.count = 0;
+            }
+            _ => unreachable!(),
+        }
+        assert!(!r.readable(), "case {kind}");
+        assert!(!r.ready(), "case {kind}");
+    }
+}

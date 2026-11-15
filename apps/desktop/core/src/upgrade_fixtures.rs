@@ -18,7 +18,7 @@ pub const NAMES: &[&str] = &[
 ];
 pub fn report() -> Report {
     Report {
-        report_version: 1,
+        report_version: REPORT_VERSION,
         host_probes: "enabled".into(),
         ready: true,
         machine: vec![Finding {
@@ -27,6 +27,7 @@ pub fn report() -> Report {
             summary: "Daemon matches the CLI".into(),
             args: None,
             action: None,
+            apply_fix: None,
         }],
         projects: vec![Project {
             name: "sample".into(),
@@ -43,6 +44,7 @@ pub fn report() -> Report {
                     "/example/project".into(),
                 ]),
                 action: None,
+                apply_fix: None,
             }],
         }],
         registry: Registry {
@@ -63,6 +65,8 @@ pub fn report() -> Report {
                 why: "Save files before making changes".into(),
                 args: Some(vec!["upgrade".into(), "snapshot".into()]),
                 action: None,
+                count: 0,
+                targets: vec![],
             },
             Step {
                 id: "env-format".into(),
@@ -75,6 +79,20 @@ pub fn report() -> Report {
                     "/example/project".into(),
                 ]),
                 action: None,
+                count: 1,
+                targets: vec![PlanTarget {
+                    scope: "sample".into(),
+                    project: "sample".into(),
+                    root: "/example/project".into(),
+                    status: "warn".into(),
+                    args: Some(vec![
+                        "env".into(),
+                        "migrate".into(),
+                        "--path".into(),
+                        "/example/project".into(),
+                    ]),
+                    action: None,
+                }],
             },
         ],
     }

@@ -31,7 +31,7 @@ pub fn read<T: DeserializeOwned>(runner: &CliRunner, args: &[&str]) -> Result<T,
 }
 pub fn check(source: &LiveSource) -> Result<Observation, String> {
     let report: Report = read(&source.runner, &["upgrade", "check", "--json"])?;
-    if report.report_version != 1 {
+    if report.report_version != REPORT_VERSION {
         return Err("This upgrade report version is not supported".into());
     }
     Ok(Observation {

@@ -99,6 +99,14 @@ pub fn render(flow: &Flow, machine_busy: bool, cx: &mut Context<HackApp>) -> Any
                     step.id
                 )))
                 .child(div().text_sm().child(step.why.clone()));
+            if step.targets.len() > 1 {
+                let names: Vec<&str> = step.targets.iter().map(|t| t.scope.as_str()).collect();
+                card = card.child(div().text_xs().child(format!(
+                    "{} checkouts: {}",
+                    step.count,
+                    names.join(", ")
+                )));
+            }
             if let Some(action) = &step.action {
                 card = card.child(div().text_sm().child(action.clone()));
             }

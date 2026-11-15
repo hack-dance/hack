@@ -340,7 +340,11 @@ launchd exit status; these states need attention even if hackd runs separately.
 
 **Upgrade Hack** opens without probing for updates. **Review readiness** runs the
 selected CLI's read-only `upgrade check --json` on a background worker, keeping
-valid reports from exit 1. The hackd version comes from the socket named in the
+valid reports from exit 1. Only `report_version` 2 is read: every plan step must
+carry its `count` and `targets`, and a step covers the machine (no targets), one
+checkout (its name) or several (`projects`). A target must name a live checkout,
+by name and root, with exactly one finding for that step; any other report stays
+Unknown. Grouped cards list their checkouts. The hackd version comes from the socket named in the
 CLI's own read-only `daemon status --json` answer. No `update --check` probe or daily check runs: R14's
 observe-only target and installation contract is still missing. Availability
 therefore stays Unknown for every live install kind, including candidates and
@@ -368,7 +372,9 @@ Terminal launch and window focus never confirm success. **Check again** requires
 fresh CLI and Homebrew-installed app versions at the exact target, hackd matching
 the CLI, and a live, fully readable ready report with no remaining plan. Every
 previous step needs the same scope, checkout root and explicit `ok` finding;
-a disappeared step, missing scope, unreadable checkout or unchecked registry
+a grouped step needs that for every checkout it covered, under the id of the
+finding that put the checkout in the step (an `apply_fix` group may differ).
+A disappeared step, missing scope, unreadable checkout or unchecked registry
 entry stays Unknown. The snapshot plan entry is proven by its separate complete
 receipt. A read adapter for `brew info --json=v2 --cask hack-desktop` uses the
 installed version, never the catalog version; it stays unwired until R14 verifies

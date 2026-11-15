@@ -3,6 +3,10 @@
 use serde::Deserialize;
 use std::path::Path;
 
+/// The only `upgrade check --json` contract read. Version 2 groups checkout
+/// steps (`count`, `targets`); version 1 never shipped in a release tag.
+pub const REPORT_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Finding {
     pub id: String,
@@ -10,7 +14,27 @@ pub struct Finding {
     pub summary: String,
     pub args: Option<Vec<String>>,
     pub action: Option<String>,
+    /// The grouped plan step this finding belongs to when it is not `id`.
+    pub apply_fix: Option<String>,
 }
+impl Finding {
+    /// The plan step id that covers this finding.
+    pub fn step_id(&self) -> &str {
+        self.apply_fix.as_deref().unwrap_or(&self.id)
+    }
+}
+/// One checkout a grouped plan step covers. Its argv is display-only.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PlanTarget {
+    pub scope: String,
+    pub project: String,
+    pub root: String,
+    pub status: String,
+    pub args: Option<Vec<String>>,
+    pub action: Option<String>,
+}
+/// A plan step: `machine` (no targets), one checkout (its name, one target)
+/// or `projects` (two or more targets).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Step {
     pub id: String,
@@ -18,6 +42,8 @@ pub struct Step {
     pub why: String,
     pub args: Option<Vec<String>>,
     pub action: Option<String>,
+    pub count: usize,
+    pub targets: Vec<PlanTarget>,
 }
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ScopedFinding {
@@ -61,7 +87,7 @@ pub struct Report {
 }
 impl Report {
     pub fn readable(&self) -> bool {
-        self.report_version == 1
+        self.report_version == REPORT_VERSION
             && self.host_probes == "enabled"
             && matches!(self.registry.state.as_str(), "valid" | "absent")
             && self.registry.missing.is_empty()
@@ -78,6 +104,33 @@ impl Report {
                     .iter()
                     .any(|q| q.name == p.name || q.root == p.root)
             })
+            && self.plan.iter().all(|step| self.consistent(step))
+    }
+    /// A step's scope, count and targets agree with each other and name a
+    /// live checkout whose single finding the step covers.
+    fn consistent(&self, step: &Step) -> bool {
+        let scope = match step.targets.as_slice() {
+            [] => "machine",
+            [only] => only.scope.as_str(),
+            _ => "projects",
+        };
+        step.count == step.targets.len()
+            && step.scope == scope
+            && step.targets.iter().enumerate().all(|(i, t)| {
+                !step.targets[..i].iter().any(|u| u.scope == t.scope)
+                    && self.target_finding(step, t).is_some()
+            })
+    }
+    /// The one finding in the target's checkout (same name and root) that
+    /// this step covers, if there is exactly one.
+    fn target_finding(&self, step: &Step, target: &PlanTarget) -> Option<&Finding> {
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.name == target.scope && p.root == target.root)?;
+        let mut matching = project.findings.iter().filter(|f| f.step_id() == step.id);
+        let found = matching.next()?;
+        matching.next().is_none().then_some(found)
     }
     pub fn ready(&self) -> bool {
         self.readable()
@@ -104,21 +157,33 @@ impl Report {
         if step.id == "snapshot" && step.scope == "machine" {
             return true; // Proven separately by the admitted snapshot, not a finding.
         }
-        let findings = if step.scope == "machine" {
-            Some(&self.machine)
-        } else {
-            let old = before.projects.iter().find(|p| p.name == step.scope);
-            old.and_then(|old| {
-                self.projects
-                    .iter()
-                    .find(|p| p.name == old.name && p.root == old.root && p.state == "live")
-            })
-            .map(|p| &p.findings)
-        };
-        findings.is_some_and(|fs| {
-            let matching: Vec<_> = fs.iter().filter(|f| f.id == step.id).collect();
+        let explicit_ok = |fs: &[Finding], id: &str| {
+            let matching: Vec<_> = fs.iter().filter(|f| f.id == id).collect();
             matching.len() == 1 && matching[0].status == "ok"
-        })
+        };
+        if step.scope == "machine" {
+            return step.targets.is_empty() && explicit_ok(&self.machine, &step.id);
+        }
+        // Every covered checkout needs its own explicit ok, under the id of
+        // the finding that put it in the step (a grouped fix may differ).
+        !step.targets.is_empty()
+            && step.targets.iter().all(|target| {
+                let Some(old) = before.target_finding(step, target) else {
+                    return false;
+                };
+                !self.incomplete.iter().any(|f| f.scope == target.scope)
+                    && !self
+                        .blockers
+                        .iter()
+                        .any(|f| f.scope == target.scope && f.id == old.id)
+                    && self
+                        .projects
+                        .iter()
+                        .find(|p| {
+                            p.name == target.scope && p.root == target.root && p.state == "live"
+                        })
+                        .is_some_and(|p| explicit_ok(&p.findings, &old.id))
+            })
     }
 }
 

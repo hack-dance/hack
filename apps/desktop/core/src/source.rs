@@ -1269,6 +1269,8 @@ mod tests {
             let discovery = crate::doctor_plugins::Discovery {
                 config_dir: Some(root.join("client")),
                 unsupported_extra_selector: false,
+                docker_host: None,
+                context: None,
                 system_dirs: vec![root.join("system-plugins")],
             };
             let runs = self.doctor_runs_with_discovery(projects, budget, timeout, &discovery);
@@ -1824,6 +1826,8 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let discovery = crate::doctor_plugins::Discovery {
             config_dir: Some(client.clone()),
             unsupported_extra_selector: false,
+            docker_host: None,
+            context: None,
             system_dirs: vec![],
         };
         script(&plugin, "/bin/sh");
@@ -1854,6 +1858,45 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             )
             .is_err()
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn doctor_refuses_remote_or_unknown_docker_endpoints() {
+        let hack = fake_hack("doctor-docker-endpoint", "echo '{}'");
+        let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let client = root.join("client");
+        let meta = client.join("contexts/meta/one");
+        std::fs::create_dir_all(&meta).unwrap();
+        let discovery =
+            |host: Option<&str>, context: Option<&str>| crate::doctor_plugins::Discovery {
+                config_dir: Some(client.clone()),
+                unsupported_extra_selector: false,
+                system_dirs: vec![],
+                docker_host: host.map(str::to_owned),
+                context: context.map(str::to_owned),
+            };
+        let write = |host: &str| {
+            std::fs::write(
+                meta.join("meta.json"),
+                format!(r#"{{"Name":"selected","Endpoints":{{"docker":{{"Host":"{host}"}}}}}}"#),
+            )
+            .unwrap();
+        };
+        write("unix:///example/docker.sock");
+        assert!(crate::doctor_plugins::validate(&discovery(None, None)).is_ok());
+        assert!(crate::doctor_plugins::validate(&discovery(None, Some("default"))).is_ok());
+        assert!(crate::doctor_plugins::validate(&discovery(None, Some("selected"))).is_ok());
+        assert!(
+            crate::doctor_plugins::validate(&discovery(Some("unix:///example/docker.sock"), None))
+                .is_ok()
+        );
+        assert!(
+            crate::doctor_plugins::validate(&discovery(Some("tcp://example:2375"), None)).is_err()
+        );
+        assert!(crate::doctor_plugins::validate(&discovery(None, Some("missing"))).is_err());
+        write("ssh://user@example");
+        assert!(crate::doctor_plugins::validate(&discovery(None, Some("selected"))).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2241,6 +2284,8 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
         let discovery = crate::doctor_plugins::Discovery {
             config_dir: Some(client),
             unsupported_extra_selector: false,
+            docker_host: None,
+            context: None,
             system_dirs: vec![system_plugins],
         };
         let source = LiveSource {
@@ -2296,6 +2341,8 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
         );
         let refused = crate::doctor_plugins::Discovery {
             unsupported_extra_selector: true,
+            docker_host: None,
+            context: None,
             ..discovery
         };
         let refused_runs =
@@ -2465,6 +2512,14 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
         std::fs::write(
             client.join("config.json"),
             serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        // The selected context must resolve to a local Unix socket.
+        let meta = client.join("contexts/meta/fixture");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("meta.json"),
+            r#"{"Name":"fixture-context","Endpoints":{"docker":{"Host":"unix:///example/docker.sock"}}}"#,
         )
         .unwrap();
         let source = LiveSource {

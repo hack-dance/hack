@@ -862,26 +862,6 @@ fn readable_self(members: &[Identity]) -> Result<()> {
     Ok(())
 }
 
-pub fn flock_retry(fd: i32, operation: i32) -> Result<()> {
-    retry_interrupted(|| {
-        // SAFETY: caller retains ownership of the live descriptor across retries.
-        if unsafe { libc::flock(fd, operation) } == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    })
-}
-
-fn retry_interrupted(mut operation: impl FnMut() -> Result<()>) -> Result<()> {
-    loop {
-        match operation() {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => return result,
-        }
-    }
-}
-
 pub fn nonblocking(fd: &impl AsRawFd) -> Result<()> {
     // SAFETY: fcntl borrows a live descriptor and supplies integer flags only.
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
@@ -1061,25 +1041,6 @@ mod tests {
         identity.uid = state.uid;
         identity.session = state.guard_pid;
         assert!(super::recorded_guard_matches(&state, &identity));
-    }
-
-    #[test]
-    fn flock_interruption_retries_but_other_errors_do_not() {
-        let mut calls = 0;
-        super::retry_interrupted(|| {
-            calls += 1;
-            if calls < 3 {
-                Err(std::io::Error::from_raw_os_error(libc::EINTR))
-            } else {
-                Ok(())
-            }
-        })
-        .unwrap();
-        assert_eq!(calls, 3);
-        let error =
-            super::retry_interrupted(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)))
-                .unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
     }
 
     #[test]

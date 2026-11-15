@@ -124,3 +124,9 @@ Rust supervisor executable is installed alongside the CLI. The default stays
 `hack logs -f <name>` to watch output. See the
 [lifecycle runner implementation contract](https://github.com/hack-dance/hack/blob/next/docs/lifecycle-supervisor.md) for prerequisites and
 recovery behavior.
+
+Project JSON rows and hackd project snapshots share `backend`, `state`,
+`started_at` and per-service readiness, completion, health and exit fields.
+Unavailable evidence stays unknown/null. A zero exit is a completed job only
+with a declared completion role. Default `projects --json --observe` still
+contacts no runtime; live observations require `--runtime`.

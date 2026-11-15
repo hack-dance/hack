@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "data": {
+    "command": "trust",
+    "platform": "linux",
+    "refused": null,
+    "complete": true,
+    "blocked": [],
+    "steps": [],
+    "schema": "hack.global-admin-plan.v1"
+  }
+}

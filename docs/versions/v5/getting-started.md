@@ -118,6 +118,13 @@ routing services. See [Run and inspect](guides/run-project.md) for service selec
 log history and restarts. When this Compose run works, try native only on a
 [disposable project](native/start.md).
 
+Lifecycle host processes can opt into `lifecycle.runner: "supervisor"` when the
+Rust supervisor executable is installed alongside the CLI. The default stays
+`"mux"`. This mode has no terminal: use noninteractive commands and
+`hack logs -f <name>` to watch output. See the
+[lifecycle runner implementation contract](https://github.com/hack-dance/hack/blob/next/docs/lifecycle-supervisor.md) for prerequisites and
+recovery behavior.
+
 Project JSON rows and hackd project snapshots share `backend`, `state`,
 `started_at` and per-service readiness, completion, health and exit fields.
 Unavailable evidence stays unknown/null. A zero exit is a completed job only

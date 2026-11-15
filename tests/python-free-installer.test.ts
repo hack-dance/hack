@@ -105,11 +105,14 @@ function fixtureArchive(
   expect(tar.exitCode).toBe(0);
   return { archive, checksum: digest(archive) };
 }
-function fixture(hooks: ConstructorParameters<typeof Channel>[2] = {}) {
+function fixture(
+  hooks: ConstructorParameters<typeof Channel>[2] = {},
+  channelName = "channel"
+) {
   const root = scratch();
   const source = join(root, "source-manager");
   writeFileSync(source, "manager-one");
-  const channel = new Channel(join(root, "channel"), source, {
+  const channel = new Channel(join(root, channelName), source, {
     signatures: () => {},
     quiescence: () => {},
     ...hooks,
@@ -118,8 +121,8 @@ function fixture(hooks: ConstructorParameters<typeof Channel>[2] = {}) {
   channel.validate();
   return { root, source, channel };
 }
-async function installed() {
-  const f = fixture();
+async function installed(channelName?: string) {
+  const f = fixture({}, channelName);
   const input = fixtureArchive(f.root);
   await f.channel.install("5.0.0-next.1", input.archive, input.checksum);
   return f;
@@ -134,6 +137,15 @@ fixtureTest(
       process.env.HACK_NATIVE_HOME = join(f.root, "custom");
       await expect(f.channel.run(["up"])).rejects.toThrow(
         "receipt-owned native home"
+      );
+      // The refusal names the bundle's launcher by path; it is not on PATH.
+      await expect(f.channel.run(["up"])).rejects.toThrow(
+        join(f.channel.root, "versions/5.0.0-next.1/bundle/hack-v5")
+      );
+      // A root with a space is printed as one shell word (HACK-2251).
+      const spaced = await installed("a channel");
+      await expect(spaced.channel.run(["up"])).rejects.toThrow(
+        `directly: '${join(spaced.channel.root, "versions/5.0.0-next.1/bundle/hack-v5")}'`
       );
       expect(() => f.channel.requireQuiescent("5.0.0-next.1")).not.toThrow();
       expect(f.channel.environment("5.0.0-next.1").HACK_NATIVE_HOME).toBe(

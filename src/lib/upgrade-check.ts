@@ -1,6 +1,7 @@
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { isCandidateRun } from "../daemon/client.ts";
+import { resolveCandidateLauncher } from "./candidate-launcher.ts";
 import { quoteShellWord } from "./logs.ts";
 import { withProcessDeadline } from "./process-deadline.ts";
 import {
@@ -78,28 +79,28 @@ export type UpgradeCommandPrefix = {
 
 /**
  * During the prerelease, v5 runs through a candidate launcher while stable
- * v4 stays `hack` on PATH, so a bare `hack` would run the old CLI. The
- * `hack-next` launcher lives at `~/.hack-next/bin/hack-next` (not on PATH);
- * a Compose candidate run also needs `HACK_RUNTIME_BACKEND=compose`.
+ * v4 stays `hack` on PATH, so a bare `hack` would run the old CLI. Printed
+ * commands use the launcher this run came through (see
+ * {@link resolveCandidateLauncher}): `~/.hack-next/bin/hack-next`, or the
+ * bundle's `hack-v5` by path. A Compose candidate run also needs
+ * `HACK_RUNTIME_BACKEND=compose`.
  */
 export function upgradeCommandPrefix(opts: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly homeDir: string;
+  /** The running executable (default `process.execPath`). */
+  readonly execPath?: string;
 }): UpgradeCommandPrefix {
-  const entry = (opts.env.HACK_CANDIDATE_ENTRYPOINT ?? "").trim();
-  if (entry === "") {
+  const launcher = resolveCandidateLauncher(opts);
+  if (launcher.kind === "stable") {
     return { env: {}, argv: ["hack"] };
   }
-  const launcher =
-    entry === "hack-next"
-      ? join(opts.homeDir, ".hack-next", "bin", "hack-next")
-      : entry;
   return {
     env:
       (opts.env.HACK_RUNTIME_BACKEND ?? "").trim() === "compose"
         ? { HACK_RUNTIME_BACKEND: "compose" }
         : {},
-    argv: [launcher],
+    argv: [launcher.command],
   };
 }
 
@@ -250,6 +251,7 @@ export async function runUpgradeCheck(opts: {
           nativePreflight: opts.probes.nativePreflight,
           deadline,
           checkTimeoutMs: opts.checkTimeoutMs,
+          command: (args) => renderUpgradeCommand(prefix, args),
         })
       ).map(render),
     })
@@ -578,7 +580,7 @@ async function inspectMachine(opts: {
             id: "linux-dns",
             status: "info",
             summary:
-              "The Linux DNS route is set up by hack global install (listed above).",
+              "The Linux DNS route is set up by the global install listed above.",
             args: null,
             action: null,
           }
@@ -870,7 +872,7 @@ async function inspectGlobalSecretStore(opts: {
         "The global secret store's key file is missing; the OS keychain may hold its key, but it was not asked (asking can prompt).",
       args: ["doctor"],
       action:
-        "hack doctor asks the OS keychain and reports whether the key is there.",
+        "Doctor (the command above) asks the OS keychain and reports whether the key is there.",
     };
   }
   // Each reader's own key decides whether it is stranded: a project may
@@ -934,7 +936,7 @@ function misconfiguredReadersFinding(readers: ReaderKeyStates): UpgradeFinding {
     action:
       readers.opening.length > 0
         ? `Give ${readers.failing.join(", ")} the key that opens the store (the keyPath ${readers.opening.join(", ")} use${readers.opening.length === 1 ? "s" : ""}), or HACK_SECRETS_FILE_KEY.`
-        : "Run hack doctor to establish every reader's key before retiring or replacing the store.",
+        : "Run doctor (the command above) to establish every reader's key before retiring or replacing the store.",
   };
 }
 

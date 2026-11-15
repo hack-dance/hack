@@ -28,15 +28,17 @@ const CONFIRM_BOUND: Duration = Duration::from_secs(2);
 /// waiter normally gets its own outcome. Admission, census and signalling run
 /// outside the timers, so it is not a hard bound: an expired wait returns an
 /// `unknown` receipt with reason `stop-lock-wait-expired` and acts on nothing.
-const STOP_LOCK_WAIT: Duration =
+pub(crate) const STOP_LOCK_WAIT: Duration =
     Duration::from_secs(2 * (GRACE.as_secs() + CONFIRM_BOUND.as_secs()) + 2);
 /// Bounded wait for a previous command owner to release its lock.
 const COMMAND_LOCK_WAIT: Duration = Duration::from_secs(10);
+/// Bounded wait for another project supervisor to release the instance lock.
+pub(crate) const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(10);
 const LINE_LIMIT: usize = 64 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Receipt {
+pub(crate) struct Receipt {
     version: u32,
     supervisor_pid: u32,
     outcome: &'static str,
@@ -49,14 +51,16 @@ struct Receipt {
 }
 
 impl Receipt {
-    fn new(supervisor_pid: u32, outcome: &'static str, processes: Vec<State>) -> Self {
+    pub(crate) fn new(supervisor_pid: u32, outcome: &'static str, processes: Vec<State>) -> Self {
         let mut live_process_names = Vec::new();
         let mut unknown_process_names = Vec::new();
         for state in &processes {
             match os::observe_state(state) {
-                os::Observation::Live => live_process_names.push(state.name.clone()),
+                os::Observation::Live => live_process_names
+                    .push(state.display_name.as_ref().unwrap_or(&state.name).clone()),
+                os::Observation::Unknown => unknown_process_names
+                    .push(state.display_name.as_ref().unwrap_or(&state.name).clone()),
                 os::Observation::Absent => (),
-                os::Observation::Unknown => unknown_process_names.push(state.name.clone()),
             }
         }
         Self {
@@ -143,7 +147,16 @@ fn control_effects(
             }
         }
     } else {
-        None
+        // Status waits for a stop in progress, but never creates the lock file.
+        match root.existing_lock_wait(".stop.lock", STOP_LOCK_WAIT) {
+            Ok(lock) => lock,
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    *reason = "stop-lock-wait-expired";
+                }
+                return Err(error);
+            }
+        }
     };
     let mut states = Vec::new();
     *reason = "receipt-read-failed";
@@ -188,6 +201,17 @@ fn control_effects(
 }
 
 pub fn main() -> Result<()> {
+    let result = dispatch();
+    if result.is_err() && !protocol::stdout_started() {
+        let _ = protocol::write(
+            &mut std::io::stdout(),
+            &Receipt::new(0, "refused", Vec::new()),
+        );
+    }
+    result
+}
+
+fn dispatch() -> Result<()> {
     os::close_inherited()?;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() != 1 {
@@ -195,14 +219,23 @@ pub fn main() -> Result<()> {
     }
     match args[0].to_str() {
         Some("run") => run(protocol::read(&mut std::io::stdin())?),
+        Some("serve") => crate::incremental::serve(protocol::read(&mut std::io::stdin())?),
+        Some("add") => crate::incremental::add(protocol::read(&mut std::io::stdin())?),
         Some("guard") => guard(protocol::read(&mut std::io::stdin())?),
         Some(action @ ("stop" | "status")) => control(action),
         _ => Err(refused()),
     }
 }
 
-fn run(request: Launch) -> Result<()> {
+pub(crate) fn validate_launch(request: &Launch) -> Result<()> {
     protocol::validate_control(request.version, &request.root, &request.owner_token)?;
+    if request
+        .log_path
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute() || path.file_name().is_none())
+    {
+        return Err(refused());
+    }
     if request.processes.is_empty() || request.processes.len() > 128 {
         return Err(refused());
     }
@@ -213,8 +246,16 @@ fn run(request: Launch) -> Result<()> {
             return Err(refused());
         }
     }
+    Ok(())
+}
+
+fn run(request: Launch) -> Result<()> {
+    validate_launch(&request)?;
     let root = Root::open(&request.root)?;
-    let _instance_lock = instance_lock(&root)?;
+    let _instance_lock = match root.lock(".instance.lock") {
+        Ok(lock) => lock,
+        Err(_) => root.lock_wait(".instance.lock", INSTANCE_LOCK_WAIT)?,
+    };
     os::census_preflight()?;
     let launch_lock = root.lock_wait(".stop.lock", STOP_LOCK_WAIT)?;
     root.assert_not_retired(&request.owner_token)?;
@@ -234,42 +275,14 @@ fn run(request: Launch) -> Result<()> {
             if os::STOP.load(Ordering::Relaxed) {
                 return Err(refused());
             }
-            #[cfg(target_os = "linux")]
-            let executable = std::path::PathBuf::from("/proc/self/exe");
-            #[cfg(not(target_os = "linux"))]
-            let executable = std::env::current_exe()?;
-            let mut command = Command::new(executable);
-            command
-                .arg("guard")
-                .env_clear()
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                // Keep stop admission leased even if this supervisor dies
-                // before the guard publishes its durable identity. fd 2 is
-                // reserved until guard receipt delivery/detach (or exit).
-                .stderr(Stdio::from(launch_lock.try_clone()?));
-            // SAFETY: setsid is async-signal-safe, and this closure allocates no
-            // application state. It runs in the freshly forked child only.
-            unsafe {
-                command.pre_exec(os::session);
-            }
-            let child = command.spawn()?;
-            children.push(child);
-            let child = children.last_mut().ok_or_else(refused)?;
-            let plan = GuardLaunch {
-                version: 1,
-                root: request.root.clone(),
-                owner_token: request.owner_token.clone(),
+            let state = start_guard(
+                &request.root,
+                &request.owner_token,
+                request.log_path.as_deref(),
+                &launch_lock,
                 process,
-            };
-            protocol::write(&mut child.stdin.take().ok_or_else(refused)?, &plan)?;
-            let state: State = protocol::read(&mut child.stdout.take().ok_or_else(refused)?)?;
-            if state.guard_pid != child.id() as i32 || state.owner_token != request.owner_token {
-                return Err(refused());
-            }
-            if state.phase == "failed-start" {
-                return Err(refused());
-            }
+                &mut children,
+            )?;
             states.push(state);
         }
         protocol::write(
@@ -308,32 +321,53 @@ fn run(request: Launch) -> Result<()> {
     outcome
 }
 
-fn instance_lock(root: &Root) -> Result<File> {
-    // Preserve the uncontended fast path; a bounded retry below distinguishes
-    // contention from persistent file/OS failures with the actual errno.
-    if let Ok(file) = root.lock(".instance.lock") {
-        return Ok(file);
+pub(crate) fn start_guard(
+    root: &std::path::Path,
+    owner_token: &str,
+    log_path: Option<&std::path::Path>,
+    launch_lock: &File,
+    process: protocol::Process,
+    children: &mut Vec<Child>,
+) -> Result<State> {
+    if os::STOP.load(Ordering::Relaxed) {
+        return Err(refused());
     }
-    let file = root.file(".instance.lock", libc::O_RDWR | libc::O_CREAT)?;
-    let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        // SAFETY: file remains owned throughout this bounded retry.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(file);
-        }
-        let error = std::io::Error::last_os_error();
-        if !matches!(
-            error.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-        ) || Instant::now() >= deadline
-        {
-            return Err(error);
-        }
-        thread::sleep(TICK);
+    #[cfg(target_os = "linux")]
+    let executable = std::path::PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let executable = std::env::current_exe()?;
+    let mut command = Command::new(executable);
+    command
+        .arg("guard")
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(launch_lock.try_clone()?));
+    // SAFETY: setsid only uses async-signal-safe operations in the fresh child.
+    unsafe {
+        command.pre_exec(os::session);
     }
+    children.push(command.spawn()?);
+    let child = children.last_mut().ok_or_else(refused)?;
+    let plan = GuardLaunch {
+        version: 1,
+        root: root.into(),
+        owner_token: owner_token.into(),
+        process,
+        log_path: log_path.map(std::path::Path::to_path_buf),
+    };
+    protocol::write(&mut child.stdin.take().ok_or_else(refused)?, &plan)?;
+    let state: State = protocol::read(&mut child.stdout.take().ok_or_else(refused)?)?;
+    if state.guard_pid != child.id() as i32
+        || state.owner_token != owner_token
+        || state.phase == "failed-start"
+    {
+        return Err(refused());
+    }
+    Ok(state)
 }
 
-fn rollback(children: &mut [Child]) {
+pub(crate) fn rollback(children: &mut [Child]) {
     for child in children.iter_mut() {
         if child.try_wait().ok().flatten().is_some() {
             continue;
@@ -381,6 +415,7 @@ fn guard(request: GuardLaunch) -> Result<()> {
     let mut state = State {
         version: 1,
         name: request.process.name.clone(),
+        display_name: request.process.display_name.clone(),
         owner_token: request.owner_token,
         guard_pid: pid,
         process_group_id: pid,
@@ -393,10 +428,25 @@ fn guard(request: GuardLaunch) -> Result<()> {
         exit_code: None,
         signal: None,
     };
-    let mut log = root.file(
-        "lifecycle.log",
-        libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
-    )?;
+    let mut log = if let Some(path) = request.log_path {
+        if !path.is_absolute() {
+            return Err(refused());
+        }
+        let parent = Root::open(path.parent().ok_or_else(refused)?)?;
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or_else(refused)?;
+        if name == "." || name == ".." || name.contains('/') {
+            return Err(refused());
+        }
+        parent.file(name, libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT)?
+    } else {
+        root.file(
+            "lifecycle.log",
+            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
+        )?
+    };
     root.save(&state)?;
     let outcome = guard_command(&request.process, &root, &mut state, &mut log);
     if outcome.is_err() && state.command_pid.is_some() {
@@ -416,12 +466,33 @@ fn guard(request: GuardLaunch) -> Result<()> {
     outcome
 }
 
+/// Only qualification builds can pause at these instruction boundaries. The
+/// requested checkpoint is read from the explicit test process plan, never the
+/// guard's ambient environment. Shipped/default builds contain no checkpoint.
+#[cfg(feature = "test-hooks")]
+fn test_pause(process: &protocol::Process, checkpoint: &str) {
+    if process
+        .env
+        .get("SUPERVISOR_TEST_CHECKPOINT")
+        .map(String::as_str)
+        == Some(checkpoint)
+    {
+        // SAFETY: affects only this guard, which the fixture owns and kills.
+        unsafe {
+            libc::raise(libc::SIGSTOP);
+        }
+    }
+}
+
 fn guard_command(
     process: &protocol::Process,
     root: &Root,
     state: &mut State,
     log: &mut File,
 ) -> Result<()> {
+    let log_name = sanitize_service(state.display_name.as_deref().unwrap_or(&state.name));
+    #[cfg(feature = "test-hooks")]
+    test_pause(process, "before-spawn");
     let mut command = Command::new(&process.argv[0]);
     command
         .args(&process.argv[1..])
@@ -444,6 +515,8 @@ fn guard_command(
             return Err(refused());
         }
     };
+    #[cfg(feature = "test-hooks")]
+    test_pause(process, "after-spawn");
     state.command_pid = Some(child.id() as i32);
     state.command_start_time = os::inspect(child.id() as i32)?.map(|identity| identity.start);
     state.phase = "running".into();
@@ -467,10 +540,10 @@ fn guard_command(
     loop {
         // Alternate bounded reads so stdout bursts cannot starve stderr/stop.
         if stdout_open {
-            stdout_open = out.drain(&mut stdout, log, &state.name, "stdout")?;
+            stdout_open = out.drain(&mut stdout, log, &log_name, "stdout")?;
         }
         if stderr_open {
-            stderr_open = err.drain(&mut stderr, log, &state.name, "stderr")?;
+            stderr_open = err.drain(&mut stderr, log, &log_name, "stderr")?;
         }
         let was_exited = direct_exited;
         if !direct_exited && let Some(status) = child.try_wait()? {
@@ -508,10 +581,10 @@ fn guard_command(
             // inherit a pipe on Darwin. Drain a bounded final interval instead.
             if since.elapsed() >= Duration::from_millis(100) {
                 if !out.pending.is_empty() {
-                    out.flush(log, &state.name, "stdout", true)?;
+                    out.flush(log, &log_name, "stdout", true)?;
                 }
                 if !err.pending.is_empty() {
-                    err.flush(log, &state.name, "stderr", true)?;
+                    err.flush(log, &log_name, "stderr", true)?;
                 }
                 state.phase = if killed { "killed" } else { "exited" }.into();
                 root.save(state)?;
@@ -707,7 +780,7 @@ fn stop(states: &[State]) -> Result<()> {
     }
 }
 
-fn detach_stdio() -> Result<()> {
+pub(crate) fn detach_stdio() -> Result<()> {
     let null = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -800,9 +873,21 @@ fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
     0
 }
 
+fn sanitize_service(name: &str) -> String {
+    let compact = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut units = 0;
+    compact
+        .chars()
+        .take_while(|ch| {
+            units += ch.len_utf16();
+            units <= 96
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::incomplete_utf8_tail;
+    use super::{incomplete_utf8_tail, sanitize_service};
 
     #[test]
     fn live_guard_admission_tolerates_unavailable_recovery_census() {
@@ -825,5 +910,8 @@ mod tests {
             }
         }
         assert_eq!(incomplete_utf8_tail(b"abc\xff"), 0);
+        assert_eq!(sanitize_service("  API\t/\nworker  "), "API / worker");
+        assert_eq!(sanitize_service(&"x".repeat(120)).len(), 96);
+        assert_eq!(sanitize_service(&format!("{}🦀", "x".repeat(95))).len(), 95);
     }
 }

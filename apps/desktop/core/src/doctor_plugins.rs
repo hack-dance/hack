@@ -31,7 +31,7 @@ impl Discovery {
             });
         let text = |key| {
             runner
-                .env_value(key)
+                .effective_env(key)
                 .and_then(|v| v.into_string().ok())
                 .filter(|v| !v.is_empty())
         };

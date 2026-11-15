@@ -11,7 +11,8 @@ import { buildVersionReport } from "./version-report.ts";
 
 const RELEASES_API = "https://api.github.com/repos/hack-dance/hack/releases";
 const FETCH_TIMEOUT_MS = 10_000;
-const NEXT_LIST_PAGE_SIZE = 50;
+/** GitHub's maximum page size; the check never reads a second page. */
+const NEXT_LIST_PAGE_SIZE = 100;
 const HOMEBREW_UPGRADE = ["brew", "upgrade", "hack-dance/tap/hack"] as const;
 
 const LEADING_V = /^v/;
@@ -85,7 +86,17 @@ export function compareUpdateVersions(
 type ReadFailure = "network-unavailable" | "release-unavailable";
 
 type LatestOutcome =
-  | { readonly ok: true; readonly version: string }
+  | {
+      readonly ok: true;
+      readonly version: string;
+      /**
+       * Whether "nothing newer" can be trusted. The list is ordered by creation,
+       * not version, so one page proves it only when the page is not full or
+       * contains the running version's own release (everything created later
+       * is then on the page).
+       */
+      readonly settled: boolean;
+    }
   | { readonly ok: false; readonly reason: ReadFailure };
 
 async function readJson(opts: {
@@ -129,12 +140,13 @@ function releaseVersion(entry: unknown): string | null {
 
 /**
  * Stable: GitHub's latest release, which excludes prereleases and drafts.
- * Next: the newest `-next.N` release with the running CLI's major version.
+ * Next: the newest `-next.N` release with the running CLI's major version
+ * on the first page of the release list.
  */
 async function resolveLatest(opts: {
   readonly fetch: typeof fetch;
   readonly channel: "stable" | "next";
-  readonly major: number;
+  readonly current: ParsedVersion;
 }): Promise<LatestOutcome> {
   if (opts.channel === "stable") {
     const read = await readJson({
@@ -146,7 +158,7 @@ async function resolveLatest(opts: {
     }
     const version = releaseVersion(read.json);
     return version !== null && parseUpdateVersion(version)?.next === null
-      ? { ok: true, version }
+      ? { ok: true, version, settled: true }
       : { ok: false, reason: "release-unavailable" };
   }
   const read = await readJson({
@@ -160,6 +172,7 @@ async function resolveLatest(opts: {
     return { ok: false, reason: "release-unavailable" };
   }
   let best: { version: string; parsed: ParsedVersion } | null = null;
+  let includesCurrent = false;
   for (const entry of read.json) {
     const version = releaseVersion(entry);
     const parsed = version === null ? null : parseUpdateVersion(version);
@@ -167,17 +180,22 @@ async function resolveLatest(opts: {
       version === null ||
       parsed === null ||
       parsed.next === null ||
-      parsed.core[0] !== opts.major
+      parsed.core[0] !== opts.current.core[0]
     ) {
       continue;
     }
+    includesCurrent ||= compareUpdateVersions(parsed, opts.current) === 0;
     if (best === null || compareUpdateVersions(parsed, best.parsed) > 0) {
       best = { version, parsed };
     }
   }
   return best === null
     ? { ok: false, reason: "release-unavailable" }
-    : { ok: true, version: best.version };
+    : {
+        ok: true,
+        version: best.version,
+        settled: read.json.length < NEXT_LIST_PAGE_SIZE || includesCurrent,
+      };
 }
 
 /** A supported, self-contained upgrade path for this install, or `null`. */
@@ -190,6 +208,11 @@ function upgradeCommand(opts: {
   readonly homeDir: string;
 }): readonly string[] | null {
   if (opts.installKind === "candidate") {
+    // Only the `hack-next` launcher has the standalone manager; other
+    // candidate launchers (such as a bundle's `hack-v5`) forward every argument.
+    if ((opts.env.HACK_CANDIDATE_ENTRYPOINT ?? "").trim() !== "hack-next") {
+      return null;
+    }
     const prefix = upgradeCommandPrefix({
       env: opts.env,
       homeDir: opts.homeDir,
@@ -243,7 +266,7 @@ export async function observeUpdate(opts: {
   const latest = await resolveLatest({
     fetch: opts.fetch ?? fetch,
     channel: identity.channel,
-    major: current.core[0],
+    current,
   });
   if (!latest.ok) {
     return unknown(latest.reason);
@@ -251,6 +274,10 @@ export async function observeUpdate(opts: {
   const target = parseUpdateVersion(latest.version);
   const available =
     target === null ? null : compareUpdateVersions(current, target) < 0;
+  if (available === false && !latest.settled) {
+    // A newer release may sit beyond the one page read: unknown, not current.
+    return unknown("release-unavailable");
+  }
   return {
     current: identity.version,
     channel: identity.channel,

@@ -48,7 +48,7 @@ async function executable(relative: string): Promise<string> {
   return path;
 }
 
-const base = { env: {}, homeDir: "/example/home" } as const;
+const base = { env: {}, homeDir: "/example/user" } as const;
 
 test("candidate versions sort before their release and by next number", () => {
   const parse = (raw: string) => {
@@ -126,7 +126,7 @@ test("a candidate picks the newest same-major next release and its manager upgra
   });
   const report = await observeUpdate({
     env: { HACK_CANDIDATE_ENTRYPOINT: "hack-next" },
-    homeDir: "/example/home",
+    homeDir: "/example/user",
     version: "5.0.0-next.17",
     executable: "/example/bun",
     compiled: false,
@@ -139,7 +139,7 @@ test("a candidate picks the newest same-major next release and its manager upgra
     available: true,
     install_kind: "candidate",
     upgrade_command: [
-      "/example/home/.hack-next/bin/hack-next",
+      "/example/user/.hack-next/bin/hack-next",
       "--manager",
       "upgrade",
       "--version",
@@ -148,7 +148,7 @@ test("a candidate picks the newest same-major next release and its manager upgra
     reason: null,
   });
   expect(read.urls).toEqual([
-    "https://api.github.com/repos/hack-dance/hack/releases?per_page=50",
+    "https://api.github.com/repos/hack-dance/hack/releases?per_page=100",
   ]);
 });
 
@@ -290,4 +290,62 @@ test.each([
   expect(run.code).not.toBe(0);
   machineError(run.stdout, "E_USAGE");
   expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+test("a candidate launcher without the manager gets no upgrade command", async () => {
+  const report = await observeUpdate({
+    env: { HACK_CANDIDATE_ENTRYPOINT: "/example/bundle/bin/hack-v5" },
+    homeDir: "/example/user",
+    version: "5.0.0-next.17",
+    executable: "/example/bun",
+    compiled: false,
+    fetch: releases({ list: [{ tag_name: "v5.0.0-next.18" }] }).fetch,
+  });
+  expect(report).toMatchObject({
+    install_kind: "candidate",
+    available: true,
+    upgrade_command: null,
+    reason: null,
+  });
+});
+
+/** A full first page: older stable releases fill it unless `extra` takes slots. */
+function fullPage(extra: readonly string[]): unknown[] {
+  const tags = [...extra];
+  for (let index = 0; tags.length < 100; index++) {
+    tags.push(`v4.0.${index}`);
+  }
+  return tags.map((tag_name) => ({ tag_name, draft: false }));
+}
+
+test("a full page proves 'up to date' only when it holds the running release", async () => {
+  const observe = (list: unknown[]) =>
+    observeUpdate({
+      ...base,
+      version: "5.0.0-next.17",
+      executable: "/example/bun",
+      compiled: false,
+      fetch: releases({ list }).fetch,
+    });
+  // Older candidates only, and not the running one: a newer one may be on page two.
+  expect(await observe(fullPage(["v5.0.0-next.16"]))).toMatchObject({
+    latest: null,
+    available: null,
+    reason: "release-unavailable",
+  });
+  // The running release is listed, so everything created after it is too.
+  expect(
+    await observe(fullPage(["v5.0.0-next.17", "v5.0.0-next.16"]))
+  ).toMatchObject({ latest: "5.0.0-next.17", available: false, reason: null });
+  // A newer candidate on the page is positive evidence either way.
+  expect(await observe(fullPage(["v5.0.0-next.18"]))).toMatchObject({
+    latest: "5.0.0-next.18",
+    available: true,
+  });
+  // A short page is the whole list.
+  expect(await observe([{ tag_name: "v5.0.0-next.16" }])).toMatchObject({
+    latest: "5.0.0-next.16",
+    available: false,
+    reason: null,
+  });
 });

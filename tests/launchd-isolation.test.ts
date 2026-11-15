@@ -129,6 +129,10 @@ async function makeFixture(): Promise<Fixture> {
   );
 
   await writeStub(join(tools, "security"), "exit 0");
+  // Stands for the system directories of the launchd PATH (HACK-2142).
+  const sysbin = join(root, "sysbin");
+  await mkdir(sysbin);
+  await chmod(sysbin, 0o755);
 
   return {
     root,
@@ -151,6 +155,9 @@ async function makeFixture(): Promise<Fixture> {
           // This file asserts daemon starts against stubs, so it opts in. A
           // case that tests the opt-out sets it again through `extra`.
           [DAEMON_AUTOSTART_DISABLE_ENV]: undefined,
+          // The driver's launchd PATH check inspects this fixture directory
+          // instead of the host's system directories (HACK-2142).
+          DRIVER_SYSTEM_PATH: sysbin,
           ...extra,
         },
       }),
@@ -508,6 +515,86 @@ test("a refresh whose kept program has a group-writable ancestor is refused, not
   });
   expect(after).toBe(stale);
   expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+});
+
+// Codex security finding on PR #854 (HACK-2216): the PATH a rewritten
+// plist gives hackd is checked like systemd's rendered unit PATH.
+
+/** A stale managed plist for the fixture's `hack` (an older PATH). */
+function stalePlist(fixture: Fixture): string {
+  return renderLaunchdPlist({
+    hackBinPath: join(fixture.root, "tools", "hack"),
+    home: fixture.home,
+    runAtLoad: false,
+    guiSessionOnly: false,
+  }).replace(":/opt/homebrew/bin", "");
+}
+
+test("a refresh whose PATH has a group-writable directory is refused, nothing changed", async () => {
+  let stale = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    stale = stalePlist(fixture);
+    // A system directory of the rendered PATH others in the group can add
+    // programs to (hackd runs `docker` by bare name).
+    chmodSync(join(fixture.root, "sysbin"), 0o775);
+    return stale;
+  });
+  expect(results).toEqual({
+    repair: "refresh-refused",
+    secondRepair: "refresh-refused",
+  });
+  expect(after).toBe(stale);
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+});
+
+test("a retarget whose PATH has a world-writable home directory is refused, nothing changed", async () => {
+  let written = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    written = missingProgramPlist(fixture);
+    // ~/.hack/bin on the rendered PATH, writable by everyone.
+    const hackBin = join(fixture.home, ".hack", "bin");
+    mkdirSync(hackBin, { recursive: true });
+    chmodSync(hackBin, 0o777);
+    return written;
+  });
+  expect(results).toEqual({
+    repair: "retarget-refused",
+    secondRepair: "retarget-refused",
+  });
+  expect(after).toBe(written);
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+});
+
+test("a refresh with a safe PATH still refreshes", async () => {
+  let fixtureHome = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    fixtureHome = fixture.home;
+    return stalePlist(fixture);
+  });
+  expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
+  expect(after).toContain(`${fixtureHome}/.hack/bin`);
+  expect(verbs).toEqual(["print", "bootout", "bootstrap"]);
+});
+
+test("an explicit install refuses a PATH with a group-writable directory before launchctl", async () => {
+  const fixture = await makeFixture();
+  await chmod(join(fixture.root, "sysbin"), 0o775);
+  const run = await runAsDarwin({
+    argv: [DRIVER],
+    cwd: fixture.root,
+    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack") }),
+  });
+  expect(run.code).toBe(0);
+  const results = JSON.parse(run.stdout) as Record<string, unknown>;
+  expect(results.install).toMatchObject({ ok: false, unsafePath: true });
+  const verbs = (await launchctlCalls(fixture)).map(
+    (line) => line.split(" ")[0]
+  );
+  // The driver's own stop and uninstall still call launchctl afterwards,
+  // but neither the repair nor the install loaded anything.
   expect(verbs).not.toContain("bootstrap");
 });
 

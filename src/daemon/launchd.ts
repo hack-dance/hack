@@ -201,6 +201,53 @@ export function isHackManagedPlist(opts: {
   );
 }
 
+/** The system directories on the PATH the rendered plist gives hackd. */
+export const LAUNCHD_SYSTEM_PATH_DIRECTORIES = [
+  "/usr/local/bin",
+  "/opt/homebrew/bin",
+  "/usr/bin",
+  "/bin",
+] as const;
+
+/** The PATH directories the rendered plist gives hackd, in order. */
+export function renderedLaunchdPathDirectories(opts: {
+  readonly home: string;
+  /**
+   * Test seam: replaces {@link LAUNCHD_SYSTEM_PATH_DIRECTORIES} so tests do
+   * not depend on the host's own system directories.
+   */
+  readonly systemDirectories?: readonly string[];
+}): readonly string[] {
+  return [
+    ...(opts.systemDirectories ?? LAUNCHD_SYSTEM_PATH_DIRECTORIES),
+    `${opts.home}/.bun/bin`,
+    `${opts.home}/.hack/bin`,
+  ];
+}
+
+/**
+ * hackd runs helpers such as `docker` by bare name through the plist's
+ * PATH, so a directory on it that another account can add programs to (or
+ * create) has them run as this user (HACK-2216). Every directory of the
+ * PATH the rendered plist gives hackd gets the checks systemd makes for
+ * its rendered unit ({@link checkServicePathDirectories} in systemd.ts),
+ * with no exception for administrator directories. Null, or why not.
+ */
+export async function checkLaunchdServicePath(opts: {
+  readonly home: string;
+  /** Test seam; see {@link renderedLaunchdPathDirectories}. */
+  readonly systemDirectories?: readonly string[];
+}): Promise<string | null> {
+  // Loaded lazily: systemd.ts imports this module.
+  const { checkServicePathDirectories } = await import("./systemd.ts");
+  const error = await checkServicePathDirectories({
+    dirs: renderedLaunchdPathDirectories(opts),
+  });
+  return error === null
+    ? null
+    : `the PATH the launchd service would give hackd is not safe: ${error.replace("the hackd.service PATH", "its PATH")}`;
+}
+
 /**
  * Generates the launchd plist XML for hackd.
  */
@@ -245,7 +292,7 @@ export function renderLaunchdPlist(opts: LaunchdPlistOptions): string {
     "    <key>HOME</key>",
     `    <string>${opts.home}</string>`,
     "    <key>PATH</key>",
-    `    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${opts.home}/.bun/bin:${opts.home}/.hack/bin</string>`,
+    `    <string>${renderedLaunchdPathDirectories({ home: opts.home }).join(":")}</string>`,
     "  </dict>",
   ];
 
@@ -268,18 +315,28 @@ export interface LaunchdInstallResult {
   readonly alreadyInstalled?: boolean;
   /** Set when {@link resolveLaunchdAccess} refused; nothing was read or written. */
   readonly blocked?: LaunchdAccessBlockReason;
+  /**
+   * Set when the PATH the plist would give hackd failed
+   * {@link checkLaunchdServicePath}; nothing was unloaded, written or loaded.
+   */
+  readonly unsafePath?: true;
 }
 
 /**
  * Installs the launchd plist and bootstraps the service.
  *
  * Refuses, without touching the plist or launchctl, when
- * {@link resolveLaunchdAccess} denies access.
+ * {@link resolveLaunchdAccess} denies access, or when the PATH the plist
+ * would give hackd fails {@link checkLaunchdServicePath} (`unsafePath`).
+ * The PATH check runs for an explicit `hack daemon install` and for every
+ * automatic refresh or retarget alike, right before anything is unloaded
+ * or written.
  */
 export async function installLaunchdService({
   paths,
   config,
   hackBinPath: keepProgram,
+  systemPathDirectories,
 }: {
   readonly paths: DaemonPaths;
   readonly config: DaemonLaunchdConfig;
@@ -288,6 +345,8 @@ export async function installLaunchdService({
    * link to this CLI stays a link). Defaults to this CLI's resolution.
    */
   readonly hackBinPath?: string;
+  /** Test seam; see {@link renderedLaunchdPathDirectories}. */
+  readonly systemPathDirectories?: readonly string[];
 }): Promise<LaunchdInstallResult> {
   const access = resolveLaunchdAccess();
   if (!access.allowed) {
@@ -309,6 +368,13 @@ export async function installLaunchdService({
     };
   }
   const home = resolveUserHomeDir();
+  const unsafePath = await checkLaunchdServicePath({
+    home,
+    systemDirectories: systemPathDirectories,
+  });
+  if (unsafePath !== null) {
+    return { ok: false, error: unsafePath, unsafePath: true };
+  }
 
   const plistContent = renderLaunchdPlist({
     hackBinPath,
@@ -759,6 +825,8 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   readonly validateRetarget?: (path: string) => Promise<string | null>;
   /** Defaults to the real launchd status; tests pin it. */
   readonly readStatus?: () => Promise<LaunchdServiceStatus>;
+  /** Test seam; see {@link renderedLaunchdPathDirectories}. */
+  readonly systemPathDirectories?: readonly string[];
 }): Promise<LaunchdProgramRepairResult> {
   if (!resolveLaunchdAccess().allowed) {
     return "not-installed";
@@ -795,12 +863,14 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   // bootstrapped: the program the rewritten plist runs, kept by a refresh
   // or new for a retarget, gets the full target checks (HACK-2216). A
   // refresh of a pathname another account can replace would bootstrap
-  // whatever they put there.
+  // whatever they put there. installLaunchdService then checks the PATH
+  // the plist gives hackd before it unloads or writes anything.
+  const refused = program === null ? "retarget-refused" : "refresh-refused";
   const unfit = await (opts.validateRetarget ?? checkLaunchdRetargetTarget)(
     target
   );
   if (unfit !== null) {
-    return program === null ? "retarget-refused" : "refresh-refused";
+    return refused;
   }
   const result = await installLaunchdService({
     paths: opts.paths,
@@ -811,7 +881,11 @@ export async function repairLaunchdProgramIfInvalid(opts: {
     // A refresh keeps the plist's own program path; a retarget writes the
     // validated target.
     hackBinPath: target,
+    systemPathDirectories: opts.systemPathDirectories,
   });
+  if (result.unsafePath) {
+    return refused;
+  }
   if (!result.ok) {
     return "failed";
   }

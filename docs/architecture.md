@@ -760,9 +760,16 @@ Such a plist is never replaced automatically; `start` reports it and
   nothing is written, unloaded or loaded, and start refuses
   (`blocked: "rewrite-refused"`) with `hack daemon install` as the next step.
   Without this check, someone able to replace that pathname would have
-  launchd start their program as this user. The check that runs before `start`
-  or `restart` stops a running hackd makes the same check for a refresh the
-  start would run. On Linux, the program a rewritten unit keeps passes
+  launchd start their program as this user. hackd also runs helpers such as
+  `docker` by bare name, so every directory of the PATH the new plist gives
+  hackd (`/usr/local/bin`, `/opt/homebrew/bin`, `/usr/bin`, `/bin`,
+  `~/.bun/bin` and `~/.hack/bin`) must pass the checks systemd makes for its
+  rendered unit's PATH. A directory another account can add programs to, or
+  create, refuses the rewrite the same way, with nothing unloaded or written.
+  An explicit `hack daemon install` on macOS makes the same PATH check before
+  it touches launchd. The check that runs before `start` or `restart` stops a
+  running hackd makes the program and PATH checks for a refresh or retarget
+  the start would run. On Linux, the program a rewritten unit keeps passes
   install's program checks just before the unit is written, and an automatic
   restart checks the unit's program once more as its last step.
 - A plist that runs another existing `hack` is left as it is, even an older

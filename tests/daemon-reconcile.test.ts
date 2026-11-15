@@ -1579,6 +1579,9 @@ test("an incompatible launchd daemon with a missing plist program is only replac
             observation: "reported" as const,
           }),
         isAncestor: () => Promise.resolve(false),
+        // The rendered PATH's system directories: this test's own, not the
+        // host's (HACK-2142).
+        systemPathDirectories: [dir],
         readProgram: () =>
           Promise.resolve({
             kind: "missing" as const,
@@ -1656,6 +1659,7 @@ test("an incompatible launchd daemon with a missing plist program is only replac
         proveJob: () => Promise.resolve(true),
         executing: null,
         validateRetarget: () => Promise.resolve(null),
+        systemPathDirectories: [dir],
       })
     ).toBe(1);
     expect(restartTrace.blocked).toBe("unproven-owner");

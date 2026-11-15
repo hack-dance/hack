@@ -1,6 +1,7 @@
 import { resolveExecutingCliPath } from "../daemon/executing-cli.ts";
 import {
   checkLaunchdRetargetTarget,
+  checkLaunchdServicePath,
   getLaunchdServiceStatus,
   kickstartLaunchdService,
   type LaunchdProgramRepairResult,
@@ -17,6 +18,7 @@ import type { DaemonPaths } from "../daemon/paths.ts";
 import { hasAncestorProcess } from "../daemon/process-ancestry.ts";
 import type { DaemonCommandTrace } from "../daemon/reconcile.ts";
 import { readTextFile } from "../lib/fs.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import { logger } from "../ui/logger.ts";
 
 /**
@@ -48,6 +50,11 @@ export interface LaunchdStartHooks {
   readonly executing?: string | null;
   /** Defaults to {@link checkLaunchdRetargetTarget}; tests pin it. */
   readonly validateRetarget?: (path: string) => Promise<string | null>;
+  /**
+   * Test seam for {@link checkLaunchdServicePath}: replaces the system
+   * directories of the rendered PATH.
+   */
+  readonly systemPathDirectories?: readonly string[];
   /**
    * Called before launchd may be asked to start hackd (a reload or a
    * kickstart), so the caller can tell a refusal from a failed start.
@@ -220,7 +227,7 @@ function describeReplacementBlock(block: ReplacementBlock): string {
     case "other-program":
       return "the launchd job would be retargeted to a hack that is not this CLI";
     case "refresh-refused":
-      return "the launchd plist is stale and the program a refresh would keep is not fit for a login service (a source file, a temporary location or one others can change)";
+      return "the launchd plist is stale and the program a refresh would keep, or the PATH it would give hackd, is not fit for a login service (a source file, a temporary location, or a program or PATH directory others can change)";
     default:
       return "the launchd job's program is gone and the hack it would be retargeted to is not fit for a login service";
   }
@@ -267,10 +274,7 @@ async function launchdJobBlocksReplacement(opts: {
   if (program.resolved === null) {
     return "retarget-refused";
   }
-  const unfit = await (hooks.validateRetarget ?? checkLaunchdRetargetTarget)(
-    program.resolved
-  );
-  if (unfit !== null) {
+  if (!(await rewriteTargetIsFit({ hooks, target: program.resolved }))) {
     return "retarget-refused";
   }
   return await refuseRunningRewrite({
@@ -283,10 +287,33 @@ async function launchdJobBlocksReplacement(opts: {
 }
 
 /**
+ * What a rewrite checks just before it writes, predicted before a running
+ * daemon is stopped: the program the plist will run
+ * ({@link checkLaunchdRetargetTarget}) and the PATH it gives hackd
+ * ({@link checkLaunchdServicePath}). True when both pass.
+ */
+async function rewriteTargetIsFit(opts: {
+  readonly hooks: LaunchdStartHooks;
+  readonly target: string;
+}): Promise<boolean> {
+  const { hooks } = opts;
+  const unfit =
+    (await (hooks.validateRetarget ?? checkLaunchdRetargetTarget)(
+      opts.target
+    )) ??
+    (await checkLaunchdServicePath({
+      home: resolveUserHomeDir(),
+      systemDirectories: hooks.systemPathDirectories,
+    }));
+  return unfit === null;
+}
+
+/**
  * The start after the stop would refresh a stale plist for the program it
- * keeps: that program must pass the same checks the refresh makes just
- * before it writes ({@link checkLaunchdRetargetTarget}), or nothing is
- * stopped (`refresh-refused`). Null when no refresh would run or it may.
+ * keeps: that program and the PATH the refreshed plist gives hackd must
+ * pass the checks the refresh makes just before it writes
+ * ({@link rewriteTargetIsFit}), or nothing is stopped (`refresh-refused`).
+ * Null when no refresh would run or it may.
  */
 async function refreshBlocksReplacement(opts: {
   readonly hooks: LaunchdStartHooks;
@@ -301,10 +328,9 @@ async function refreshBlocksReplacement(opts: {
   if (target === null) {
     return null;
   }
-  const unfit = await (hooks.validateRetarget ?? checkLaunchdRetargetTarget)(
-    target
-  );
-  return unfit === null ? null : "refresh-refused";
+  return (await rewriteTargetIsFit({ hooks, target }))
+    ? null
+    : "refresh-refused";
 }
 
 /**
@@ -366,6 +392,7 @@ export async function startViaLaunchdIfLoaded(
       repairLaunchdProgramIfInvalid({
         paths,
         daemonRunning: hooks.onlyIfStale === true,
+        systemPathDirectories: hooks.systemPathDirectories,
       }))
   )();
   if (repair === "failed") {
@@ -406,7 +433,7 @@ export async function startViaLaunchdIfLoaded(
   if (repair === "refresh-refused") {
     logger.error({
       message:
-        "Not starting hackd through launchd: its plist is stale and the program a refresh would keep is not fit for a login service; nothing was changed | Install hack to a stable location, then run: hack daemon install",
+        "Not starting hackd through launchd: its plist is stale and the program a refresh would keep, or the PATH it would give hackd, is not fit for a login service; nothing was changed | Make the program and its PATH directories writable only by you (chmod go-w), then run: hack daemon install",
     });
     return 1;
   }
@@ -503,7 +530,7 @@ function noteRepair(opts: {
       trace.blocked = "rewrite-refused";
       logger.warn({
         message:
-          "The launchd plist is stale, but the program a refresh would keep is not fit for a login service (a source file, a bun script, a temporary location or one others can change), so it was not rewritten or restarted | Install hack to a stable location, then run: hack daemon install",
+          "The launchd plist is stale, but the program a refresh would keep, or the PATH it would give hackd, is not fit for a login service (a source file, a bun script, a temporary location, or a program or PATH directory others can change), so it was not rewritten or restarted | Fix that, then run: hack daemon install",
       });
       return false;
     case "unmanaged":

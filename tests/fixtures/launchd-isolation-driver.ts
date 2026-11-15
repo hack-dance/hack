@@ -103,6 +103,16 @@ if (process.argv[2] === "manager-state") {
   process.exit(0);
 }
 
+/**
+ * DRIVER_SYSTEM_PATH (colon-separated): the system directories of the
+ * rendered PATH the launchd PATH check inspects, instead of the host's own
+ * (HACK-2142: CI images leave some of them writable). Test-only.
+ */
+function driverSystemPath(): readonly string[] | undefined {
+  const value = process.env.DRIVER_SYSTEM_PATH;
+  return value ? value.split(":") : undefined;
+}
+
 if (process.argv[2] === "repair-output") {
   // This driver runs from source, which has no executable of its own; the
   // test names the binary that stands for "this CLI" (HACK-2216).
@@ -125,6 +135,7 @@ if (process.argv[2] === "repair-output") {
       executing,
       daemonRunning,
       validateRetarget,
+      systemPathDirectories: driverSystemPath(),
     });
   const repair = await repairOnce();
   const secondRepair = await repairOnce();
@@ -136,10 +147,14 @@ const results = {
   platform: process.platform,
   access: resolveLaunchdAccess(),
   status: await getLaunchdServiceStatus({ paths }),
-  repair: await repairLaunchdProgramIfInvalid({ paths }),
+  repair: await repairLaunchdProgramIfInvalid({
+    paths,
+    systemPathDirectories: driverSystemPath(),
+  }),
   install: await installLaunchdService({
     paths,
     config: { installed: true, runAtLoad: false, guiSessionOnly: false },
+    systemPathDirectories: driverSystemPath(),
   }),
   kickstart: await kickstartLaunchdService(),
   stop: await stopLaunchdService(),

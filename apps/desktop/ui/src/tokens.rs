@@ -245,3 +245,75 @@ impl Palette {
         }
     }
 }
+
+/// Fallback terminal theme, used when the user has no Ghostty config. The
+/// panel is dark in both app modes (as in the approved mockup); a Ghostty
+/// theme replaces every value here.
+#[derive(Debug, Clone, Copy)]
+pub struct TermPalette {
+    pub bg: Hsla,
+    pub fg: Hsla,
+    pub dim: Hsla,
+    /// Tab strip and its separators.
+    pub strip: Hsla,
+    pub strip_border: Hsla,
+    pub tab_fg: Hsla,
+    pub green: Hsla,
+    pub bright_green: Hsla,
+    pub blue: Hsla,
+    pub magenta: Hsla,
+    pub yellow: Hsla,
+    pub red: Hsla,
+    pub cyan: Hsla,
+    pub cursor: Hsla,
+    /// Env badge: non-default overlay (warning) and default overlay.
+    pub badge_warn_bg: Hsla,
+    pub badge_warn_fg: Hsla,
+    pub badge_bg: Hsla,
+    pub badge_fg: Hsla,
+}
+
+impl TermPalette {
+    #[must_use]
+    pub fn fallback() -> Self {
+        Self {
+            bg: c(rgb(0x1C1C1A)),
+            fg: c(rgb(0xE8E6DC)),
+            dim: c(rgb(0x8B8A85)),
+            strip: c(rgb(0x2A2A28)),
+            strip_border: c(rgb(0x3A3A37)),
+            tab_fg: c(rgb(0xB4B2A9)),
+            green: c(rgb(0x5DCAA5)),
+            bright_green: c(rgb(0x97C459)),
+            blue: c(rgb(0x85B7EB)),
+            magenta: c(rgb(0xAFA9EC)),
+            yellow: c(rgb(0xEF9F27)),
+            red: c(rgb(0xF07B7A)),
+            cyan: c(rgb(0x6CCFD9)),
+            cursor: c(rgb(0xE8E6DC)),
+            badge_warn_bg: c(rgb(0x633806)),
+            badge_warn_fg: c(rgb(0xFAC775)),
+            badge_bg: c(rgb(0x3A3A37)),
+            badge_fg: c(rgb(0xD3D1C7)),
+        }
+    }
+}
+
+/// Terminal panel sizes.
+pub mod panel {
+    use gpui_kit::{Pixels, px};
+    /// Drag handle on the panel's top edge.
+    pub const HANDLE: Pixels = px(9.);
+    pub const GRIP_W: Pixels = px(36.);
+    pub const GRIP_H: Pixels = px(3.);
+    /// Tab strip height (also the collapsed panel height).
+    pub const STRIP: Pixels = px(32.);
+    /// Default height as a fraction of the content area.
+    pub const DEFAULT_FRACTION: f32 = 0.5;
+    /// Terminal text inset.
+    pub const PAD_X: Pixels = px(14.);
+    pub const PAD_Y: Pixels = px(10.);
+    /// Fallback terminal font size and line height.
+    pub const FONT: Pixels = px(12.5);
+    pub const LINE: Pixels = px(19.);
+}

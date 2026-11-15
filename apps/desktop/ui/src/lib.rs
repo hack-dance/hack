@@ -7,6 +7,7 @@
 
 pub mod components;
 pub mod icons;
+pub mod panel;
 pub mod status;
 pub mod tokens;
 pub mod window;

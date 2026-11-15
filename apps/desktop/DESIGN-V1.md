@@ -1,13 +1,14 @@
 # Hack desktop app: design v1 (visual spec)
 
-Status: proposal for owner acceptance (HACK-2252). The current window
-(`app/src/view.rs`) is unchanged. This spec, the tokens and components in
-`ui/` and the gallery renders in `screenshots/v1/` are what the window will be
-restyled to once the main-window renders are accepted.
+Status: direction accepted by the owner on Nov 15 2026 (HACK-2252), with
+the logs moved into a terminal panel (approved panel mockup). The current
+window (`app/src/view.rs`) is unchanged; this spec, the tokens and components
+in `ui/` and the gallery renders in `screenshots/v1/` are what it will be
+restyled to after the Logs (#808) and Doctor (#806) tab PRs land.
 
-Reference: the approved mockup (main window: title bar with search, sidebar
+Reference: the approved mockups (main window: title bar with search, sidebar
 with Running / Stopped / Machine, detail header, pill tabs, services table,
-compact log tail, status bar). Quality bar: a native, crisp, dense but calm
+status bar; and the edge-to-edge terminal panel with tabs and env badges). Quality bar: a native, crisp, dense but calm
 window with clear hierarchy and nothing that looks like a default widget.
 
 `DESIGN.md` still owns behaviour (states, actions, data flow). This file owns
@@ -18,23 +19,30 @@ both together.
 
 | | |
 |---|---|
-| ![running, light](screenshots/v1/running-light.png) | ![running, dark](screenshots/v1/running-dark.png) |
+| ![running, panel half, light](screenshots/v1/panel-running-half-light.png) | ![running, panel half, dark](screenshots/v1/panel-running-half-dark.png) |
+| ![running, panel maximized](screenshots/v1/panel-running-max-light.png) | ![running, panel collapsed](screenshots/v1/panel-running-collapsed-dark.png) |
 
-All 15 fixtures, row by row (loading, empty, daemon-down / daemon-mismatch,
-engine-down, error / cli-missing, many-projects, stopped / starting, running,
-degraded / stopping, failed-start, needs-attention):
+Terminal panel in its three states, light and dark, for `running` and
+`failed-start`, plus the new-tab menu: `screenshots/v1/panel-*.png`.
+All 15 main-window fixtures with the panel half open on Logs, row by row
+(loading, empty, daemon-down / daemon-mismatch, engine-down, error /
+cli-missing, many-projects, stopped / starting, running, degraded / stopping,
+failed-start, needs-attention):
 [light](screenshots/v1/fixtures-light.png), [dark](screenshots/v1/fixtures-dark.png).
 
 ```sh
 cd apps/desktop
-cargo run -p hack-desktop-ui --bin hack-desktop-gallery -- --fixture running --theme dark
+cargo run -p hack-desktop-ui --bin hack-desktop-gallery -- --fixture running --theme dark --panel max
 cargo run -p hack-desktop-ui --features screenshots --bin hack-desktop-gallery -- --screenshots /tmp/v1
 ```
 
 The offscreen renders draw stand-in traffic lights so the title bar can be
 judged; the real window uses the native controls. CPU and memory in the
 gallery are labelled sample values: the core does not read per-service usage
-yet (`hack usage --json`, #852, is the source to wire next).
+yet (`hack usage --json`, #852, is the source to wire next). Shell tabs in
+the gallery show sample output (a starship-style prompt drawn with an
+installed Nerd Font when there is one); the gallery never reads the user's
+own configuration.
 
 ## Type
 
@@ -50,7 +58,7 @@ on Linux). URLs, routes, commands and logs use the platform monospace font
 | `BODY_STRONG` | 13 / 18 | 500 | Selected row, selected tab, window title, primary button |
 | `SMALL` | 12 / 16 | 400 | Table header, status bar |
 | `SMALL_STRONG` | 12 / 16 | 500 | Sidebar captions, pills |
-| `MONO` | 12 / 18 | 400 | URL, routes, commands, log lines |
+| `MONO` | 12 / 18 | 400 | URL, routes, commands |
 | `MICRO` | 11 / 14 | 500 | Count pill, ⌘K hint |
 
 Hierarchy comes from three text colours (primary, secondary, muted) and one
@@ -73,7 +81,7 @@ Spacing is a 4-point scale: 2, 4, 6, 8, 10, 12, 16, 20, 24 (`S1`–`S9`).
 | Search field | 240 × 24 |
 | Traffic-light inset | 76 |
 
-Radii: pill 5, control 6, panel (log block) 8, window 12. Borders are
+Radii: pill 5, control 6, menu and icon tile 8, terminal panel 0 (edge to edge), window 12. Borders are
 hairlines, 0.5 pt (one device pixel at 2x), in `border`; controls use
 `border_strong`. The services table has row separators only, no outer box.
 Detail content is inset 20 left and right; the sidebar list 6.
@@ -84,7 +92,7 @@ Detail content is inset 20 left and right; the sidebar list 6.
 |---|---|---|---|
 | `surface` | `#FFFFFF` | `#1B1B1A` | Detail pane |
 | `chrome` | `#F7F7F5` | `#161615` | Title bar, sidebar, status bar |
-| `surface_1` | `#EFEFEC` | `#272725` | Hover, selected row, selected tab, log block, neutral pill |
+| `surface_1` | `#EFEFEC` | `#272725` | Hover, selected row, selected tab, panel handle, neutral pill |
 | `surface_2` | `#E6E6E2` | `#31312E` | Pressed |
 | `border` | black 9% | white 8% | Hairlines |
 | `border_strong` | black 18% | white 15% | Button and field outlines |
@@ -126,7 +134,13 @@ Stroke icons at 14 pt, coloured with the text colour of their context.
 | `power` | Banner: Start hackd |
 | `triangle-alert` | Banners |
 | `folder-plus`, `circle-alert`, `loader-circle` | Empty, error and loading panes |
-| `square-terminal` | Exec action (terminal surface, later) |
+| `list` | Panel tab: Logs |
+| `box` | Panel tab and menu item: shell in a service |
+| `terminal` | Panel tab and menu item: host shell |
+| `plus`, `chevron-down` | Panel: new-tab menu |
+| `x` | Panel: close tab |
+| `maximize-2` / `minimize-2` / `chevron-up` | Panel: maximize / restore / expand from collapsed |
+| `square-terminal` | Reserved: "Open shell" on a service row |
 
 ## Anatomy
 
@@ -151,7 +165,11 @@ Machine section at the bottom.
 - Machine rows: icon (15, secondary), label, trailing state. Routing and DNS
   has a dot (a ring while routing status is not read). Doctor has an amber
   count pill when it reports findings, a green dot when clean, a ring when
-  unknown.
+  unknown. Routing and DNS shows a solid state dot whenever its state is
+  known (from Doctor's routing checks: proxy, local CA, DNS; worst wins:
+  green ok, amber warn, red error) and a ring only when nothing has reported.
+  The live app needs the core to expose this; the gallery derives it from the
+  fixture's Doctor checks.
 
 ### Banners
 Directly under the title bar, across the detail pane: one line, tinted
@@ -180,7 +198,7 @@ Inset 20, top 16.
    others in secondary. Native-project note in `SMALL`, muted.
 
 ### Tabs
-Pill tabs: Services, Logs, Env, Activity. 26 high, radius 6, padding 10.
+Pill tabs: Services, Env, Activity (Logs moved into the terminal panel). 26 high, radius 6, padding 10.
 Selected: `surface_1` background, `BODY_STRONG`, primary. Others: `BODY`,
 secondary, primary on hover. No underline, no bar background.
 
@@ -195,13 +213,76 @@ unrecognised container state (unknown ring, never stopped), `unknown` when
 not observed; failures in `failed.fg`. Unknown
 numbers are an em dash in muted.
 
-### Log tail (compact)
-12 below the table. `surface_1` block, radius 8, padding 8 / 10, sized to its
-lines (no fixed minimum height): caption "Recent logs" (`SMALL`, muted), then
-up to the last few lines in `MONO`: time (muted), service (secondary, 52),
-message. Warnings in `degraded.fg`, errors in `failed.fg`. With no lines it
-shows one muted line ("No recent log lines", or the read error). The full log
-view is the Logs tab (terminal surface, below).
+### Terminal panel
+
+Approved mockup: an edge-to-edge panel docked at the bottom of the content
+area, right of the sidebar, full width. No card, no rounded corners, no inner
+padding box. Its height is remembered per project.
+
+Anatomy, top to bottom:
+
+1. **Drag handle** (9): `surface_1`, `border_strong` hairline on top, a
+   36 × 3 grip (radius 2), row-resize cursor. Drag to resize; drag to the top
+   or double-click to maximize; drag down past the strip to collapse.
+2. **Tab strip** (32): terminal `strip` colour, hairline below. Tabs are
+   12 pt with a 14 pt icon, separated by hairlines; the selected tab takes the
+   terminal background and primary text. After the tabs: `+` and a caret for
+   the new-tab menu. Right: find (search icon) and maximize / restore
+   (`chevron-up` when collapsed).
+3. **Terminal surface**: fills the rest; 14 / 10 inset; terminal font and
+   theme (below). The emulator draws everything inside it.
+
+States:
+
+| State | Panel | Project header | Top tabs and Services |
+|---|---|---|---|
+| Collapsed | Handle and tab strip only, at the bottom | Full | Visible, fill the area |
+| Open (default half; any remembered height) | Handle, strip, terminal | Full | Visible above, scroll |
+| Maximized | Strip and terminal fill the content area | One compact row: name (13/500), state pill, backend pill, actions | Hidden |
+
+Tab kinds and labels (names only, never values):
+
+| Kind | Started with | Label | Badge |
+|---|---|---|---|
+| Logs (always first, not closable) | Core log stream reader (from #808), read-only | `Logs` | — |
+| Shell in a service | `hack exec <service> -- bash` (falls back to `sh`) | `api · sh` | — |
+| Host shell | User's login shell, login + interactive, in the project root | `host · zsh` | — |
+| Host shell with env | `hack host shell --env <overlay> --scope <service>` | `host · zsh` | `env staging · api` |
+
+The env badge is 11 pt, radius 5: amber (`badge_warn`) when the overlay is
+not the project's default, so a production-like environment is obvious;
+neutral when it is the default. It stays visible when the panel is
+maximized. The Logs tab has a service filter, follow, and find; its output
+is shown exactly as printed (ANSI kept, never stripped or re-coloured).
+
+New-tab menu (`+`): "Shell in <service>" for each running service, a
+separator, "Host shell", "Host shell with env…" (then pick overlay and scope
+from names read with `hack env list --json`). 220 wide, `surface`,
+`border_strong` hairline, shadow, 28 pt rows, opens above the strip from the
+`+` button.
+
+Closing a tab, or the window, ends that tab's whole process session.
+
+Terminal look: the user's Ghostty config when it exists (font family and
+size, theme or palette, cursor style, padding), mapped onto the component.
+Without one, the fallback terminal theme (`TermPalette::fallback`): dark in
+both app modes, as in the approved mockup (`#1C1C1A` background, `#E8E6DC`
+text, strip `#2A2A28`, separators `#3A3A37`), 12.5 / 19 in the app's mono
+font. Prompt themes (zsh, oh-my-zsh, starship) come from the real shell in a
+real PTY (`TERM`, `COLORTERM=truecolor`); tmux is not involved.
+
+Keyboard (shortcuts that would reach the shell are never taken; on Linux the
+app uses Ctrl-Shift chords, as terminals do):
+
+| Action | macOS | Linux |
+|---|---|---|
+| Toggle panel | ⌘J | Ctrl-Shift-J |
+| New tab (opens the menu) | ⌘T | Ctrl-Shift-T |
+| Close tab | ⌘W | Ctrl-Shift-W |
+| Next / previous tab | ⌘⇧] / ⌘⇧[ | Ctrl-PageDown / Ctrl-PageUp |
+| Maximize / restore | ⌘⇧↩ | Ctrl-Shift-Enter |
+| Find in tab | ⌘F | Ctrl-Shift-F |
+| Copy / paste | ⌘C / ⌘V | Ctrl-Shift-C / Ctrl-Shift-V |
 
 ### Status bar (26)
 `chrome`, hairline above, `SMALL` secondary. Left, separated by `·`:
@@ -222,7 +303,7 @@ three skeleton rows in the sidebar.
 | Window root | `gpui_kit::open_window` (gpui-kit `Root`) | Background, text colour and font family set from tokens, not the theme |
 | Always on switch | gpui-kit `Switch`, `.small()` | `.color(accent)`; label from tokens; disabled until HACK-2213 |
 | Icons | gpui-kit `Icon` with `.path()` | Selected Lucide set via `icon_assets!`, explicit size and colour |
-| Buttons, tabs, pills, rows, table, log block, search field, banners | `div` compositions in `ui/src/components.rs` | All colours, sizes and radii from tokens |
+| Buttons, tabs, pills, rows, table, search field, banners, terminal panel chrome | `div` compositions in `ui/src/components.rs` and `ui/src/panel.rs` | All colours, sizes and radii from tokens |
 
 gpui-kit's `Button`, `TabBar::pill` and `Tag` draw from the theme's
 colours, heights (32) and radii, which are the "default-looking" parts. When
@@ -233,27 +314,26 @@ handlers. Recommended default: (a) for buttons, (b) for tabs and rows.
 Hairlines use a small `StyledExt` helper because GPUI's border helpers start
 at 1 pt.
 
-## Terminal surface (planned)
+## Terminal sessions
 
-The Logs tab and an Exec action move onto one terminal component (crate
-`term`, decision in `term/DECISION.md`):
+The `term` crate (decision in `term/DECISION.md`, PR #862) owns the PTYs and
+the emulator; this spec owns the panel. Session rules:
 
-- **Logs tab**: the component in read-only mode, fed by the core's existing
-  log stream reader and ndjson parser (they stay). It replaces the text
-  panel; the compact tail above stays on Services. Bounded scrollback, follow
-  on/off, search bar drawn above the terminal, selection and copy.
-- **Exec**: a `square-terminal` action on a running service row and in the
-  header overflow. It runs `hack exec <service> -- <shell>` on a PTY the app
-  owns: the child starts in its own session and process group, and closing
-  the tab or window ends the whole group.
-- **Security rules**: the app never types secrets into a terminal, never
-  logs terminal contents, never passes values in argv (it passes service and
-  shell names only); what a service prints is shown as printed, without
-  redaction claims.
+- The app owns each PTY and runs the CLI in it. It never builds an
+  environment and never sees a value: env injection happens inside
+  `hack host shell` / `hack exec`, and the app passes overlay, scope,
+  service and shell names only.
+- Each session starts in its own session and process group; closing the
+  tab or the window ends the whole group.
+- The app never types secrets, never logs terminal contents, and passes no
+  values in argv. What a service prints is shown as printed, without any
+  redaction claim.
+- Preferred over attaching to tmux: one mechanism, it works without tmux,
+  and the CLI stays the only thing that touches env values.
 
 ## Not in v1
 
 Menu bar popover (mockup "later"), Doctor and Routing detail views,
-Env and Activity content, per-service usage in the live app, the Exec
-action wiring. Accessibility labels are kept from the current view when the
+Env and Activity content, per-service usage in the live app, and wiring the
+panel to real sessions (PR 3, after #808 and #806). Accessibility labels are kept from the current view when the
 window is restyled.

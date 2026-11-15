@@ -37,6 +37,23 @@ pub enum Glyph {
     Power,
     /// Loading.
     Loader,
+    /// Terminal panel: Logs tab.
+    Logs,
+    /// Terminal panel: shell in a container.
+    Container,
+    /// Terminal panel: host shell.
+    HostShell,
+    /// Terminal panel: close tab.
+    Close,
+    /// Terminal panel: new tab.
+    Plus,
+    /// Terminal panel: new-tab menu caret.
+    ChevronDown,
+    /// Terminal panel: maximize / restore.
+    Maximize,
+    Restore,
+    /// Terminal panel: expand from collapsed.
+    ChevronUp,
 }
 
 impl Glyph {
@@ -57,6 +74,15 @@ impl Glyph {
             Self::CircleAlert => "icons/circle-alert.svg",
             Self::Power => "icons/power.svg",
             Self::Loader => "icons/loader-circle.svg",
+            Self::Logs => "icons/list.svg",
+            Self::Container => "icons/box.svg",
+            Self::HostShell => "icons/terminal.svg",
+            Self::Close => "icons/x.svg",
+            Self::Plus => "icons/plus.svg",
+            Self::ChevronDown => "icons/chevron-down.svg",
+            Self::Maximize => "icons/maximize-2.svg",
+            Self::Restore => "icons/minimize-2.svg",
+            Self::ChevronUp => "icons/chevron-up.svg",
         }
     }
 }
@@ -78,6 +104,15 @@ icon_assets!(
         CircleAlert,
         Power,
         LoaderCircle,
+        List,
+        Box,
+        Terminal,
+        X,
+        Plus,
+        ChevronDown,
+        Maximize2,
+        Minimize2,
+        ChevronUp,
     ]
 );
 
@@ -121,6 +156,15 @@ mod tests {
             Glyph::CircleAlert,
             Glyph::Power,
             Glyph::Loader,
+            Glyph::Logs,
+            Glyph::Container,
+            Glyph::HostShell,
+            Glyph::Close,
+            Glyph::Plus,
+            Glyph::ChevronDown,
+            Glyph::Maximize,
+            Glyph::Restore,
+            Glyph::ChevronUp,
         ] {
             assert!(
                 Assets.load(g.path()).unwrap().is_some(),

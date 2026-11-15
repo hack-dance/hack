@@ -17,13 +17,14 @@ use hack_desktop_core::state::{Action, ProjectState};
 use hack_desktop_core::viewmodel::{AppModel, Banner, DetailView, Event, ListView, Phase, Row};
 
 use crate::components::{
-    BannerTone, LogLevel, LogLine, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch,
-    banner, caption, count_pill, dot, empty_pane, log_tail, machine_row, neutral_pill, pill_tabs,
-    primary_button, project_row, services_table, skeleton, state_pill, status_bar, title_bar,
+    BannerTone, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, banner, caption,
+    count_pill, dot, empty_pane, machine_row, neutral_pill, pill_tabs, primary_button, project_row,
+    services_table, skeleton, state_pill, status_bar, title_bar,
 };
 use crate::icons::Glyph;
+use crate::panel::{Ansi, PanelState, PanelView, Span, TabKind, span, terminal_panel};
 use crate::status::{Status, project_label, service_label};
-use crate::tokens::{Mode, Palette, size, space, text};
+use crate::tokens::{Mode, Palette, TermPalette, size, space, text};
 
 /// Per-service CPU and memory, when known. The core does not read usage yet;
 /// the gallery passes labelled sample values (see DESIGN-V1.md).
@@ -37,6 +38,8 @@ pub struct WindowData {
     pub recovery: Option<DaemonRecovery>,
     pub engine_observed: bool,
     pub usage: Usage,
+    /// Routing and DNS state, when Doctor has reported routing checks.
+    pub routing: Option<Status>,
 }
 
 impl WindowData {
@@ -69,6 +72,12 @@ impl WindowData {
                 action,
             });
         }
+        let routing = fixtures::snapshot(f)
+            .ok()
+            .and_then(|s| s.doctor)
+            .and_then(|d| {
+                routing_status(d.checks.iter().map(|c| (c.id.as_str(), c.status.as_str())))
+            });
         let detail = model.detail();
         let usage = detail
             .as_ref()
@@ -81,8 +90,42 @@ impl WindowData {
             recovery: model.daemon_recovery(),
             engine_observed: model.engine_observed(),
             usage,
+            routing,
         }
     }
+}
+
+/// Routing and DNS state from Doctor's routing checks (proxy, local CA,
+/// DNS). `None` when Doctor has not reported any: the row shows a ring.
+/// The live app needs the core to expose this (follow-up).
+#[must_use]
+pub fn routing_status<'a>(checks: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Status> {
+    let mut worst: Option<Status> = None;
+    for (id, status) in checks {
+        let id = id.to_ascii_lowercase();
+        if !["caddy", "dns", "routing", "proxy", "tls"]
+            .iter()
+            .any(|k| id.contains(k))
+        {
+            continue;
+        }
+        let s = match status {
+            "ok" => Status::Running,
+            "warn" => Status::Degraded,
+            "error" => Status::Failed,
+            _ => Status::Unknown,
+        };
+        let rank = |s: Status| match s {
+            Status::Failed => 3,
+            Status::Degraded => 2,
+            Status::Unknown => 1,
+            _ => 0,
+        };
+        if worst.is_none_or(|w| rank(s) > rank(w)) {
+            worst = Some(s);
+        }
+    }
+    worst
 }
 
 /// Sample CPU and memory for running services, so the table can be judged
@@ -119,9 +162,32 @@ pub struct MainWindow {
     /// Draw stand-in traffic lights (offscreen macOS-style renders).
     pub traffic_lights: bool,
     pub tab: usize,
+    /// Terminal panel state and tabs. Logs is always tab 0.
+    pub panel: PanelState,
+    pub panel_tabs: Vec<TabKind>,
+    pub panel_selected: usize,
+    pub panel_menu: bool,
+    /// Terminal font family (from the user's Ghostty config, else mono).
+    pub term_font: Option<SharedString>,
 }
 
 impl MainWindow {
+    /// The window for `data` with the panel half open on its Logs tab.
+    #[must_use]
+    pub fn new(data: WindowData, mode: Mode) -> Self {
+        Self {
+            data,
+            mode,
+            traffic_lights: false,
+            tab: 0,
+            panel: PanelState::half(),
+            panel_tabs: default_tabs(),
+            panel_selected: 0,
+            panel_menu: false,
+            term_font: None,
+        }
+    }
+
     fn ui(&self, cx: &gpui_kit::App) -> Ui {
         use gpui_kit::component::ActiveTheme as _;
         let t = cx.theme();
@@ -208,12 +274,12 @@ impl MainWindow {
             .px(space::S3)
             .pb(space::S4)
             .child(caption("Machine", ui))
-            // Routing status is not read yet: shown as unknown (ring).
+            // A real dot when Doctor reported routing; a ring until then.
             .child(machine_row(
                 "routing",
                 Glyph::Globe,
                 "Routing and DNS",
-                dot(Status::Unknown, ui),
+                dot(self.data.routing.unwrap_or(Status::Unknown), ui),
                 ui,
             ))
             .child(machine_row(
@@ -276,7 +342,7 @@ impl MainWindow {
         col
     }
 
-    fn header(&self, d: &DetailView, ui: &Ui) -> Div {
+    fn header(&self, d: &DetailView, compact: bool, ui: &Ui) -> Div {
         let p = ui.p;
         let status = Status::of(&d.state);
         let mut actions = div().flex().items_center().gap(space::S3);
@@ -306,26 +372,32 @@ impl MainWindow {
             }
             _ => None,
         };
+        let title_row = div()
+            .flex()
+            .items_center()
+            .gap(space::S4)
+            .child(
+                div()
+                    .type_step(if compact {
+                        text::BODY_STRONG
+                    } else {
+                        text::TITLE
+                    })
+                    .text_color(p.text_primary)
+                    .child(d.name.clone()),
+            )
+            .child(state_pill(status, project_label(&d.state), ui))
+            .child(neutral_pill(d.backend.clone(), ui))
+            .child(div().flex_1())
+            .child(actions);
+        if compact {
+            return title_row;
+        }
         div()
             .flex()
             .flex_col()
             .gap(space::S4)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(space::S4)
-                    .child(
-                        div()
-                            .type_step(text::TITLE)
-                            .text_color(p.text_primary)
-                            .child(d.name.clone()),
-                    )
-                    .child(state_pill(status, project_label(&d.state), ui))
-                    .child(neutral_pill(d.backend.clone(), ui))
-                    .child(div().flex_1())
-                    .child(actions),
-            )
+            .child(title_row)
             .child(
                 div()
                     .flex()
@@ -375,23 +447,20 @@ impl MainWindow {
                 }
             })
             .collect();
-        let lines: Vec<LogLine> = match &self.data.tail {
-            Ok(entries) => entries
-                .iter()
-                .map(|e| LogLine {
-                    time: e.timestamp.clone(),
-                    service: e.service.clone(),
-                    message: e.message.clone(),
-                    level: match e.level.as_deref() {
-                        Some("error" | "fatal") => LogLevel::Error,
-                        Some("warn" | "warning") => LogLevel::Warn,
-                        _ => LogLevel::Info,
-                    },
-                })
-                .collect(),
-            Err(_) => Vec::new(),
+        let max = self.panel == PanelState::Maximized;
+        let panel = PanelView {
+            state: self.panel,
+            tabs: self.panel_tabs.clone(),
+            selected: self.panel_selected,
+            lines: self.panel_lines(),
+            cursor: self
+                .panel_tabs
+                .get(self.panel_selected)
+                .is_some_and(|t| *t != TabKind::Logs),
+            menu: self.panel_menu.then(|| new_tab_menu(d)),
+            font: self.term_font.clone().unwrap_or_else(|| ui.mono.clone()),
+            term: TermPalette::fallback(),
         };
-        let empty = self.data.tail.as_ref().err().map(String::as_str);
         div()
             .flex_1()
             .min_w_0()
@@ -401,29 +470,81 @@ impl MainWindow {
             .child(
                 div()
                     .px(space::S8)
-                    .pt(space::S7)
+                    .pt(if max { space::S5 } else { space::S7 })
                     .pb(space::S5)
-                    .child(self.header(d, ui)),
+                    .when(max, |d| d.hairline_b(ui.p.border))
+                    .child(self.header(d, max, ui)),
             )
-            .child(div().px(space::S7).pb(space::S3).child(pill_tabs(
-                &["Services", "Logs", "Env", "Activity"],
-                self.tab,
-                ui,
-            )))
-            .child(
-                div()
-                    .id("detail-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(space::S8)
-                    .pb(space::S7)
-                    .flex()
-                    .flex_col()
-                    .gap(space::S6)
-                    .child(services_table(&rows, ui))
-                    .child(log_tail("Recent logs", &lines, empty, ui)),
-            )
+            .when(!max, |col| {
+                col.child(div().px(space::S7).pb(space::S3).child(pill_tabs(
+                    &["Services", "Env", "Activity"],
+                    self.tab,
+                    ui,
+                )))
+                .child(
+                    div()
+                        .id("detail-body")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px(space::S8)
+                        .pb(space::S5)
+                        .child(services_table(&rows, ui)),
+                )
+            })
+            .child(terminal_panel(&panel, ui))
+    }
+
+    /// Visible lines of the selected panel tab. Logs come from the core's
+    /// log tail; shell tabs show a labelled sample until the `term` crate
+    /// is wired in (PR 3).
+    fn panel_lines(&self) -> Vec<Vec<Span>> {
+        match self.panel_tabs.get(self.panel_selected) {
+            Some(TabKind::Logs) | None => log_lines(&self.data.tail),
+            Some(TabKind::ContainerShell { service, .. }) => vec![
+                vec![span("/app # ", Ansi::Fg), span("ls", Ansi::Fg)],
+                vec![
+                    span("dist  ", Ansi::Blue),
+                    span("node_modules  ", Ansi::Blue),
+                    span("package.json  server.js", Ansi::Fg),
+                ],
+                vec![
+                    span("/app # ", Ansi::Fg),
+                    span(
+                        format!("env | grep -c ^{}", service.to_uppercase()),
+                        Ansi::Fg,
+                    ),
+                ],
+                vec![span("3", Ansi::Fg)],
+                vec![span("/app # ", Ansi::Fg)],
+            ],
+            Some(TabKind::HostShell { .. } | TabKind::HostShellWithEnv { .. }) => {
+                let prompt = |extra: bool| {
+                    let mut l = vec![
+                        span("~/dev/storefront ", Ansi::Green),
+                        span("on \u{e0a0} main ", Ansi::Magenta),
+                    ];
+                    if extra {
+                        l.push(span("via \u{e718} v22 ", Ansi::Yellow));
+                    }
+                    l
+                };
+                vec![
+                    prompt(true),
+                    vec![
+                        span("❯ ", Ansi::Green),
+                        span("bun run db:migrate", Ansi::Fg),
+                    ],
+                    vec![span("applying 0042_add_orders_index.sql", Ansi::Dim)],
+                    vec![
+                        span("✓ ", Ansi::BrightGreen),
+                        span("1 migration applied in 212 ms", Ansi::Fg),
+                    ],
+                    prompt(false),
+                    vec![span("❯ ", Ansi::Green)],
+                ]
+            }
+        }
     }
 
     fn daemon_banner(&self) -> bool {
@@ -552,5 +673,94 @@ impl Render for MainWindow {
                 list.cli_version.clone().map(|v| format!("hack {v}")),
                 &ui,
             ))
+    }
+}
+
+/// Logs tab content from the core's log entries. The live tab shows the
+/// stream's bytes exactly as printed (ANSI kept); this stands in with the
+/// colours a typical service prints.
+fn log_lines(tail: &Result<Vec<LogEntry>, String>) -> Vec<Vec<Span>> {
+    let entries = match tail {
+        Ok(e) if e.is_empty() => {
+            return vec![vec![span("No log lines yet. Following…", Ansi::Dim)]];
+        }
+        Ok(e) => e,
+        Err(why) => return vec![vec![span(why.clone(), Ansi::Dim)]],
+    };
+    let services = [Ansi::Cyan, Ansi::Magenta, Ansi::Blue, Ansi::Green];
+    entries
+        .iter()
+        .map(|e| {
+            let svc = e.service.clone().unwrap_or_default();
+            let color = services[svc.bytes().map(usize::from).sum::<usize>() % services.len()];
+            let msg = match e.level.as_deref() {
+                Some("error" | "fatal") => Ansi::Red,
+                Some("warn" | "warning") => Ansi::Yellow,
+                _ => Ansi::Fg,
+            };
+            vec![
+                span(
+                    format!("{} ", e.timestamp.clone().unwrap_or_default()),
+                    Ansi::Dim,
+                ),
+                span(format!("{svc:<7}| "), color),
+                span(e.message.clone(), msg),
+            ]
+        })
+        .collect()
+}
+
+/// The "+" menu: a shell in each running service, a host shell, and a host
+/// shell with an env overlay. An empty string is a separator.
+#[must_use]
+pub fn new_tab_menu(d: &DetailView) -> Vec<String> {
+    let mut items: Vec<String> = d
+        .services
+        .iter()
+        .filter(|s| s.running)
+        .map(|s| format!("Shell in {}", s.name))
+        .collect();
+    if !items.is_empty() {
+        items.push(String::new());
+    }
+    items.push("Host shell".into());
+    items.push("Host shell with env…".into());
+    items
+}
+
+/// Default panel tabs for a project: Logs, then any open sessions.
+#[must_use]
+pub fn default_tabs() -> Vec<TabKind> {
+    vec![TabKind::Logs]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_dot_is_known_only_from_routing_checks() {
+        assert_eq!(routing_status([("docker daemon", "ok")].into_iter()), None);
+        assert_eq!(
+            routing_status([("caddy local ca", "warn"), ("dns", "ok")].into_iter()),
+            Some(Status::Degraded)
+        );
+        assert_eq!(
+            routing_status([("dns", "ok")].into_iter()),
+            Some(Status::Running)
+        );
+        assert_eq!(
+            routing_status([("dns", "ok"), ("caddy proxy", "error")].into_iter()),
+            Some(Status::Failed)
+        );
+    }
+
+    #[test]
+    fn new_tab_menu_lists_running_services_then_host_shells() {
+        let d = WindowData::from_fixture(Fixture::Degraded).detail.unwrap();
+        let m = new_tab_menu(&d);
+        assert!(m.iter().any(|i| i == "Shell in api"));
+        assert!(!m.iter().any(|i| i == "Shell in worker"), "worker is down");
+        assert_eq!(m.last().map(String::as_str), Some("Host shell with env…"));
     }
 }

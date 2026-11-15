@@ -93,18 +93,23 @@ fn control(action: &str) -> Result<()> {
         }
     };
     let mut reason = "io-error";
-    let result = control_effects(action, &request, &root, &mut reason);
+    let mut result = control_effects(action, &request, &root, &mut reason);
     // Receipts are atomically replaced files, so this read is safe without the
-    // lock, also after a lock wait expired.
-    let processes = root
-        .states()
-        .map(|states| {
-            states
-                .into_iter()
-                .filter(|state| state.owner_token == request.owner_token)
-                .collect()
-        })
-        .unwrap_or_default();
+    // lock, also after a lock wait expired. A failed read never reports
+    // success: it keeps an earlier error, or becomes `io-error` itself.
+    let processes = match root.states() {
+        Ok(states) => states
+            .into_iter()
+            .filter(|state| state.owner_token == request.owner_token)
+            .collect(),
+        Err(error) => {
+            if result.is_ok() {
+                reason = "io-error";
+                result = Err(error);
+            }
+            Vec::new()
+        }
+    };
     let outcome = match (&result, action) {
         (Err(_), _) => "unknown",
         (Ok(()), "stop") => "stopped",

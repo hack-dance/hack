@@ -201,6 +201,21 @@ export function defaultProjectSlugFromPath(repoRoot: string): string {
   return sanitizeProjectSlug(basename(repoRoot));
 }
 
+/**
+ * The project's effective name: its configured `name`, else the checkout
+ * directory, as a sanitized slug. Legacy secret stores (keychain service and
+ * encrypted-file scope) are keyed by this name, so every env read, write and
+ * migration route must use it to find the same stored values.
+ */
+export async function resolveEffectiveProjectName(
+  ctx: ProjectContext
+): Promise<string> {
+  const cfg = await readProjectConfig(ctx);
+  const derived = defaultProjectSlugFromPath(ctx.projectRoot);
+  const raw = (cfg.name ?? derived).trim();
+  return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
+}
+
 export async function readProjectDevHost(
   ctx: ProjectContext
 ): Promise<string | null> {

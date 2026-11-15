@@ -246,6 +246,7 @@ for (const ready of [true, false]) {
         ready,
         blockers: ready ? 0 : 3,
         warnings: 0,
+        consentNeeded: 0,
       }),
     });
     const finding = findings.find((value) => value.id === "native-preflight");
@@ -1722,3 +1723,25 @@ test("hack upgrade snapshot, then rollback restores exact bytes; a changed file 
   expect(listed.stdout).toContain("Choose a snapshot to restore");
   expect(listed.stdout).toContain(snapshot.manifest_path);
 }, 60_000);
+
+test("native consent is informational for upgrade and remains distinct from blockers", async () => {
+  const project = await liveProject("native-consent");
+  const findings = await inspectUpgradeProject({
+    project: { ...project, project: project.name },
+    homeDir: home,
+    deadline: Date.now() + 30_000,
+    nativePreflight: async () => ({
+      ready: false,
+      blockers: 0,
+      warnings: 0,
+      consentNeeded: 1,
+    }),
+  });
+  expect(
+    findings.find((finding) => finding.id === "native-preflight")
+  ).toMatchObject({
+    status: "info",
+    summary:
+      "Native configuration has 0 blocker(s) and 1 consent item(s); runtime setup and runtime review were not checked. Compose is unaffected.",
+  });
+});

@@ -13,8 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderBootstrap } from "../scripts/installer/bootstrap.ts";
 import { hash } from "../scripts/installer/integrity.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 
 // Filesystem fixtures may span several bounded subprocesses; the suite default is only 5 s.
+// Every spawn here is synchronous, so the per-test timeout cannot interrupt one:
+// each carries its own bound and fails naming the command (HACK-2247).
 const fixtureTest = (name: string, run: () => void | Promise<void>) =>
   test(name, run, 30_000);
 const roots: string[] = [];
@@ -102,7 +105,7 @@ for (const shell of [
         return;
       }
       const f = fixture();
-      const result = Bun.spawnSync([...shell, f.bootstrap], {
+      const result = spawnSyncBounded([...shell, f.bootstrap], {
         env: f.env,
         timeout: 10_000,
         stdout: "pipe",
@@ -134,7 +137,10 @@ for (const shell of [
       expect(Bun.which("python3", { PATH: f.bin })).toBeNull();
       expect(Bun.which("bun", { PATH: f.bin })).toBeNull();
       expect(existsSync(`${f.home}/.hack-next`)).toBe(false); // Stand-in records protocol; compiled manager has a separate test.
-      expect(Bun.spawnSync(["/bin/sh", "-n", f.bootstrap]).exitCode).toBe(0);
+      expect(
+        spawnSyncBounded(["/bin/sh", "-n", f.bootstrap], { timeout: 10_000 })
+          .exitCode
+      ).toBe(0);
     }
   );
 }
@@ -165,7 +171,7 @@ for (const [name, options, error] of [
       const f = fixture(options);
       const sentinel = join(f.home, "keep");
       writeFileSync(sentinel, "original");
-      const result = Bun.spawnSync(["/bin/sh", f.bootstrap], {
+      const result = spawnSyncBounded(["/bin/sh", f.bootstrap], {
         env: f.env,
         timeout: 10_000,
         stdout: "pipe",
@@ -183,14 +189,14 @@ fixtureTest(
   "bootstrap refuses relative roots and missing tools before network requests",
   () => {
     const f = fixture();
-    const relative = Bun.spawnSync(
+    const relative = spawnSyncBounded(
       ["/bin/sh", f.bootstrap, "--root", "relative"],
       { env: f.env, timeout: 10_000 }
     );
     expect(relative.exitCode).not.toBe(0);
     expect(relative.stderr.toString()).toContain("absolute");
     rmSync(join(f.bin, "shasum"));
-    const missing = Bun.spawnSync(["/bin/sh", f.bootstrap], {
+    const missing = spawnSyncBounded(["/bin/sh", f.bootstrap], {
       env: f.env,
       timeout: 10_000,
     });
@@ -220,7 +226,7 @@ fixtureTest(
       ["--archive", ""],
     ]) {
       const f = fixture();
-      const result = Bun.spawnSync(["/bin/sh", f.bootstrap, ...args], {
+      const result = spawnSyncBounded(["/bin/sh", f.bootstrap, ...args], {
         env: f.env,
         timeout: 10_000,
       });
@@ -235,7 +241,7 @@ fixtureTest(
   () => {
     const f = fixture();
     const checksum = "a".repeat(64);
-    const result = Bun.spawnSync(
+    const result = spawnSyncBounded(
       [
         "/bin/sh",
         f.bootstrap,

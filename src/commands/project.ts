@@ -1,4 +1,9 @@
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
+import {
+  assertEnvMigrationFinished,
+  migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
+  recordEnvMigrationProjectRun,
+} from "../lib/env-migration.ts";
 import { resolveLifecycleRunner } from "../lib/lifecycle-runner.ts";
 import { preflightLifecycleSupervisor } from "../lib/lifecycle-supervisor.ts";
 import {
@@ -335,7 +340,6 @@ import {
   finishImplicitLegacyEnvMigration,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hasUnmigratedLegacyDotenv,
-  migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
@@ -1451,6 +1455,7 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
   readonly projectName: string;
   readonly serviceNames: readonly string[];
 }): Promise<boolean> {
+  await assertEnvMigrationFinished(opts.project);
   if (
     await projectEnvConfigExists({
       projectDir: opts.project.projectDir,
@@ -6251,6 +6256,20 @@ async function handleNativeUp({
                 "Native up lifecycle readiness hook failed; values omitted.",
             });
           }
+
+          await recordEnvMigrationProjectRun({
+            projectRoot: project.projectRoot,
+            projectDir: project.projectDir,
+            projectName,
+            serviceNames: await discoverComposeServiceNames({
+              composeFile: project.composeFile,
+            }),
+          }).catch(() =>
+            logger.warn({
+              message:
+                "Could not record successful env migration startup; legacy cleanup remains blocked (values omitted).",
+            })
+          );
         },
       };
     },
@@ -7102,6 +7121,19 @@ async function runUpCommand({
         }),
         exitCode: 1,
       });
+    }
+    if (!serviceScoped) {
+      await recordEnvMigrationProjectRun({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        projectName: baseProjectName,
+        serviceNames: allServiceNames,
+      }).catch(() =>
+        logger.warn({
+          message:
+            "Could not record successful env migration startup; legacy cleanup remains blocked (values omitted).",
+        })
+      );
     }
     if (!json) {
       return 0;

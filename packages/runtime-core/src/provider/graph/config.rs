@@ -487,46 +487,74 @@ fn declared_configuration(
     let mut volumes = BTreeSet::new();
     let mut total_memory = 0u64;
     let mut total_cpus = 0f64;
-    for service in plan.services.values().filter(|s| s.active) {
-        if (!service.ports.is_empty() && !loopback_ports)
-            || service.labels.keys().any(|key| {
-                !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
-                    && !(service.one_shot && key == "hack.service.one-shot")
-                    // Inert hostname declarations carry no traffic; they never
-                    // reach the engine (graph labels are ownership-only).
-                    && !(service.inert_route_labels
-                        && service.routing.is_none()
-                        && matches!(key.as_str(), "caddy" | "caddy.tls"))
-                    // Plain metadata is reviewed with a warning and dropped here.
-                    && !crate::project::inert_metadata_label(key)
-                    && !(service.dependency_cache.is_some()
-                        && matches!(
-                            key.as_str(),
-                            "hack.dependencies.cache-volume"
-                                | "hack.dependencies.lockfiles"
-                                | "hack.dependencies.runtime-files"
-                                | "hack.dependencies.bootstrap"
-                        ))
-            })
-            // A local driver is reviewed with a warning and not applied; an
-            // external sink was already an error at review.
-            || service
-                .logging
-                .as_ref()
-                .is_some_and(|logging| logging.driver == "[unsupported]")
-            || service.platform.as_deref().is_some_and(|p| {
-                !(["linux/arm64", "linux/arm64/v8"].contains(&p)
-                    || (p == "linux/amd64" && service.amd64_emulation.is_some()))
-            })
+    let mut findings = Vec::new();
+    let mut first_error = None;
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        let mut refuse = |field, message, fix| {
+            findings.push(
+                crate::error::ConfigurationRefusal::new(field, message, fix).with_service(name),
+            )
+        };
+        if !service.ports.is_empty() && !loopback_ports {
+            refuse(
+                "ports",
+                "This graph driver has no enrolled port publication.",
+                "Start through hack up so it owns the loopback publishers, or remove ports.",
+            );
+        }
+        if service.labels.keys().any(|key| {
+            !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
+                && !(service.one_shot && key == "hack.service.one-shot")
+                && !(service.inert_route_labels
+                    && service.routing.is_none()
+                    && matches!(key.as_str(), "caddy" | "caddy.tls"))
+                && !crate::project::inert_metadata_label(key)
+                && !(service.dependency_cache.is_some()
+                    && matches!(
+                        key.as_str(),
+                        "hack.dependencies.cache-volume"
+                            | "hack.dependencies.lockfiles"
+                            | "hack.dependencies.runtime-files"
+                            | "hack.dependencies.bootstrap"
+                    ))
+        }) {
+            refuse(
+                "labels",
+                "The service has labels the graph driver cannot apply.",
+                "Remove unsupported router or ownership labels; keep supported Caddy, one-shot and dependency-cache declarations. Use Compose if another router needs these labels.",
+            );
+        }
+        if service
+            .logging
+            .as_ref()
+            .is_some_and(|logging| logging.driver == "[unsupported]")
         {
-            return Err(unsupported());
+            refuse(
+                "logging.driver",
+                "The service selects an external logging driver.",
+                "Remove logging or use json-file, local or none. Native retains bounded container logs; use hack logs.",
+            );
+        }
+        if service.platform.as_deref().is_some_and(|p| {
+            !(["linux/arm64", "linux/arm64/v8"].contains(&p)
+                || (p == "linux/amd64" && service.amd64_emulation.is_some()))
+        }) {
+            refuse(
+                "platform",
+                "The service platform is not admitted by this graph driver.",
+                "Remove platform or use an arm64 image; linux/amd64 requires explicit service opt-in under amd64Emulation in the native adaptation.",
+            );
         }
         if service.network_mode == "project-networks" {
             if service.networks.is_empty()
                 || service.networks.len() > MAX_NETWORKS
                 || service.networks.iter().collect::<BTreeSet<_>>().len() != service.networks.len()
             {
-                return Err(unsupported());
+                refuse(
+                    "networks",
+                    "The service needs between one and 32 distinct project networks.",
+                    "Attach the service to at least one declared network and remove duplicate or excess attachments.",
+                );
             }
             for network in &service.networks {
                 if !plan
@@ -534,24 +562,40 @@ fn declared_configuration(
                     .get(network)
                     .is_some_and(|n| n.driver == "bridge")
                 {
-                    return Err(unsupported());
+                    refuse(
+                        "networks",
+                        "A service network is undeclared or does not use the bridge driver.",
+                        "Declare each attached network with the bridge driver, or select an isolated-network adaptation for a supported external network.",
+                    );
                 }
                 networks.insert(network.clone());
             }
         } else if service.network_mode != "none" || !service.networks.is_empty() {
-            return Err(unsupported());
+            refuse(
+                "network_mode",
+                "The service network mode cannot be combined with its network attachments.",
+                "Remove network_mode and use project networks, or use none with no network attachments. Namespace sharing requires Compose.",
+            );
         }
         for mount in &service.mounts {
             if mount.subpath.as_deref().is_some_and(|value| {
                 mount.kind != "volume" || !project::valid_volume_subpath(value)
             }) {
-                return Err(unsupported());
+                refuse(
+                    "volumes.volume.subpath",
+                    "A mount subpath is not a safe named-volume-relative directory.",
+                    "Use subpath only on a named volume, with a nonempty relative path and no dot, parent or empty components.",
+                );
             }
             if mount.kind == "bind" {
                 continue;
             }
             if mount.kind != "volume" || !plan.volumes.contains_key(&mount.source) {
-                return Err(unsupported());
+                refuse(
+                    "volumes",
+                    "A mount is neither a bind nor a declared named volume.",
+                    "Declare the named volume at top level, or use a supported bind mount. Other mount types require Compose.",
+                );
             }
             volumes.insert(mount.source.clone());
         }
@@ -559,6 +603,9 @@ fn declared_configuration(
         // count toward graph reservations. Docker represents omitted caps as zero.
         let memory = service.limits.memory_bytes.unwrap_or(0);
         let cpus = service.limits.cpus.unwrap_or(0.0);
+        if !findings.is_empty() && first_error.is_none() {
+            first_error = Some(unsupported());
+        }
         if service
             .limits
             .memory_bytes
@@ -576,15 +623,25 @@ fn declared_configuration(
                 .stop_grace_period_nanos
                 .is_some_and(|n| n > 30_000_000_000)
         {
-            return Err(error(
-                "graph_budget",
-                "A service exceeds the bounded graph profile.",
-            ));
+            first_error.get_or_insert_with(|| {
+                error(
+                    "graph_budget",
+                    "A service exceeds the bounded graph profile.",
+                )
+                .with_service(name)
+            });
         }
         // ShmSize is a tmpfs ceiling, not preallocated RSS. Its actual usage is
         // already constrained by an explicit container memory cap or the VM pool.
-        total_memory += memory;
+        total_memory = total_memory.saturating_add(memory);
         total_cpus += cpus;
+    }
+    if let Some(error) = first_error {
+        return Err(if error.code == "graph_subset" {
+            error.with_configuration_refusals(findings)
+        } else {
+            error
+        });
     }
     if networks.len() > MAX_NETWORKS
         || volumes.len() > MAX_VOLUMES
@@ -1185,6 +1242,53 @@ mod compose_field_tests {
             service[key] = value.clone();
         }
         json!({"services":{"web":service},"networks":{"private":{"internal":true}}})
+    }
+
+    #[test]
+    fn subset_reports_all_services_and_keeps_the_first_error_precedence() {
+        let fixture = super::super::tests::Fixture::new();
+        let candidate_root = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&candidate_root.0).unwrap();
+        state::write(&fixture.0.join("compose.yaml"), &document(json!({}))).unwrap();
+        let mut plan = project::plan(
+            &candidate,
+            PlanOptions {
+                branch: None,
+                project: &fixture.0,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )
+        .unwrap()
+        .plan;
+        let mut bad = plan.services["web"].clone();
+        bad.platform = Some("private-sentinel".into());
+        bad.network_mode = "private-sentinel".into();
+        bad.limits.memory_bytes = Some(u64::MAX);
+        plan.services.insert("api".into(), bad.clone());
+        plan.services.insert("web".into(), bad);
+        let error = declared_configuration(&plan, true, true).unwrap_err();
+        assert_eq!(error.code, "graph_subset");
+        let wire = serde_json::to_value(error).unwrap();
+        for service in ["api", "web"] {
+            for field in ["platform", "network_mode"] {
+                assert!(
+                    wire["configuration_refusals"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["service"] == service && item["field"] == field)
+                );
+            }
+        }
+        assert!(!wire.to_string().contains("private-sentinel"));
+        // An earlier service budget still wins over a later subset error.
+        let first = plan.services.get_mut("api").unwrap();
+        first.platform = None;
+        first.network_mode = "project-networks".into();
+        let budget = declared_configuration(&plan, true, true).unwrap_err();
+        assert_eq!(budget.code, "graph_budget");
+        assert_eq!(budget.service.as_deref(), Some("api"));
     }
 
     #[test]

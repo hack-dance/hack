@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -66,7 +67,9 @@ async function createContractRepo(opts: {
   readonly otherVars?: readonly Record<string, unknown>[];
   readonly secrets?: (projectRoot: string) => Record<string, unknown>;
 }): Promise<Repo> {
-  const root = await mkdtemp(join(tmpdir(), "hack-env-contract-shell-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-env-contract-shell-"))
+  );
   tempDirs.add(root);
   const projectRoot = resolve(root, "repo");
   const projectDir = resolve(projectRoot, ".hack");

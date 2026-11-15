@@ -817,6 +817,8 @@ test.each([
 // invalid-deadline assertions. Give setup the same outer budget as adjacent
 // prepared-store tests; the rejected mutation deadlines remain unchanged.
 test("HACK-1359: file8 rejects missing and non-finite mutation deadlines without effects", async () => {
+  // Preparation still performs the full retained-file proof before the invalid
+  // deadline assertions. Give it the same setup budget as the adjacent cases.
   const { store, generation } = await prepared();
   try {
     await assertInvalidRetainedMutationDeadlines({

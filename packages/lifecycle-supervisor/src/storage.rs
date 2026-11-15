@@ -117,9 +117,9 @@ impl Root {
         Ok(file)
     }
 
-    pub fn lock_wait(&self, name: &str) -> Result<File> {
+    pub fn lock_wait(&self, name: &str, wait: std::time::Duration) -> Result<File> {
         let file = self.file(name, libc::O_RDWR | libc::O_CREAT)?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + wait;
         loop {
             // SAFETY: flock only borrows the live owned descriptor.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {

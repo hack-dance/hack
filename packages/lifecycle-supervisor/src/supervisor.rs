@@ -21,6 +21,15 @@ use std::{
 const GRACE: Duration = Duration::from_secs(5);
 const IDLE_TICK: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(20);
+/// One stop holds `.stop.lock` for at most two TERM-to-KILL bounds: the guard
+/// path, then orphan recovery after a late guard loss. A waiter must outlast
+/// that holder instead of failing without a receipt.
+const STOP_LOCK_WAIT: Duration =
+    Duration::from_secs(2 * (GRACE.as_secs() + CONFIRM_BOUND.as_secs()) + 2);
+/// Bounded wait for a previous command owner to release its lock.
+const COMMAND_LOCK_WAIT: Duration = Duration::from_secs(10);
+/// Time after KILL for a stop to confirm absence.
+const CONFIRM_BOUND: Duration = Duration::from_secs(2);
 const LINE_LIMIT: usize = 64 * 1024;
 
 #[derive(Serialize)]
@@ -70,7 +79,7 @@ pub fn main() -> Result<()> {
             protocol::validate_control(request.version, &request.root, &request.owner_token)?;
             let root = Root::open(&request.root)?;
             let _stop_lock = if args[0] == "stop" {
-                Some(root.lock_wait(".stop.lock")?)
+                Some(root.lock_wait(".stop.lock", STOP_LOCK_WAIT)?)
             } else {
                 None
             };
@@ -135,7 +144,7 @@ fn run(request: Launch) -> Result<()> {
     let root = Root::open(&request.root)?;
     let _instance_lock = instance_lock(&root)?;
     os::census_preflight()?;
-    let launch_lock = root.lock_wait(".stop.lock")?;
+    let launch_lock = root.lock_wait(".stop.lock", STOP_LOCK_WAIT)?;
     root.assert_not_retired(&request.owner_token)?;
     // Validate every old claim before starting any new command. A guard survives
     // project-owner death; its command lock also closes concurrent restart races.
@@ -199,7 +208,7 @@ fn run(request: Launch) -> Result<()> {
         detach_stdio()?;
         loop {
             if os::STOP.load(Ordering::Relaxed) {
-                match root.lock_wait(".stop.lock") {
+                match root.lock_wait(".stop.lock", STOP_LOCK_WAIT) {
                     Ok(_lock) => {
                         stop(&root.states()?)?;
                     }
@@ -264,7 +273,7 @@ fn rollback(children: &mut [Child]) {
             libc::kill(pid, libc::SIGTERM);
         }
     }
-    let deadline = Instant::now() + GRACE + Duration::from_secs(2);
+    let deadline = Instant::now() + GRACE + CONFIRM_BOUND;
     while Instant::now() < deadline {
         if children
             .iter_mut()
@@ -282,7 +291,8 @@ fn guard(request: GuardLaunch) -> Result<()> {
     protocol::validate_control(request.version, &request.root, &request.owner_token)?;
     request.process.validate()?;
     let root = Root::open(&request.root)?;
-    let _command_lock = root.lock_wait(&format!("{}.lock", request.process.name))?;
+    let _command_lock =
+        root.lock_wait(&format!("{}.lock", request.process.name), COMMAND_LOCK_WAIT)?;
     if let Some(previous) = root.load(&request.process.name)?
         && os::recorded_live(&previous, false)?
     {
@@ -518,7 +528,7 @@ fn stop(states: &[State]) -> Result<()> {
                     None => self.recover()?,
                     Some(false) => return Ok(false),
                     Some(true) => {
-                        if start.elapsed() >= GRACE + Duration::from_secs(2) {
+                        if start.elapsed() >= GRACE + CONFIRM_BOUND {
                             return Err(refused());
                         }
                         return Ok(true);
@@ -526,14 +536,17 @@ fn stop(states: &[State]) -> Result<()> {
                 }
             }
             let recovery = self.recovery.as_ref().ok_or_else(refused)?;
-            if !recovery.live()? {
+            let liveness = recovery.live()?;
+            if liveness == os::RecoveryLiveness::Gone {
                 return Ok(false);
             }
             let elapsed = self.orphan_term.ok_or_else(refused)?.elapsed();
-            if elapsed >= GRACE + Duration::from_secs(2) {
+            if elapsed >= GRACE + CONFIRM_BOUND {
                 return Err(refused());
             }
-            if elapsed >= GRACE {
+            // Only captured incarnations are signalled. Unobserved members get
+            // the rest of this target's deadline to exit on their own.
+            if elapsed >= GRACE && liveness == os::RecoveryLiveness::Captured {
                 recovery.signal(libc::SIGKILL)?;
             }
             Ok(true)

@@ -761,19 +761,32 @@ impl Recovery {
         Ok(())
     }
 
-    pub fn live(&self) -> Result<bool> {
+    pub fn live(&self) -> Result<RecoveryLiveness> {
         for member in &self.members {
             if inspect(member.pid)?.is_some_and(|p| !p.zombie && incarnation_matches(member, &p)) {
-                return Ok(true);
+                return Ok(RecoveryLiveness::Captured);
             }
         }
         // Unobserved descendants or an unrelated reused session cannot be
         // signalled by this snapshot, and must not be claimed as stopped.
         if live_group(self.session, Some(self.session))? {
-            return Err(refused());
+            return Ok(RecoveryLiveness::Unobserved);
         }
-        Ok(false)
+        Ok(RecoveryLiveness::Gone)
     }
+}
+
+/// What a recovery snapshot can still see of its session.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecoveryLiveness {
+    /// A captured incarnation is alive; it may still be signalled.
+    Captured,
+    /// No captured incarnation is alive, but the session still has members this
+    /// snapshot never observed. They may exit by themselves; they are never
+    /// signalled, and stop reports unknown if they outlive its deadline.
+    Unobserved,
+    /// The session has no live member.
+    Gone,
 }
 
 /// A successful census must contain our own readable identity. Known restricted

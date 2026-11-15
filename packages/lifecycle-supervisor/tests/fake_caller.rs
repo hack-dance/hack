@@ -8,7 +8,7 @@ use std::{
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -1108,11 +1108,27 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
         "TERM-ignoring child exited before guard loss"
     );
     let recovery_started = Instant::now();
+    // Freeze stop too, so it cannot observe the guard as an unreaped zombie:
+    // a zombie guard is still a witness, and a fresh capture would then succeed
+    // without the admission snapshot this test is about.
+    let stop_pid = stop.id() as i32;
+    // SAFETY: the stop request is this test's own child.
+    assert_eq!(unsafe { libc::kill(stop_pid, libc::SIGSTOP) }, 0);
+    eventually(|| process_is_stopped(stop_pid).then_some(()));
     // SAFETY: the frozen guard belongs to this fixture.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
     if !blocked {
         assert!(wait(&mut caller, TIMEOUT).success());
     }
+    // Resume stop only after the guard incarnation has no process record left,
+    // so neither a live nor a zombie guard can witness a fresh capture.
+    eventually(|| {
+        identity(guard)
+            .is_none_or(|current| current.birth != guard_birth)
+            .then_some(())
+    });
+    // SAFETY: resumes the stop request stopped above.
+    assert_eq!(unsafe { libc::kill(stop_pid, libc::SIGCONT) }, 0);
     let receipt = receive(stop.stdout.as_mut().unwrap());
     let stopped = wait(&mut stop, TIMEOUT).success();
     assert_eq!(stopped, !blocked, "{receipt}");
@@ -1177,6 +1193,71 @@ fn orphan_recovery_keeps_observed_child_after_term_ends_witness() {
                 || identity(p.pid).is_none()
                 || process_is_zombie(p.pid))
     );
+}
+
+/// Recovery captures the session before its TERM. A descendant forked after
+/// that capture is never signalled; stop waits until its own deadline for it.
+fn late_descendant_case(forever: bool) {
+    let f = Fixture::new();
+    let mode = if forever {
+        "fork-on-term-forever"
+    } else {
+        "fork-on-term"
+    };
+    let (mut caller, _) = f.start(vec![f.process("worker", mode)]);
+    f.await_log("fixture-ready");
+    let state = f.state("worker");
+    // SAFETY: the captured guard belongs to this fixture; its command survives.
+    assert_eq!(
+        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+        0
+    );
+    assert!(wait(&mut caller, TIMEOUT).success());
+    let start = Instant::now();
+    let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    let stopped = wait(&mut stop, TIMEOUT).success();
+    let elapsed = start.elapsed();
+    let late = std::fs::read_to_string(f.root.join("late-descendant"))
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("command did not fork after recovery TERM");
+    let late_identity = identity(late);
+    if let Some(late) = &late_identity {
+        f.owned.borrow_mut().push(late.clone());
+    }
+    assert!(
+        identity(pid(&state, "commandPid")).is_none()
+            || process_is_zombie(pid(&state, "commandPid")),
+        "captured command survived recovery KILL"
+    );
+    if forever {
+        assert!(!stopped, "{receipt}");
+        assert_eq!(receipt["outcome"], "unknown");
+        assert!(
+            elapsed >= Duration::from_secs(7),
+            "stop gave up before its deadline: {elapsed:?}"
+        );
+        let late = late_identity.expect("unobserved descendant was signalled");
+        assert!(
+            !process_is_zombie(late.pid),
+            "unobserved descendant was signalled"
+        );
+    } else {
+        assert!(stopped, "{receipt}");
+        assert_eq!(receipt["outcome"], "stopped");
+        assert!(elapsed >= Duration::from_secs(5));
+        assert!(elapsed < TIMEOUT);
+    }
+}
+
+#[test]
+fn orphan_recovery_waits_for_unobserved_descendant_to_exit() {
+    late_descendant_case(false);
+}
+
+#[test]
+fn orphan_recovery_never_signals_unobserved_descendant() {
+    late_descendant_case(true);
 }
 
 fn process_is_zombie(pid: i32) -> bool {
@@ -1903,6 +1984,52 @@ fn fixture_process() {
                 }
             }
             println!("wrapper-child {child}");
+        }
+        "fork-on-term" | "fork-on-term-forever" => {
+            // Fork one TERM-ignoring descendant after each TERM, so recovery
+            // meets a session member forked after its capture. Its PID goes to
+            // a file: stdout belongs to the guard, which the test kills first.
+            static TERMINATED: AtomicBool = AtomicBool::new(false);
+            extern "C" fn on_term(_: libc::c_int) {
+                TERMINATED.store(true, Ordering::SeqCst);
+            }
+            let forever = mode == "fork-on-term-forever";
+            // SAFETY: the handler only stores an atomic flag.
+            unsafe {
+                libc::signal(
+                    libc::SIGTERM,
+                    on_term as extern "C" fn(libc::c_int) as libc::sighandler_t,
+                );
+            }
+            println!("fixture-ready");
+            std::io::stdout().flush().unwrap();
+            loop {
+                if TERMINATED.swap(false, Ordering::SeqCst) {
+                    // SAFETY: the fork child uses only async-signal-safe libc
+                    // calls and never returns into Rust state.
+                    let child = unsafe { libc::fork() };
+                    assert!(child >= 0);
+                    if child == 0 {
+                        unsafe {
+                            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                            if forever {
+                                loop {
+                                    libc::pause();
+                                }
+                            }
+                            // Outlive the parent's KILL at five seconds, then
+                            // exit before the seven-second recovery deadline.
+                            for _ in 0..12 {
+                                libc::usleep(500_000);
+                            }
+                            libc::_exit(0);
+                        }
+                    }
+                    std::fs::write("late-descendant.tmp", child.to_string()).unwrap();
+                    std::fs::rename("late-descendant.tmp", "late-descendant").unwrap();
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
         }
         "hold" => (),
         _ => std::process::exit(99),

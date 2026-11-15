@@ -459,6 +459,9 @@ impl HackApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon.finished(&result);
+                // Keep this receipt through the automatic recheck below, as
+                // setup's own action path does, so a failure stays readable.
+                this.setup.pending_fix = true;
                 this.setup.result = Some(match &result {
                     Ok(()) => "Daemon command exited successfully. Checking fresh status.".into(),
                     Err(e) => format!("Daemon command failed: {e}. Checking fresh status."),

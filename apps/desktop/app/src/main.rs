@@ -103,7 +103,7 @@ fn main() {
     let args = parse_args();
     #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.screenshots {
-        screenshots::run(dir);
+        screenshots::run(dir, args.fixture);
         return;
     }
     #[cfg(not(feature = "screenshots"))]
@@ -134,6 +134,9 @@ fn main() {
                         if !fixtures::opens_doctor(f) {
                             app.show_project();
                         }
+                    }
+                    if f.name().starts_with("env-") {
+                        app.show_env_fixture();
                     }
                     if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
                         app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);

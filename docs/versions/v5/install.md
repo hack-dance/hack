@@ -105,5 +105,8 @@ Stop its projects with `hack down` first. For a login daemon, use that install's
   before removing `~/.hack-next`; that removes all its version-private homes too.
 
 Removing an executable does not undo host DNS/trust, project files or volumes.
+Intended for next.18: to see whether a newer release exists without changing
+anything, run `hack update --check --json --observe` through the same launcher;
+it prints the upgrade command for this install.
 For a candidate rollback or return to stable, use
 [the full procedure](../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).

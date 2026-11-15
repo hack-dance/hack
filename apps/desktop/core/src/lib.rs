@@ -27,6 +27,8 @@ pub mod state;
 pub mod terminal;
 pub mod viewmodel;
 
+pub mod env;
+
 pub mod execution;
 
 mod setup_login;

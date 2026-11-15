@@ -14,7 +14,7 @@ terminal).
 - `hack up --branch <name>` — a parallel branch instance with its own hostnames
 - `hack dev` — the repository's [side-by-side development build](dev.md)
 - `hack open` — open/print the project URL
-- `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
+- `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`; `--json` is the [logs JSON stream](reference/logs-json.md))
 - `hack ps` / `hack status` — project status
 - `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
 - `hack projects --json --observe` — read-only listing: no registration, `lastSeenAt` update, registry creation or write, daemon contact or engine contact. Works with `--summary`, `--project` and `--all`; rejects `--meta`. Add `--runtime` to query Docker explicitly; socket contact can start an on-demand engine. Ordinary listing retains discovery writes for compatibility.

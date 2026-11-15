@@ -25,7 +25,7 @@ libvulkan-dev`.
 
 ```sh
 cd apps/desktop
-cargo test -p hack-desktop-core          # no daemon, Docker or Hack home needed
+bash scripts/test.sh                    # pinned nextest, separate process per test
 cargo run -p hack-desktop                # live: matching hackd; otherwise needs R18
 cargo run -p hack-desktop -- --list-fixtures
 cargo run -p hack-desktop -- --fixtures failed-start --theme dark
@@ -81,6 +81,29 @@ degraded / stopping, failed-start, needs-attention):
 Logs, Env and Activity tabs, CPU and memory, Doctor view, onboarding, always-on,
 daemon actions and upgrades come in later units. The design and the CLI/daemon
 requests they need are in `DESIGN.md` (PR #800).
+
+The supported desktop test command uses the repository-pinned nextest release
+(installed by `scripts/install-cargo-nextest.sh` at the repository root), with
+zero retries and one process per test. Raw threaded `cargo test --workspace` is
+not the macOS qualification command: fresh executable writes, concurrent process
+creation, and short socket deadlines can interact across libtest threads.
+
+On macOS, the CLI runner uses `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`
+and explicit stdin/stdout/stderr actions. This prevents a CLI child from holding
+an unrelated descriptor during another thread's non-atomic close-on-exec setup.
+The process group, selected environment, cwd, timeout and retirement contracts
+are preserved. Linux retains the standard process implementation. This product
+boundary is needed independently of test isolation; a mutex around runner calls
+would not cover descriptors opened by other GUI/library threads.
+
+For the macOS qualification loop, run
+`HACK_DESKTOP_TEST_REPETITIONS=200 bash scripts/test.sh` from this directory.
+Each iteration runs all workspace tests in separate processes with zero retries;
+doctests run afterward. Both CI hosts use this same wrapper (one iteration per
+job). Three consecutive green hosted macOS jobs and the lead's 200-run native
+receipt are required for HACK-2243 acceptance; a Linux run or cross-check is not
+that evidence. The generous retirement deadlines from #843 are integrated in
+this tree for the combined qualification.
 
 Process-cleanup regression tests use a generous 60-second scheduling deadline,
 then check process retirement rather than enforcing a short wall-clock latency.

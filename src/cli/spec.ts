@@ -18,6 +18,7 @@ import { helpCommand } from "../commands/help.ts";
 import { internalCommand } from "../commands/internal.ts";
 import { logPipeCommand } from "../commands/log-pipe.ts";
 import { mcpCommand } from "../commands/mcp.ts";
+import { nativeCommand } from "../commands/native.ts";
 import { nodeCommand } from "../commands/node.ts";
 import {
   downCommand,
@@ -103,6 +104,7 @@ export const CLI_SPEC = defineCli({
     configCommand,
     mcpCommand,
     setupCommand,
+    nativeCommand,
     sessionCommand,
     sshCommand,
     agentCommand,

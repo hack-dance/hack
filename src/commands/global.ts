@@ -3850,7 +3850,7 @@ async function handleGlobalLogs({
       cwd: dirname(composeFile),
       follow,
       tail,
-      service: isCaddy ? undefined : service,
+      services: isCaddy ? undefined : [service],
     });
   }
 

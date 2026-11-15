@@ -268,6 +268,8 @@ fn selected_source_device_rebind_restores_same_run_and_two_ordinary_generations(
         .device = old_device;
     state::write(&graph_root.join("state.json"), &synthetic_ready).unwrap();
     let original_ready_bytes = fs::read(graph_root.join("state.json")).unwrap();
+    // Removing both roots simulates the lost publication under test.
+    // owner-root: deliberate removal
     let publisher_root = transport::root(&candidate, &run).unwrap();
     fs::remove_dir_all(&publisher_root).unwrap();
     fs::remove_dir_all(

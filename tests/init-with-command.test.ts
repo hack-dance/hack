@@ -10,6 +10,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requireFixtureRoot } from "./helpers/fixture-root.ts";
+import { expectOpenPayload } from "./helpers/open-payload.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 /**
@@ -393,7 +394,9 @@ test("global default_domain drives new project config, routes and open without c
     repoRoot,
   ]);
   expect(opened.exitCode).toBe(0);
-  expect(JSON.parse(opened.stdout)).toEqual({ url: "https://repo.hack.gy" });
+  // Exact URL; the DNS notice depends on the resolver of the machine running
+  // the test (HACK-2249), so it is allowed but nothing else is.
+  expectOpenPayload(opened.stdout, "https://repo.hack.gy");
 });
 
 test("explicit --dev-host wins over global default_domain", async () => {

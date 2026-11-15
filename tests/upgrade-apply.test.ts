@@ -194,8 +194,8 @@ function healthyProbes(): UpgradeCheckProbes {
   };
 }
 
-/** A launcher path standing in for `~/.hack-next/bin/hack-next`. */
-const LAUNCHER = "/fixture/home/.hack-next/bin/hack-next";
+/** A launcher path standing in for the hack-next launcher. */
+const LAUNCHER = "/fixture/launcher/hack-next";
 function withLauncher(report: UpgradeCheckReport): UpgradeCheckReport {
   return { ...report, cli: { ...report.cli, command: LAUNCHER } };
 }

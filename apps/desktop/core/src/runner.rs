@@ -74,6 +74,9 @@ pub struct CliRunner {
     /// For PATH discovery: the last validated executable, shared by clones so
     /// automatic reads reuse it instead of searching PATH on every use.
     pinned: Option<std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>>,
+    /// An explicit `HACK_DESKTOP_CLI` selection: checked like PATH discovery
+    /// (ownership, write, links, ACL and `#!` interpreter) before every use.
+    verify_explicit: bool,
     clear_env: bool,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
     term_grace: Duration,
@@ -117,6 +120,26 @@ fn is_startup_var(name: &std::ffi::OsStr) -> bool {
             .any(|p| bytes.starts_with(p.as_bytes()))
 }
 
+/// A CLI executable may run only if it and every directory above it are owned
+/// by this user or root and not writable by group or others (links and ACLs
+/// included), and its `#!` interpreter passes the same rule without the env
+/// form. Refused before it ever runs.
+fn trusted_cli(program: &Path) -> Result<(), RunError> {
+    if std::fs::symlink_metadata(program).is_err() {
+        return Err(RunError::NotFound);
+    }
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    crate::source::trusted_tool_path(program, uid, false)
+        .filter(|real| crate::source::trusted_interpreter(real, uid, 4, false))
+        .map(|_| ())
+        .ok_or_else(|| {
+            RunError::Spawn(
+                "the selected hack is in a location other users can change; it was not run".into(),
+            )
+        })
+}
+
 /// Default grace after SIGTERM. The CLI forwards SIGTERM to the detached
 /// subprocess groups it owns (for example a Compose build) and waits for
 /// them; SIGKILL alone would orphan those and kill the CLI's own timer.
@@ -133,6 +156,7 @@ impl CliRunner {
             missing: false,
             path_name: None,
             pinned: None,
+            verify_explicit: false,
             clear_env: false,
             term_grace: TERM_GRACE,
             strip_startup: false,
@@ -166,7 +190,11 @@ impl CliRunner {
     pub fn selected(value: Option<&std::ffi::OsStr>) -> Self {
         match value {
             None => Self::on_path("hack"),
-            Some(path) if Path::new(path).is_absolute() => Self::new(PathBuf::from(path)),
+            Some(path) if Path::new(path).is_absolute() => {
+                let mut runner = Self::new(PathBuf::from(path));
+                runner.verify_explicit = true;
+                runner
+            }
             Some(_) => {
                 let mut runner = Self::new("hack");
                 runner.missing = true;
@@ -191,6 +219,7 @@ impl CliRunner {
                     None => self.rediscover(),
                 }
             }
+            _ if self.verify_explicit => trusted_cli(&self.program).map(|()| self.program.clone()),
             _ => Ok(self.program.clone()),
         }
     }

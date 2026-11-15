@@ -378,6 +378,7 @@ impl CliRunner {
             stderr,
             stdout_diagnostics: String::new(),
             stderr_diagnostics: None,
+            reaped: false,
         })
     }
 }
@@ -528,6 +529,9 @@ pub struct LogStream {
     stderr: mpsc::Receiver<Drained>,
     stdout_diagnostics: String,
     stderr_diagnostics: Option<Drained>,
+    /// `poll` observed the exit and reaped the child: its PID (and group id)
+    /// may now belong to another process, so Drop must not signal it.
+    reaped: bool,
 }
 
 impl LogStream {
@@ -563,7 +567,9 @@ impl LogStream {
             if let Some(reader) = self.reader.take() {
                 self.stdout_diagnostics = reader.join().unwrap_or_default();
             }
-            self.child.try_wait().ok().flatten().map(|s| s.code())
+            let status = self.child.try_wait().ok().flatten();
+            self.reaped |= status.is_some();
+            status.map(|s| s.code())
         } else {
             None
         };
@@ -606,6 +612,10 @@ impl Drop for LogStream {
     fn drop(&mut self) {
         // Disconnect before signalling the owned process group and joining.
         drop(self.rx.take());
+        if self.reaped {
+            // Already reaped by `poll`, which also joined the reader.
+            return;
+        }
         signal_kill_group(&mut self.child);
         if let Some(r) = self.reader.take() {
             // A group signal can race a descendant fork on macOS. Keep the
@@ -757,9 +767,17 @@ fn kill_group(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Group signals sent by this thread (tests prove a reaped stream sends none).
+    static GROUP_SIGNALS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Only for the log-drop path, which has not reaped its child. Avoid
 /// Child::kill here: its status check may reap and release the PID reservation.
 fn signal_kill_group(child: &mut Child) {
+    #[cfg(test)]
+    GROUP_SIGNALS.with(|n| n.set(n.get() + 1));
     if let Ok(pid) = i32::try_from(child.id()) {
         // SAFETY: plain syscall on the group we created with process_group(0).
         unsafe {
@@ -1174,6 +1192,24 @@ exit 1"#,
         }
         assert_eq!(got, 301, "every line and the end event delivered first");
         assert_eq!(exit, Some(Some(3)));
+    }
+
+    #[test]
+    fn dropping_a_stream_after_poll_reaped_it_sends_no_signal() {
+        let f = FakeHack::new("echo '{\"type\":\"end\",\"reason\":\"eof\"}'");
+        let mut s = f.runner().stream_logs(&["logs"], None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while s.poll(64).exit.is_none() {
+            assert!(Instant::now() < deadline, "stream never reported its exit");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let before = GROUP_SIGNALS.with(std::cell::Cell::get);
+        drop(s);
+        assert_eq!(
+            GROUP_SIGNALS.with(std::cell::Cell::get),
+            before,
+            "a reaped PID may be reused; Drop must not signal it"
+        );
     }
 
     #[test]

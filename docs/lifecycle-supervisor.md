@@ -124,12 +124,12 @@ The bounds below limit each wait, not the total duration of a request:
 
 | Lock | Held by | Held across a blocking call? | Who waits, and the bound |
 |---|---|---|---|
-| `.instance.lock` | The project supervisor (`run`), for its lifetime | Yes, its whole run | Another `run` for the root: retries 1 s, then refused. Guards, `stop` and `status` never take it. |
-| `.stop.lock` | `run` from admission until its ready receipt; each new guard (inherited on fd 2) until it publishes and detaches; `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. A launch (`run`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` waits up to 10 s for each guard's receipt, then rolls back. |
+| `.instance.lock` | The project supervisor (`run` or `serve`), for its lifetime | Yes, its whole run | Another `run` or `serve` for the root: up to 10 s, then refused. Guards, `add`, `stop` and `status` never take it. |
+| `.stop.lock` | `run` or `serve` from admission until its ready receipt; `add` while it admits one command; each new guard (inherited on fd 2) until it publishes and detaches; `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. `status` waits up to 16 s only when the lock file exists (it never creates it), with the same framed answer on expiry. `add` waits up to 16 s; its forwarder reads the reply for up to 26 s. A launch (`run`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` waits up to 10 s for each guard's receipt, then rolls back. |
 | `<name>.lock` | The guard of that command, for its lifetime | Yes | Only a new guard for the same command name: up to 10 s, then refused. Never a sibling, `stop` or `status`. |
 | Receipts, retirement marker, `lifecycle.log` | No lock | No | Receipts are replaced atomically; a reader that races a replacement reopens the name. Log records are single appends (above). |
 
-`status` takes no lock. `stop` handles each target separately: a frozen live guard costs
+`status` takes only the bounded stop-lock wait above. `stop` handles each target separately: a frozen live guard costs
 its own target the five-second grace plus the two-second confirmation bound (and the
 same again if the guard is lost), then that target reports `unknown` while the others
 complete.

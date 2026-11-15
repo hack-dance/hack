@@ -10,6 +10,7 @@ import {
   resolveNativeConfigCompilerBinary,
 } from "../src/lib/native-config-compiler.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { withCompilerFixtureEnvironment } from "./helpers/tmux-socket-guard.ts";
 
 const PROTOCOL = { transport_version: 1, authored_version: 1, plan_version: 1 };
 const SUCCESS = {
@@ -46,12 +47,16 @@ test("local resolution preserves original document text and explicit tri-state",
     )
   );
   for (const explicitOverlay of [undefined, null, "qa"]) {
-    const result = await resolveNativeConfig({
-      input: INPUT,
-      checkoutLocal: new TextEncoder().encode(local),
-      explicitOverlay,
+    const result = await withCompilerFixtureEnvironment({
       binary,
-      profiles: ["qa"],
+      run: () =>
+        resolveNativeConfig({
+          input: INPUT,
+          checkoutLocal: new TextEncoder().encode(local),
+          explicitOverlay,
+          binary,
+          profiles: ["qa"],
+        }),
     });
     expect(result.ok).toBe(true);
     if (!result.ok) {
@@ -464,10 +469,14 @@ test("compiler receives no inherited credentials and forwards profile arguments 
         `const value = ${JSON.stringify(SUCCESS)}; value.plan.received = await Bun.stdin.text(); value.plan.profiles = process.argv.slice(3); value.plan.keys = Object.keys(process.env).sort(); console.log(JSON.stringify(value));`
       )
     );
-    const result = await compileNativeConfig({
-      input: INPUT,
+    const result = await withCompilerFixtureEnvironment({
       binary,
-      profiles: ["with spaces", "--unsafe"],
+      run: () =>
+        compileNativeConfig({
+          input: INPUT,
+          binary,
+          profiles: ["with spaces", "--unsafe"],
+        }),
     });
     expect(result.ok).toBe(true);
     if (!result.ok) {

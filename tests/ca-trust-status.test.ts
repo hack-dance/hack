@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { X509Certificate } from "node:crypto";
+import { dirname, join } from "node:path";
 import { buildDoctorJsonData } from "../src/commands/doctor.ts";
 import {
   type CaTrustDeps,
@@ -7,6 +8,7 @@ import {
   MAC_SYSTEM_KEYCHAIN,
 } from "../src/lib/ca-trust-status.ts";
 import type { LinuxTrustHost } from "../src/lib/linux-trust-setup.ts";
+import internalModuleFixture from "./fixtures/nss-read/upstream-internal.pkcs11.json";
 import {
   CURRENT_CA_PEM,
   EXPIRED_SAME_SUBJECT_CA_PEM,
@@ -16,6 +18,8 @@ import {
 // R16 (HACK-2218): whether the system trust store, and NSS on Linux,
 // trusts the local CA, or "unknown". Read-only and bounded: only the
 // queries below are issued, and a failed read is never "not trusted".
+
+const UPSTREAM_MODULE = internalModuleFixture.text;
 
 const CA_PATH = "/fixture-home/.hack/caddy/pki/caddy-local-authority.crt";
 const NOW = Date.parse("2027-01-01T00:00:00Z");
@@ -45,7 +49,11 @@ function deps(opts: {
       platform: opts.platform,
       caPath: CA_PATH,
       readText: async (path) => {
-        const value = opts.files[path] ?? "missing";
+        const value =
+          opts.files[path] ??
+          (path.endsWith("/pkcs11.txt") && opts.linuxHost
+            ? UPSTREAM_MODULE.replace("@DATABASE_DIR@", dirname(path))
+            : "missing");
         return await Promise.resolve(
           value === "missing" || value === "unreadable"
             ? value
@@ -63,7 +71,8 @@ function deps(opts: {
       },
       ...(opts.linuxHost ? { linuxHost: opts.linuxHost } : {}),
       exists: async (path) =>
-        await Promise.resolve(opts.exists?.[path] ?? false),
+        opts.exists?.[path] ??
+        Boolean((await opts.linuxHost?.inspectPath(path))?.isFile),
       listDir: async (path) => await Promise.resolve(opts.dirs?.[path] ?? []),
       now: () => clock,
     },
@@ -217,7 +226,28 @@ function fakeHost(opts: {
             ? ["cert9.db"]
             : []
       ),
-    inspectPath: async () => await Promise.resolve(null),
+    inspectPath: async (path) => {
+      const dbs = opts.profiles.map((p) => join(firefox, p));
+      const isFile = dbs.some((db) =>
+        ["cert9.db", "key4.db", "pkcs11.txt"].some(
+          (name) => path === join(db, name)
+        )
+      );
+      const isDirectory =
+        path === "/" ||
+        path === "/fixture-home" ||
+        dbs.some((db) => db === path || db.startsWith(`${path}/`));
+      return isFile || isDirectory
+        ? {
+            realPath: path,
+            uid: path === "/" ? 0 : 1000,
+            mode: isDirectory ? 0o4_0700 : 0o10_0600,
+            isDirectory,
+            isFile,
+            identity: path,
+          }
+        : null;
+    },
     makeDir: async () => {
       throw new Error("never creates");
     },
@@ -274,7 +304,7 @@ test("Linux NSS: each existing database is listed read-only; trust needs TLS iss
     exported: { exitCode: 0, stdout: CURRENT_CA_PEM },
   });
   expect(trusted.db?.state).toBe("trusted");
-  expect(trusted.report.state).toBe("trusted");
+  expect(trusted.report.state).toBe("unknown"); // The unconfigured shared db is unknown.
   // Only list and export, never add/modify/create/delete.
   for (const argv of trusted.queries) {
     expect(argv.slice(1, 3)).toEqual(["-d", `sql:${profile}`]);
@@ -306,9 +336,9 @@ test("Linux NSS: each existing database is listed read-only; trust needs TLS iss
   const unknownDb = await run({ list: listing("C,,"), exists: "unknown" });
   expect(unknownDb.db?.state).toBe("unknown");
   expect(unknownDb.report.state).toBe("unknown");
-  // A profile without cert9.db is not a database: nothing to check.
+  // A discovered profile whose cert9.db vanished is unknown, never healthy.
   const none = await run({ list: listing("C,,"), exists: false });
-  expect(none.db).toBeUndefined();
+  expect(none.db?.state).toBe("unknown");
   expect(none.queries).toEqual([]);
 });
 
@@ -357,7 +387,7 @@ test("the whole inspection has one budget: no query starts after it, and the rep
   expect(queries).toHaveLength(7);
   // Every database is in the report: the first three trusted, the rest
   // unknown (not reached, or over the 16-database cap).
-  expect(report.nss).toHaveLength(20);
+  expect(report.nss).toHaveLength(21); // Includes the missing shared database.
   expect(report.nss.filter((db) => db.state === "trusted")).toHaveLength(3);
   expect(
     report.nss.filter((db) => db.detail.startsWith("Not inspected: more than"))

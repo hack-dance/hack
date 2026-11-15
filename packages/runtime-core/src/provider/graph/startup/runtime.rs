@@ -1815,6 +1815,7 @@ mod application_failure_tests {
 #[cfg(test)]
 mod owner_scope_tests {
     use super::*;
+    use crate::owned_tmp_root::OwnedTmpRoot;
     #[test]
     fn restored_owner_stops_without_replaying_legacy_pending_coordinator() {
         use crate::provider::relay_owner::lifecycle_intent::Coordinator;
@@ -1824,7 +1825,8 @@ mod owner_scope_tests {
         let owner = "b".repeat(32);
         let context = super::super::super::host_relay::context(&owner, "boot").unwrap();
         let graph = super::super::super::host_relay::graph_scope(context, &run).unwrap();
-        let old_root = control_root(&state, &owner, Some("boot"), Some(&run)).unwrap();
+        let old_root =
+            OwnedTmpRoot::new(control_root(&state, &owner, Some("boot"), Some(&run)).unwrap());
         state::private_directory(&old_root).unwrap();
         let mut old_owner = ManagedOwner::start(context, &old_root, vec![]).unwrap();
         let endpoint = old_owner.endpoint();
@@ -1845,17 +1847,21 @@ mod owner_scope_tests {
         old_owner.shutdown().unwrap();
         let bytes = fs::read(old_root.join("relay-lifecycle/state.json")).unwrap();
         let process = crate::provider::identity::observe(std::process::id() as i32).unwrap();
-        let fresh_root = process_control_root(&state, &owner, "boot", &run, &process).unwrap();
-        assert_ne!(fresh_root, old_root);
+        let fresh_root = OwnedTmpRoot::new(
+            process_control_root(&state, &owner, "boot", &run, &process).unwrap(),
+        );
+        assert_ne!(*fresh_root, *old_root);
         let mut replacement = process.clone();
         replacement.executable = "/fixture/renamed-runtime".into();
+        // owner-root: path-only
         assert_eq!(
-            fresh_root,
+            *fresh_root,
             process_control_root(&state, &owner, "boot", &run, &replacement).unwrap()
         );
         replacement.start_micros += 1;
+        // owner-root: path-only
         assert_ne!(
-            fresh_root,
+            *fresh_root,
             process_control_root(&state, &owner, "boot", &run, &replacement).unwrap()
         );
         state::private_directory(&fresh_root).unwrap();
@@ -1881,8 +1887,8 @@ mod owner_scope_tests {
             fs::read(old_root.join("relay-lifecycle/state.json")).unwrap(),
             bytes
         );
-        fs::remove_dir_all(old_root).unwrap();
-        fs::remove_dir_all(fresh_root).unwrap();
+        drop(old_root);
+        drop(fresh_root);
         fs::remove_dir_all(state).unwrap();
     }
 
@@ -1890,7 +1896,10 @@ mod owner_scope_tests {
     fn scoped_identity_binds_run_owner_boot_and_candidate() {
         let state = Path::new("/candidate/.hack-local");
         let run = "a".repeat(32);
+        // Identity only: these roots are computed, never created.
+        // owner-root: path-only
         let root = control_root(state, "owner", Some("boot"), Some(&run)).unwrap();
+        // owner-root: path-only
         for other in [
             control_root(state, "owner", Some("boot"), Some(&"b".repeat(32))).unwrap(),
             control_root(state, "other", Some("boot"), Some(&run)).unwrap(),
@@ -1900,6 +1909,7 @@ mod owner_scope_tests {
         ] {
             assert_ne!(root, other);
         }
+        // owner-root: path-only
         assert!(control_root(state, "owner", Some("boot"), Some("bad")).is_err());
         assert!(matches_selected_run(Some(&run), &run));
         assert!(!matches_selected_run(Some(&run), &"b".repeat(32)));
@@ -1914,10 +1924,12 @@ mod owner_scope_tests {
                 serde_json::to_vec(&json!(["hack-graph-owner-v1", state, "owner", null])).unwrap()
             )
         );
+        // owner-root: path-only
         assert_eq!(
             control_root(state, "owner", None, None).unwrap(),
             PathBuf::from(format!("/private/tmp/hkro-{}", &digest[..24]))
         );
+        // owner-root: path-only
         assert_ne!(
             control_root(state, "owner", None, None).unwrap(),
             control_root(state, "owner", Some("boot"), None).unwrap()
@@ -1934,6 +1946,7 @@ mod owner_scope_tests {
                     .unwrap()
             )
         );
+        // owner-root: path-only
         assert_eq!(
             control_root(state, "owner", Some("boot"), None).unwrap(),
             PathBuf::from(format!("/private/tmp/hkro-{}", &digest[..24]))

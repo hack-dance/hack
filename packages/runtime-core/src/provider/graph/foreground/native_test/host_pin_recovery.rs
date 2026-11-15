@@ -295,6 +295,7 @@ fn explicit_host_pin_witness_recovers_only_selected_previous_boot_run() {
     let root = graph::directory(&candidate, &runs[0]).unwrap();
     let graph_bytes = fs::read(root.join("state.json")).unwrap();
     let startup = original.relay_startup.as_ref().unwrap();
+    // owner-root: path-only
     let publisher_root = transport::root(&candidate, &runs[0]).unwrap();
     let publisher = publisher_root.join("owner.json");
     let control = startup.control_root.join("relay-control/owner.json");

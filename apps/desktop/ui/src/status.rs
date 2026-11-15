@@ -36,15 +36,47 @@ impl Status {
 
     #[must_use]
     pub fn of_service(s: &ServiceView) -> Self {
-        if s.running {
-            Self::Running
-        } else if s.exit_code.is_some_and(|c| c != 0) {
-            Self::Failed
-        } else if s.status.to_ascii_lowercase().contains("unknown") {
-            Self::Unknown
-        } else {
-            Self::Stopped
+        Self::service(s).0
+    }
+
+    /// Visual status and short label for a service, from one decision so
+    /// the dot and the text never disagree. Order matters: an unobserved
+    /// service is Unknown whatever was last known about it; unhealthy
+    /// running is Degraded; restarting or dead is Failed; a container in any
+    /// state the app does not recognise (paused, created, removing) is
+    /// Unknown, never Stopped.
+    fn service(s: &ServiceView) -> (Self, String) {
+        let lower = s.status.to_ascii_lowercase();
+        if lower.contains("status unknown") || lower == "unknown" {
+            return (Self::Unknown, "unknown".into());
         }
+        if s.running {
+            if lower.contains("unhealthy") {
+                return (Self::Degraded, "unhealthy".into());
+            }
+            return (Self::Running, "running".into());
+        }
+        if lower.starts_with("restarting") {
+            return (Self::Failed, "restarting".into());
+        }
+        if lower.starts_with("dead") {
+            return (Self::Failed, "dead".into());
+        }
+        if let Some(code) = s.exit_code {
+            let status = if code == 0 {
+                Self::Stopped
+            } else {
+                Self::Failed
+            };
+            return (status, format!("exited {code}"));
+        }
+        if !s.created {
+            return (Self::Stopped, "not created".into());
+        }
+        if lower.contains("paused") {
+            return (Self::Unknown, "paused".into());
+        }
+        (Self::Unknown, "unknown".into())
     }
 
     #[must_use]
@@ -79,24 +111,11 @@ pub fn project_label(state: &ProjectState) -> String {
     }
 }
 
-/// Short state cell for a service row: "running", "exited 1", "not created".
+/// Short state cell for a service row: "running", "unhealthy", "exited 1",
+/// "not created", "paused", "unknown".
 #[must_use]
 pub fn service_label(s: &ServiceView) -> String {
-    if s.running {
-        return "running".into();
-    }
-    if let Some(code) = s.exit_code {
-        return format!("exited {code}");
-    }
-    if !s.created {
-        return "not created".into();
-    }
-    let lower = s.status.to_ascii_lowercase();
-    if lower.contains("unknown") {
-        "unknown".into()
-    } else {
-        "stopped".into()
-    }
+    Status::service(s).1
 }
 
 fn list(names: &[String]) -> String {
@@ -164,6 +183,55 @@ mod tests {
             exited_ok: vec![],
         };
         assert_eq!(project_label(&r), "running · 2h");
+    }
+
+    fn svc(running: bool, status: &str, exit: Option<i32>, created: bool) -> ServiceView {
+        ServiceView {
+            name: "api".into(),
+            running,
+            status: status.into(),
+            exit_code: exit,
+            completed: !running && exit == Some(0),
+            created,
+            route: None,
+        }
+    }
+
+    #[test]
+    fn unobserved_service_is_unknown_even_if_never_created() {
+        let s = svc(false, "Status unknown", None, false);
+        assert_eq!(Status::of_service(&s), Status::Unknown);
+        assert_eq!(service_label(&s), "unknown");
+    }
+
+    #[test]
+    fn unhealthy_running_service_is_degraded() {
+        let s = svc(true, "Up 2 minutes (unhealthy)", None, true);
+        assert_eq!(Status::of_service(&s), Status::Degraded);
+        assert_eq!(service_label(&s), "unhealthy");
+    }
+
+    #[test]
+    fn paused_or_unrecognised_container_is_not_stopped() {
+        let paused = svc(false, "Up 2 minutes (Paused)", None, true);
+        assert_eq!(Status::of_service(&paused), Status::Unknown);
+        assert_eq!(service_label(&paused), "paused");
+        let created = svc(false, "Created", None, true);
+        assert_eq!(Status::of_service(&created), Status::Unknown);
+    }
+
+    #[test]
+    fn restarting_and_failed_exits_are_failed() {
+        let r = svc(false, "Restarting (1) 5 seconds ago", Some(1), true);
+        assert_eq!(service_label(&r), "restarting");
+        assert_eq!(Status::of_service(&r), Status::Failed);
+        let e = svc(false, "Exited (2) 20 seconds ago", Some(2), true);
+        assert_eq!(
+            (Status::of_service(&e), service_label(&e).as_str()),
+            (Status::Failed, "exited 2")
+        );
+        let ok = svc(false, "Exited (0) 20 seconds ago", Some(0), true);
+        assert_eq!(Status::of_service(&ok), Status::Stopped);
     }
 
     #[test]

@@ -157,8 +157,10 @@ Machine section at the bottom.
 Directly under the title bar, across the detail pane: one line, tinted
 (`degraded.bg` for daemon problems, `failed.bg` for engine down), alert icon,
 message, optional action button on the right (Start hackd / Restart hackd).
-The stale banner is not shown separately: the daemon banner and the "Not
-observed" caption already say it. The reason line is suppressed when a daemon
+The stale banner is folded into the daemon banner when one is shown (it has
+the same cause); otherwise it is shown ("Showing last known state. The latest
+read failed: …"), because it is then the only sign that the current read
+failed. The reason line is suppressed when a daemon
 banner explains an Unknown project.
 
 ### Detail header
@@ -186,8 +188,11 @@ secondary, primary on hover. No underline, no bar background.
 Columns: Service (flex, dot + name), State (92), CPU (64, right-aligned),
 Memory (64, right-aligned), Route (flex, `MONO` secondary; "internal" muted
 when the service has no route). Header row 26, `SMALL` muted, sentence case.
-Rows 32, hairline separators. State cell is short: `running`, `exited 1`,
-`not created`, `stopped`, `unknown`; failures in `failed.fg`. Unknown
+Rows 32, hairline separators. State cell is short and agrees with the dot:
+`running`, `unhealthy` (degraded), `restarting` / `dead` / `exited 1`
+(failed), `exited 0` and `not created` (stopped), `paused` and any
+unrecognised container state (unknown ring, never stopped), `unknown` when
+not observed; failures in `failed.fg`. Unknown
 numbers are an em dash in muted.
 
 ### Log tail (compact)

@@ -256,9 +256,14 @@ impl MainWindow {
                     None,
                 ),
                 Banner::DaemonReadFailed { error } => (BannerTone::Warn, error.clone(), None),
-                // The stale banner repeats the daemon banner's cause; the
-                // sidebar's "Not observed" caption already says it.
-                Banner::Stale { .. } => continue,
+                // With a daemon banner, the stale banner repeats its cause.
+                // Otherwise it is the only sign the latest read failed.
+                Banner::Stale { .. } if self.daemon_banner() => continue,
+                Banner::Stale { error } => (
+                    BannerTone::Warn,
+                    format!("Showing last known state. The latest read failed: {error}"),
+                    None,
+                ),
             };
             let action = if action.is_some() && self.data.recovery.is_some() && !recovery_shown {
                 recovery_shown = true;

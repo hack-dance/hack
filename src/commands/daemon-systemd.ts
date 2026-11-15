@@ -36,6 +36,7 @@ import {
   checkSystemdLoadedUnitPaths,
   checkSystemdStopHooks,
   checkSystemdUnitTrusted,
+  checkSystemdUnitTrustedBeforeChange,
   defaultSystemdDeps,
   describeSystemdUnavailable,
   extractSystemdExecProgram,
@@ -143,6 +144,39 @@ export interface SystemdCommandHooks {
   readonly trace?: DaemonCommandTrace;
   /** Defaults to this CLI's version; tests pin it. */
   readonly cliVersion?: string;
+  /**
+   * The uid the unit trust checks compare owners to; defaults to this
+   * process's. Tests model a file another account owns with another uid.
+   */
+  readonly trustUid?: number;
+}
+
+/** A refusal that ends with the `hack daemon install` step. */
+function withInstallStep(message: string): string {
+  return message.includes("hack daemon install")
+    ? message
+    : `${message} | Run: hack daemon install`;
+}
+
+/**
+ * {@link checkSystemdUnitTrustedBeforeChange} for a command: null, or the
+ * refusal after recording `blocked: "untrusted-unit"` (nothing changed).
+ */
+async function refuseUntrustedUnit(opts: {
+  readonly hooks: Pick<SystemdCommandHooks, "trace" | "trustUid">;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  const untrusted = await checkSystemdUnitTrustedBeforeChange({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+    uid: opts.hooks.trustUid,
+  });
+  if (untrusted !== null && opts.hooks.trace) {
+    opts.hooks.trace.action = "none";
+    opts.hooks.trace.blocked = "untrusted-unit";
+  }
+  return untrusted;
 }
 
 /** Status for `daemon status` and doctor; null off Linux or when access is denied. */
@@ -217,10 +251,15 @@ export async function refuseSystemdStartBeforeReplacing(
     | "assessDurability"
     | "systemPathDirectories"
     | "cliVersion"
+    | "trustUid"
   >
 ): Promise<{
   readonly message: string;
-  readonly blocked: "unproven-owner" | "read-only" | "rewrite-refused";
+  readonly blocked:
+    | "unproven-owner"
+    | "read-only"
+    | "rewrite-refused"
+    | "untrusted-unit";
 } | null> {
   const deps = hooks.deps ?? defaultSystemdDeps();
   if (!resolveSystemdAccess({ env: deps.env }).allowed) {
@@ -234,9 +273,12 @@ export async function refuseSystemdStartBeforeReplacing(
   if (!status?.availability.available) {
     return null;
   }
-  const untrusted = await checkSystemdUnitTrusted({ unitPath });
+  const untrusted = await checkSystemdUnitTrusted({
+    unitPath,
+    uid: hooks.trustUid,
+  });
   if (untrusted !== null) {
-    return { message: untrusted, blocked: "unproven-owner" };
+    return { message: withInstallStep(untrusted), blocked: "untrusted-unit" };
   }
   const unitHome = await checkUnitServesHome({
     hackHome: dirname(hooks.paths.root),
@@ -249,6 +291,17 @@ export async function refuseSystemdStartBeforeReplacing(
   }
   if (unitHome.kind === "unknown") {
     return { message: unitHome.message, blocked: "unproven-owner" };
+  }
+  // What the start would check before it reads the unit to rewrite or
+  // retarget it, or reloads it (HACK-2216): never stop the running daemon
+  // for a unit another account could have written.
+  const beforeChange = await checkSystemdUnitTrustedBeforeChange({
+    unitPath,
+    deps,
+    uid: hooks.trustUid,
+  });
+  if (beforeChange !== null) {
+    return { message: beforeChange, blocked: "untrusted-unit" };
   }
   // The same plan and rewrite computation the start itself runs after the
   // stop (planStoppedStart, computeUnitRewrite), without writing anything.
@@ -326,7 +379,10 @@ export async function startViaSystemdIfInstalled(
     return null;
   }
   // Never start a unit (or drop-in) another account could have written.
-  const untrusted = await checkSystemdUnitTrusted({ unitPath });
+  const untrusted = await checkSystemdUnitTrusted({
+    unitPath,
+    uid: hooks.trustUid,
+  });
   if (untrusted !== null) {
     logger.error({ message: untrusted });
     return 1;
@@ -493,6 +549,15 @@ export async function reconcileRunningSystemdDaemon(
         pid: hooks.pid,
       }),
     });
+    return 1;
+  }
+  // Trust comes first in every changing path (HACK-2216): before the unit
+  // is read to keep its directives, rewritten, retargeted or reloaded, and
+  // before the restart. A rewrite replaces the file as this user, so the
+  // check after it would pass for directives another account planted.
+  const untrusted = await refuseUntrustedUnit({ hooks, unitPath, deps });
+  if (untrusted !== null) {
+    logger.error({ message: untrusted });
     return 1;
   }
   // A restart stops the unit's main process and everything in its cgroup:
@@ -745,7 +810,7 @@ async function restartReconciledUnit(opts: {
     }
   }
   const blocked =
-    (await checkSystemdUnitTrusted({ unitPath })) ??
+    (await checkSystemdUnitTrusted({ unitPath, uid: hooks.trustUid })) ??
     (await checkSystemdLoadedUnitPaths({ unitPath, deps })) ??
     (await checkUnitProgramTrusted({ unitPath })) ??
     (await checkSystemdStopHooks({ unitPath, deps }));
@@ -893,6 +958,7 @@ async function prepareSystemdUnitForStart(opts: {
     | "trace"
     | "cliVersion"
     | "systemPathDirectories"
+    | "trustUid"
   >;
 }): Promise<number | null> {
   const { status, unitPath, deps, hooks } = opts;
@@ -915,6 +981,16 @@ async function prepareSystemdUnitForStart(opts: {
       message: `${describeMissingProgram(status)}; not changing the service here | Run: hack daemon install`,
     });
     return 1;
+  }
+  if (plan.rewrite !== "none" || (status.needsReload && !readOnly)) {
+    // Trust before the unit is read to keep its directives, rewritten or
+    // reloaded: the rewrite replaces the file as this user, so a later
+    // check would pass for text another account planted.
+    const untrusted = await refuseUntrustedUnit({ hooks, unitPath, deps });
+    if (untrusted !== null) {
+      logger.error({ message: untrusted });
+      return 1;
+    }
   }
   if (plan.rewrite !== "none") {
     return await rewriteUnitForPlan({

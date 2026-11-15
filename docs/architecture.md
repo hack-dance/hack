@@ -611,6 +611,21 @@ does not re-read the joined setting, so it cannot rule out a binding there. Move
 the setting into a drop-in
 (`systemctl --user edit hackd`), then run `hack daemon install`.
 
+Trust comes first on every path that changes the unit. Before `start` reads the
+unit to keep its other directives, rewrites it, retargets a missing program,
+completes a pending `daemon-reload` or restarts the service, and before it stops
+a running daemon to make room for the service, it runs the checks that `install`
+and `enable` run. The unit file must be a regular file owned by this user and not
+writable by others, and the directories above it and its drop-in directories
+must be safe from other accounts. Every user-unit load directory systemd reports
+(`UnitPath`) must be safe too, as must the fragment and drop-ins systemd has
+loaded, because a rewrite of the main file keeps them. If any check fails,
+nothing is written, reloaded, stopped or restarted, and `start` exits 1 with
+`blocked: "untrusted-unit"` and `hack daemon install` as the next step. The check
+must come first because a rewrite replaces the file as this user: a check after
+it would pass for directives another account planted, such as a `Wants=` of
+its own unit, which a retarget keeps.
+
 The rewrite keeps the program path as written, so a stable symlink stays a
 symlink, and an enabled unit stays enabled while a disabled one stays disabled.
 It makes the same checks as `install`: the program and every directory on the
@@ -769,8 +784,9 @@ Such a plist is never replaced automatically; `start` reports it and
     including a `PATH` or program that a drop-in the rewrite keeps supplies.
 
   If the start would be refused, `start` refuses first (exit 1,
-  `E_DAEMON_SERVICE`, with `home-binding`, `unproven-owner`, `read-only` or
-  `rewrite-refused` as `blocked`) and leaves the running daemon alone.
+  `E_DAEMON_SERVICE`, with `home-binding`, `unproven-owner`, `untrusted-unit`,
+  `read-only` or `rewrite-refused` as `blocked`) and leaves the running daemon
+  alone.
   `hack daemon restart` runs the same checks before it stops a running hackd.
   Its start after the stop then gets the same direct fallback as a replacement
   in `start`.
@@ -860,7 +876,7 @@ else on stdout (human lines go to stderr). Success is
 | `manager` | `systemd`, `launchd` or `none` (hackd runs directly) |
 | `action` | `none`, `started`, `restarted`, `reinstalled`, `stopped` or `installed` |
 | `stale`, `stale_reasons` | whether the service or daemon was stale, and why: `content`, `program-missing`, `version-mismatch` |
-| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service`, `unproven-owner`, `rewrite-refused`, `service-pending` |
+| `blocked` | why a stale service was left as it is, or `null`: `read-only`, `other-program`, `unknown-program`, `unmanaged`, `home-binding`, `inside-service`, `unproven-owner`, `rewrite-refused`, `service-pending`, `untrusted-unit` |
 | `fallback` | `"direct"` when a replaced daemon was started directly because the service could not start it, else `null` |
 | `cli_version` | this CLI's version |
 | `daemon` | `running`, `pid`, `version` and `compatible` after the command |

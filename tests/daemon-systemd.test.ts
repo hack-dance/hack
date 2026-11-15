@@ -5497,3 +5497,110 @@ linuxTest(
     expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
   }
 );
+
+// Codex security finding on PR #854 (HACK-2216): unit trust is checked
+// before the unit is read to keep its directives, rewritten, retargeted,
+// reloaded or restarted, and before a running daemon is stopped for it.
+
+/**
+ * A unit whose program was removed, carrying a directive another account
+ * planted: a retarget would keep it and rewrite the file as this user.
+ * Returns the file's bytes.
+ */
+async function writePlantedMissingProgramUnit(fake: Fake): Promise<Buffer> {
+  const old = await writeOldUnit(fake, "Wants=attacker.service");
+  await rm(old);
+  withLoadedExec(fake, () => [execStart(old)]);
+  fake.calls.length = 0;
+  return await readFile(unitPath);
+}
+
+/** A user-unit load directory (in the fake's UnitPath) the group can write. */
+async function makeLoadDirectoryGroupWritable(): Promise<void> {
+  const dir = join(root, "data", "systemd", "user");
+  await mkdir(dir, { recursive: true });
+  await chmod(dir, 0o775);
+}
+
+/** The uid of another account, as the trust checks compare it. */
+const otherUid = () => (process.getuid?.() ?? 0) + 1;
+
+linuxTest(
+  "a running daemon's unit owned by another account is not retargeted, reloaded or restarted",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    const before = await writePlantedMissingProgramUnit(fake);
+
+    const hooks = { ...runningHooks(fake, "1.0.0"), trustUid: otherUid() };
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
+    expect(systemctlMutations(fake)).toEqual([]);
+    expect(hooks.trace.action).toBe("none");
+    expect(hooks.trace.blocked).toBe("untrusted-unit");
+    expect(await Bun.file(restartMarker()).exists()).toBe(false);
+
+    // The same unit with this account as its owner is retargeted (the
+    // control: the refusal above is the trust check, not the plan).
+    const trusted = runningHooks(fake, "1.0.0");
+    await reconcileRunningSystemdDaemon(trusted);
+    expect(fake.calls).toContain("systemctl --user daemon-reload");
+  }
+);
+
+linuxTest(
+  "a running daemon's unit is not retargeted while a user-unit directory is group-writable",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    const before = await writePlantedMissingProgramUnit(fake);
+    await makeLoadDirectoryGroupWritable();
+
+    const hooks = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
+    expect(systemctlMutations(fake)).toEqual([]);
+    expect(hooks.trace.blocked).toBe("untrusted-unit");
+    expect(await Bun.file(restartMarker()).exists()).toBe(false);
+  }
+);
+
+linuxTest(
+  "a stopped start does not retarget a unit while a user-unit directory is group-writable",
+  async () => {
+    const fake = fakeSystemd();
+    const before = await writePlantedMissingProgramUnit(fake);
+    await makeLoadDirectoryGroupWritable();
+
+    const trace = createDaemonCommandTrace();
+    expect(
+      await startViaSystemdIfInstalled({ ...startHooks(fake), trace })
+    ).toBe(1);
+    expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
+    expect(systemctlMutations(fake)).toEqual([]);
+    expect(trace.blocked).toBe("untrusted-unit");
+  }
+);
+
+linuxTest(
+  "the check before a direct daemon is stopped refuses an untrusted unit with a missing program",
+  async () => {
+    const fake = fakeSystemd();
+    const before = await writePlantedMissingProgramUnit(fake);
+
+    // The unit file is another account's.
+    const foreign = await refuseSystemdStartBeforeReplacing({
+      ...startHooks(fake),
+      trustUid: otherUid(),
+    });
+    expect(foreign?.blocked).toBe("untrusted-unit");
+    expect(foreign?.message).toContain("hack daemon install");
+
+    // A user-unit load directory the group can write.
+    await makeLoadDirectoryGroupWritable();
+    const shared = await refuseSystemdStartBeforeReplacing(startHooks(fake));
+    expect(shared?.blocked).toBe("untrusted-unit");
+    expect(shared?.message).toContain("hack daemon install");
+
+    expect(systemctlMutations(fake)).toEqual([]);
+    expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
+  }
+);

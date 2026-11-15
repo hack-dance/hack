@@ -1860,6 +1860,41 @@ export async function checkSystemdLoadedUnitPaths(opts: {
 }
 
 /**
+ * Trust before Hack changes an installed unit it found (HACK-2216): run
+ * before it reads the unit to keep its other directives, rewrites or
+ * retargets it, reloads systemd, or restarts the service. A rewrite
+ * replaces the file as this user, so a check after it would pass for text
+ * another account planted (a `Wants=` of its own unit survives a program
+ * retarget). Checked here: the unit file, the directories above it and its
+ * drop-in directories ({@link checkSystemdUnitTrusted}, as install and
+ * enable check them), every user-unit load directory, and the fragment and
+ * drop-ins systemd has loaded, which survive a rewrite of the main file.
+ * The loaded program is not judged here: a retarget replaces a missing
+ * one, and the check just before the restart judges what is loaded then.
+ * Null, or why Hack must not touch the unit; the message ends with the
+ * `hack daemon install` step.
+ */
+export async function checkSystemdUnitTrustedBeforeChange(opts: {
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const error =
+    (await checkSystemdUnitTrusted({ unitPath: opts.unitPath, uid })) ??
+    (await checkSystemdUnitLoadPaths({ deps: opts.deps, uid })) ??
+    (await checkLoadedUnitFiles({
+      unitPath: opts.unitPath,
+      deps: opts.deps,
+      uid,
+    }));
+  return error === null
+    ? null
+    : `${error} (${SYSTEMD_UNIT_NAME} was not rewritten, reloaded or restarted) | Run: hack daemon install`;
+}
+
+/**
  * The files systemd has loaded for hackd.service (`FragmentPath`,
  * `DropInPaths`): the fragment must be the unit Hack manages, and every
  * drop-in, the directories above it and every symlink hop must belong to

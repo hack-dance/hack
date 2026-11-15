@@ -82,7 +82,12 @@ export type ServiceUnitState =
  * - `service-pending`: a replaced daemon's service start failed, but the
  *   manager may still start it (a queued job, restart timer or KeepAlive
  *   retry) or could not be checked, so hackd was not started directly
- *   next to it.
+ *   next to it;
+ * - `untrusted-unit`: the unit file, the directories above it, a user-unit
+ *   load directory or a drop-in systemd loads could have been written by
+ *   another account (the checks install and enable run), so Hack did not
+ *   read it to rewrite, retarget, reload or restart it, and did not stop
+ *   a running daemon for it; `hack daemon install` is the next step.
  */
 export type DaemonReconcileBlock =
   | "read-only"
@@ -93,7 +98,8 @@ export type DaemonReconcileBlock =
   | "inside-service"
   | "unproven-owner"
   | "rewrite-refused"
-  | "service-pending";
+  | "service-pending"
+  | "untrusted-unit";
 
 export interface DaemonReconcileInput {
   readonly unit: ServiceUnitState;

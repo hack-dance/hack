@@ -531,7 +531,7 @@ installFlowTest(
         detail: {
           schema: "hack.daemon-restart/v1",
           manager: "systemd",
-          blocked: "unproven-owner",
+          blocked: "untrusted-unit",
         },
       },
     });

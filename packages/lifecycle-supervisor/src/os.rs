@@ -63,7 +63,17 @@ pub struct Identity {
     pub zombie: bool,
 }
 
-/// One `/proc/<pid>/stat` read: state letter, group, session and start time.
+/// One `/proc/<pid>/stat` read: whether the thread group is dead, group,
+/// session and start time.
+///
+/// A thread-group leader that called `pthread_exit` shows `Z` while its other
+/// threads keep running; such a process is alive (it owns its PID and receives
+/// process-directed signals). The leader's own stat line carries the kernel's
+/// count of the group's threads (field 20) from the same read: a dead leader
+/// with more than one counted thread is a live process. An exiting thread stays
+/// counted until it is released, which only errs toward live. No listing of
+/// `/proc/<pid>/task` is used, because a listing cannot see a thread created
+/// after it and can miss a live replacement during thread turnover.
 #[cfg(target_os = "linux")]
 fn linux_stat(pid: i32) -> Result<Option<(bool, i32, i32, u64)>> {
     let bytes = match fs::read(format!("/proc/{pid}/stat")) {
@@ -85,25 +95,28 @@ fn linux_stat(pid: i32) -> Result<Option<(bool, i32, i32, u64)>> {
         .get(19)
         .and_then(|v| v.parse().ok())
         .ok_or_else(refused)?;
-    let leader_dead = matches!(fields.first(), Some(&"Z" | &"X"));
-    Ok(Some((leader_dead, group, session, start)))
+    let threads: u64 = fields
+        .get(17)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(refused)?;
+    let group_dead = matches!(fields.first(), Some(&"Z" | &"X")) && threads <= 1;
+    Ok(Some((group_dead, group, session, start)))
 }
 
-/// The identity is assembled from several reads (`stat`, `status`, the task
-/// list). The leader's start time is read again afterwards: if it changed, the
+/// The identity is assembled from two reads (`stat`, then `status`). The
+/// leader's start time is read again afterwards: if it changed, the
 /// PID was reused during the reads, so the reads are repeated rather than
 /// combining two processes. Three unstable attempts refuse.
 #[cfg(target_os = "linux")]
 pub fn inspect(pid: i32) -> Result<Option<Identity>> {
     for _ in 0..3 {
-        let Some((leader_dead, group, session, start)) = linux_stat(pid)? else {
+        let Some((zombie, group, session, start)) = linux_stat(pid)? else {
             return Ok(None);
         };
         let uid = match linux_uid(pid)? {
             Some(uid) => uid,
             None => return Ok(None),
         };
-        let zombie = leader_dead && !linux_live_thread(pid)?;
         match linux_stat(pid)? {
             None => return Ok(None),
             Some((_, _, _, again)) if again == start => {
@@ -120,49 +133,6 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
         }
     }
     Err(refused())
-}
-
-/// A thread-group leader that called `pthread_exit` shows `Z` in
-/// `/proc/<pid>/stat` while its other threads keep running. Such a process is
-/// alive: it still owns its PID and receives process-directed signals. Only a
-/// group with no live thread left is a zombie.
-///
-/// One listing of `/proc/<pid>/task` cannot see a thread created after it, so
-/// if every listed thread exits while a newer one takes over, a single scan
-/// would read a live process as dead. "No live thread" is therefore accepted
-/// only when two consecutive listings agree.
-#[cfg(target_os = "linux")]
-fn linux_live_thread(pid: i32) -> Result<bool> {
-    for _ in 0..2 {
-        if linux_task_scan(pid)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_task_scan(pid: i32) -> Result<bool> {
-    let tasks = match fs::read_dir(format!("/proc/{pid}/task")) {
-        Ok(tasks) => tasks,
-        Err(error) if absent_error(&error) => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    for task in tasks {
-        let task = task?;
-        let stat = match fs::read(task.path().join("stat")) {
-            Ok(stat) => stat,
-            Err(error) if absent_error(&error) => continue,
-            Err(error) => return Err(error),
-        };
-        if !matches!(
-            proc_stat_tail(&stat)?.split_whitespace().next(),
-            Some("Z" | "X")
-        ) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(target_os = "linux")]

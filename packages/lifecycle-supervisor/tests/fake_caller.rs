@@ -549,19 +549,18 @@ fn output_bursts_and_long_lines_include_partial_tail() {
     }
 }
 
-/// Without a log lock, each record is one O_APPEND write. Two guards burst at
-/// the same moment (both commands wait for one start file), including 64 KiB
-/// records far above PIPE_BUF. The bursts must overlap, and every line must be
-/// one whole record of one guard: a split anywhere, also inside the timestamp,
-/// fails a field check.
+/// Without a log lock, each record is one O_APPEND write. Two guards burst
+/// with a barrier in the middle (each waits until both halves are in the log),
+/// so their appends overlap in both directions by construction, including
+/// 64 KiB records far above PIPE_BUF. Every line must be one whole record of
+/// one guard: a split anywhere, also inside the timestamp, fails a field check.
 #[test]
 fn concurrent_guards_append_whole_records_without_a_lock() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![
-        f.process("alpha", "burst-after-start"),
-        f.process("beta", "burst-after-start"),
+        f.process("alpha", "burst-pair-alpha"),
+        f.process("beta", "burst-pair-beta"),
     ]);
-    fs::write(f.root.join("burst-start"), b"").unwrap();
     assert!(wait(&mut caller, TIMEOUT).success());
     let text = f.log();
     let lines: Vec<_> = text.lines().collect();
@@ -573,16 +572,18 @@ fn concurrent_guards_append_whole_records_without_a_lock() {
         assert!(matches!(fields[1], "alpha" | "beta"), "{line:.80}");
         assert!(matches!(fields[2], "stdout" | "stderr"), "{line:.80}");
     }
-    let first_beta = lines
-        .iter()
-        .position(|line| line.split('\t').nth(1) == Some("beta"))
-        .expect("beta logged nothing");
-    assert!(
-        lines[first_beta..]
+    for (first, later) in [("alpha", "beta"), ("beta", "alpha")] {
+        let start = lines
             .iter()
-            .any(|line| line.split('\t').nth(1) == Some("alpha")),
-        "bursts did not overlap"
-    );
+            .position(|line| line.split('\t').nth(1) == Some(first))
+            .expect("a guard logged nothing");
+        assert!(
+            lines[start..]
+                .iter()
+                .any(|line| line.split('\t').nth(1) == Some(later)),
+            "no {later} record after the first {first} record"
+        );
+    }
     for name in ["alpha", "beta"] {
         let own: Vec<_> = lines
             .iter()
@@ -1459,9 +1460,16 @@ fn invalid_control_requests_still_get_a_framed_refusal() {
 #[cfg(target_os = "linux")]
 #[test]
 fn main_thread_exit_with_live_worker_is_still_stopped() {
-    for lose_guard in [false, true] {
+    // `pthread-churn` keeps replacing its only worker thread, so a scan of the
+    // task list can miss the live replacement; the kernel's thread count cannot.
+    for (mode, lose_guard) in [
+        ("pthread-main-exit", false),
+        ("pthread-main-exit", true),
+        ("pthread-churn", false),
+        ("pthread-churn", true),
+    ] {
         let f = Fixture::new();
-        let (mut caller, _) = f.start(vec![f.process("worker", "pthread-main-exit")]);
+        let (mut caller, _) = f.start(vec![f.process("worker", mode)]);
         f.await_log("fixture-ready");
         let state = f.state("worker");
         let child = eventually(|| {
@@ -2152,13 +2160,38 @@ fn fixture_process() {
         "command inherited caller environment"
     );
     match mode.as_str() {
-        "burst" | "burst-after-start" => {
-            if mode == "burst-after-start" {
-                // Start together with the sibling guard's burst, so appends overlap.
-                while !std::path::Path::new("burst-start").exists() {
-                    thread::sleep(Duration::from_millis(1));
-                }
+        "burst-pair-alpha" | "burst-pair-beta" => {
+            // Two guards' appends overlap by construction: each writes half its
+            // records, then waits until both halves are in the shared log
+            // before writing the rest.
+            let (own, other) = if mode == "burst-pair-alpha" {
+                ("alpha", "beta")
+            } else {
+                ("beta", "alpha")
+            };
+            let mut out = std::io::stdout().lock();
+            for i in 0..1000 {
+                writeln!(out, "burst-record-{i}").unwrap();
             }
+            out.flush().unwrap();
+            let half = |name: &str| format!("\t{name}\tstdout\tburst-record-999\n");
+            loop {
+                let log = fs::read_to_string("lifecycle.log").unwrap_or_default();
+                if log.contains(&half(own)) && log.contains(&half(other)) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            for i in 1000..2000 {
+                writeln!(out, "burst-record-{i}").unwrap();
+            }
+            out.write_all(&vec![b'X'; 300_000]).unwrap();
+            out.write_all(b"\npartial-tail").unwrap();
+            out.flush().unwrap();
+            eprintln!("fixture-error");
+            std::process::exit(0);
+        }
+        "burst" => {
             let mut out = std::io::stdout().lock();
             for i in 0..2000 {
                 writeln!(out, "burst-record-{i}").unwrap();
@@ -2407,7 +2440,7 @@ fn fixture_process() {
             }
         }
         #[cfg(target_os = "linux")]
-        "pthread-main-exit" => {
+        "pthread-main-exit" | "pthread-churn" => {
             extern "C" fn worker(_: *mut libc::c_void) -> *mut libc::c_void {
                 loop {
                     // SAFETY: pause has no preconditions.
@@ -2416,6 +2449,36 @@ fn fixture_process() {
                     }
                 }
             }
+            /// Thread turnover: each worker starts its replacement, then ends.
+            /// The group always has a live thread, but no single listing of
+            /// its tasks is guaranteed to see one.
+            extern "C" fn churn(_: *mut libc::c_void) -> *mut libc::c_void {
+                // SAFETY: libc thread calls only; a failed create keeps this
+                // thread alive instead of ending the group.
+                unsafe {
+                    libc::usleep(2000);
+                    let mut next: libc::pthread_t = std::mem::zeroed();
+                    if libc::pthread_create(
+                        &mut next,
+                        std::ptr::null(),
+                        churn,
+                        std::ptr::null_mut(),
+                    ) != 0
+                    {
+                        loop {
+                            libc::pause();
+                        }
+                    }
+                    libc::syscall(libc::SYS_exit, 0);
+                }
+                std::ptr::null_mut()
+            }
+            let body: extern "C" fn(*mut libc::c_void) -> *mut libc::c_void =
+                if mode == "pthread-churn" {
+                    churn
+                } else {
+                    worker
+                };
             // The fork child is single-threaded, so its main thread is the
             // thread-group leader. It starts one worker and ends only its main
             // thread (as `pthread_exit` does); Linux then shows the leader as
@@ -2430,7 +2493,7 @@ fn fixture_process() {
                     if libc::pthread_create(
                         &mut thread,
                         std::ptr::null(),
-                        worker,
+                        body,
                         std::ptr::null_mut(),
                     ) != 0
                     {

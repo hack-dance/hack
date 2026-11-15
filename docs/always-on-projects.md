@@ -228,7 +228,10 @@ startup parses only this policy setting and never reports credential fields.
 No terminal or keychain prompt is allowed. Missing keys, required interaction,
 pending env migration, unavailable project paths and startup failures produce a
 recorded result. An unfinished or unverifiable `hack env migrate` journal is
-reported as `pending_env_migration` before any startup work, not as a failed start. Run `hack up` manually to investigate and recover. The daemon does
+reported as `pending_env_migration` before any startup work, not as a failed start.
+A `.hack/.env` written by `hack env materialize` (with its valid `.env.state.json`
+and env layers) is generated output, not a pending migration; unattended Compose
+does not load it. Run `hack up` manually to investigate and recover. The daemon does
 not install routing, start Docker, sign in, or migrate configuration at login.
 Before trusting intent, Hack opens `projects.json` without following links and
 requires a regular file owned by the current user, with no group or other write

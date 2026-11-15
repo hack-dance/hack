@@ -4952,6 +4952,31 @@ export async function inspectProjectEnvMaterialization(opts: {
   };
 }
 
+/**
+ * Whether `.hack/.env` is `hack env materialize` output rather than a legacy
+ * input: the same rule {@link findUnmigratedLegacyDotenv} uses to skip the
+ * base file (env layers exist, no legacy contract, a valid state file).
+ */
+export async function isMaterializedBaseDotenv(opts: {
+  readonly projectDir: string;
+}): Promise<boolean> {
+  const entries = await readdir(opts.projectDir);
+  if (
+    !entries.some(
+      (name) =>
+        name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+    ) ||
+    entries.includes(PROJECT_ENV_CONTRACT_FILENAME)
+  ) {
+    return false;
+  }
+  const state = await readProjectEnvStateFile({
+    statePath: resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
+  });
+  return state.ok;
+}
+
 async function readProjectEnvStateFile(opts: {
   readonly statePath: string;
 }): Promise<

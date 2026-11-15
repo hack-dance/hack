@@ -470,6 +470,41 @@ test("legacy dotenv and contracts preserve the fixed pending migration refusal w
   }
 });
 
+test("hack env materialize output is not a pending migration, but an unproven .env still is", async () => {
+  await config({ name: "example", lifecycle: {} });
+  await layer({
+    version: 1,
+    environment: "default",
+    secretsprovider: "project_key",
+    values: { global: { APP_MODE: "local" } },
+  });
+  const envPath = join(opts.projectDir, ".env");
+  await writeFile(envPath, "APP_MODE=local\n", { mode: 0o600 });
+  // Without a valid state file the same bytes are an unmigrated input.
+  expect(await autostartStartPolicyRefusal(opts)).toBe("pending_env_migration");
+  await writeFile(
+    join(opts.projectDir, ".env.state.json"),
+    JSON.stringify({
+      version: 1,
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      selectedOverlay: null,
+      selectedService: null,
+      inputs: {},
+    }),
+    { mode: 0o600 }
+  );
+  const before = await snapshot(root);
+  expect(await autostartStartPolicyRefusal(opts)).toBeNull();
+  expect(await snapshot(root)).toEqual(before);
+  // A legacy contract still marks the project as unmigrated.
+  await writeFile(
+    join(opts.projectDir, "hack.env.json"),
+    JSON.stringify({ version: 1, vars: [] }),
+    { mode: 0o600 }
+  );
+  expect(await autostartStartPolicyRefusal(opts)).toBe("pending_env_migration");
+});
+
 test("dotenv templates and backups are not active inputs in either project directory", async () => {
   for (const directory of [opts.repoRoot, opts.projectDir]) {
     for (const suffix of [

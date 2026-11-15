@@ -24,7 +24,10 @@ import {
   type ProjectDirName,
   parseProjectConfigRecord,
 } from "./project.ts";
-import { isExcludedLegacyDotenvName } from "./project-env-config.ts";
+import {
+  isExcludedLegacyDotenvName,
+  isMaterializedBaseDotenv,
+} from "./project-env-config.ts";
 
 export type AutostartStartPolicyReason =
   | "host_commands_require_manual_start"
@@ -295,7 +298,16 @@ async function envPolicyReason(
     if (inputs.length > MAX_ENV_FILES) {
       return "compose_inputs_require_manual_start";
     }
+    // `hack env materialize` output is generated from the layers, which are
+    // checked below; unattended Compose never loads it (implicit dotenv off).
+    const materialized =
+      directory === opts.projectDir &&
+      inputs.includes(".env") &&
+      (await isMaterializedBaseDotenv({ projectDir: directory }));
     for (const name of inputs) {
+      if (materialized && name === ".env") {
+        continue;
+      }
       const text = await readPolicyText(resolve(directory, name), opts.budget);
       if (text === null) {
         return "compose_inputs_require_manual_start";

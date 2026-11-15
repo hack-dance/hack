@@ -279,6 +279,56 @@ test("preflight and start share env-file admission and never publish file values
   }
 }, 30_000);
 
+test("preflight and start refuse the project key as an env file before reading it", async () => {
+  const f = await fixture({
+    services: { web: { image: IMAGE, env_file: "../.hack.secret.key" } },
+  });
+  await chmod(f.project, 0o700);
+  const keyFile = join(f.project, ".hack.secret.key");
+  await writeFile(keyFile, `${PRIVATE}\n`, { mode: 0o600 });
+  await f.review([], { services: { web: { active: true } } });
+  const env = { ...f.native, ...GRANT };
+  const report = await preflight(f, env);
+  expect(codes(report.report, "cli")).toContain("environment_file_input:web");
+  expect(report.output).toContain(
+    "Hack key and secret-store files cannot be environment sources"
+  );
+  expect(report.output).not.toContain(PRIVATE);
+  const before = await f.argv();
+  // Foreground start: a detached owner discards the refusal text.
+  const up = await cli(f, ["up"], env);
+  expect(up.code).toBe(1);
+  expect(up.output).toContain(
+    "Hack key and secret-store files cannot be environment sources"
+  );
+  expect(up.output).not.toContain(PRIVATE);
+  const after = await f.argv();
+  expect(after.join("\n")).not.toContain(PRIVATE);
+  // Start may review the plan and, with first-use setup guidance, inspect the
+  // runtime setup read-only. Nothing else may run: no pool, file delivery or
+  // start call reaches the runtime.
+  const readOnly = (line: string) => {
+    const words = line.split(" ").slice(2);
+    if (words[0] === "project" && words[1] === "plan") {
+      return true;
+    }
+    const [runtime, setup, inspect, ...flags] = words;
+    return (
+      runtime === "runtime" &&
+      setup === "setup" &&
+      inspect === "inspect" &&
+      flags.includes("--json") &&
+      flags.every((flag) => flag === "--json" || flag === "--quiescence")
+    );
+  };
+  const started = after.slice(before.length);
+  expect(started.filter((line) => !readOnly(line))).toEqual([]);
+  expect(readOnly("--home h runtime setup --no-interactive --json")).toBe(
+    false
+  );
+  expect(readOnly("--home h project start --json")).toBe(false);
+});
+
 test("preflight and static start refuse oversized file delivery before pool effects", async () => {
   const f = await fixture({
     services: { web: { image: IMAGE, env_file: "service.env" } },

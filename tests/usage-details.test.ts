@@ -166,3 +166,63 @@ test("project-scoped host usage includes branch descendants and excludes other p
     expect(nested.get(101)).toBe(filter === "beta" ? null : "host:alpha:bun");
   }
 });
+
+test("by-service usage sums replicas per instance and service, sorted", () => {
+  const sample = (containerId: string, cpu: number | null, mem: number) => ({
+    containerId,
+    cpuPercent: cpu,
+    memUsedBytes: mem,
+    memLimitBytes: 1000,
+    memPercent: null,
+    netInputBytes: null,
+    netOutputBytes: null,
+    blockInputBytes: null,
+    blockOutputBytes: null,
+    pids: null,
+  });
+  const at = (id: string, project: string, service: string) =>
+    [id, { ...container(id, "running"), project, service }] as const;
+  const rows = __testOnlyUsage.buildServiceUsageRows({
+    index: {
+      containerById: new Map([
+        at("w1", "shop", "worker"),
+        at("w2", "shop", "worker"),
+        at("a1", "shop", "api"),
+        at("b1", "shop--feature", "api"),
+      ]),
+    },
+    samples: [
+      sample("w1", 10, 100),
+      sample("w2", null, 50),
+      sample("a1", 5, 10),
+      sample("b1", 1, 1),
+      sample("unknown", 99, 99),
+    ],
+  });
+  expect(rows).toEqual([
+    {
+      composeProject: "shop",
+      service: "api",
+      containers: 1,
+      cpuPercent: 5,
+      memUsedBytes: 10,
+      memLimitBytes: 1000,
+    },
+    {
+      composeProject: "shop",
+      service: "worker",
+      containers: 2,
+      cpuPercent: 10,
+      memUsedBytes: 150,
+      memLimitBytes: 2000,
+    },
+    {
+      composeProject: "shop--feature",
+      service: "api",
+      containers: 1,
+      cpuPercent: 1,
+      memUsedBytes: 1,
+      memLimitBytes: 1000,
+    },
+  ]);
+});

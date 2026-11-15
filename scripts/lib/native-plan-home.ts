@@ -19,6 +19,10 @@ export async function assertNativePlanHome(opts: {
   const expectedHome = expectedHackFiles.length > 0 ? [".hack"] : [];
   const homeEntries = await readdir(opts.home);
   assertNames(homeEntries, expectedHome);
+  assertNames(await readdir(opts.home, { recursive: true }), [
+    ...expectedHome,
+    ...expectedHackFiles.map((name) => `.hack/${name}`),
+  ]);
   if (expectedHackFiles.length === 0) {
     return;
   }
@@ -40,7 +44,20 @@ export async function assertNativePlanHome(opts: {
       !isRecord(activity) ||
       activity.action !== "up" ||
       activity.outcome !== "failed" ||
-      activity.project !== null
+      activity.project !== null ||
+      JSON.stringify(Object.keys(activity).sort()) !==
+        JSON.stringify([
+          "action",
+          "branch",
+          "duration_ms",
+          "failed_services",
+          "origin",
+          "outcome",
+          "project",
+          "ts",
+          "v",
+        ]) ||
+      JSON.stringify(activity).includes(opts.home)
     ) {
       throw new Error("Expected failed unregistered up activity");
     }

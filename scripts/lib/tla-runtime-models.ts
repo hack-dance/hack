@@ -142,6 +142,39 @@ const restartPolicyStaleUses = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "env-migration",
+    module: "Migration",
+    states: 74,
+    invariant: "NoSameRunCleanup",
+    action: "UnsafeRemoveDuringApply",
+    fields: [
+      'phase = "apply"',
+      "legacy = FALSE",
+      "snapshot = TRUE",
+      "separate = FALSE",
+      "published = 0",
+      "recorded = 0",
+      "complete = FALSE",
+      "runProof = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "stale-repair-proof",
+        negative: true,
+        invariant: "FreshRunProof",
+        action: "RequestRepair",
+        fields: [
+          'phase = "apply"',
+          "complete = FALSE",
+          "runProof = TRUE",
+          "snapshot = TRUE",
+          "legacy = TRUE",
+          "deferred = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "interactive-session",
     module: "Session",
     states: 459,

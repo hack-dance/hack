@@ -44,7 +44,7 @@ fn checks_are_observe_only_and_safe_action_does_not_prove_health() {
 [ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 99
 printf '%s\n' "$* backend=$HACK_RUNTIME_BACKEND" >> "$HOME/calls"
 case "$*" in
---version) printf '5.0.0\n';;
+'version --json') printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}\n';;
 'projects --json --no-daemon') printf '{"projects":[],"runtime_ok":true}';;
 'daemon status --json') printf '{"running":false,"service":{"installed":false}}';;
 'doctor --json') printf '{"ok":true,"data":{"checks":[{"id":"linux dns route","status":"ok"},{"id":"caddy local ca","status":"ok"}]}}'; exit 1;;
@@ -135,7 +135,7 @@ fn shared_source_recovers_after_cli_install_and_actions_use_same_executable() {
         &hack,
         r#"#!/bin/sh
 case "$1 $2" in
-'--version ') printf '5.0.0-next.16';;
+'version --json') printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0-next.16"}}';;
 'daemon status') printf '{"running":false,"service":{"installed":false}}';;
 'doctor --json') printf '{"ok":true,"data":{"checks":[]}}';;
 'daemon start') printf action > "$HOME/action";;
@@ -183,7 +183,7 @@ fn service_source(
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/calls"
 case "$*" in
---version) printf '5.0.0';;
+'version --json') printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}';;
 'daemon status --json') /bin/cat "$HOME/status";;
 'doctor --json') printf '{"ok":true,"data":{"checks":[{"id":"linux dns route","status":"ok"}]}}';;
 'daemon install --no-interactive') printf installed > "$HOME/action";;
@@ -391,6 +391,6 @@ fn version_timeout_is_unknown_without_forcing_a_missing_cli_gate() {
     assert!(report.cards[0].detail.contains("did not answer"));
     assert_eq!(
         std::fs::read_to_string(t.0.join("calls")).unwrap(),
-        "--version"
+        "version --json"
     );
 }

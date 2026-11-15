@@ -1,0 +1,14 @@
+flowchart TD
+    S[Registered project] --> G{Runtime contact allowed}
+    G -->|no| U[Unknown live state]
+    G -->|yes| B{Selected backend}
+    B -->|Compose| D[Current ps and selected inspect fields]
+    B -->|Native| N[Owned run and current authenticated observation]
+    D --> P[Shared service projection]
+    N --> P
+    P --> J{Declared job and observed zero exit}
+    J -->|yes| C[Completed and ready]
+    J -->|no| E[Current state and nullable readiness]
+    C --> R[Shared full and summary rows]
+    E --> R
+    U --> R

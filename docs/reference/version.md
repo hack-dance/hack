@@ -5,7 +5,16 @@ lookup, project discovery, registry writes or starting Docker, a VM or hackd.
 Plain `hack version` and `hack --version` keep their text output.
 
 ```json
-{"version":"5.0.0-next.1","channel":"next","install_kind":"standalone","binary_path":"/example/bin/hack"}
+{
+  "ok": true,
+  "data": {
+    "version": "5.0.0-next.1",
+    "channel": "next",
+    "install_kind": "standalone",
+    "binary_path": "/example/bin/hack",
+    "schema": "hack.version.v1"
+  }
+}
 ```
 
 - `version` is the running CLI's embedded version.
@@ -23,8 +32,8 @@ Plain `hack version` and `hack --version` keep their text output.
   The OS may already have resolved a launch symlink, so its original spelling
   is not guaranteed.
 
-The JSON is a bare object with these four fields, without an `ok` or `data`
-envelope.
+The four identity fields and `schema: "hack.version.v1"` are inside `data`
+in the standard success envelope. See [Machine-readable output](./machine-readable-output.md).
 
 The report inspects only local executable metadata and, for compiled installs,
 its initial bytes. It does not check whether a newer version exists.

@@ -54,7 +54,9 @@ its own five-second TERM grace and two-second confirmation bound. Recovery begin
 at most once per target; late guard loss can extend stop to roughly fourteen seconds. Descendants forked after the capture are never
 signalled: once no captured member is left, stop waits until the target's own deadline for them to
 exit and reports unknown only if they are still alive. A failed or expired target does not abandon other admitted
-targets: stop drives them to their own outcomes before returning unknown.
+targets: stop drives them to their own outcomes before returning unknown. A receipt that
+cannot be verified at admission is never signalled, but it no longer keeps the owner's
+other targets from being stopped; the reply is still `unknown` with `stop-incomplete`.
 
 Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
 `observed`, `stopped`, `unknown` or `refused`). A stop whose confirmation times out emits
@@ -335,8 +337,8 @@ window. They require a dedicated synchronization seam, not a timing-only test.
 ## Manual recovery after an unknown stop
 
 Stop retires the owner token before validating all receipts. One unknown receipt
-can therefore leave otherwise healthy guards running and block every new start
-in that private root. Repeating up with a new token does not bypass the uncertainty.
+is left running (it is never signalled) and blocks every new start in that private
+root, although the owner's other, verifiable targets are still stopped. Repeating up with a new token does not bypass the uncertainty.
 This also applies when a guard dies after spawn but before publishing running:
 the receipt has no command birth evidence, so an unanchored session is unknown.
 

@@ -306,7 +306,7 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
 /// once env is trusted: Doctor children see only the private wrapper PATH.
 /// A file this user cannot read cannot be interpreted, so it is treated as a
 /// binary; any other read failure or unparsable line refuses the tool.
-fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
+pub(crate) fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
     use std::io::Read;
     use std::os::unix::ffi::OsStrExt;
     let mut file = match std::fs::File::open(real) {
@@ -1798,6 +1798,27 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let runner = fixture_runner(&hack)
             .with_env("HACK_HOME", dir.to_str().unwrap())
             .with_env("HACK_MUTAGEN_PATH", "");
+        // A trusted helper script whose #! interpreter another user can replace.
+        let shared = dir.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::copy("/bin/sh", shared.join("interp")).unwrap();
+        let scripted = dir.join("bin/scripted-mutagen");
+        std::fs::write(
+            &scripted,
+            format!("#!{}\n", shared.join("interp").display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&scripted, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            crate::doctor_plugins::validate_helpers(
+                &runner
+                    .clone()
+                    .with_env("HACK_MUTAGEN_PATH", scripted.to_str().unwrap())
+            )
+            .is_err(),
+            "absolute helpers need a trusted interpreter too"
+        );
         for explicit in [false, true] {
             let runner = if explicit {
                 runner

@@ -12,6 +12,7 @@ const KEYS: &[&str] = &[
     "HACK_SYSTEMD_DISABLE",
     "HACK_DAEMON_AUTOSTART_DISABLE",
     "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
 ];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionContext {
@@ -89,6 +90,15 @@ impl ExecutionContext {
                 return Err("XDG_RUNTIME_DIR must be absolute; hand-off refused".into());
             }
             entries.push(("XDG_RUNTIME_DIR".into(), dir.into()));
+        }
+        // The CLI places the systemd user unit under an absolute
+        // XDG_CONFIG_HOME and ignores a relative one (XDG spec); keep the same
+        // selection so setup checks and installs the user's actual unit.
+        if let Some(dir) = get("XDG_CONFIG_HOME").filter(|d| Path::new(d).is_absolute()) {
+            entries.push((
+                "XDG_CONFIG_HOME".into(),
+                normalized(Path::new(dir)).to_string_lossy().into_owned(),
+            ));
         }
         Ok(Self { entries })
     }

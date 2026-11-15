@@ -71,6 +71,9 @@ pub struct CliRunner {
     /// An invalid explicit selection: spawn reports `NotFound`.
     missing: bool,
     path_name: Option<String>,
+    /// For PATH discovery: the last validated executable, shared by clones so
+    /// automatic reads reuse it instead of searching PATH on every use.
+    pinned: Option<std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>>,
     clear_env: bool,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
     term_grace: Duration,
@@ -91,6 +94,7 @@ impl CliRunner {
             cwd: None,
             missing: false,
             path_name: None,
+            pinned: None,
             clear_env: false,
             term_grace: TERM_GRACE,
         }
@@ -114,6 +118,7 @@ impl CliRunner {
     pub fn on_path(name: &str) -> Self {
         let mut runner = Self::new(name);
         runner.path_name = Some(name.into());
+        runner.pinned = Some(std::sync::Arc::default());
         runner
     }
 
@@ -131,26 +136,61 @@ impl CliRunner {
         }
     }
 
-    /// Resolve again for every use so Check again and later actions recover
-    /// after installation. Explicit test/selected programs remain pinned.
+    /// The executable to run. Explicit selections are fixed. PATH discovery
+    /// reuses the last validated result; only the first use and explicit setup
+    /// checks ([`Self::rediscover`]) search PATH, so a CLI added later to an
+    /// earlier PATH directory is never picked up by an automatic read.
     pub fn resolve_program(&self) -> Result<PathBuf, RunError> {
         if self.missing {
             return Err(RunError::NotFound);
         }
-        match &self.path_name {
-            Some(name) => {
-                let inherited = std::env::var_os("PATH");
-                let path = self
-                    .env
-                    .iter()
-                    .rev()
-                    .find(|(key, _)| key == "PATH")
-                    .map(|(_, value)| std::ffi::OsStr::new(value))
-                    .or(inherited.as_deref());
-                resolve_on_path(name, path).ok_or(RunError::NotFound)
+        match (&self.path_name, &self.pinned) {
+            (Some(_), Some(pinned)) => {
+                let current = pinned.lock().map_err(|_| RunError::NotFound)?.clone();
+                match current {
+                    Some(path) => Ok(path),
+                    None => self.rediscover(),
+                }
             }
-            None => Ok(self.program.clone()),
+            _ => Ok(self.program.clone()),
         }
+    }
+
+    /// Search PATH again (explicit setup checks, so Check again recovers after
+    /// an install), validate the result and pin it for later reads and
+    /// actions. The executable and every directory above it must be owned by
+    /// this user or root and not writable by group or others; otherwise it is
+    /// refused before it ever runs. A failed search clears the pin.
+    ///
+    /// # Errors
+    /// `NotFound`, or `Spawn` for an untrusted location.
+    pub fn rediscover(&self) -> Result<PathBuf, RunError> {
+        let (Some(name), Some(pinned)) = (&self.path_name, &self.pinned) else {
+            return self.resolve_program();
+        };
+        let inherited = std::env::var_os("PATH");
+        let path = self
+            .env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| std::ffi::OsStr::new(value))
+            .or(inherited.as_deref());
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let found = resolve_on_path(name, path).ok_or(RunError::NotFound).and_then(|p| {
+            crate::source::trusted_tool_path(&p, uid, false)
+                .map(|_| p)
+                .ok_or_else(|| {
+                    RunError::Spawn(
+                        "the hack found on PATH is in a location other users can change; it was not run"
+                            .into(),
+                    )
+                })
+        });
+        let mut slot = pinned.lock().map_err(|_| RunError::NotFound)?;
+        *slot = found.as_ref().ok().cloned();
+        found
     }
 
     /// Run every command from `dir` (for checks that must run outside any
@@ -165,6 +205,10 @@ impl CliRunner {
     /// a temporary `HACK_HOME`).
     #[must_use]
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        // A different search path is a different discovery: start a new pin.
+        if key == "PATH" && self.pinned.is_some() {
+            self.pinned = Some(std::sync::Arc::default());
+        }
         self.env.push((key.into(), value.into()));
         self
     }
@@ -806,6 +850,48 @@ mod tests {
             .unwrap();
         assert_eq!(code, Some(0));
         assert_eq!(clean, format!("unset|{}", f.dir.to_string_lossy()));
+    }
+
+    #[test]
+    fn path_discovery_is_pinned_and_untrusted_locations_never_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "hack-desktop-pin-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        let (early, late) = (root.join("early"), root.join("late"));
+        for dir in [&early, &late] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let marker = root.join("ran");
+        let fake = |dir: &std::path::Path| {
+            crate::test_support::script(
+                &dir.join("hack"),
+                format!("#!/bin/sh\n: > '{}'\necho '{{}}'\n", marker.display()),
+            );
+        };
+        fake(&late);
+        let path = format!("{}:{}", early.display(), late.display());
+        let runner = CliRunner::on_path("hack").with_env("PATH", &path);
+        let clone = runner.clone();
+        assert_eq!(runner.resolve_program().unwrap(), late.join("hack"));
+        // A CLI added later to an earlier PATH directory is not picked up by
+        // ordinary reads (clones share the pin) ...
+        fake(&early);
+        assert_eq!(clone.resolve_program().unwrap(), late.join("hack"));
+        // ... only by an explicit rediscovery, which validates it first.
+        assert_eq!(runner.rediscover().unwrap(), early.join("hack"));
+        std::fs::set_permissions(&early, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let _ = std::fs::remove_file(&marker);
+        assert!(matches!(runner.rediscover(), Err(RunError::Spawn(_))));
+        assert!(
+            runner.run_raw(&["x"], None, T).is_err(),
+            "no pin remains after a refused discovery"
+        );
+        assert!(!marker.exists(), "an untrusted CLI never runs");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

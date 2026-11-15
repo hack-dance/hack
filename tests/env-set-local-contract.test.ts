@@ -390,9 +390,10 @@ for (const lateContract of [false, true]) {
         )
       ).not.toContain(VALUE);
       expect(await readFile(local, "utf8")).toContain(VALUE);
-      expect(run.output).toContain(
-        "Moved LOCAL_KEY to .hack/hack.env.local.yaml"
-      );
+      expect(run.output).toContain("Env migration completed.");
+      expect(run.output).toContain("Legacy files were kept");
+      expect(run.output).toContain("hack env migrate");
+      expect(run.output).toContain("--cleanup");
       expect(await git(project, ["check-ignore", "--", local])).toContain(
         "hack.env.local.yaml"
       );

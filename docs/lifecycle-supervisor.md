@@ -103,19 +103,21 @@ there is no total ordering guarantee between stdout and stderr.
 Each record is written with one `write` on an `O_APPEND` descriptor and no lock. On a
 local file system the kernel places each append atomically at the end of the file, so
 whole records from different guards never interleave; records from different guards
-appear in the order their appends happened. A short write (for example a full disk)
-can split one record. No guard waits for another guard to log, so a stopped or hung
+appear in the order their appends happened. A short write (a full disk, a file-size
+limit, or a signal after partial progress) is completed by a second write and can split
+one record. No guard waits for another guard to log, so a stopped or hung
 guard cannot stall a sibling guard's output, exit detection or stop handling.
 
 ## Locks and waits
 
 A guard stopped at any instruction (SIGSTOP, a debugger) can hold only what it already
-had. No sibling guard waits on it, and every request that can wait on it has a bound:
+had. No sibling guard waits on it, and every request that can wait on it has a bound.
+The bounds below limit each wait, not the total duration of a request:
 
 | Lock | Held by | Held across a blocking call? | Who waits, and the bound |
 |---|---|---|---|
 | `.instance.lock` | The project supervisor (`run`), for its lifetime | Yes, its whole run | Another `run` for the root: retries 1 s, then refused. Guards, `stop` and `status` never take it. |
-| `.stop.lock` | `run` from admission until its ready receipt; each new guard (inherited on fd 2) until it publishes and detaches; `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` and launches wait up to 16 s, then answer `unknown` with reason `stop-lock-wait-expired` and act on nothing. `run` waits up to 10 s for each guard's receipt, then rolls back. |
+| `.stop.lock` | `run` from admission until its ready receipt; each new guard (inherited on fd 2) until it publishes and detaches; `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. A launch (`run`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` waits up to 10 s for each guard's receipt, then rolls back. |
 | `<name>.lock` | The guard of that command, for its lifetime | Yes | Only a new guard for the same command name: up to 10 s, then refused. Never a sibling, `stop` or `status`. |
 | Receipts, retirement marker, `lifecycle.log` | No lock | No | Receipts are replaced atomically; a reader that races a replacement reopens the name. Log records are single appends (above). |
 

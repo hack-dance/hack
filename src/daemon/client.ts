@@ -6,11 +6,11 @@ import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import {
-  checkLaunchdJobBeforeStart,
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
   resolveLaunchdAccess,
+  verifyLaunchdJobBeforeKickstart,
 } from "./launchd.ts";
 import { resolveDaemonPaths } from "./paths.ts";
 import { spawnDetachedDaemon } from "./spawn.ts";
@@ -306,13 +306,20 @@ async function ensureLaunchdDaemonReady(opts: {
   }
 
   // Last, right before launchd is asked to start the job: its program and
-  // the PATH it gives hackd (HACK-2216). On a refusal the autostart falls
-  // back to `hack daemon start`, which refuses the same job with the reason.
+  // the PATH it gives hackd, in the plist and in the configuration launchd
+  // has loaded (HACK-2216). On a refusal the autostart falls back to
+  // `hack daemon start`, which refuses the same job with the reason.
   const plistText = await readTextFile(opts.paths.launchdPlistPath);
-  if (
-    plistText === null ||
-    (await checkLaunchdJobBeforeStart({ plistText })) !== null
-  ) {
+  if (plistText === null) {
+    return false;
+  }
+  // A job that was just installed was not running before its install.
+  const refused = await verifyLaunchdJobBeforeKickstart({
+    paths: opts.paths,
+    plistText,
+    running: launchdStatus.running || launchdStatus.pid !== null,
+  });
+  if (refused !== null) {
     return false;
   }
 

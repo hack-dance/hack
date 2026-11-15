@@ -108,12 +108,14 @@ async function makeFixture(): Promise<Fixture> {
       `printf '%s\\n' "$*" >> "${launchctlLog}"`,
       // HACK_TEST_LAUNCHCTL_FAIL=<verb> makes that verb fail (HACK-2216).
       'if [ -n "$HACK_TEST_LAUNCHCTL_FAIL" ] && [ "$1" = "$HACK_TEST_LAUNCHCTL_FAIL" ]; then echo "simulated $1 failure" >&2; exit 5; fi',
-      // HACK_TEST_LAUNCHCTL_JOB=stopped: the job is loaded but runs nothing.
-      `if [ "$1" = "print" ] && [ "$HACK_TEST_LAUNCHCTL_JOB" = "stopped" ]; then printf 'state = not running\\n'; exit 0; fi`,
       // HACK_TEST_LAUNCHCTL_JOB=missing: launchd's own answer for a service
       // it does not have (exit 113).
       `if [ "$1" = "print" ] && [ "$HACK_TEST_LAUNCHCTL_JOB" = "missing" ]; then printf 'Bad request.\\nCould not find service "dance.hack.hackd" in domain for port\\n' >&2; exit 113; fi`,
-      `if [ "$1" = "print" ]; then printf 'state = running\\npid = 4242\\n'; fi`,
+      // A service block as launchctl prints it. HACK_TEST_LAUNCHCTL_JOB=stopped:
+      // the job is loaded but runs nothing. The loaded configuration
+      // (program, arguments, environment) is the file named by
+      // HACK_TEST_LAUNCHCTL_LOADED when it exists (HACK-2216).
+      `if [ "$1" = "print" ]; then printf 'gui/501/dance.hack.hackd = {\\n'; if [ "$HACK_TEST_LAUNCHCTL_JOB" = "stopped" ]; then printf '\\tstate = not running\\n'; else printf '\\tstate = running\\n\\tpid = 4242\\n'; fi; if [ -n "$HACK_TEST_LAUNCHCTL_LOADED" ] && [ -f "$HACK_TEST_LAUNCHCTL_LOADED" ]; then cat "$HACK_TEST_LAUNCHCTL_LOADED"; fi; printf '}\\n'; exit 0; fi`,
       `if [ "$1" = "kickstart" ]; then ${touchSocket}; fi`,
       "exit 0",
     ].join("\n")
@@ -159,6 +161,8 @@ async function makeFixture(): Promise<Fixture> {
           // The driver's launchd PATH check inspects this fixture directory
           // instead of the host's system directories (HACK-2142).
           DRIVER_SYSTEM_PATH: sysbin,
+          // The stub's loaded configuration; absent unless a test writes it.
+          HACK_TEST_LAUNCHCTL_LOADED: join(root, "launchctl-loaded.txt"),
           ...extra,
         },
       }),
@@ -539,6 +543,38 @@ function safeFixturePlist(fixture: Fixture): string {
   );
 }
 
+/**
+ * What the stub `launchctl print` reports loaded (HACK-2216): the
+ * service block's program, arguments and environment, as launchctl prints
+ * them. Defaults to {@link safeFixturePlist}'s program and PATH.
+ */
+async function writeLoadedJob(
+  fixture: Fixture,
+  loaded: { readonly program?: string; readonly path?: string } = {}
+): Promise<void> {
+  const program = loaded.program ?? join(fixture.root, "tools", "hack");
+  const path = loaded.path ?? join(fixture.root, "sysbin");
+  await writeFile(
+    join(fixture.root, "launchctl-loaded.txt"),
+    [
+      `\tprogram = ${program}`,
+      "\targuments = {",
+      `\t\t${program}`,
+      "\t\tdaemon",
+      "\t\tstart",
+      "\t\t--foreground",
+      "\t}",
+      "",
+      "\tenvironment = {",
+      `\t\tHOME => ${fixture.home}`,
+      `\t\tPATH => ${path}`,
+      "\t\tXPC_SERVICE_NAME => dance.hack.hackd",
+      "\t}",
+      "",
+    ].join("\n")
+  );
+}
+
 /** A stale managed plist for the fixture's `hack` (an older PATH). */
 function stalePlist(fixture: Fixture): string {
   return renderLaunchdPlist({
@@ -614,6 +650,55 @@ test("an explicit install refuses a PATH with a group-writable directory before 
   // The driver's own stop and uninstall still call launchctl afterwards,
   // but neither the repair nor the install loaded anything.
   expect(verbs).not.toContain("bootstrap");
+});
+
+// Review round 30 (HACK-2216): install checks the program it writes before
+// it unloads, writes or bootstraps anything, for every caller.
+
+test("an install whose hack sits in a group-writable directory bootstraps nothing", async () => {
+  const fixture = await makeFixture();
+  // The rendered PATH is safe (the fixture's sysbin); the program is not.
+  await chmod(join(fixture.root, "tools"), 0o775);
+  const run = await runAsDarwin({
+    argv: [DRIVER],
+    cwd: fixture.root,
+    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack") }),
+  });
+  expect(run.code).toBe(0);
+  const results = JSON.parse(run.stdout) as Record<string, unknown>;
+  expect(results.install).toMatchObject({ ok: false, unsafeProgram: true });
+  const verbs = (await launchctlCalls(fixture)).map(
+    (line) => line.split(" ")[0]
+  );
+  expect(verbs).not.toContain("bootstrap");
+});
+
+test("autostart's implicit install of a hack in a group-writable directory bootstraps nothing", async () => {
+  const fixture = await makeFixture();
+  // No plist yet: autostart would install one.
+  await rm(fixture.plistPath);
+  await chmod(join(fixture.root, "tools"), 0o775);
+  const hackHome = join(fixture.home, GLOBAL_HACK_DIR_NAME);
+  const run = await runAsDarwin({
+    argv: [DRIVER, "autostart"],
+    cwd: fixture.root,
+    env: fixture.env({
+      HACK_HOME: hackHome,
+      HACK_NO_INTERACTIVE: undefined,
+      HACK_TEST_STUB_SOCKET: join(
+        hackHome,
+        GLOBAL_DAEMON_DIR_NAME,
+        GLOBAL_DAEMON_SOCKET_FILENAME
+      ),
+    }),
+  });
+  expect(run.code).toBe(0);
+  const verbs = (await launchctlCalls(fixture)).map(
+    (line) => line.split(" ")[0]
+  );
+  expect(verbs).not.toContain("bootstrap");
+  expect(verbs).not.toContain("kickstart");
+  expect(await Bun.file(fixture.plistPath).exists()).toBe(false);
 });
 
 // Review round 2 (HACK-2216).
@@ -1298,7 +1383,9 @@ const AUTOSTART_CASES = [
     denied: false,
     isolated: false,
     safePlist: true,
-    launchctl: ["print", "kickstart"],
+    // The second `print` reads the configuration launchd has loaded, which
+    // must be the checked plist before the kickstart.
+    launchctl: ["print", "print", "kickstart"],
     hack: [],
   },
   {
@@ -1331,6 +1418,8 @@ for (const autostartCase of AUTOSTART_CASES) {
     const fixture = await makeFixture();
     if ("safePlist" in autostartCase) {
       await writeFile(fixture.plistPath, safeFixturePlist(fixture));
+      // launchd has that same plist loaded.
+      await writeLoadedJob(fixture);
     }
     if ("unsafePath" in autostartCase) {
       await chmod(join(fixture.root, "sysbin"), 0o775);

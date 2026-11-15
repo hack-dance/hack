@@ -41,6 +41,7 @@ import {
   readLaunchdManagerState,
   renderLaunchdPlist,
 } from "../src/daemon/launchd.ts";
+import type { LaunchdLoadedJob } from "../src/daemon/launchd-print.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import type { DaemonProcessProof } from "../src/daemon/process.ts";
 import { hasAncestorProcess } from "../src/daemon/process-ancestry.ts";
@@ -1158,6 +1159,8 @@ test("any continued line in the main unit file counts as a home binding", () => 
 async function safeLaunchdJob(): Promise<{
   readonly dir: string;
   readonly plist: (env?: string) => string;
+  /** What launchd reports loaded for that plist (its program and PATH). */
+  readonly loaded: () => Promise<LaunchdLoadedJob>;
 }> {
   const dir = await mkdtemp(join(tmpdir(), "hack-launchd-job-"));
   await chmod(dir, 0o755);
@@ -1166,6 +1169,13 @@ async function safeLaunchdJob(): Promise<{
   await chmod(program, 0o755);
   return {
     dir,
+    loaded: () =>
+      Promise.resolve({
+        kind: "job",
+        program,
+        arguments: [program, "daemon", "start", "--foreground"],
+        path: dir,
+      }),
     plist: (env = "") =>
       `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${program}</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>${dir}</string>\n${env}\n  </dict>\n</dict>\n</plist>\n`,
   };
@@ -1203,6 +1213,7 @@ test("launchd: an incompatible direct daemon is not replaced when the loaded job
         resolved: "/opt/hack/bin/hack",
       }),
     readPlist: () => Promise.resolve(opts.plist),
+    readLoaded: job.loaded,
     proveJob: () => Promise.resolve(opts.proven),
     repair: () => {
       effects.push("repair");
@@ -1266,6 +1277,7 @@ test("launchd: a current plist with an unsafe PATH stops nothing and kickstarts 
           resolved: join(job.dir, "hack"),
         }),
       readPlist: () => Promise.resolve(job.plist()),
+      readLoaded: job.loaded,
       proveJob: () => Promise.resolve(true),
       // No refresh is predicted (a source run): launchd starts the plist
       // as it is, which is what the check before a kickstart covers.
@@ -1314,6 +1326,116 @@ test("launchd: a current plist with an unsafe PATH stops nothing and kickstarts 
     ).toBeNull();
   } finally {
     await rm(job.dir, { recursive: true, force: true });
+  }
+});
+
+// Review round 30 (HACK-2216): a kickstart runs launchd's LOADED
+// configuration, so it must be the checked plist.
+
+test("launchd: a safe plist with an unsafe loaded PATH never kickstarts the loaded configuration", async () => {
+  const job = await safeLaunchdJob();
+  const shared = await mkdtemp(join(tmpdir(), "hack-shared-bin-"));
+  try {
+    await chmod(shared, 0o777);
+    const safeLoaded = await job.loaded();
+    // What launchd still runs: the old configuration, with a PATH directory
+    // everyone can write.
+    const unsafeLoaded = { ...safeLoaded, path: shared } as const;
+    const effects: string[] = [];
+    const hooks = (opts: {
+      readonly running: boolean;
+      /** What launchd reports loaded before and after a reload. */
+      readonly loaded: readonly LaunchdLoadedJob[];
+    }) => {
+      let reads = 0;
+      return {
+        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        trace: createDaemonCommandTrace(),
+        waitForReady: () => Promise.resolve(true),
+        readStatus: () =>
+          Promise.resolve({
+            installed: true,
+            loaded: true,
+            running: opts.running,
+            pid: opts.running ? 4242 : null,
+            exitStatus: null,
+            observation: "reported" as const,
+          }),
+        readPlist: () => Promise.resolve(job.plist()),
+        readLoaded: () => {
+          const loaded =
+            opts.loaded[Math.min(reads, opts.loaded.length - 1)] ??
+            unsafeLoaded;
+          reads += 1;
+          return Promise.resolve(loaded);
+        },
+        reloadJob: () => {
+          effects.push("reload");
+          return Promise.resolve({ ok: true });
+        },
+        repair: () => Promise.resolve("ok" as const),
+        kickstart: () => {
+          effects.push("kickstart");
+          return Promise.resolve({ ok: true });
+        },
+      };
+    };
+
+    // A running job is never reloaded (that would stop hackd) nor
+    // kickstarted from the unchecked configuration.
+    const running = hooks({ running: true, loaded: [unsafeLoaded] });
+    expect(await startViaLaunchdIfLoaded(running)).toBe(1);
+    expect(running.trace.blocked).toBe("rewrite-refused");
+    expect(effects).toEqual([]);
+
+    // A stopped job is reloaded from the checked plist; when launchd
+    // still reports the unsafe configuration, nothing is kickstarted.
+    const stale = hooks({ running: false, loaded: [unsafeLoaded] });
+    expect(await startViaLaunchdIfLoaded(stale)).toBe(1);
+    expect(stale.trace.blocked).toBe("rewrite-refused");
+    expect(effects).toEqual(["reload"]);
+
+    // An unreadable loaded configuration is treated the same way.
+    effects.length = 0;
+    const unreadable = hooks({
+      running: false,
+      loaded: [{ kind: "unknown", reason: "garbled" }],
+    });
+    expect(await startViaLaunchdIfLoaded(unreadable)).toBe(1);
+    expect(effects).toEqual(["reload"]);
+
+    // When the reload makes launchd run the checked plist, it starts.
+    effects.length = 0;
+    const reloaded = hooks({
+      running: false,
+      loaded: [unsafeLoaded, safeLoaded],
+    });
+    expect(await startViaLaunchdIfLoaded(reloaded)).toBe(0);
+    expect(effects).toEqual(["reload", "kickstart"]);
+
+    // The check before a running daemon is stopped refuses a loaded
+    // configuration it cannot read.
+    const replace = {
+      ...hooks({ running: true, loaded: [{ kind: "unknown", reason: "x" }] }),
+      pid: 4242,
+      compatible: false,
+      isAncestor: () => Promise.resolve(false),
+      readProgram: () =>
+        Promise.resolve({
+          kind: "ours" as const,
+          program: join(job.dir, "hack"),
+          resolved: join(job.dir, "hack"),
+        }),
+      proveJob: () => Promise.resolve(true),
+      executing: null,
+    };
+    effects.length = 0;
+    expect(await checkRunningLaunchdDaemon(replace)).toBe(1);
+    expect(replace.trace.blocked).toBe("rewrite-refused");
+    expect(effects).toEqual([]);
+  } finally {
+    await rm(job.dir, { recursive: true, force: true });
+    await rm(shared, { recursive: true, force: true });
   }
 });
 
@@ -1622,6 +1744,7 @@ test("a compatible running daemon is restarted after a repair only when the repa
       onlyIfStale: true,
       waitForReady: () => Promise.resolve(true),
       readPlist: () => Promise.resolve(job.plist()),
+      readLoaded: job.loaded,
       readStatus: () =>
         Promise.resolve({
           installed: true,

@@ -776,9 +776,18 @@ Such a plist is never replaced automatically; `start` reports it and
   plist's program must be safe from other accounts along its whole path, and
   every directory of the PATH it gives hackd (its own `PATH`, or launchd's
   default when it sets none) must pass the same PATH checks. A plist whose
-  program or PATH cannot be read is refused. On a refusal launchd is not
-  asked to start the job, and `start` exits 1 (`blocked: "rewrite-refused"`,
-  `hack daemon install` as the next step). Before `start` or `restart` stops
+  program or PATH cannot be read is refused. A kickstart runs the
+  configuration launchd has loaded, which can differ from the plist on disk
+  until the job is reloaded. So the loaded job, read from
+  `launchctl print gui/<uid>/dance.hack.hackd`, must also run exactly the
+  checked plist: the same program, Hack's own arguments and the same `PATH`.
+  When it does not, or cannot be read, a job that is not running is reloaded
+  from the checked plist and read again; a running job is not reloaded, because
+  that would stop hackd. On a refusal launchd is not asked to start the job,
+  and `start` exits 1 (`blocked: "rewrite-refused"`, `hack daemon install` as
+  the next step). Every plist install (explicit, autostart's implicit install,
+  refresh or retarget) also checks the program it writes, safe from other
+  accounts along its whole path, before it unloads, writes or loads anything. Before `start` or `restart` stops
   a running hackd under a current plist, it makes the same check, so a
   running daemon is never stopped for a start that would be refused. On Linux,
   a stopped-service start checks the loaded unit's programs and effective

@@ -10,11 +10,14 @@ import {
   type LaunchdServiceStatus,
   plistKeepsThisHome,
   proveLaunchdJobOwnership,
+  readLaunchdLoadedJob,
   readLaunchdProgramState,
   readLaunchdRefreshTarget,
   refuseRunningRewrite,
   repairLaunchdProgramIfInvalid,
+  verifyLaunchdJobBeforeKickstart,
 } from "../daemon/launchd.ts";
+import type { LaunchdLoadedJob } from "../daemon/launchd-print.ts";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import { hasAncestorProcess } from "../daemon/process-ancestry.ts";
 import type { DaemonCommandTrace } from "../daemon/reconcile.ts";
@@ -56,6 +59,13 @@ export interface LaunchdStartHooks {
    * directories of the rendered PATH.
    */
   readonly systemPathDirectories?: readonly string[];
+  /** Defaults to {@link readLaunchdLoadedJob}; tests pin it. */
+  readonly readLoaded?: () => Promise<LaunchdLoadedJob>;
+  /** Defaults to bootout plus bootstrap of the plist; tests pin it. */
+  readonly reloadJob?: () => Promise<{
+    readonly ok: boolean;
+    readonly error?: string;
+  }>;
   /**
    * Called before launchd may be asked to start hackd (a reload or a
    * kickstart), so the caller can tell a refusal from a failed start.
@@ -233,7 +243,7 @@ function describeReplacementBlock(block: ReplacementBlock): string {
     case "refresh-refused":
       return "the launchd plist is stale and the program a refresh would keep, or the PATH it would give hackd, is not fit for a login service (a source file, a temporary location, or a program or PATH directory others can change)";
     case "start-refused":
-      return "the program the launchd service runs, or a directory of the PATH it gives hackd, is not safe from other accounts, so launchd would not be asked to start it";
+      return "the program the launchd service runs, or a directory of the PATH it gives hackd, is not safe from other accounts, or the configuration launchd has loaded cannot be read, so launchd would not be asked to start it";
     default:
       return "the launchd job's program is gone and the hack it would be retargeted to is not fit for a login service";
   }
@@ -344,7 +354,15 @@ async function startBlocksReplacement(opts: {
     plistText: opts.plistText,
     systemDirectories: hooks.systemPathDirectories,
   });
-  return unsafe === null ? null : "start-refused";
+  if (unsafe !== null) {
+    return "start-refused";
+  }
+  // The kickstart after the stop runs launchd's loaded configuration. One
+  // that differs is reloaded from the checked plist then (the job is no
+  // longer running); one that cannot be read at all is refused now, so
+  // hackd is not stopped for a start that may be refused.
+  const loaded = await (hooks.readLoaded ?? readLaunchdLoadedJob)();
+  return loaded.kind === "unknown" ? "start-refused" : null;
 }
 
 /**
@@ -519,9 +537,16 @@ async function launchdStartIsUnsafe(
   if (plistText === null) {
     return "the launchd plist could not be read";
   }
-  return await checkLaunchdJobBeforeStart({
+  // Fresh: the repair may have reloaded the job.
+  const status = await readStatus(hooks);
+  return await verifyLaunchdJobBeforeKickstart({
+    paths: hooks.paths,
     plistText,
+    // Unknown counts as running: a reload would then stop hackd.
+    running: status === null || status.running || status.pid !== null,
     systemDirectories: hooks.systemPathDirectories,
+    readLoaded: hooks.readLoaded,
+    reload: hooks.reloadJob,
   });
 }
 

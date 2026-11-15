@@ -20,6 +20,10 @@ import {
   parseLaunchdPlistEnvironment,
   parseLaunchdPlistProgram,
 } from "./launchd-plist.ts";
+import {
+  type LaunchdLoadedJob,
+  parseLaunchdPrintJob,
+} from "./launchd-print.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { type DaemonProcessProof, proveOwnedDaemonProcess } from "./process.ts";
 
@@ -329,6 +333,110 @@ export async function checkLaunchdJobBeforeStart(opts: {
     : `the PATH the launchd service gives hackd is not safe: ${unsafePath.replace("the hackd.service PATH", "its PATH")}`;
 }
 
+/** The configuration launchd has loaded for hackd, read strictly. */
+export async function readLaunchdLoadedJob(): Promise<LaunchdLoadedJob> {
+  const { exitCode, stdout } = await runLaunchctl([
+    "print",
+    launchdServiceTarget(),
+  ]);
+  return exitCode === 0
+    ? parseLaunchdPrintJob(stdout)
+    : { kind: "unknown", reason: `launchctl print exited ${exitCode}` };
+}
+
+/**
+ * Whether the loaded job runs exactly what the checked plist says: the same
+ * program, the arguments Hack writes (`<program> daemon start
+ * --foreground`), and the same `PATH` (or none in both).
+ */
+export function loadedJobMatchesPlist(opts: {
+  readonly loaded: LaunchdLoadedJob;
+  readonly plistText: string;
+}): boolean {
+  const { loaded } = opts;
+  if (loaded.kind !== "job") {
+    return false;
+  }
+  const program = parseLaunchdPlistProgram({ plistText: opts.plistText });
+  const env = parseLaunchdPlistEnvironment({ plistText: opts.plistText });
+  if (program.kind !== "path" || env.kind !== "env") {
+    return false;
+  }
+  const expected = [program.path, "daemon", "start", "--foreground"];
+  return (
+    loaded.program === program.path &&
+    loaded.arguments.length === expected.length &&
+    loaded.arguments.every((arg, index) => arg === expected[index]) &&
+    loaded.path === (env.env.get("PATH") ?? null)
+  );
+}
+
+/** Unloads the job and loads the plist on disk again. */
+async function reloadLaunchdPlist(
+  paths: DaemonPaths
+): Promise<LaunchctlResult> {
+  const unloaded = await unloadLaunchdService();
+  if (!(unloaded.ok || unloaded.notLoaded)) {
+    return unloaded;
+  }
+  return await loadLaunchdService({ plistPath: paths.launchdPlistPath });
+}
+
+/**
+ * Everything before an automatic kickstart (HACK-2216). A kickstart runs
+ * the configuration launchd has LOADED, not the plist on disk, so:
+ * 1. the plist on disk gets {@link checkLaunchdJobBeforeStart};
+ * 2. the loaded job ({@link readLaunchdLoadedJob}) must run exactly that
+ *    plist ({@link loadedJobMatchesPlist});
+ * 3. when it does not, or cannot be read: a job that is not running is
+ *    reloaded from the checked plist and read again, and must then match;
+ *    a running job is refused (reloading it would stop hackd).
+ * Null when the kickstart may run, or why it must not. Nothing is
+ * kickstarted here.
+ */
+export async function verifyLaunchdJobBeforeKickstart(opts: {
+  readonly paths: DaemonPaths;
+  readonly plistText: string;
+  /** The job runs a process now. */
+  readonly running: boolean;
+  /** Test seam; see {@link renderedLaunchdPathDirectories}. */
+  readonly systemDirectories?: readonly string[];
+  /** Defaults to {@link readLaunchdLoadedJob}; tests pin it. */
+  readonly readLoaded?: () => Promise<LaunchdLoadedJob>;
+  /** Defaults to bootout plus bootstrap of the plist; tests pin it. */
+  readonly reload?: () => Promise<{
+    readonly ok: boolean;
+    readonly error?: string;
+  }>;
+}): Promise<string | null> {
+  const unsafe = await checkLaunchdJobBeforeStart(opts);
+  if (unsafe !== null) {
+    return unsafe;
+  }
+  const read = opts.readLoaded ?? readLaunchdLoadedJob;
+  const loaded = await read();
+  if (loadedJobMatchesPlist({ loaded, plistText: opts.plistText })) {
+    return null;
+  }
+  const why =
+    loaded.kind === "unknown"
+      ? `its loaded configuration could not be read (${loaded.reason})`
+      : "its loaded configuration differs from the checked plist";
+  if (opts.running) {
+    return `launchd would restart hackd from a configuration that was not checked: ${why}, and hackd runs, so it was not reloaded`;
+  }
+  const reloaded = await (
+    opts.reload ?? (() => reloadLaunchdPlist(opts.paths))
+  )();
+  if (!reloaded.ok) {
+    return `${why}, and reloading the checked plist failed: ${reloaded.error ?? "unknown error"}`;
+  }
+  const again = await read();
+  return loadedJobMatchesPlist({ loaded: again, plistText: opts.plistText })
+    ? null
+    : `${why}, and it still differs after reloading the checked plist`;
+}
+
 /**
  * Generates the launchd plist XML for hackd.
  */
@@ -401,6 +509,11 @@ export interface LaunchdInstallResult {
    * {@link checkLaunchdServicePath}; nothing was unloaded, written or loaded.
    */
   readonly unsafePath?: true;
+  /**
+   * Set when the program the plist would run failed
+   * `checkServiceExecutableTrusted`; nothing was unloaded, written or loaded.
+   */
+  readonly unsafeProgram?: true;
 }
 
 /**
@@ -449,6 +562,22 @@ export async function installLaunchdService({
     };
   }
   const home = resolveUserHomeDir();
+  // The program the plist will run, safe from other accounts along its
+  // whole path, for every caller: explicit install, autostart's implicit
+  // install, refresh and retarget (HACK-2216). Loaded lazily: systemd.ts
+  // imports this module.
+  const { checkServiceExecutableTrusted } = await import("./systemd.ts");
+  const untrusted = await checkServiceExecutableTrusted({ path: hackBinPath });
+  if (untrusted !== null) {
+    return {
+      ok: false,
+      error: untrusted.replace(
+        "hackd.service would run",
+        "the launchd service would run"
+      ),
+      unsafeProgram: true,
+    };
+  }
   const unsafePath = await checkLaunchdServicePath({
     home,
     systemDirectories: systemPathDirectories,
@@ -964,7 +1093,7 @@ export async function repairLaunchdProgramIfInvalid(opts: {
     hackBinPath: target,
     systemPathDirectories: opts.systemPathDirectories,
   });
-  if (result.unsafePath) {
+  if (result.unsafePath || result.unsafeProgram) {
     return refused;
   }
   if (!result.ok) {

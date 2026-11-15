@@ -95,8 +95,36 @@ pub fn inspect(pid: i32) -> Result<Option<Identity>> {
         session,
         start,
         uid,
-        zombie: fields.first() == Some(&"Z") || fields.first() == Some(&"X"),
+        zombie: matches!(fields.first(), Some(&"Z" | &"X")) && !linux_live_thread(pid)?,
     }))
+}
+
+/// A thread-group leader that called `pthread_exit` shows `Z` in
+/// `/proc/<pid>/stat` while its other threads keep running. Such a process is
+/// alive: it still owns its PID and receives process-directed signals. Only a
+/// group with no live thread left is a zombie.
+#[cfg(target_os = "linux")]
+fn linux_live_thread(pid: i32) -> Result<bool> {
+    let tasks = match fs::read_dir(format!("/proc/{pid}/task")) {
+        Ok(tasks) => tasks,
+        Err(error) if absent_error(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for task in tasks {
+        let task = task?;
+        let stat = match fs::read(task.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if absent_error(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if !matches!(
+            proc_stat_tail(&stat)?.split_whitespace().next(),
+            Some("Z" | "X")
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "linux")]

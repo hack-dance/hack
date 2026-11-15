@@ -107,6 +107,7 @@ impl Fixture {
     /// launch writes its ready receipt just before it drops this lock, and a
     /// guard keeps its startup lease until publication, so the lock can still
     /// be held briefly after `start` returns.
+    #[track_caller]
     fn take_stop_lock(&self) -> fs::File {
         let lock = fs::OpenOptions::new()
             .read(true)
@@ -306,6 +307,7 @@ fn send(writer: &mut impl Write, value: &Value) {
     writer.flush().unwrap();
 }
 
+#[track_caller]
 fn exact(reader: &mut (impl Read + AsRawFd), bytes: &mut [u8]) {
     let end = Instant::now() + TIMEOUT;
     let mut offset = 0;
@@ -328,6 +330,7 @@ fn exact(reader: &mut (impl Read + AsRawFd), bytes: &mut [u8]) {
     }
 }
 
+#[track_caller]
 fn receive(reader: &mut (impl Read + AsRawFd)) -> Value {
     let mut header = [0; 4];
     exact(reader, &mut header);
@@ -338,6 +341,7 @@ fn receive(reader: &mut (impl Read + AsRawFd)) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+#[track_caller]
 fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
     let end = Instant::now() + timeout;
     loop {
@@ -353,6 +357,7 @@ fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
     }
 }
 
+#[track_caller]
 fn eventually<T>(mut predicate: impl FnMut() -> Option<T>) -> T {
     let end = Instant::now() + TIMEOUT;
     loop {
@@ -1344,6 +1349,7 @@ fn stop_waiting_past_lock_bound_reports_unknown_without_acting() {
     let receipt = receive(stop.stdout.as_mut().unwrap());
     assert!(!wait(&mut stop, TIMEOUT).success(), "{receipt}");
     assert_eq!(receipt["outcome"], "unknown");
+    assert_eq!(receipt["reason"], "stop-lock-wait-expired");
     assert!(start.elapsed() >= Duration::from_secs(16));
     assert!(
         identity(worker.pid).as_ref() == Some(&worker),
@@ -1353,6 +1359,78 @@ fn stop_waiting_past_lock_bound_reports_unknown_without_acting() {
     drop(lock);
     f.stop();
     assert!(wait(&mut caller, TIMEOUT).success());
+}
+
+#[test]
+fn invalid_control_requests_still_get_a_framed_refusal() {
+    let f = Fixture::new();
+    for action in ["stop", "status"] {
+        let (mut child, receipt) = f.request(
+            action,
+            &json!({"version": 99, "root": f.root, "ownerToken": TOKEN}),
+        );
+        assert!(!wait(&mut child, TIMEOUT).success(), "{receipt}");
+        assert_eq!(receipt["outcome"], "refused");
+        assert_eq!(receipt["reason"], "invalid-request");
+        assert_eq!(receipt["processes"], json!([]));
+    }
+}
+
+/// Linux shows a leader whose main thread called `pthread_exit` as `Z` while
+/// its worker threads run. It must count as live. After guard loss, recovery
+/// signals captured members one by one, so a member misread as a zombie is
+/// never captured: stop then reported absence while its worker survived.
+#[cfg(target_os = "linux")]
+#[test]
+fn main_thread_exit_with_live_worker_is_still_stopped() {
+    for lose_guard in [false, true] {
+        let f = Fixture::new();
+        let (mut caller, _) = f.start(vec![f.process("worker", "pthread-main-exit")]);
+        f.await_log("fixture-ready");
+        let state = f.state("worker");
+        let child = eventually(|| {
+            f.log().lines().find_map(|line| {
+                line.split("pthread-child ")
+                    .nth(1)
+                    .and_then(|pid| pid.parse::<i32>().ok())
+            })
+        });
+        f.owned
+            .borrow_mut()
+            .push(identity(child).expect("pthread child identity"));
+        eventually(|| (process_state(child) == Some(b'Z') && live_task(child)).then_some(()));
+        if lose_guard {
+            drop(f.take_stop_lock());
+            // SAFETY: the captured guard belongs to this fixture.
+            assert_eq!(
+                unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+                0
+            );
+            assert!(wait(&mut caller, TIMEOUT).success());
+        }
+        let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+        assert!(wait(&mut stop, TIMEOUT).success(), "{receipt}");
+        assert_eq!(receipt["outcome"], "stopped");
+        eventually(|| (!live_task(child)).then_some(()));
+        if !lose_guard {
+            assert!(wait(&mut caller, TIMEOUT).success());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn live_task(pid: i32) -> bool {
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|task| {
+            fs::read_to_string(task.path().join("stat"))
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.bytes().next()))
+                .flatten()
+                .is_some_and(|state| state != b'Z' && state != b'X')
+        })
 }
 
 fn process_is_zombie(pid: i32) -> bool {
@@ -2132,6 +2210,44 @@ fn fixture_process() {
                 }
                 thread::sleep(Duration::from_millis(10));
             }
+        }
+        #[cfg(target_os = "linux")]
+        "pthread-main-exit" => {
+            extern "C" fn worker(_: *mut libc::c_void) -> *mut libc::c_void {
+                loop {
+                    // SAFETY: pause has no preconditions.
+                    unsafe {
+                        libc::pause();
+                    }
+                }
+            }
+            // The fork child is single-threaded, so its main thread is the
+            // thread-group leader. It starts one worker and ends only its main
+            // thread (as `pthread_exit` does); Linux then shows the leader as
+            // `Z` while the worker runs.
+            // SAFETY: the child calls only libc thread and exit functions and
+            // never returns into Rust/libtest state.
+            let child = unsafe { libc::fork() };
+            assert!(child >= 0);
+            if child == 0 {
+                unsafe {
+                    let mut thread: libc::pthread_t = std::mem::zeroed();
+                    if libc::pthread_create(
+                        &mut thread,
+                        std::ptr::null(),
+                        worker,
+                        std::ptr::null_mut(),
+                    ) != 0
+                    {
+                        libc::_exit(96);
+                    }
+                    // End only the main thread, as pthread_exit would, without
+                    // its unwinder: the raw exit syscall is thread-scoped.
+                    libc::syscall(libc::SYS_exit, 0);
+                    libc::_exit(95);
+                }
+            }
+            println!("pthread-child {child}");
         }
         "hold" => (),
         _ => std::process::exit(99),

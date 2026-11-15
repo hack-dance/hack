@@ -323,7 +323,9 @@ pins that executable for every later read and action; only setup checks
 (startup and **Check again**) search PATH again, so installing into an existing
 PATH directory recovers through **Check again** without restarting. A `hack`
 whose file or any directory above it is writable by group or others, or owned
-by another user, is refused before it runs. The app inherits PATH at launch; a changed PATH still needs a
+by another user, is refused before it runs. A script CLI's `#!` interpreter must
+pass the same rule with no arguments (`#!/usr/bin/env` is refused here because
+the CLI uses the ordinary PATH). The app inherits PATH at launch; a changed PATH still needs a
 relaunch. Follow the installation page's platform limits and existing-v4 migration
 steps before using a candidate against a shared home.
 On Linux, this preview requires a separately prepared source-built 5.x CLI; the

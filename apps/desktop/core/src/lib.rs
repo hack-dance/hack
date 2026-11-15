@@ -30,6 +30,8 @@ pub mod upgrade_fixtures;
 pub mod upgrade_io;
 pub mod viewmodel;
 
+pub mod env;
+
 pub mod execution;
 
 mod setup_login;

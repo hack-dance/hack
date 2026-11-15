@@ -118,6 +118,25 @@ impl Drop for Fixture {
     }
 }
 
+/// Spawn a binary this test has just written. On Linux another test thread
+/// can fork while the copy's write descriptor is still open; that child holds
+/// the descriptor until it execs, and exec of the new file then fails with
+/// ETXTBSY. The window is short, so retry only that error, briefly.
+fn spawn_fresh_executable(command: &mut Command) -> Child {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match command.spawn() {
+            Ok(child) => return child,
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("spawn fresh executable: {error}"),
+        }
+    }
+}
+
 fn send(output: &mut impl Write, value: &Value) {
     let bytes = serde_json::to_vec(value).unwrap();
     output
@@ -558,7 +577,7 @@ fn atomic_executable_replacement_between_serve_and_add_keeps_guard_spawn_usable(
     let installed = fixture.base.join("installed-supervisor");
     let replacement = fixture.base.join("replacement-supervisor");
     fs::copy(env!("CARGO_BIN_EXE_hack-lifecycle-supervisor"), &installed).unwrap();
-    let mut owner = fixture.command_binary("serve", &installed).spawn().unwrap();
+    let mut owner = spawn_fresh_executable(&mut fixture.command_binary("serve", &installed));
     send(
         owner.stdin.as_mut().unwrap(),
         &fixture.launch(fixture.process("first", "hold")),

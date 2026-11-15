@@ -346,9 +346,9 @@ function groupAction(opts: {
     ? " Each checkout's finding says what else to do."
     : "";
   if (shared !== null && first?.args?.includes(first.root)) {
-    return `Run ${opts.render(shared)} --path ${PATH_PLACEHOLDER} for each of the ${count} checkouts (hack upgrade check --verbose lists them).${advice}`;
+    return `Run ${opts.render(shared)} --path ${PATH_PLACEHOLDER} for each of the ${count} checkouts (${opts.render(["upgrade", "check", "--verbose"])} lists them).${advice}`;
   }
-  return `See the finding in each of the ${count} checkouts (hack upgrade check --verbose lists them).`;
+  return `See the finding in each of the ${count} checkouts (${opts.render(["upgrade", "check", "--verbose"])} lists them).`;
 }
 
 /** `args` without its `--path <root>` pair. */

@@ -26,7 +26,10 @@ import {
   type UpgradeCheckProbes,
 } from "../src/lib/upgrade-check-probes.ts";
 import { inspectUpgradeProject } from "../src/lib/upgrade-check-project.ts";
+import { renderUpgradeCheck } from "../src/lib/upgrade-check-render.ts";
+import { buildUpgradePlan } from "../src/lib/upgrade-plan.ts";
 import { collectUpgradeSnapshotTargets } from "../src/lib/upgrade-snapshot-targets.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -731,6 +734,121 @@ test("printed commands run the candidate launcher when the check ran through it"
       true
     );
   }
+});
+
+test("a native hack-next check prints only hack-next commands, in every hint (HACK-2251)", async () => {
+  // The bundle entrypoint keeps the manager's hack-next marker on native, so
+  // the CLI sees HACK_CANDIDATE_ENTRYPOINT=hack-next with no Compose selection.
+  const legacy = await liveProject("app-native-next");
+  await writeFile(join(legacy.projectDir, "hack.env.json"), "{}\n");
+  // A Git checkout without Hack's ignore rules makes an applicable step.
+  const git = spawnSyncBounded(["git", "-C", legacy.repoRoot, "init", "-q"], {
+    env: fixtureGitEnv(),
+    timeout: 10_000,
+  });
+  expect(git.exitCode).toBe(0);
+  await writeRegistry([legacy]);
+  const report = await runUpgradeCheck({
+    cliVersion: "5.0.0-next.18",
+    homeDir: home,
+    probes: healthyProbes({
+      nativePreflight: async () => ({
+        ready: true,
+        blockers: 0,
+        warnings: 0,
+        consentNeeded: 0,
+      }),
+    }),
+    env: {
+      HACK_CANDIDATE_ENTRYPOINT: "hack-next",
+      HACK_RUNTIME_BACKEND: "native",
+    },
+  });
+  const launcher = join(home, ".hack-next", "bin", "hack-next");
+  expect(report.cli.command).toBe(launcher);
+  expect(report.next_command?.startsWith(`${launcher} `)).toBe(true);
+  const native = report.projects
+    .flatMap((project) => project.findings)
+    .find((finding) => finding.id === "native-preflight");
+  expect(native?.summary).toContain(
+    `Run ${launcher} native setup, then ${launcher} doctor --native-preflight.`
+  );
+  const text = renderUpgradeCheck(report, { verbose: true });
+  expect(report.plan.some((step) => step.applies)).toBe(true);
+  expect(text).toContain(`with ${launcher} upgrade apply (--dry-run`);
+  // No printed hint sends a candidate user to stable `hack` or bare hack-v5.
+  expect(text).not.toMatch(/(^|[\s(`])hack (upgrade|native|doctor) /m);
+  expect(text).not.toContain("hack-v5");
+});
+
+test("exceptional and grouped hints also name the hack-next launcher (HACK-2251)", async () => {
+  const env = {
+    HACK_CANDIDATE_ENTRYPOINT: "hack-next",
+    HACK_RUNTIME_BACKEND: "native",
+  };
+  const launcher = join(home, ".hack-next", "bin", "hack-next");
+  // A refused env layer tells the user to rerun the check through the launcher.
+  const project = await liveProject("linked-next");
+  const target = join(root, "sibling-next", "layer.yaml");
+  await mkdir(join(root, "sibling-next"));
+  await writeFile(target, "version: 1\nvars: {}\n");
+  await symlink(target, join(project.projectDir, "hack.env.dev.local.yaml"));
+  await writeRegistry([project]);
+  const report = await runUpgradeCheck({
+    cliVersion: "5.0.0-next.18",
+    homeDir: home,
+    probes: healthyProbes(),
+    env,
+  });
+  const refused = report.projects[0]?.findings.find(
+    (item) => item.id === "env-format"
+  );
+  expect(refused?.summary).toContain(`then rerun ${launcher} upgrade check.`);
+  expect(refused?.action).toContain(`then rerun ${launcher} upgrade check.`);
+  // More unchecked items than are named point at the launcher's --verbose.
+  const many = {
+    ...report,
+    incomplete: Array.from({ length: 7 }, (_, index) => ({
+      scope: `checkout-${index}`,
+      id: "env-format",
+      status: "incomplete" as const,
+      summary: "Not checked.",
+      args: null,
+      action: null,
+      kind: "manual" as const,
+      command: null,
+    })),
+  };
+  expect(renderUpgradeCheck(many)).toContain(
+    `more (${launcher} upgrade check --verbose).`
+  );
+  // A grouped manual step points at the launcher's --verbose listing.
+  const finding = (checkout: string) => ({
+    id: "project-store",
+    status: "warn" as const,
+    summary: "Project store.",
+    args: ["doctor", "--path", checkout],
+    action: null,
+    kind: "manual" as const,
+    command: null,
+  });
+  const plan = buildUpgradePlan({
+    machine: [],
+    projects: ["/repos/a", "/repos/b"].map((checkout) => ({
+      name: checkout,
+      project: checkout,
+      root: checkout,
+      project_dir: join(checkout, ".hack"),
+      state: "live" as const,
+      reason: null,
+      findings: [finding(checkout)],
+    })),
+    render: (args) => [launcher, ...args].join(" "),
+  });
+  const grouped = plan.find((step) => step.id === "project-store");
+  expect(grouped?.action).toContain(
+    `(${launcher} upgrade check --verbose lists them)`
+  );
 });
 
 /** A global encrypted_file store with one entry, and its key file. */

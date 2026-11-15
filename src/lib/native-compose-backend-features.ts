@@ -6,6 +6,11 @@ import {
   selectNativePlatformModes,
 } from "../backends/native-project-platform.ts";
 import { readNativeSelection } from "../backends/native-project-selection.ts";
+import {
+  type CandidateLauncher,
+  currentCandidateLauncher,
+  launcherCommand,
+} from "./candidate-launcher.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "./hack-ownership-labels.ts";
@@ -606,9 +611,17 @@ export function describeComposeBackendFeatures(
   return `${phrases.slice(0, -1).join(", ")} and ${phrases.at(-1)}`;
 }
 
-/** The selection that runs this project on the Compose backend. */
-export const COMPOSE_BACKEND_SELECTION =
-  "Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too)";
+/**
+ * The command that runs `args` on the Compose backend, through the launcher
+ * the user has (`hack`, `~/.hack-next/bin/hack-next` or the bundle's
+ * `hack-v5`; HACK-2251).
+ */
+export function composeBackendCommand(
+  args: readonly string[],
+  launcher: CandidateLauncher = currentCandidateLauncher()
+): string {
+  return launcherCommand(launcher, args, { HACK_RUNTIME_BACKEND: "compose" });
+}
 
 /**
  * The documented selection that keeps a project with an external network on
@@ -617,9 +630,44 @@ export const COMPOSE_BACKEND_SELECTION =
 export const ISOLATED_NETWORKS_SELECTION =
   "An external network can stay on native instead: list it by name in `isolatedNetworks` of the `HACK_NATIVE_ADAPTATION` selection, and native start replaces it with an owned isolated network that does not join the external one";
 
-/** The next step for a basic build, which native image-project `up` refuses without native builds. */
-export const BASIC_BUILD_NEXT_STEP =
-  "Set HACK_NATIVE_BUILDS=1 to build it in the native runtime, or preview the authored native conversion with `hack config import --dry-run --path <project root>`";
+/**
+ * The next step for a basic build, which native image-project `up` refuses
+ * without native builds. The preview command names the user's launcher.
+ */
+export function basicBuildNextStep(
+  launcher: CandidateLauncher = currentCandidateLauncher(),
+  /** The selected project's root; `<project root>` when unknown. */
+  projectRoot?: string
+): string {
+  const preview =
+    projectRoot === undefined
+      ? `${launcherCommand(launcher, ["config", "import", "--dry-run", "--path"])} <project root>`
+      : launcherCommand(launcher, [
+          "config",
+          "import",
+          "--dry-run",
+          "--path",
+          projectRoot,
+        ]);
+  return `Set HACK_NATIVE_BUILDS=1 to build it in the native runtime, or preview the authored native conversion with \`${preview}\``;
+}
+
+/**
+ * The command words that select the same project, branch and env overlay as
+ * the refused command, so the printed fallback works from any directory and
+ * starts the same configuration.
+ */
+export function projectSelectorArgs(opts: {
+  readonly projectRoot?: string;
+  readonly branch?: string;
+  readonly env?: string;
+}): string[] {
+  return [
+    ...(opts.projectRoot === undefined ? [] : ["--path", opts.projectRoot]),
+    ...(opts.branch === undefined ? [] : ["--branch", opts.branch]),
+    ...(opts.env === undefined ? [] : ["--env", opts.env]),
+  ];
+}
 
 /**
  * The closed refusal for a project that needs the Compose backend: stable code
@@ -631,6 +679,12 @@ export function composeBackendRefusal(
     readonly features: readonly ComposeBackendFeature[];
     readonly restart: boolean;
     readonly foreignNetworks?: readonly string[];
+    /** The selected project's root, printed as `--path` in the fallback. */
+    readonly projectRoot?: string;
+    /** The `--branch` the refused command was given, if any. */
+    readonly branch?: string;
+    /** The `--env` the refused command was given, if any. */
+    readonly env?: string;
   } & ComposeBackendFeatureOptions
 ): HackCliError {
   const command = opts.restart ? "hack restart" : "hack up";
@@ -639,7 +693,7 @@ export function composeBackendRefusal(
     : "";
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. ${COMPOSE_BACKEND_SELECTION} and run the command again. Nothing was started or stopped.${names}`,
+    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. To run it there: ${composeBackendCommand([opts.restart ? "restart" : "up", ...projectSelectorArgs(opts)])}. Nothing was started or stopped.${names}`,
     detail: { backend: "compose", features: [...opts.features] },
   });
 }
@@ -657,6 +711,12 @@ export async function refuseNativeComposeBackendFeatures(
     /** Every adaptation native start could apply; see {@link readComposeBackendFeatures}. */
     readonly adaptationCandidates?: readonly (string | undefined)[];
     readonly restart: boolean;
+    /** The selected project's root, printed as `--path` in the fallback. */
+    readonly projectRoot?: string;
+    /** The `--branch` the refused command was given, if any. */
+    readonly branch?: string;
+    /** The `--env` the refused command was given, if any. */
+    readonly env?: string;
   } & ComposeBackendFeatureOptions
 ): Promise<void> {
   const features = await readComposeBackendFeatures(opts.composeFile, {

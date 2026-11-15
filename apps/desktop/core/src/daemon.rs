@@ -158,6 +158,9 @@ fn readable_within(stream: &UnixStream, timeout: Duration) -> Result<bool, Daemo
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
         let mut poll = libc::pollfd {
             fd: stream.as_raw_fd(),
             events: libc::POLLIN,

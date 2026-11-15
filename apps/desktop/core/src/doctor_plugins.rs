@@ -202,6 +202,20 @@ pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<(), &'static str> {
     {
         return Err("Doctor absolute helper or its ancestors/ACLs are untrusted");
     }
+    // A native candidate runtime is spawned by absolute path with a narrowed
+    // environment (not the wrapper PATH), so the env #! form is refused.
+    if let Some(native) = selector("HACK_NATIVE_BINARY")? {
+        let native = PathBuf::from(native);
+        if !native.is_absolute() {
+            return Err("relative native runtime selection is unsupported");
+        }
+        if present(&native, uid)?
+            && trusted_tool_path(&native, uid, false)
+                .is_none_or(|real| !crate::source::trusted_interpreter(&real, uid, 4, false))
+        {
+            return Err("Native runtime binary or its ancestors/ACLs are untrusted");
+        }
+    }
     Ok(())
 }
 
@@ -249,8 +263,11 @@ pub(crate) fn validate(discovery: &Discovery) -> Result<(), &'static str> {
             if !entry.file_name().as_bytes().starts_with(b"docker-") {
                 continue;
             }
+            // Docker runs plugins by absolute path, so the interpreter of a
+            // script plugin must pass the same rule as PATH tools.
             if !guarded_names(&entry.path(), uid, &mut 64, false)
-                || trusted_tool_path(&entry.path(), uid, false).is_none()
+                || trusted_tool_path(&entry.path(), uid, false)
+                    .is_none_or(|real| !crate::source::trusted_interpreter(&real, uid, 4, true))
             {
                 return Err(
                     "Docker plugin executable or symlink target is untrusted or unprovable",

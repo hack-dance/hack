@@ -426,7 +426,8 @@ pub struct Card {
     pub action: CardAction,
     /// Authored argv for context binding; never parse `action` display text.
     pub authored_remedy: Option<AuthoredRemedy>,
-    /// A safe one-click fix needs the CLI to report a fix kind (R7a).
+    /// Design request that would allow a safe one-click fix (the CLI
+    /// reporting a fix kind). Internal metadata: never shown in the UI.
     pub needs: &'static str,
 }
 

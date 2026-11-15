@@ -3,6 +3,8 @@ use super::*;
 mod authored_exec;
 #[path = "run_tests.rs"]
 mod authored_run;
+#[path = "cold_environment_tests.rs"]
+mod cold_environment;
 use hack_config_compiler::environment::EnvMetadata;
 use std::{
     cell::{Cell, RefCell},
@@ -671,6 +673,8 @@ fn foreground_cancellation_after_network_creation_prevents_container_effects_and
 
 #[derive(Default)]
 struct FakeState {
+    /// Real Engine Config.Env capture used at the create/inspect boundary.
+    inspected_environment: Option<Value>,
     log_reads: Vec<(String, u16)>,
     log_source_deadlines: Vec<Instant>,
     log_data_deadlines: Vec<Instant>,
@@ -883,6 +887,9 @@ impl Backend for Fake {
             let id = format!("{:064x}", state.containers.len() + 1);
             let mut process = config.clone();
             process.as_object_mut().unwrap().remove("HostConfig");
+            if let Some(environment) = &state.inspected_environment {
+                process["Env"] = environment.clone();
+            }
             let selected = resource.networks.as_ref().unwrap();
             let mut attached = serde_json::Map::new();
             for logical in selected {

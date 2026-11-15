@@ -169,7 +169,7 @@ async function handleSsh(opts: {
     });
     if (!backend) {
       p.log.error(
-        "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij."
+        "No session mux backend available. Install tmux, or set sessions.mux to auto|tmux."
       );
       return 1;
     }
@@ -410,7 +410,7 @@ async function resolveSessionNameToConnect(opts: {
     });
     if (!backend) {
       p.log.error(
-        "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij."
+        "No session mux backend available. Install tmux, or set sessions.mux to auto|tmux."
       );
       return null;
     }
@@ -438,7 +438,7 @@ async function resolveSessionNameToConnect(opts: {
   });
   if (!backend) {
     p.log.error(
-      "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij."
+      "No session mux backend available. Install tmux, or set sessions.mux to auto|tmux."
     );
     return null;
   }
@@ -561,9 +561,6 @@ function buildWorkspaceAttachShellCommand(opts: {
   readonly workspaceName: string;
 }): string {
   const quotedSessionName = shellQuote({ value: opts.workspaceName });
-  if (opts.backend === "zellij") {
-    return `zellij attach ${quotedSessionName} 2>/dev/null || zellij attach --create ${quotedSessionName}`;
-  }
   return `tmux attach -d -t ${quotedSessionName} 2>/dev/null || tmux new -s ${quotedSessionName}`;
 }
 

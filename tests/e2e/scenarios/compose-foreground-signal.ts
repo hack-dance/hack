@@ -32,12 +32,13 @@ export const composeForegroundSignalScenario: Scenario = {
     if (info.exitCode !== 0) {
       ctx.skip("docker daemon unavailable");
     }
-    for (const persistentUpBefore of [false, true]) {
-      const cleanExit = join(
-        ctx.tempRoot,
-        `lifecycle-clean-exit-${persistentUpBefore}`
-      );
-      const writer = `process.on("SIGTERM", () => setTimeout(async () => { await Bun.write(${JSON.stringify(cleanExit)}, "clean"); process.exit(0); }, 1000)); setInterval(() => {}, 60000)`;
+    for (const mode of ["plain", "graceful", "forced"] as const) {
+      const persistentUpBefore = mode !== "plain";
+      const forced = mode === "forced";
+      const cleanExit = join(ctx.tempRoot, `lifecycle-clean-exit-${mode}`);
+      const writer = forced
+        ? 'process.on("SIGTERM", () => {}); setInterval(() => {}, 60000)'
+        : `process.on("SIGTERM", () => setTimeout(async () => { await Bun.write(${JSON.stringify(cleanExit)}, "clean"); process.exit(0); }, 1000)); setInterval(() => {}, 60000)`;
       const fixture = await createMonorepoFixture({
         parentDir: ctx.tempRoot,
         withHackConfig: true,
@@ -79,7 +80,7 @@ export const composeForegroundSignalScenario: Scenario = {
         `${fixture.name}.cleanup-released`
       );
       const shimDir = join(ctx.tempRoot, `${fixture.name}.bin`);
-      if (persistentUpBefore) {
+      if (forced) {
         const tmux = Bun.which("tmux");
         expect({
           that: tmux !== null,
@@ -109,9 +110,7 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
           hackHome: ctx.hackHome,
           extra: {
             HACK_RUNTIME_BACKEND: "compose",
-            ...(persistentUpBefore
-              ? { PATH: `${shimDir}:${process.env.PATH}` }
-              : {}),
+            ...(forced ? { PATH: `${shimDir}:${process.env.PATH}` } : {}),
           },
         }),
         detached: true,
@@ -158,13 +157,13 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
         }
         process.kill(-child.pid, "SIGINT");
         await interruptDuringCleanup({
-          enabled: persistentUpBefore,
+          enabled: forced,
           child,
           entered: cleanupEntered,
           released: cleanupReleased,
         });
         const code = await child.exited;
-        if (persistentUpBefore) {
+        if (persistentUpBefore && !forced) {
           expect({
             that: await Bun.file(cleanExit).exists(),
             message:
@@ -173,7 +172,7 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
         }
         const after = await containers();
         ctx.log(
-          `persistent lifecycle=${persistentUpBefore}; foreground exit=${code}; running project containers=${after.stdout.trim() || "none"}; output:\n${await Bun.file(logPath).text()}\n${await errorLog.text()}`
+          `lifecycle mode=${mode}; foreground exit=${code}; running project containers=${after.stdout.trim() || "none"}; output:\n${await Bun.file(logPath).text()}\n${await errorLog.text()}`
         );
         expect({
           that: code === 130,
@@ -291,7 +290,8 @@ async function interruptDuringCleanup(opts: {
       message: "must reach lifecycle teardown after Compose exits",
     });
     // Two more group interrupts arrive while the real tmux teardown is
-    // paused. Neither may terminate Hack or abandon its owned cleanup.
+    // paused. They request one forced retirement after the mux returns; neither
+    // may abandon ownership checks or the post-KILL confirmation.
     process.kill(-opts.child.pid, "SIGINT");
     await Bun.sleep(50);
     process.kill(-opts.child.pid, "SIGINT");

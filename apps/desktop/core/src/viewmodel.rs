@@ -29,7 +29,7 @@ impl Banner {
     pub fn text(&self) -> String {
         match self {
             Self::DaemonOff => {
-                "hackd is off or unreachable: start hackd to read project status".into()
+                "hackd is off or unreachable: run `hack daemon start` to read project status".into()
             }
             Self::DaemonMismatch { daemon, cli } => {
                 format!("hackd v{daemon} is running, CLI is v{cli}: restart hackd")
@@ -307,6 +307,12 @@ impl AppModel {
                 ctx.last_failed.clear();
             }
         }
+    }
+
+    /// Machine effects must wait for every project effect to settle.
+    #[must_use]
+    pub fn has_in_flight(&self) -> bool {
+        self.local.values().any(|c| c.in_flight.is_some())
     }
 
     /// Can `action` start for `project` now?
@@ -703,10 +709,10 @@ mod tests {
         let v = m.list();
         assert_eq!(v.phase, Phase::Ready);
         assert!(matches!(v.banners.last(), Some(Banner::Stale { .. })));
+        assert!(!m.project_list_readable());
         assert!(v.running.is_empty());
         assert_eq!(v.counts.unknown, 4);
         assert!(m.detail().unwrap().actions.is_empty());
-        assert!(!m.project_list_readable());
     }
 
     #[test]
@@ -928,6 +934,31 @@ mod tests {
             let d = m.detail().unwrap_or_else(|| panic!("{f:?}"));
             assert_eq!(d.name, "storefront");
             assert_eq!(d.url.as_deref(), Some("https://storefront.hack"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod machine_gate_tests {
+    use super::*;
+    #[test]
+    fn machine_gate_observes_every_project_until_each_action_settles() {
+        let mut model = AppModel::new();
+        assert!(!model.has_in_flight());
+        for project in ["alpha", "beta"] {
+            model.apply(Event::ActionStarted {
+                project: project.into(),
+                action: Action::Stop,
+            });
+        }
+        assert!(model.has_in_flight());
+        for project in ["alpha", "beta"] {
+            model.apply(Event::ActionFinished {
+                project: project.into(),
+                action: Action::Stop,
+                result: Err(SourceError::CliMissing),
+            });
+            assert_eq!(model.has_in_flight(), project == "alpha");
         }
     }
 }

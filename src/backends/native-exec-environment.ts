@@ -1,7 +1,10 @@
 import { HackCliError } from "../lib/cli-result.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
-import { prepareNativeProjectInput } from "./native-project-input.ts";
+import {
+  mergeNativeShellEnvironment,
+  prepareNativeProjectInput,
+} from "./native-project-input.ts";
 import {
   describeNativeRunEnvironmentChange,
   type NativeProjectRun,
@@ -36,6 +39,7 @@ export async function prepareNativeExecEnvironment(opts: {
   readonly run: NativeProjectRun;
   readonly composeFile: string;
   readonly service: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
   readonly prepare?: typeof prepareNativeProjectInput;
   readonly adaptAws?: typeof adaptNativeAwsEnvironment;
   readonly adaptGcloud?: typeof adaptNativeGcloudEnvironment;
@@ -58,6 +62,9 @@ export async function prepareNativeExecEnvironment(opts: {
       projectDir: opts.scope.projectDir,
       composeFile: opts.composeFile,
       envName: opts.run.effectiveEnvName,
+      env: opts.env ?? process.env,
+      profiles: opts.run.profiles ?? [],
+      selectedServices: [opts.service],
     });
     if (
       !input.serviceNames.includes(opts.service) ||
@@ -84,6 +91,7 @@ export async function prepareNativeExecEnvironment(opts: {
     ) {
       throw new SelectionChanged();
     }
+    input = mergeNativeShellEnvironment(input);
     if (opts.run.aws) {
       input = (
         await (opts.adaptAws ?? adaptNativeAwsEnvironment)({

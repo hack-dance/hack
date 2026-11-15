@@ -36,3 +36,10 @@ condition = "AND"
 paths = ['''^tests/project-task-catalog\.test\.ts$''']
 regexTarget = "line"
 regexes = ['''(?m)^\s*const SECRET_CANARY = "secret-canary-91c4d0";\s*$''']
+
+[[rules.allowlists]]
+description = "Real-engine fixture records the public Python image signing-key fingerprint, not a credential"
+condition = "AND"
+paths = ['''^packages/runtime-core/tests/fixtures/native-bare-env-engine\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*"GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",?\s*$''']

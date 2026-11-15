@@ -16,6 +16,10 @@ import {
   listSecretStoreReaders,
   secretStoreSelectionProblem,
 } from "./secret-store-retire.ts";
+import {
+  type UpgradeActionKind,
+  upgradeActionKind,
+} from "./upgrade-action-kind.ts";
 import type { UpgradeCheckProbes } from "./upgrade-check-probes.ts";
 import {
   classifyRegistryEntry,
@@ -26,11 +30,13 @@ import {
   type UpgradeFinding,
   type UpgradeFindingStatus,
 } from "./upgrade-check-project.ts";
+import { buildUpgradePlan, type UpgradePlanStep } from "./upgrade-plan.ts";
 
 export type {
   UpgradeFinding,
   UpgradeFindingStatus,
 } from "./upgrade-check-project.ts";
+export type { UpgradePlanStep, UpgradePlanTarget } from "./upgrade-plan.ts";
 
 /**
  * `hack upgrade check` (HACK-2189, the upgrade assistant HACK-2188): a
@@ -54,7 +60,13 @@ export type {
  *   action, never prose labelled as a command.
  */
 
-export const UPGRADE_CHECK_REPORT_VERSION = 1;
+/**
+ * 2 (HACK-2220): the plan has one step per kind of change (`count`,
+ * `targets`, `applies`), project reports name their registered `project`
+ * and `project_dir`, and `cli.build` says whether a source build ran.
+ * R17 adds `kind` on report findings and plan steps without removing detail.
+ */
+export const UPGRADE_CHECK_REPORT_VERSION = 2;
 
 /** How printed commands run the CLI that produced the report. */
 export type UpgradeCommandPrefix = {
@@ -106,30 +118,20 @@ export function renderUpgradeCommand(
 
 /** A finding as reported: its command rendered for the running CLI. */
 export type UpgradeReportFinding = UpgradeFinding & {
+  /** Classifies the supplied command/action, independently of severity. */
+  readonly kind: UpgradeActionKind;
   /** The command line for `args`; null when only `action` applies. */
   readonly command: string | null;
 };
 
-export type UpgradePlanStep = {
-  readonly order: number;
-  /** The finding this step resolves, or `snapshot`. */
-  readonly id: string;
-  /** `machine`, or the checkout's registered name. */
-  readonly scope: string;
-  readonly status: UpgradeFindingStatus | "step";
-  /** An executable command line; null for a manual step. */
-  readonly command: string | null;
-  /** Its Hack CLI arguments (after `cli.command`); null for a manual step. */
-  readonly args: readonly string[] | null;
-  /** A manual action: what to do when there is no command, or instead of it. */
-  readonly action: string | null;
-  readonly why: string;
-  readonly blocker: boolean;
-};
-
 export type UpgradeProjectReport = {
+  /** The checkout's name: the project's, or `project (worktree dir)`. */
   readonly name: string;
+  /** The registered project this checkout belongs to. */
+  readonly project: string;
   readonly root: string;
+  /** Its Hack directory (`.hack`), absolute. */
+  readonly project_dir: string | null;
   readonly state: "live" | "unreadable";
   readonly reason: string | null;
   readonly findings: readonly UpgradeReportFinding[];
@@ -149,6 +151,8 @@ export type UpgradeCheckReport = {
     readonly version: string;
     readonly channel: "stable" | "next";
     readonly candidate_run: boolean;
+    /** `source` when the CLI ran from a source checkout, not a built binary. */
+    readonly build: "release" | "source";
     /** How printed commands run this CLI, as a command-line prefix. */
     readonly command: string;
   };
@@ -185,6 +189,7 @@ export type UpgradeCheckReport = {
 
 type RegistryEntrySummary = {
   readonly name: string;
+  readonly project: string;
   readonly root: string;
   readonly reason: string;
 };
@@ -201,6 +206,8 @@ export async function runUpgradeCheck(opts: {
   readonly homeDir: string;
   readonly probes: UpgradeCheckProbes;
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** How the running CLI was built (default `release`). */
+  readonly build?: "release" | "source";
   readonly now?: () => number;
   /** Test seams: the whole budget and the per-check limit. */
   readonly budgetMs?: number;
@@ -213,6 +220,7 @@ export async function runUpgradeCheck(opts: {
   const prefix = upgradeCommandPrefix({ env, homeDir: opts.homeDir });
   const render = (finding: UpgradeFinding): UpgradeReportFinding => ({
     ...finding,
+    kind: upgradeActionKind(finding),
     command:
       finding.args === null ? null : renderUpgradeCommand(prefix, finding.args),
   });
@@ -230,7 +238,9 @@ export async function runUpgradeCheck(opts: {
     PROJECT_CONCURRENCY,
     async (project): Promise<UpgradeProjectReport> => ({
       name: project.name,
+      project: project.project,
       root: project.repoRoot,
+      project_dir: project.projectDir,
       state: "live",
       reason: null,
       findings: (
@@ -247,7 +257,9 @@ export async function runUpgradeCheck(opts: {
   const unreadableProjects: UpgradeProjectReport[] =
     registry.report.unreadable.map((entry) => ({
       name: entry.name,
+      project: entry.project,
       root: entry.root,
+      project_dir: null,
       state: "unreadable",
       reason: entry.reason,
       findings: [
@@ -285,10 +297,10 @@ export async function runUpgradeCheck(opts: {
   ];
   const blockers = scoped("blocker");
   const incomplete = scoped("incomplete");
-  const plan = buildPlan({
+  const plan: UpgradePlanStep[] = buildUpgradePlan({
     machine: machineFindings,
     projects: allProjects,
-    prefix,
+    render: (args) => renderUpgradeCommand(prefix, args),
   });
   const first = plan[0];
   const version = opts.cliVersion;
@@ -300,6 +312,7 @@ export async function runUpgradeCheck(opts: {
       version,
       channel: version.includes("-next.") ? "next" : "stable",
       candidate_run: isCandidateRun(env),
+      build: opts.build ?? "release",
       command: renderUpgradeCommand(prefix, []),
     },
     host_probes: opts.probes.disabled === true ? "disabled" : "enabled",
@@ -368,6 +381,7 @@ async function inspectRegistry(opts: { readonly deadline: number }): Promise<{
   );
   const summary = (checkout: RegisteredCheckout, reason: string) => ({
     name: checkout.name,
+    project: checkout.project,
     root: checkout.repoRoot,
     reason,
   });
@@ -1069,110 +1083,6 @@ function uncertainReadersFinding(readers: ReaderKeyStates): UpgradeFinding {
 // ---------------------------------------------------------------------------
 // Plan
 // ---------------------------------------------------------------------------
-
-/** Machine fixes in the order they should run. */
-const MACHINE_ORDER = [
-  "host-probes",
-  "registry",
-  "registry-unchecked",
-  "secret-store",
-  "registry-dead",
-  "registry-rejected",
-  "docker",
-  "global-infra",
-  "linux-dns",
-  "proxy-ports",
-  "daemon",
-] as const;
-
-/** Checkout fixes in the order they should run. */
-const PROJECT_ORDER = [
-  "project-config",
-  "project-store",
-  "env-secrets",
-  "env-format",
-  "env-key",
-  "tracked-files",
-  "ignore-rules",
-  "agent-integrations",
-] as const;
-
-const ACTIONABLE: ReadonlySet<UpgradeFindingStatus> = new Set([
-  "blocker",
-  "incomplete",
-  "warn",
-]);
-
-function buildPlan(opts: {
-  readonly machine: readonly UpgradeReportFinding[];
-  readonly projects: readonly UpgradeProjectReport[];
-  readonly prefix: UpgradeCommandPrefix;
-}): UpgradePlanStep[] {
-  type Draft = Omit<UpgradePlanStep, "order">;
-  const actionable = (finding: UpgradeReportFinding) =>
-    ACTIONABLE.has(finding.status) &&
-    (finding.args !== null || finding.action !== null);
-  const rank =
-    (order: readonly string[]) => (finding: UpgradeReportFinding) => {
-      const index = order.indexOf(finding.id);
-      return index === -1 ? order.length : index;
-    };
-  const toStep =
-    (scope: string) =>
-    (finding: UpgradeReportFinding): Draft => ({
-      id: finding.id,
-      scope,
-      status: finding.status,
-      command: finding.command,
-      args: finding.args,
-      action: finding.action,
-      why: finding.summary,
-      blocker: finding.status === "blocker",
-    });
-  const machineSteps = [...opts.machine]
-    .filter(actionable)
-    .sort((a, b) => rank(MACHINE_ORDER)(a) - rank(MACHINE_ORDER)(b))
-    .map(toStep("machine"));
-  const projectSteps = opts.projects.flatMap((project) =>
-    [...project.findings]
-      .filter(actionable)
-      .sort((a, b) => rank(PROJECT_ORDER)(a) - rank(PROJECT_ORDER)(b))
-      .map(toStep(project.name))
-  );
-  const steps = [...machineSteps, ...projectSteps];
-  const severity = (step: Draft) => {
-    if (step.status === "blocker") {
-      return 0;
-    }
-    return step.status === "incomplete" ? 1 : 2;
-  };
-  const ordered = steps
-    .map((step, index) => ({ step, index }))
-    .sort((a, b) => severity(a.step) - severity(b.step) || a.index - b.index)
-    .map(({ step }) => step);
-  // A snapshot first, before any step changes a file, so `hack upgrade
-  // rollback` can put back what the following steps change. It covers
-  // files only: not the Git index, services or containers.
-  const snapshot: Draft[] =
-    ordered.length > 0
-      ? [
-          {
-            id: "snapshot",
-            scope: "machine",
-            status: "step",
-            command: renderUpgradeCommand(opts.prefix, ["upgrade", "snapshot"]),
-            args: ["upgrade", "snapshot"],
-            action: null,
-            why: "Keep a private copy of the files the following steps change, so the upgrade rollback command can put them back.",
-            blocker: false,
-          },
-        ]
-      : [];
-  return [...snapshot, ...ordered].map((step, index) => ({
-    order: index + 1,
-    ...step,
-  }));
-}
 
 // ---------------------------------------------------------------------------
 // Helpers

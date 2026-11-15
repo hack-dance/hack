@@ -97,12 +97,50 @@ test("no named data volume means no advisory", () => {
     findNativeDataAdvisories(
       project({
         web: { image: "example/web:latest", volumes: ["./src:/app:ro"] },
-        tmp: { image: "example/web", volumes: ["/var/cache"] },
+        mode: { image: "example/web", volumes: ["/var/cache:ro"] },
+        bind: {
+          image: "example/web",
+          volumes: [{ type: "bind", target: "/d" }],
+        },
         undeclared: { image: "example/web", volumes: ["other:/data"] },
         interpolated: { image: "example/web", volumes: ["${DATA}:/data"] },
       })
     )
   ).toEqual([]);
+});
+
+test("an anonymous volume is retained on native, so it counts as data", () => {
+  for (const volumes of [
+    ["/var/lib/data"],
+    [{ type: "volume", target: "/var/lib/data" }],
+    [{ target: "/var/lib/data" }],
+  ]) {
+    expect(
+      findNativeDataAdvisories(
+        project({ db: { image: "example/database", volumes } }, {})
+      )
+    ).toEqual([
+      { code: "native_data_owner_handoff_unqualified", services: ["db"] },
+      { code: "native_retained_data_mutable_image", services: ["db"] },
+    ]);
+  }
+});
+
+test("a refused anonymous-volume shape does not add a retained-data advisory", () => {
+  for (const mount of [
+    { type: "volume", target: "/data", volume: { subpath: "cache" } },
+    { type: "volume", target: "/data", volume: null },
+    { type: "volume", target: "/data", volume: {} },
+    { type: "volume", source: null, target: "/data" },
+    { type: "volume", source: "", target: "/data" },
+    { type: "bind", target: "/data" },
+  ]) {
+    expect(
+      findNativeDataAdvisories(
+        project({ db: { image: "example/database", volumes: [mount] } }, {})
+      )
+    ).toEqual([]);
+  }
 });
 
 test("a data service without user and on a mutable tag gets both advisories", () => {

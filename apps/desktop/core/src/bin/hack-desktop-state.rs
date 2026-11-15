@@ -10,7 +10,7 @@
 //! invoking today's registry-writing `hack projects` fallback.
 //!
 //! ```text
-//! hack-desktop-state [--project <name>] [--compact] [--setup-fixture missing-cli|partial|ready|native-unknown]
+//! hack-desktop-state [--project <name>] [--compact] [--setup-fixture missing-cli|partial|ready|native-unknown|service-unavailable]
 //! ```
 
 use std::time::Instant;
@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop-state [--project <name>] [--compact] [--setup-fixture missing-cli|partial|ready|native-unknown]"
+        "usage: hack-desktop-state [--project <name>] [--compact] [--setup-fixture missing-cli|partial|ready|native-unknown|service-unavailable]"
     );
     std::process::exit(2)
 }

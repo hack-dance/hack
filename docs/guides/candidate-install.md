@@ -104,9 +104,68 @@ Leave `HACK_RUNTIME_BACKEND` unset, or set it to `native`, to return to the nati
 default. A shell that exported `HACK_RUNTIME_BACKEND=compose` for other work also
 selects Compose for `hack-next`; unset it before native testing.
 
-The bundled `hack-v5` entrypoint follows the same rule for manual bundles:
-unset selects native and requires `HACK_NATIVE_HOME`; `compose` needs no native
-home and uses your own Hack home.
+The bundled `hack-v5` entrypoint follows the same backend rule for manual bundles.
+Native defaults to `~/.hack/native-runtime`, or `$HACK_HOME/native-runtime` when
+`HACK_HOME` is selected. An absolute `HACK_NATIVE_HOME` overrides that default.
+Selecting a home creates nothing; setup creates missing directories privately
+after consent. Existing homes must be owned by you, mode 0700, and have no symlink
+components. `compose` needs no native home and uses your own Hack home.
+
+### Prepare the native runtime once
+
+Use the candidate frontend for both setup and project commands:
+
+```sh
+hack-next native setup
+hack-next doctor --native-preflight
+hack-next up -d
+```
+
+The command is `native setup` because it prepares native provider files without
+starting a VM or changing the Compose backend. It lists the pinned downloads,
+sizes, SHA-256 hashes, cache and destination, then asks once. Scripts use
+`hack-next native setup --accept-downloads --json`; JSON never prompts and passes
+the runtime's setup result through unchanged. Completed files are verified and
+reused; interrupted downloads resume. The complete offline archive input form is
+also available; see [provider setup](native-candidate.md).
+
+Preflight reports runtime installation separately from project review, in text
+and in the JSON `runtime_setup` item. A fresh or interrupted home blocks startup
+with `hack native setup` as its fix. Noninteractive `up` refuses before starting
+an owner; interactive `up` offers the same pinned setup and continues only after
+successful setup and a fresh readiness check. Record readiness is a quick check;
+startup still verifies prepared content before executing it.
+
+![Native first-use flow](native-first-use.svg)
+
+Diagram [source](native-first-use.mmd); rendered with Pele 1.9.0.
+
+Managed `hack-next` keeps its version's receipt-owned `native-home` so upgrades
+can find and stop its runtime. It refuses a differing `HACK_NATIVE_HOME` rather
+than silently ignoring it. Use that version's bundle `hack-v5` launcher for a
+custom home. To move a manual bundle's home, stop its projects and runtime using
+the old home and matching executor, preserve the old home for retained data, then
+select a fresh absolute `HACK_NATIVE_HOME` and run `native setup` again. Setup
+does not migrate live receipts, disks or project data. The machine home is
+distinct from each project's `.hack/native/` adaptation directory.
+An explicit `native setup` selects the native home even when the surrounding
+shell sets `HACK_RUNTIME_BACKEND=compose`; ordinary Compose commands still remove
+native selectors.
+
+The frontend passes only system environment variables to setup; project values,
+credentials and proxy variables are excluded. Downloads need direct HTTPS access;
+use the offline inputs where a proxy is required. Invalid prepared trees and pin
+mismatches are preserved and need their own repair or a fresh home, rather than
+an endless setup retry. Setup-only homes permit managed upgrades only after an
+existing-lock quiescence check; unexpected or busy state still refuses. As with
+the previous empty-home check, a detached process that has not created any state
+is outside this observation's proof.
+
+Older candidate executors cannot prove the new setup-only quiescence predicate.
+If an older selected version was set up but never started, finish its setup,
+start a project with that old version's `hack-next up`, then run `hack-next down`
+before upgrading. Its runtime must report `stopped`. An interrupted or unknown
+old home still refuses an upgrade; do not remove its receipts to bypass the check.
 
 ### Stop stable hackd before a Compose run
 

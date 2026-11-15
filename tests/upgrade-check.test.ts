@@ -235,11 +235,39 @@ test("a project with only the legacy TOML config or only a Compose file is live,
   expect(report.registry.missing).toEqual([]);
 });
 
+for (const ready of [true, false]) {
+  test(`upgrade native configuration finding does not claim runtime readiness: ${ready}`, async () => {
+    const project = await liveProject("native-config-only");
+    const findings = await inspectUpgradeProject({
+      project: { ...project, project: project.name },
+      homeDir: home,
+      deadline: Date.now() + 60_000,
+      nativePreflight: async () => ({
+        ready,
+        blockers: ready ? 0 : 3,
+        warnings: 0,
+      }),
+    });
+    const finding = findings.find((value) => value.id === "native-preflight");
+    expect(finding?.status).toBe(ready ? "ok" : "info");
+    expect(finding?.summary).toContain(
+      "runtime setup and runtime review were not checked"
+    );
+    expect(finding?.summary).not.toContain("Ready for the native backend");
+    if (ready) {
+      expect(finding?.summary).toContain("hack native setup");
+      expect(finding?.summary).toContain("hack doctor --native-preflight");
+    } else {
+      expect(finding?.summary).toContain("3 blocker(s)");
+    }
+  });
+}
+
 test("once the time budget is spent, project checks report not checked without running", async () => {
   const project = await liveProject("app-late");
   let ran = false;
   const findings = await inspectUpgradeProject({
-    project,
+    project: { ...project, project: project.name },
     homeDir: home,
     deadline: Date.now() - 1,
     nativePreflight: async () => {
@@ -280,26 +308,43 @@ test("the plan starts with the snapshot, then blockers, then machine and project
     {
       scope: "app-blocked",
       id: "env-format",
-      summary: expect.stringContaining("link or not a regular file"),
+      summary: expect.stringContaining("env-layer-refused"),
     },
   ]);
   expect(
     report.plan.map((step) => [step.id, step.scope, step.blocker])
   ).toEqual([
     ["snapshot", "machine", false],
-    ["env-format", "app-blocked", true],
+    ["env-format", "projects", true],
     // Its dangling layer link cannot be inspected for secrets either.
     ["env-secrets", "app-blocked", false],
     ["registry-dead", "machine", false],
     ["global-infra", "machine", false],
-    ["env-format", "app-legacy", false],
   ]);
   expect(report.next_command).toBe("hack upgrade snapshot");
-  const legacyStep = report.plan.find((step) => step.scope === "app-legacy");
-  expect(legacyStep?.command).toBe(
+  const grouped = report.plan.filter((step) => step.id === "env-format");
+  expect(grouped).toHaveLength(1);
+  expect(
+    grouped[0]?.targets.find((target) => target.scope === "app-blocked")?.status
+  ).toBe("blocker");
+  expect(
+    grouped[0]?.targets.find((target) => target.scope === "app-legacy")?.status
+  ).toBe("warn");
+  expect(grouped[0]?.targets.map((target) => target.scope).sort()).toEqual([
+    "app-blocked",
+    "app-legacy",
+  ]);
+  const legacyTarget = grouped[0]?.targets.find(
+    (target) => target.scope === "app-legacy"
+  );
+  expect(legacyTarget?.command).toBe(
     `hack doctor --migrate-env-config --path ${legacy.repoRoot}`
   );
-  expect(legacyStep?.why).toContain("legacy-json, dotenv");
+  expect(
+    report.projects
+      .find((project) => project.name === "app-legacy")
+      ?.findings.find((finding) => finding.id === "env-format")?.summary
+  ).toContain("legacy-json, dotenv");
 });
 
 test("a host with nothing to do is ready, with no plan and no next command", async () => {
@@ -325,6 +370,7 @@ test("a host with nothing to do is ready, with no plan and no next command", asy
     version: "5.0.0-next.17",
     channel: "next",
     candidate_run: false,
+    build: "release",
     command: "hack",
   });
 });
@@ -1287,7 +1333,7 @@ test("a host probe's children end with the probe, not after the report", async (
   expect(await alive()).toEqual([]);
 }, 20_000);
 
-test("candidate commands keep a path with spaces, quotes and ' hack ' intact", async () => {
+test("candidate review commands preserve the executable path and group unusual checkout names", async () => {
   const name = "my hack repo's";
   const project = await liveProject(name);
   await writeFile(join(project.projectDir, "hack.env.json"), "{}\n");
@@ -1303,12 +1349,7 @@ test("candidate commands keep a path with spaces, quotes and ' hack ' intact", a
     },
   });
   const step = report.plan.find((s) => s.id === "env-format");
-  expect(step?.args).toEqual([
-    "doctor",
-    "--migrate-env-config",
-    "--path",
-    project.repoRoot,
-  ]);
+  expect(step?.args).toEqual(["upgrade", "review", "--only", "env-format"]);
   // Split the command the way a shell does: every argument survives.
   const split = Bun.spawnSync([
     "sh",
@@ -1321,10 +1362,10 @@ test("candidate commands keep a path with spaces, quotes and ' hack ' intact", a
   expect(words).toEqual([
     "HACK_RUNTIME_BACKEND=compose",
     join(weirdHome, ".hack-next", "bin", "hack-next"),
-    "doctor",
-    "--migrate-env-config",
-    "--path",
-    project.repoRoot,
+    "upgrade",
+    "review",
+    "--only",
+    "env-format",
   ]);
 });
 
@@ -1344,6 +1385,211 @@ test("a step with no command is manual: its action is never shown as a command",
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
+
+test("a sibling-linked env layer has a named closed refusal in check and review without values", async () => {
+  const project = await liveProject("linked-app");
+  const sibling = join(root, "sibling-checkout");
+  await mkdir(sibling);
+  const target = join(sibling, "private-layer.yaml");
+  await writeFile(target, `version: 1\nvars:\n  TOKEN: ${SENTINEL}\n`);
+  const layer = "hack.env.dev.local.yaml";
+  await symlink(target, join(project.projectDir, layer));
+  await writeRegistry([project]);
+  const before = [
+    await tree(project.repoRoot),
+    await tree(sibling),
+    await tree(hackHome),
+  ];
+  const report = await check(healthyProbes());
+  const finding = report.projects[0]?.findings.find(
+    (item) => item.id === "env-format"
+  );
+  expect(finding?.diagnostic).toEqual({
+    code: "env-layer-refused",
+    step: "env-format",
+    layer,
+  });
+  expect(finding?.summary).toContain(layer);
+  expect(finding?.summary).not.toContain("unexpected-error");
+  expect(finding?.action).toContain("replace the link with a real file here");
+  expect(finding?.action).toContain("remove the layer");
+  const checked = await cli(["upgrade", "check", "--json"]);
+  expect(checked.code).toBe(1);
+  expect(
+    JSON.parse(checked.stdout).data.projects[0].findings.find(
+      (item: { id: string }) => item.id === "env-format"
+    ).diagnostic
+  ).toEqual(finding?.diagnostic);
+  const checkedText = await cli(["upgrade", "check"]);
+  expect(checkedText.stdout).toContain("env-layer-refused");
+  expect(checkedText.stdout).toContain(layer);
+  expect(checkedText.stdout).toContain(
+    "replace the link with a readable file in this checkout"
+  );
+  const review = await cli([
+    "upgrade",
+    "review",
+    "--only",
+    "env-format",
+    "--json",
+  ]);
+  expect(review.code).toBe(0);
+  expect(
+    JSON.parse(review.stdout).data.checkouts[0].findings[0].diagnostic
+  ).toEqual(finding?.diagnostic);
+  const text = await cli(["upgrade", "review", "--only", "env-format"]);
+  expect(text.stdout).toContain("env-layer-refused");
+  expect(text.stdout).toContain(layer);
+  expect(text.stdout).toContain("rerun hack upgrade check");
+  for (const output of [
+    JSON.stringify(report),
+    checked.stdout + checked.stderr,
+    checkedText.stdout + checkedText.stderr,
+    review.stdout + review.stderr,
+    text.stdout + text.stderr,
+  ]) {
+    expect(output).not.toContain(SENTINEL);
+    expect(output).not.toContain(Buffer.from(SENTINEL).toString("base64"));
+    expect(output).not.toContain(target);
+  }
+  expect([
+    await tree(project.repoRoot),
+    await tree(sibling),
+    await tree(hackHome),
+  ]).toEqual(before);
+}, 60_000);
+
+test("an invalid env layer entry uses the same refusal code and filename-only remedy", async () => {
+  const project = await liveProject("invalid-layer");
+  const layer = "hack.env.dev.local.yaml";
+  await mkdir(join(project.projectDir, layer));
+  await writeRegistry([project]);
+  const report = await check(healthyProbes());
+  const finding = report.projects[0]?.findings.find(
+    (item) => item.id === "env-format"
+  );
+  expect(finding?.diagnostic).toEqual({
+    code: "env-layer-refused",
+    step: "env-format",
+    layer,
+  });
+  expect(finding?.status).toBe("blocker");
+  expect(finding?.action).not.toContain(project.projectDir);
+});
+
+test("a case-variant refused env layer keeps the file remedy", async () => {
+  const project = await liveProject("case-layer");
+  const layer = "HACK.ENV.DEV.LOCAL.YAML";
+  const target = join(root, "outside-layer.yaml");
+  await writeFile(target, SENTINEL);
+  await symlink(target, join(project.projectDir, layer));
+  await writeRegistry([project]);
+  const report = await check(healthyProbes());
+  const finding = report.projects[0]?.findings.find(
+    (item) => item.id === "env-format"
+  );
+  expect(finding?.diagnostic?.layer).toBe(layer);
+  expect(finding?.action).toContain("replace the link");
+  expect(finding?.action).not.toContain("readable directory");
+  expect(JSON.stringify(report)).not.toContain(SENTINEL);
+});
+
+test("unclassified upgrade errors keep a fixed failing step and never echo the error", async () => {
+  await writeRegistry([await liveProject("unknown-error")]);
+  const report = await check(
+    healthyProbes({
+      nativePreflight: async () => {
+        throw new Error(SENTINEL);
+      },
+    })
+  );
+  const finding = report.projects[0]?.findings.find(
+    (item) => item.id === "native-preflight"
+  );
+  expect(finding?.diagnostic).toEqual({
+    code: "unexpected-error",
+    step: "native-preflight",
+  });
+  expect(finding?.summary).toBe(
+    "Not checked: native-preflight failed (unexpected-error)."
+  );
+  expect(JSON.stringify(report)).not.toContain(SENTINEL);
+});
+
+for (const layer of ["hack.env.dev.local.yaml", "HACK.ENV.DEV.LOCAL.YAML"]) {
+  test.skipIf(process.getuid?.() === 0)(
+    `an unreadable regular env layer ${layer} has the same named refusal`,
+    async () => {
+      const project = await liveProject("unreadable-layer");
+      const path = join(project.projectDir, layer);
+      await writeFile(path, SENTINEL, { mode: 0o000 });
+      await writeRegistry([project]);
+      try {
+        const report = await check(healthyProbes());
+        const finding = report.projects[0]?.findings.find(
+          (item) => item.id === "env-format"
+        );
+        expect(finding?.diagnostic).toEqual({
+          code: "env-layer-refused",
+          step: "env-format",
+          layer,
+        });
+        expect(JSON.stringify(report)).not.toContain(SENTINEL);
+      } finally {
+        await chmod(path, 0o600);
+      }
+    }
+  );
+}
+
+test("reported kinds distinguish guarded apply, broad Doctor commands and host changes", async () => {
+  const project = await liveProject("action-kinds");
+  const git = Bun.spawnSync(["git", "-C", project.repoRoot, "init", "-q"], {
+    env: fixtureGitEnv(),
+  });
+  expect(git.exitCode).toBe(0);
+  await writeRegistry([project]);
+  const probes = healthyProbes({
+    globalInfra: async () => ({ installed: false, running: false }),
+  });
+  const report = await check(probes);
+  expect(report.report_version).toBe(2);
+  expect(
+    report.machine.find((finding) => finding.id === "global-infra")?.kind
+  ).toBe("admin");
+  expect(report.plan.find((step) => step.id === "global-infra")?.kind).toBe(
+    "admin"
+  );
+  expect(report.plan.find((step) => step.id === "snapshot")?.kind).toBe("safe");
+  expect(
+    report.projects[0]?.findings.find(
+      (finding) => finding.id === "ignore-rules"
+    )?.kind
+  ).toBe("manual");
+  expect(report.plan.find((step) => step.id === "ignore-rules")?.kind).toBe(
+    "safe"
+  );
+  for (const item of [
+    ...report.machine,
+    ...report.projects.flatMap((row) => row.findings),
+    ...report.plan,
+  ]) {
+    expect(["safe", "admin", "manual"]).toContain(item.kind);
+  }
+  // An unsafe checkout keeps the grouped wrapper from being offered as Run.
+  await writeFile(join(project.projectDir, "hack.env.json"), "{}\n");
+  await symlink(
+    join(root, "missing-layer.yaml"),
+    join(project.projectDir, "hack.env.default.yaml")
+  );
+  const blocked = await check(probes);
+  expect(blocked.plan.find((step) => step.id === "ignore-rules")?.kind).toBe(
+    "manual"
+  );
+  expect(blocked.plan.find((step) => step.id === "env-format")?.kind).toBe(
+    "manual"
+  );
+});
 
 async function cli(args: readonly string[]) {
   const child = Bun.spawn([process.execPath, ENTRYPOINT, ...args], {
@@ -1393,7 +1639,9 @@ test("hack upgrade check exits 1 naming the blockers, and prints the next comman
   expect(text.code).toBe(1);
   expect(text.stdout).toContain("Blocked by: app-blocked env-format");
   expect(text.stdout).toContain("Next: hack upgrade snapshot");
-  expect(text.stdout).toContain("[blocker] hack doctor --path");
+  expect(text.stdout).toContain(
+    "[blocker] hack upgrade review --only env-format"
+  );
 }, 60_000);
 
 test("hack upgrade snapshot, then rollback restores exact bytes; a changed file needs --overwrite", async () => {

@@ -278,7 +278,7 @@ fn card(c: &Card, cx: &mut Context<HackApp>) -> AnyElement {
                 .child(c.affected.label())
                 .children(command)
                 .child(div().flex_1())
-                .child(format!("One-click fix needs {}", c.needs)),
+                .child("Copy only: no one-click fix yet"),
         )
         .into_any_element()
 }

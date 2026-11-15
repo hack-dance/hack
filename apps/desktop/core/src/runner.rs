@@ -8,9 +8,10 @@
 //! - stderr is kept (last 8 KB) only for error messages; it is never parsed.
 //! - `HACK_NO_INTERACTIVE=1` is always set: the app never answers prompts.
 
+use crate::process::Child;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -70,6 +71,7 @@ pub struct CliRunner {
     /// An invalid explicit selection: spawn reports `NotFound`.
     missing: bool,
     path_name: Option<String>,
+    clear_env: bool,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
     term_grace: Duration,
 }
@@ -89,6 +91,7 @@ impl CliRunner {
             cwd: None,
             missing: false,
             path_name: None,
+            clear_env: false,
             term_grace: TERM_GRACE,
         }
     }
@@ -166,9 +169,32 @@ impl CliRunner {
         self
     }
 
+    /// Read one authored non-secret key without enumerating the environment.
+    pub fn effective_env(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into())
+            .or_else(|| {
+                if self.clear_env {
+                    None
+                } else {
+                    std::env::var_os(key)
+                }
+            })
+    }
+    pub fn with_clean_env(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
+
     fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(program);
+        if self.clear_env {
+            cmd.env_clear();
+        }
         cmd.args(args);
         if let Some(p) = path {
             cmd.arg("--path").arg(p);
@@ -199,7 +225,7 @@ impl CliRunner {
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match self.command(args, path, &program).spawn() {
+            match crate::process::spawn(&mut self.command(args, path, &program), !self.clear_env) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;
@@ -591,7 +617,6 @@ pub fn parse_version(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// A fake `hack` in a fresh temp dir: a shell script with a fixed body.
     struct FakeHack {
@@ -607,9 +632,19 @@ mod tests {
             ));
             std::fs::create_dir_all(&dir).unwrap();
             let p = dir.join("hack");
-            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Self { dir }
+            crate::test_support::script(
+                &p,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = __warmup ]; then echo '{{}}'; exit 0; fi\n{body}\n"
+                ),
+            );
+            let fake = Self { dir };
+            // macOS may scan a newly written executable on first launch. Keep
+            // that delay outside every test's product-timeout measurement.
+            fake.runner()
+                .run_json::<Value>(&["__warmup"], None, Duration::from_secs(60))
+                .expect("fake CLI warmup");
+            fake
         }
         fn runner(&self) -> CliRunner {
             CliRunner::new(self.dir.join("hack")).with_env("HACK_HOME", &self.dir.to_string_lossy())
@@ -689,49 +724,88 @@ mod tests {
         false
     }
 
+    /// A scheduling allowance, not a product latency target. Completion of
+    /// Drop proves its reader join finished; process checks prove retirement.
+    fn completes<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        rx.recv_timeout(Duration::from_secs(60))
+            .expect("process cleanup did not complete within the test deadline")
+    }
+
+    fn assert_retired(pid: i32) {
+        assert!(!process_gone(i32::try_from(std::process::id()).unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !process_gone(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(process_gone(pid), "process {pid} survived cleanup");
+    }
+
     #[test]
     fn timeout_kills_the_process_group() {
         // The child spawns a grandchild that would outlive a plain kill.
-        // The timeout leaves room for a slow first start of a new script
-        // (macOS scans freshly written executables); `ready` tells a slow
-        // start apart from a runner failure.
+        // FakeHack warms the script before this timed run; `ready` proves
+        // the body ran, rather than timing out before it exercised cleanup.
         let f = FakeHack::new(
-            "echo ready > \"$HACK_HOME/ready\"\nsleep 30 &\necho $! > \"$HACK_HOME/grandchild\"\nwait",
+            "echo ready > \"$HACK_HOME/ready\"\nsleep 300 &\necho $! > \"$HACK_HOME/grandchild\"\nwait",
         );
-        let started = Instant::now();
-        let r = f
-            .runner()
-            .with_term_grace(Duration::from_millis(500))
-            .run_json::<Value>(&["up"], None, Duration::from_secs(2));
+        let runner = f.runner();
+        let r = completes(move || {
+            runner
+                .with_term_grace(Duration::from_millis(500))
+                .run_json::<Value>(&["up"], None, Duration::from_secs(2))
+        });
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
         assert!(f.dir.join("ready").exists(), "the fake CLI never started");
-        assert!(started.elapsed() < Duration::from_secs(5));
         let pid: i32 = std::fs::read_to_string(f.dir.join("grandchild"))
             .expect("grandchild pid written")
             .trim()
             .parse()
             .unwrap();
-        // Give the kernel a moment to deliver SIGKILL and reparent/reap.
-        // Positive control: a live process must never count as gone, so
-        // the assertion below cannot pass just because a probe is missing.
-        assert!(!process_gone(i32::try_from(std::process::id()).unwrap()));
-        let gone = (0..100).any(|_| {
-            thread::sleep(Duration::from_millis(20));
-            process_gone(pid)
-        });
-        assert!(gone, "grandchild {pid} survived the timeout");
+        assert_retired(pid);
     }
 
     #[test]
     fn timeout_covers_a_descendant_holding_the_pipe() {
         // `hack` exits at once, but a background child keeps stdout open.
-        let f = FakeHack::new("sleep 30 &\necho '{}'");
-        let started = Instant::now();
-        let r = f
-            .runner()
-            .run_json::<Value>(&["x"], None, Duration::from_millis(300));
+        let f = FakeHack::new("sleep 300 &\necho $! > \"$HACK_HOME/grandchild\"\necho '{}'");
+        let runner = f.runner();
+        let r =
+            completes(move || runner.run_json::<Value>(&["x"], None, Duration::from_millis(300)));
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
-        assert!(started.elapsed() < Duration::from_secs(5));
+        let pid = std::fs::read_to_string(f.dir.join("grandchild"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_retired(pid);
+    }
+
+    #[test]
+    fn clean_environment_reaches_the_child_on_every_platform() {
+        // The Apple spawn boundary builds the child environment itself, so a
+        // clean runner must say so explicitly; env_clear alone is not visible.
+        assert!(
+            std::env::var_os("HOME").is_some(),
+            "precondition: parent HOME"
+        );
+        let f = FakeHack::new(r#"printf '%s|%s' "${HOME-unset}" "${HACK_HOME-unset}""#);
+        let (inherited, _, code) = f.runner().run_raw(&["x"], None, T).unwrap();
+        assert_eq!(code, Some(0));
+        assert!(
+            !inherited.starts_with("unset|"),
+            "positive control: {inherited}"
+        );
+        let (clean, _, code) = f
+            .runner()
+            .with_clean_env()
+            .run_raw(&["x"], None, T)
+            .unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(clean, format!("unset|{}", f.dir.to_string_lossy()));
     }
 
     #[test]
@@ -794,34 +868,39 @@ mod tests {
         let f = FakeHack::new(
             r#"trap 'echo term > "$HACK_HOME/got"; exit 0' TERM
 echo ready > "$HACK_HOME/ready"
-sleep 30 &
+sleep 300 &
 wait $!"#,
         );
-        let started = Instant::now();
-        let r = f
-            .runner()
-            .with_term_grace(Duration::from_secs(3))
-            .run_json::<Value>(&["up"], None, Duration::from_secs(2));
+        // A full-grace regression must exceed the generous completion bound.
+        let runner = f.runner();
+        let r = completes(move || {
+            runner
+                .with_term_grace(Duration::from_secs(300))
+                .run_json::<Value>(&["up"], None, Duration::from_secs(2))
+        });
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
         assert!(f.dir.join("ready").exists(), "the fake CLI never started");
         assert!(f.dir.join("got").exists(), "SIGTERM reached the CLI");
-        assert!(
-            started.elapsed() < Duration::from_millis(4500),
-            "exited on TERM without the full grace: {:?}",
-            started.elapsed()
-        );
     }
 
     #[test]
     fn a_cli_ignoring_sigterm_is_killed_after_the_grace() {
-        let f = FakeHack::new("trap '' TERM\nwhile :; do sleep 0.05; done");
-        let started = Instant::now();
-        let r = f
-            .runner()
-            .with_term_grace(Duration::from_millis(300))
-            .run_json::<Value>(&["up"], None, Duration::from_millis(200));
+        let f = FakeHack::new(
+            "echo $$ > \"$HACK_HOME/pid\"\ntrap '' TERM\nwhile :; do sleep 0.05; done",
+        );
+        let runner = f.runner();
+        let r = completes(move || {
+            runner
+                .with_term_grace(Duration::from_millis(300))
+                .run_json::<Value>(&["up"], None, Duration::from_millis(200))
+        });
         assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
-        assert!(started.elapsed() < Duration::from_secs(3));
+        let pid = std::fs::read_to_string(f.dir.join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_retired(pid);
     }
 
     #[test]
@@ -928,7 +1007,7 @@ wait $!"#,
             r#"echo '{"type":"start","backend":"compose"}'
 echo '{"type":"log","entry":{"service":"api","message":"hi"}}'
 echo 'plain text'
-sleep 30"#,
+exec sleep 300"#,
         );
         let s = f.runner().stream_logs(&["logs", "--json"], None).unwrap();
         let mut got = Vec::new();
@@ -938,8 +1017,16 @@ sleep 30"#,
         assert_eq!(got[0].kind, "start");
         assert_eq!(got[1].entry.as_ref().unwrap().message, "hi");
         assert_eq!(got[2].message.as_deref(), Some("plain text"));
-        let t = Instant::now();
-        drop(s);
-        assert!(t.elapsed() < Duration::from_secs(5));
+        let pid = i32::try_from(s.child.id()).unwrap();
+        assert!(
+            !process_gone(pid),
+            "positive control: stream child is alive"
+        );
+        assert!(
+            !s.reader.as_ref().unwrap().is_finished(),
+            "reader awaits EOF"
+        );
+        completes(move || drop(s));
+        assert_retired(pid);
     }
 }

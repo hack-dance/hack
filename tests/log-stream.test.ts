@@ -4,6 +4,8 @@ import {
   buildLogStreamEndEvent,
   buildLogStreamLogEvent,
   buildLogStreamStartEvent,
+  capLogEntry,
+  LOG_STREAM_SCHEMA,
   writeLogStreamEvent,
 } from "../src/ui/log-stream.ts";
 
@@ -66,4 +68,50 @@ test("writeLogStreamEvent emits NDJSON", () => {
   const parsed = JSON.parse(output.trim()) as { type: string; reason?: string };
   expect(parsed.type).toBe("end");
   expect(parsed.reason).toBe("eof");
+});
+
+test("only the start event carries the stream schema", () => {
+  expect(buildLogStreamStartEvent({ context: baseContext }).schema).toBe(
+    LOG_STREAM_SCHEMA
+  );
+  expect(LOG_STREAM_SCHEMA).toBe("hack.logs.v1");
+  expect(buildLogStreamEndEvent({ context: baseContext }).schema).toBe(
+    undefined
+  );
+});
+
+test("capLogEntry leaves an entry within the bound unchanged", () => {
+  const entry: LogJsonEntry = {
+    source: "compose",
+    message: "ok",
+    raw: "api-1 | ok",
+    fields: { user: "1" },
+  };
+  expect(capLogEntry({ entry, maxBytes: 64 })).toBe(entry);
+});
+
+test("capLogEntry cuts on a character boundary and drops parsed fields", () => {
+  // Each emoji is four UTF-8 bytes; seven bytes hold one, never a half.
+  const entry: LogJsonEntry = {
+    source: "loki",
+    message: "\u{1F600}\u{1F600}",
+    raw: "abcdefghij",
+    fields: { big: "x".repeat(100) },
+    service: "api",
+  };
+  const capped = capLogEntry({ entry, maxBytes: 7 });
+  expect(capped.message).toBe("\u{1F600}");
+  expect(capped.raw).toBe("abcdefg");
+  expect(capped.truncated).toBe(true);
+  expect(capped.fields).toBeUndefined();
+  expect(capped.service).toBe("api");
+});
+
+test("a log event applies the context's maxLineBytes", () => {
+  const event = buildLogStreamLogEvent({
+    context: { ...baseContext, maxLineBytes: 3 },
+    entry: { source: "compose", message: "hello", raw: "hello" },
+  });
+  expect(event.entry?.message).toBe("hel");
+  expect(event.entry?.truncated).toBe(true);
 });

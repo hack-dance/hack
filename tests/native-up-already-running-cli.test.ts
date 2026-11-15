@@ -17,6 +17,7 @@ import {
   classifyNativeAlreadyRunning,
   nativeScopedCommand,
 } from "../src/commands/native-up-already-running.ts";
+import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -94,6 +95,7 @@ async function fixture(opts: {
   await writeFile(
     binary,
     `#!/bin/sh
+${nativeSetupShellReply()}
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
 printf '%s' '{"code":"runtime_not_running"}' >&2

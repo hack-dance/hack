@@ -130,7 +130,12 @@ impl DaemonClient {
             if left.is_zero() {
                 return Err(DaemonError::Timeout);
             }
-            s.set_read_timeout(Some(left)).map_err(io_err)?;
+            // Wait with poll rather than SO_RCVTIMEO: macOS rejects setting a
+            // receive timeout (EINVAL) once the peer has closed, which is the
+            // normal end of an HTTP/1.1 response here.
+            if !readable_within(&s, left)? {
+                return Err(DaemonError::Timeout);
+            }
             let n = match s.read(&mut buf) {
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 result => result.map_err(io_err)?,
@@ -144,6 +149,38 @@ impl DaemonClient {
             raw.extend_from_slice(&buf[..n]);
         }
         parse_http(&raw)
+    }
+}
+
+/// Whether `stream` has data, end of file or an error within `timeout`.
+fn readable_within(stream: &UnixStream, timeout: Duration) -> Result<bool, DaemonError> {
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let mut poll = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll points to one live initialized pollfd for this call.
+        let ready = unsafe {
+            libc::poll(
+                &mut poll,
+                1,
+                left.as_millis().max(1).min(i32::MAX as u128) as i32,
+            )
+        };
+        match ready {
+            0 => return Ok(false),
+            n if n > 0 => return Ok(true),
+            _ => {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(io_err(e));
+                }
+            }
+        }
     }
 }
 

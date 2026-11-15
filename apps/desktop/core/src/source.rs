@@ -1388,6 +1388,14 @@ esac
         );
     }
 
+    /// Docker's metadata directory name for a context: hex sha256 of the name.
+    fn context_dir(name: &str) -> String {
+        <sha2::Sha256 as sha2::Digest>::digest(name.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
     fn fake_hack(tag: &str, body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
@@ -1753,7 +1761,15 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let hack = fake_hack("doctor-docker-endpoint", "echo '{}'");
         let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
         let client = root.join("client");
-        let meta = client.join("contexts/meta/one");
+        let meta = client.join("contexts/meta").join(context_dir("selected"));
+        // A decoy elsewhere that claims the same name with a local endpoint.
+        let decoy = client.join("contexts/meta/decoy");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::fs::write(
+            decoy.join("meta.json"),
+            r#"{"Name":"selected","Endpoints":{"docker":{"Host":"unix:///example/decoy.sock"}}}"#,
+        )
+        .unwrap();
         std::fs::create_dir_all(&meta).unwrap();
         let discovery =
             |host: Option<&str>, context: Option<&str>| crate::doctor_plugins::Discovery {
@@ -1783,6 +1799,12 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         );
         assert!(crate::doctor_plugins::validate(&discovery(None, Some("missing"))).is_err());
         write("ssh://user@example");
+        assert!(crate::doctor_plugins::validate(&discovery(None, Some("selected"))).is_err());
+        // A FIFO at the exact path is refused without blocking.
+        std::fs::remove_file(meta.join("meta.json")).unwrap();
+        let fifo = std::ffi::CString::new(meta.join("meta.json").to_str().unwrap()).unwrap();
+        // SAFETY: fifo is a valid NUL-terminated path for this call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(crate::doctor_plugins::validate(&discovery(None, Some("selected"))).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2402,7 +2424,9 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
         )
         .unwrap();
         // The selected context must resolve to a local Unix socket.
-        let meta = client.join("contexts/meta/fixture");
+        let meta = client
+            .join("contexts/meta")
+            .join(context_dir("fixture-context"));
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(
             meta.join("meta.json"),

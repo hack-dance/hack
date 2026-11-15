@@ -9,6 +9,10 @@ files; env migration and the runtime trial remain manual. Keep stable v4
 installed and try one Compose project at a time. Native is a separate trial.
 The published v5 candidate bundle requires an Apple Silicon Mac.
 
+In builds with `hack upgrade check`, its native finding covers configuration
+only; runtime setup and admission are not checked. For a native trial, follow
+[runtime setup and full preflight](native/start.md#prepare-the-runtime).
+
 ```mermaid
 ---
 title: A reversible upgrade trial

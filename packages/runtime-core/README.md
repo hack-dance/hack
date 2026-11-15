@@ -574,6 +574,9 @@ An unmatched name filter exits **4** with pinned nextest 0.9.151 ("no tests to r
 where stock Cargo exits **0** after running zero tests. Check filter spelling;
 this wrapper keeps nextest's nonzero result, including in CI.
 
+macOS tests that create a per-run owner root in `/private/tmp` remove it through
+`OwnedTmpRoot`; see "Per-run owner roots in `/private/tmp`" below.
+
 
 `bun run test:local` checks `cargo nextest --version`, matching Cargo's lookup for
 the test run. If that resolves the pin, it uses nextest; a missing or different
@@ -967,6 +970,42 @@ without hooks; `process::publisher_command` gives each host port/route publisher
 its own group. Terminal group SIGINT cannot retire a publisher ahead of the
 owner's authenticated cleanup. Portable process tests exercise a real group
 signal; a macOS cross-check is compilation evidence, not real-VM acceptance.
+
+### Per-run owner roots in `/private/tmp`
+
+Each foreground run gets a short private owner root, `/private/tmp/hkgf-<24 hex>`
+(hash of state root and run), and each relay owner process gets
+`/private/tmp/hkro-<24 hex>` (hash of state root, owner, boot, run and the owner
+process's identity). The path is fixed and short because macOS limits a socket
+path to 104 bytes; the retired socket name inside `hkgf` already reaches 88.
+
+The runtime does not delete either root today, on exit, cancellation or a crash.
+That is deliberate for `hkgf`: its `operation.lock` inode, retirement journal and
+retired socket/owner names are the evidence that restore, `--remove-data` and
+dead-owner recovery read, and those paths refuse when the root is gone. Only the
+explicit absent-publication recovery (for a publication lost entirely, for example
+across a host reboot) proceeds without it: it creates a lock-only replacement root.
+What a root left behind does to the next start:
+
+| Left behind | Next start of the same run |
+|---|---|
+| `hkgf` with only the lock and retirement records (clean exit) | Reused: a new publication binds when the lock is free and `control.sock` and `owner.json` are absent. A pending missing-lock intent still refuses. |
+| `hkgf` with `control.sock` and `owner.json` (crash) | New publication refuses; `hack down --recover` retires the dead owner from these files. |
+| `hkgf` with files but no lock | Only the explicit missing-lock retirement recovers it. |
+| `hkgf` absent | A new publication creates it; restoring a retained run refuses until explicit absent-publication recovery runs. |
+| `hkro` of an earlier process | Never reused: each owner process derives a new root. Recovery reads it through the receipt's recorded control root. |
+
+So leftovers accumulate: one `hkgf` per run and one `hkro` per owner process.
+Removing a root is safe only once nothing can read it again: for `hkgf`, after the
+run's receipt is gone (not merely stopped with retained data); for `hkro`, after
+the receipt no longer records it as its control root. That product cleanup is not
+implemented yet and needs real-VM evidence for crash and cancellation paths.
+
+Tests that create an owner root hold an `OwnedTmpRoot` guard (`src/owned_tmp_root.rs`),
+which removes it even when the test panics and refuses any path that is not one of
+these two shapes. A source check, run on every platform, fails when test code names
+an owner root without the guard or an auditable `// owner-root: <reason>` marker.
+Native tests that start real owners still leave the roots their product runs create.
 
 Same-boot dead-owner cleanup also accepts the unchanged ready receipt and Pending
 relay enrollment left when an older publisher exited before cleanup. The old

@@ -258,9 +258,12 @@ HACK_DESKTOP_CLI="$HOME/.hack-next/bin/hack-next" HACK_RUNTIME_BACKEND=compose h
 
 `HACK_DESKTOP_CLI` must be an absolute executable path. This selects the CLI for
 checks, safe actions and terminal hand-offs; it does not install anything or
-change PATH. Without it, each command rediscovers `hack` on absolute PATH entries,
-so installing into an existing PATH directory can recover through **Check again**
-without restarting. The app inherits PATH at launch; a changed PATH still needs a
+change PATH. Without it, the app finds `hack` on absolute PATH entries once and
+pins that executable for every later read and action; only setup checks
+(startup and **Check again**) search PATH again, so installing into an existing
+PATH directory recovers through **Check again** without restarting. A `hack`
+whose file or any directory above it is writable by group or others, or owned
+by another user, is refused before it runs. The app inherits PATH at launch; a changed PATH still needs a
 relaunch. Follow the installation page's platform limits and existing-v4 migration
 steps before using a candidate against a shared home.
 On Linux, this preview requires a separately prepared source-built 5.x CLI; the
@@ -268,7 +271,8 @@ Apple Silicon prerelease download is not a Linux installer.
 
 Execution context (`core::execution::ExecutionContext`) reads only the allowlisted
 non-secret HOME, HACK_HOME, PATH, backend, launchd/systemd-disable guards,
-daemon-autostart guard and optional XDG_RUNTIME_DIR. An absent HACK_HOME stays
+daemon-autostart guard, optional XDG_RUNTIME_DIR and an absolute XDG_CONFIG_HOME
+(which selects the systemd user unit; a relative one is ignored, as the CLI does). An absent HACK_HOME stays
 absent so a candidate launcher can keep its own private-home default. Context is
 captured before version checking. `runner(checked_program)` pins that absolute
 executable, clears the child environment and applies the context for all reads

@@ -19,7 +19,9 @@ impl LiveSource {
                 .saturating_duration_since(Instant::now())
                 .saturating_sub(Duration::from_secs(2))
         };
-        let selected = self.runner.resolve_program().and_then(|p| {
+        // Setup checks are the explicit refresh: search PATH again, validate
+        // and pin, so later automatic reads reuse this executable.
+        let selected = self.runner.rediscover().and_then(|p| {
             p.into_os_string()
                 .into_string()
                 .map_err(|_| crate::runner::RunError::Spawn("CLI path is not UTF-8".into()))

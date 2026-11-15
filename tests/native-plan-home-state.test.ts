@@ -6,10 +6,24 @@ import {
   assertNativePlanRefusalActivity,
   snapshotNativePlanHome,
 } from "../scripts/lib/native-plan-home-state.ts";
+import { buildActivityRecord } from "../src/lib/activity-log.ts";
 
 const roots: string[] = [];
 const sentinel = "synthetic-native-plan-private-value";
-const record = { v: 1, action: "up", outcome: "failed", project: null };
+/**
+ * A complete failed, unregistered `up` record, built by the production
+ * writer so it has exactly the schema's keys and no path or value.
+ */
+const record = buildActivityRecord({
+  action: "up",
+  startedAt: Date.UTC(2026, 0, 1),
+  durationMs: 42,
+  project: null,
+  branch: null,
+  exitCode: 1,
+  failedServices: [],
+  origin: "cli",
+});
 
 afterEach(async () => {
   for (const root of roots.splice(0)) {

@@ -277,7 +277,9 @@ CLI is available; the next launch checks everything again. No first-run flag,
 setup results or command output are saved.
 
 Cards cover CLI, Compose Docker, each native runtime, hackd, routing, trust and
-the login service. An empty registry checks Compose prerequisites. A native-only
+the login service. Docker readiness comes from the machine Doctor run's `docker
+daemon` check, which uses the app's checked Docker selectors; a running hackd's
+own `runtime_ok` describes the engine in the daemon's environment and is not used. An empty registry checks Compose prerequisites. A native-only
 registry offers native documentation instead of global install/trust. Native DNS
 stays Unknown when doctor did not receive a browser URL. Compose macOS DNS needs
 all built-in resolver/dnsmasq pairs, any reported/custom host domain, port 53 and
@@ -295,8 +297,8 @@ matching the CLI proves hackd; bare status exit zero does not. `service.installe
 proves installation only; known disabled/drifted/failed service metadata stays
 Needs attention. Missing service-manager availability never permits Install.
 
-Start and Install pass the checked CLI as the CLI's self-invocation selector
-(`HACK_MCP_COMMAND`), so the daemon they start or install runs that CLI, not
+Start and Install, and the project pane's Start/Restart hackd recovery, pass the
+selected CLI as the CLI's self-invocation selector (`HACK_MCP_COMMAND`), so the daemon they start or install runs that CLI, not
 whatever `hack` is first on PATH. Only the fixed `daemon start` and supported `daemon install` actions offer **Run**, with
 bounded, memory-only exit/error feedback followed by fresh checks. Install requires explicit
 `service.available: true`, an ordinary home, and no launchd/systemd-disable guard;

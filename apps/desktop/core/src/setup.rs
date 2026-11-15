@@ -59,10 +59,13 @@ impl Report {
         if !self.cli_ready() {
             return Err("The CLI has not been checked".into());
         }
-        let context = self
+        // A bound command runs later in a terminal or from the clipboard, so
+        // its PATH keeps only directories no other user can change.
+        let context = &self
             .context
             .as_ref()
-            .ok_or("Execution context has not been checked")?;
+            .ok_or("Execution context has not been checked")?
+            .with_controlled_path()?;
         let compose = if args.first().is_some_and(|s| s == "global")
             && args.get(1).is_some_and(|s| s == "install" || s == "trust")
         {

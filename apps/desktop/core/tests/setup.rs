@@ -382,6 +382,57 @@ fn check_clears_old_output_but_preserves_immediate_action_receipt_and_skips() {
     assert_eq!(p.result.as_deref(), Some("just finished"));
 }
 
+/// Bound commands run later, outside the app: a PATH directory another
+/// user can write is dropped, and a controlled one is kept.
+#[test]
+fn bound_commands_keep_only_controlled_path_directories() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "setup-path-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let shared = root.join("shared");
+    let own = root.join("own");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let mut report = setup::Report::default();
+    report.cards.push(setup::Card {
+        id: "cli".into(),
+        title: "CLI".into(),
+        status: Status::Passed,
+        detail: String::new(),
+        remedy: setup::Remedy::Doc(String::new()),
+    });
+    report.cli_program = Some("/checked/hack-next".into());
+    let path = format!("{}:{}", shared.display(), own.display());
+    report.context = Some(
+        hack_desktop_core::execution::ExecutionContext::from_values(&[
+            ("HOME".into(), "/private/home".into()),
+            ("PATH".into(), path),
+        ])
+        .unwrap(),
+    );
+    for args in [
+        vec!["daemon".to_owned(), "restart".to_owned()],
+        vec!["global".to_owned(), "install".to_owned()],
+    ] {
+        let spec = report.command(args).unwrap();
+        assert!(
+            spec.args.contains(&format!("PATH={}", own.display())),
+            "{:?}",
+            spec.args
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn compose_remedies_override_native_but_keep_checked_home_and_program() {
     let mut report = setup::Report::default();

@@ -1966,7 +1966,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         assert!(wrappers.join("native-unavailable").is_file());
         let pin = NativePin::Unavailable
             .apply(base(&launcher), wrappers)
-            .env_value("HACK_NATIVE_BINARY")
+            .effective_env("HACK_NATIVE_BINARY")
             .unwrap();
         assert_eq!(
             Path::new(&pin),

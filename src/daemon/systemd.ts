@@ -1346,6 +1346,11 @@ export type SystemdInstallResult =
       readonly unavailable?: SystemdAvailability & {
         readonly available: false;
       };
+      /**
+       * A unit, drop-in or load directory, or the unit file, could have been
+       * written by another account; nothing was written (HACK-2216).
+       */
+      readonly untrusted?: true;
     };
 
 /**
@@ -1376,7 +1381,18 @@ export async function installSystemdUnit(opts: {
    * repair, which does not enable.
    */
   readonly hackHome?: string;
+  /**
+   * Explicit `hack daemon install` only (default false): secure Hack's own
+   * directories by removing group/other write from ones this user owns,
+   * and replace a unit file another account could have written. Without
+   * it (every automatic rewrite) any of those is refused with `untrusted`
+   * and nothing is changed, written, reloaded or restarted (HACK-2216): a
+   * directory that became writable after the earlier checks may already
+   * hold planted content.
+   */
+  readonly repair?: boolean;
 }): Promise<SystemdInstallResult> {
+  const repair = opts.repair === true;
   const access = resolveSystemdAccess({ env: opts.deps.env });
   if (!access.allowed) {
     return { ok: false, error: access.message };
@@ -1394,26 +1410,31 @@ export async function installSystemdUnit(opts: {
   const secured = await ensureOwnerWritableOnlyDirectories({
     // `$XDG_CONFIG_HOME`, `systemd/` and `systemd/user/`.
     dirs: [dirname(dirname(unitDir)), dirname(unitDir), unitDir],
+    repair,
   });
   if (!secured.ok) {
-    return { ok: false, error: secured.error };
+    return { ok: false, error: secured.error, untrusted: true };
   }
   // After Hack's own directories are secured: the config unit directory is
   // one of the load paths.
   const dropIns =
     (await checkSystemdUnitDirectoryChain({ unitPath: opts.unitPath })) ??
-    (await checkSystemdUnitDropIns({
-      unitPath: opts.unitPath,
-      repair: true,
-    })) ??
+    (await checkSystemdUnitDropIns({ unitPath: opts.unitPath, repair })) ??
     (await checkSystemdUnitLoadPaths({ deps: opts.deps }));
   if (dropIns !== null) {
-    return { ok: false, error: dropIns };
+    return { ok: false, error: dropIns, untrusted: true };
   }
   // Install writes the whole file: an existing one that another account
   // could have written (or a link) is removed and written fresh, never
-  // trusted for being unchanged.
+  // trusted for being unchanged. An automatic rewrite refuses it instead.
   if (await isUnitFileReplaceable({ unitPath: opts.unitPath })) {
+    if (!repair) {
+      return {
+        ok: false,
+        error: `Not rewriting ${SYSTEMD_UNIT_NAME}: ${opts.unitPath} could have been written by another account (a link, or writable by others) | Review it, then run: hack daemon install`,
+        untrusted: true,
+      };
+    }
     await rm(opts.unitPath, { force: true });
   }
   const { changed } = await writeTextFileAtomicIfChanged(
@@ -1424,10 +1445,10 @@ export async function installSystemdUnit(opts: {
   // An unchanged file is not rewritten: it must already be this user's.
   const unitFile = await checkSystemdUnitFile({
     unitPath: opts.unitPath,
-    repair: true,
+    repair,
   });
   if (unitFile !== null) {
-    return { ok: false, error: unitFile };
+    return { ok: false, error: unitFile, untrusted: true };
   }
   if (changed || opts.forceReload === true) {
     const reload = await opts.deps.run("systemctl", [
@@ -1470,15 +1491,18 @@ export async function installSystemdUnit(opts: {
  * must be a directory owned by this user and not writable by its group or
  * others: otherwise another account could replace `hackd.service`, and the
  * enabled unit would run its `ExecStart` as this user at the next login
- * (HACK-2052). New directories are created `0755` whatever the umask; an
- * existing one this user owns has group/other write removed; anything else
- * is refused before the unit is written. A symlinked directory is judged by
- * its real target.
+ * (HACK-2052). New directories are created `0755` whatever the umask. With
+ * `repair` (explicit `hack daemon install` only), an existing one this user
+ * owns has group/other write removed; without it that is refused, unchanged
+ * (HACK-2216). Anything else is refused before the unit is written. A
+ * symlinked directory is judged by its real target.
  */
 export async function ensureOwnerWritableOnlyDirectories(opts: {
   readonly dirs: readonly string[];
   /** Defaults to this process's uid. */
   readonly uid?: number;
+  /** Explicit `hack daemon install` only; defaults to false. */
+  readonly repair?: boolean;
 }): Promise<
   { readonly ok: true } | { readonly ok: false; readonly error: string }
 > {
@@ -1496,11 +1520,14 @@ export async function ensureOwnerWritableOnlyDirectories(opts: {
   }
   for (const dir of opts.dirs) {
     const created = await createDirectoryExactly(dir);
-    // Install creates and secures its own directories: the one place that
-    // repairs group/other write (HACK-2216).
+    // Only explicit install repairs group/other write (HACK-2216).
     const error =
       created ??
-      (await checkOwnerWritableOnlyDirectory({ dir, uid, repair: true }));
+      (await checkOwnerWritableOnlyDirectory({
+        dir,
+        uid,
+        repair: opts.repair === true,
+      }));
     if (error !== null) {
       return { ok: false, error };
     }

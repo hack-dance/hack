@@ -1307,7 +1307,7 @@ async function rewriteUnitForPlan(opts: {
   readonly deps: SystemdDeps;
   readonly hooks: Pick<
     SystemdCommandHooks,
-    "assessDurability" | "systemPathDirectories"
+    "assessDurability" | "systemPathDirectories" | "trace"
   >;
   readonly expected: { readonly hackBinPath: string } | null;
 }): Promise<number | null> {
@@ -1320,6 +1320,9 @@ async function rewriteUnitForPlan(opts: {
   if (rewritten.warning) {
     logger.warn({ message: rewritten.warning });
   }
+  // An automatic rewrite never repairs (no `repair`): a directory or unit
+  // file that became writable after the earlier checks is refused, with
+  // its mode unchanged, and nothing is written, reloaded or restarted.
   const repaired = await installSystemdUnit({
     unitPath,
     unitText: rewritten.unitText,
@@ -1329,6 +1332,10 @@ async function rewriteUnitForPlan(opts: {
     forceReload: status.needsReload,
   });
   if (!repaired.ok) {
+    if (repaired.untrusted && opts.hooks.trace) {
+      opts.hooks.trace.action = "none";
+      opts.hooks.trace.blocked = "untrusted-unit";
+    }
     logger.error({
       message: `Failed to repair ${SYSTEMD_UNIT_NAME}: ${repaired.error}`,
     });
@@ -2107,6 +2114,9 @@ export async function installDaemonSystemdService(
     deps,
     forceReload: before?.needsReload === true,
     hackHome: dirname(hooks.paths.root),
+    // Explicit `hack daemon install`: the only caller that repairs Hack's
+    // own directories and replaces an untrusted unit file (HACK-2216).
+    repair: true,
   });
   if (!installed.ok) {
     logger.error({

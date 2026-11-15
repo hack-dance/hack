@@ -459,7 +459,12 @@ the enabled unit runs code as you at the next login. Only an explicit
 the reconcile after `hack update`, the check before a running daemon is
 stopped) refuses a group- or other-writable unit or drop-in directory with
 `blocked: "untrusted-unit"` and changes nothing. While such a directory was
-writable, another account may already have planted a unit there.
+writable, another account may already have planted a unit there. That holds
+inside an automatic rewrite too. The installer it shares with `install`
+repairs nothing and does not replace an untrusted unit file unless the
+caller is explicit `install`, so a directory that becomes writable after the
+earlier checks refuses the rewrite. Nothing is written, reloaded or
+restarted, and the mode is left as it is.
 `hack daemon stop` neither repairs nor refuses such a directory (see below).
 For the same reason,
 `install` and `start` check `hackd.service.d/` and `service.d/`: every drop-in

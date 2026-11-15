@@ -1955,12 +1955,25 @@ linuxTest(
     const userDir = join(root, "config", "systemd", "user");
     await mkdir(userDir, { recursive: true });
     await chmod(userDir, 0o775);
+    // Without `repair` (every automatic rewrite): refused, mode unchanged,
+    // nothing written or reloaded (HACK-2216).
+    const automatic = await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    expect(automatic).toMatchObject({ ok: false, untrusted: true });
+    expect((await stat(userDir)).mode & 0o777).toBe(0o775);
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    // Explicit `hack daemon install` passes `repair`: secured and written.
     expect(
       (
         await installSystemdUnit({
           unitPath,
           unitText: unitText(),
           deps: fake.deps,
+          repair: true,
         })
       ).ok
     ).toBe(true);
@@ -2073,7 +2086,7 @@ linuxTest("start runs only a unit file this user controls", async () => {
   );
 
   // A unit file others could write: start refuses it (its contents may be
-  // someone else's); install replaces it with a fresh file.
+  // someone else's); explicit install replaces it with a fresh file.
   await chmod(unitPath, 0o664);
   fake.calls.length = 0;
   expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
@@ -2084,6 +2097,7 @@ linuxTest("start runs only a unit file this user controls", async () => {
         unitPath,
         unitText: unitText(),
         deps: fake.deps,
+        repair: true,
       })
     ).ok
   ).toBe(true);
@@ -2106,6 +2120,7 @@ linuxTest("start runs only a unit file this user controls", async () => {
         unitPath,
         unitText: unitText(),
         deps: fake.deps,
+        repair: true,
       })
     ).ok
   ).toBe(true);
@@ -6005,5 +6020,54 @@ linuxTest(
     expect(fake.calls).toContain("systemctl --user stop hackd.service");
     expect(fake.calls).not.toContain("systemctl --user daemon-reload");
     expect((await stat(userDir)).mode & 0o777).toBe(0o775);
+  }
+);
+
+// Reviewer round 37 (HACK-2216): an automatic rewrite's install never
+// repairs, even when a directory becomes writable after the earlier gate.
+
+linuxTest(
+  "a unit directory that becomes writable after the gate stops the automatic rewrite: no chmod, write, reload or restart",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    const stale = await writeStaleUnit(fake);
+    const userDir = join(root, "config", "systemd", "user");
+    const base = runningHooks(fake, "1.0.0");
+    let proofs = 0;
+    const hooks = {
+      ...base,
+      proveMainProcess: async (pid: number, daemonRoot: string) => {
+        proofs += 1;
+        if (proofs === 1) {
+          // After the trust gate, before the rewrite's install: the unit
+          // directory becomes writable by the group.
+          await chmod(userDir, 0o775);
+        }
+        return await base.proveMainProcess(pid, daemonRoot);
+      },
+    };
+    fake.calls.length = 0;
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(proofs).toBeGreaterThanOrEqual(1);
+    expect(hooks.trace.blocked).toBe("untrusted-unit");
+    // Refused: mode unchanged, the stale unit not rewritten, no reload or
+    // restart.
+    expect((await stat(userDir)).mode & 0o777).toBe(0o775);
+    expect(await readFile(unitPath, "utf8")).toBe(stale);
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+
+    // Explicit install still repairs it.
+    expect(
+      (
+        await installSystemdUnit({
+          unitPath,
+          unitText: unitText(),
+          deps: fake.deps,
+          repair: true,
+        })
+      ).ok
+    ).toBe(true);
+    expect((await stat(userDir)).mode & 0o777).toBe(0o755);
   }
 );

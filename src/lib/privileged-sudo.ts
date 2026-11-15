@@ -123,6 +123,18 @@ const spawnWithInput: InputRunner = async (argv, opts) => {
 };
 
 /**
+ * The exact argv `runTrustedSudo` spawns for `argv`: the vetted sudo, then
+ * `vettedRootCommand` (fixed PATH and locale), then `argv`. Plans print this,
+ * so a printed root step is the spawned one (HACK-2218).
+ */
+export function trustedSudoInvocation(opts: {
+  readonly sudo: string;
+  readonly argv: readonly string[];
+}): readonly string[] {
+  return [opts.sudo, ...vettedRootCommand(opts.argv)];
+}
+
+/**
  * Run `<trusted sudo> <argv>` with the terminal attached and the vetted
  * helper environment. With `input`, those bytes are the child's stdin (the
  * terminal still serves sudo's prompt). Returns {@link SUDO_UNAVAILABLE_EXIT}
@@ -142,7 +154,7 @@ export async function runTrustedSudo(
     return SUDO_UNAVAILABLE_EXIT;
   }
   const helperEnv = vettedHelperEnv();
-  const command = [sudo, ...vettedRootCommand(argv)];
+  const command = trustedSudoInvocation({ sudo, argv });
   try {
     if (opts?.input !== undefined) {
       return await (opts.inputRunner ?? spawnWithInput)(command, {

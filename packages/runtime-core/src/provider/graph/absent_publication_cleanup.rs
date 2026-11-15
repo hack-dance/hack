@@ -1187,6 +1187,7 @@ pub fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::owned_tmp_root::OwnedTmpRoot;
     use std::os::unix::fs::PermissionsExt;
 
     fn candidate() -> (super::super::tests::Fixture, Candidate) {
@@ -1434,7 +1435,7 @@ mod tests {
     fn read_only_inspection_of_existing_reservation_never_creates_a_root() {
         let (_fixture, candidate) = candidate();
         let run = "a".repeat(32);
-        let root = foreground::transport::root(&candidate, &run).unwrap();
+        let root = OwnedTmpRoot::new(foreground::transport::root(&candidate, &run).unwrap());
         assert!(
             Reservation::inspect_existing(&candidate, &run)
                 .unwrap()
@@ -1455,7 +1456,7 @@ mod tests {
         );
         drop(inspected);
         fs::remove_file(root.join("operation.lock")).unwrap();
-        fs::remove_dir(root).unwrap();
+        fs::remove_dir(&root).unwrap();
     }
 
     #[test]
@@ -1463,7 +1464,7 @@ mod tests {
         let (_fixture, candidate) = candidate();
         let run = "b".repeat(32);
         let acquired = Reservation::acquire(&candidate, &run).unwrap();
-        let root = acquired.root.clone();
+        let root = OwnedTmpRoot::new(acquired.root.clone());
         let path = acquired.root.join("operation.lock");
         let saved = acquired.root.join("operation.held");
         fs::rename(&path, &saved).unwrap();

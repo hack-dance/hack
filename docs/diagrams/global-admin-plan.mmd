@@ -1,0 +1,8 @@
+flowchart TD
+    S[Read-only snapshot] --> K{Phase inputs known?}
+    K -->|yes| P[Shared argv preparation]
+    K -->|no| B[Incomplete plan]
+    P --> J[JSON admin plan]
+    P --> C[Command confirmation gates]
+    C --> R[Run prepared argv]
+    B --> N[Report missing prerequisite]

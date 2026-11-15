@@ -555,6 +555,52 @@ turn on no features and do not need Zig. Root `mise.toml` and `.tool-versions` p
 Zig 0.15.2. The toolchain image installs the `mise.toml` pins and runs its tasks
 under `mise exec`. CI downloads a checksum-verified 0.15.2 archive.
 
+### Rust test processes
+
+Both Candidate core CI hosts use **cargo-nextest 0.9.151**, downloaded from its
+pinned release and SHA-256 verified, for default and all-feature tests. Each test
+runs in its own process: on macOS the two-call close-on-exec setup briefly permits
+another test's spawned child to inherit a socket and delay EOF. Retries are zero.
+The admission-pool test group retains the old mutex's serialization of whole-host
+`lsof` scans. Ignored helpers remain ignored and their owning tests still invoke
+them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+Focused target selections such as `bun run test:local --lib` or `--test <name>`
+skip doctests, matching Cargo; explicit `--doc` selection runs through Cargo alone.
+The wrapper accepts Cargo build, feature and target options; nextest-specific
+options such as `-E` need a direct `cargo nextest` invocation. Documentation-only
+selection refuses repetition or report settings intended for nextest qualification.
+
+An unmatched name filter exits **4** with pinned nextest 0.9.151 ("no tests to run"),
+where stock Cargo exits **0** after running zero tests. Check filter spelling;
+this wrapper keeps nextest's nonzero result, including in CI.
+
+macOS tests that create a per-run owner root in `/private/tmp` remove it through
+`OwnedTmpRoot`; see "Per-run owner roots in `/private/tmp`" below.
+
+
+`bun run test:local` checks `cargo nextest --version`, matching Cargo's lookup for
+the test run. If that resolves the pin, it uses nextest; a missing or different
+version prints one fallback line and uses stock `cargo test`, leaving the
+contributor's installed version alone. The macOS fallback sets one libtest thread
+to prevent cross-test descriptor inheritance. To opt into the pinned runner,
+install it with `cargo install --locked --version 0.9.151 cargo-nextest`.
+CI and qualification reports/repetitions require the pin and never fall back.
+`bun run test:local --all-features` retains the
+Zig prerequisite above. The toolchain container's existing `rust` task continues
+to use stock Cargo on Linux, where the descriptor creation primitives are atomic.
+
+For bounded hosted qualification, dispatch `ci.yml` at the exact branch/commit
+with `full=true` and `rust_repetitions=20`. Only macOS repeats: 20 default suites
+and 20 all-feature suites, each followed by doctests. A failed iteration stops
+the job immediately; this is a consecutive-pass experiment, not retry policy.
+The `candidate-rust-results-*` artifacts retain each pass's counts and duration.
+Discovery JSON and stock libtest lists retain ignored-test counts separately:
+nextest's JUnit report contains executed tests, not ignored fixtures. The CI profile
+terminates a hung test after ten 60-second intervals, above the existing 500-second
+fixture budgets, so a hang fails with evidence. Qualification dispatches allow up
+to 300 minutes; ordinary Candidate jobs keep their 45-minute limit. Record measured
+test-step times as well as the pass count before treating the loop as qualified.
+
 Source binaries embed their build checkout. If a copied Cargo target directory
 retains a different checkout identity, use a fresh `--target-dir` for checks and
 tests; Cargo reporting a cached binary as fresh does not qualify that identity.
@@ -924,6 +970,42 @@ without hooks; `process::publisher_command` gives each host port/route publisher
 its own group. Terminal group SIGINT cannot retire a publisher ahead of the
 owner's authenticated cleanup. Portable process tests exercise a real group
 signal; a macOS cross-check is compilation evidence, not real-VM acceptance.
+
+### Per-run owner roots in `/private/tmp`
+
+Each foreground run gets a short private owner root, `/private/tmp/hkgf-<24 hex>`
+(hash of state root and run), and each relay owner process gets
+`/private/tmp/hkro-<24 hex>` (hash of state root, owner, boot, run and the owner
+process's identity). The path is fixed and short because macOS limits a socket
+path to 104 bytes; the retired socket name inside `hkgf` already reaches 88.
+
+The runtime does not delete either root today, on exit, cancellation or a crash.
+That is deliberate for `hkgf`: its `operation.lock` inode, retirement journal and
+retired socket/owner names are the evidence that restore, `--remove-data` and
+dead-owner recovery read, and those paths refuse when the root is gone. Only the
+explicit absent-publication recovery (for a publication lost entirely, for example
+across a host reboot) proceeds without it: it creates a lock-only replacement root.
+What a root left behind does to the next start:
+
+| Left behind | Next start of the same run |
+|---|---|
+| `hkgf` with only the lock and retirement records (clean exit) | Reused: a new publication binds when the lock is free and `control.sock` and `owner.json` are absent. A pending missing-lock intent still refuses. |
+| `hkgf` with `control.sock` and `owner.json` (crash) | New publication refuses; `hack down --recover` retires the dead owner from these files. |
+| `hkgf` with files but no lock | Only the explicit missing-lock retirement recovers it. |
+| `hkgf` absent | A new publication creates it; restoring a retained run refuses until explicit absent-publication recovery runs. |
+| `hkro` of an earlier process | Never reused: each owner process derives a new root. Recovery reads it through the receipt's recorded control root. |
+
+So leftovers accumulate: one `hkgf` per run and one `hkro` per owner process.
+Removing a root is safe only once nothing can read it again: for `hkgf`, after the
+run's receipt is gone (not merely stopped with retained data); for `hkro`, after
+the receipt no longer records it as its control root. That product cleanup is not
+implemented yet and needs real-VM evidence for crash and cancellation paths.
+
+Tests that create an owner root hold an `OwnedTmpRoot` guard (`src/owned_tmp_root.rs`),
+which removes it even when the test panics and refuses any path that is not one of
+these two shapes. A source check, run on every platform, fails when test code names
+an owner root without the guard or an auditable `// owner-root: <reason>` marker.
+Native tests that start real owners still leave the roots their product runs create.
 
 Same-boot dead-owner cleanup also accepts the unchanged ready receipt and Pending
 relay enrollment left when an older publisher exited before cleanup. The old

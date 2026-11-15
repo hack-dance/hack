@@ -2,6 +2,8 @@
 //! Project planning remains read-only; provider commands are explicit and separately qualified.
 
 pub mod node;
+#[cfg(test)]
+pub(crate) mod owned_tmp_root;
 pub mod project;
 pub mod provider;
 #[cfg(test)]

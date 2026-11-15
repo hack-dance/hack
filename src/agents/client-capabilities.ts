@@ -21,10 +21,10 @@
  */
 
 /** Increment when cells are reclassified or the cell shape changes. */
-export const AGENT_CLIENT_CAPABILITY_MATRIX_VERSION = 3;
+export const AGENT_CLIENT_CAPABILITY_MATRIX_VERSION = 4;
 
 /** Latest observation date (UTC); older cells retain their own provenance. */
-export const AGENT_CLIENT_CAPABILITY_OBSERVED_ON = "2026-10-18";
+export const AGENT_CLIENT_CAPABILITY_OBSERVED_ON = "2026-11-13";
 
 export const AGENT_CLIENTS = [
   "codex",
@@ -177,6 +177,12 @@ const CODEX_VERSION = "codex-cli 0.162.1";
 const CLAUDE_VERSION = "Claude Code 2.1.296";
 const CURSOR_VERSION = "Cursor 3.24.12";
 const BUNDLE_FIXTURE = "tests/mcp-bundle-client.test.ts";
+/** Authenticated client sessions against a source build (HACK-2083). */
+const SESSION_HOST = "linux-x64-contributor";
+const SESSION_SOURCE_SHA = "ab29d491302b533b75aa2b6e1c75f43bb50270c0";
+const SESSION_REF = "docs/reference/mcp-tools.md";
+const SESSION_GATE =
+  "Replay this as a repository fixture (tests/mcp-bundle-client.test.ts end to end, with the entry written by `hack mcp install` in an isolated client home); an authenticated session is evidence but not a repeatable test.";
 
 const PLUGIN_LOAD_GATE =
   "Install the plugin into an isolated client home, start a fresh session and observe the component load; a marketplace listing or manifest parse does not count.";
@@ -235,14 +241,13 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     client: "codex",
     capability: "standaloneMcp",
     status: "untested",
-    evidenceClass: "isolated-fixture",
-    evidenceRef: BUNDLE_FIXTURE,
-    observedClientVersion: CODEX_VERSION,
-    sourceSha: SOURCE_SHA,
-    hostLabel: HOST,
-    note: "In the opt-in fixture, `codex mcp get hack --json` resolved the generated bundle adapter from an isolated CODEX_HOME. The fixture then stopped at the Claude step, so no tool call was observed in that run. Configuration discovery alone does not prove a Codex model session loaded the server or accepted project trust.",
-    openGate:
-      "Pass tests/mcp-bundle-client.test.ts end to end at this client version; a Codex model session tool call remains a separate authenticated-session gate.",
+    evidenceClass: "authenticated-session",
+    evidenceRef: SESSION_REF,
+    observedClientVersion: "codex-cli 0.168.0",
+    sourceSha: SESSION_SOURCE_SHA,
+    hostLabel: SESSION_HOST,
+    note: "A `codex exec` model session loaded `hack mcp serve` (entry passed with `-c mcp_servers.hack.*`, same command and args as the installer writes) and called the tools: background start, cursor reads, inspect, cancel and request-key reuse; with default settings no client limit interrupted a foreground exec of 90 s or of 200 s (longer calls not measured). With `tool_timeout_sec = 30` Codex reported `timed out awaiting tools/call after 30s` and Hack stopped the command (exit 143). `start` and `cancel` are destructive: a headless run needs `default_tools_approval_mode` or refuses them.",
+    openGate: SESSION_GATE,
   },
   {
     client: "codex",
@@ -322,14 +327,13 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     client: "claude",
     capability: "standaloneMcp",
     status: "untested",
-    evidenceClass: "isolated-fixture",
-    evidenceRef: BUNDLE_FIXTURE,
-    observedClientVersion: CLAUDE_VERSION,
-    sourceSha: SOURCE_SHA,
-    hostLabel: HOST,
-    note: "The opt-in fixture failed at this version: in an isolated HOME, `claude mcp get hack` reports the project-scoped server as pending approval instead of connected, so no connection or tool call was observed. Project approval is a native trust gate and must not be bypassed.",
-    openGate:
-      "Qualify Claude standalone MCP without bypassing project approval (for example, user scope in an isolated HOME) and pass the fixture end to end.",
+    evidenceClass: "authenticated-session",
+    evidenceRef: SESSION_REF,
+    observedClientVersion: "Claude Code 2.1.322",
+    sourceSha: SESSION_SOURCE_SHA,
+    hostLabel: SESSION_HOST,
+    note: "A `claude -p` session loaded `hack mcp serve` from an explicit `--mcp-config` (same command and args as the installer writes; no project approval bypassed), found the tools through its tool search and called them: background start, cursor reads, inspect, cancel and request-key reuse; a foreground exec of 90 s completed. The project-scoped installer entry still reports pending approval in an isolated HOME, as before.",
+    openGate: SESSION_GATE,
   },
   {
     client: "claude",

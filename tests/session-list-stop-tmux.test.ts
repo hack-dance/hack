@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { registerPrivateTmuxRoot } from "./helpers/tmux-socket-guard.ts";
 
 /**
  * HACK-1798: `hack session list` printed lifecycle sessions as one string of
@@ -16,10 +17,12 @@ const workspace = "hack-1798-fixture-project--lifecycle";
 // stop touches only the session it named.
 const sibling = `${workspace}-sibling`;
 let root = "";
+let unregister = () => {};
 
 function isolatedEnv(): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "",
+    HACK_DAEMON_AUTOSTART_DISABLE: "1",
     HOME: join(root, "home"),
     TMUX_TMPDIR: join(root, "tmux"),
     LC_ALL: "C",
@@ -56,7 +59,8 @@ beforeAll(async () => {
   // Unix socket paths are length-limited, so keep the root short.
   root = await mkdtemp("/tmp/hack-1798-");
   await mkdir(join(root, "home"));
-  await mkdir(join(root, "tmux"));
+  await mkdir(join(root, "tmux"), { mode: 0o700 });
+  unregister = registerPrivateTmuxRoot(join(root, "tmux"));
   await mkdir(join(root, "outside"));
 });
 
@@ -67,6 +71,7 @@ afterAll(async () => {
   if (root) {
     await rm(root, { recursive: true, force: true });
   }
+  unregister();
 });
 
 test.skipIf(!tmuxPath)(

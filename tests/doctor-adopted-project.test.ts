@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
+import {
+  buildDoctorRemediationPlanLines,
+  type DoctorJsonCheck,
+} from "../src/commands/doctor.ts";
 import {
   ADOPTED_PROJECT_NOT_APPLICABLE_CHECKS,
   ADOPTED_PROJECT_NOT_APPLICABLE_MESSAGE,
@@ -85,13 +88,6 @@ async function doctorJson(): Promise<{
   return { exit, stdout, stderr };
 }
 
-type JsonCheck = {
-  readonly id: string;
-  readonly status: string;
-  readonly detail: string;
-  readonly durationMs: number;
-};
-
 test("doctor reports an adopted project with closed messages instead of refusing it as native input (HACK-1311)", async () => {
   await adopt();
   const receipt = await readFile(receiptPath(), "utf8");
@@ -99,12 +95,21 @@ test("doctor reports an adopted project with closed messages instead of refusing
   expect(run.stdout + run.stderr).not.toContain("E_NATIVE_PROJECT");
   expect(run.stdout + run.stderr).not.toContain(SOURCE_BIND_CANARY);
   const parsed: unknown = JSON.parse(run.stdout);
-  expect(parsed).toMatchObject({ ok: true });
-  const checks = (parsed as { data: { checks: JsonCheck[] } }).data.checks;
+  expect(parsed).toMatchObject({ ok: true, data: { schema: 1 } });
+  const checks = (parsed as { data: { checks: DoctorJsonCheck[] } }).data
+    .checks;
   const byId = new Map(checks.map((check) => [check.id, check]));
 
   expect(byId.get("project")).toEqual({
     id: "project",
+    area: "project_files",
+    scope: "project",
+    fix: {
+      kind: "manual",
+      args: [],
+      doc_url:
+        "https://github.com/hack-dance/hack/blob/next/docs/versions/v5/troubleshooting.md",
+    },
     status: "ok",
     detail: `Adopted Compose project at ${join(h.root, ".hack")} ('hack config adopt'). Its Compose inputs belong to the adoption; adopted commands support retained-container start, restart, stop, ps, logs and exec.`,
     durationMs: expect.any(Number),
@@ -198,11 +203,20 @@ test("doctor reports a pending adoption as a project warning that asks for recov
   expect(run.stdout + run.stderr).not.toContain(SOURCE_BIND_CANARY);
   const parsed: unknown = JSON.parse(run.stdout);
   // A warning, not an error: doctor still exits ok.
-  expect(parsed).toMatchObject({ ok: true });
-  const checks = (parsed as { data: { checks: JsonCheck[] } }).data.checks;
+  expect(parsed).toMatchObject({ ok: true, data: { schema: 1 } });
+  const checks = (parsed as { data: { checks: DoctorJsonCheck[] } }).data
+    .checks;
   const byId = new Map(checks.map((check) => [check.id, check]));
   expect(byId.get("project")).toEqual({
     id: "project",
+    area: "project_files",
+    scope: "project",
+    fix: {
+      kind: "manual",
+      args: [],
+      doc_url:
+        "https://github.com/hack-dance/hack/blob/next/docs/versions/v5/troubleshooting.md",
+    },
     status: "warn",
     detail: `Adopted Compose project at ${join(h.root, ".hack")} has a pending or interrupted adoption operation. Use explicit adoption recovery before other project commands; values omitted.`,
     durationMs: expect.any(Number),

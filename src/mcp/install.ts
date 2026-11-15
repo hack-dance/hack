@@ -10,6 +10,8 @@ import {
   prepareMcpBundleLaunch,
 } from "./bundle-launch.ts";
 import {
+  addCodexToolTimeout,
+  CODEX_TOOL_TIMEOUT_SEC,
   hasCodexLaunch,
   removeCodexLaunch,
   renderCodexLaunch,
@@ -392,12 +394,27 @@ async function installCodexConfig(opts: {
     const result = await writeTextFileIfChanged(opts.path, next);
     return { status: result.changed ? "updated" : "noop" };
   }
+  let present: boolean;
   try {
-    if (hasCodexLaunch(existing)) {
-      return { status: "noop" };
-    }
+    present = hasCodexLaunch(existing);
   } catch {
     return { status: "error", message: "Invalid Codex MCP configuration" };
+  }
+  if (present) {
+    // An entry from before the tool-call limit existed gets it; any other
+    // value, including a limit the user set, is kept.
+    let next: string;
+    try {
+      next = addCodexToolTimeout(existing);
+    } catch {
+      return {
+        status: "noop",
+        message:
+          "Existing Codex entry kept unchanged. To raise its tool limit, add tool_timeout_sec = 660 under [mcp_servers.hack] manually.",
+      };
+    }
+    const result = await writeTextFileIfChanged(opts.path, next);
+    return { status: result.changed ? "updated" : "noop" };
   }
 
   const block = renderCodexTomlBlock();
@@ -474,6 +491,7 @@ function renderCodexTomlBlock(): string {
     `[mcp_servers.${SERVER_NAME}]`,
     `command = "${SERVER_COMMAND}"`,
     `args = ["${SERVER_ARGS[0]}", "${SERVER_ARGS[1]}"]`,
+    `tool_timeout_sec = ${CODEX_TOOL_TIMEOUT_SEC}`,
   ].join("\n");
 }
 

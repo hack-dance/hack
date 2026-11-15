@@ -219,6 +219,10 @@ if (role === "channel-holder") {
       if (mode === "shell-names-empty") {
         nativeDetachedUpShellVariables([]);
       }
+      if (mode === "shell-names-root-dotenv") {
+        nativeDetachedUpShellVariables([], true);
+        nativeDetachedUpShellVariables([], true);
+      }
       if (["provider-pin", "wrapped-provider-pin"].includes(mode)) {
         await nativeDetachedUpFailure(new Error("synthetic-private-value"));
         const failure = new NativeRuntimeRequestError({
@@ -359,6 +363,7 @@ if (role === "channel-holder") {
           "cancel-at-accept",
           "shell-names",
           "shell-names-empty",
+          "shell-names-root-dotenv",
           "unsafe-failure",
         ].includes(mode)
       ) {

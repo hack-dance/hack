@@ -8,6 +8,7 @@ import {
   LOCAL_NETWORK_HINT_MESSAGE,
   shouldShowLocalNetworkHint,
 } from "../src/lib/local-network-hint.ts";
+import { expectOpenPayload as expectSharedOpenPayload } from "./helpers/open-payload.ts";
 import { projectNameFixture } from "./helpers/project-name-fixture.ts";
 
 function capture(platform: string) {
@@ -193,26 +194,12 @@ function countHints(text: string): number {
   return text.split(LOCAL_NETWORK_HINT_MESSAGE).length - 1;
 }
 
-/**
- * The payload is `{ url }`, plus the documented DNS notice (`dns` and `hint`
- * together) when the machine running the test has no address for the host.
- * Whether it does depends on that machine's resolver, so both shapes pass;
- * any other key fails.
- */
+/** The shared payload check, plus: the Local Network hint stays out of stdout. */
 function expectOpenPayload(stdout: string, url: string): void {
   // The Local Network hint belongs on stderr only, never in any payload field.
   expect(stdout).not.toContain(LOCAL_NETWORK_HINT_MESSAGE);
   expect(stdout).not.toContain("Local Network");
-  const payload = JSON.parse(stdout) as Record<string, unknown>;
-  expect(payload.url).toBe(url);
-  const extra = Object.keys(payload)
-    .filter((key) => key !== "url")
-    .sort();
-  if (extra.length > 0) {
-    expect(extra).toEqual(["dns", "hint"]);
-    expect(["unresolved", "unconfigured"]).toContain(payload.dns as string);
-    expect(typeof payload.hint).toBe("string");
-  }
+  expectSharedOpenPayload(stdout, url);
 }
 
 test("the open payload check rejects a leaked hint and unknown keys", () => {

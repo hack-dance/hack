@@ -229,6 +229,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
     readonly retireSession?: Parameters<
       typeof createLifecycleProcessController
     >[0]["retireSession"];
+    readonly readIdentities?: typeof readProcessIdentities;
   }) =>
     createLifecycleProcessController({
       mux: resolvedMux,
@@ -249,6 +250,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
         return { dispose: () => undefined };
       },
       ...(opts.retireSession ? { retireSession: opts.retireSession } : {}),
+      readIdentities: opts.readIdentities,
       ...(opts.prepareLaunch
         ? {
             prepareLaunch: async () => {
@@ -300,6 +302,77 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
 }
 
 const PROCESS = { name: "helper-client", command: "sleep 600" };
+
+test("operation cleanup recovers a birth missed by the launch observation", async () => {
+  const { controller, entries, bin } = await fixture("tmux");
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  await writeFile(
+    join(bin, "tmux"),
+    `#!/bin/sh\nif [ "$1" = list-panes ]; then echo ${process.pid}; fi\nexit 0\n`,
+    { mode: 0o755 }
+  );
+  let reads = 0;
+  let retired = false;
+  const force = new AbortController();
+  const starter = controller({
+    sessionOwnership: undefined,
+    readIdentities: async () => (++reads === 1 ? [] : readProcessIdentities()),
+    retireSession: async (opts) => {
+      expect(opts.processes[0]?.panePid).toBe(process.pid);
+      expect(opts.processes[0]?.paneBirth).toBeString();
+      expect(opts.force).toBe(force.signal);
+      expect(await opts.stopSession()).toBe(true);
+      retired = true;
+      return true;
+    },
+  });
+  try {
+    await starter.startMany({ processes: [PROCESS] });
+    await starter.finalize();
+    expect((await entries())[0]?.processes[0]?.paneBirth).toBeUndefined();
+    await starter.getOperationCleanup()?.({ force: force.signal });
+    expect(retired).toBe(true);
+    expect(await entries()).toEqual([]);
+  } finally {
+    await starter.abort();
+    restoreEnv("PATH", previousPath);
+  }
+}, 10_000);
+
+test("a missing-birth window query failure still stops the owned mux and keeps unknown state", async () => {
+  const { controller, entries, bin, mux } = await fixture("tmux");
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  await writeFile(
+    join(bin, "tmux"),
+    `#!/bin/sh\nif [ "$1" = list-panes ]; then echo ${process.pid}; fi\nexit 0\n`,
+    { mode: 0o755 }
+  );
+  let reads = 0;
+  let retirementReached = false;
+  const starter = controller({
+    sessionOwnership: undefined,
+    readIdentities: async () => (++reads === 1 ? [] : readProcessIdentities()),
+    retireSession: async (opts) => {
+      retirementReached = true;
+      expect(opts.processes[0]?.paneBirth).toBeUndefined();
+      expect(await opts.stopSession()).toBe(true);
+      throw new Error("identity unavailable");
+    },
+  });
+  try {
+    await starter.startMany({ processes: [PROCESS] });
+    await starter.finalize();
+    await writeFile(join(bin, "tmux"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    expect(await starter.getOperationCleanup()?.()).toBe("session-retained");
+    expect(retirementReached).toBe(true);
+    expect(mux.sessions.has(SESSION)).toBe(false);
+    expect(await entries()).toHaveLength(1);
+  } finally {
+    restoreEnv("PATH", previousPath);
+  }
+}, 10_000);
 
 test("explicit down awaits ordered group retirement before session and state removal", async () => {
   const { controller, stop, entries, mux, bin } = await fixture("tmux");

@@ -63,7 +63,12 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
     use Area::*;
     use Scope::*;
     let exact = match id {
-        "docker" | "docker compose" | "docker daemon" | "bun" | "mutagen" => (Engine, Machine),
+        "docker"
+        | "docker compose"
+        | "docker daemon"
+        | "docker plugin discovery"
+        | "bun"
+        | "mutagen" => (Engine, Machine),
         "compose backend features" => (Engine, Project),
         "proxy ports"
         | "proxy network"
@@ -137,6 +142,69 @@ pub enum CardAction {
     OpenDoc(String),
 }
 
+/// An authored Hack CLI recipe, without an executable or environment.
+/// Consumers must bind `argv()` to their selected, checked CLI context and
+/// retain their own action-admission rules. A recipe is not permission to run
+/// a fix: standalone Doctor remains copy-only until R7a/R7b.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoredRemedy {
+    fixed: &'static str,
+    project_name: Option<String>,
+    project_root: Option<PathBuf>,
+}
+
+impl AuthoredRemedy {
+    fn fixed(command: &'static str) -> Self {
+        Self {
+            fixed: command,
+            project_name: None,
+            project_root: None,
+        }
+    }
+
+    /// Arguments only: no `hack` executable, shell parsing or environment.
+    /// Dynamic names and roots remain individual arguments, including roots
+    /// that contain whitespace, quotes, newlines or non-UTF-8 bytes.
+    #[must_use]
+    pub fn argv(&self) -> Vec<std::ffi::OsString> {
+        // Only authored static constants reach `fixed`; finding text never
+        // supplies these words. Dynamic values are appended separately.
+        let mut args: Vec<_> = self
+            .fixed
+            .split_ascii_whitespace()
+            .skip(1)
+            .map(std::ffi::OsString::from)
+            .collect();
+        if let Some(name) = &self.project_name {
+            args.extend(["--project".into(), name.into()]);
+        }
+        if let Some(root) = &self.project_root {
+            args.extend(["--path".into(), root.as_os_str().into()]);
+        }
+        args
+    }
+
+    #[must_use]
+    pub fn project_root(&self) -> Option<&Path> {
+        self.project_root.as_deref()
+    }
+
+    /// Standalone copy display uses `hack` from the user's terminal PATH.
+    /// Context-aware consumers must render from `argv()` and their checked
+    /// executable/environment instead of copying or parsing this string.
+    #[must_use]
+    pub fn standalone_command(&self) -> String {
+        let mut command = self.fixed.to_owned();
+        if let Some(name) = &self.project_name {
+            command.push_str(&format!(" --project {}", shell_quote(name)));
+        }
+        if let Some(root) = &self.project_root {
+            command.push_str(&format!(" --path {}", shell_quote(&root.to_string_lossy())));
+        }
+        command
+    }
+}
+
 const DOCS: &str = "https://github.com/hack-dance/hack/blob/next/docs/";
 
 fn doc_for(id: &str, area: Area) -> String {
@@ -163,7 +231,7 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 /// Daemon repairs depend on the state the check reports (doctor-daemon.ts).
-fn daemon_command(id: &str, detail: &str) -> Option<String> {
+fn daemon_command(id: &str, detail: &str) -> Option<AuthoredRemedy> {
     if detail.contains("candidate") {
         return None;
     }
@@ -178,7 +246,7 @@ fn daemon_command(id: &str, detail: &str) -> Option<String> {
         }
         _ => return None,
     };
-    Some(cmd.into())
+    Some(AuthoredRemedy::fixed(cmd))
 }
 
 /// Project repairs that `hack doctor --fix` applies for one checkout.
@@ -239,23 +307,27 @@ fn is_plain_name(s: &str) -> bool {
 /// when it is a known remedy. Anything else yields `None` (the card falls
 /// back to its documented default), so a hostile project name can never
 /// put a shell program on the clipboard.
-fn remedy_in_detail(detail: &str) -> Option<String> {
+fn remedy_in_detail(detail: &str) -> Option<AuthoredRemedy> {
     let tail = detail.trim().strip_suffix(')')?;
     let start = tail.rfind("(run: ")? + "(run: ".len();
     let cmd = tail[start..].trim();
-    if KNOWN_REMEDIES.contains(&cmd) {
-        return Some(cmd.to_owned());
+    if let Some(fixed) = KNOWN_REMEDIES.iter().find(|fixed| **fixed == cmd) {
+        return Some(AuthoredRemedy::fixed(fixed));
     }
     let name = cmd.strip_prefix(PRUNE_PROJECT)?;
-    is_plain_name(name).then(|| format!("{PRUNE_PROJECT}{}", shell_quote(name)))
+    is_plain_name(name).then(|| AuthoredRemedy {
+        project_name: Some(name.to_owned()),
+        ..AuthoredRemedy::fixed("hack projects prune")
+    })
 }
 
-fn with_path(cmd: &str, root: &Path) -> String {
-    format!("{cmd} --path {}", shell_quote(&root.to_string_lossy()))
+fn with_path(mut recipe: AuthoredRemedy, root: &Path) -> AuthoredRemedy {
+    recipe.project_root = Some(root.to_owned());
+    recipe
 }
 
 /// The one exact command for a card, or `None` when only a doc applies.
-fn command_for(id: &str, area: Area, detail: &str, affected: &Affected) -> Option<String> {
+fn command_for(id: &str, area: Area, detail: &str, affected: &Affected) -> Option<AuthoredRemedy> {
     if matches!(id, "daemon" | "daemon service") {
         // The CLI's own named remedy wins: it knows cases the status words
         // do not show (an incompatible systemd hackd needs `install`, and
@@ -268,10 +340,10 @@ fn command_for(id: &str, area: Area, detail: &str, affected: &Affected) -> Optio
         }
         Affected::Machine => match id {
             "caddy local ca" | "host tls trust" | "local ca trust" => {
-                Some("hack global trust".into())
+                Some(AuthoredRemedy::fixed("hack global trust"))
             }
             "browser local network" => None,
-            _ if area == Area::RoutingDns => Some("hack global install".into()),
+            _ if area == Area::RoutingDns => Some(AuthoredRemedy::fixed("hack global install")),
             _ => None,
         },
         // One exact command needs exactly one non-native checkout. The
@@ -280,16 +352,18 @@ fn command_for(id: &str, area: Area, detail: &str, affected: &Affected) -> Optio
             [p] if !p.native => {
                 let root = p.root.as_ref()?;
                 if let Some(cmd) = remedy_in_detail(detail) {
-                    return Some(if PROJECT_COMMANDS.iter().any(|c| cmd.starts_with(c)) {
-                        with_path(&cmd, root)
-                    } else {
-                        cmd
-                    });
+                    return Some(
+                        if PROJECT_COMMANDS.iter().any(|c| cmd.fixed.starts_with(c)) {
+                            with_path(cmd, root)
+                        } else {
+                            cmd
+                        },
+                    );
                 }
                 if PROJECT_RESTART_IDS.contains(&id) {
-                    Some(with_path("hack restart", root))
+                    Some(with_path(AuthoredRemedy::fixed("hack restart"), root))
                 } else if PROJECT_FIX_IDS.contains(&id) {
-                    Some(with_path("hack doctor --fix", root))
+                    Some(with_path(AuthoredRemedy::fixed("hack doctor --fix"), root))
                 } else {
                     None
                 }
@@ -350,6 +424,8 @@ pub struct Card {
     pub detail: String,
     pub affected: Affected,
     pub action: CardAction,
+    /// Authored argv for context binding; never parse `action` display text.
+    pub authored_remedy: Option<AuthoredRemedy>,
     /// A safe one-click fix needs the CLI to report a fix kind (R7a).
     pub needs: &'static str,
 }
@@ -361,6 +437,11 @@ pub struct DoctorRun {
     pub project: Option<String>,
     pub root: Option<PathBuf>,
     pub native: bool,
+    /// Source verified exact CLI root selection and unchanged marker identity
+    /// before/after the native read. Check ids alone never prove a checkout.
+    pub exact_native_root: bool,
+    /// False for local preflight notes: no CLI checks ran.
+    pub probe_started: bool,
     pub result: Result<DoctorReport, String>,
 }
 
@@ -371,6 +452,8 @@ impl DoctorRun {
             project: None,
             root: None,
             native: false,
+            exact_native_root: false,
+            probe_started: true,
             result,
         }
     }
@@ -381,6 +464,8 @@ impl DoctorRun {
             project: Some(name.into()),
             root: Some(root.into()),
             native: false,
+            exact_native_root: false,
+            probe_started: true,
             result,
         }
     }
@@ -486,20 +571,24 @@ type ProjectKey = (String, Severity, String);
 
 /// Legacy Compose output identifies the selected Hack directory. Native
 /// output has no project row, so require a known project-scoped check.
-fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
+pub(crate) fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
     let Some(root) = &run.root else { return false };
+    if adopted_project_evidence(root, report) {
+        return true;
+    }
     if run.native {
-        return report.checks.iter().any(|c| {
-            matches!(
-                c.id.as_str(),
-                "env key"
-                    | "secret integrity"
-                    | "compose backend features"
-                    | "native settings"
-                    | "native source size"
-                    | "amd64 emulation"
-            )
-        });
+        return run.exact_native_root
+            && report.checks.iter().any(|c| {
+                matches!(
+                    c.id.as_str(),
+                    "env key"
+                        | "secret integrity"
+                        | "compose backend features"
+                        | "native settings"
+                        | "native source size"
+                        | "amd64 emulation"
+                )
+            });
     }
     report.checks.iter().any(|c| {
         c.id == "project"
@@ -510,6 +599,18 @@ fn project_evidence(run: &DoctorRun, report: &DoctorReport) -> bool {
                     let path = Path::new(p);
                     path == root.join(".hack") || path == root.join(".dev")
                 })
+    })
+}
+
+pub(crate) fn adopted_project_evidence(root: &Path, report: &DoctorReport) -> bool {
+    let prefix = format!(
+        "Adopted Compose project at {}",
+        root.join(".hack").display()
+    );
+    report.checks.iter().any(|c| c.id == "project" && match c.detail.strip_prefix(&prefix) {
+        Some(" ('hack config adopt'). Its Compose inputs belong to the adoption; adopted commands support retained-container start, restart, stop, ps, logs and exec.") => c.status == "ok",
+        Some(" has a pending or interrupted adoption operation. Use explicit adoption recovery before other project commands; values omitted.") => c.status == "warn",
+        _ => false,
     })
 }
 
@@ -536,22 +637,22 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
                 continue;
             }
         };
+        let project_proven = run.project.is_none() || project_evidence(run, report);
         if let Some(name) = &run.project {
-            if project_evidence(run, report) {
+            if project_proven {
                 projects_checked += 1;
             } else {
                 failed_runs.push((
                     name.clone(),
                     "could not check (no exact project evidence)".into(),
                 ));
-                continue;
             }
         } else {
             if report.checks.is_empty() {
                 failed_runs.push(("machine".into(), "could not check (empty report)".into()));
                 continue;
             }
-            machine_checked = true;
+            machine_checked |= run.probe_started;
         }
         for DoctorCheck { id, status, detail } in &report.checks {
             let (area, scope) = classify(id).unwrap_or((
@@ -571,6 +672,11 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
             } else {
                 scope
             };
+            // An unproven checkout cannot own project findings, but its
+            // machine diagnostics remain useful (notably native trust).
+            if !project_proven && scope == Scope::Project {
+                continue;
+            }
             // A project check outside any project has no project to name.
             let owner = match (scope, &run.project) {
                 (Scope::Machine, _) => None,
@@ -590,7 +696,9 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
                 Ok(Some(s)) => (s, detail.clone()),
                 Err(()) => (
                     Severity::CouldNotCheck,
-                    if status.is_empty() {
+                    if !detail.is_empty() {
+                        detail.clone()
+                    } else if status.is_empty() {
                         "The check reported no status".into()
                     } else {
                         format!("The check reported an unknown status {status:?}")
@@ -620,9 +728,14 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
     }
 
     let card = |id: &str, area: Area, severity: Severity, detail: String, affected: Affected| {
-        let action = match (severity, command_for(id, area, &detail, &affected)) {
-            (Severity::CouldNotCheck, _) | (_, None) => CardAction::OpenDoc(doc_for(id, area)),
-            (_, Some(c)) => CardAction::Copy(c),
+        let authored_remedy = if severity == Severity::CouldNotCheck {
+            None
+        } else {
+            command_for(id, area, &detail, &affected)
+        };
+        let action = match &authored_remedy {
+            None => CardAction::OpenDoc(doc_for(id, area)),
+            Some(recipe) => CardAction::Copy(recipe.standalone_command()),
         };
         Card {
             id: id.into(),
@@ -631,6 +744,7 @@ pub fn aggregate(runs: &[DoctorRun]) -> DoctorView {
             detail,
             affected,
             action,
+            authored_remedy,
             needs: "R7a",
         }
     };
@@ -1033,6 +1147,69 @@ mod tests {
     }
 
     #[test]
+    fn authored_remedies_expose_arguments_without_binding_an_executable() {
+        let root = PathBuf::from("/work/it's here\n$(touch never)");
+        let view = aggregate(&[DoctorRun::project(
+            "alpha",
+            root.to_str().unwrap(),
+            report(vec![
+                check(
+                    "project",
+                    "ok",
+                    &format!(
+                        "Found .hack/ (or legacy .dev/) at {}",
+                        root.join(".hack").display()
+                    ),
+                ),
+                check("generated files", "warn", "tracked"),
+            ]),
+        )]);
+        let card = view.cards().next().unwrap();
+        let recipe = card.authored_remedy.as_ref().unwrap();
+        assert_eq!(
+            recipe.argv(),
+            [
+                std::ffi::OsString::from("doctor"),
+                "--fix".into(),
+                "--path".into(),
+                root.as_os_str().into()
+            ]
+        );
+        assert_eq!(recipe.project_root(), Some(root.as_path()));
+        assert_eq!(card.action, CardAction::Copy(recipe.standalone_command()));
+
+        let prune =
+            remedy_in_detail("orphan (run: hack projects prune --project my-app.v2)").unwrap();
+        assert_eq!(
+            prune.argv(),
+            ["projects", "prune", "--project", "my-app.v2"].map(std::ffi::OsString::from)
+        );
+        assert!(prune.project_root().is_none());
+
+        let unknown = aggregate(&[machine(vec![check("docker", "skipped", "run: hack down")])]);
+        assert!(unknown.cards().all(|c| c.authored_remedy.is_none()));
+    }
+
+    #[test]
+    fn authored_root_argument_preserves_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = PathBuf::from(std::ffi::OsString::from_vec(b"/work/\xff".to_vec()));
+        let affected = Affected::Projects(vec![ProjectRef {
+            name: "alpha".into(),
+            root: Some(root.clone()),
+            native: false,
+        }]);
+        let recipe = command_for(
+            "caddy hosts",
+            Area::RoutingDns,
+            "missing mapping",
+            &affected,
+        )
+        .unwrap();
+        assert_eq!(recipe.argv().last().unwrap(), root.as_os_str());
+    }
+
+    #[test]
     fn a_checks_own_remedy_wins_over_doctor_fix() {
         let card = |id: &str, detail: &str| {
             aggregate(&[proj("alpha", vec![check(id, "warn", detail)])])
@@ -1090,7 +1267,8 @@ mod tests {
     #[test]
     fn named_remedies_are_allowlisted_and_quoted() {
         assert_eq!(
-            remedy_in_detail("service run: hack down failed (run: hack restart)"),
+            remedy_in_detail("service run: hack down failed (run: hack restart)")
+                .map(|r| r.standalone_command()),
             Some("hack restart".into())
         );
         assert_eq!(remedy_in_detail("service run: hack down failed"), None);
@@ -1270,8 +1448,58 @@ mod tests {
             report(vec![check("native settings", "ok", "valid")]),
         );
         native.native = true;
+        native.exact_native_root = true;
         assert_eq!(aggregate(&[machine.clone(), native]).projects_checked, 1);
         assert!(!aggregate(&[DoctorRun::machine(report(vec![]))]).is_clean());
+    }
+
+    #[test]
+    fn unproven_native_report_retains_only_machine_diagnostics() {
+        let mut native = DoctorRun::project(
+            "alpha",
+            "/work/alpha",
+            report(vec![
+                check("native root trust", "error", "untrusted active root"),
+                check("native future project check", "warn", "not attributable"),
+            ]),
+        );
+        native.native = true;
+        let view = aggregate(&[machine(vec![check("docker", "ok", "")]), native]);
+        assert_eq!(view.projects_checked, 0);
+        assert!(!view.is_clean());
+        assert_eq!(view.cards().count(), 1);
+        let card = view.cards().next().unwrap();
+        assert_eq!(card.id, "native root trust");
+        assert_eq!(card.affected, Affected::Machine);
+        assert_eq!(view.tone(), Tone::Error);
+    }
+
+    #[test]
+    fn adopted_reports_require_exact_root_and_keep_pending_findings() {
+        for (status, suffix) in [
+            (
+                "ok",
+                " ('hack config adopt'). Its Compose inputs belong to the adoption; adopted commands support retained-container start, restart, stop, ps, logs and exec.",
+            ),
+            (
+                "warn",
+                " has a pending or interrupted adoption operation. Use explicit adoption recovery before other project commands; values omitted.",
+            ),
+        ] {
+            let report = report(vec![
+                check(
+                    "project",
+                    status,
+                    &format!("Adopted Compose project at /work/alpha/.hack{suffix}"),
+                ),
+                check("env key", "error", "missing"),
+            ]);
+            let v = aggregate(&[DoctorRun::project("alpha", "/work/alpha", report.clone())]);
+            assert_eq!(v.projects_checked, 1);
+            assert!(v.has_errors());
+            let wrong = aggregate(&[DoctorRun::project("nested", "/work/alpha/nested", report)]);
+            assert_eq!(wrong.projects_checked, 0);
+        }
     }
 
     #[test]

@@ -28,16 +28,65 @@ again before signalling. The wrapper forwards TERM to its main command group;
 Hack sends TERM to separately grouped descendants that the wrapper does not signal.
 It waits for the detached commands to disappear before
 retiring the FIFO wrapper and its reader. Each phase allows 5 seconds for graceful
-exit, escalates surviving groups once with SIGKILL, then waits up to 2 seconds for
-retirement (at most 14 seconds of group waiting across both phases, plus bounded mux
-and process-identity queries). The capture allows two 1-second group snapshots
-alongside a 2-second identity read; each signal batch checks identities again with
-bounded queries. Explicit `hack down` uses the same command-before-wrapper order
+exit, escalates surviving groups once with SIGKILL, then gives confirmation a
+2-second polling budget. Each `ps` call can itself take up to 2 seconds, including
+a final call begun at the polling deadline: these budgets are not hard wall-clock
+limits. A failed census is retried within the current observation budget. If no
+read succeeds, cleanup stays unconfirmed; a successful live observation still
+requires retirement or escalation. Probe EPERM means the group may still exist: on
+macOS, even a zombie-only group can return it. Hack uses the process census to
+distinguish live members from zombies. TERM or KILL denied with EPERM is benign
+only when the following observation proves retirement; live members still cause
+a refusal. Failed reads retry within the existing phase budget.
+Explicit `hack down` uses the same command-before-wrapper order
 after interrupting its owned lifecycle panes.
 Commands that finish their TERM handler sooner do not wait out the grace period.
+A second Ctrl-C skips the remaining command grace and requests the single SIGKILL;
+identity/ownership checks and post-KILL confirmation still run. An in-flight
+bounded `ps` or mux call finishes before that request can take effect.
+The foreground guard counts Ctrl-Cs from before Compose starts: two interrupts
+while Compose stops containers also skip the later lifecycle command grace.
+The wrapper/reader phase keeps its five-second reap window even after a forced
+command stop, so the wrapper can remove its private FIFO directory before exiting.
+
+| Lifecycle shutdown case | With prompt process reads (excluding Compose and mux shutdown) |
+| --- | --- |
+| Command finishes a one-second TERM handler; wrapper reaps it | About 1 second, plus polling/scheduling |
+| Command ignores TERM; wrapper reaps after KILL | About 5 seconds, plus KILL confirmation/polling |
+| Command needs KILL; wrapper then also needs KILL | About 10 seconds, plus both KILL confirmations; confirmation polling budgets can add up to 4 seconds |
+| Every process observation consumes its timeout | Up to 48 seconds across both group phases, as detailed below; capture and mux checks are additional |
+
+The conservative 48-second group ceiling includes two initial-observation budgets
+of 5 seconds (up to 7 seconds each with one final 2-second read), two grace budgets
+(up to 7 seconds each), two confirmation budgets (up to 4 seconds each), and three
+signal-identity batches (up to 4 seconds each with one failed-read retry). No census
+success within an initial budget refuses cleanup without signalling. Capture adds
+up to 4 seconds: two 1-second snapshots run alongside up to two 2-second identity
+reads. The normal owned foreground mux-stop path uses a token read and a stop,
+each bounded by `HACK_MUX_COMMAND_TIMEOUT_MS` (15 seconds by default); a failed stop
+can add one bounded presence check. Thus the worst-case process/mux allowance is
+97 seconds before optional identity refresh, rather than 14 seconds. A missing
+launch birth adds up to two owner reads, one parallel pane-query batch and two
+identity reads: at most another 49 seconds with default mux timeouts. These are
+conservative allowances for successful observations near deadlines, not a timer
+that every shutdown waits out. Filesystem I/O, OS scheduling, the instance-lock
+wait and Compose's own service stop grace are separate. Explicit `down` also sends
+an interrupt to each lifecycle window and waits 750 ms before this group path;
+its per-window mux calls and subsequent shutdown work are additional.
 An unreaped zombie has exited and runs no code: a group containing only zombies
 counts as retired. A live member in the same group still requires shutdown;
-failed process observation remains unconfirmed.
+failed process observations never count as absence.
+Native launch cancellation still permits the owned cleanup to retry a missing
+start time: its ownership and artifact checks remain active independently of the
+canceled startup deadline. Failed native launches also use a cleanup freshness
+check independent of canceled startup inputs: admission, hook ownership, private
+directory identity, the saved owner record and the mux token are still checked.
+Normal startup and ordinary stop retain their full input freshness checks.
+
+For value-free retirement diagnostics, set `HACK_LIFECYCLE_RETIREMENT_TRACE=1`.
+Stderr records fixed decision labels, PIDs/group IDs, counts and boolean outcomes.
+It excludes paths, names, command/env values, ownership tokens and raw errors.
+Leave it unset for normal operation.
 `hack doctor --fix` also captures groups before mux teardown and waits for
 commands before wrappers when repairing an ownership-proven orphan. An
 unconfirmed retirement keeps that entry and is reported while repair continues
@@ -56,8 +105,13 @@ grant signal authority or make an unrelated live group count as retained work.
 
 Zellij does not await process-group retirement; it is scheduled for removal in v5.0.0.
 
-Retrying missing launch-time identity observations during owned foreground cleanup
-remains a follow-up: a missing start time can currently leave cleanup unconfirmed.
+If the launch missed a pane start time, foreground cleanup re-reads the current
+pane in the recorded window while checking the session's ownership token before
+and after the query. It fills only a missing birth for that same current pane;
+it never replaces a stored birth or borrows identity from a reused PID outside
+the window. A failed pane query leaves the original missing birth intact: Hack
+still attempts the token-checked mux stop, then retains unconfirmed descendant
+state. A replaced owner still refuses the stop.
 
 ![Foreground lifecycle retirement](diagrams/compose-lifecycle-retirement.svg)
 
@@ -558,6 +612,14 @@ use the remaining budget. Inspection failures return the Docker/Compose error
 without retrying it as a missing service.
 Lifecycle failures are one of the primary consumers of the `--json` error envelope,
 since hook and process startup are common failure points around `hack up`.
+
+### Activity log
+
+Every `hack up`, `hack down` and `hack restart`, on either backend, appends one
+names-only record (time, project, branch, action, origin, outcome, failed
+services, duration) to `<hack home>/activity.jsonl`; `hack activity --json`
+reads it newest first. `HACK_ORIGIN` (`cli`, `app`, `autostart`, `agent`) names
+who asked. See the [activity log reference](./reference/activity-log.md).
 
 ## Sessions backend
 

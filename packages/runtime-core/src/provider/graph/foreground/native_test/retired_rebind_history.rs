@@ -399,6 +399,8 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
         .unwrap(),
     )
     .unwrap();
+    // Removing both roots simulates the lost publication under test.
+    // owner-root: deliberate removal
     let publisher = transport::root(&candidate, &run).unwrap();
     let control = refreshed
         .relay_startup
@@ -494,6 +496,7 @@ fn completed_prior_boot_rebind_archives_after_newer_stopped_generation() {
     );
     assert!(first_ready.journal_incomplete);
     assert!(first_ready.guest_endpoints.is_empty());
+    // owner-root: path-only
     let foreground_root = transport::root(&candidate, &run).unwrap();
     let publisher_sha = file_hash(&foreground_root.join("owner.json"));
     let first_cleanup = Process::start(

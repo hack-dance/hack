@@ -1,6 +1,10 @@
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
-import type { NativeProjectInput } from "./native-project-input.ts";
+import {
+  type NativeProjectInput,
+  requireNativeShellDeliveryFits,
+  selectActiveNativeProjectInput,
+} from "./native-project-input.ts";
 import { withNativeProjectReview } from "./native-project-review.ts";
 import {
   invokeNativeRuntime,
@@ -52,6 +56,12 @@ export async function requireNativeStaticStartReview(opts: {
       if (!(isRecord(plan) && isRecord(plan.services))) {
         throw new ClosedCliError("Native static start review is invalid.");
       }
+      requireNativeShellDeliveryFits(
+        selectActiveNativeProjectInput({
+          input: opts.input,
+          reviewedPlan: plan,
+        })
+      );
       const services = Object.keys(plan.services);
       const refusals = readNativeStartRefusals(report.start_refusals, services);
       if (refusals === null) {

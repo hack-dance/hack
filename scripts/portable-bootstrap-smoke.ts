@@ -27,6 +27,57 @@ const INPUTS = [
   "denied.ts",
 ] as const;
 
+type BootstrapStep =
+  | "setup"
+  | "identity"
+  | "env"
+  | "http"
+  | "dev-write"
+  | "restart"
+  | "cleanup";
+type BootstrapReason =
+  | "cli_identity"
+  | "cli_version_format"
+  | "missing_wrong_key_refusal"
+  | "secret_free_launch_refusal"
+  | "configuration_read"
+  | "env_provenance_read"
+  | "env_provenance_semantics"
+  | "repeat_reads_preserve_inputs"
+  | "fresh_application_data"
+  | "development_command"
+  | "application_reads_development_write"
+  | "new_application_process"
+  | "restart_retains_application_data"
+  | "workflow_preserves_inputs"
+  | "workflow_completion"
+  | "bounded_command_output"
+  | "secret_free_command_output"
+  | "application_readiness"
+  | "bounded_http_response"
+  | "loopback_http_response"
+  | "owned_application_response"
+  | "owned_application_stop"
+  | "application_stop_status"
+  | "application_listener_retired"
+  | "fixture_contains_no_external_symlinks"
+  | "no_materialized_env_key_files"
+  | "secret_free_fixture_files"
+  | "owned_cleanup_failed"
+  | "fixture_cleanup"
+  | "invalid_executable"
+  | "invalid_json"
+  | "connection_refused"
+  | "connection_reset"
+  | "http_timeout"
+  | "io_error"
+  | "unexpected_error"
+  | "command_deadline"
+  | "output_collection_deadline"
+  | "owned_process_cleanup_deadline"
+  | "forced_owned_process_cleanup_deadline";
+type BootstrapContext = { step: BootstrapStep };
+
 type Child = Bun.Subprocess<"ignore", "pipe", "pipe">;
 type Capture = { text: string; overflow: boolean };
 type OwnedCommand = {
@@ -54,30 +105,51 @@ type Fixture = {
 export async function runPortableBootstrap(opts: {
   readonly hackBin: string;
 }): Promise<{ version: string; checks: readonly string[]; cleanup: true }> {
+  const context: BootstrapContext = { step: "setup" };
+  try {
+    return await runWorkflow(opts, context);
+  } catch (error: unknown) {
+    throw new BootstrapFailure(
+      failureReason(error),
+      error instanceof BootstrapFailure
+        ? (error.step ?? context.step)
+        : context.step,
+      error instanceof BootstrapFailure ? error.cleanupReason : undefined
+    );
+  }
+}
+
+async function runWorkflow(
+  opts: { readonly hackBin: string },
+  context: BootstrapContext
+): Promise<{ version: string; checks: readonly string[]; cleanup: true }> {
   if (!isAbsolute(opts.hackBin)) {
-    throw new Error("--hack-bin must be an absolute executable path");
+    throw new BootstrapFailure("invalid_executable");
   }
   const hackBin = await realpath(opts.hackBin);
   if (!(await lstat(hackBin)).isFile()) {
-    throw new Error("--hack-bin must select a regular executable file");
+    throw new BootstrapFailure("invalid_executable");
   }
   await access(hackBin, constants.X_OK);
   const fixture = await createFixture();
   const checks: string[] = [];
   let version = "";
   let completed = false;
+  let failure: BootstrapFailure | undefined;
   try {
+    context.step = "identity";
     const identity = await command({ fixture, hackBin, args: ["--version"] });
     requireThat(
       identity.code === 0 && identity.stdout.trim().length > 0,
-      "CLI identity"
+      "cli_identity"
     );
     version = identity.stdout.trim();
     requireThat(
       version.length < 160 && !version.includes("\n"),
-      "CLI version format"
+      "cli_version_format"
     );
     checks.push("selected executable");
+    context.step = "env";
     const before = await inputSnapshot(fixture);
     const wrongKey = randomBytes(32).toString("base64url");
     fixture.forbidden.push(wrongKey);
@@ -88,10 +160,10 @@ export async function runPortableBootstrap(opts: {
         args: hostArgs(fixture, "denied.ts"),
         key,
       });
-      requireThat(denied.code !== 0, "missing/wrong key refusal");
+      requireThat(denied.code !== 0, "missing_wrong_key_refusal");
       requireThat(
         !(await Bun.file(join(fixture.project, "unexpected-launch")).exists()),
-        "secret-free launch refusal"
+        "secret_free_launch_refusal"
       );
     }
     checks.push("missing and wrong keys refuse child launch");
@@ -104,7 +176,7 @@ export async function runPortableBootstrap(opts: {
       });
       requireThat(
         config.code === 0 && config.stdout.trim() === `portable-${fixture.run}`,
-        "configuration read"
+        "configuration_read"
       );
       const env = await command({
         fixture,
@@ -121,21 +193,23 @@ export async function runPortableBootstrap(opts: {
           "--json",
         ],
       });
-      requireThat(env.code === 0, "env provenance read");
+      requireThat(env.code === 0, "env_provenance_read");
       const value: unknown = JSON.parse(env.stdout);
       requireThat(
         isRecord(value) && value.available === true && value.secret === true,
-        "env provenance semantics"
+        "env_provenance_semantics"
       );
     }
     requireThat(
       JSON.stringify(await inputSnapshot(fixture)) === JSON.stringify(before),
-      "repeat reads preserve inputs"
+      "repeat_reads_preserve_inputs"
     );
     checks.push("repeat configuration/env reads preserve inputs");
+    context.step = "http";
     const first = await startApplication({ fixture, hackBin });
     const initial = await health({ fixture, ready: first.ready });
-    requireThat(initial.marker === null, "fresh application data");
+    requireThat(initial.marker === null, "fresh_application_data");
+    context.step = "dev-write";
     const dev = await command({
       fixture,
       hackBin,
@@ -144,12 +218,13 @@ export async function runPortableBootstrap(opts: {
     });
     requireThat(
       dev.code === 0 && dev.stdout === "development command passed\n",
-      "development command"
+      "development_command"
     );
     requireThat(
       (await health({ fixture, ready: first.ready })).marker === fixture.run,
-      "application reads development write"
+      "application_reads_development_write"
     );
+    context.step = "restart";
     await stopApplication({
       fixture,
       command: first.command,
@@ -158,12 +233,13 @@ export async function runPortableBootstrap(opts: {
     const second = await startApplication({ fixture, hackBin });
     requireThat(
       second.ready.boot !== first.ready.boot,
-      "new application process"
+      "new_application_process"
     );
     requireThat(
       (await health({ fixture, ready: second.ready })).marker === fixture.run,
-      "restart retains application data"
+      "restart_retains_application_data"
     );
+    context.step = "cleanup";
     await stopApplication({
       fixture,
       command: second.command,
@@ -176,23 +252,85 @@ export async function runPortableBootstrap(opts: {
     );
     requireThat(
       JSON.stringify(await inputSnapshot(fixture)) === JSON.stringify(before),
-      "workflow preserves inputs"
+      "workflow_preserves_inputs"
     );
     await assertNoSecretFiles(fixture);
     checks.push("no key/plaintext files or output");
     completed = true;
-  } finally {
-    await cleanup(fixture);
+  } catch (error: unknown) {
+    failure = new BootstrapFailure(failureReason(error), context.step);
   }
-  requireThat(completed, "workflow completion");
+  try {
+    await cleanup(fixture);
+  } catch (error: unknown) {
+    throw new BootstrapFailure(
+      failure?.reason ?? failureReason(error),
+      failure?.step ?? "cleanup",
+      failure === undefined ? undefined : failureReason(error)
+    );
+  }
+  if (failure !== undefined) {
+    throw failure;
+  }
+  requireThat(completed, "workflow_completion");
   return { version, checks, cleanup: true };
 }
 
-class BootstrapFailure extends Error {}
+/** Only closed labels may cross the runner's stderr boundary; never retain a raw cause. */
+class BootstrapFailure extends Error {
+  readonly reason: BootstrapReason;
+  readonly step?: BootstrapStep;
+  readonly cleanupReason?: BootstrapReason;
 
-function requireThat(condition: boolean, stage: string): asserts condition {
+  constructor(
+    reason: BootstrapReason,
+    step?: BootstrapStep,
+    cleanupReason?: BootstrapReason
+  ) {
+    super(
+      `Portable bootstrap failed: step=${step ?? "setup"} reason=${reason}${cleanupReason === undefined ? "" : ` cleanup=${cleanupReason}`}`
+    );
+    this.reason = reason;
+    this.step = step;
+    this.cleanupReason = cleanupReason;
+  }
+}
+
+function failureReason(error: unknown): BootstrapReason {
+  if (error instanceof BootstrapFailure) {
+    return error.reason;
+  }
+  if (error instanceof SyntaxError) {
+    return "invalid_json";
+  }
+  if (isRecord(error)) {
+    switch (error.code) {
+      case "ECONNREFUSED":
+        return "connection_refused";
+      case "ECONNRESET":
+        return "connection_reset";
+      case "ABORT_ERR":
+      case "ETIMEDOUT":
+        return "http_timeout";
+      case "ENOENT":
+      case "EACCES":
+      case "EPERM":
+      case "EIO":
+      case "ENOSPC":
+        return "io_error";
+      default:
+        break;
+    }
+  }
+  return "unexpected_error";
+}
+
+function requireThat(
+  condition: boolean,
+  reason: BootstrapReason
+): asserts condition {
   if (!condition) {
-    throw new BootstrapFailure(`Portable bootstrap failed: ${stage}`);
+    throw new BootstrapFailure(reason);
   }
 }
 
@@ -297,6 +435,7 @@ function verifyTokenSource(digest: string): string {
 function applicationSource(opts: { run: string; digest: string }): string {
   return `${verifyTokenSource(opts.digest)}
 import { Database } from "bun:sqlite";
+import { rename } from "node:fs/promises";
 const db = new Database("data/state.sqlite", { create: true });
 db.run("CREATE TABLE IF NOT EXISTS fixture (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)");
 const boot = crypto.randomUUID();
@@ -310,7 +449,9 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
   const row = db.query("SELECT marker FROM fixture WHERE id = 1").get();
   return Response.json({ run, boot, marker: row?.marker ?? null });
 }});
-await Bun.write("ready.json", JSON.stringify({ port: server.port, run, boot }));
+// Publish only a complete readiness document: existence is the reader's commit signal.
+await Bun.write("ready.json.pending", JSON.stringify({ port: server.port, run, boot }));
+await rename("ready.json.pending", "ready.json");
 setTimeout(() => { server.stop(true); db.close(); process.exit(42); }, 120000);
 `;
 }
@@ -386,7 +527,7 @@ async function capture(stream: ReadableStream<Uint8Array>): Promise<Capture> {
 async function within<T>(
   promise: Promise<T>,
   milliseconds: number,
-  stage: string
+  reason: BootstrapReason
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -394,12 +535,7 @@ async function within<T>(
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(
-          () =>
-            reject(
-              new BootstrapFailure(
-                `Portable bootstrap failed: ${stage} deadline`
-              )
-            ),
+          () => reject(new BootstrapFailure(reason)),
           milliseconds
         );
       }),
@@ -416,14 +552,14 @@ async function collect(
   const [code, stdout, stderr] = await within(
     Promise.all([owned.child.exited, owned.stdout, owned.stderr]),
     STOP_TIMEOUT_MS,
-    "output collection"
+    "output_collection_deadline"
   );
   fixture.commands.delete(owned);
-  requireThat(!(stdout.overflow || stderr.overflow), "bounded command output");
+  requireThat(!(stdout.overflow || stderr.overflow), "bounded_command_output");
   for (const output of [stdout.text, stderr.text]) {
     requireThat(
       !fixture.forbidden.some((value) => output.includes(value)),
-      "secret-free command output"
+      "secret_free_command_output"
     );
   }
   return { code, stdout: stdout.text };
@@ -436,7 +572,7 @@ async function command(opts: {
   key?: string;
 }): Promise<{ code: number; stdout: string }> {
   const owned = spawn(opts);
-  await within(owned.child.exited, COMMAND_TIMEOUT_MS, "command");
+  await within(owned.child.exited, COMMAND_TIMEOUT_MS, "command_deadline");
   return collect(opts.fixture, owned);
 }
 
@@ -475,9 +611,7 @@ async function startApplication(opts: {
     }
     await Bun.sleep(POLL_MS);
   }
-  throw new BootstrapFailure(
-    "Portable bootstrap failed: application readiness"
-  );
+  throw new BootstrapFailure("application_readiness");
 }
 
 /** Node's direct loopback transport does not consult inherited proxy settings. */
@@ -502,11 +636,7 @@ function loopback(opts: {
         response.on("data", (chunk: string) => {
           body += chunk;
           if (body.length > OUTPUT_LIMIT) {
-            req.destroy(
-              new BootstrapFailure(
-                "Portable bootstrap failed: bounded HTTP response"
-              )
-            );
+            req.destroy(new BootstrapFailure("bounded_http_response"));
           }
         });
         response.on("error", reject);
@@ -525,13 +655,13 @@ async function health(opts: {
   ready: Ready;
 }): Promise<Record<string, unknown>> {
   const response = await loopback(opts);
-  requireThat(response.status === 200, "loopback HTTP response");
+  requireThat(response.status === 200, "loopback_http_response");
   const value: unknown = JSON.parse(response.body);
   requireThat(
     isRecord(value) &&
       value.run === opts.fixture.run &&
       value.boot === opts.ready.boot,
-    "owned application response"
+    "owned_application_response"
   );
   return value;
 }
@@ -543,16 +673,16 @@ async function stopApplication(opts: {
 }): Promise<void> {
   await health(opts);
   const response = await loopback({ ...opts, stop: true });
-  requireThat(response.status === 200, "owned application stop");
+  requireThat(response.status === 200, "owned_application_stop");
   const result = await collect(opts.fixture, opts.command);
-  requireThat(result.code === 0, "application stop status");
+  requireThat(result.code === 0, "application_stop_status");
   try {
     await loopback(opts);
-    requireThat(false, "application listener retired");
+    requireThat(false, "application_listener_retired");
   } catch (error: unknown) {
     requireThat(
       isRecord(error) && error.code === "ECONNREFUSED",
-      "application listener retired"
+      "application_listener_retired"
     );
   }
 }
@@ -575,25 +705,33 @@ async function assertNoSecretFiles(
     const path = join(directory, item.name);
     requireThat(
       !item.isSymbolicLink(),
-      "fixture contains no external symlinks"
+      "fixture_contains_no_external_symlinks"
     );
     if (item.isDirectory()) {
       await assertNoSecretFiles(fixture, path);
     } else if (item.isFile()) {
       requireThat(
         item.name !== ".hack.secret.key" && item.name !== ".env",
-        "no materialized env/key files"
+        "no_materialized_env_key_files"
       );
       const bytes = await readFile(path);
       requireThat(
         !fixture.forbidden.some((value) => bytes.includes(Buffer.from(value))),
-        "secret-free fixture files"
+        "secret_free_fixture_files"
       );
     }
   }
 }
 
 async function cleanup(fixture: Fixture): Promise<void> {
+  try {
+    await cleanupFixture(fixture);
+  } catch (error: unknown) {
+    throw new BootstrapFailure(failureReason(error), "cleanup");
+  }
+}
+
+async function cleanupFixture(fixture: Fixture): Promise<void> {
   let clean = true;
   for (const owned of fixture.commands) {
     try {
@@ -603,7 +741,7 @@ async function cleanup(fixture: Fixture): Promise<void> {
       await within(
         owned.child.exited,
         STOP_TIMEOUT_MS,
-        "owned process cleanup"
+        "owned_process_cleanup_deadline"
       );
       await collect(fixture, owned);
     } catch {
@@ -614,15 +752,15 @@ async function cleanup(fixture: Fixture): Promise<void> {
       await within(
         owned.child.exited,
         STOP_TIMEOUT_MS,
-        "forced owned process cleanup"
+        "forced_owned_process_cleanup_deadline"
       );
     }
   }
-  requireThat(clean, "owned cleanup (fixture retained for diagnosis)");
+  requireThat(clean, "owned_cleanup_failed");
   await rm(fixture.root, { recursive: true });
   requireThat(
     !(await Bun.file(join(fixture.project, INPUTS[0])).exists()),
-    "fixture cleanup"
+    "fixture_cleanup"
   );
 }
 
@@ -641,7 +779,7 @@ if (import.meta.main) {
       const message =
         error instanceof BootstrapFailure
           ? error.message
-          : "Portable bootstrap failed; no raw child output or credentials were emitted.";
+          : "Portable bootstrap failed: step=setup reason=unexpected_error";
       process.stderr.write(`${message}\n`);
       process.exitCode = 1;
     }

@@ -262,7 +262,11 @@ function resolvedMux(available: readonly ("tmux" | "zellij")[]) {
     }) as unknown as MuxBackend;
   return () =>
     Promise.resolve({
-      mode: "auto" as const,
+      // Exercise the retained lifecycle ownership gate with an injected legacy backend,
+      // rather than relying on auto detection (which supports tmux only in v5).
+      mode: available.includes("tmux")
+        ? ("tmux" as const)
+        : ("zellij" as const),
       backends: new Map([
         ["tmux" as const, backend("tmux")],
         ["zellij" as const, backend("zellij")],

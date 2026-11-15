@@ -91,6 +91,7 @@ import {
   invokeNativeRuntime,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
+import { requireNativeSetup } from "../backends/native-runtime-setup.ts";
 import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -165,6 +166,10 @@ import {
   reassignCollidingPorts,
   reportInitDiscoveryFindings,
 } from "../init/validation.ts";
+import {
+  noteActivityBranch,
+  noteActivityFailedServices,
+} from "../lib/activity-log.ts";
 import {
   answerExistingRequest,
   parseBackgroundRequest,
@@ -258,6 +263,13 @@ import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
+import {
+  beginLifecycleProgress,
+  closeLifecycleProgress,
+  isLifecycleProgressRequested,
+  prepareLifecycleProgress,
+  reportLifecycleProgress,
+} from "../lib/lifecycle-progress.ts";
 import {
   createLifecycleLogSink,
   drainLifecycleOutput,
@@ -412,6 +424,7 @@ import {
   startNativeBackgroundCommand,
   withBackgroundSweep,
 } from "./background-command-start.ts";
+import { withActivity } from "./lifecycle-activity.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
@@ -558,6 +571,13 @@ const initOptions = [
   optNoDiscovery,
   optWith,
 ] as const;
+const optProgress = defineOption({
+  name: "progress",
+  type: "boolean",
+  long: "--progress",
+  description:
+    "With --json: stream ndjson progress lines before the result envelope (Compose backend)",
+} as const);
 const upOptions = [
   optPath,
   optProject,
@@ -567,6 +587,7 @@ const upOptions = [
   optProfile,
   optTarget,
   optJson,
+  optProgress,
 ] as const;
 const downOptions = [
   optPath,
@@ -585,6 +606,7 @@ const downOptions = [
   } as const),
   optYes,
   optJson,
+  optProgress,
   defineOption({
     name: "recoverNativeCompose",
     type: "boolean",
@@ -601,6 +623,7 @@ const restartOptions = [
   optProfile,
   optTarget,
   optJson,
+  optProgress,
   optRecoverFrontend,
   optExpectFinalizationAttempt,
   optExpectFrontendPid,
@@ -651,7 +674,20 @@ const optServices = defineOption({
   type: "string",
   long: "--services",
   valueHint: "<csv>",
-  description: "Filter Loki logs by service(s), comma-separated (e.g. api,www)",
+  description:
+    "Only these services, comma-separated (e.g. api,www); merged with the service argument",
+} as const);
+
+/** Upper bound for `--max-line-bytes`; the reader's own record cap is larger. */
+const MAX_LINE_BYTES_LIMIT = 1024 * 1024;
+
+const optMaxLineBytes = defineOption({
+  name: "maxLineBytes",
+  type: "number",
+  long: "--max-line-bytes",
+  valueHint: "<n>",
+  description:
+    "With --json, keep at most n UTF-8 bytes of each line and mark it truncated",
 } as const);
 
 const optQuery = defineOption({
@@ -684,6 +720,7 @@ const logsOptions = [
   optCompose,
   optLoki,
   optServices,
+  optMaxLineBytes,
   optQuery,
   optSince,
   optUntil,
@@ -734,7 +771,10 @@ const upSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const upCommand = withHandler(upSpec, withBackgroundSweep(handleUp));
+export const upCommand = withHandler(
+  upSpec,
+  withBackgroundSweep(withActivity("up", handleUp))
+);
 
 const downSpec = defineCommand({
   name: "down",
@@ -747,7 +787,7 @@ const downSpec = defineCommand({
 
 export const downCommand = withHandler(
   downSpec,
-  withBackgroundSweep(handleDown)
+  withBackgroundSweep(withActivity("down", handleDown))
 );
 
 const restartSpec = defineCommand({
@@ -759,7 +799,10 @@ const restartSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const restartCommand = withHandler(restartSpec, handleRestart);
+export const restartCommand = withHandler(
+  restartSpec,
+  withActivity("restart", handleRestart)
+);
 
 const psSpec = defineCommand({
   name: "ps",
@@ -948,6 +991,8 @@ export async function resolveEffectiveBranchForCommand(opts: {
       }
     }
   }
+  // Recorded only when the command runs inside an activity record.
+  noteActivityBranch(resolved.branch);
   return resolved.branch;
 }
 
@@ -1108,6 +1153,10 @@ function trackComposeStartupPhase(): {
   return {
     onStartupPhase: (phase) => {
       current = phase;
+      reportLifecycleProgress({
+        service: null,
+        phase: phase === "images" ? "images" : "starting",
+      });
       if (phase === "start") {
         startedAt = performance.now();
       }
@@ -1130,13 +1179,28 @@ function composeStartupFailureDetail(opts: {
 }
 
 /**
+ * The Compose "startup incomplete" message; also notes the services that
+ * did not start in the running action's activity record (names only).
+ */
+function composeStartupIncompleteMessage(
+  opts: Parameters<typeof buildStartupIncompleteMessage>[0]
+): string {
+  noteActivityFailedServices(opts.failed);
+  return buildStartupIncompleteMessage(opts);
+}
+
+/**
  * Emit the `--json` envelope for a lifecycle command and map it to the
- * standard 0/1 exit semantics.
+ * standard 0/1 exit semantics. A started `--progress` stream closes with it
+ * as one compact line; otherwise it is the ordinary pretty envelope.
  */
 function emitLifecycleResult(opts: {
   readonly result: CliResult<LifecycleJsonData>;
   readonly exitCode: number;
 }): number {
+  if (closeLifecycleProgress({ result: opts.result })) {
+    return opts.exitCode;
+  }
   emitCliResult({ result: opts.result });
   return opts.exitCode;
 }
@@ -1169,6 +1233,10 @@ function emitRemoteLifecycleJson(opts: {
   readonly branch: string | null;
   readonly startedAtMs?: number;
 }): number {
+  const composeProject = opts.branch
+    ? `${opts.project}--${opts.branch}`
+    : opts.project;
+  beginLifecycleProgress({ project: composeProject });
   if (opts.exitCode !== 0) {
     return emitLifecycleResult({
       result: errorResult({
@@ -1185,9 +1253,7 @@ function emitRemoteLifecycleJson(opts: {
         action: opts.action,
         project: opts.project,
         branch: opts.branch,
-        composeProject: opts.branch
-          ? `${opts.project}--${opts.branch}`
-          : opts.project,
+        composeProject,
         durationMs: Date.now() - (opts.startedAtMs ?? Date.now()),
       }),
     }),
@@ -2279,11 +2345,11 @@ export function signalCleanupKeepingStartedHelpers(opts: {
   if (!cleanup) {
     return null;
   }
-  return async () => {
+  return async (cleanupOpts) => {
     if (opts.containerStartBegun()) {
       opts.keepSharedHelpers()?.();
     }
-    return await cleanup();
+    return await cleanup(cleanupOpts);
   };
 }
 
@@ -2630,7 +2696,7 @@ export function withSharedHelperCleanup(opts: {
     keepSharedHelpers: () => {
       containersRunning = true;
     },
-    cleanup: async () => {
+    cleanup: async (cleanupOpts) => {
       const processCleanup = opts.cleanup;
       let outcome: ProcessCleanupOutcome | null = null;
       // The session could not be confirmed stopped and was kept: its shared
@@ -2642,7 +2708,9 @@ export function withSharedHelperCleanup(opts: {
         // only clean up while the session is still this start's own.
         if (processCleanup) {
           outcome = await runProcessCleanup(async () => {
-            if ((await processCleanup()) === LIFECYCLE_SESSION_RETAINED) {
+            if (
+              (await processCleanup(cleanupOpts)) === LIFECYCLE_SESSION_RETAINED
+            ) {
               sessionRetained = true;
             }
           });
@@ -5873,6 +5941,10 @@ async function runRemoteLifecycleCommand(opts: {
   if (target.resolvedTarget === "local") {
     return null;
   }
+  if (isLifecycleProgressRequested()) {
+    // Dispatch output would precede `start`; remote targets are unsupported.
+    throw new CliUsageError("--progress is not supported for remote targets.");
+  }
 
   const projectSelector = await resolveDispatchProjectSelector({
     project: opts.project,
@@ -6330,6 +6402,7 @@ async function restartNativeImageProject({
             removeData: false,
             yes: false,
             recoverNativeCompose: false,
+            progress: false,
           },
           positionals: {},
           raw: args.raw,
@@ -6369,6 +6442,12 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
+  prepareLifecycleProgress({
+    action: "up",
+    progress: args.options.progress,
+    json: args.options.json,
+    backend: process.env.HACK_RUNTIME_BACKEND,
+  });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
   if (resolveNativeRuntimeSelection()) {
@@ -6376,6 +6455,23 @@ async function handleUp({
     noteNativeBackendBeta({ json: args.options.json === true });
   }
   const native = resolveNativeRuntimeSelection();
+  if (native) {
+    refuseUnsupportedNativeUpOptions({
+      restart: false,
+      target: args.options.target,
+      services: args.positionals.services,
+    });
+    const setupExit = await requireNativeSetup({
+      runtime: native,
+      cwd: ctx.cwd,
+      json: args.options.json === true,
+    });
+    if (setupExit !== 0) {
+      return setupExit;
+    }
+    // Detached children and setup continuations use exactly the selected home.
+    process.env.HACK_NATIVE_HOME = native.home;
+  }
   if ((args.options.detach || args.options.json) && native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,
@@ -6446,7 +6542,7 @@ async function handleUp({
     json: args.options.json,
     detach: args.options.detach,
     services: args.positionals.services,
-    unsupportedOptions: Boolean(args.options.target),
+    unsupportedOptions: Boolean(args.options.target || args.options.progress),
   });
   if (authored !== null) {
     return authored;
@@ -6578,6 +6674,7 @@ async function runUpCommand({
     projectName,
     branch,
   });
+  beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
   const devHost = await resolveRuntimeDevHost({ project, branch });
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalSettings = resolveInternalSettings(cfg);
@@ -6863,7 +6960,7 @@ async function runUpCommand({
       // Compose may have started some services before it failed or timed
       // out: their helpers stay unless no container may run.
       await retainHelpersIfContainersMayRun();
-      await lifecycleCleanup?.();
+      await lifecycleCleanup?.({ force: foregroundTermination.guard?.force });
       await removeProjectRuntimeStateEntry({
         projectDir: project.projectDir,
         composeProject: lifecycleComposeProject,
@@ -6965,7 +7062,7 @@ async function runUpCommand({
         projectDir: project.projectDir,
         composeProject: lifecycleComposeProject,
       });
-      const message = buildStartupIncompleteMessage({
+      const message = composeStartupIncompleteMessage({
         composeProject: composeProjectName ?? baseProjectName,
         failed: startup.failed,
       });
@@ -7119,6 +7216,12 @@ async function handleDown({
   /** The native runtime requests of this down; a restart starts them in their own process group. */
   readonly invoke?: typeof invokeNativeRuntime;
 }): Promise<number> {
+  prepareLifecycleProgress({
+    action: "down",
+    progress: args.options.progress,
+    json: args.options.json,
+    backend: process.env.HACK_RUNTIME_BACKEND,
+  });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
   const authored = await tryNativeComposeCommand({
@@ -7139,6 +7242,7 @@ async function handleDown({
       args.options.pruneCaches,
       args.options.removeData,
       args.options.yes,
+      args.options.progress,
     ].some(Boolean),
   });
   if (authored !== null) {
@@ -7394,6 +7498,8 @@ async function runDownCommand({
         writeDownNotice({ json, level, message });
       },
     });
+    // The activity record names the instance this down actually targets.
+    noteActivityBranch(branch);
   }
   await recordBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
@@ -7415,6 +7521,7 @@ async function runDownCommand({
     projectName,
     branch,
   });
+  beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
   const effectiveEnvName = await resolveStoredRuntimeEnvName({
     requestedEnvName: envName,
     projectDir: project.projectDir,
@@ -7478,6 +7585,7 @@ async function runDownCommand({
       cfg,
       composeProject: lifecycleComposeProject,
     });
+    reportLifecycleProgress({ service: null, phase: "stopping" });
     code = await composeRuntimeBackend.down({
       composeFiles: [project.composeFile],
       composeProject: composeProjectName,
@@ -7510,6 +7618,7 @@ async function runDownCommand({
     }
     return code;
   }
+  reportLifecycleProgress({ service: null, phase: "stopped" });
   if (helperReleaseFailures.length > 0) {
     const message = sharedHelperReleaseFailureMessage(helperReleaseFailures);
     if (json) {
@@ -8317,7 +8426,7 @@ async function runTargetedServiceRestart(opts: {
       ok: false,
       code: 1,
       errorCode: "E_STARTUP_INCOMPLETE",
-      message: buildStartupIncompleteMessage({
+      message: composeStartupIncompleteMessage({
         composeProject:
           opts.composeProjectName ??
           defaultProjectSlugFromPath(opts.project.projectRoot),
@@ -8366,6 +8475,12 @@ async function handleRestart({
   const expectAttempt = args.options.expectFinalizationAttempt;
   const legacyPid = args.options.expectFrontendPid;
   validateFrontendRecoveryOptions({ recover, expectAttempt, legacyPid });
+  prepareLifecycleProgress({
+    action: "restart",
+    progress: args.options.progress,
+    json: args.options.json,
+    backend: process.env.HACK_RUNTIME_BACKEND,
+  });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
   const authored = await tryNativeComposeCommand({
@@ -8383,6 +8498,7 @@ async function handleRestart({
       recover,
       expectAttempt,
       legacyPid,
+      args.options.progress,
     ].some(Boolean),
   });
   if (authored !== null) {
@@ -8502,6 +8618,7 @@ async function runRestartCommand({
     baseProjectName,
     branch,
   });
+  beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
   const projectName = sanitizeProjectSlug(baseProjectName);
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
@@ -8578,6 +8695,7 @@ async function runRestartCommand({
     envByService: preflightEnv.preflightEnvByService,
   });
 
+  reportLifecycleProgress({ service: null, phase: "stopping" });
   const downPhase = await runRestartDownPhase({
     project,
     cfg,
@@ -8624,6 +8742,7 @@ async function runRestartCommand({
     return downCode;
   }
 
+  reportLifecycleProgress({ service: null, phase: "stopped" });
   await removeProjectRuntimeStateEntry({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
@@ -8719,7 +8838,7 @@ async function runRestartCommand({
   });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
     await cleanupIncompleteStartup();
-    const message = buildStartupIncompleteMessage({
+    const message = composeStartupIncompleteMessage({
       composeProject: composeProjectName ?? baseProjectName,
       failed: startup.failed,
     });
@@ -9731,7 +9850,6 @@ async function resolveExecTargetReady(opts: {
 function computeWantsLokiExplicit(opts: {
   readonly options: {
     readonly loki: boolean | undefined;
-    readonly services: string | undefined;
     readonly query: string | undefined;
     readonly since: string | undefined;
     readonly until: string | undefined;
@@ -9739,7 +9857,6 @@ function computeWantsLokiExplicit(opts: {
 }): boolean {
   return (
     opts.options.loki === true ||
-    opts.options.services !== undefined ||
     opts.options.query !== undefined ||
     opts.options.since !== undefined ||
     opts.options.until !== undefined
@@ -9753,13 +9870,20 @@ function validateLogsArgs(opts: {
   readonly pretty: boolean | undefined;
   readonly follow: boolean;
   readonly timeRange: ReturnType<typeof parseLogTimeRange>;
+  readonly maxLineBytes: number | undefined;
 }): { readonly ok: true } | { readonly ok: false; readonly message: string } {
   if (opts.forceCompose && opts.wantsLokiExplicit) {
     return {
       ok: false,
-      message:
-        "Cannot combine --compose with --loki/--services/--query/--since/--until.",
+      message: "Cannot combine --compose with --loki/--query/--since/--until.",
     };
+  }
+  const maxLineBytes = validateMaxLineBytes({
+    value: opts.maxLineBytes,
+    json: opts.json,
+  });
+  if (!maxLineBytes.ok) {
+    return maxLineBytes;
   }
   if (opts.json && opts.pretty) {
     return { ok: false, message: "Cannot combine --json with --pretty." };
@@ -9774,7 +9898,35 @@ function validateLogsArgs(opts: {
   return { ok: true };
 }
 
-function resolveLokiServices(opts: {
+/**
+ * `--max-line-bytes` bounds JSON entries only, so it requires `--json`, and it
+ * must be a whole number of bytes from 1 to {@link MAX_LINE_BYTES_LIMIT}.
+ */
+function validateMaxLineBytes(opts: {
+  readonly value: number | undefined;
+  readonly json: boolean;
+}): { readonly ok: true } | { readonly ok: false; readonly message: string } {
+  if (opts.value === undefined) {
+    return { ok: true };
+  }
+  if (!opts.json) {
+    return { ok: false, message: "--max-line-bytes requires --json." };
+  }
+  if (
+    !Number.isSafeInteger(opts.value) ||
+    opts.value < 1 ||
+    opts.value > MAX_LINE_BYTES_LIMIT
+  ) {
+    return {
+      ok: false,
+      message: `--max-line-bytes requires a whole number from 1 to ${MAX_LINE_BYTES_LIMIT}.`,
+    };
+  }
+  return { ok: true };
+}
+
+/** `--services` plus the positional service, deduplicated in that order. */
+function resolveRequestedServices(opts: {
   readonly servicesOpt: readonly string[];
   readonly positionalService: string | undefined;
 }): string[] {
@@ -9797,6 +9949,7 @@ function buildLogStreamContext(opts: {
   readonly follow: boolean;
   readonly since: string | undefined;
   readonly until: string | undefined;
+  readonly maxLineBytes: number | undefined;
 }): LogStreamContext | undefined {
   if (!opts.json) {
     return undefined;
@@ -9816,6 +9969,7 @@ function buildLogStreamContext(opts: {
     follow: opts.follow,
     since: opts.since,
     until: opts.until,
+    maxLineBytes: opts.maxLineBytes,
   };
 }
 
@@ -9852,6 +10006,7 @@ async function runLogsWithLoki(opts: {
   readonly since: string | undefined;
   readonly until: string | undefined;
   readonly wantsLokiExplicit: boolean;
+  readonly maxLineBytes: number | undefined;
   /** Project selection repeated in suggested `hack logs --compose` commands. */
   readonly target: LogsCommandTarget;
   /** `--tail` as passed; undefined when the user left the default. */
@@ -9880,7 +10035,7 @@ async function runLogsWithLoki(opts: {
     return 1;
   }
 
-  const services = resolveLokiServices({
+  const services = resolveRequestedServices({
     servicesOpt: parseCsvList(opts.servicesOpt),
     positionalService: opts.positionalService,
   });
@@ -9894,6 +10049,7 @@ async function runLogsWithLoki(opts: {
     follow: opts.follow,
     since: opts.since,
     until: opts.until,
+    maxLineBytes: opts.maxLineBytes,
   });
 
   const query = resolveLokiQuery({
@@ -9965,21 +10121,20 @@ async function runLogsWithCompose(opts: {
   readonly json: boolean;
   readonly follow: boolean;
   readonly tail: number;
-  readonly service: string | undefined;
+  /** Requested services; empty reads every service. */
+  readonly services: readonly string[];
   readonly profiles: readonly string[];
   readonly format: ReturnType<typeof resolveLogFormat>;
   readonly since: string | undefined;
   readonly until: string | undefined;
+  readonly maxLineBytes: number | undefined;
 }): Promise<number> {
-  const serviceTrimmed = (opts.service ?? "").trim();
-  const servicesForContext =
-    serviceTrimmed.length > 0 ? [serviceTrimmed] : undefined;
   const lifecycleComposeProject =
     opts.composeProject ?? opts.projectNameForPrefix;
-  const lifecycle = await resolveLifecycleLogCompanion({
+  const selection = await resolveLifecycleLogCompanion({
     projectDir: opts.project.projectDir,
     composeProject: lifecycleComposeProject,
-    service: serviceTrimmed.length > 0 ? serviceTrimmed : undefined,
+    services: opts.services,
     follow: opts.follow,
   });
   const streamContext = buildLogStreamContext({
@@ -9987,10 +10142,11 @@ async function runLogsWithCompose(opts: {
     backend: "compose",
     projectNameForPrefix: opts.projectNameForPrefix,
     branch: opts.branch,
-    services: servicesForContext,
+    services: opts.services,
     follow: opts.follow,
     since: opts.since,
     until: opts.until,
+    maxLineBytes: opts.maxLineBytes,
   });
 
   return await composeLogBackend.run({
@@ -9998,7 +10154,7 @@ async function runLogsWithCompose(opts: {
     cwd: dirname(opts.project.composeFile),
     follow: opts.follow,
     tail: opts.tail,
-    service: opts.service,
+    services: selection.composeServices,
     projectName:
       opts.projectNameForPrefix.length > 0
         ? opts.projectNameForPrefix
@@ -10007,23 +10163,38 @@ async function runLogsWithCompose(opts: {
     profiles: opts.profiles,
     format: opts.format,
     streamContext,
-    lifecycle,
+    lifecycle: selection.lifecycle,
   });
 }
 
+/**
+ * Split requested services between `docker compose logs` and the lifecycle log
+ * that persistent `hack up` processes write.
+ *
+ * - A persistent lifecycle process is read from the lifecycle log only.
+ * - A Compose service is read from Compose (and the lifecycle log, if any).
+ * - A name that is neither is passed to Compose, which refuses it, unless a
+ *   lifecycle log exists or is being followed; then only that log is read.
+ *
+ * With no requested service, Compose reads every service and the lifecycle
+ * log is included when it exists, has state, or is followed. Compose is
+ * disabled only when services were requested and none of them is for Compose.
+ */
 async function resolveLifecycleLogCompanion(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
-  readonly service: string | undefined;
+  readonly services: readonly string[];
   readonly follow: boolean;
-}): Promise<
-  | {
-      readonly logPath: string;
-      readonly service?: string;
-      readonly composeDisabled?: boolean;
-    }
-  | undefined
-> {
+}): Promise<{
+  readonly composeServices: readonly string[];
+  readonly lifecycle:
+    | {
+        readonly logPath: string;
+        readonly services?: readonly string[];
+        readonly composeDisabled?: boolean;
+      }
+    | undefined;
+}> {
   const logPath = resolveLifecycleLogPath({
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
@@ -10031,55 +10202,43 @@ async function resolveLifecycleLogCompanion(opts: {
   const state = await readLifecycleState({ projectDir: opts.projectDir });
   const entry =
     state.find((item) => item.composeProject === opts.composeProject) ?? null;
-  const persistentServices = new Set(
-    (entry?.processes ?? []).map((process) => process.name)
-  );
-  const requested = (opts.service ?? "").trim();
   const hasLogFile = await pathExists(logPath);
+  const lifecycleAvailable = Boolean(entry) || hasLogFile || opts.follow;
 
-  if (requested.length > 0) {
-    if (persistentServices.has(requested)) {
-      return {
-        logPath,
-        service: requested,
-        composeDisabled: true,
-      };
-    }
-    const composeServices = await readComposeServiceNames(
-      resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME)
-    );
-    const composeHasService = composeServices.includes(requested);
-
-    if (composeHasService) {
-      if (!(entry || hasLogFile || opts.follow)) {
-        return undefined;
-      }
-      return {
-        logPath,
-        service: requested,
-      };
-    }
-
-    if (!(entry || hasLogFile || opts.follow)) {
-      return undefined;
-    }
-
+  if (opts.services.length === 0) {
     return {
-      logPath,
-      service: requested,
-      composeDisabled: true,
+      composeServices: [],
+      lifecycle: lifecycleAvailable ? { logPath } : undefined,
     };
   }
 
-  if (entry) {
-    return { logPath };
+  const persistentServices = new Set(
+    (entry?.processes ?? []).map((process) => process.name)
+  );
+  const composeNames = new Set(
+    await readComposeServiceNames(
+      resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME)
+    )
+  );
+  const composeServices = opts.services.filter(
+    (service) =>
+      !persistentServices.has(service) &&
+      (composeNames.has(service) || !lifecycleAvailable)
+  );
+  const hasPersistent = opts.services.some((service) =>
+    persistentServices.has(service)
+  );
+  if (!(hasPersistent || lifecycleAvailable)) {
+    return { composeServices, lifecycle: undefined };
   }
-
-  if (!(hasLogFile || opts.follow)) {
-    return undefined;
-  }
-
-  return { logPath };
+  return {
+    composeServices,
+    lifecycle: {
+      logPath,
+      services: [...opts.services],
+      ...(composeServices.length === 0 ? { composeDisabled: true } : {}),
+    },
+  };
 }
 
 async function handleNativeLogs({
@@ -10155,6 +10314,7 @@ function logsHaveUnsupportedNativeOptions(
         options.pretty ||
         options.query !== undefined ||
         options.services !== undefined ||
+        options.maxLineBytes !== undefined ||
         options.until !== undefined ||
         (options.follow && options.noFollow)
     );
@@ -10163,6 +10323,7 @@ function logsHaveUnsupportedNativeOptions(
     options.loki ||
       options.query ||
       options.services ||
+      options.maxLineBytes !== undefined ||
       options.since ||
       options.until
   );
@@ -10243,11 +10404,16 @@ async function handleLogs({
     pretty: args.options.pretty,
     follow,
     timeRange,
+    maxLineBytes: args.options.maxLineBytes,
   });
   if (!validation.ok) {
-    process.stderr.write(`${validation.message}\n`);
-    return 1;
+    // Thrown so that `--json` refusals use the `{ ok: false }` envelope.
+    throw new CliUsageError(validation.message);
   }
+  const services = resolveRequestedServices({
+    servicesOpt: parseCsvList(args.options.services),
+    positionalService: typeof service === "string" ? service : undefined,
+  });
   const baseUrl = (process.env.HACK_LOKI_URL ?? "http://127.0.0.1:3100").trim();
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
@@ -10291,11 +10457,12 @@ async function handleLogs({
       json,
       follow,
       tail,
-      service: typeof service === "string" ? service : undefined,
+      services,
       profiles,
       format,
       since: args.options.since,
       until: args.options.until,
+      maxLineBytes: args.options.maxLineBytes,
     });
 
   if (useLoki) {
@@ -10315,6 +10482,7 @@ async function handleLogs({
       since: args.options.since,
       until: args.options.until,
       wantsLokiExplicit,
+      maxLineBytes: args.options.maxLineBytes,
       target: {
         path: args.options.path,
         project: args.options.project,

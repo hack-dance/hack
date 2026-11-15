@@ -409,13 +409,17 @@ fn compose_remedies_override_native_but_keep_checked_home_and_program() {
         assert!(spec.args.contains(&"/checked/hack-next".into()));
         assert!(!spec.args.contains(&"HACK_RUNTIME_BACKEND=native".into()));
     }
-    assert!(
-        report
-            .command(vec!["daemon".into(), "restart".into()])
-            .unwrap()
-            .args
-            .contains(&"HACK_RUNTIME_BACKEND=native".into())
-    );
+    let restart = report
+        .command(vec!["daemon".into(), "restart".into()])
+        .unwrap();
+    assert!(restart.args.contains(&"HACK_RUNTIME_BACKEND=native".into()));
+    // The restarted daemon runs the checked CLI, not the first hack on PATH.
+    let pin = restart
+        .args
+        .iter()
+        .position(|a| a == "HACK_MCP_COMMAND=/checked/hack-next")
+        .expect("self-invocation pinned");
+    assert_eq!(restart.args[pin + 1], "/checked/hack-next");
 }
 
 #[test]

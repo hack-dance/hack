@@ -389,11 +389,7 @@ fn trusted_probe_path_with_limits(
     max_dirs: usize,
     max_entries: usize,
 ) -> Result<ProbeTools, String> {
-    use std::io::Write;
-    use std::os::unix::{
-        ffi::OsStrExt,
-        fs::{DirBuilderExt, OpenOptionsExt},
-    };
+    use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     // SAFETY: getuid has no preconditions and cannot fail.
@@ -482,24 +478,23 @@ fn trusted_probe_path_with_limits(
                 }
                 continue;
             }
-            let mut script = b"#!/bin/sh\nexec '".to_vec();
-            for byte in entry.path().as_os_str().as_bytes() {
-                if *byte == b'\'' {
-                    script.extend_from_slice(b"'\\''");
-                } else {
-                    script.push(*byte);
-                }
-            }
-            script.extend_from_slice(b"' \"$@\"\n");
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o700)
-                .open(tools.dir.join(&name))
-                .map_err(|e| e.to_string())?;
-            file.write_all(&script).map_err(|e| e.to_string())?;
+            write_wrapper(&tools.dir, &name, &entry.path())?;
             names.insert(name);
         }
+    }
+    // Candidate launchers (hack-v5, hack-next) need dirname before they run
+    // the CLI. Offer it from a trusted system location when the scan did not.
+    if !names.contains(std::ffi::OsStr::new("dirname"))
+        && let Some(found) = ["/usr/bin/dirname", "/bin/dirname"]
+            .iter()
+            .map(Path::new)
+            .find(|p| {
+                trusted_tool_path(p, uid, false)
+                    .is_some_and(|real| trusted_interpreter(&real, uid, 4, true))
+            })
+    {
+        write_wrapper(&tools.dir, std::ffi::OsStr::new("dirname"), found)?;
+        names.insert("dirname".into());
     }
     if tools.coverage.is_some() {
         for tool in crate::doctor_tools::NAMES {
@@ -509,6 +504,29 @@ fn trusted_probe_path_with_limits(
         }
     }
     Ok(tools)
+}
+
+/// A private wrapper that execs `target` by absolute path, so shims keep their
+/// normal `$0`. Created new with owner-only permissions.
+fn write_wrapper(dir: &Path, name: &std::ffi::OsStr, target: &Path) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+    let mut script = b"#!/bin/sh\nexec '".to_vec();
+    for byte in target.as_os_str().as_bytes() {
+        if *byte == b'\'' {
+            script.extend_from_slice(b"'\\''");
+        } else {
+            script.push(*byte);
+        }
+    }
+    script.extend_from_slice(b"' \"$@\"\n");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(dir.join(name))
+        .map_err(|e| e.to_string())?;
+    file.write_all(&script).map_err(|e| e.to_string())
 }
 
 fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
@@ -2175,6 +2193,22 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             ));
         }
         assert!(!after.is_clean());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_path_always_offers_dirname_for_candidate_launchers() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack("doctor-dirname", "echo '{}'");
+        let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tools = trusted_probe_path(bin.as_os_str()).unwrap();
+        let system = ["/usr/bin/dirname", "/bin/dirname"]
+            .iter()
+            .any(|p| Path::new(p).exists());
+        assert_eq!(tools.dir.join("dirname").exists(), system);
         let _ = std::fs::remove_dir_all(root);
     }
 

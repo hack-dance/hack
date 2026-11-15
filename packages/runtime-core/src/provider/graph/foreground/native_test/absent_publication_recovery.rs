@@ -327,6 +327,8 @@ fn explicit_absent_publication_cleanup_retains_selected_volume_and_sibling() {
     let raw_graph = fs::read(graph_root.join("state.json")).unwrap();
     let provider_owner_path = candidate.state_root.join("run/smolvm/owner.json");
     let raw_provider_owner = fs::read(&provider_owner_path).unwrap();
+    // Removing both roots simulates the lost publication under test.
+    // owner-root: deliberate removal
     let publisher_root = transport::root(&candidate, &runs[0]).unwrap();
     let control_root = original
         .relay_startup

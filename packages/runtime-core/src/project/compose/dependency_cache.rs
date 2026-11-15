@@ -99,6 +99,10 @@ pub(super) fn parse(value: Option<&Value>) -> Result<Option<DependencyCachePlan>
     }
     let volume = labels.get(VOLUME).ok_or_else(refused)?.trim().to_owned();
     super::fields::identifier(&volume).map_err(|_| refused())?;
+    // A generated anonymous volume belongs to one service and is never a cache.
+    if volume.starts_with(super::service::ANONYMOUS_PREFIX) {
+        return Err(super::service::reserved_volume_name());
+    }
     let (lockfiles, lockfiles_explicit) = paths(labels.get(LOCKFILES), DEFAULT_LOCKFILES)?;
     let (runtime_files, _) = paths(labels.get(RUNTIME), DEFAULT_RUNTIME)?;
     let bootstrap = match labels.get(BOOTSTRAP).map(String::as_str) {

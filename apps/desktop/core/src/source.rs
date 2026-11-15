@@ -503,7 +503,7 @@ mod tests {
     use super::*;
 
     fn fake_daemon(projects: &str) -> (DaemonClient, std::thread::JoinHandle<()>) {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::os::unix::{fs::DirBuilderExt, net::UnixListener};
         let dir = PathBuf::from(format!(
             "/tmp/hds-{}-{}",
@@ -519,8 +519,8 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let projects = projects.to_owned();
         let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + crate::test_support::DAEMON_BUDGET;
             for body in [r#"{"status":"ok","version":"5.0.0"}"#.to_owned(), projects] {
-                let deadline = std::time::Instant::now() + Duration::from_secs(3);
                 let (mut stream, _) = loop {
                     match listener.accept() {
                         Ok(pair) => break pair,
@@ -533,12 +533,10 @@ mod tests {
                         Err(e) => panic!("fake daemon accept failed or timed out: {e}"),
                     }
                 };
+                crate::test_support::read_request(&mut stream, deadline);
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .set_write_timeout(Some(crate::test_support::remaining(deadline)))
                     .unwrap();
-                let mut buf = [0; 4096];
-                let n = stream.read(&mut buf).unwrap();
-                assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET /v1/"));
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
@@ -549,13 +547,76 @@ mod tests {
             }
             std::fs::remove_dir_all(dir).unwrap();
         });
-        (DaemonClient::new(socket, Duration::from_secs(2)), handle)
+        (
+            DaemonClient::new(socket, crate::test_support::DAEMON_BUDGET),
+            handle,
+        )
+    }
+
+    #[test]
+    fn fake_daemon_waits_for_delayed_and_partial_request_headers() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::{
+            fs::DirBuilderExt,
+            net::{UnixListener, UnixStream},
+        };
+        let dir = PathBuf::from(format!(
+            "/tmp/hdr-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let socket = dir.join("s");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + crate::test_support::DAEMON_BUDGET;
+            let mut server = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("regression fixture accept: {error}"),
+                }
+            };
+            // Force Darwin's inherited-mode case on Linux as well.
+            server.set_nonblocking(true).unwrap();
+            ready.send(()).unwrap();
+            crate::test_support::read_request(&mut server, deadline);
+            // SAFETY: the accepted stream remains live; inspect its flags.
+            let flags = unsafe { libc::fcntl(server.as_raw_fd(), libc::F_GETFL) };
+            assert!(flags >= 0);
+            assert_eq!(
+                flags & libc::O_NONBLOCK,
+                0,
+                "accepted stream must be blocking"
+            );
+        });
+        let mut client = UnixStream::connect(&socket).unwrap();
+        waiting
+            .recv_timeout(crate::test_support::DAEMON_BUDGET)
+            .unwrap();
+        // Exceed the former two-second timeout, then split the header.
+        std::thread::sleep(Duration::from_millis(2500));
+        client.write_all(b"GET /v1/status HTTP/1.1\r\n").unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        client.write_all(b"Host: fixture\r\n\r\n").unwrap();
+        worker.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A trusted fake daemon provides rows; only native ps uses the fake CLI.
     #[test]
     fn live_source_reads_native_rows_with_native_backend() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "hack-desktop-source-{}-{}",
             std::process::id(),
@@ -566,7 +627,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let hack = dir.join("hack");
-        std::fs::write(
+        crate::test_support::script(
             &hack,
             r#"#!/bin/sh
 case "$1" in
@@ -575,9 +636,7 @@ case "$1" in
   ps) if [ "$HACK_RUNTIME_BACKEND" = native ]; then echo '{"ok":true,"data":{"backend":"native","status":"pending","items":[]}}'; else echo '{"ok":false,"error":{"code":"E_NATIVE_PROJECT_UNSUPPORTED","message":"m"}}'; exit 1; fi ;;
 esac
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // Complete macOS first-launch scanning before the fake daemon's
         // bounded accept window starts. --version has no fixture effects.
         CliRunner::new(&hack)
@@ -616,7 +675,6 @@ esac
 
     #[test]
     fn live_source_rejects_a_payload_without_projects() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "hack-desktop-source-empty-{}-{}",
             std::process::id(),
@@ -627,12 +685,10 @@ esac
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let hack = dir.join("hack");
-        std::fs::write(
+        crate::test_support::script(
             &hack,
             "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0' ;; projects) echo '{}' ;; esac\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         CliRunner::new(&hack)
             .version(Duration::from_secs(60))
             .unwrap();
@@ -822,17 +878,14 @@ esac
     fn lifecycle_actions_run_to_completion_without_an_app_deadline() {
         // A Start slower than any read timeout still completes; Open keeps
         // its bounded limit. (The CLI owns lifecycle timeouts.)
-        use std::os::unix::fs::PermissionsExt;
         let b = base("lifecycle");
         let p = b.join("p");
         make_project(&p, ".hack", "docker-compose.yml");
         let hack = b.join("hack");
-        std::fs::write(
+        crate::test_support::script(
             &hack,
             "#!/bin/sh\nsleep 1\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let src = LiveSource {
             runner: CliRunner::new(&hack),
             daemon: None,

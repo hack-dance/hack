@@ -12,7 +12,8 @@
  * times out is unknown, never "not trusted".
  */
 import type { X509Certificate } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   bundleContainsCertificate,
@@ -27,6 +28,7 @@ import {
 import type { LinuxTrustHost } from "./linux-trust-setup.ts";
 import { findNssDatabases } from "./linux-trust-setup.ts";
 import { inspectMacCaEligibility } from "./mac-ca-trust.ts";
+import { checkNssReadSafety, sameNssReadSnapshot } from "./nss-read-safety.ts";
 import type { ExecResult } from "./shell.ts";
 
 export type TrustState = "trusted" | "not_trusted" | "unknown";
@@ -39,6 +41,9 @@ export const TRUST_INSPECTION_BUDGET_MS = 20_000;
 
 /** NSS databases inspected at most; any beyond are reported unknown. */
 export const MAX_NSS_DATABASES = 16;
+
+/** Entries admitted from any one NSS discovery directory. */
+export const MAX_NSS_DISCOVERY_ENTRIES = 256;
 
 /** Largest file read (a system CA bundle is well below this). */
 export const MAX_TRUST_FILE_BYTES = 32 * 1024 * 1024;
@@ -76,7 +81,8 @@ export type CaTrustDeps = {
   readonly caPath: string;
   /** Text, or "missing" (ENOENT/ENOTDIR), or "unreadable". */
   readonly readText: (
-    path: string
+    path: string,
+    opts?: { readonly maxBytes?: number; readonly noFollow?: boolean }
   ) => Promise<{ readonly text: string } | "missing" | "unreadable">;
   /**
    * A read-only query, stopped after `timeoutMs` (exit 124 on timeout, 127
@@ -341,7 +347,7 @@ async function linuxNssTrust(opts: {
     ...host,
     listDir: async (path) => {
       const entries = await opts.deps.listDir(path);
-      if (entries === "unknown") {
+      if (entries === "unknown" || entries.length > MAX_NSS_DISCOVERY_ENTRIES) {
         unlisted.push(path);
         return [];
       }
@@ -353,7 +359,7 @@ async function linuxNssTrust(opts: {
     (dir) => ({
       db: dir,
       state: "unknown" as const,
-      detail: "Could not be listed, so NSS databases in it are unknown",
+      detail: "NSS discovery could not be completed within its read limits",
     })
   );
   if (candidates === null) {
@@ -368,14 +374,25 @@ async function linuxNssTrust(opts: {
   }
   const dbs: string[] = [];
   for (const dir of candidates) {
+    if (unlisted.some((path) => dir === path || dir.startsWith(`${path}/`))) {
+      if (!results.some((entry) => entry.db === dir)) {
+        results.push({
+          db: dir,
+          state: "unknown",
+          detail: "NSS discovery could not be completed within its read limits",
+        });
+      }
+      continue;
+    }
     const present = await opts.deps.exists(join(dir, "cert9.db"));
-    if (present === "unknown") {
+    if (present !== true) {
       results.push({
         db: dir,
         state: "unknown",
-        detail: "The database could not be inspected",
+        detail:
+          "NSS database missing or unreadable; review the selected browser profile and trust setup, then rerun Doctor",
       });
-    } else if (present) {
+    } else {
       dbs.push(dir);
     }
   }
@@ -417,9 +434,56 @@ async function nssDbTrust(opts: {
   readonly certificate: X509Certificate;
 }): Promise<CaTrustReport["nss"][number]> {
   const { dbDir } = opts.db;
-  const listed = await opts.deps.query(nssListTrustArgv(opts.db), {
-    timeoutMs: TRUST_QUERY_TIMEOUT_MS,
+  const unknown = (detail: string) => ({
+    db: dbDir,
+    state: "unknown" as const,
+    detail,
   });
+  const host = opts.deps.linuxHost;
+  if (!host) {
+    return unknown("NSS read safety could not be established");
+  }
+  const inspect = async () =>
+    await checkNssReadSafety({
+      host,
+      dbDir,
+      readText: opts.deps.readText,
+      exists: opts.deps.exists,
+    });
+  const initial = await inspect();
+  if (!initial.ok) {
+    return unknown(
+      "NSS database or module configuration is unsafe, missing, unreadable or unsupported; no query was run"
+    );
+  }
+  const query = async (argv: readonly string[]) => {
+    const before = await inspect();
+    if (
+      !(
+        before.ok &&
+        sameNssReadSnapshot({
+          pinned: initial.snapshot,
+          current: before.snapshot,
+        })
+      )
+    ) {
+      return null;
+    }
+    const result = await opts.deps.query(argv, {
+      timeoutMs: TRUST_QUERY_TIMEOUT_MS,
+    });
+    const after = await inspect();
+    return after.ok &&
+      sameNssReadSnapshot({ pinned: initial.snapshot, current: after.snapshot })
+      ? result
+      : null;
+  };
+  const listed = await query(nssListTrustArgv(opts.db));
+  if (listed === null) {
+    return unknown(
+      "NSS read safety changed or could not be rechecked; query results were discarded"
+    );
+  }
   if (listed.exitCode !== 0) {
     return {
       db: dbDir,
@@ -434,9 +498,12 @@ async function nssDbTrust(opts: {
       detail: "No Hack CA entry with TLS issuer trust (run: hack global trust)",
     };
   }
-  const exported = await opts.deps.query(nssExportArgv(opts.db), {
-    timeoutMs: TRUST_QUERY_TIMEOUT_MS,
-  });
+  const exported = await query(nssExportArgv(opts.db));
+  if (exported === null) {
+    return unknown(
+      "NSS read safety changed or could not be rechecked; query results were discarded"
+    );
+  }
   if (exported.exitCode !== 0) {
     return {
       db: dbDir,
@@ -487,8 +554,8 @@ function withBudget(deps: CaTrustDeps): CaTrustDeps {
   const host = deps.linuxHost;
   return {
     ...deps,
-    readText: async (path) =>
-      await bounded(async () => await deps.readText(path), "unreadable"),
+    readText: async (path, opts) =>
+      await bounded(async () => await deps.readText(path, opts), "unreadable"),
     exists: async (path) =>
       await bounded(async () => await deps.exists(path), "unknown"),
     listDir: async (path) =>
@@ -509,6 +576,26 @@ function withBudget(deps: CaTrustDeps): CaTrustDeps {
       ? {
           linuxHost: {
             ...host,
+            inspectPath: async (path) =>
+              await bounded(async () => await host.inspectPath(path), null),
+            ...(host.inspectEntry
+              ? {
+                  inspectEntry: async (path: string) =>
+                    await bounded(
+                      async () => (await host.inspectEntry?.(path)) ?? null,
+                      null
+                    ),
+                }
+              : {}),
+            ...(host.readLink
+              ? {
+                  readLink: async (path: string) =>
+                    await bounded(
+                      async () => (await host.readLink?.(path)) ?? null,
+                      null
+                    ),
+                }
+              : {}),
             resolveCommand: async (name) =>
               await bounded(async () => await host.resolveCommand(name), null),
           },
@@ -519,14 +606,44 @@ function withBudget(deps: CaTrustDeps): CaTrustDeps {
 
 /** Strict reads for the real boundary: only a missing path is "missing". */
 export async function readTextOutcome(
-  path: string
+  path: string,
+  opts?: { readonly maxBytes?: number; readonly noFollow?: boolean }
 ): Promise<{ readonly text: string } | "missing" | "unreadable"> {
+  const maxBytes = Math.min(
+    opts?.maxBytes ?? MAX_TRUST_FILE_BYTES,
+    MAX_TRUST_FILE_BYTES
+  );
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    return "unreadable";
+  }
   try {
-    const info = await stat(path);
-    if (!info.isFile() || info.size > MAX_TRUST_FILE_BYTES) {
-      return "unreadable";
+    const flags =
+      constants.O_RDONLY |
+      constants.O_NONBLOCK |
+      (opts?.noFollow ? constants.O_NOFOLLOW : 0);
+    const file = await open(path, flags);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.size > maxBytes) {
+        return "unreadable";
+      }
+      // Bound the read too: the file may grow after stat. One extra byte
+      // distinguishes exact-size input from an oversized replacement.
+      const bytes = Buffer.alloc(maxBytes + 1);
+      let used = 0;
+      while (used < bytes.length) {
+        const read = await file.read(bytes, used, bytes.length - used, null);
+        if (read.bytesRead === 0) {
+          break;
+        }
+        used += read.bytesRead;
+      }
+      return used > maxBytes
+        ? "unreadable"
+        : { text: bytes.subarray(0, used).toString("utf8") };
+    } finally {
+      await file.close();
     }
-    return { text: await readFile(path, "utf8") };
   } catch (error: unknown) {
     return isMissing(error) ? "missing" : "unreadable";
   }

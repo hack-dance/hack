@@ -1,7 +1,10 @@
-import { isAbsolute } from "node:path";
+import { accessSync, constants } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { normalizeHomeDir, readAbsolutePathOverride } from "../lib/home-dir.ts";
 import {
   type NativeProcessRefusal,
   readNativeProcessRefusals,
@@ -315,14 +318,57 @@ export function resolveNativeRuntimeSelection(
   if (env.HACK_RUNTIME_BACKEND !== "native") {
     return null;
   }
-  const binary = env.HACK_NATIVE_BINARY;
-  const home = env.HACK_NATIVE_HOME;
-  if (!(binary && home && isAbsolute(binary) && isAbsolute(home))) {
+  return resolveNativeSetupSelection(env);
+}
+
+/** Native setup is explicit even when the project uses the Compose backend. */
+export function resolveNativeSetupSelection(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): NativeRuntimeSelection {
+  let binary = env.HACK_NATIVE_BINARY?.trim();
+  if (!binary) {
+    const adjacent = join(dirname(process.execPath), "hack-native");
+    try {
+      accessSync(adjacent, constants.X_OK);
+      binary = adjacent;
+    } catch {
+      binary = undefined;
+    }
+  }
+  if (!(binary && isAbsolute(binary))) {
     throw new ClosedCliError(
-      `Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths. ${nativeBetaCandidatePointer()}`
+      `Native runtime requires an adjacent bundled hack-native or an absolute HACK_NATIVE_BINARY path. ${nativeBetaCandidatePointer()}`
     );
   }
+  const home = resolveNativeHome(env);
   return { binary, home };
+}
+
+/** Selecting a home never creates it. Explicit isolation overrides fail closed. */
+export function resolveNativeHome(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): string {
+  const explicit = readAbsolutePathOverride({
+    name: "HACK_NATIVE_HOME",
+    value: env.HACK_NATIVE_HOME,
+  });
+  if (explicit) {
+    return explicit;
+  }
+  const hackHome = readAbsolutePathOverride({
+    name: "HACK_HOME",
+    value: env.HACK_HOME,
+  });
+  if (hackHome) {
+    return join(hackHome, "native-runtime");
+  }
+  const userHome = normalizeHomeDir(env.HOME) ?? normalizeHomeDir(homedir());
+  if (!userHome) {
+    throw new ClosedCliError(
+      "Native runtime needs an absolute HOME, HACK_HOME or HACK_NATIVE_HOME."
+    );
+  }
+  return join(userHome, ".hack", "native-runtime");
 }
 
 /**

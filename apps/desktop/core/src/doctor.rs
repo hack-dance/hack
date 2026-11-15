@@ -304,13 +304,17 @@ fn is_plain_name(s: &str) -> bool {
 }
 
 /// The command a check names in its own detail ("… (run: hack restart)"),
-/// when it is a known remedy. Anything else yields `None` (the card falls
-/// back to its documented default), so a hostile project name can never
-/// put a shell program on the clipboard.
+/// when it is a known remedy. The last `(run: …)` group is used even when
+/// diagnostic text follows it (lifecycle hygiene appends the supervisor's
+/// identity: "… (run: hack down); /path/hack-lifecycle-supervisor (v)").
+/// Anything other than a known remedy yields `None` (the card falls back to
+/// its documented default), so a hostile project name can never put a shell
+/// program on the clipboard.
 fn remedy_in_detail(detail: &str) -> Option<AuthoredRemedy> {
-    let tail = detail.trim().strip_suffix(')')?;
-    let start = tail.rfind("(run: ")? + "(run: ".len();
-    let cmd = tail[start..].trim();
+    let detail = detail.trim();
+    let start = detail.rfind("(run: ")? + "(run: ".len();
+    let end = start + detail[start..].find(')')?;
+    let cmd = detail[start..end].trim();
     if let Some(fixed) = KNOWN_REMEDIES.iter().find(|fixed| **fixed == cmd) {
         return Some(AuthoredRemedy::fixed(fixed));
     }
@@ -1247,6 +1251,22 @@ mod tests {
                 "Orphaned processes remain (run: hack down)"
             ),
             CardAction::Copy("hack down --path '/work/alpha'".into())
+        );
+        // The supervisor runner appends its identity after the remedy.
+        assert_eq!(
+            card(
+                "lifecycle hygiene",
+                "1 stale lifecycle entry (run: hack down); /example/bin/hack-lifecycle-supervisor (hack-lifecycle-supervisor 0.1.0 protocol=1)"
+            ),
+            CardAction::Copy("hack down --path '/work/alpha'".into())
+        );
+        // Trailing text cannot smuggle a command past the allowlist.
+        assert_eq!(
+            card(
+                "lifecycle hygiene",
+                "stale (run: hack down; rm -rf ~) trailing"
+            ),
+            CardAction::Copy("hack doctor --fix --path '/work/alpha'".into())
         );
         // No remedy in the detail: the documented default.
         assert_eq!(

@@ -167,9 +167,12 @@ test("the Compose fallback selects the same project and branch from any director
     restart: true,
     projectRoot: join(root, "my app"),
     branch: "feature-x",
+    env: "staging",
   });
+  // An explicit --env is kept too: without it the paste would start the
+  // default overlay, a different configuration.
   expect(refusal.message).toContain(
-    `To run it there: HACK_RUNTIME_BACKEND=compose hack restart --path '${join(root, "my app")}' --branch feature-x.`
+    `To run it there: HACK_RUNTIME_BACKEND=compose hack restart --path '${join(root, "my app")}' --branch feature-x --env staging.`
   );
   // Doctor checks one project; its hints select it too.
   const doctor = composeBackendCheckResult({

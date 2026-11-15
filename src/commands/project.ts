@@ -6103,6 +6103,7 @@ async function handleNativeUp({
     projectRoot: project.projectRoot,
     branch:
       typeof args.options.branch === "string" ? args.options.branch : undefined,
+    env: typeof args.options.env === "string" ? args.options.env : undefined,
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,

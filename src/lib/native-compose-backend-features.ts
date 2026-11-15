@@ -653,16 +653,19 @@ export function basicBuildNextStep(
 }
 
 /**
- * The command words that select the same project (and branch) as the refused
- * command, so the printed fallback works from any directory.
+ * The command words that select the same project, branch and env overlay as
+ * the refused command, so the printed fallback works from any directory and
+ * starts the same configuration.
  */
 export function projectSelectorArgs(opts: {
   readonly projectRoot?: string;
   readonly branch?: string;
+  readonly env?: string;
 }): string[] {
   return [
     ...(opts.projectRoot === undefined ? [] : ["--path", opts.projectRoot]),
     ...(opts.branch === undefined ? [] : ["--branch", opts.branch]),
+    ...(opts.env === undefined ? [] : ["--env", opts.env]),
   ];
 }
 
@@ -680,6 +683,8 @@ export function composeBackendRefusal(
     readonly projectRoot?: string;
     /** The `--branch` the refused command was given, if any. */
     readonly branch?: string;
+    /** The `--env` the refused command was given, if any. */
+    readonly env?: string;
   } & ComposeBackendFeatureOptions
 ): HackCliError {
   const command = opts.restart ? "hack restart" : "hack up";
@@ -710,6 +715,8 @@ export async function refuseNativeComposeBackendFeatures(
     readonly projectRoot?: string;
     /** The `--branch` the refused command was given, if any. */
     readonly branch?: string;
+    /** The `--env` the refused command was given, if any. */
+    readonly env?: string;
   } & ComposeBackendFeatureOptions
 ): Promise<void> {
   const features = await readComposeBackendFeatures(opts.composeFile, {

@@ -34,8 +34,8 @@ const SPAWN_TIMEOUT_MS = 60_000;
 const IMAGE = `sha256:${"e".repeat(64)}`;
 const PROJECT = "settings-cli-fixture";
 /** The refusal's fallback selects the same project, so it works from any directory. */
-const selection = (project: string) =>
-  `this project runs on the Compose backend. To run it there: HACK_RUNTIME_BACKEND=compose hack up --path ${quoteShellWord(project)}. Nothing was started or stopped.`;
+const selection = (project: string, env?: string) =>
+  `this project runs on the Compose backend. To run it there: HACK_RUNTIME_BACKEND=compose hack up --path ${quoteShellWord(project)}${env === undefined ? "" : ` --env ${env}`}. Nothing was started or stopped.`;
 const EXTERNAL_COMPOSE = {
   services: { web: { image: IMAGE, networks: ["shared-dev"] } },
   networks: { "shared-dev": { external: true } },
@@ -224,6 +224,13 @@ test(
       HACK_NATIVE_SHARED_SOURCE: "1",
     });
     expect(withEnv.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+    // Another env still refuses, and the fallback keeps that --env (HACK-2251).
+    const otherEnv = await cli(f, ["up", "--env", "dev"], {
+      HACK_NATIVE_SHARED_SOURCE: "1",
+    });
+    expect(errorLines(otherEnv.output)).toEqual([
+      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${selection(f.project, "dev")} Foreign external networks: shared-dev.`,
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );

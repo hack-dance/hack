@@ -189,6 +189,23 @@ pub(crate) fn card(id: &str, title: &str, evidence: (Status, String), remedy: Re
         remedy,
     }
 }
+/// Docker readiness for the engine Setup itself checks: the machine Doctor
+/// run's `docker daemon` check, which runs with the app's checked Docker
+/// selectors. A running hackd's `runtime_ok` is not used: it describes the
+/// engine selected by the daemon's own environment, which may differ.
+fn docker_evidence(runs: &[DoctorRun]) -> (Status, String) {
+    match check(runs, None, "docker daemon") {
+        (Status::Passed, _) => (Status::Passed, "Docker reachable".into()),
+        (Status::NeedsAttention, detail) => (
+            Status::NeedsAttention,
+            format!("Docker not reachable; Compose projects only. {detail}"),
+        ),
+        (_, _) => (
+            Status::Unknown,
+            "Could not confirm Docker for the selected engine".into(),
+        ),
+    }
+}
 pub(crate) fn boolean(value: Option<bool>, yes: &str, no: &str) -> (Status, String) {
     match value {
         Some(true) => (Status::Passed, yes.into()),
@@ -239,16 +256,14 @@ pub fn derive(
         cards.push(card(
             "docker",
             "Docker · Compose",
-            boolean(
-                projects.and_then(|p| p.runtime_ok),
-                "Docker reachable",
-                "Docker not reachable; Compose projects only",
-            ),
+            docker_evidence(runs),
             Remedy::Doc("https://docs.docker.com/engine/install/".into()),
         ));
     }
     if projects.is_none()
-        && let Some(docker) = cards.iter_mut().find(|c| c.id == "docker")
+        && let Some(docker) = cards
+            .iter_mut()
+            .find(|c| c.id == "docker" && c.status == Status::Unknown)
     {
         docker.detail = "Could not read project or Docker status. Start a matching version of hackd, then check again.".into();
     }

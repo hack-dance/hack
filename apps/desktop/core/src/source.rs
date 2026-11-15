@@ -944,8 +944,19 @@ impl Source for LiveSource {
     }
 
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
+        // The CLI starts the daemon by invoking itself and would otherwise
+        // prefer whatever `hack` is first on PATH: pin the selected one.
+        let program = self
+            .runner
+            .resolve_program()
+            .map_err(|e| e.to_string())?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "CLI path is not UTF-8".to_owned())?;
         let (_, stderr, code) = self
             .runner
+            .clone()
+            .with_env("HACK_MCP_COMMAND", &program)
             .run_raw(
                 &["daemon", action.command()],
                 None,

@@ -1105,25 +1105,50 @@ mod tests {
 
     #[test]
     fn interpreter_startup_variables_never_reach_doctor_children() {
-        let f = FakeHack::new(
-            r#"printf '%s|%s|%s|%s' "${BASH_ENV-unset}" "${NODE_OPTIONS-unset}" "${DYLD_VERSIONED_LIBRARY_PATH-unset}" "${LD_AUDIT-unset}""#,
-        );
+        // A run-time check with variables SIP-protected macOS shells keep;
+        // loader (DYLD_*) variables are checked on the Command below.
+        let f = FakeHack::new(r#"printf '%s|%s' "${BASH_ENV-unset}" "${NODE_OPTIONS-unset}""#);
         let runner = f
             .runner()
             .with_env("BASH_ENV", "/example/startup")
-            .with_env("NODE_OPTIONS", "--require=/example/preload")
-            .with_env("DYLD_VERSIONED_LIBRARY_PATH", "/example/lib")
-            .with_env("LD_AUDIT", "/example/audit");
+            .with_env("NODE_OPTIONS", "--require=/example/preload");
         let (seen, _, _) = runner.run_raw(&["x"], None, T).unwrap();
         assert_eq!(
-            seen, "/example/startup|--require=/example/preload|/example/lib|/example/audit",
+            seen, "/example/startup|--require=/example/preload",
             "positive control"
         );
         let (stripped, _, _) = runner
             .without_interpreter_startup()
             .run_raw(&["x"], None, T)
             .unwrap();
-        assert_eq!(stripped, "unset|unset|unset|unset");
+        assert_eq!(stripped, "unset|unset");
+    }
+
+    #[test]
+    fn loader_and_function_prefixes_are_removed_from_the_command() {
+        let names = [
+            "DYLD_VERSIONED_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "LD_AUDIT",
+            "BASH_FUNC_x%%",
+        ];
+        let mut runner = CliRunner::new("/example/hack");
+        for name in names {
+            runner = runner.with_env(name, "/example/value");
+        }
+        let removed = |runner: &CliRunner| {
+            let command = runner.command(&["x"], None);
+            names
+                .iter()
+                .filter(|name| {
+                    command
+                        .get_envs()
+                        .any(|(key, value)| key == std::ffi::OsStr::new(name) && value.is_none())
+                })
+                .count()
+        };
+        assert_eq!(removed(&runner), 0, "positive control: set, not removed");
+        assert_eq!(removed(&runner.without_interpreter_startup()), names.len());
     }
 
     #[test]

@@ -1137,7 +1137,7 @@ mod tests {
             runner = runner.with_env(name, "/example/value");
         }
         let removed = |runner: &CliRunner| {
-            let command = runner.command(&["x"], None);
+            let command = runner.command(&["x"], None, std::path::Path::new("/example/hack"));
             names
                 .iter()
                 .filter(|name| {

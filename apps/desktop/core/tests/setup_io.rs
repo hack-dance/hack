@@ -42,7 +42,7 @@ fn checks_are_observe_only_and_safe_action_does_not_prove_health() {
     let calls = t.0.join("calls");
     std::fs::write(&program,r#"#!/bin/sh
 [ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 99
-printf '%s\n' "$* backend=$HACK_RUNTIME_BACKEND" >> "$HOME/calls"
+printf '%s\n' "$* backend=$HACK_RUNTIME_BACKEND self=${HACK_MCP_COMMAND-unset}" >> "$HOME/calls"
 case "$*" in
 'version --json') printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}\n';;
 'projects --json --no-daemon') printf '{"projects":[],"runtime_ok":true}';;
@@ -83,6 +83,15 @@ esac
     assert!(!read_calls.contains("daemon start"));
     let out = source.setup_action(SafeAction::StartDaemon, &r);
     assert!(out.contains("Some(0)"));
+    // The started daemon runs the checked CLI, not whatever is first on PATH.
+    let started = std::fs::read_to_string(t.0.join("calls")).unwrap();
+    assert!(
+        started.contains(&format!(
+            "daemon start --no-interactive backend=native self={}",
+            r.cli_program.as_deref().unwrap()
+        )),
+        "{started}"
+    );
     let r = source.setup();
     assert_eq!(
         r.cards.iter().find(|c| c.id == "daemon").unwrap().status,

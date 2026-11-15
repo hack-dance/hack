@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { machineData } from "./helpers/machine-output.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
 /**
@@ -129,13 +130,9 @@ type Entry = Record<string, unknown>;
 async function activity(args: readonly string[] = []): Promise<Entry[]> {
   const result = await runCli({ args: ["activity", "--json", ...args] });
   expect(result.exitCode).toBe(0);
-  const envelope = JSON.parse(result.stdout) as {
-    ok: boolean;
-    data: { version: number; entries: Entry[] };
-  };
-  expect(envelope.ok).toBe(true);
-  expect(envelope.data.version).toBe(1);
-  return envelope.data.entries;
+  const data = machineData(result.stdout, "hack.activity.v1");
+  expect(data.version).toBe(1);
+  return data.entries;
 }
 
 test("up, a failed up, restart and down are recorded with names only", async () => {

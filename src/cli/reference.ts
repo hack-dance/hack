@@ -46,7 +46,7 @@ export function renderCliReferenceMarkdown(opts: {
     "",
     `${opts.cli.name} — ${opts.cli.summary}`,
     "",
-    "Run `hack help <command>` for the same content in the terminal. Global options: `--no-interactive` (or `HACK_NO_INTERACTIVE=1`); commands with `--json` emit a `{ok, data, error}` envelope on stdout.",
+    "Run `hack help <command>` for the same content in the terminal. Global options: `--no-interactive` (or `HACK_NO_INTERACTIVE=1`); new JSON contracts use schema-tagged envelopes; published legacy and streaming formats are listed in [Machine-readable output](./machine-readable-output.md).",
     "",
   ];
 

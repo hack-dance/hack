@@ -261,7 +261,7 @@ fn config_file(path: &Path, uid: u32) -> Result<PluginConfig, &'static str> {
 
 /// Compose Doctor resolves Mutagen before PATH. Validate that fixed override
 /// or managed candidate without changing its selection or reading its contents.
-pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<(), &'static str> {
+pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<NativePin, &'static str> {
     let selector = |key| -> Result<Option<String>, &'static str> {
         runner
             .env_value(key)
@@ -298,19 +298,86 @@ pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<(), &'static str> {
     }
     // A native candidate runtime is spawned by absolute path with a narrowed
     // environment (not the wrapper PATH), so the env #! form is refused.
+    let native_ok = |native: &Path| -> Result<bool, &'static str> {
+        if present(native, uid)? {
+            if trusted_tool_path(native, uid, false)
+                .is_none_or(|real| !crate::source::trusted_interpreter(&real, uid, 4, false))
+            {
+                return Err("Native runtime binary or its ancestors/ACLs are untrusted");
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    };
     if let Some(native) = selector("HACK_NATIVE_BINARY")? {
         let native = PathBuf::from(native);
         if !native.is_absolute() {
             return Err("relative native runtime selection is unsupported");
         }
-        if present(&native, uid)?
-            && trusted_tool_path(&native, uid, false)
-                .is_none_or(|real| !crate::source::trusted_interpreter(&real, uid, 4, false))
-        {
-            return Err("Native runtime binary or its ancestors/ACLs are untrusted");
+        native_ok(&native)?;
+        return Ok(NativePin::Selected);
+    }
+    // Unset: the CLI falls back to `hack-native` beside its own executable
+    // (`process.execPath`). For a compiled CLI that is the CLI's directory; a
+    // `#!` launcher's eventual executable is not knowable here, so Doctor
+    // pins an absent private path instead of letting the CLI search.
+    let Some(program) = runner.program_path() else {
+        return Ok(NativePin::Unavailable);
+    };
+    let Ok(real) = std::fs::canonicalize(&program) else {
+        return Ok(NativePin::Unavailable);
+    };
+    let mut head = [0_u8; 2];
+    let launcher = std::fs::File::open(&real)
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
+        .map_or(true, |()| head == *b"#!");
+    if launcher {
+        return Ok(NativePin::Unavailable);
+    }
+    let mut found = None;
+    for dir in [real.parent(), program.parent()].into_iter().flatten() {
+        let candidate = dir.join("hack-native");
+        if native_ok(&candidate)? && found.is_none() {
+            found = Some(candidate);
         }
     }
-    Ok(())
+    Ok(found.map_or(NativePin::Absent, NativePin::Adjacent))
+}
+
+/// The native runtime selection Doctor's runs use when `HACK_NATIVE_BINARY`
+/// is unset. Every variant has been checked; [`NativePin::apply`] keeps the
+/// CLI from choosing anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativePin {
+    /// `HACK_NATIVE_BINARY` was set and checked; the CLI uses it as is.
+    Selected,
+    /// A checked `hack-native` beside the CLI executable; pinned by path.
+    Adjacent(PathBuf),
+    /// No `hack-native` beside the CLI, and its absence is protected by
+    /// owner-controlled ancestry; the CLI's own fallback finds nothing.
+    Absent,
+    /// The CLI's fallback location cannot be known (a `#!` launcher or an
+    /// unresolvable program); a path that cannot exist is pinned.
+    Unavailable,
+}
+
+impl NativePin {
+    /// `private_dir` must be Doctor's private wrapper directory, which only
+    /// this user can write, so the pinned unavailable path stays absent.
+    pub(crate) fn apply(&self, runner: CliRunner, private_dir: &Path) -> CliRunner {
+        match self {
+            Self::Selected | Self::Absent => runner,
+            Self::Adjacent(path) => match path.to_str() {
+                Some(path) => runner.with_env("HACK_NATIVE_BINARY", path),
+                None => Self::Unavailable.apply(runner, private_dir),
+            },
+            Self::Unavailable => match private_dir.join("hack-native-unavailable").to_str() {
+                Some(path) => runner.with_env("HACK_NATIVE_BINARY", path),
+                // The wrapper PATH is required to be UTF-8 before this runs.
+                None => runner,
+            },
+        }
+    }
 }
 
 /// Success proves only the documented Unix discovery inputs inspected here.

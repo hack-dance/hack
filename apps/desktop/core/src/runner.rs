@@ -185,6 +185,18 @@ impl CliRunner {
         self
     }
 
+    /// The absolute executable this runner would start, without starting it.
+    pub(crate) fn program_path(&self) -> Option<PathBuf> {
+        if self.missing {
+            return None;
+        }
+        if self.program.is_absolute() {
+            return Some(self.program.clone());
+        }
+        let name = self.program.to_str()?;
+        resolve_on_path(name, self.env_value("PATH").as_deref())
+    }
+
     pub(crate) fn env_value(&self, key: &str) -> Option<std::ffi::OsString> {
         self.env
             .iter()

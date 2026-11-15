@@ -571,24 +571,27 @@ impl LiveSource {
         discovery: &crate::doctor_plugins::Discovery,
     ) -> Vec<DoctorRun> {
         let deadline = std::time::Instant::now() + budget;
-        if let Err(reason) = crate::doctor_plugins::validate_helpers(&self.runner)
-            .and_then(|()| crate::doctor_plugins::validate(discovery))
+        let native_pin = match crate::doctor_plugins::validate_helpers(&self.runner)
+            .and_then(|pin| crate::doctor_plugins::validate(discovery).map(|()| pin))
         {
-            let why = format!("Could not check Doctor executable discovery: {reason}");
-            let report = crate::models::DoctorReport {
-                checks: vec![crate::models::DoctorCheck {
-                    id: "desktop preflight".into(),
-                    status: "unknown".into(),
-                    detail: why.clone(),
-                }],
-                summary: vec![],
-            };
-            let mut machine = DoctorRun::machine(Ok(report));
-            machine.probe_started = false;
-            return std::iter::once(machine)
-                .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
-                .collect();
-        }
+            Ok(pin) => pin,
+            Err(reason) => {
+                let why = format!("Could not check Doctor executable discovery: {reason}");
+                let report = crate::models::DoctorReport {
+                    checks: vec![crate::models::DoctorCheck {
+                        id: "desktop preflight".into(),
+                        status: "unknown".into(),
+                        detail: why.clone(),
+                    }],
+                    summary: vec![],
+                };
+                let mut machine = DoctorRun::machine(Ok(report));
+                machine.probe_started = false;
+                return std::iter::once(machine)
+                    .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
+                    .collect();
+            }
+        };
         // Resolve once per refresh, not once per project. The private PATH
         // stays alive until every bounded child has completed.
         let tools = match trusted_probe_path(
@@ -633,9 +636,8 @@ impl LiveSource {
         candidates.push(std::path::PathBuf::from("/"));
         let machine = match crate::doctor::neutral_dir(&candidates) {
             Some(dir) if !left().is_zero() => read(
-                &self
-                    .runner
-                    .clone()
+                &native_pin
+                    .apply(self.runner.clone(), &tools.dir)
                     .with_env("PATH", tool_path)
                     .without_interpreter_startup()
                     .with_cwd(dir)
@@ -652,8 +654,8 @@ impl LiveSource {
                 let handles: Vec<_> = chunk
                     .iter()
                     .map(|t| {
-                        let runner = self
-                            .runner_for(t.native)
+                        let runner = native_pin
+                            .apply(self.runner_for(t.native), &tools.dir)
                             .with_env("PATH", tool_path)
                             .without_interpreter_startup()
                             .with_term_grace(DOCTOR_TERM_GRACE);
@@ -1812,6 +1814,60 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// With `HACK_NATIVE_BINARY` unset the CLI would run `hack-native` from
+    /// beside its own executable, so Doctor checks that fallback and pins the
+    /// result; a `#!` launcher's fallback is unknowable and pinned absent.
+    #[test]
+    fn doctor_checks_and_pins_the_adjacent_native_fallback() {
+        use crate::doctor_plugins::{NativePin, validate_helpers};
+        use std::os::unix::fs::PermissionsExt;
+        let launcher = fake_hack("doctor-native-fallback", "echo '{}'");
+        let root = std::fs::canonicalize(launcher.parent().unwrap()).unwrap();
+        let private = root.join("private-tools");
+        let pinned = |runner: CliRunner| {
+            NativePin::apply(&validate_helpers(&runner).unwrap(), runner, &private)
+                .env_value("HACK_NATIVE_BINARY")
+        };
+        let base = |hack: &Path| fixture_runner(hack).with_env("HACK_HOME", root.to_str().unwrap());
+        // A #! launcher: its eventual executable is unknown.
+        assert_eq!(
+            validate_helpers(&base(&launcher)),
+            Ok(NativePin::Unavailable)
+        );
+        assert_eq!(
+            pinned(base(&launcher)),
+            Some(private.join("hack-native-unavailable").into())
+        );
+        // A compiled CLI (no #!): its own directory is the fallback.
+        let compiled = root.join("compiled");
+        std::fs::create_dir(&compiled).unwrap();
+        std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let hack = compiled.join("hack");
+        std::fs::write(&hack, b"\x7fELF fixture").unwrap();
+        std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(validate_helpers(&base(&hack)), Ok(NativePin::Absent));
+        assert_eq!(pinned(base(&hack)), None);
+        let native = compiled.join("hack-native");
+        std::fs::write(&native, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            validate_helpers(&base(&hack)),
+            Ok(NativePin::Adjacent(native.clone()))
+        );
+        assert_eq!(pinned(base(&hack)), Some(native.clone().into()));
+        // Writable by others, or an untrusted interpreter: Doctor refuses.
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o722)).unwrap();
+        assert!(validate_helpers(&base(&hack)).is_err());
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&native, "#!/usr/bin/env sh\n").unwrap();
+        assert!(validate_helpers(&base(&hack)).is_err());
+        // An explicit selection is checked and left as the CLI's choice.
+        let selected = base(&hack).with_env("HACK_NATIVE_BINARY", "/example/absent/hack-native");
+        assert_eq!(validate_helpers(&selected), Ok(NativePin::Selected));
+        assert_eq!(pinned(selected), Some("/example/absent/hack-native".into()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn doctor_refuses_remote_or_unknown_docker_endpoints() {
         let hack = fake_hack("doctor-docker-endpoint", "echo '{}'");
@@ -2289,7 +2345,7 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
             daemon: None,
         };
         assert_eq!(
-            crate::doctor_plugins::validate_helpers(&source.runner),
+            crate::doctor_plugins::validate_helpers(&source.runner).map(|_| ()),
             Ok(()),
             "stage=helper-preflight"
         );

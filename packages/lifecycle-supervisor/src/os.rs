@@ -63,48 +63,86 @@ pub struct Identity {
     pub zombie: bool,
 }
 
+/// One `/proc/<pid>/stat` read: state letter, group, session and start time.
 #[cfg(target_os = "linux")]
-pub fn inspect(pid: i32) -> Result<Option<Identity>> {
-    let path = format!("/proc/{pid}/stat");
-    let bytes = match fs::read(&path) {
+fn linux_stat(pid: i32) -> Result<Option<(bool, i32, i32, u64)>> {
+    let bytes = match fs::read(format!("/proc/{pid}/stat")) {
         Ok(value) => value,
         Err(error) if absent_error(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let tail = proc_stat_tail(&bytes)?;
     let fields: Vec<_> = tail.split_whitespace().collect();
-    let group = fields
+    let group: i32 = fields
         .get(2)
         .and_then(|v| v.parse().ok())
         .ok_or_else(refused)?;
-    let start = fields
-        .get(19)
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(refused)?;
-    let session = fields
+    let session: i32 = fields
         .get(3)
         .and_then(|v| v.parse().ok())
         .ok_or_else(refused)?;
-    let uid = match linux_uid(pid)? {
-        Some(uid) => uid,
-        None => return Ok(None),
-    };
-    Ok(Some(Identity {
-        pid,
-        group,
-        session,
-        start,
-        uid,
-        zombie: matches!(fields.first(), Some(&"Z" | &"X")) && !linux_live_thread(pid)?,
-    }))
+    let start: u64 = fields
+        .get(19)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(refused)?;
+    let leader_dead = matches!(fields.first(), Some(&"Z" | &"X"));
+    Ok(Some((leader_dead, group, session, start)))
+}
+
+/// The identity is assembled from several reads (`stat`, `status`, the task
+/// list). The leader's start time is read again afterwards: if it changed, the
+/// PID was reused during the reads, so the reads are repeated rather than
+/// combining two processes. Three unstable attempts refuse.
+#[cfg(target_os = "linux")]
+pub fn inspect(pid: i32) -> Result<Option<Identity>> {
+    for _ in 0..3 {
+        let Some((leader_dead, group, session, start)) = linux_stat(pid)? else {
+            return Ok(None);
+        };
+        let uid = match linux_uid(pid)? {
+            Some(uid) => uid,
+            None => return Ok(None),
+        };
+        let zombie = leader_dead && !linux_live_thread(pid)?;
+        match linux_stat(pid)? {
+            None => return Ok(None),
+            Some((_, _, _, again)) if again == start => {
+                return Ok(Some(Identity {
+                    pid,
+                    group,
+                    session,
+                    start,
+                    uid,
+                    zombie,
+                }));
+            }
+            Some(_) => continue,
+        }
+    }
+    Err(refused())
 }
 
 /// A thread-group leader that called `pthread_exit` shows `Z` in
 /// `/proc/<pid>/stat` while its other threads keep running. Such a process is
 /// alive: it still owns its PID and receives process-directed signals. Only a
 /// group with no live thread left is a zombie.
+///
+/// One listing of `/proc/<pid>/task` cannot see a thread created after it, so
+/// if every listed thread exits while a newer one takes over, a single scan
+/// would read a live process as dead. "No live thread" is therefore accepted
+/// only when two consecutive listings agree.
 #[cfg(target_os = "linux")]
 fn linux_live_thread(pid: i32) -> Result<bool> {
+    for _ in 0..2 {
+        if linux_task_scan(pid)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_task_scan(pid: i32) -> Result<bool> {
     let tasks = match fs::read_dir(format!("/proc/{pid}/task")) {
         Ok(tasks) => tasks,
         Err(error) if absent_error(&error) => return Ok(false),

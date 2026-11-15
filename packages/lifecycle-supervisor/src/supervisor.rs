@@ -615,37 +615,48 @@ fn stop(states: &[State]) -> Result<()> {
         }
     }
     let mut active = Vec::new();
+    let mut failure = None;
     // Validate admission before effects. Capture while a live guard can still
     // prove membership, so loss during the later liveness check retains authority.
+    // A receipt that cannot be verified is never signalled; it records the first
+    // failure, and the other admitted targets still get their stop.
     for state in states {
-        let guard_live = match os::inspect(state.guard_pid)? {
-            Some(identity) if !identity.zombie => {
-                if let Err(error) = os::same(state, &identity) {
-                    if !os::recorded_live(state, false)? {
-                        continue;
+        let admitted = (|| -> Result<Option<Target>> {
+            let guard_live = match os::inspect(state.guard_pid)? {
+                Some(identity) if !identity.zombie => {
+                    if let Err(error) = os::same(state, &identity) {
+                        if !os::recorded_live(state, false)? {
+                            return Ok(None);
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
+                    true
                 }
-                true
+                _ => false,
+            };
+            let (recovery, admission) = stop_capture(guard_live, || os::Recovery::capture(state))?;
+            match os::recorded_live(state, false) {
+                Ok(false) => return Ok(None),
+                Ok(true) => (),
+                Err(_) if guard_lost(state)? && (recovery.is_some() || admission.is_some()) => (),
+                Err(error) => return Err(error),
             }
-            _ => false,
-        };
-        let (recovery, admission) = stop_capture(guard_live, || os::Recovery::capture(state))?;
-        match os::recorded_live(state, false) {
-            Ok(false) => continue,
-            Ok(true) => (),
-            Err(_) if guard_lost(state)? && (recovery.is_some() || admission.is_some()) => (),
-            Err(error) => return Err(error),
+            Ok(Some(Target {
+                state: state.clone(),
+                recovery,
+                admission,
+                orphan_term: None,
+                finished: false,
+            }))
+        })();
+        match admitted {
+            Ok(Some(target)) => active.push(target),
+            Ok(None) => (),
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
         }
-        active.push(Target {
-            state: state.clone(),
-            recovery,
-            admission,
-            orphan_term: None,
-            finished: false,
-        });
     }
-    let mut failure = None;
     for target in &mut active {
         let signalled = if let Some(recovery) = &target.recovery {
             target.orphan_term = Some(Instant::now());

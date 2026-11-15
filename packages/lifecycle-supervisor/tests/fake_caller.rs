@@ -1502,6 +1502,51 @@ fn held_log_lock_never_stalls_a_guard() {
     drop(log);
 }
 
+/// One receipt that cannot be verified (guard gone, recorded command birth
+/// wrong, so no witness proves the session) must not keep stop from stopping
+/// the healthy commands of the same owner. The unverifiable command is never
+/// signalled, and the request answers `unknown` with `stop-incomplete`.
+#[test]
+fn unverifiable_receipt_does_not_block_healthy_targets() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![
+        f.process("healthy", "hold"),
+        f.process("unverifiable", "hold"),
+    ]);
+    eventually(|| (f.log().matches("fixture-ready").count() == 2).then_some(()));
+    let healthy = identity(pid(&f.state("healthy"), "commandPid")).expect("healthy command");
+    let mut bad = f.state("unverifiable");
+    let bad_command = identity(pid(&bad, "commandPid")).expect("unverifiable command");
+    let bad_guard = pid(&bad, "guardPid");
+    // SAFETY: the guard belongs to this fixture; its command survives it.
+    assert_eq!(unsafe { libc::kill(bad_guard, libc::SIGKILL) }, 0);
+    eventually(|| identity(bad_guard).is_none().then_some(()));
+    bad["commandStartTime"] = json!(bad["commandStartTime"].as_u64().unwrap() + 1);
+    fs::write(
+        f.root.join("unverifiable.json"),
+        serde_json::to_vec(&bad).unwrap(),
+    )
+    .unwrap();
+    let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    assert!(!wait(&mut stop, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "unknown");
+    assert_eq!(receipt["reason"], "stop-incomplete");
+    eventually(|| {
+        (identity(healthy.pid).as_ref() != Some(&healthy) || process_is_zombie(healthy.pid))
+            .then_some(())
+    });
+    assert!(
+        identity(bad_command.pid).as_ref() == Some(&bad_command)
+            && !process_is_zombie(bad_command.pid),
+        "unverifiable command was signalled"
+    );
+    // SAFETY: this fixture's own command, identity checked just above.
+    unsafe {
+        libc::kill(bad_command.pid, libc::SIGKILL);
+    }
+    let _ = wait(&mut caller, TIMEOUT);
+}
+
 fn process_is_zombie(pid: i32) -> bool {
     process_state(pid) == Some(b'Z')
 }

@@ -107,12 +107,18 @@ pub const INTERPRETER_STARTUP_VARS: &[&str] = &[
     "RUBYLIB",
     "NODE_OPTIONS",
     "NODE_PATH",
+    // The Hack CLI is a Bun-compiled binary: these make its runtime preload
+    // code (the same set the CLI removes before re-executing itself).
+    "BUN_OPTIONS",
+    "BUN_BE_BUN",
 ];
 
 /// Every variable with one of these prefixes is removed too: all dynamic
 /// loader controls (`LD_*`, `DYLD_*`, including versioned and fallback search
-/// paths) and exported Bash functions.
-pub const INTERPRETER_STARTUP_PREFIXES: &[&str] = &["LD_", "DYLD_", "BASH_FUNC_"];
+/// paths), exported Bash functions, and Bun runtime configuration and
+/// inspector settings.
+pub const INTERPRETER_STARTUP_PREFIXES: &[&str] =
+    &["LD_", "DYLD_", "BASH_FUNC_", "BUN_CONFIG_", "BUN_INSPECT"];
 
 fn is_startup_var(name: &std::ffi::OsStr) -> bool {
     let bytes = name.as_encoded_bytes();
@@ -1440,6 +1446,10 @@ mod tests {
             "DYLD_FALLBACK_LIBRARY_PATH",
             "LD_AUDIT",
             "BASH_FUNC_x%%",
+            "BUN_OPTIONS",
+            "BUN_BE_BUN",
+            "BUN_CONFIG_REGISTRY",
+            "BUN_INSPECT_CONNECT_TO",
         ];
         let mut runner = CliRunner::new("/example/hack");
         for name in names {

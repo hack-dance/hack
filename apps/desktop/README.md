@@ -182,6 +182,11 @@ Ruby and Node options and paths, the Bun runtime's `BUN_OPTIONS`, `BUN_BE_BUN`,
 `LD_*` and `DYLD_*` loader variable), so a checked tool script cannot be made to load code from the
 environment; missing candidates
 require protected ancestry, and relative/unprovable selections are refused.
+For a compiled CLI, the `hack-lifecycle-supervisor` companion beside it (which
+Doctor's project checks run by absolute path for projects using the supervisor
+runner, ignoring any selector) must pass the same rule; an unsafe one refuses
+Doctor. When the CLI is a `#!` launcher, the supervisor it would finally run cannot
+be located or checked by the app.
 Doctor's runs pin the checked native runtime through `HACK_NATIVE_BINARY`. When the
 CLI is a `#!` launcher, the executable it finally runs (and so its fallback
 directory) cannot be known, so Doctor pins an absent path inside its private

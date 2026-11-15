@@ -12,6 +12,7 @@
 
 - [Project state](./reference/project-state.md) — shared backend-aware CLI and daemon project/service observations
 - [Version identity](./reference/version.md) — `hack version --json` describes the running CLI without starting services
+- [Read-only update check](./reference/update-check.md) — `hack update --check --json --observe`: newer release, install kind and upgrade command, for any install
 - [Machine-readable output](./reference/machine-readable-output.md) — envelope rule, schema identifiers and the complete JSON command inventory
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)

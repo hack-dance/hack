@@ -193,7 +193,12 @@ pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<(), &'static str> {
         return Err("relative Doctor Mutagen helper selection is unsupported");
     }
     let uid = unsafe { libc::getuid() };
-    if present(&candidate, uid)? && trusted_tool_path(&candidate, uid, false).is_none() {
+    // The CLI executes this helper directly, so its #! interpreter must pass
+    // the same rule as PATH tools.
+    if present(&candidate, uid)?
+        && trusted_tool_path(&candidate, uid, false)
+            .is_none_or(|real| !crate::source::trusted_interpreter(&real, uid, 4))
+    {
         return Err("Doctor absolute helper or its ancestors/ACLs are untrusted");
     }
     Ok(())

@@ -154,7 +154,8 @@ alias; expected shim paths come from the fixture's canonical root, never from
 the runner's real Homebrew installation or filesystem modes.
 
 The fixed absolute Mutagen override (`HACK_MUTAGEN_PATH`) or managed
-`HACK_HOME/bin/mutagen` candidate is checked before Doctor too; missing candidates
+`HACK_HOME/bin/mutagen` candidate is checked before Doctor too, including the
+same `#!` interpreter rule; missing candidates
 require protected ancestry, and relative/unprovable selections are refused.
 Docker plugin preflight preserves HOME, DOCKER_CONFIG and DOCKER_CONTEXT. It
 checks the selected config/plugin directories, configured `cliPluginsExtraDirs`,

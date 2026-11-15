@@ -34,6 +34,7 @@ import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
+import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import {
   createOperationTimings,
@@ -50,7 +51,6 @@ import {
   AmbiguousProjectNameError,
   normalizeProjectName,
 } from "../lib/project-name.ts";
-import { projectObservation } from "../lib/project-observation.ts";
 import { assertPruneRuntimeOwnership } from "../lib/project-prune-ownership.ts";
 import {
   findMissingRegistryEntries,
@@ -695,6 +695,7 @@ async function runProjects(opts: {
 
   const views = await profiler.measure("project_views_ms", () =>
     buildProjectViews({
+      observeNative: !opts.observe || opts.observeRuntime === true,
       registryProjects: registry.projects,
       runtime: runtime.runtime,
       runtimeOk: runtime.ok,
@@ -1014,14 +1015,6 @@ function outputProjectsJson(opts: {
             view.projectId !== undefined &&
             opts.autostartGlobal.login_run.pending.includes(view.projectId),
         }),
-        ...(opts.observe
-          ? projectObservation({
-              view,
-              runtimeOk: opts.runtime.ok,
-              nativeSelected:
-                process.env.HACK_RUNTIME_BACKEND?.trim() === "native",
-            })
-          : {}),
         ...(opts.includeMeta
           ? { meta: opts.metaByName.get(view.name) ?? null }
           : {}),
@@ -1029,7 +1022,12 @@ function outputProjectsJson(opts: {
     ),
   };
   writeProfiledProjects({
-    payload,
+    payload: opts.observe
+      ? machineSuccess({
+          schema: MACHINE_SCHEMAS.projectsObserve,
+          data: payload,
+        })
+      : payload,
     profiler: opts.profiler,
     started: opts.started,
     enabled: opts.timings,

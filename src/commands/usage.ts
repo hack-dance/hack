@@ -22,6 +22,7 @@ import {
   readHostCommandRecords,
   readObservedProcesses,
 } from "../lib/host-command-observation.ts";
+import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import {
   findProjectContext,
@@ -90,7 +91,7 @@ const optByService = defineOption({
 } as const);
 
 /** Schema id of `hack usage --json --by-service`; see docs/reference/usage-by-service.md. */
-export const USAGE_BY_SERVICE_SCHEMA = "hack.usage.by-service.v1";
+export const USAGE_BY_SERVICE_SCHEMA = MACHINE_SCHEMAS.usageByService;
 
 const options = [
   optProject,

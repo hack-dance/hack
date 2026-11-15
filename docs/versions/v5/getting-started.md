@@ -157,3 +157,9 @@ Direnv files such as `.envrc` are not dotenv overlays and do not block admission
 Prepare Caddy/CoreDNS images with manual `hack global up`: login routing never
 pulls or builds images and refuses missing local images.
 Machine-wide autostart progress is exposed locally, not through the unsupported gateway.
+
+Project JSON rows and hackd project snapshots share `backend`, `state`,
+`started_at` and per-service readiness, completion, health and exit fields.
+Unavailable evidence stays unknown/null. A zero exit is a completed job only
+with a declared completion role. Default `projects --json --observe` still
+contacts no runtime; live observations require `--runtime`.

@@ -10,6 +10,11 @@ import {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
 import { serializeProjectAutostart } from "./autostart-view.ts";
+import {
+  type ComposeServiceActivation,
+  composeServiceActivation,
+} from "./compose-service-activation.ts";
+import { composeServiceReadiness } from "./compose-service-readiness.ts";
 
 // biome-ignore lint/performance/noBarrelFile: Preserve the existing project policy serializer import contract.
 export { serializeProjectAutostart } from "./autostart-view.ts";
@@ -28,6 +33,12 @@ import {
   ProjectInputSelectionError,
 } from "./project-input-selection.ts";
 import { normalizeProjectName } from "./project-name.ts";
+import { observeNativeProject } from "./project-native-observation.ts";
+import {
+  type ProjectObservation,
+  projectObservation,
+} from "./project-observation.ts";
+import type { ServiceReadiness } from "./project-state.ts";
 import type {
   RegisteredProject,
   RegisteredProjectWorktree,
@@ -39,6 +50,8 @@ import {
   serializeRuntimeProject,
 } from "./runtime-projects.ts";
 import { exec, findExecutableInPath } from "./shell.ts";
+
+const NATIVE_OBSERVATION_CONCURRENCY = 4;
 
 export type BranchRuntime = {
   readonly branch: string;
@@ -88,6 +101,9 @@ export type ProjectLifecycleView = {
 };
 
 export type ProjectView = {
+  readonly observation?: ProjectObservation;
+  readonly serviceActivation?: ComposeServiceActivation;
+  readonly serviceReadiness?: Readonly<Record<string, ServiceReadiness>>;
   readonly projectId?: string;
   readonly autostart?: RegisteredProject["autostart"];
   readonly name: string;
@@ -129,6 +145,7 @@ export type ProjectRuntimeStatus =
   | "not_configured";
 
 type BuildProjectViewsOptions = {
+  readonly observeNative?: boolean;
   readonly registryProjects: readonly RegisteredProject[];
   readonly runtime: readonly RuntimeProject[];
   readonly runtimeOk: boolean;
@@ -231,7 +248,34 @@ export async function buildProjectViews(
     }
   }
 
-  return out;
+  const nativeSelected = process.env.HACK_RUNTIME_BACKEND?.trim() === "native";
+  const observed: ProjectView[] = [];
+  // Native status reads own subprocesses; keep registry size from becoming fan-out.
+  for (
+    let offset = 0;
+    offset < out.length;
+    offset += NATIVE_OBSERVATION_CONCURRENCY
+  ) {
+    observed.push(
+      ...(await Promise.all(
+        out
+          .slice(offset, offset + NATIVE_OBSERVATION_CONCURRENCY)
+          .map(async (view) => {
+            const base = projectObservation({
+              view,
+              runtimeOk: opts.runtimeOk,
+              nativeSelected,
+            });
+            const observation =
+              opts.observeNative && base.backend === "native"
+                ? await observeNativeProject({ view })
+                : base;
+            return { ...view, observation };
+          })
+      ))
+    );
+  }
+  return observed;
 }
 
 function resolveRegisteredRuntime(opts: {
@@ -276,9 +320,10 @@ async function buildRegisteredProjectView(opts: {
     PROJECT_COMPOSE_FILENAME
   );
   const composeExists = projectDirOk && (await pathExists(composeFile));
-  const definedServices = composeExists
+  const composeDefinition = composeExists
     ? await readComposeServices({ composeFile })
     : null;
+  const definedServices = composeDefinition?.names ?? null;
   const serviceHosts = composeExists
     ? await readComposeServiceHosts({ composeFile })
     : null;
@@ -325,6 +370,8 @@ async function buildRegisteredProjectView(opts: {
     projectDir: opts.registration.projectDir,
     ownership: config && !config.parseError ? config.ownership : null,
     definedServices,
+    serviceReadiness: composeDefinition?.readiness,
+    serviceActivation: composeDefinition?.activation,
     extensionsEnabled: extensions?.enabled ?? null,
     features: extensions?.features ?? null,
     serviceHosts,
@@ -414,6 +461,14 @@ export function serializeProjectSummary(
     [...runtime.services.values()].flatMap((service) => service.containers)
   );
   return {
+    ...(view.observation ??
+      projectObservation({
+        view,
+        runtimeOk:
+          view.runtimeStatus !== "unknown" &&
+          view.runtimeStatus !== "unavailable",
+        nativeSelected: false,
+      })),
     project_id: view.projectId ?? null,
     autostart: serializeProjectAutostart(view.autostart),
     name: view.name,
@@ -443,6 +498,14 @@ export function serializeProjectView(
   view: ProjectView
 ): Record<string, unknown> {
   return {
+    ...(view.observation ??
+      projectObservation({
+        view,
+        runtimeOk:
+          view.runtimeStatus !== "unknown" &&
+          view.runtimeStatus !== "unavailable",
+        nativeSelected: false,
+      })),
     project_id: view.projectId ?? null,
     autostart: serializeProjectAutostart(view.autostart),
     name: view.name,
@@ -836,7 +899,11 @@ function parseTmuxSessionFields(
 
 async function readComposeServices(opts: {
   readonly composeFile: string;
-}): Promise<readonly string[] | null> {
+}): Promise<{
+  names: readonly string[];
+  readiness: Readonly<Record<string, ServiceReadiness>>;
+  activation: ComposeServiceActivation;
+} | null> {
   const text = await readTextFile(opts.composeFile);
   if (!text) {
     return null;
@@ -853,11 +920,13 @@ async function readComposeServices(opts: {
   }
 
   const servicesRaw = parsed.services;
-  if (!isRecord(servicesRaw)) {
-    return [];
-  }
-
-  return Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b));
+  return {
+    names: isRecord(servicesRaw)
+      ? Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b))
+      : [],
+    readiness: composeServiceReadiness(parsed),
+    activation: composeServiceActivation(parsed),
+  };
 }
 
 async function readComposeServiceHosts(opts: {

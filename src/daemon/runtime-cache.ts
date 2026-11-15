@@ -331,6 +331,7 @@ export function createRuntimeCache(opts: {
     });
     const views = await profiler.measure("project_views_ms", () =>
       deps.buildProjectViews({
+        observeNative: true,
         registryProjects: registry.projects,
         runtime,
         runtimeOk: health.ok,

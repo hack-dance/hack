@@ -100,13 +100,22 @@ pub const INTERPRETER_STARTUP_VARS: &[&str] = &[
     "RUBYLIB",
     "NODE_OPTIONS",
     "NODE_PATH",
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "LD_AUDIT",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_LIBRARY_PATH",
-    "DYLD_FRAMEWORK_PATH",
 ];
+
+/// Every variable with one of these prefixes is removed too: all dynamic
+/// loader controls (`LD_*`, `DYLD_*`, including versioned and fallback search
+/// paths) and exported Bash functions.
+pub const INTERPRETER_STARTUP_PREFIXES: &[&str] = &["LD_", "DYLD_", "BASH_FUNC_"];
+
+fn is_startup_var(name: &std::ffi::OsStr) -> bool {
+    let bytes = name.as_encoded_bytes();
+    INTERPRETER_STARTUP_VARS
+        .iter()
+        .any(|v| bytes == v.as_bytes())
+        || INTERPRETER_STARTUP_PREFIXES
+            .iter()
+            .any(|p| bytes.starts_with(p.as_bytes()))
+}
 
 /// Default grace after SIGTERM. The CLI forwards SIGTERM to the detached
 /// subprocess groups it owns (for example a Compose build) and waits for
@@ -314,10 +323,12 @@ impl CliRunner {
             for key in INTERPRETER_STARTUP_VARS {
                 cmd.env_remove(key);
             }
-            // Exported Bash functions run as code in every Bash child. Only
+            // Prefix matches cover inherited and runner-set names alike. Only
             // names are read here, never values.
-            for (key, _) in std::env::vars_os() {
-                if key.as_encoded_bytes().starts_with(b"BASH_FUNC_") {
+            let inherited = std::env::vars_os().map(|(key, _)| key);
+            let authored = self.env.iter().map(|(key, _)| key.into());
+            for key in inherited.chain(authored) {
+                if is_startup_var(&key) {
                     cmd.env_remove(key);
                 }
             }
@@ -1094,21 +1105,25 @@ mod tests {
 
     #[test]
     fn interpreter_startup_variables_never_reach_doctor_children() {
-        let f = FakeHack::new(r#"printf '%s|%s' "${BASH_ENV-unset}" "${NODE_OPTIONS-unset}""#);
+        let f = FakeHack::new(
+            r#"printf '%s|%s|%s|%s' "${BASH_ENV-unset}" "${NODE_OPTIONS-unset}" "${DYLD_VERSIONED_LIBRARY_PATH-unset}" "${LD_AUDIT-unset}""#,
+        );
         let runner = f
             .runner()
             .with_env("BASH_ENV", "/example/startup")
-            .with_env("NODE_OPTIONS", "--require=/example/preload");
+            .with_env("NODE_OPTIONS", "--require=/example/preload")
+            .with_env("DYLD_VERSIONED_LIBRARY_PATH", "/example/lib")
+            .with_env("LD_AUDIT", "/example/audit");
         let (seen, _, _) = runner.run_raw(&["x"], None, T).unwrap();
         assert_eq!(
-            seen, "/example/startup|--require=/example/preload",
+            seen, "/example/startup|--require=/example/preload|/example/lib|/example/audit",
             "positive control"
         );
         let (stripped, _, _) = runner
             .without_interpreter_startup()
             .run_raw(&["x"], None, T)
             .unwrap();
-        assert_eq!(stripped, "unset|unset");
+        assert_eq!(stripped, "unset|unset|unset|unset");
     }
 
     #[test]

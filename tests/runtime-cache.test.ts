@@ -967,8 +967,13 @@ test("nextRefresh wakes on a completed refresh, its deadline or an abort", async
   const never = new AbortController().signal;
 
   let woke = false;
+  const before = cache.refreshGeneration();
   const waiting = cache
-    .nextRefresh({ signal: never, deadlineMs: Date.now() + 60_000 })
+    .nextRefresh({
+      after: before,
+      signal: never,
+      deadlineMs: Date.now() + 60_000,
+    })
     .then(() => {
       woke = true;
     });
@@ -977,13 +982,28 @@ test("nextRefresh wakes on a completed refresh, its deadline or an abort", async
   await cache.refresh({ reason: "test" });
   await waiting;
   expect(woke).toBe(true);
+  expect(cache.refreshGeneration()).toBe(before + 1);
+
+  // A refresh already newer than `after` resolves at once.
+  const quick = Date.now();
+  await cache.nextRefresh({
+    after: before,
+    signal: never,
+    deadlineMs: Date.now() + 60_000,
+  });
+  expect(Date.now() - quick).toBeLessThan(1000);
 
   const started = Date.now();
-  await cache.nextRefresh({ signal: never, deadlineMs: Date.now() + 20 });
+  await cache.nextRefresh({
+    after: cache.refreshGeneration(),
+    signal: never,
+    deadlineMs: Date.now() + 20,
+  });
   expect(Date.now() - started).toBeLessThan(5000);
 
   const controller = new AbortController();
   const aborted = cache.nextRefresh({
+    after: cache.refreshGeneration(),
     signal: controller.signal,
     deadlineMs: Date.now() + 60_000,
   });
@@ -992,6 +1012,7 @@ test("nextRefresh wakes on a completed refresh, its deadline or an abort", async
   const already = new AbortController();
   already.abort();
   await cache.nextRefresh({
+    after: cache.refreshGeneration(),
     signal: already.signal,
     deadlineMs: Date.now() + 60_000,
   });

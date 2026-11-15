@@ -518,6 +518,7 @@ async function handleRequest({
           profile,
         }),
       wait,
+      refreshGeneration: cache.refreshGeneration,
       nextRefresh: cache.nextRefresh,
       signal: req.signal,
     });

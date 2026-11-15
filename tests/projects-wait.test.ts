@@ -82,11 +82,14 @@ function source() {
   };
 }
 
-/** Manually driven refresh events, honouring deadline and abort like the cache. */
+/** Manually driven refreshes with the cache's generation and wake rules. */
 function refreshes() {
   const pending = new Set<() => void>();
+  let generation = 0;
   return {
+    refreshGeneration: () => generation,
     nextRefresh: (opts: {
+      readonly after: number;
       readonly signal: AbortSignal;
       readonly deadlineMs: number;
     }) =>
@@ -100,10 +103,15 @@ function refreshes() {
           wake,
           Math.max(0, opts.deadlineMs - Date.now())
         );
+        if (opts.signal.aborted || generation > opts.after) {
+          wake();
+          return;
+        }
         opts.signal.addEventListener("abort", wake, { once: true });
         pending.add(wake);
       }),
     fire: () => {
+      generation++;
       for (const wake of [...pending]) {
         wake();
       }
@@ -119,6 +127,7 @@ test("without wait, or with a stale token, the answer is immediate", async () =>
   const plain = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "none" },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -126,6 +135,7 @@ test("without wait, or with a stale token, the answer is immediate", async () =>
   const stale = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "wait", token: TOKEN, timeoutMs: 55_000 },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -139,6 +149,7 @@ test("a current token waits for a refresh that changes the content", async () =>
   const first = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "none" },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -146,6 +157,7 @@ test("a current token waits for a refresh that changes the content", async () =>
   const waiting = resolveProjectsPayload({
     build: data.build,
     wait: { kind: "wait", token: first.state_token, timeoutMs: 55_000 },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   }).then((result) => {
@@ -172,6 +184,7 @@ test("a timeout answers with a fresh build; an abort stops waiting", async () =>
   const first = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "none" },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -180,6 +193,7 @@ test("a timeout answers with a fresh build; an abort stops waiting", async () =>
   const timedOut = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "wait", token: first.state_token, timeoutMs: 1000 },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -189,6 +203,7 @@ test("a timeout answers with a fresh build; an abort stops waiting", async () =>
   const same = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "none" },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -196,6 +211,7 @@ test("a timeout answers with a fresh build; an abort stops waiting", async () =>
   const unchanged = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "wait", token: same.state_token, timeoutMs: 1000 },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -206,6 +222,7 @@ test("a timeout answers with a fresh build; an abort stops waiting", async () =>
   const aborted = resolveProjectsPayload({
     build: data.build,
     wait: { kind: "wait", token: same.state_token, timeoutMs: 55_000 },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: controller.signal,
   });
@@ -223,6 +240,7 @@ test("past the waiter cap a matching request is answered at once", async () => {
   const first = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "none" },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -231,6 +249,7 @@ test("past the waiter cap a matching request is answered at once", async () => {
     resolveProjectsPayload({
       build: data.build,
       wait: { kind: "wait", token: first.state_token, timeoutMs: 55_000 },
+      refreshGeneration: events.refreshGeneration,
       nextRefresh: events.nextRefresh,
       signal: controller.signal,
     })
@@ -240,6 +259,7 @@ test("past the waiter cap a matching request is answered at once", async () => {
   const extra = await resolveProjectsPayload({
     build: data.build,
     wait: { kind: "wait", token: first.state_token, timeoutMs: 55_000 },
+    refreshGeneration: events.refreshGeneration,
     nextRefresh: events.nextRefresh,
     signal: neverAborted(),
   });
@@ -247,4 +267,36 @@ test("past the waiter cap a matching request is answered at once", async () => {
   controller.abort();
   await Promise.all(held);
   expect(projectsWaiterCount()).toBe(0);
+});
+
+test("a refresh that completes during the build is not missed", async () => {
+  const data = source();
+  const events = refreshes();
+  const first = await resolveProjectsPayload({
+    build: data.build,
+    wait: { kind: "none" },
+    refreshGeneration: events.refreshGeneration,
+    nextRefresh: events.nextRefresh,
+    signal: neverAborted(),
+  });
+  let builds = 0;
+  const started = Date.now();
+  const result = await resolveProjectsPayload({
+    // The first build reads the old state; a refresh then lands before the
+    // waiter subscribes (as when Docker events arrive during project views).
+    build: async () => {
+      const payload = await data.build();
+      if (builds++ === 0) {
+        data.advance();
+        events.fire();
+      }
+      return payload;
+    },
+    wait: { kind: "wait", token: first.state_token, timeoutMs: 55_000 },
+    refreshGeneration: events.refreshGeneration,
+    nextRefresh: events.nextRefresh,
+    signal: neverAborted(),
+  });
+  expect(result.projects).toEqual([1]);
+  expect(Date.now() - started).toBeLessThan(5000);
 });

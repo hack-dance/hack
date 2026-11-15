@@ -110,8 +110,14 @@ let waiters = 0;
 export async function resolveProjectsPayload<T extends object>(opts: {
   readonly build: () => Promise<T>;
   readonly wait: ProjectsWaitRequest;
-  /** Resolves after the next cache refresh, the deadline, or an abort. */
+  /** Completed-refresh count, read before each build. */
+  readonly refreshGeneration: () => number;
+  /**
+   * Resolves once a refresh newer than `after` has completed (at once if one
+   * already has), at the deadline, or on abort.
+   */
   readonly nextRefresh: (opts: {
+    readonly after: number;
     readonly signal: AbortSignal;
     readonly deadlineMs: number;
   }) => Promise<void>;
@@ -119,7 +125,11 @@ export async function resolveProjectsPayload<T extends object>(opts: {
   readonly now?: () => number;
 }): Promise<T & { readonly state_token: string }> {
   const now = opts.now ?? Date.now;
+  // The generation is read before each build, so a refresh that completes
+  // while building wakes the next wait at once instead of being missed.
+  let seen = opts.refreshGeneration();
   const tokenOf = async () => {
+    seen = opts.refreshGeneration();
     const payload = await opts.build();
     return { payload, token: projectsStateToken(payload) };
   };
@@ -135,7 +145,7 @@ export async function resolveProjectsPayload<T extends object>(opts: {
   waiters++;
   try {
     while (!opts.signal.aborted && now() < deadlineMs) {
-      await opts.nextRefresh({ signal: opts.signal, deadlineMs });
+      await opts.nextRefresh({ after: seen, signal: opts.signal, deadlineMs });
       if (opts.signal.aborted || now() >= deadlineMs) {
         break;
       }

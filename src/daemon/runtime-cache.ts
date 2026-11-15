@@ -123,11 +123,15 @@ export interface RuntimeCache {
   }): PsPayload;
   getSnapshot(): RuntimeSnapshot | null;
   getDiagnostics(): RuntimeCacheDiagnostics;
+  /** Count of completed refreshes; read it before building from the cache. */
+  refreshGeneration(): number;
   /**
-   * Resolves after the next completed refresh, at `deadlineMs`, or when
-   * `signal` aborts, whichever is first. Never rejects.
+   * Resolves once a refresh newer than generation `after` has completed (at
+   * once if one already has), at `deadlineMs`, or when `signal` aborts,
+   * whichever is first. Never rejects.
    */
   nextRefresh(opts: {
+    readonly after: number;
     readonly signal: AbortSignal;
     readonly deadlineMs: number;
   }): Promise<void>;
@@ -171,6 +175,7 @@ export function createRuntimeCache(opts: {
   let lastRefreshPhasesMs: Readonly<Record<string, number>> = {};
   let snapshot: RuntimeSnapshot | null = null;
   const refreshWaiters = new Set<() => void>();
+  let generation = 0;
   let refreshTask: Promise<void> | null = null;
   let pendingRefresh: QueuedRefresh | null = null;
   let lastRefreshDurationMs: number | null = null;
@@ -290,6 +295,7 @@ export function createRuntimeCache(opts: {
       health = refreshed.health;
       snapshot = nextSnapshot;
       opts.onRefresh?.(nextSnapshot);
+      generation++;
       for (const wake of [...refreshWaiters]) {
         wake();
       }
@@ -478,7 +484,11 @@ export function createRuntimeCache(opts: {
     }
   }
 
-  const nextRefresh: RuntimeCache["nextRefresh"] = ({ signal, deadlineMs }) =>
+  const nextRefresh: RuntimeCache["nextRefresh"] = ({
+    after,
+    signal,
+    deadlineMs,
+  }) =>
     new Promise<void>((resolve) => {
       const wake = () => {
         clearTimeout(timer);
@@ -487,7 +497,8 @@ export function createRuntimeCache(opts: {
         resolve();
       };
       const timer = setTimeout(wake, Math.max(0, deadlineMs - Date.now()));
-      if (signal.aborted) {
+      // A refresh that completed while the caller was building counts.
+      if (signal.aborted || generation > after) {
         wake();
         return;
       }
@@ -500,6 +511,7 @@ export function createRuntimeCache(opts: {
     getProjectsPayload,
     getPsPayload,
     nextRefresh,
+    refreshGeneration: () => generation,
     getSnapshot: () => snapshot,
     getDiagnostics: () => {
       const inspect = getRuntimeInspectCacheDiagnostics({

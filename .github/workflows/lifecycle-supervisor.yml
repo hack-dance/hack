@@ -4,11 +4,47 @@ on:
   pull_request:
     paths:
       - packages/lifecycle-supervisor/**
+      - src/lib/lifecycle-supervisor.ts
+      - src/lib/project-lifecycle-supervisor.ts
+      - src/lib/project-lifecycle-controller.ts
+      - src/lib/lifecycle-runtime.ts
+      - tests/lifecycle-supervisor-controller.test.ts
+      - tests/lifecycle-supervisor-observers.test.ts
+      - tests/lifecycle-state-publication.test.ts
+      - tests/lifecycle-runner-config.test.ts
+      - tests/e2e/scenarios/lifecycle-*.ts
+      - src/lib/project-lifecycle-hygiene.ts
+      - src/lib/lifecycle-runner.ts
+      - src/lib/runtime-projects.ts
+      - src/lib/private-file.ts
+      - src/lib/projects-registry-lock.ts
+      - src/lib/child-environment.ts
+      - src/commands/host-ps.ts
+      - src/commands/project.ts
+      - src/commands/doctor.ts
       - .github/workflows/lifecycle-supervisor.yml
   push:
     branches: [next, main]
     paths:
       - packages/lifecycle-supervisor/**
+      - src/lib/lifecycle-supervisor.ts
+      - src/lib/project-lifecycle-supervisor.ts
+      - src/lib/project-lifecycle-controller.ts
+      - src/lib/lifecycle-runtime.ts
+      - tests/lifecycle-supervisor-controller.test.ts
+      - tests/lifecycle-supervisor-observers.test.ts
+      - tests/lifecycle-state-publication.test.ts
+      - tests/lifecycle-runner-config.test.ts
+      - tests/e2e/scenarios/lifecycle-*.ts
+      - src/lib/project-lifecycle-hygiene.ts
+      - src/lib/lifecycle-runner.ts
+      - src/lib/runtime-projects.ts
+      - src/lib/private-file.ts
+      - src/lib/projects-registry-lock.ts
+      - src/lib/child-environment.ts
+      - src/commands/host-ps.ts
+      - src/commands/project.ts
+      - src/commands/doctor.ts
       - .github/workflows/lifecycle-supervisor.yml
   workflow_dispatch:
 
@@ -42,5 +78,17 @@ jobs:
         run: cargo clippy --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml --all-targets -- -D warnings
       - name: Test standalone supervisor with private fake callers
         run: cargo test --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml -- --test-threads=4
+      - name: Test deterministic guard crash windows (qualification build only)
+        run: cargo test --locked --manifest-path packages/lifecycle-supervisor/Cargo.toml --features test-hooks guard_killed_after_ -- --test-threads=1
       - name: Build standalone release executable
         run: cargo build --locked --release --manifest-path packages/lifecycle-supervisor/Cargo.toml
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - name: Install locked CLI test dependencies
+        run: bun install --frozen-lockfile
+      - name: Test current-source CLI controller against native supervisor
+        env:
+          HACK_TEST_REQUIRE_SUPERVISOR: '1'
+          HACK_TEST_SUPERVISOR_BINARY: ${{ env.CARGO_TARGET_DIR }}/release/hack-lifecycle-supervisor
+        run: bun test tests/lifecycle-supervisor-controller.test.ts tests/lifecycle-runner-config.test.ts tests/lifecycle-state-publication.test.ts tests/lifecycle-supervisor-observers.test.ts

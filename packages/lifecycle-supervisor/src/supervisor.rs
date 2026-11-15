@@ -819,13 +819,13 @@ impl Lines {
         };
         let message = String::from_utf8_lossy(bytes).replace('\t', "    ");
         let record = format!("{}\t{name}\t{stream}\t{message}\n", os::timestamp()?);
-        // One append per complete record; concurrent guards share the same
-        // flock so records larger than PIPE_BUF never interleave.
-        os::flock_retry(log.as_raw_fd(), libc::LOCK_EX)?;
-        let result = log.write_all(record.as_bytes());
-        let unlocked = os::flock_retry(log.as_raw_fd(), libc::LOCK_UN);
-        result?;
-        unlocked?;
+        // One write per complete record on an O_APPEND descriptor, with no
+        // lock: the kernel positions and writes each append atomically, so
+        // whole records from sibling guards do not interleave on a local file
+        // system. A guard never waits on another guard to log, so a stopped or
+        // hung sibling cannot stall this guard's loop (STOP, exit, census).
+        // Only a short write (for example a full disk) splits a record.
+        log.write_all(record.as_bytes())?;
         self.pending.clear();
         Ok(())
     }

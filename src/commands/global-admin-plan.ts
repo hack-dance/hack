@@ -35,6 +35,7 @@ import type {
   LinuxTrustHost,
   PreparedLinuxSystemTrust,
 } from "../lib/linux-trust-setup.ts";
+import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import { trustedSudoInvocation } from "../lib/privileged-sudo.ts";
 import {
   type DockerBackend,
@@ -54,7 +55,7 @@ import {
   type PreparedMacTrustPlan,
 } from "./global-mac-trust.ts";
 
-export const ADMIN_PLAN_SCHEMA = "hack.global-admin-plan.v1";
+export const ADMIN_PLAN_SCHEMA = MACHINE_SCHEMAS.globalAdminPlan;
 
 /**
  * A bounded `docker info` result as the plan reads it: exit 0 answers;

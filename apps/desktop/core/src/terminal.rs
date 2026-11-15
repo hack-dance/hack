@@ -120,7 +120,9 @@ impl Script {
         if !temp_root.is_absolute() || temp_root.to_str().is_none() {
             return Err("Terminal temp root must be an absolute UTF-8 path".into());
         }
-        safe_temp_root(temp_root)?;
+        // Use the validated canonical root from here on: an alias path could
+        // be replaced after validation.
+        let temp_root = &safe_temp_root(temp_root)?;
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
@@ -205,7 +207,7 @@ impl Drop for Script {
 /// owned by root and either not writable by others or sticky (as `/tmp` is);
 /// every directory above it follows the same rule, and ACLs may not grant
 /// changes (Doctor's ACL check).
-fn safe_temp_root(root: &Path) -> Result<(), String> {
+fn safe_temp_root(root: &Path) -> Result<PathBuf, String> {
     use std::os::unix::fs::MetadataExt;
     const REFUSED: &str =
         "The temporary directory can be changed by other users; terminal hand-off refused";
@@ -227,7 +229,7 @@ fn safe_temp_root(root: &Path) -> Result<(), String> {
             return Err(REFUSED.into());
         }
     }
-    Ok(())
+    Ok(real)
 }
 
 /// Discover only the Linux adapter; never fall back to typing into a pane.

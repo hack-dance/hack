@@ -240,3 +240,29 @@ fn script_temp_root_writable_by_others_is_refused() {
     std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(Script::create(&shared, &spec).is_ok());
 }
+
+#[test]
+fn script_uses_the_validated_root_not_a_replaceable_alias() {
+    let tree = Tree::new();
+    let spec = CommandSpec {
+        program: "/usr/bin/true".into(),
+        args: vec![],
+    };
+    let private = tree.0.join("private");
+    let shared = tree.0.join("shared");
+    for dir in [&private, &shared] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    // An alias in a directory others can change, pointing at a safe root.
+    let alias = shared.join("alias");
+    std::os::unix::fs::symlink(&private, &alias).unwrap();
+    let script = Script::create(&alias, &spec).unwrap();
+    let canonical = std::fs::canonicalize(&private).unwrap();
+    assert!(
+        script.path().starts_with(&canonical),
+        "{} must not go through the alias",
+        script.path().display()
+    );
+}

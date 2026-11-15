@@ -17,7 +17,11 @@ mod doctor_plugins;
 mod doctor_tools;
 pub mod fixtures;
 pub mod models;
+mod process;
 pub mod runner;
 pub mod source;
 pub mod state;
 pub mod viewmodel;
+
+#[cfg(test)]
+mod test_support;

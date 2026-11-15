@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdir,
   mkdtemp,
+  realpath,
   rm,
   stat,
   symlink,
@@ -141,6 +143,36 @@ test("login refuses a pending legacy migration without touching dotenv or changi
     status: "skipped",
     reason: "pending_env_migration",
   });
+});
+
+test("login treats an unfinished env migration as a manual-start refusal, not a failed start", async () => {
+  await writeRegistry(false);
+  const projectRoot = await realpath(join(root, "project"));
+  const journalDir = join(
+    root,
+    "home",
+    ".hack",
+    "env-migrations",
+    createHash("sha256").update(projectRoot).digest("hex")
+  );
+  await mkdir(journalDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(journalDir, "journal.json"),
+    JSON.stringify({
+      version: 1,
+      kind: "hack-env-migration",
+      project: { projectRoot },
+      state: "applying",
+    }),
+    { mode: 0o600 }
+  );
+  const result = await run(["up", "--json", "-d"], true);
+  expect(result.exitCode).not.toBe(0);
+  expect(classifyAutostartExit(result)).toEqual({
+    status: "skipped",
+    reason: "pending_env_migration",
+  });
+  expect((await marker()).paused).toBe(false);
 });
 
 test("up --always registers and marks the selected primary instance before runtime dispatch", async () => {

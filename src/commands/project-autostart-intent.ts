@@ -18,6 +18,7 @@ import { assertAutostartStartPolicy } from "../lib/autostart-start-policy.ts";
 import { resolveEffectiveBranch } from "../lib/branches.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
+import { assertEnvMigrationFinished } from "../lib/env-migration.ts";
 import { pathExists } from "../lib/fs.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
 import {
@@ -206,6 +207,18 @@ export async function assertAutostartEnvironment(opts: {
   readonly project: ProjectContext;
 }): Promise<void> {
   const project = opts.project;
+  // An unfinished or unverifiable env migration needs its owner, not a retry:
+  // report it as the manual-start reason before any startup work.
+  try {
+    await assertEnvMigrationFinished(project);
+  } catch {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Autostart skipped: an env migration is unfinished or cannot be verified. Finish it with hack env migrate, then run hack up.",
+      detail: { reason: "pending_env_migration" },
+    });
+  }
   const contract = await pathExists(
     resolve(project.projectDir, PROJECT_ENV_CONTRACT_FILENAME)
   );

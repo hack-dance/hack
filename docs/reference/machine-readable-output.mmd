@@ -1,0 +1,7 @@
+flowchart LR
+    C[New JSON command] --> O{Command outcome}
+    O -->|success| D[ok true with data and schema]
+    O -->|failure| E[ok false with stable error code]
+    D --> V[Client validates schema]
+    E --> F[Nonzero exit and optional recovery detail]
+    L[Published legacy command] --> P[Existing parser unchanged]

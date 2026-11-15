@@ -44,3 +44,8 @@ install kind and executable path without starting services or checking the
 network. The JSON fields are `version`, `channel`, `install_kind` and
 `binary_path`; a source run reports Bun as its executable and `source` as its
 install kind.
+
+New machine-readable contracts return `{ok:true,data:{schema,...}}`; failures
+return `{ok:false,error:{code,message}}` with a nonzero exit. Version identity,
+observe-only projects/global status and administrator plans use this envelope.
+Published plain project listing and existing streaming formats keep their shapes.

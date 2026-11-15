@@ -13,6 +13,7 @@
  * reported as absent or as a failure of the thing.
  */
 import type { LinuxDnsInspection } from "../lib/linux-dns-setup.ts";
+import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import type { ExecResult } from "../lib/shell.ts";
 import type { ObservedCheck } from "./global-mac-dns.ts";
 import type {
@@ -21,7 +22,7 @@ import type {
   ProxyObservation,
 } from "./global-status-observe-host.ts";
 
-export const OBSERVE_STATUS_SCHEMA = "hack.global-status.observe.v1";
+export const OBSERVE_STATUS_SCHEMA = MACHINE_SCHEMAS.globalStatusObserve;
 
 /** A yes/no answer, or "unknown" when it could not be determined. */
 export type Tri = true | false | "unknown";

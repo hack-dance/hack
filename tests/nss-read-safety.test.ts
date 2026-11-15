@@ -32,6 +32,7 @@ import {
 } from "../src/lib/nss-read-safety.ts";
 import { vettedHelperEnv } from "../src/lib/vetted-env.ts";
 import internalModuleFixture from "./fixtures/nss-read/upstream-internal.pkcs11.json";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { CURRENT_CA_PEM } from "./helpers/ca-certificates.ts";
 
 const roots: string[] = [];
@@ -615,7 +616,7 @@ test("nonblocking strict reads reject a FIFO without a writer, and no-follow ref
   }
   const f = await fixture();
   const pipe = join(f.root, "fifo-placeholder");
-  const created = Bun.spawnSync(["mkfifo", pipe]);
+  const created = spawnSyncBounded(["mkfifo", pipe], { timeout: 10_000 });
   expect(created.exitCode).toBe(0);
   const started = Date.now();
   expect(await readTextOutcome(pipe, { maxBytes: 32 })).toBe("unreadable");

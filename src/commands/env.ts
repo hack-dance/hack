@@ -30,6 +30,10 @@ import {
 } from "../lib/env-hydrate-input.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
+  assertEnvMigrationFinished,
+  migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
+} from "../lib/env-migration.ts";
+import {
   assertEnvValueStdinUsage,
   readEnvValueFromStdin,
 } from "../lib/env-value-stdin.ts";
@@ -71,10 +75,8 @@ import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
-  defaultProjectSlugFromPath,
   findProjectContext,
-  readProjectConfig,
-  sanitizeProjectSlug,
+  resolveEffectiveProjectName,
 } from "../lib/project.ts";
 import {
   assertMachineLocalFileGitPrivate,
@@ -89,7 +91,6 @@ import {
   hydrateProjectEnvLocalLayer,
   listProjectEnvPlaintextEntries,
   materializeProjectEnv,
-  migrateLegacyProjectEnv,
   type ProjectEnvKeyState,
   type ProjectEnvResolvedMetadata,
   parseProjectEnvTarget,
@@ -115,6 +116,7 @@ import {
 import { run } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
+import { envMigrateCommand } from "./env-migrate.ts";
 import { hostPsCommand } from "./host-ps.ts";
 
 const optShowSecrets = defineOption({
@@ -740,9 +742,11 @@ async function resolveProjectForEnv(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    return await resolveRegisteredProjectOption({
+    const registered = await resolveRegisteredProjectOption({
       projectOpt: opts.projectOpt,
     });
+    await assertEnvMigrationFinished(registered);
+    return registered;
   }
 
   const startDir = opts.pathOpt
@@ -752,14 +756,12 @@ async function resolveProjectForEnv(opts: {
   if (!project) {
     throw new MissingProjectContextError();
   }
+  await assertEnvMigrationFinished(project);
   return project;
 }
 
 async function resolveProjectName(project: ProjectContext): Promise<string> {
-  const cfg = await readProjectConfig(project);
-  const derived = defaultProjectSlugFromPath(project.projectRoot);
-  const raw = (cfg.name ?? derived).trim();
-  return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
+  return await resolveEffectiveProjectName(project);
 }
 
 async function resolveConfiguredSecretStore(input: {
@@ -997,6 +999,7 @@ async function maybeMigrateLegacyProjectEnv(input: {
   readonly projectName: string;
   readonly reason: "mutation" | "runtime";
 }): Promise<boolean> {
+  await assertEnvMigrationFinished(input.project);
   if (
     await projectEnvConfigExists({
       projectDir: input.project.projectDir,
@@ -2901,6 +2904,7 @@ export const envCommand = defineCommand({
   options: [],
   positionals: [],
   subcommands: [
+    envMigrateCommand,
     withHandler(listSpec, handleEnvList),
     withHandler(protectSpec, handleEnvProtect),
     withHandler(getSpec, handleEnvGet),

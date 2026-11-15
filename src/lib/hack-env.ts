@@ -433,6 +433,8 @@ export async function resolveHackEnv(opts: {
   readonly projectDir: string;
   readonly projectName: string;
   readonly envName?: string | null;
+  /** Read-only migration planning must never provision or copy backend key material. */
+  readonly allowKeyProvisioning?: boolean;
 }): Promise<HackEnvResolveResult> {
   const read = await readHackEnvContract({ projectDir: opts.projectDir });
   const contract = read.contract;
@@ -466,6 +468,7 @@ export async function resolveHackEnv(opts: {
         await resolveSecretStore({
           projectName: opts.projectName,
           projectDir: opts.projectDir,
+          allowKeyProvisioning: opts.allowKeyProvisioning,
         })
       ).descriptor
     : await resolveSecretStoreDescriptor({
@@ -476,6 +479,7 @@ export async function resolveHackEnv(opts: {
     ? await resolveSecretStore({
         projectName: opts.projectName,
         projectDir: opts.projectDir,
+        allowKeyProvisioning: opts.allowKeyProvisioning,
       })
     : createUnusedSecretStore({
         descriptor: secretStoreDescriptor,

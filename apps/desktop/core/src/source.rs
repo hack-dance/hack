@@ -1378,14 +1378,14 @@ mod tests {
             &hack,
             r#"#!/bin/sh
 case "$1" in
-  --version) echo "hack v5.0.0" ;;
+  version) echo '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}'  ;;
   projects) echo '{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","input_diagnostic":{"code":"E_NATIVE_PROJECT_UNSUPPORTED","message":"m"}}]}' ;;
   ps) if [ "$HACK_RUNTIME_BACKEND" = native ]; then echo '{"ok":true,"data":{"backend":"native","status":"pending","items":[]}}'; else echo '{"ok":false,"error":{"code":"E_NATIVE_PROJECT_UNSUPPORTED","message":"m"}}'; exit 1; fi ;;
 esac
 "#,
         );
         // Complete macOS first-launch scanning before the fake daemon's
-        // bounded accept window starts. --version has no fixture effects.
+        // bounded accept window starts. version --json has no fixture effects.
         fixture_runner(&hack)
             .version(Duration::from_secs(60))
             .unwrap();
@@ -1434,7 +1434,7 @@ esac
         let hack = dir.join("hack");
         crate::test_support::script(
             &hack,
-            "#!/bin/sh\ncase \"$1\" in --version) echo 'hack v5.0.0' ;; projects) echo '{}' ;; esac\n",
+            "#!/bin/sh\ncase \"$1\" in version) echo '{\"ok\":true,\"data\":{\"schema\":\"hack.version.v1\",\"version\":\"5.0.0\"}}' ;; projects) echo '{}' ;; esac\n",
         );
         fixture_runner(&hack)
             .version(Duration::from_secs(60))

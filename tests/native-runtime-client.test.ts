@@ -212,7 +212,7 @@ test("native selection is explicit and requires an isolated absolute home", () =
   }
   expect(refusal).toBeInstanceOf(ClosedCliError);
   expect(String(refusal)).toContain(
-    "Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths."
+    "Native runtime requires an adjacent bundled hack-native or an absolute HACK_NATIVE_BINARY path."
   );
   expect(
     resolveNativeRuntimeSelection({

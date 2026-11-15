@@ -381,8 +381,9 @@ try {
   await rm(join(checkout, ".hack/hack.local.json"));
   await assertNativePlanHome({
     home,
-    failedUps: 0,
     preparedHackFiles: ["hack.config.json"],
+    failedUps: 0,
+    privateInputs: [canary, directory],
   });
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
@@ -404,8 +405,9 @@ try {
   );
   await assertNativePlanHome({
     home,
-    failedUps: 1,
     preparedHackFiles: ["hack.config.json"],
+    failedUps: 1,
+    privateInputs: [canary, directory],
   });
   process.stdout.write(
     `Relocated native routing planning: ${checks} checks passed; no DNS/trust/runtime effects\n`

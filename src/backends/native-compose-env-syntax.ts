@@ -2,7 +2,12 @@
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*/;
 const ENTRY =
   /^(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:([=:])[ \t]*(.*))?$/;
-const COMMENT = /[ \t]+#.*$/;
+/**
+ * An unquoted inline comment starts at the first space immediately followed by
+ * `#`, as in compose-go. A tab before `#` does not start one: `A=val\t# c`
+ * keeps `val\t# c` (recorded with Docker Compose v5.6.1).
+ */
+const COMMENT = / #.*$/;
 const OPERATOR = /^(?::)?[-+?]/;
 const BOM = /^\uFEFF/;
 const ESCAPE_SEQUENCE = /\\(?:[abcfnrtv$"\\]|0\d{0,3})/g;

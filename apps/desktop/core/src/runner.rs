@@ -8,9 +8,10 @@
 //! - stderr is kept (last 8 KB) only for error messages; it is never parsed.
 //! - `HACK_NO_INTERACTIVE=1` is always set: the app never answers prompts.
 
+use crate::process::Child;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -155,7 +156,7 @@ impl CliRunner {
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match self.command(args, path).spawn() {
+            match crate::process::spawn(&mut self.command(args, path)) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;
@@ -547,7 +548,6 @@ pub fn parse_version(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// A fake `hack` in a fresh temp dir: a shell script with a fixed body.
     struct FakeHack {
@@ -563,14 +563,12 @@ mod tests {
             ));
             std::fs::create_dir_all(&dir).unwrap();
             let p = dir.join("hack");
-            std::fs::write(
+            crate::test_support::script(
                 &p,
                 format!(
                     "#!/bin/sh\nif [ \"$1\" = __warmup ]; then echo '{{}}'; exit 0; fi\n{body}\n"
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
             let fake = Self { dir };
             // macOS may scan a newly written executable on first launch. Keep
             // that delay outside every test's product-timeout measurement.

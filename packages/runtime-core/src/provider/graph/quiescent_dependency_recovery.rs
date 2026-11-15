@@ -379,6 +379,7 @@ impl<'a> Guard<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::owned_tmp_root::OwnedTmpRoot;
     use serde_json::json;
 
     #[test]
@@ -442,12 +443,12 @@ mod tests {
         let run = "a".repeat(32);
         let guard = Foreground::acquire(&candidate, &run).unwrap();
         guard.verify().unwrap();
-        let root = guard.root.clone();
+        let root = OwnedTmpRoot::new(guard.root.clone());
         fs::rename(root.join("operation.lock"), root.join("old.lock")).unwrap();
         let replacement = state::Lock::acquire(&root).unwrap();
         assert!(guard.verify().is_err());
         drop(replacement);
         drop(guard);
-        fs::remove_dir_all(root).unwrap();
+        drop(root);
     }
 }

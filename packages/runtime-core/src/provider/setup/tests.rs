@@ -407,6 +407,49 @@ fn full_setup_orchestration_downloads_once_and_reuses_without_prepare() {
 }
 
 #[test]
+fn local_server_setup_transitions_the_shared_installation_gate() {
+    let root = Fixture::new();
+    let candidate = Candidate::discover_installed(&root.0).unwrap();
+    assert_eq!(
+        inspect_home(&root.0).unwrap().installation_state,
+        InstallationState::NotSetUp
+    );
+    let (pin, server) = server(vec![
+        (
+            "get /provider.tgz",
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+        ),
+        (
+            "get /engine.tgz",
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+        ),
+        (
+            "get /guest.apk",
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+        ),
+    ]);
+    install(
+        &candidate,
+        None,
+        &fixture_pins(&pin),
+        |staged, inputs| {
+            fixture_prepare(staged, inputs)?;
+            super::inspection::tests::prepared_records(staged);
+            Ok(())
+        },
+        fixture_verify,
+    )
+    .unwrap();
+    server.join().unwrap();
+    let inspection = inspect_home(&root.0).unwrap();
+    assert_eq!(inspection.installation_state, InstallationState::Ready);
+    assert!(inspect_home_quiescence(&root.0).unwrap().setup_only);
+    // The fixture's prepared bytes deliberately are not production artifacts.
+    // Readiness guides first use; startup still performs the full content check.
+    assert!(artifact::verify(&candidate).is_err());
+}
+
+#[test]
 fn offline_setup_and_partial_manual_install_preservation() {
     let root = Fixture::new();
     let candidate = Candidate::discover(&root.0).unwrap();

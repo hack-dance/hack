@@ -701,6 +701,65 @@ test("autostart's implicit install of a hack in a group-writable directory boots
   expect(await Bun.file(fixture.plistPath).exists()).toBe(false);
 });
 
+// Review round 31 (HACK-2216): an automatic start needs exactly Hack's
+// command and the plist's own PATH, checked before any unload or load.
+
+test("autostart with a custom-argument plist reloads and kickstarts nothing", async () => {
+  const fixture = await makeFixture();
+  // Safe program and PATH, but another command than Hack's.
+  await writeFile(
+    fixture.plistPath,
+    safeFixturePlist(fixture).replace(
+      "<string>--foreground</string>",
+      "<string>--foreground</string>\n    <string>--other</string>"
+    )
+  );
+  // launchd still has an older configuration loaded, and the job is
+  // stopped, so a reload would otherwise be due.
+  await writeLoadedJob(fixture, { path: "/srv/old/bin" });
+  const hackHome = join(fixture.home, GLOBAL_HACK_DIR_NAME);
+  const run = await runAsDarwin({
+    argv: [DRIVER, "autostart"],
+    cwd: fixture.root,
+    env: fixture.env({
+      HACK_HOME: hackHome,
+      HACK_TEST_LAUNCHCTL_JOB: "stopped",
+      HACK_NO_INTERACTIVE: undefined,
+      HACK_TEST_STUB_SOCKET: join(
+        hackHome,
+        GLOBAL_DAEMON_DIR_NAME,
+        GLOBAL_DAEMON_SOCKET_FILENAME
+      ),
+    }),
+  });
+  expect(run.code).toBe(0);
+  const verbs = (await launchctlCalls(fixture)).map(
+    (line) => line.split(" ")[0]
+  );
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+  expect(verbs).not.toContain("kickstart");
+});
+
+test("a Hack plist that sets no PATH is refreshed, and the refresh writes one", async () => {
+  let stale = "";
+  const { results, after } = await repairPlist((fixture) => {
+    stale = renderLaunchdPlist({
+      hackBinPath: join(fixture.root, "tools", "hack"),
+      home: fixture.home,
+      runAtLoad: false,
+      guiSessionOnly: false,
+    }).replace(
+      `    <key>PATH</key>\n    <string>${renderedLaunchdPathDirectories({ home: fixture.home }).join(":")}</string>\n`,
+      ""
+    );
+    return stale;
+  });
+  expect(stale).not.toContain("<key>PATH</key>");
+  expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
+  expect(after).toContain("<key>PATH</key>");
+});
+
 // Review round 2 (HACK-2216).
 
 test("a refresh whose unload fails reports failed and leaves the plist", async () => {

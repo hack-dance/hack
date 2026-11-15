@@ -17,6 +17,7 @@ import { boundedTimeoutMs } from "../lib/process-deadline.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
 import { resolveExecutingCliPath } from "./executing-cli.ts";
 import {
+  parseLaunchdPlistCommand,
   parseLaunchdPlistEnvironment,
   parseLaunchdPlistProgram,
 } from "./launchd-plist.ts";
@@ -252,74 +253,92 @@ export async function checkLaunchdServicePath(opts: {
     : `the PATH the launchd service would give hackd is not safe: ${error.replace("the hackd.service PATH", "its PATH")}`;
 }
 
-/** launchd's PATH for an agent whose plist sets none. */
-const LAUNCHD_DEFAULT_PATH_DIRECTORIES = [
-  "/usr/bin",
-  "/bin",
-  "/usr/sbin",
-  "/sbin",
-] as const;
-
 /**
- * The PATH directories a plist gives hackd: its own `PATH`, or launchd's
- * default when it sets none. With the test seam, the system directories
- * among them are replaced by `systemDirectories`. Null when the PATH is
- * not a plain string or the plist cannot be read.
+ * The PATH directories a plist sets for hackd: its own `PATH`, which an
+ * automatic start requires (HACK-2216). launchd's default or inherited
+ * PATH is never assumed: it can hold a directory another account writes.
+ * With the test seam, the system directories among them are replaced by
+ * `systemDirectories`. Null when the plist sets no PATH, a non-string one,
+ * or cannot be read.
  */
 function launchdPlistPathDirectories(opts: {
   readonly plistText: string;
   readonly systemDirectories?: readonly string[];
 }): readonly string[] | null {
-  const env = parseLaunchdPlistEnvironment({ plistText: opts.plistText });
-  if (env.kind === "unknown") {
-    return null;
-  }
-  const raw = env.env.get("PATH");
+  const raw = readPlistPath(opts.plistText);
   if (raw === null) {
     return null;
   }
-  const dirs =
-    raw === undefined ? [...LAUNCHD_DEFAULT_PATH_DIRECTORIES] : raw.split(":");
+  const dirs = raw.split(":");
   const seam = opts.systemDirectories;
   if (seam === undefined) {
     return dirs;
   }
-  const system = new Set<string>([
-    ...LAUNCHD_SYSTEM_PATH_DIRECTORIES,
-    ...LAUNCHD_DEFAULT_PATH_DIRECTORIES,
-  ]);
+  const system = new Set<string>(LAUNCHD_SYSTEM_PATH_DIRECTORIES);
   return [...dirs.filter((dir) => !system.has(dir)), ...seam];
 }
 
+/** The plist's own `PATH` string, or null when it sets none it can read. */
+function readPlistPath(plistText: string): string | null {
+  const env = parseLaunchdPlistEnvironment({ plistText });
+  if (env.kind === "unknown") {
+    return null;
+  }
+  const raw = env.env.get("PATH");
+  return typeof raw === "string" ? raw : null;
+}
+
 /**
- * The last check before launchd is asked to start this job (HACK-2216): a
- * kickstart of a loaded job, current plist or not, for `start`, `restart`,
- * the post-update reconcile, a stopped-service start or autostart. The
- * plist's program must be safe from other accounts along its whole path
- * (`checkServiceExecutableTrusted`), and every directory of the PATH it
- * gives hackd (its own `PATH`, or launchd's default) must pass the checks
- * systemd makes for its unit's PATH (`checkServicePathDirectories`):
- * hackd runs helpers such as `docker` by bare name. A plist whose program
- * or PATH cannot be read is refused. Null, or why launchd must not start it.
+ * The only command an automatic start runs: `<program> daemon start
+ * --foreground`, the program first (HACK-2216). Hack writes exactly this.
+ */
+function expectedArguments(program: string): readonly string[] {
+  return [program, "daemon", "start", "--foreground"];
+}
+
+function sameArguments(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((arg, index) => arg === b[index]);
+}
+
+/**
+ * The last check before launchd is asked to load or start this job
+ * (HACK-2216): a kickstart, reload or bootstrap for `start`, `restart`,
+ * the post-update reconcile, a stopped-service start or autostart. It runs
+ * before anything is unloaded or loaded. The plist must:
+ * - run exactly `<program> daemon start --foreground` (its complete
+ *   `ProgramArguments`, with `Program` taking precedence), so a reload with
+ *   `RunAtLoad` or `KeepAlive` cannot run custom arguments;
+ * - name a program safe from other accounts along its whole path
+ *   (`checkServiceExecutableTrusted`);
+ * - set its own `PATH` (launchd's default or inherited one is never
+ *   assumed), every directory of which passes the checks systemd makes for
+ *   its unit's PATH (`checkServicePathDirectories`): hackd runs helpers such
+ *   as `docker` by bare name.
+ * Hack always renders `PATH`; a plist without one is refreshed by the
+ * checked repair when it is Hack's, and refused otherwise. Null, or why
+ * launchd must not start it.
  */
 export async function checkLaunchdJobBeforeStart(opts: {
   readonly plistText: string;
   /** Test seam; see {@link renderedLaunchdPathDirectories}. */
   readonly systemDirectories?: readonly string[];
 }): Promise<string | null> {
-  const program = parseLaunchdPlistProgram({ plistText: opts.plistText });
-  if (program.kind !== "path") {
-    return "the program the launchd service runs cannot be read";
+  const command = parseLaunchdPlistCommand({ plistText: opts.plistText });
+  if (command.kind !== "command") {
+    return `the command the launchd service runs cannot be read (${command.reason})`;
+  }
+  if (!sameArguments(command.arguments, expectedArguments(command.program))) {
+    return "the launchd service runs other arguments than `hack daemon start --foreground`, which an automatic start does not run";
   }
   const dirs = launchdPlistPathDirectories(opts);
   if (dirs === null) {
-    return "the PATH the launchd service gives hackd cannot be read";
+    return "the launchd plist sets no PATH of its own (launchd's default or inherited PATH is not checked), so it is not started automatically";
   }
   // Loaded lazily: systemd.ts imports this module.
   const { checkServiceExecutableTrusted, checkServicePathDirectories } =
     await import("./systemd.ts");
   const untrusted = await checkServiceExecutableTrusted({
-    path: program.path,
+    path: command.program,
   });
   if (untrusted !== null) {
     return untrusted.replace(
@@ -347,7 +366,8 @@ export async function readLaunchdLoadedJob(): Promise<LaunchdLoadedJob> {
 /**
  * Whether the loaded job runs exactly what the checked plist says: the same
  * program, the arguments Hack writes (`<program> daemon start
- * --foreground`), and the same `PATH` (or none in both).
+ * --foreground`), and the same explicit `PATH` in the job's own
+ * environment. A job or plist without its own PATH never matches.
  */
 export function loadedJobMatchesPlist(opts: {
   readonly loaded: LaunchdLoadedJob;
@@ -357,17 +377,15 @@ export function loadedJobMatchesPlist(opts: {
   if (loaded.kind !== "job") {
     return false;
   }
-  const program = parseLaunchdPlistProgram({ plistText: opts.plistText });
-  const env = parseLaunchdPlistEnvironment({ plistText: opts.plistText });
-  if (program.kind !== "path" || env.kind !== "env") {
+  const command = parseLaunchdPlistCommand({ plistText: opts.plistText });
+  const path = readPlistPath(opts.plistText);
+  if (command.kind !== "command" || path === null) {
     return false;
   }
-  const expected = [program.path, "daemon", "start", "--foreground"];
   return (
-    loaded.program === program.path &&
-    loaded.arguments.length === expected.length &&
-    loaded.arguments.every((arg, index) => arg === expected[index]) &&
-    loaded.path === (env.env.get("PATH") ?? null)
+    loaded.program === command.program &&
+    sameArguments(loaded.arguments, expectedArguments(command.program)) &&
+    loaded.path === path
   );
 }
 
@@ -385,20 +403,27 @@ async function reloadLaunchdPlist(
 /**
  * Everything before an automatic kickstart (HACK-2216). A kickstart runs
  * the configuration launchd has LOADED, not the plist on disk, so:
- * 1. the plist on disk gets {@link checkLaunchdJobBeforeStart};
+ * 1. the plist on disk gets {@link checkLaunchdJobBeforeStart} (command,
+ *    program, explicit PATH) before anything is unloaded or loaded;
  * 2. the loaded job ({@link readLaunchdLoadedJob}) must run exactly that
  *    plist ({@link loadedJobMatchesPlist});
- * 3. when it does not, or cannot be read: a job that is not running is
- *    reloaded from the checked plist and read again, and must then match;
- *    a running job is refused (reloading it would stop hackd).
+ * 3. when it does not, or cannot be read, the job is reloaded from the
+ *    checked plist, but only on fresh evidence that it is stopped
+ *    (`isRunning`, read right before the bootout): a running job is
+ *    refused, because a reload would stop hackd;
+ * 4. after that reload, a re-read that positively differs refuses. One
+ *    that cannot be read is accepted: launchd has just loaded the plist
+ *    that passed step 1. Reading real `launchctl print` output is a
+ *    compatibility point that is not verified against every macOS
+ *    release, and this keeps the service available if its format moves.
  * Null when the kickstart may run, or why it must not. Nothing is
  * kickstarted here.
  */
 export async function verifyLaunchdJobBeforeKickstart(opts: {
   readonly paths: DaemonPaths;
   readonly plistText: string;
-  /** The job runs a process now. */
-  readonly running: boolean;
+  /** Whether the job runs a process now; read fresh right before a reload. */
+  readonly isRunning: () => Promise<boolean>;
   /** Test seam; see {@link renderedLaunchdPathDirectories}. */
   readonly systemDirectories?: readonly string[];
   /** Defaults to {@link readLaunchdLoadedJob}; tests pin it. */
@@ -422,7 +447,7 @@ export async function verifyLaunchdJobBeforeKickstart(opts: {
     loaded.kind === "unknown"
       ? `its loaded configuration could not be read (${loaded.reason})`
       : "its loaded configuration differs from the checked plist";
-  if (opts.running) {
+  if (await opts.isRunning()) {
     return `launchd would restart hackd from a configuration that was not checked: ${why}, and hackd runs, so it was not reloaded`;
   }
   const reloaded = await (
@@ -432,9 +457,26 @@ export async function verifyLaunchdJobBeforeKickstart(opts: {
     return `${why}, and reloading the checked plist failed: ${reloaded.error ?? "unknown error"}`;
   }
   const again = await read();
+  if (again.kind === "unknown") {
+    return null;
+  }
   return loadedJobMatchesPlist({ loaded: again, plistText: opts.plistText })
     ? null
     : `${why}, and it still differs after reloading the checked plist`;
+}
+
+/**
+ * Whether a launchd status shows a job that runs (or may run) a process:
+ * an unreadable status counts as running, so nothing is reloaded on it.
+ */
+export function launchdJobMayBeRunning(status: LaunchdServiceStatus): boolean {
+  if (status.observation === "not-found") {
+    return false;
+  }
+  if (status.observation !== undefined && status.observation !== "reported") {
+    return true;
+  }
+  return status.running || status.pid !== null;
 }
 
 /**

@@ -8,6 +8,7 @@ import {
   type LaunchdProgramRepairResult,
   type LaunchdProgramState,
   type LaunchdServiceStatus,
+  launchdJobMayBeRunning,
   plistKeepsThisHome,
   proveLaunchdJobOwnership,
   readLaunchdLoadedJob,
@@ -537,13 +538,15 @@ async function launchdStartIsUnsafe(
   if (plistText === null) {
     return "the launchd plist could not be read";
   }
-  // Fresh: the repair may have reloaded the job.
-  const status = await readStatus(hooks);
   return await verifyLaunchdJobBeforeKickstart({
     paths: hooks.paths,
     plistText,
-    // Unknown counts as running: a reload would then stop hackd.
-    running: status === null || status.running || status.pid !== null,
+    // Read fresh right before a reload: the job may have started since
+    // start looked. Unknown counts as running (a reload would stop hackd).
+    isRunning: async () => {
+      const status = await readStatus(hooks);
+      return status === null || launchdJobMayBeRunning(status);
+    },
     systemDirectories: hooks.systemPathDirectories,
     readLoaded: hooks.readLoaded,
     reload: hooks.reloadJob,

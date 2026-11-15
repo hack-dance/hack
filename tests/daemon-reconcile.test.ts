@@ -28,6 +28,7 @@ import {
 } from "../src/commands/daemon-upgrade.ts";
 import { resolveExecutingCliPath } from "../src/daemon/executing-cli.ts";
 import {
+  checkLaunchdJobBeforeStart,
   checkLaunchdRetargetTarget,
   classifyLaunchdProgramPath,
   isHackManagedPlist,
@@ -35,6 +36,7 @@ import {
   isLaunchdServiceNotFound,
   isSameExecutableFile,
   LAUNCHD_MANAGED_MARKER,
+  loadedJobMatchesPlist,
   parseLaunchdPlistProgram,
   plistKeepsThisHome,
   proveLaunchdJobOwnership,
@@ -1177,7 +1179,7 @@ async function safeLaunchdJob(): Promise<{
         path: dir,
       }),
     plist: (env = "") =>
-      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${program}</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>${dir}</string>\n${env}\n  </dict>\n</dict>\n</plist>\n`,
+      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${program}</string>\n    <string>daemon</string>\n    <string>start</string>\n    <string>--foreground</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>${dir}</string>\n${env}\n  </dict>\n</dict>\n</plist>\n`,
   };
 }
 
@@ -1346,21 +1348,29 @@ test("launchd: a safe plist with an unsafe loaded PATH never kickstarts the load
       readonly running: boolean;
       /** What launchd reports loaded before and after a reload. */
       readonly loaded: readonly LaunchdLoadedJob[];
+      /** The job starts running after this many status reads. */
+      readonly startsAfter?: number;
     }) => {
       let reads = 0;
+      let statusReads = 0;
       return {
         paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
         trace: createDaemonCommandTrace(),
         waitForReady: () => Promise.resolve(true),
-        readStatus: () =>
-          Promise.resolve({
+        readStatus: () => {
+          statusReads += 1;
+          const running =
+            opts.running ||
+            (opts.startsAfter !== undefined && statusReads > opts.startsAfter);
+          return Promise.resolve({
             installed: true,
             loaded: true,
-            running: opts.running,
-            pid: opts.running ? 4242 : null,
+            running,
+            pid: running ? 4242 : null,
             exitStatus: null,
             observation: "reported" as const,
-          }),
+          });
+        },
         readPlist: () => Promise.resolve(job.plist()),
         readLoaded: () => {
           const loaded =
@@ -1395,14 +1405,33 @@ test("launchd: a safe plist with an unsafe loaded PATH never kickstarts the load
     expect(stale.trace.blocked).toBe("rewrite-refused");
     expect(effects).toEqual(["reload"]);
 
-    // An unreadable loaded configuration is treated the same way.
+    // An unreadable loaded configuration on a stopped job is reloaded from
+    // the fully checked plist. A re-read that still cannot be parsed after
+    // that successful reload is accepted (round 31 owner decision: reading
+    // real `launchctl print` output is an unverified compatibility point),
+    // so the job starts.
     effects.length = 0;
     const unreadable = hooks({
       running: false,
       loaded: [{ kind: "unknown", reason: "garbled" }],
     });
-    expect(await startViaLaunchdIfLoaded(unreadable)).toBe(1);
-    expect(effects).toEqual(["reload"]);
+    expect(await startViaLaunchdIfLoaded(unreadable)).toBe(0);
+    expect(effects).toEqual(["reload", "kickstart"]);
+
+    // A positive mismatch after the reload still refuses (above, `stale`).
+    // A job that starts running between the check and the reload is not
+    // booted out: eligibility is read fresh right before the bootout.
+    effects.length = 0;
+    const startedMeanwhile = hooks({
+      running: false,
+      loaded: [unsafeLoaded],
+      // start reads the status once; the fresh read before a reload sees
+      // the job running.
+      startsAfter: 1,
+    });
+    expect(await startViaLaunchdIfLoaded(startedMeanwhile)).toBe(1);
+    expect(startedMeanwhile.trace.blocked).toBe("rewrite-refused");
+    expect(effects).toEqual([]);
 
     // When the reload makes launchd run the checked plist, it starts.
     effects.length = 0;
@@ -1436,6 +1465,94 @@ test("launchd: a safe plist with an unsafe loaded PATH never kickstarts the load
   } finally {
     await rm(job.dir, { recursive: true, force: true });
     await rm(shared, { recursive: true, force: true });
+  }
+});
+
+// Review round 31 (HACK-2216): an automatic start needs the plist's own
+// PATH and exactly Hack's command, checked before any unload or bootstrap.
+
+test("launchd: an automatic start needs the plist's own PATH and exactly Hack's command", async () => {
+  const job = await safeLaunchdJob();
+  try {
+    const safe = job.plist();
+    expect(await checkLaunchdJobBeforeStart({ plistText: safe })).toBeNull();
+
+    // No PATH of its own: launchd's default or inherited PATH is not
+    // checked, so it is not started automatically.
+    const noPath = safe.replace(
+      `    <key>PATH</key>\n    <string>${job.dir}</string>\n`,
+      ""
+    );
+    expect(noPath).not.toContain("<key>PATH</key>");
+    expect(await checkLaunchdJobBeforeStart({ plistText: noPath })).toContain(
+      "sets no PATH"
+    );
+    // A loaded job without its own PATH never matches either.
+    expect(
+      loadedJobMatchesPlist({
+        loaded: {
+          kind: "job",
+          program: join(job.dir, "hack"),
+          arguments: [join(job.dir, "hack"), "daemon", "start", "--foreground"],
+          path: null,
+        },
+        plistText: noPath,
+      })
+    ).toBe(false);
+
+    // Custom arguments, and a `Program` that differs from the first
+    // argument (launchd runs `Program`), are refused.
+    const extraArg = safe.replace(
+      "<string>--foreground</string>",
+      "<string>--foreground</string>\n    <string>--other</string>"
+    );
+    expect(await checkLaunchdJobBeforeStart({ plistText: extraArg })).toContain(
+      "other arguments"
+    );
+    const otherProgram = safe.replace(
+      "  <key>ProgramArguments</key>",
+      "  <key>Program</key>\n  <string>/bin/sh</string>\n  <key>ProgramArguments</key>"
+    );
+    expect(
+      await checkLaunchdJobBeforeStart({ plistText: otherProgram })
+    ).toContain("other arguments");
+
+    // start on such a plist (not refreshed: not Hack's) unloads, reloads
+    // and kickstarts nothing.
+    for (const plistText of [noPath, extraArg, otherProgram]) {
+      const effects: string[] = [];
+      const trace = createDaemonCommandTrace();
+      const code = await startViaLaunchdIfLoaded({
+        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        trace,
+        waitForReady: () => Promise.resolve(true),
+        readStatus: () =>
+          Promise.resolve({
+            installed: true,
+            loaded: true,
+            running: false,
+            pid: null,
+            exitStatus: null,
+            observation: "reported" as const,
+          }),
+        readPlist: () => Promise.resolve(plistText),
+        readLoaded: () => Promise.resolve({ kind: "unknown", reason: "x" }),
+        reloadJob: () => {
+          effects.push("reload");
+          return Promise.resolve({ ok: true });
+        },
+        repair: () => Promise.resolve("unmanaged" as const),
+        kickstart: () => {
+          effects.push("kickstart");
+          return Promise.resolve({ ok: true });
+        },
+      });
+      expect(code).toBe(1);
+      expect(trace.blocked).toBe("rewrite-refused");
+      expect(effects).toEqual([]);
+    }
+  } finally {
+    await rm(job.dir, { recursive: true, force: true });
   }
 });
 

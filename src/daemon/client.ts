@@ -9,6 +9,7 @@ import {
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
+  launchdJobMayBeRunning,
   resolveLaunchdAccess,
   verifyLaunchdJobBeforeKickstart,
 } from "./launchd.ts";
@@ -313,11 +314,14 @@ async function ensureLaunchdDaemonReady(opts: {
   if (plistText === null) {
     return false;
   }
-  // A job that was just installed was not running before its install.
   const refused = await verifyLaunchdJobBeforeKickstart({
     paths: opts.paths,
     plistText,
-    running: launchdStatus.running || launchdStatus.pid !== null,
+    // Read fresh, only when a reload is about to happen.
+    isRunning: async () =>
+      launchdJobMayBeRunning(
+        await getLaunchdServiceStatus({ paths: opts.paths })
+      ),
   });
   if (refused !== null) {
     return false;

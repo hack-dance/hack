@@ -770,31 +770,47 @@ Such a plist is never replaced automatically; `start` reports it and
   it touches launchd. The check that runs before `start` or `restart` stops a
   running hackd makes the program and PATH checks for a refresh or retarget
   the start would run.
-- Every automatic kickstart of the launchd job checks the plist launchd will
-  start, current or just rewritten, as its last step: `start`, `restart`, the
-  reconcile after `hack update`, a stopped-service start and autostart. The
-  plist's program must be safe from other accounts along its whole path, and
-  every directory of the PATH it gives hackd (its own `PATH`, or launchd's
-  default when it sets none) must pass the same PATH checks. A plist whose
-  program or PATH cannot be read is refused. A kickstart runs the
-  configuration launchd has loaded, which can differ from the plist on disk
-  until the job is reloaded. So the loaded job, read from
-  `launchctl print gui/<uid>/dance.hack.hackd`, must also run exactly the
-  checked plist: the same program, Hack's own arguments and the same `PATH`.
-  When it does not, or cannot be read, a job that is not running is reloaded
-  from the checked plist and read again; a running job is not reloaded, because
-  that would stop hackd. On a refusal launchd is not asked to start the job,
-  and `start` exits 1 (`blocked: "rewrite-refused"`, `hack daemon install` as
-  the next step). Every plist install (explicit, autostart's implicit install,
+- Every automatic start of the launchd job checks the plist launchd will
+  load or start, current or just rewritten, before anything is unloaded,
+  bootstrapped or kickstarted. That covers `start`, `restart`, the reconcile
+  after `hack update`, a stopped-service start and autostart. The plist must:
+  - run exactly `<program> daemon start --foreground`: its complete
+    `ProgramArguments`, with `Program` taking precedence as launchd does;
+  - name a program that is safe from other accounts along its whole path;
+  - set its own `PATH`. launchd's default or inherited PATH is never assumed,
+    because it can hold a directory another account writes.
+
+  Every directory of that `PATH` must pass the same PATH checks. Hack has
+  always rendered `PATH` and that exact command (the first launchd renderer
+  already did). A Hack plist without them is refreshed through the checked
+  repair, which writes them. Any other such plist is not started
+  automatically.
+- A kickstart runs the configuration launchd has loaded, which can differ
+  from the plist on disk until the job is reloaded. The loaded job is read
+  from `launchctl print gui/<uid>/dance.hack.hackd`. It must run exactly the
+  checked plist: the same program, Hack's arguments, and the same explicit
+  `PATH` in the job's own environment. When it does not, or cannot be read,
+  the job is reloaded from the checked plist, but only if a status read made
+  just before the bootout shows it stopped. A running job is not reloaded,
+  because that would stop hackd. After a successful reload, a re-read that
+  positively differs still refuses. A re-read that cannot be parsed is
+  accepted, because launchd has just loaded the plist that passed every
+  check. Reading real `launchctl print` output is a compatibility point that
+  has not been verified against every macOS release, and this fallback keeps
+  the service available if that format moves.
+- On a refusal launchd is not asked to start the job, and `start` exits 1
+  (`blocked: "rewrite-refused"`, `hack daemon install` as the next step).
+  Before `start` or `restart` stops a running hackd under a current plist,
+  it makes the same plist checks and refuses a loaded configuration it cannot
+  read. So a running daemon is never stopped for a start that would be
+  refused. Every plist install (explicit, autostart's implicit install,
   refresh or retarget) also checks the program it writes, safe from other
-  accounts along its whole path, before it unloads, writes or loads anything. Before `start` or `restart` stops
-  a running hackd under a current plist, it makes the same check, so a
-  running daemon is never stopped for a start that would be refused. On Linux,
-  a stopped-service start checks the loaded unit's programs and effective
-  PATH just before `systemctl start`, and an automatic restart checks the
-  exact loaded program and the effective PATH as its last step. On Linux, the program a rewritten unit keeps passes
-  install's program checks just before the unit is written, and an automatic
-  restart checks the unit's program once more as its last step.
+  accounts along its whole path, before it unloads, writes or loads anything.
+- On Linux, a stopped-service start checks the loaded unit's programs and
+  effective PATH just before `systemctl start`. The program a rewritten unit
+  keeps passes install's program checks just before the unit is written. An
+  automatic restart checks the exact loaded program and the effective PATH
+  as its last step.
 - A plist that runs another existing `hack` is left as it is, even an older
   versioned install path. A running hackd of another version under it is
   refused with `hack daemon install`. A stopped service under it is not

@@ -22,7 +22,7 @@ type Token =
 
 type PlistValue =
   | { readonly kind: "string"; readonly text: string }
-  | { readonly kind: "array"; readonly first: PlistValue | null }
+  | { readonly kind: "array"; readonly items: readonly PlistValue[] }
   | {
       readonly kind: "dict";
       readonly keys: ReadonlyMap<string, PlistValue>;
@@ -72,12 +72,53 @@ export function parseLaunchdPlistProgram(opts: {
   if (args === undefined) {
     return { kind: "none" };
   }
-  return args.kind === "array" && args.first?.kind === "string"
-    ? programPath(args.first.text)
+  const first = args.kind === "array" ? args.items[0] : undefined;
+  return first?.kind === "string"
+    ? programPath(first.text)
     : {
         kind: "unknown",
         reason: "ProgramArguments is not an array that starts with a string",
       };
+}
+
+/**
+ * The whole command a plist runs (HACK-2216): launchd's program (see
+ * {@link parseLaunchdPlistProgram}: `Program` first) and the complete
+ * `ProgramArguments` vector, every item a plain string without an XML
+ * escape. `unknown` for anything else, including a plist with no
+ * `ProgramArguments`.
+ */
+export function parseLaunchdPlistCommand(opts: { readonly plistText: string }):
+  | {
+      readonly kind: "command";
+      readonly program: string;
+      readonly arguments: readonly string[];
+    }
+  | { readonly kind: "unknown"; readonly reason: string } {
+  const program = parseLaunchdPlistProgram(opts);
+  if (program.kind !== "path") {
+    return {
+      kind: "unknown",
+      reason:
+        program.kind === "unknown" ? program.reason : "the plist runs nothing",
+    };
+  }
+  // Read already by parseLaunchdPlistProgram: the shape is valid here.
+  const args = readRootDict(opts.plistText)?.get("ProgramArguments");
+  if (args?.kind !== "array") {
+    return { kind: "unknown", reason: "ProgramArguments is not an array" };
+  }
+  const strings: string[] = [];
+  for (const item of args.items) {
+    if (item.kind !== "string" || item.text.includes("&")) {
+      return {
+        kind: "unknown",
+        reason: "ProgramArguments holds a value that is not a plain string",
+      };
+    }
+    strings.push(item.text);
+  }
+  return { kind: "command", program: program.path, arguments: strings };
 }
 
 /**
@@ -302,7 +343,7 @@ function emptyValue(name: string): PlistValue {
     return { kind: "string", text: "" };
   }
   if (name === "array") {
-    return { kind: "array", first: null };
+    return { kind: "array", items: [] };
   }
   if (name === "dict") {
     return { kind: "dict", keys: new Map() };
@@ -345,15 +386,15 @@ function readValue(tokens: readonly Token[], start: number): ValueRead {
 
 function readArray(tokens: readonly Token[], start: number): ValueRead {
   let i = start;
-  let first: PlistValue | null = null;
+  const items: PlistValue[] = [];
   while (true) {
     i = skipSpace(tokens, i);
     const next = tokens[i];
     if (next?.kind === "close" && next.name === "array") {
-      return { value: { kind: "array", first }, next: i + 1 };
+      return { value: { kind: "array", items }, next: i + 1 };
     }
     const item = readValue(tokens, i);
-    first ??= item.value;
+    items.push(item.value);
     i = item.next;
   }
 }

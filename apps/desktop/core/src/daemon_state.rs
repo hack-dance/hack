@@ -318,14 +318,14 @@ pub fn always_on(
                     .as_ref()
                     .map_or_else(|| "unknown".into(), |s| s.join(", "))
             ),
-            _ => "Always-on state unknown (needs R12b)".into(),
+            _ => "Always-on state unknown: the CLI does not report it yet".into(),
         });
     } else {
-        lines.push("Always-on state unknown (needs R12b)".into());
+        lines.push("Always-on state unknown: the CLI does not report it yet".into());
     }
     if let Some(g) = global {
         if g.paused.is_none() {
-            lines.push("Global pause unknown (needs R12b)".into());
+            lines.push("Global pause unknown: the CLI does not report it yet".into());
         }
         if g.paused == Some(true) {
             lines.push("Always-on paused for all projects".into());
@@ -353,9 +353,9 @@ pub fn always_on(
     {
         lines.push("Needs hack daemon install".into());
     } else if global.and_then(|g| g.service_ready) != Some(true) {
-        lines.push("Login service readiness unknown or unavailable (needs R12b)".into());
+        lines.push("Login service readiness unknown or unavailable".into());
     }
-    lines.push("Read-only: needs R12a/R12b capability; no always-on commands run".into());
+    lines.push("Read-only: the app cannot change always-on yet; no always-on commands run".into());
     lines.join(" · ")
 }
 
@@ -456,7 +456,9 @@ mod tests {
         );
         let unknown = always_on(None, None, &Observation::default());
         assert!(unknown.contains("unknown"));
-        assert!(unknown.contains("R12a/R12b"));
+        assert!(unknown.contains("Read-only"));
+        // Visible text never names internal design request ids.
+        assert!(!unknown.contains("R12"), "{unknown}");
         let partial: Autostart =
             serde_json::from_value(json!({"state":"needs_attention"})).unwrap();
         let text = always_on(Some(&partial), None, &Observation::default());

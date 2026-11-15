@@ -945,7 +945,7 @@ impl HackApp {
                             .checked(d.always_on)
                             .small()
                             .disabled(true)
-                            .tooltip("Read-only: needs R12a/R12b"),
+                            .tooltip("Read-only: the app cannot change always-on yet"),
                     ),
             )
             .child(

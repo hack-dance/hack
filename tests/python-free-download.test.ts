@@ -306,11 +306,24 @@ for (const scenario of ["progress", "stall", "total"] as const) {
       schedule: clock.schedule,
     });
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-    const stream = new ReadableStream<Uint8Array>({
-      start(value) {
-        controller = value;
+    // With no prefetch (highWaterMark 0), pull runs only while the download
+    // has a read pending: the handshake each clock tick waits for (HACK-2250).
+    let readPending = false;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        start(value) {
+          controller = value;
+        },
+        pull() {
+          readPending = true;
+        },
       },
-    });
+      { highWaterMark: 0 }
+    );
+    const nextRead = async () => {
+      await until(() => readPending, "download read pending");
+      readPending = false;
+    };
     const mock = spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(stream)
     );
@@ -326,21 +339,18 @@ for (const scenario of ["progress", "stall", "total"] as const) {
         () => ({ ok: true, error: "" }),
         (error) => ({ ok: false, error: String(error) })
       );
-      // Drive the clock only once the read is pending: the download opens its
-      // target first, and an inactivity tick before that is a false stall.
-      await until(
-        () => existsSync(join(root, "download")),
-        "download opened its target"
-      );
-      await drain();
+      // Each tick waits until the download is reading: it opens and writes
+      // its file with real I/O, and a tick before the read is a false stall.
       if (scenario === "stall") {
+        await nextRead();
         clock.advance(31);
       } else {
         for (let i = 0; i < (scenario === "progress" ? 3 : 4); i++) {
+          await nextRead();
           clock.advance(20);
           controller?.enqueue(Uint8Array.of(65));
-          await drain();
         }
+        await nextRead();
         if (scenario === "progress") {
           controller?.close();
         } else {
@@ -441,22 +451,30 @@ for (const scenario of [
     });
     let cancellations = 0;
     let rejectLate: ((reason: unknown) => void) | undefined;
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        if (scenario === "read-error" || scenario === "cleanup-rejection") {
-          controller.enqueue(Uint8Array.of(1, 2));
-        }
+    // With no prefetch, pull runs only while the download has a read pending.
+    let readPending = false;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        start(controller) {
+          if (scenario === "read-error" || scenario === "cleanup-rejection") {
+            controller.enqueue(Uint8Array.of(1, 2));
+          }
+        },
+        pull() {
+          readPending = true;
+        },
+        cancel() {
+          cancellations++;
+          if (scenario === "cleanup-rejection") {
+            return Promise.reject(new Error("fixture cancellation rejection"));
+          }
+          return new Promise<void>((_resolve, reject) => {
+            rejectLate = reject;
+          });
+        },
       },
-      cancel() {
-        cancellations++;
-        if (scenario === "cleanup-rejection") {
-          return Promise.reject(new Error("fixture cancellation rejection"));
-        }
-        return new Promise<void>((_resolve, reject) => {
-          rejectLate = reject;
-        });
-      },
-    });
+      { highWaterMark: 0 }
+    );
     const response =
       scenario === "redirect"
         ? new Response(stream, {
@@ -476,12 +494,9 @@ for (const scenario of [
         (error) => ({ error })
       );
       if (scenario === "stalled-read") {
-        // The read must be pending before the inactivity budget expires.
-        await until(
-          () => existsSync(join(root, "target")),
-          "download opened its target"
-        );
-        await drain();
+        // The read must be pending before the inactivity budget expires: the
+        // download opens its target (real I/O) first.
+        await until(() => readPending, "download read pending");
         clock.advance(31);
       }
       if (scenario !== "cleanup-rejection") {

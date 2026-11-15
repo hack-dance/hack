@@ -209,15 +209,35 @@ pub fn observe(
 /// # Errors
 /// Spawn, exit or timeout failure; caller must obtain a fresh observation.
 pub fn act(runner: &CliRunner, action: DaemonAction) -> Result<(), RunError> {
-    let (_, stderr, code) = runner.run_raw(
+    let (stdout, stderr, code) = runner.run_raw(
         &["daemon", action.verb(), "--no-interactive"],
         None,
         Duration::from_secs(120),
     )?;
     if code != Some(0) {
-        return Err(RunError::Exit { code, stderr });
+        // The CLI's fallback logger writes diagnostics to stdout: keep a
+        // bounded tail of both streams so the failure reason stays visible.
+        let detail = [stderr.as_str(), stdout.as_str()]
+            .into_iter()
+            .map(|s| tail(s.trim(), 2048))
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(RunError::Exit {
+            code,
+            stderr: detail,
+        });
     }
     Ok(())
+}
+
+/// The last `max` bytes of `s`, cut on a character boundary.
+fn tail(s: &str, max: usize) -> &str {
+    let mut start = s.len().saturating_sub(max);
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
 }
 
 #[derive(Debug, Clone, Default)]
@@ -380,6 +400,35 @@ pub fn always_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_actions_keep_stdout_diagnostics() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "daemon-act-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let program = dir.join("hack");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf 'Could not start hackd: example reason\\n'\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = act(&CliRunner::new(&program), DaemonAction::Start).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Could not start hackd: example reason"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
     use serde_json::json;
     #[test]
     fn setup_remedies_share_machine_admission_and_require_cli_evidence() {

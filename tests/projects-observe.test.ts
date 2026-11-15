@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { machineData } from "./helpers/machine-output.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let root = "";
@@ -146,7 +147,7 @@ test("observe default preserves HOME and Hack home and never contacts Docker", a
   ]) {
     const result = await run(["--json", "--observe", ...flags]);
     expect(result.code).toBe(0);
-    const payload = JSON.parse(result.stdout);
+    const payload = machineData(result.stdout, "hack.projects.observe.v1");
     expect(payload.observe).toBe(true);
     expect(payload.runtime_requested).toBe(false);
     expect(payload.runtime_error).toBeNull();
@@ -188,8 +189,21 @@ test("observe runtime explicitly opts in to Docker reads without registering dis
       ...flags,
     ]);
     expect(result.code).toBe(0);
-    const payload = JSON.parse(result.stdout);
+    const payload = machineData(result.stdout, "hack.projects.observe.v1");
     expect(payload.runtime_requested).toBe(true);
+    // R2's observer has run even without a native selection. Re-projecting
+    // here would replace its result with native-observer-required (and discard
+    // live service evidence when a native selection is available).
+    expect(
+      payload.projects.find(
+        (row: { name: string }) => row.name === "native-app"
+      )
+    ).toMatchObject({
+      backend: "native",
+      state: "unknown",
+      state_reason: "observation-unavailable",
+      services: [],
+    });
     expect(
       payload.projects.find(
         (row: { name: string }) => row.name === "unregistered-app"
@@ -219,7 +233,7 @@ test("observe keeps native rows and unknown Compose services when Docker is unav
     OFFLINE: "1",
   });
   expect(result.code).toBe(0);
-  const payload = JSON.parse(result.stdout);
+  const payload = machineData(result.stdout, "hack.projects.observe.v1");
   expect(payload.runtime_ok).toBe(false);
   const compose = payload.projects.find(
     (row: { name: string }) => row.name === "compose-app"
@@ -249,7 +263,10 @@ test("mixed running and exited replicas keep service and project degraded", asyn
       { MIXED: "1" }
     );
     expect(result.code).toBe(0);
-    const row = JSON.parse(result.stdout).projects.find(
+    const row = machineData(
+      result.stdout,
+      "hack.projects.observe.v1"
+    ).projects.find(
       (project: { name: string }) => project.name === "unregistered-app"
     );
     expect(row.services[0].state).toBe("degraded");
@@ -261,7 +278,9 @@ test("observe never creates a missing registry or registers the current checkout
   await rm(registry);
   const result = await run(["--json", "--observe"]);
   expect(result.code).toBe(0);
-  expect(JSON.parse(result.stdout).projects).toEqual([]);
+  expect(
+    machineData(result.stdout, "hack.projects.observe.v1").projects
+  ).toEqual([]);
   expect(await stat(registry).catch(() => null)).toBeNull();
 });
 
@@ -293,9 +312,21 @@ test("observe does not query an available daemon cache", async () => {
   try {
     const result = await run(["--json", "--observe"]);
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout).projects).toHaveLength(2);
+    expect(
+      machineData(result.stdout, "hack.projects.observe.v1").projects
+    ).toHaveLength(2);
     expect(requests).toBe(0);
   } finally {
     await server.stop(true);
   }
+});
+
+test("published plain projects JSON retains its unwrapped shape", async () => {
+  const result = await run(["--json", "--no-daemon"]);
+  expect(result.code).toBe(0);
+  const payload = JSON.parse(result.stdout);
+  expect(payload.projects).toBeArray();
+  expect(payload).not.toHaveProperty("ok");
+  expect(payload).not.toHaveProperty("data");
+  expect(payload).not.toHaveProperty("schema");
 });

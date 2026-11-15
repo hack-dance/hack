@@ -388,7 +388,10 @@ PATH: per-operation wrappers only for tools no other user can change, with
 interpreter startup variables such as `BASH_ENV` removed. Like Doctor, every run
 disables repository `core.fsmonitor` and hooks through command-line Git config,
 because `upgrade check` reads Git in registered checkouts, and pins the native
-runtime Doctor checked. Copied commands keep the host-probe hard deny too. If that PATH cannot be
+runtime Doctor checked. Copied commands keep the host-probe hard deny too. They
+run later, without the private wrapper PATH, so their PATH keeps only directories
+no other user can change (owner- or root-owned, not group- or other-writable, with
+the same ancestry and ACL rule as Doctor); with none left, it is `/usr/bin:/bin`. If that PATH cannot be
 built, or a tool such as `docker` or `git` on PATH is in a location other users can
 change, or PATH is too long to check fully, the operation is refused before the CLI
 runs and the message names the tools. No `update --check` probe or daily check runs. The

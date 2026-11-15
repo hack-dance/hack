@@ -174,8 +174,7 @@ impl ExecutionContext {
         Self::from_values(&values)
     }
     /// The same context with `PATH` reduced to directories no other user can
-    /// change; with none left, `PATH` is omitted (the shell's default search
-    /// covers only system directories).
+    /// change; with none left, the context's system default PATH applies.
     pub fn with_controlled_path(&self) -> Result<Self, String> {
         let kept = self
             .value("PATH")

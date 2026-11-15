@@ -422,7 +422,7 @@ fn copied_commands_keep_only_controlled_path_directories() {
         .copy_command(&["upgrade".into(), "snapshot".into()])
         .expect("copied command");
     assert!(!copied.contains(shared.to_str().unwrap()), "{copied}");
-    // With no controlled directory left, PATH is omitted entirely.
+    // With no controlled directory left, the context's system default applies.
     let source = LiveSource {
         runner: t
             .runner(REPORT, 1)
@@ -430,7 +430,10 @@ fn copied_commands_keep_only_controlled_path_directories() {
         daemon: None,
     };
     let observation = source.upgrade_check().unwrap();
-    assert_eq!(observation.context.as_ref().unwrap().value("PATH"), None);
+    assert_eq!(
+        observation.context.as_ref().unwrap().value("PATH"),
+        Some("/usr/bin:/bin")
+    );
 }
 
 #[test]

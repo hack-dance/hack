@@ -404,17 +404,17 @@ impl Drop for ProbeTools {
     }
 }
 
-/// `hack daemon status --json` is read automatically (Setup, polling, the
-/// install pre-check). The CLI's status command also probes Docker (`docker
-/// info`) and the service manager from its PATH, though the JSON answer uses
-/// neither Docker result. Run it with Doctor's private wrapper PATH (only tools
-/// no other user can change), interpreter startup variables removed, and no
-/// `docker` at all, so an automatic read never starts Docker or its helpers.
-/// The wrapper directory lives until the read has finished.
-pub(crate) fn read_daemon_status(
+/// `hack daemon status` is read automatically (Setup, polling, the daemon
+/// card, the install pre-check). The CLI's status command also probes Docker
+/// (`docker info`) and the service manager from its PATH, though the JSON
+/// answer uses neither Docker result. `read` runs with Doctor's private
+/// wrapper PATH (only tools no other user can change), interpreter startup
+/// variables removed, and no `docker` at all, so an automatic read never
+/// starts Docker or its helpers. The wrapper directory outlives `read`.
+pub(crate) fn with_status_tools<T>(
     runner: &CliRunner,
-    timeout: Duration,
-) -> Result<serde_json::Value, String> {
+    read: impl FnOnce(&CliRunner) -> T,
+) -> Result<T, String> {
     let tools = trusted_probe_path(runner.effective_env("PATH").unwrap_or_default().as_os_str())?;
     match std::fs::remove_file(tools.dir.join("docker")) {
         Ok(()) => {}
@@ -426,14 +426,26 @@ pub(crate) fn read_daemon_status(
         .to_str()
         .ok_or("The private tool PATH is not UTF-8")?
         .to_owned();
-    let value = runner
-        .clone()
-        .with_env("PATH", &path)
-        .without_interpreter_startup()
-        .run_json::<serde_json::Value>(&["daemon", "status", "--json"], None, timeout)
-        .map_err(|e| e.to_string());
+    let value = read(
+        &runner
+            .clone()
+            .with_env("PATH", &path)
+            .without_interpreter_startup(),
+    );
     drop(tools);
-    value
+    Ok(value)
+}
+
+/// `hack daemon status --json` through [`with_status_tools`].
+pub(crate) fn read_daemon_status(
+    runner: &CliRunner,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    with_status_tools(runner, |runner| {
+        runner
+            .run_json::<serde_json::Value>(&["daemon", "status", "--json"], None, timeout)
+            .map_err(|e| e.to_string())
+    })?
 }
 
 fn trusted_probe_path(path: &std::ffi::OsStr) -> Result<ProbeTools, String> {

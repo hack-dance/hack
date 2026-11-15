@@ -606,6 +606,21 @@ impl LiveSource {
                 .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
                 .collect();
         }
+        // Keep the CLI pinned by setup: bind its absolute path before the
+        // private tool PATH replaces PATH, which would otherwise rediscover.
+        let pinned = match self.runner.fixed() {
+            Ok(runner) => LiveSource {
+                runner,
+                daemon: self.daemon.clone(),
+            },
+            Err(e) => {
+                let why = e.to_string();
+                return std::iter::once(DoctorRun::machine(Err(why.clone())))
+                    .chain(projects.iter().map(|t| t.run(Err(why.clone()))))
+                    .collect();
+            }
+        };
+        let pinned = &pinned;
         // Resolve once per refresh, not once per project. The private PATH
         // stays alive until every bounded child has completed.
         let tools = match trusted_probe_path(
@@ -650,7 +665,7 @@ impl LiveSource {
         candidates.push(std::path::PathBuf::from("/"));
         let machine = match crate::doctor::neutral_dir(&candidates) {
             Some(dir) if !left().is_zero() => read(
-                &self
+                &pinned
                     .runner
                     .clone()
                     .with_env("PATH", tool_path)
@@ -668,7 +683,7 @@ impl LiveSource {
                 let handles: Vec<_> = chunk
                     .iter()
                     .map(|t| {
-                        let runner = self
+                        let runner = pinned
                             .runner_for(t.native)
                             .with_env("PATH", tool_path)
                             .with_term_grace(DOCTOR_TERM_GRACE);
@@ -699,7 +714,7 @@ impl LiveSource {
                             {
                                 let timeout = per_call.min(left());
                                 if !timeout.is_zero() {
-                                    let compose = self
+                                    let compose = pinned
                                         .runner_for(false)
                                         .with_env("PATH", tool_path)
                                         .with_term_grace(DOCTOR_TERM_GRACE);
@@ -1789,6 +1804,58 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             );
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn plugins_and_native_runtime_require_a_trusted_interpreter() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack("doctor-plugin-native-interp", "echo '{}'");
+        let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let shared = root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::copy("/bin/sh", shared.join("interp")).unwrap();
+        let client = root.join("client");
+        std::fs::create_dir_all(client.join("cli-plugins")).unwrap();
+        let script = |path: &Path, shebang: &str| {
+            std::fs::write(path, format!("#!{shebang}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let plugin = client.join("cli-plugins/docker-compose");
+        let discovery = crate::doctor_plugins::Discovery {
+            config_dir: Some(client.clone()),
+            unsupported_extra_selector: false,
+            system_dirs: vec![],
+        };
+        script(&plugin, "/bin/sh");
+        assert!(crate::doctor_plugins::validate(&discovery).is_ok());
+        script(&plugin, shared.join("interp").to_str().unwrap());
+        assert!(crate::doctor_plugins::validate(&discovery).is_err());
+        // A native candidate runtime is spawned directly, without the
+        // wrapper PATH: an unsafe interpreter and the env form are refused.
+        let native = root.join("native-runtime");
+        let runner = fixture_runner(&hack)
+            .with_env("HACK_HOME", root.to_str().unwrap())
+            .with_env("HACK_NATIVE_BINARY", native.to_str().unwrap());
+        for (shebang, ok) in [
+            ("/bin/sh", true),
+            (shared.join("interp").to_str().unwrap(), false),
+            ("/usr/bin/env sh", false),
+        ] {
+            script(&native, shebang);
+            assert_eq!(
+                crate::doctor_plugins::validate_helpers(&runner).is_ok(),
+                ok,
+                "{shebang}"
+            );
+        }
+        assert!(
+            crate::doctor_plugins::validate_helpers(
+                &runner.with_env("HACK_NATIVE_BINARY", "relative-runtime")
+            )
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

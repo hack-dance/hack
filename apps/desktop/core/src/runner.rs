@@ -156,6 +156,21 @@ impl CliRunner {
         }
     }
 
+    /// This runner bound to its current executable by absolute path, so a later
+    /// `with_env("PATH", ..)` (Doctor's private tool PATH) cannot switch CLIs.
+    ///
+    /// # Errors
+    /// As [`Self::resolve_program`].
+    pub fn fixed(&self) -> Result<Self, RunError> {
+        let program = self.resolve_program()?;
+        Ok(Self {
+            program,
+            path_name: None,
+            pinned: None,
+            ..self.clone()
+        })
+    }
+
     /// Search PATH again (explicit setup checks, so Check again recovers after
     /// an install), validate the result and pin it for later reads and
     /// actions. The executable and every directory above it must be owned by
@@ -979,6 +994,17 @@ mod tests {
         // ordinary reads (clones share the pin) ...
         fake(&early);
         assert_eq!(clone.resolve_program().unwrap(), late.join("hack"));
+        // Doctor swaps PATH for its private tool wrappers on a fixed runner,
+        // which keeps the pinned CLI instead of searching the new PATH.
+        assert_eq!(
+            runner
+                .fixed()
+                .unwrap()
+                .with_env("PATH", early.to_str().unwrap())
+                .resolve_program()
+                .unwrap(),
+            late.join("hack")
+        );
         // ... only by an explicit rediscovery, which validates it first.
         assert_eq!(runner.rediscover().unwrap(), early.join("hack"));
         std::fs::set_permissions(&early, std::fs::Permissions::from_mode(0o777)).unwrap();

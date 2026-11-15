@@ -20,3 +20,38 @@ export function resolveExecutingCliPath(
   const compiled = main.startsWith("/$bunfs/") || main.includes("~BUN");
   return compiled ? (opts.execPath ?? process.execPath) : null;
 }
+
+/**
+ * How to run THIS CLI again (HACK-2216): the executing compiled binary, or,
+ * for a source invocation, the same runtime with the same entry point
+ * (`bun index.ts`). Never the `hack` first on PATH: during `hack update`
+ * the new binary runs by absolute path while an older `hack` may come
+ * first on PATH, and a replacement daemon started from that one would run
+ * the old version.
+ */
+export function resolveExecutingInvocation(
+  opts: { readonly main?: string; readonly execPath?: string } = {}
+): { readonly bin: string; readonly args: readonly string[] } {
+  const executing = resolveExecutingCliPath(opts);
+  if (executing !== null) {
+    return { bin: executing, args: [] };
+  }
+  return {
+    bin: opts.execPath ?? process.execPath,
+    args: [opts.main ?? Bun.main],
+  };
+}
+
+/** The argv that starts this CLI's hackd in the foreground. */
+export function executingDaemonArgv(
+  opts: { readonly main?: string; readonly execPath?: string } = {}
+): readonly string[] {
+  const invocation = resolveExecutingInvocation(opts);
+  return [
+    invocation.bin,
+    ...invocation.args,
+    "daemon",
+    "start",
+    "--foreground",
+  ];
+}

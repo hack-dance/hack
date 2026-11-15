@@ -880,6 +880,18 @@ Such a plist is never replaced automatically; `start` reports it and
   reconcile-only mode uses the fallback as well, because that daemon was
   running before.
 
+  A replacement's direct start runs this CLI itself: the executing compiled
+  binary, or the same runtime and entry point for a source invocation. It
+  never runs the `hack` first on `PATH`. `hack update` runs the new binary by
+  absolute path while an older `hack` may come first on `PATH`, and starting
+  that one would bring back the old version. After any replacement start,
+  through the service or directly, `start` checks that the daemon answers on
+  this home's socket and reports this CLI's version. A pid and a socket are
+  not enough. If it does not, the replacement failed: `start` exits 1 with
+  `E_DAEMON_SERVICE` and action `none`, never `restarted`, and the update
+  result records `daemon.status: "failed"`. Ordinary starts with no running
+  daemon to replace keep starting the `hack` they always did.
+
   The fallback covers an early refusal (before the manager was asked to start
   anything), a failed start, and a start that throws. It never starts a second
   hackd next to one the manager may still start, so it runs only on positive

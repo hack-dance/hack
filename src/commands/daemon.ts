@@ -10,6 +10,7 @@ import { optJson, optTail } from "../cli/options.ts";
 import type { DaemonLaunchdConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { probeDaemonApi, requestDaemonJson } from "../daemon/client.ts";
+import { executingDaemonArgv } from "../daemon/executing-cli.ts";
 import {
   getLaunchdServiceStatus,
   installLaunchdService,
@@ -72,6 +73,7 @@ import {
   startViaLaunchdIfLoaded,
 } from "./daemon-launchd.ts";
 import {
+  describeUnverifiedReplacement,
   type ReplacementStartOutcome,
   type ServiceManagerState,
   startReplacementDaemon,
@@ -361,21 +363,30 @@ async function startDaemon(opts: {
       trace,
       trackedPid: status.pid,
       stalePid: pidIsDaemon ? null : livePid,
+      replacement: replaced,
     });
   if (!replaced || opts.foreground) {
     return (await startStopped()).exitCode;
   }
   // A running daemon was just stopped: never leave hackd stopped, unless
-  // the manager may still start it (see startReplacementDaemon).
+  // the manager may still start it (see startReplacementDaemon). Any direct
+  // start runs this CLI itself, and the result must be this CLI's hackd.
   return await startReplacementDaemon({
     trace,
     startViaService: startStopped,
-    startDirect: () => startDaemonDetached({ paths }),
+    startDirect: () =>
+      startDaemonDetached({ paths, argv: executingDaemonArgv() }),
     isRunning: async () => {
       const now = await readDaemonStatus({ paths });
       return now.running && now.socketExists;
     },
     managerState: (manager) => readServiceManagerState({ manager, paths }),
+    verifyStarted: async () => {
+      const now = await readDaemonStatus({ paths });
+      return describeUnverifiedReplacement(
+        await checkDaemonApi({ socketExists: now.socketExists, paths })
+      );
+    },
   });
 }
 
@@ -408,6 +419,12 @@ async function startStoppedDaemon(opts: {
   readonly trackedPid: number | null;
   /** A live pid already shown not to be hackd. */
   readonly stalePid: number | null;
+  /**
+   * A running daemon was just stopped to replace it: a direct start runs
+   * this CLI itself ({@link executingDaemonArgv}), not the `hack` first on
+   * PATH, which may be the old version (HACK-2216).
+   */
+  readonly replacement?: boolean;
 }): Promise<ReplacementStartOutcome> {
   const { paths, trace } = opts;
   const sweep = await sweepOrphanDaemons({
@@ -476,7 +493,10 @@ async function startStoppedDaemon(opts: {
     };
   }
 
-  const started = await startDaemonDetached({ paths });
+  const started = await startDaemonDetached({
+    paths,
+    argv: opts.replacement === true ? executingDaemonArgv() : undefined,
+  });
   trace.manager = "none";
   trace.action = started === 0 ? "started" : trace.action;
   return { kind: "direct-attempted", exitCode: started, manager: null };
@@ -724,18 +744,26 @@ async function clearStaleDaemonFilesBeforeStart(opts: {
  */
 async function startDaemonDetached(opts: {
   readonly paths: DaemonPaths;
+  /**
+   * What to run. Defaults to the `hack` this CLI resolves (an ordinary
+   * start); a replacement passes {@link executingDaemonArgv}, this CLI
+   * itself (HACK-2216).
+   */
+  readonly argv?: readonly string[];
 }): Promise<number> {
   const { paths } = opts;
-  const invocation = await resolveHackInvocation();
-  spawnDetachedDaemon({
-    argv: [
+  let argv = opts.argv;
+  if (argv === undefined) {
+    const invocation = await resolveHackInvocation();
+    argv = [
       invocation.bin,
       ...invocation.args,
       "daemon",
       "start",
       "--foreground",
-    ],
-  });
+    ];
+  }
+  spawnDetachedDaemon({ argv: [...argv] });
 
   const started = await waitForDaemonStart({ paths });
   if (!started) {

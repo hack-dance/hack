@@ -17,6 +17,7 @@ import {
   startViaLaunchdIfLoaded,
 } from "../src/commands/daemon-launchd.ts";
 import {
+  describeUnverifiedReplacement,
   type ReplacementStartOutcome,
   type ServiceManagerState,
   startReplacementDaemon,
@@ -26,7 +27,10 @@ import {
   parseStartEnvelope,
   reconcileDaemonAfterUpdate,
 } from "../src/commands/daemon-upgrade.ts";
-import { resolveExecutingCliPath } from "../src/daemon/executing-cli.ts";
+import {
+  executingDaemonArgv,
+  resolveExecutingCliPath,
+} from "../src/daemon/executing-cli.ts";
 import {
   checkLaunchdJobBeforeStart,
   checkLaunchdRetargetTarget,
@@ -1582,6 +1586,8 @@ type ReplacementCase = {
   readonly running?: boolean;
   readonly managerState?: ServiceManagerState;
   readonly directCode?: number;
+  /** What the started hackd reports when verified; null: this CLI's. */
+  readonly verified?: string | null;
 };
 
 async function runReplacement(c: ReplacementCase) {
@@ -1615,12 +1621,82 @@ async function runReplacement(c: ReplacementCase) {
         asked.push(manager);
         return Promise.resolve(c.managerState ?? "idle");
       },
+      verifyStarted: () => Promise.resolve(c.verified ?? null),
     });
   } catch (error: unknown) {
     thrown = error;
   }
   return { code, thrown, steps, asked, trace };
 }
+
+// Codex finding on PR #854 (HACK-2216): a replacement only counts when the
+// started hackd is this CLI's, and a direct start runs this CLI itself.
+
+test("a replacement whose started hackd reports an older version fails, not restarted", async () => {
+  // Through the service.
+  const viaService = await runReplacement({
+    outcome: { kind: "service-attempted", exitCode: 0, manager: "systemd" },
+    verified: "it reports version 1.0.0, not this CLI's",
+  });
+  expect(viaService.code).toBe(1);
+  expect(viaService.trace.action).toBe("none");
+  // Through the direct fallback.
+  const viaDirect = await runReplacement({
+    verified: "it reports version 1.0.0, not this CLI's",
+  });
+  expect(viaDirect.steps).toEqual(["service", "direct"]);
+  expect(viaDirect.code).toBe(1);
+  expect(viaDirect.trace.action).toBe("none");
+  expect(viaDirect.trace.fallback).toBeNull();
+});
+
+test("a replacement is verified on this home's socket and this CLI's version", () => {
+  expect(
+    describeUnverifiedReplacement({
+      reachable: true,
+      compatible: true,
+      version: "2.0.0",
+    })
+  ).toBeNull();
+  expect(
+    describeUnverifiedReplacement({
+      reachable: true,
+      compatible: false,
+      version: "1.0.0",
+    })
+  ).toContain("1.0.0");
+  expect(
+    describeUnverifiedReplacement({
+      reachable: false,
+      compatible: false,
+      version: null,
+    })
+  ).toContain("does not answer");
+});
+
+test("a replacement's direct start runs the executing CLI, never the hack first on PATH", () => {
+  // A compiled binary run by absolute path (as `hack update` runs the new
+  // one) while an older `hack` comes first on PATH.
+  expect(
+    executingDaemonArgv({
+      main: "/$bunfs/root/hack",
+      execPath: "/srv/new/bin/hack",
+    })
+  ).toEqual(["/srv/new/bin/hack", "daemon", "start", "--foreground"]);
+  // A source invocation keeps its runtime and entry point.
+  expect(
+    executingDaemonArgv({
+      main: "/srv/checkout/index.ts",
+      execPath: "/srv/runtime/bun",
+    })
+  ).toEqual([
+    "/srv/runtime/bun",
+    "/srv/checkout/index.ts",
+    "daemon",
+    "start",
+    "--foreground",
+  ]);
+});
 
 test("a failed service start falls back to a direct start once the manager is idle", async () => {
   const r = await runReplacement({

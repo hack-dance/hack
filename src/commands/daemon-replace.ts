@@ -47,6 +47,12 @@ export type ServiceManagerState = "idle" | "pending" | "unknown";
  * Success reports action `restarted` with `fallback: "direct"` and keeps
  * the service path's `blocked` reason. If the direct start also fails, the
  * service's result stands: its exit code, or its error rethrown.
+ *
+ * A start that reports success only counts when `verifyStarted` confirms
+ * the replacement answers on this home's socket and reports this CLI's
+ * version: a pid and a socket are not enough, because an older `hack`
+ * could have been started (HACK-2216). Otherwise the replacement failed:
+ * exit 1, action `none`, never `restarted`.
  */
 export async function startReplacementDaemon(opts: {
   readonly trace: DaemonCommandTrace;
@@ -58,6 +64,11 @@ export async function startReplacementDaemon(opts: {
   readonly managerState: (
     manager: "systemd" | "launchd" | null
   ) => Promise<ServiceManagerState>;
+  /**
+   * Null when the started hackd answers on this home's socket and reports
+   * this CLI's version; otherwise what it reports instead.
+   */
+  readonly verifyStarted: () => Promise<string | null>;
 }): Promise<number> {
   const { trace } = opts;
   let outcome: ReplacementStartOutcome;
@@ -71,6 +82,9 @@ export async function startReplacementDaemon(opts: {
     outcome = { kind: "service-attempted", exitCode: 1, manager: null };
   }
   if (outcome.exitCode === 0) {
+    if (await refuseUnverified({ trace, verify: opts.verifyStarted })) {
+      return 1;
+    }
     if (trace.action === "started") {
       trace.action = "restarted";
     }
@@ -101,7 +115,47 @@ export async function startReplacementDaemon(opts: {
   if (direct !== 0) {
     return fail();
   }
+  if (await refuseUnverified({ trace, verify: opts.verifyStarted })) {
+    return 1;
+  }
   trace.action = "restarted";
   trace.fallback = "direct";
   return 0;
+}
+
+/**
+ * What `verifyStarted` reports for a probe of this home's socket: null when
+ * the daemon answers and is compatible with this CLI (reports its
+ * version), otherwise what it does instead.
+ */
+export function describeUnverifiedReplacement(api: {
+  readonly reachable: boolean;
+  readonly compatible: boolean;
+  readonly version: string | null;
+}): string | null {
+  if (!api.reachable) {
+    return "it does not answer on this home's socket";
+  }
+  return api.compatible
+    ? null
+    : `it reports version ${api.version ?? "unknown"}, not this CLI's`;
+}
+
+/**
+ * True (reported, action `none`) when the replacement that started is not
+ * this CLI's hackd on this home's socket.
+ */
+async function refuseUnverified(opts: {
+  readonly trace: DaemonCommandTrace;
+  readonly verify: () => Promise<string | null>;
+}): Promise<boolean> {
+  const problem = await opts.verify();
+  if (problem === null) {
+    return false;
+  }
+  opts.trace.action = "none";
+  logger.error({
+    message: `hackd was replaced, but ${problem}, so it is not running this version | Run: hack daemon install, then check: hack daemon status`,
+  });
+  return true;
 }

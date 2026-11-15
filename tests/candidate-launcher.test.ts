@@ -9,9 +9,11 @@ import {
   freshNativeHomeSetupCommand,
   resolveCandidateLauncher,
 } from "../src/lib/candidate-launcher.ts";
+import { composeBackendCheckResult } from "../src/lib/doctor-compose-backend.ts";
 import {
   basicBuildNextStep,
   composeBackendCommand,
+  composeBackendRefusal,
 } from "../src/lib/native-compose-backend-features.ts";
 import {
   renderUpgradeCommand,
@@ -154,6 +156,33 @@ test("the basic-build hint previews config import through the user's launcher", 
   );
   expect(basicBuildNextStep(next)).toContain(
     `\`${join(home, ".hack-next", "bin", "hack-next")} config import --dry-run --path <project root>\``
+  );
+});
+
+test("the Compose fallback selects the same project and branch from any directory", () => {
+  // Codex review of #863: a refused `up --path /repos/app --branch feature`
+  // must print a fallback that still selects that project and branch.
+  const refusal = composeBackendRefusal({
+    features: ["external_network"],
+    restart: true,
+    projectRoot: join(root, "my app"),
+    branch: "feature-x",
+  });
+  expect(refusal.message).toContain(
+    `To run it there: HACK_RUNTIME_BACKEND=compose hack restart --path '${join(root, "my app")}' --branch feature-x.`
+  );
+  // Doctor checks one project; its hints select it too.
+  const doctor = composeBackendCheckResult({
+    backend: "native",
+    features: ["external_network"],
+    basicBuild: true,
+    projectRoot: join(root, "app"),
+  });
+  expect(doctor.message).toContain(
+    `To run it there: HACK_RUNTIME_BACKEND=compose hack up --path ${join(root, "app")}.`
+  );
+  expect(doctor.message).toContain(
+    `hack config import --dry-run --path ${join(root, "app")}\``
   );
 });
 

@@ -635,9 +635,35 @@ export const ISOLATED_NETWORKS_SELECTION =
  * without native builds. The preview command names the user's launcher.
  */
 export function basicBuildNextStep(
-  launcher: CandidateLauncher = currentCandidateLauncher()
+  launcher: CandidateLauncher = currentCandidateLauncher(),
+  /** The selected project's root; `<project root>` when unknown. */
+  projectRoot?: string
 ): string {
-  return `Set HACK_NATIVE_BUILDS=1 to build it in the native runtime, or preview the authored native conversion with \`${launcherCommand(launcher, ["config", "import", "--dry-run", "--path"])} <project root>\``;
+  const preview =
+    projectRoot === undefined
+      ? `${launcherCommand(launcher, ["config", "import", "--dry-run", "--path"])} <project root>`
+      : launcherCommand(launcher, [
+          "config",
+          "import",
+          "--dry-run",
+          "--path",
+          projectRoot,
+        ]);
+  return `Set HACK_NATIVE_BUILDS=1 to build it in the native runtime, or preview the authored native conversion with \`${preview}\``;
+}
+
+/**
+ * The command words that select the same project (and branch) as the refused
+ * command, so the printed fallback works from any directory.
+ */
+export function projectSelectorArgs(opts: {
+  readonly projectRoot?: string;
+  readonly branch?: string;
+}): string[] {
+  return [
+    ...(opts.projectRoot === undefined ? [] : ["--path", opts.projectRoot]),
+    ...(opts.branch === undefined ? [] : ["--branch", opts.branch]),
+  ];
 }
 
 /**
@@ -650,6 +676,10 @@ export function composeBackendRefusal(
     readonly features: readonly ComposeBackendFeature[];
     readonly restart: boolean;
     readonly foreignNetworks?: readonly string[];
+    /** The selected project's root, printed as `--path` in the fallback. */
+    readonly projectRoot?: string;
+    /** The `--branch` the refused command was given, if any. */
+    readonly branch?: string;
   } & ComposeBackendFeatureOptions
 ): HackCliError {
   const command = opts.restart ? "hack restart" : "hack up";
@@ -658,7 +688,7 @@ export function composeBackendRefusal(
     : "";
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. To run it there: ${composeBackendCommand([opts.restart ? "restart" : "up"])}. Nothing was started or stopped.${names}`,
+    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. To run it there: ${composeBackendCommand([opts.restart ? "restart" : "up", ...projectSelectorArgs(opts)])}. Nothing was started or stopped.${names}`,
     detail: { backend: "compose", features: [...opts.features] },
   });
 }
@@ -676,6 +706,10 @@ export async function refuseNativeComposeBackendFeatures(
     /** Every adaptation native start could apply; see {@link readComposeBackendFeatures}. */
     readonly adaptationCandidates?: readonly (string | undefined)[];
     readonly restart: boolean;
+    /** The selected project's root, printed as `--path` in the fallback. */
+    readonly projectRoot?: string;
+    /** The `--branch` the refused command was given, if any. */
+    readonly branch?: string;
   } & ComposeBackendFeatureOptions
 ): Promise<void> {
   const features = await readComposeBackendFeatures(opts.composeFile, {

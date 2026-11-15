@@ -3003,6 +3003,7 @@ async function checkComposeBackendFeatures(opts: {
   });
   return composeBackendCheckResult({
     backend: opts.backend,
+    projectRoot: ctx.projectRoot,
     buildsEnabled,
     features: reading.features,
     basicBuild: reading.basicBuild,

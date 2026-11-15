@@ -6099,6 +6099,10 @@ async function handleNativeUp({
     }),
     restart,
     buildsEnabled: nativeBuildsEnabled(),
+    // The printed Compose fallback selects the same project and branch.
+    projectRoot: project.projectRoot,
+    branch:
+      typeof args.options.branch === "string" ? args.options.branch : undefined,
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,

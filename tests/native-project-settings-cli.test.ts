@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { NATIVE_SHARED_SOURCE_REFUSAL } from "../src/backends/native-project-start.ts";
+import { quoteShellWord } from "../src/lib/logs.ts";
 import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
@@ -32,8 +33,9 @@ const entrypoint = resolve("index.ts");
 const SPAWN_TIMEOUT_MS = 60_000;
 const IMAGE = `sha256:${"e".repeat(64)}`;
 const PROJECT = "settings-cli-fixture";
-const SELECTION =
-  "this project runs on the Compose backend. To run it there: HACK_RUNTIME_BACKEND=compose hack up. Nothing was started or stopped.";
+/** The refusal's fallback selects the same project, so it works from any directory. */
+const selection = (project: string) =>
+  `this project runs on the Compose backend. To run it there: HACK_RUNTIME_BACKEND=compose hack up --path ${quoteShellWord(project)}. Nothing was started or stopped.`;
 const EXTERNAL_COMPOSE = {
   services: { web: { image: IMAGE, networks: ["shared-dev"] } },
   networks: { "shared-dev": { external: true } },
@@ -198,7 +200,7 @@ test(
       HACK_NATIVE_ADAPTATION: explicit,
     });
     expect(errorLines(result.output)).toEqual([
-      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION} Foreign external networks: shared-dev.`,
+      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${selection(f.project)} Foreign external networks: shared-dev.`,
     ]);
     expect(await f.calls()).toEqual([]);
   },
@@ -215,7 +217,7 @@ test(
     });
     const without = await cli(f, ["up"], { HACK_NATIVE_SHARED_SOURCE: "1" });
     expect(errorLines(without.output)).toEqual([
-      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION} Foreign external networks: shared-dev.`,
+      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${selection(f.project)} Foreign external networks: shared-dev.`,
     ]);
     expect(await f.calls()).toEqual([]);
     const withEnv = await cli(f, ["up", "--env", "qa"], {

@@ -12,11 +12,11 @@
 //! bounded queue, input is queued for a writer thread, and input that cannot
 //! be queued is dropped whole and shown as a notice.
 //!
-//! Keys (PTY): typed text and keys are encoded by libghostty for the
-//! program's modes. Copy: Cmd-C (macOS) or Ctrl-Shift-C. Paste: Cmd-V or
-//! Ctrl-Shift-V. Search: Cmd-F or Ctrl-Shift-F; Enter older, Shift-Enter
-//! newer, Escape closes. Stream views also scroll with PageUp/PageDown,
-//! Home/End, and toggle follow with `f`.
+//! Keys: the view forwards keys to the program on the PTY, encoded by
+//! libghostty for the program's modes, and takes typed text for its find
+//! field while that is open. It binds no shortcuts. Copy, paste, find,
+//! find navigation and scrolling are actions ([`crate::actions`]) that the
+//! app binds to keys; each is also a public method here.
 
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use gpui_kit::{
     canvas, div, fill, point, px, size,
 };
 
-use crate::actions::Find;
+use crate::actions;
 use crate::emulator::{CursorShape, Emulator, Frame, KeyInput, Rgb, SearchState, TermTheme};
 use crate::ghostty_config::GhosttyLook;
 use crate::launch::{SessionKind, SessionPlan};
@@ -221,6 +221,46 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Close the find field and clear its highlights.
+    pub fn close_find(&mut self, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.query.clear();
+        self.search = self.core.emulator().search(None);
+        cx.notify();
+    }
+
+    /// Whether the find field is open.
+    pub fn find_open(&self) -> bool {
+        self.search_open
+    }
+
+    /// Copy the selection to the clipboard, if there is one.
+    pub fn copy_selection(&self, cx: &mut App) {
+        if let Some(text) = self.core.emu().selection_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Paste the clipboard's text into the PTY.
+    pub fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+            self.paste_text(&text, cx);
+        }
+    }
+
+    /// Scroll one screen toward older (`up`) or newer output.
+    pub fn scroll_page(&mut self, up: bool, cx: &mut Context<Self>) {
+        let rows = self.core.emu().rows() as isize;
+        self.core.emulator().scroll(if up { -rows } else { rows });
+        cx.notify();
+    }
+
+    /// Scroll to the oldest output kept. Following stops.
+    pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        self.core.emulator().scroll(isize::MIN / 2);
+        cx.notify();
+    }
+
     /// Paste text into the PTY as the user would (bracketed when the
     /// program asked for it). No-op for a stream view.
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -307,84 +347,43 @@ impl TerminalView {
         )
     }
 
-    fn copy(&self, cx: &mut App) {
-        if let Some(text) = self.core.emu().selection_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
-    }
-
+    /// Keys go to the find field while it is open, and otherwise to the
+    /// program on the PTY. Nothing here is a shortcut: a key the app has
+    /// bound to an action never reaches this handler.
     fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let m = k.modifiers;
-        let chord = m.platform || (m.control && m.shift);
-        if chord && k.key == "c" {
-            self.copy(cx);
-            return;
-        }
-        if chord && k.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                self.paste_text(&text, cx);
-            }
-            return;
-        }
-        if chord && k.key == "f" {
-            self.open_find(cx);
-            return;
-        }
         if self.search_open {
-            match k.key.as_str() {
-                "escape" => {
-                    self.search_open = false;
-                    self.query.clear();
-                    self.search = self.core.emulator().search(None);
-                }
-                "enter" => self.search = self.core.emulator().search_step(!m.shift),
-                "backspace" => {
+            // Text entry for the find field.
+            let typed = k
+                .key_char
+                .as_deref()
+                .filter(|t| !m.control && !m.platform && !t.chars().any(char::is_control));
+            match (k.key.as_str(), typed) {
+                ("backspace", _) => {
                     self.query.pop();
-                    self.search = self.core.emulator().search(Some(&self.query));
                 }
-                _ => {
-                    if let Some(t) = k.key_char.as_deref().filter(|_| !m.control && !m.platform) {
-                        self.query.push_str(t);
-                        self.search = self.core.emulator().search(Some(&self.query));
-                    }
-                }
+                (_, Some(text)) => self.query.push_str(text),
+                _ => return,
             }
+            self.search = self.core.emulator().search(Some(&self.query));
             cx.notify();
             return;
         }
-        let rows = self.core.emu().rows() as isize;
-        match (self.core.read_only(), k.key.as_str()) {
-            (true, "pageup") => self.core.emulator().scroll(-rows),
-            (true, "pagedown") => self.core.emulator().scroll(rows),
-            (true, "home") => self.core.emulator().scroll(isize::MIN / 2),
-            (true, "end") => self.core.emulator().set_follow(true),
-            (true, "f") => {
-                let follow = !self.core.emu().follow();
-                self.core.emulator().set_follow(follow);
-            }
-            (true, _) => return,
-            (false, _) => {
-                if m.shift && matches!(k.key.as_str(), "pageup" | "pagedown") {
-                    self.core
-                        .emulator()
-                        .scroll(if k.key == "pageup" { -rows } else { rows });
-                } else {
-                    let bytes = self.core.emulator().encode_key(KeyInput {
-                        key: &k.key,
-                        text: k.key_char.as_deref(),
-                        shift: m.shift,
-                        ctrl: m.control,
-                        alt: m.alt,
-                        meta: m.platform,
-                    });
-                    self.core.emulator().clear_selection();
-                    self.core.emulator().set_follow(true);
-                    self.send(&bytes, cx);
-                }
-            }
+        if self.core.read_only() {
+            return;
         }
-        cx.notify();
+        let bytes = self.core.emulator().encode_key(KeyInput {
+            key: &k.key,
+            text: k.key_char.as_deref(),
+            shift: m.shift,
+            ctrl: m.control,
+            alt: m.alt,
+            meta: m.platform,
+        });
+        self.core.emulator().clear_selection();
+        self.core.emulator().set_follow(true);
+        self.send(&bytes, cx);
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -620,10 +619,19 @@ impl Render for TerminalView {
             (Some(notice), _) => Some(notice.to_owned()),
             (None, Status::Ended(s)) => Some(s.clone()),
             (None, Status::Running) if self.core.read_only() && !self.core.emu().follow() => {
-                Some("paused (End to follow)".into())
+                Some("paused".into())
             }
             _ => None,
         };
+        // Contexts for the app's key bindings; see `crate::actions`.
+        let mut key_context = gpui_kit::KeyContext::default();
+        key_context.add("Terminal");
+        if self.core.read_only() {
+            key_context.add("TerminalLogs");
+        }
+        if self.search_open {
+            key_context.add("TerminalFind");
+        }
         self.rendered = Rendered {
             count: self.rendered.count + 1,
             notice: self.core.notice().map(str::to_owned),
@@ -647,12 +655,37 @@ impl Render for TerminalView {
         div()
             .id("terminal")
             .track_focus(&self.focus)
-            .key_context("Terminal")
+            .key_context(key_context)
             .relative()
             .size_full()
             .overflow_hidden()
             .bg(hsla(theme.background))
-            .on_action(cx.listener(|this, _: &Find, _, cx| this.open_find(cx)))
+            .on_action(cx.listener(|this, _: &actions::Copy, _, cx| this.copy_selection(cx)))
+            .on_action(cx.listener(|this, _: &actions::Paste, _, cx| this.paste_clipboard(cx)))
+            .on_action(cx.listener(|this, _: &actions::Find, _, cx| this.open_find(cx)))
+            .on_action(cx.listener(|this, _: &actions::FindOlder, _, cx| {
+                this.search_step(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::FindNewer, _, cx| {
+                this.search_step(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::CloseFind, _, cx| this.close_find(cx)))
+            .on_action(cx.listener(|this, _: &actions::ScrollPageUp, _, cx| {
+                this.scroll_page(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::ScrollPageDown, _, cx| {
+                this.scroll_page(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::ScrollToTop, _, cx| {
+                this.scroll_to_top(cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::ScrollToBottom, _, cx| {
+                this.set_follow(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::ToggleFollow, _, cx| {
+                let follow = !this.follow();
+                this.set_follow(follow, cx);
+            }))
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))

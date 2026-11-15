@@ -8,6 +8,13 @@
 //! logged, and a missing or unreadable file is the same as an empty one:
 //! the caller falls back to the app's own tokens for whatever is `None`.
 //!
+//! Reading is bounded end to end. Each file is opened once and read
+//! through a limit on that handle, so a file that grows or is replaced
+//! after it was looked at cannot exceed it. A file is identified by its
+//! canonical path before it is opened and is never read twice. One load
+//! has a total budget, in bytes and in files, across the config files,
+//! every include and the theme. Only regular files are read.
+//!
 //! Rules follow Ghostty's documentation:
 //!
 //! - Files: `$XDG_CONFIG_HOME/ghostty/config.ghostty` then `.../config`
@@ -15,7 +22,8 @@
 //!   `~/Library/Application Support/com.mitchellh.ghostty/` with the same
 //!   two names, loaded after the XDG ones. Later values win.
 //! - Syntax: `key = value`, `#` comments on their own line, optional double
-//!   quotes, and an empty value resets the key.
+//!   quotes, and an empty value resets the key (`palette =` drops every
+//!   palette entry set so far, the theme's included).
 //! - `config-file = path` is processed at the end of the file that contains
 //!   it, relative to that file; a leading `?` makes it optional; cycles are
 //!   ignored.
@@ -25,14 +33,50 @@
 //!   theme file cannot set `theme` or `config-file`.
 
 use std::collections::{BTreeMap, HashSet};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::color::Rgb;
 
 /// The largest config or theme file that is read.
 const MAX_FILE_BYTES: u64 = 1 << 20;
+/// The most bytes one load reads in total, over every file.
+const MAX_TOTAL_BYTES: u64 = 4 << 20;
+/// The most files one load opens.
+const MAX_FILES: usize = 64;
 /// How deep `config-file` includes may nest.
 const MAX_INCLUDE_DEPTH: usize = 8;
+
+/// What one load read. For tests and diagnostics; holds no file content.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoadStats {
+    /// Files opened and read (each at most once).
+    pub files_read: usize,
+    /// Bytes read from them, including the bytes of files that turned out
+    /// to be over the limit.
+    pub bytes_read: u64,
+}
+
+/// The state of one load: which files were visited and what is left of the
+/// budget.
+struct Walk {
+    seen: HashSet<PathBuf>,
+    bytes_left: u64,
+    files_left: usize,
+    stats: LoadStats,
+}
+
+impl Walk {
+    fn new() -> Self {
+        Self {
+            seen: HashSet::new(),
+            bytes_left: MAX_TOTAL_BYTES,
+            files_left: MAX_FILES,
+            stats: LoadStats::default(),
+        }
+    }
+}
 
 /// Where to look. Built from the process environment in the app and by hand
 /// in tests, so a test never reads the real home directory.
@@ -138,22 +182,27 @@ impl GhosttyLook {
     /// Read the user's config. `dark` picks the side of a `light:A,dark:B`
     /// theme. Never fails: anything missing or malformed is left unset.
     pub fn load(env: &ConfigEnv, dark: bool) -> Self {
+        Self::load_counted(env, dark).0
+    }
+
+    /// [`Self::load`], also returning how much was read.
+    pub fn load_counted(env: &ConfigEnv, dark: bool) -> (Self, LoadStats) {
+        let mut walk = Walk::new();
         let mut user = Raw::default();
-        let mut seen = HashSet::new();
         for file in env.config_files() {
-            load_file(&file, env, &mut user, &mut seen, 0, Source::Config);
+            load_file(&file, env, &mut user, &mut walk, 0, Source::Config);
         }
         let mut look = Self::default();
         if let Some(theme) = user.theme.as_deref().and_then(|t| theme_name(t, dark))
             && let Some(path) = find_theme(&theme, env)
         {
             let mut base = Raw::default();
-            load_file(&path, env, &mut base, &mut HashSet::new(), 0, Source::Theme);
+            load_file(&path, env, &mut base, &mut walk, 0, Source::Theme);
             base.apply_to(&mut look);
         }
         // The user's own settings override the theme's.
         user.apply_to(&mut look);
-        look
+        (look, walk.stats)
     }
 }
 
@@ -172,6 +221,9 @@ struct Raw {
     font_size_pt: Option<Option<f32>>,
     background: Option<Option<Rgb>>,
     foreground: Option<Option<Rgb>>,
+    /// An empty `palette =` was seen: drop every entry from before it,
+    /// including a theme's. `palette` holds the entries set after it.
+    palette_reset: bool,
     palette: BTreeMap<u8, Rgb>,
     cursor_style: Option<Option<CursorShape>>,
     padding_x: Option<Option<(f32, f32)>>,
@@ -192,6 +244,9 @@ impl Raw {
         }
         if let Some(v) = self.foreground {
             look.foreground = v;
+        }
+        if self.palette_reset {
+            look.palette.clear();
         }
         look.palette.extend(self.palette);
         if let Some(v) = self.cursor_style {
@@ -227,6 +282,10 @@ impl Raw {
             }
             "background" => set_color(&mut self.background, value),
             "foreground" => set_color(&mut self.foreground, value),
+            "palette" if empty => {
+                self.palette_reset = true;
+                self.palette.clear();
+            }
             "palette" => {
                 if let Some((index, color)) = value.split_once('=')
                     && let Some(index) = parse_index(index.trim())
@@ -340,12 +399,28 @@ fn find_theme(name: &str, env: &ConfigEnv) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn read_capped(path: &Path) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&std::fs::read(path).ok()?).into_owned())
+/// Read at most `limit` bytes from `reader`. `None` when it holds more:
+/// one byte past the limit is read to find that out, and no more.
+fn read_bounded(reader: impl Read, limit: u64) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= limit).then_some(bytes)
+}
+
+/// Open `path` for reading if it is a regular file. Opening does not block
+/// on a FIFO or a device, and the check is made on the opened handle, so it
+/// is about the file that will be read.
+fn open_regular(path: &Path) -> Option<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
 }
 
 fn unquote(value: &str) -> (&str, bool) {
@@ -363,18 +438,40 @@ fn load_file(
     path: &Path,
     env: &ConfigEnv,
     raw: &mut Raw,
-    seen: &mut HashSet<PathBuf>,
+    walk: &mut Walk,
     depth: usize,
     source: Source,
 ) {
-    let Some(text) = read_capped(path) else {
+    // Identity first. A file that was already visited is not opened again:
+    // this ends include cycles and keeps repeated includes from being
+    // re-read. A path that does not resolve is a missing file.
+    let Ok(canonical) = std::fs::canonicalize(path) else {
         return;
     };
-    // A file already loaded is skipped: this is what breaks include cycles.
-    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-    if !seen.insert(key) {
+    if !walk.seen.insert(canonical.clone()) {
         return;
     }
+    if walk.files_left == 0 || walk.bytes_left == 0 {
+        return;
+    }
+    let Some(file) = open_regular(&canonical) else {
+        return;
+    };
+    walk.files_left -= 1;
+    walk.stats.files_read += 1;
+    // The limit is enforced on the handle, whatever the file's size was a
+    // moment ago, and never exceeds what is left of the total budget.
+    let limit = MAX_FILE_BYTES.min(walk.bytes_left);
+    let bytes = read_bounded(file, limit);
+    let read = bytes
+        .as_ref()
+        .map_or(limit.saturating_add(1), |b| b.len() as u64);
+    walk.bytes_left = walk.bytes_left.saturating_sub(read);
+    walk.stats.bytes_read += read;
+    let Some(bytes) = bytes else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&bytes);
     let mut includes: Vec<PathBuf> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -387,6 +484,8 @@ fn load_file(
         let (key, (value, quoted)) = (key.trim(), unquote(value.trim()));
         if key == "config-file" {
             if source == Source::Config
+                // Relative to the file as it was named, as Ghostty does, not
+                // to where a symlink points.
                 && let Some(target) = include_target(path, value, quoted, env)
             {
                 includes.push(target);
@@ -398,7 +497,7 @@ fn load_file(
     // Includes are processed at the end of the file that names them.
     if depth < MAX_INCLUDE_DEPTH {
         for target in includes {
-            load_file(&target, env, raw, seen, depth + 1, source);
+            load_file(&target, env, raw, walk, depth + 1, source);
         }
     }
 }
@@ -684,10 +783,22 @@ not a setting line
     fn an_oversized_or_non_text_file_is_skipped() {
         let (home, env) = fixture(&[(".config/ghostty/config", "font-size = 12\n")]);
         let path = home.path().join(".config/ghostty/config");
+        // Exactly at the limit is read; one byte more is not.
         let mut big = b"font-size = 12\n".to_vec();
-        big.resize(MAX_FILE_BYTES as usize + 1, b'#');
-        std::fs::write(&path, big).unwrap();
-        assert!(GhosttyLook::load(&env, true).is_empty());
+        big.resize(MAX_FILE_BYTES as usize, b'#');
+        std::fs::write(&path, &big).unwrap();
+        let (look, stats) = GhosttyLook::load_counted(&env, true);
+        assert_eq!(look.font_size_pt, Some(12.));
+        assert_eq!(stats.bytes_read, MAX_FILE_BYTES);
+        big.push(b'#');
+        std::fs::write(&path, &big).unwrap();
+        let (look, stats) = GhosttyLook::load_counted(&env, true);
+        assert!(look.is_empty());
+        assert_eq!(
+            stats.bytes_read,
+            MAX_FILE_BYTES + 1,
+            "one byte past the limit, and no more"
+        );
         // Invalid UTF-8 on one line does not stop the others.
         std::fs::write(&path, b"background = \xff\xfe\nfont-size = 12\n").unwrap();
         assert_eq!(GhosttyLook::load(&env, true).font_size_pt, Some(12.));
@@ -695,5 +806,211 @@ not a setting line
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(GhosttyLook::load(&env, true).is_empty());
+    }
+
+    /// A reader that never ends, counting what is taken from it.
+    struct Endless(u64);
+
+    impl Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            buf.fill(b'#');
+            self.0 += buf.len() as u64;
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn the_limit_is_enforced_on_the_open_handle_not_on_a_size_seen_earlier() {
+        // What a file that grows, or is swapped for a huge one, after any
+        // size check looks like to the reader: more bytes than expected,
+        // without end. The bound is on what is read.
+        let mut endless = Endless(0);
+        assert_eq!(read_bounded(&mut endless, 1024), None);
+        assert_eq!(
+            endless.0, 1025,
+            "limit + 1 bytes were taken, then it stopped"
+        );
+        assert_eq!(read_bounded(&b"abc"[..], 3), Some(b"abc".to_vec()));
+        assert_eq!(read_bounded(&b"abcd"[..], 3), None);
+        assert_eq!(read_bounded(&b""[..], 0), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_fifo_in_place_of_the_config_is_not_read_and_does_not_block() {
+        let (home, env) = fixture(&[]);
+        let dir = home.path().join(".config/ghostty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = std::ffi::CString::new(dir.join("config").to_str().unwrap()).unwrap();
+        // SAFETY: a valid path; the FIFO is created in the test's own directory.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        // Nobody writes to it. A blocking open or read would hang here.
+        let (look, stats) = GhosttyLook::load_counted(&env, true);
+        assert!(look.is_empty());
+        assert_eq!(stats, LoadStats::default(), "not a regular file: not read");
+    }
+
+    #[test]
+    fn duplicate_and_fanned_out_includes_are_each_read_once() {
+        // Every level includes the next one three times and the one before
+        // it once. Read naively that is 3^6 reads of the last file.
+        let levels = 7;
+        let mut files: Vec<(String, String)> = Vec::new();
+        for i in 0..levels {
+            let mut text = format!("palette = {i}=#0000{i:02x}\n");
+            if i + 1 < levels {
+                for _ in 0..3 {
+                    text.push_str(&format!("config-file = level{}.conf\n", i + 1));
+                }
+            }
+            if i > 0 {
+                text.push_str(&format!("config-file = level{}.conf\n", i - 1));
+            }
+            // The same file under another spelling of its path.
+            text.push_str(&format!("config-file = ./level{i}.conf\n"));
+            files.push((format!(".config/ghostty/level{i}.conf"), text));
+        }
+        files.push((
+            ".config/ghostty/config".into(),
+            "config-file = level0.conf\nconfig-file = level0.conf\nconfig-file = ../ghostty/level0.conf\n"
+                .into(),
+        ));
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let (_home, env) = fixture(&borrowed);
+        let (look, stats) = GhosttyLook::load_counted(&env, true);
+        assert_eq!(look.palette.len(), levels, "every level was reached");
+        assert_eq!(
+            stats.files_read,
+            levels + 1,
+            "the config and each level, once each"
+        );
+        let total: u64 = files.iter().map(|(_, text)| text.len() as u64).sum();
+        assert_eq!(stats.bytes_read, total, "no byte was read twice");
+    }
+
+    #[test]
+    fn one_load_has_a_total_budget_in_bytes_and_in_files() {
+        // Bytes: six includes of 900 KiB each are 5.3 MiB; the budget is 4.
+        let mut files: Vec<(String, String)> = Vec::new();
+        let mut main = String::new();
+        for i in 0..6 {
+            let mut text = format!("palette = {i}=#0000{i:02x}\n");
+            while text.len() < 900 * 1024 {
+                text.push_str("# padding padding padding padding padding padding padding\n");
+            }
+            files.push((format!(".config/ghostty/big{i}.conf"), text));
+            main.push_str(&format!("config-file = big{i}.conf\n"));
+        }
+        files.push((".config/ghostty/config".into(), main));
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let (_home, env) = fixture(&borrowed);
+        let (look, stats) = GhosttyLook::load_counted(&env, true);
+        assert_eq!(
+            look.palette.keys().copied().collect::<Vec<_>>(),
+            [0, 1, 2, 3],
+            "the fifth file does not fit in what is left and is not used"
+        );
+        assert!(
+            stats.bytes_read <= MAX_TOTAL_BYTES + 1,
+            "read {} bytes",
+            stats.bytes_read
+        );
+        // The budget is spent: the sixth file is not even opened.
+        assert_eq!(
+            stats.files_read, 6,
+            "config, four that fit, one that did not"
+        );
+
+        // Files: a hundred tiny includes; only the budgeted number is opened.
+        let mut files: Vec<(String, String)> = Vec::new();
+        let mut main = String::new();
+        for i in 0..100 {
+            files.push((
+                format!(".config/ghostty/tiny{i}.conf"),
+                format!("palette = {i}=#0000{i:02x}\n"),
+            ));
+            main.push_str(&format!("config-file = tiny{i}.conf\n"));
+        }
+        files.push((".config/ghostty/config".into(), main));
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let (_home, env) = fixture(&borrowed);
+        let (look, stats) = GhosttyLook::load_counted(&env, true);
+        assert_eq!(stats.files_read, MAX_FILES);
+        assert_eq!(
+            look.palette.len(),
+            MAX_FILES - 1,
+            "the config counts as one"
+        );
+    }
+
+    #[test]
+    fn an_empty_palette_value_resets_the_palette() {
+        // After earlier assignments in the user's own files.
+        let (_home, env) = fixture(&[(
+            ".config/ghostty/config",
+            "palette = 1=#110000\npalette = 2=#220000\npalette =\npalette = 3=#330000\n",
+        )]);
+        assert_eq!(
+            GhosttyLook::load(&env, true).palette,
+            BTreeMap::from([(3, rgb("330000"))]),
+            "entries before the reset are gone, entries after it stay"
+        );
+        // After a theme's entries.
+        let theme = (
+            ".config/ghostty/themes/T",
+            "palette = 1=#aa0000\npalette = 2=#bb0000\nbackground = #101010\n",
+        );
+        let (_home, env) = fixture(&[(".config/ghostty/config", "theme = T\npalette =\n"), theme]);
+        let look = GhosttyLook::load(&env, true);
+        assert!(look.palette.is_empty(), "the theme's palette is dropped");
+        assert_eq!(
+            look.background,
+            Some(rgb("101010")),
+            "the rest of the theme stays"
+        );
+        let (_home, env) = fixture(&[
+            (
+                ".config/ghostty/config",
+                "theme = T\npalette = \"\"\npalette = 5=#550000\n",
+            ),
+            theme,
+        ]);
+        assert_eq!(
+            GhosttyLook::load(&env, true).palette,
+            BTreeMap::from([(5, rgb("550000"))])
+        );
+        // Without a reset the theme's entries remain under the user's.
+        let (_home, env) = fixture(&[
+            (".config/ghostty/config", "theme = T\npalette = 5=#550000\n"),
+            theme,
+        ]);
+        assert_eq!(
+            GhosttyLook::load(&env, true)
+                .palette
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [1, 2, 5]
+        );
+        // A reset inside the theme only clears what the theme set before it.
+        let (_home, env) = fixture(&[
+            (".config/ghostty/config", "theme = T2\n"),
+            (
+                ".config/ghostty/themes/T2",
+                "palette = 1=#aa0000\npalette =\npalette = 2=#bb0000\n",
+            ),
+        ]);
+        assert_eq!(
+            GhosttyLook::load(&env, true).palette,
+            BTreeMap::from([(2, rgb("bb0000"))])
+        );
     }
 }

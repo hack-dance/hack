@@ -12,7 +12,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{DEADLINE, Recorded, TempHome, sh, sh_source, tagged, wait_gone};
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, HeadlessAppContext, WindowOptions};
+use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{
+    AnyWindowHandle, AppContext as _, ClipboardItem, Entity, Focusable as _, HeadlessAppContext,
+    KeyBinding, WindowOptions,
+};
+use hack_desktop_term::actions::{CloseFind, Copy, Find, Paste};
 use hack_desktop_term::pty::INPUT_QUEUE_BYTES;
 use hack_desktop_term::session::{exists, is_alive};
 use hack_desktop_term::view::TerminalView;
@@ -163,4 +168,81 @@ fn quitting_the_app_ends_a_pty_session_that_ignores_hangup() {
     );
     assert!(!exists(leader), "the shell was not reaped");
     rec.done();
+}
+
+/// Focus the terminal and draw, so key events and actions are routed to it.
+fn focus(cx: &mut HeadlessAppContext, window: AnyWindowHandle, view: &Entity<TerminalView>) {
+    cx.update_window(window, |_, window, cx| {
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        window.render_frame(cx);
+    })
+    .expect("focus");
+}
+
+fn press(cx: &mut HeadlessAppContext, window: AnyWindowHandle, key: &str) {
+    cx.update_window(window, |_, window, cx| window.press(key, cx))
+        .expect("press");
+}
+
+fn find_open(cx: &mut HeadlessAppContext, view: &Entity<TerminalView>) -> bool {
+    cx.update(|cx| view.read(cx).find_open())
+}
+
+#[test]
+fn the_crate_binds_no_keys_and_copy_paste_and_find_are_actions() {
+    let home = TempHome::new();
+    let mut cx = app();
+    let opts = sh("read line; echo \"got=[$line]\"; exec sleep 120", &home);
+    let (window, view) = open(&mut cx, move |cx| {
+        TerminalView::new_pty(&opts, cx).expect("spawn")
+    });
+    focus(&mut cx, window, &view);
+
+    // With nothing bound, the usual chords are only keys: they do not open
+    // find, and nothing in the crate treats them as shortcuts.
+    for chord in ["ctrl-shift-f", "cmd-f"] {
+        press(&mut cx, window, chord);
+        assert!(!find_open(&mut cx, &view), "{chord} is not a shortcut here");
+    }
+
+    // The actions do the work.
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_action(Box::new(Find), cx);
+    })
+    .unwrap();
+    assert!(find_open(&mut cx, &view), "Find opens the find field");
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_action(Box::new(CloseFind), cx);
+    })
+    .unwrap();
+    assert!(!find_open(&mut cx, &view));
+
+    // Paste: the clipboard goes to the program.
+    cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("hello-paste\n".into())));
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_action(Box::new(Paste), cx);
+    })
+    .unwrap();
+    let text = settle_until(&mut cx, &view, |t| t.contains("got=[hello-paste]"));
+    assert!(text.contains("got=[hello-paste]"), "{text:?}");
+
+    // Copy: the selection goes to the clipboard.
+    cx.update(|cx| {
+        view.update(cx, |v, _| v.emulator().select_all());
+        cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_action(Box::new(Copy), cx);
+    })
+    .unwrap();
+    let copied = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        .unwrap_or_default();
+    assert!(copied.contains("got=[hello-paste]"), "{copied:?}");
+
+    // A key becomes a shortcut only when the app binds it.
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("ctrl-shift-f", Find, Some("Terminal"))]));
+    press(&mut cx, window, "ctrl-shift-f");
+    assert!(find_open(&mut cx, &view), "bound by the app, it opens find");
 }

@@ -357,7 +357,10 @@ mod tests {
         .expect_err("open must fail");
         let leader = failure.leader.expect("the child had started");
         assert!(failure.error.to_string().contains("injected"));
+        // If it was left running, this handle ends it when the test unwinds.
+        let mut rec = Recorded::session(leader.unsigned_abs());
         assert_no_trace(leader, "reader spawn failure");
+        rec.done();
     }
 
     #[test]

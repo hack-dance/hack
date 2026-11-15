@@ -670,8 +670,12 @@ mod tests {
                 "{:?}",
                 failure.error
             );
+            // If it was left running, this handle ends it when the test
+            // unwinds; the assertion itself only reports.
+            let mut rec = Recorded::session(leader.unsigned_abs());
             // Killed and reaped before the error returned: not even a zombie.
             assert_no_trace(leader, &format!("spawn failure after {ok} threads"));
+            rec.done();
         }
     }
 

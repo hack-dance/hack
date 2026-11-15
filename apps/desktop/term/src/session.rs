@@ -78,22 +78,6 @@ pub fn exists(pid: libc::pid_t) -> bool {
     rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Whether `pid` is a child of this process that has not been reaped. Such
-/// a pid is anchored: it cannot have been reused.
-#[cfg(test)]
-pub(crate) fn is_own_child(pid: libc::pid_t) -> bool {
-    // SAFETY: siginfo_t is plain old data; WNOWAIT leaves the child waitable.
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    libc::id_t::try_from(pid).is_ok_and(|id| unsafe {
-        libc::waitid(
-            libc::P_PID,
-            id,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        ) == 0
-    })
-}
-
 /// How a session leader ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitInfo {

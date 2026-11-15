@@ -18,10 +18,12 @@
 //! a plain shell. The stand-in can pretend the container has no `bash`
 //! (the default), which shows the fallback to `sh`.
 //!
-//! Keys in this example (the crate itself binds none): ctrl-` toggle the
-//! panel, ctrl-shift-t new host shell, ctrl-shift-w close tab,
-//! ctrl-pagedown / ctrl-pageup next / previous tab, ctrl-shift-m maximize,
-//! ctrl-shift-f find. Closing the window ends every session.
+//! The crate binds no keys. This example binds the ones in the app's design
+//! (`bind_keys` below): toggle panel ⌘J / Ctrl-Shift-J, new tab ⌘T /
+//! Ctrl-Shift-T, close tab ⌘W / Ctrl-Shift-W, next and previous tab ⌘⇧] and
+//! ⌘⇧[ / Ctrl-Shift-PageDown and Ctrl-Shift-PageUp, maximize ⌘⇧↩ /
+//! Ctrl-Shift-Enter, find ⌘F / Ctrl-Shift-F, copy and paste ⌘C and ⌘V /
+//! Ctrl-Shift-C and Ctrl-Shift-V. Closing the window ends every session.
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +34,9 @@ use gpui_kit::{
     px, size,
 };
 use hack_desktop_term::actions::{
-    CloseTab, Find, NewTab, NextTab, PrevTab, ToggleMaximize, TogglePanel,
+    CloseFind, CloseTab, Copy, Find, FindNewer, FindOlder, NewTab, NextTab, Paste, PrevTab,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ToggleFollow, ToggleMaximize,
+    TogglePanel,
 };
 use hack_desktop_term::ghostty_config::{ConfigEnv, GhosttyLook};
 use hack_desktop_term::launch::{
@@ -384,10 +388,14 @@ impl Render for Spike {
                         .child("Project content"),
                 )
                 .child(cli_note)
-                .child(
-                    "ctrl-` panel · ctrl-shift-t new host shell · ctrl-shift-w close · \
-                     ctrl-pagedown/pageup tabs · ctrl-shift-m maximize · ctrl-shift-f find",
-                )
+                .child(if cfg!(target_os = "macos") {
+                    "⌘J panel · ⌘T new host shell · ⌘W close · ⌘⇧] and ⌘⇧[ tabs · \
+                     ⌘⇧↩ maximize · ⌘F find · ⌘C and ⌘V copy and paste"
+                } else {
+                    "Ctrl-Shift-J panel · Ctrl-Shift-T new host shell · Ctrl-Shift-W close · \
+                     Ctrl-Shift-PageDown and PageUp tabs · Ctrl-Shift-Enter maximize · \
+                     Ctrl-Shift-F find · Ctrl-Shift-C and V copy and paste"
+                })
         });
         // The panel stays in the tree when hidden (it draws nothing), so
         // its actions remain reachable.
@@ -455,15 +463,50 @@ fn build(
     (spike, tabs)
 }
 
-fn bind_example_keys(cx: &mut App) {
+/// The key bindings. The first group is the table in the app's design; an
+/// app's keymap would carry the same entries. Panel and tab keys have no
+/// context, so they work wherever focus is; the rest apply in a terminal.
+fn bind_keys(cx: &mut App) {
+    const TERMINAL: Option<&str> = Some("Terminal");
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("cmd-j", TogglePanel, None),
+            KeyBinding::new("cmd-t", NewTab, None),
+            KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("cmd-shift-]", NextTab, None),
+            KeyBinding::new("cmd-shift-[", PrevTab, None),
+            KeyBinding::new("cmd-shift-enter", ToggleMaximize, None),
+            KeyBinding::new("cmd-f", Find, TERMINAL),
+            KeyBinding::new("cmd-c", Copy, TERMINAL),
+            KeyBinding::new("cmd-v", Paste, TERMINAL),
+        ]);
+    } else {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-shift-j", TogglePanel, None),
+            KeyBinding::new("ctrl-shift-t", NewTab, None),
+            KeyBinding::new("ctrl-shift-w", CloseTab, None),
+            KeyBinding::new("ctrl-shift-pagedown", NextTab, None),
+            KeyBinding::new("ctrl-shift-pageup", PrevTab, None),
+            KeyBinding::new("ctrl-shift-enter", ToggleMaximize, None),
+            KeyBinding::new("ctrl-shift-f", Find, TERMINAL),
+            KeyBinding::new("ctrl-shift-c", Copy, TERMINAL),
+            KeyBinding::new("ctrl-shift-v", Paste, TERMINAL),
+        ]);
+    }
+    // Not in the design table: this example's choices for the find field
+    // and for scrolling. `f` toggles follow in a log view unless the find
+    // field is taking text.
     cx.bind_keys([
-        KeyBinding::new("ctrl-`", TogglePanel, None),
-        KeyBinding::new("ctrl-shift-t", NewTab, None),
-        KeyBinding::new("ctrl-shift-w", CloseTab, None),
-        KeyBinding::new("ctrl-pagedown", NextTab, None),
-        KeyBinding::new("ctrl-pageup", PrevTab, None),
-        KeyBinding::new("ctrl-shift-m", ToggleMaximize, None),
-        KeyBinding::new("ctrl-shift-f", Find, None),
+        KeyBinding::new("enter", FindOlder, Some("TerminalFind")),
+        KeyBinding::new("shift-enter", FindNewer, Some("TerminalFind")),
+        KeyBinding::new("escape", CloseFind, Some("TerminalFind")),
+        KeyBinding::new("shift-pageup", ScrollPageUp, TERMINAL),
+        KeyBinding::new("shift-pagedown", ScrollPageDown, TERMINAL),
+        KeyBinding::new("pageup", ScrollPageUp, Some("TerminalLogs")),
+        KeyBinding::new("pagedown", ScrollPageDown, Some("TerminalLogs")),
+        KeyBinding::new("home", ScrollToTop, Some("TerminalLogs")),
+        KeyBinding::new("end", ScrollToBottom, Some("TerminalLogs")),
+        KeyBinding::new("f", ToggleFollow, Some("TerminalLogs && !TerminalFind")),
     ]);
 }
 
@@ -493,7 +536,7 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            bind_example_keys(cx);
+            bind_keys(cx);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
             gpui_kit::open_window(window_options(760.), cx, move |window, cx| {
                 match theme {

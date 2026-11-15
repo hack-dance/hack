@@ -77,20 +77,15 @@ pub fn wait_gone(pids: &[libc::pid_t]) -> Vec<libc::pid_t> {
     }
 }
 
-/// Assert that `pid`, a child this test recorded, is gone without leaving a
-/// zombie. On failure the child is killed first, but only if it is provably
-/// still ours: an unreaped child of this process, whose pid is anchored.
+/// Assert that `pid`, a process this test recorded, is gone without
+/// leaving a zombie. It only reports: it never signals a pid. A test that
+/// may leave something running holds a handle to it (a [`Recorded`]
+/// session, which cleans up through pidfds).
 pub fn assert_no_trace(pid: libc::pid_t, what: &str) {
-    if crate::session::exists(pid) {
-        if crate::session::is_own_child(pid) {
-            // SAFETY: an unreaped child of this process; its pid cannot have
-            // been reused.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
-        }
-        panic!("{what}: pid {pid} was left behind");
-    }
+    assert!(
+        !crate::session::exists(pid),
+        "{what}: pid {pid} was left behind"
+    );
 }
 
 /// A session this test started. If the test fails before its own teardown,

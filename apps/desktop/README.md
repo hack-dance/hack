@@ -304,7 +304,10 @@ bounded, memory-only exit/error feedback followed by fresh checks. Install requi
 otherwise the card explains why and links to documentation. Availability is checked
 again immediately before install; an unavailable or unconfirmed manager is refused
 before an install command is submitted. Admin cards offer **Copy
-command** and **Open Terminal**. The private one-use `.command` script quotes every
+command** and **Open Terminal**. Both run later, outside the app, so the bound
+command's PATH keeps only directories no other user can change (owner- or
+root-owned, not group- or other-writable, with Doctor's ancestry and ACL rule;
+`/usr/bin:/bin` when none remain). The private one-use `.command` script quotes every
 argument, prints the command and waits for Enter. Afterward it shows the exit code
 and waits for Enter to close, preserving output and the command’s exit code. macOS requests a new window
 of the system Terminal through `open -g -a /System/Applications/Utilities/Terminal.app`

@@ -184,10 +184,10 @@ fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
     let hack = home.join("hack");
     test_support::script(
         &hack,
-        "#!/bin/sh\nprintf '%s' \"$*\" > \"$HACK_HOME/called\"\nif [ \"$2\" = restart ]; then echo 'daemon could not restart' >&2; exit 1; fi\n",
+        "#!/bin/sh\nprintf '%s' \"$*\" > \"$HACK_HOME/called\"\nprintf '%s' \"${HACK_MCP_COMMAND-unset}\" > \"$HACK_HOME/self\"\nif [ \"$2\" = restart ]; then echo 'daemon could not restart' >&2; exit 1; fi\n",
     );
     let source = LiveSource {
-        runner: CliRunner::new(hack)
+        runner: CliRunner::new(hack.clone())
             .with_env("HOME", home.to_str().unwrap())
             .with_env("HACK_HOME", home.to_str().unwrap())
             .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
@@ -198,6 +198,11 @@ fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
     assert_eq!(
         std::fs::read_to_string(home.join("called")).unwrap(),
         "daemon start"
+    );
+    // The daemon the CLI starts runs the selected CLI, not PATH's `hack`.
+    assert_eq!(
+        std::fs::read_to_string(home.join("self")).unwrap(),
+        hack.to_str().unwrap()
     );
     let error = source.recover_daemon(DaemonRecovery::Restart).unwrap_err();
     assert!(error.contains("daemon could not restart"));

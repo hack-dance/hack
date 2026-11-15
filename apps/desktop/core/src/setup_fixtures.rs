@@ -43,6 +43,11 @@ pub fn load(name: &str) -> Option<Report> {
     let machine = DoctorRun::machine(Ok(DoctorReport {
         checks: vec![
             DoctorCheck {
+                id: "docker daemon".into(),
+                status: "ok".into(),
+                detail: "Docker is running".into(),
+            },
+            DoctorCheck {
                 id: "linux dns route".into(),
                 status: "ok".into(),
                 detail: "Host DNS configured".into(),

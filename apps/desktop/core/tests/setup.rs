@@ -35,6 +35,26 @@ fn derive(
         platform,
     )
 }
+/// Docker readiness comes from the machine Doctor run with the app's
+/// checked selectors, never from a running hackd's own `runtime_ok`.
+#[test]
+fn docker_card_uses_the_checked_doctor_run_not_the_daemon() {
+    let docker = |runs: &[DoctorRun]| {
+        let r = derive(runs, Platform::Linux, serde_json::json!({}), None);
+        let card = r.cards.into_iter().find(|c| c.id == "docker").unwrap();
+        (card.status, card.detail)
+    };
+    // The daemon says runtime_ok, but the selected engine is down.
+    let (status, detail) = docker(&[machine(&[("docker daemon", "error")])]);
+    assert_eq!(status, Status::NeedsAttention, "{detail}");
+    assert_eq!(
+        docker(&[machine(&[("docker daemon", "ok")])]).0,
+        Status::Passed
+    );
+    // No Doctor evidence: the daemon's runtime_ok alone proves nothing.
+    assert_eq!(docker(&[machine(&[])]).0, Status::Unknown);
+    assert_eq!(docker(&[]).0, Status::Unknown);
+}
 #[test]
 fn export_is_not_trust_and_absence_not_pass() {
     let r = derive(

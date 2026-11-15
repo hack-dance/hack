@@ -40,10 +40,17 @@ contacts hackd, Docker or a VM.
 | `upgrade_command` | The argv to run in a terminal, only when `available` is `true` and this install has a supported path: the `hack-next` launcher → its manager's `upgrade --version`; stable Homebrew → `brew upgrade hack-dance/tap/hack`; stable standalone → that binary's `update`. Otherwise `null`, including other candidate launchers (such as a bundle's `hack-v5`) and next-channel Homebrew or standalone installs, whose update paths install stable. |
 | `reason` | `null` when `latest` and `available` are known; else `network-unavailable`, `release-unavailable` (error response, no matching release, an unexpected tag, or a full next-channel page that cannot rule out a newer release) or `version-unrecognized` (a version other than `X.Y.Z` or `X.Y.Z-next.N`). |
 
-The release list is ordered by creation, not version, and the check reads one
-page. A newer candidate on that page is reported as available. "Not available"
-is reported only when the page is not full or contains the running version's own
-release, so every release created after it is on the page.
+The release list is ordered by creation time, not version, and the check reads
+one page. A newer candidate on that page is reported as available. "Not
+available" is reported only when the page is not full or contains the running
+version's own release, so every release created after it is on the page.
+
+Known false negative: GitHub's creation time is when the release (or its draft)
+was created. A newer candidate whose release was created *before* the running
+version's release, and that a full page has pushed onto page two, is not seen;
+the check then reports `available: false`. Hack's release workflow creates
+releases in version order, so this needs a release drafted out of order. Treat
+`available: false` as "no newer release in the current listing", not proof.
 
 Unknown is not "up to date": an offline machine reports `available: null`, still
 with exit 0, because the observation itself succeeded. `upgrade_command` is

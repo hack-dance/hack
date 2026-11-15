@@ -90,10 +90,11 @@ type LatestOutcome =
       readonly ok: true;
       readonly version: string;
       /**
-       * Whether "nothing newer" can be trusted. The list is ordered by creation,
-       * not version, so one page proves it only when the page is not full or
-       * contains the running version's own release (everything created later
-       * is then on the page).
+       * Whether "nothing newer" can be reported. The list is ordered by
+       * creation, not version. A page that is not full is the whole list; a
+       * full page holding the running version's own release holds everything
+       * created after it. Accepted false negative (documented): a newer release
+       * created before the running one and pushed off a full page is missed.
        */
       readonly settled: boolean;
     }

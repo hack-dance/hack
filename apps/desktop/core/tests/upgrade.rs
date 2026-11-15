@@ -262,3 +262,95 @@ fn contradictory_grouped_plan_steps_make_the_report_unreadable() {
         assert!(!r.ready(), "case {kind}");
     }
 }
+
+/// Copied commands carry the reviewed home, backend and guards, not just the
+/// executable, and are offered only when the review kept its context.
+#[test]
+fn copied_commands_are_bound_to_the_reviewed_context_or_not_offered() {
+    let mut observation = fixtures::load("ready").unwrap().observation;
+    observation.context = Some(
+        hack_desktop_core::execution::ExecutionContext::from_values(&[
+            ("HOME".into(), "/example/home".into()),
+            ("HACK_HOME".into(), "/example/isolated".into()),
+            ("HACK_RUNTIME_BACKEND".into(), "native".into()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ])
+        .unwrap(),
+    );
+    let args = vec!["upgrade".to_owned(), "snapshot".to_owned()];
+    let command = observation.copy_command(&args).unwrap();
+    assert!(
+        command.starts_with("'/usr/bin/env' '-i' 'HOME=/example/home'"),
+        "{command}"
+    );
+    for part in [
+        "'HACK_HOME=/example/isolated'",
+        "'HACK_RUNTIME_BACKEND=native'",
+        "'HACK_DAEMON_AUTOSTART_DISABLE=1'",
+        "'/example/bin/hack' 'upgrade' 'snapshot'",
+    ] {
+        assert!(command.contains(part), "{part} missing from {command}");
+    }
+    observation.context = None;
+    assert_eq!(observation.copy_command(&args), None);
+}
+
+/// A grouped step with no shared argv still shows each checkout's own
+/// instruction and quoted, context-bound command.
+#[test]
+fn grouped_steps_show_each_checkout_action_and_command() {
+    let observation = fixtures::load("ready").unwrap().observation;
+    let target = |scope: &str, args: Option<Vec<String>>, action: Option<&str>| PlanTarget {
+        scope: scope.into(),
+        project: scope.into(),
+        root: format!("/example/{scope}"),
+        status: "warn".into(),
+        args,
+        action: action.map(Into::into),
+    };
+    let step = Step {
+        id: "project-store".into(),
+        scope: "projects".into(),
+        why: "Project stores need review".into(),
+        args: None,
+        action: Some("Run each checkout's own command.".into()),
+        count: 2,
+        targets: vec![
+            target(
+                "alpha",
+                Some(vec![
+                    "doctor".into(),
+                    "--path".into(),
+                    "/example/alpha".into(),
+                ]),
+                Some("Move the store in alpha"),
+            ),
+            target("beta", None, Some("Remove the stale store in beta by hand")),
+        ],
+    };
+    let rows = step.target_rows(&observation);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].scope, "alpha");
+    assert_eq!(rows[0].action.as_deref(), Some("Move the store in alpha"));
+    let command = rows[0].command.as_deref().unwrap();
+    assert!(command.starts_with("'/usr/bin/env' '-i' "), "{command}");
+    assert!(
+        command.ends_with("'/example/bin/hack' 'doctor' '--path' '/example/alpha'"),
+        "{command}"
+    );
+    assert_eq!(rows[1].scope, "beta");
+    assert_eq!(
+        rows[1].action.as_deref(),
+        Some("Remove the stale store in beta by hand")
+    );
+    assert_eq!(rows[1].command, None);
+    // Without a reviewed context, instructions stay but nothing is copyable.
+    let mut bare = observation.clone();
+    bare.context = None;
+    assert!(step.target_rows(&bare).iter().all(|r| r.command.is_none()));
+    // A single checkout's instruction is the step's own.
+    let mut single = step.clone();
+    single.targets.truncate(1);
+    single.count = 1;
+    assert!(single.target_rows(&observation).is_empty());
+}

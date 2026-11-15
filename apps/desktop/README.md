@@ -363,8 +363,19 @@ valid reports from exit 1. Only `report_version` 2 is read: every plan step must
 carry its `count` and `targets`, and a step covers the machine (no targets), one
 checkout (its name) or several (`projects`). A target must name a live checkout,
 by name and root, with exactly one finding for that step; any other report stays
-Unknown. Grouped cards list their checkouts. The hackd version comes from the socket named in the
-CLI's own read-only `daemon status --json` answer. No `update --check` probe or daily check runs. The
+Unknown. Grouped cards list each checkout with its own instruction and, when it
+has one, its own quoted command. The hackd version comes from the socket named in the
+CLI's own read-only `daemon status --json` answer.
+
+Every upgrade read and write (readiness, CLI version, daemon status, snapshot and
+rollback) runs the CLI by its checked absolute path with the same non-secret
+execution context as Setup (home, `HACK_HOME`, backend, service guards and Docker
+selectors; nothing else from the app's environment) and Doctor's private tool
+PATH: per-operation wrappers only for tools no other user can change, with
+interpreter startup variables such as `BASH_ENV` removed. If that PATH cannot be
+built, or a tool such as `docker` or `git` on PATH is in a location other users can
+change, or PATH is too long to check fully, the operation is refused before the CLI
+runs and the message names the tools. No `update --check` probe or daily check runs. The
 CLI now has a read-only update check (R14), but this desktop adapter does not
 consume it yet, so availability stays Unknown for every live install kind, including candidates and
 Homebrew. Readiness is separate from update availability. Actual Upgrade stays
@@ -382,7 +393,10 @@ With proposed R14 evidence, the fixture flow offers **Upgrade in Terminal** only
 after a complete snapshot. The authored sequence is `brew upgrade hack` followed
 by `brew upgrade --cask hack-desktop`, stopping on failure. The shared terminal
 adapter quotes each argument, displays the sequence and waits for Enter. It never
-runs finding `command` text. Plan argv may be displayed/copied only after quoting;
+runs finding `command` text. Plan argv may be displayed/copied only after quoting,
+bound like Setup's commands to the reviewed CLI and context (`/usr/bin/env -i
+HOME=… HACK_HOME=… <cli> …`), so a terminal run addresses the reviewed home,
+backend and guards. A review without a checked context offers no copy;
 R17 safe metadata and an authored allowlist are required before any plan fix can
 be run in the app. Today those cards offer Copy and documentation only. No admin
 action, password prompt, self update or relaunch happens in the app.

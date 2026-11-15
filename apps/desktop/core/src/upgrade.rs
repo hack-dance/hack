@@ -217,6 +217,48 @@ pub struct Observation {
     pub app: Option<String>,
     pub daemon: Option<String>,
     pub report: Option<Report>,
+    /// The non-secret context the review ran with. Copied commands are bound
+    /// to it so a terminal run sees the same home, backend and guards.
+    pub context: Option<crate::execution::ExecutionContext>,
+}
+impl Observation {
+    /// The reviewed CLI and context bound to `args`, quoted for copying.
+    /// Without a checked context there is nothing safe to copy.
+    pub fn copy_command(&self, args: &[String]) -> Option<String> {
+        self.context
+            .as_ref()?
+            .bind(&crate::terminal::CommandSpec {
+                program: self.cli_program.clone(),
+                args: args.to_vec(),
+            })
+            .and_then(|spec| spec.display())
+            .ok()
+    }
+}
+/// One checkout of a grouped step as shown: its name, its own instruction
+/// and its copyable command. Display only; nothing here is executed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetRow {
+    pub scope: String,
+    pub action: Option<String>,
+    pub command: Option<String>,
+}
+impl Step {
+    /// Per-checkout rows for a step covering two or more checkouts. A single
+    /// checkout's instruction and command are the step's own.
+    pub fn target_rows(&self, observation: &Observation) -> Vec<TargetRow> {
+        if self.targets.len() < 2 {
+            return Vec::new();
+        }
+        self.targets
+            .iter()
+            .map(|t| TargetRow {
+                scope: t.scope.clone(),
+                action: t.action.clone().filter(|a| !a.trim().is_empty()),
+                command: t.args.as_ref().and_then(|a| observation.copy_command(a)),
+            })
+            .collect()
+    }
 }
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Gap {

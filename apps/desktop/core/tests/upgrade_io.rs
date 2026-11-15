@@ -18,8 +18,19 @@ impl Tree {
                 .as_nanos()
         ));
         std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A private PATH directory with one trusted tool, so reads have a
+        // hermetic PATH instead of the test process's own.
+        let bin = path.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let git = bin.join("git");
+        std::fs::write(&git, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
         Self(path)
     }
+    /// Fake CLI. Only the checked context reaches it, so its inputs live
+    /// under HOME (the tree) rather than in ad hoc environment variables.
     fn runner(&self, data: &str, exit: i32) -> CliRunner {
         std::fs::write(self.0.join("data"), data).unwrap();
         let program = self.0.join("fake-cli");
@@ -29,9 +40,10 @@ impl Tree {
                 r#"#!/bin/sh
 [ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 97
 [ "$PWD" = / ] || exit 98
-printf '%s\n' "$*" >> "$CALLS"
+printf '%s\n' "$*" >> "$HOME/calls"
+printf '%s|%s|%s|%s\n' "$*" "$PATH" "${{BASH_ENV-unset}}" "$(/bin/ls "$PATH" 2>/dev/null | /usr/bin/tr '\n' ' ')" >> "$HOME/env"
 if [ "$*" = 'version --json' ]; then printf '{{"ok":true,"data":{{"schema":"hack.version.v1","version":"5.0.0"}}}}\n'; exit 0; fi
-/bin/cat "$DATA"
+/bin/cat "$HOME/data"
 exit {exit}
 "#
             ),
@@ -39,10 +51,15 @@ exit {exit}
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         CliRunner::new(program)
-            .with_env("DATA", self.0.join("data").to_str().unwrap())
-            .with_env("CALLS", self.0.join("calls").to_str().unwrap())
             .with_env("HOME", self.0.to_str().unwrap())
             .with_env("HACK_HOME", self.0.join("hack").to_str().unwrap())
+            .with_env("PATH", self.0.join("bin").to_str().unwrap())
+    }
+    fn source(&self, data: &str, exit: i32) -> LiveSource {
+        LiveSource {
+            runner: self.runner(data, exit),
+            daemon: None,
+        }
     }
 }
 impl Drop for Tree {
@@ -54,10 +71,7 @@ const REPORT: &str = r#"{"ok":true,"data":{"report_version":2,"host_probes":"ena
 #[test]
 fn nonzero_valid_check_envelope_is_retained_without_update_or_other_effects() {
     let t = Tree::new();
-    let source = LiveSource {
-        runner: t.runner(REPORT, 1),
-        daemon: None,
-    };
+    let source = t.source(REPORT, 1);
     let observation = source.upgrade_check().unwrap();
     assert!(!observation.report.unwrap().ready());
     assert_eq!(observation.cli.as_deref(), Some("5.0.0"));
@@ -87,16 +101,13 @@ fn malformed_envelopes_missing_required_fields_and_unsupported_version_are_refus
     }
     // Version 1 never shipped in a release; 3 is not yet defined.
     for version in ["1", "3"] {
-        let source = LiveSource {
-            runner: t.runner(
-                &REPORT.replace(
-                    "\"report_version\":2",
-                    &format!("\"report_version\":{version}"),
-                ),
-                0,
+        let source = t.source(
+            &REPORT.replace(
+                "\"report_version\":2",
+                &format!("\"report_version\":{version}"),
             ),
-            daemon: None,
-        };
+            0,
+        );
         assert!(source.upgrade_check().is_err());
     }
     // A version 2 plan step without its grouped fields is not an observation.
@@ -115,10 +126,7 @@ const CHECK_V2: &str = include_str!("fixtures/upgrade/check-v2.json");
 #[test]
 fn current_cli_v2_report_is_read_with_grouped_plan_targets() {
     let t = Tree::new();
-    let source = LiveSource {
-        runner: t.runner(CHECK_V2, 0),
-        daemon: None,
-    };
+    let source = t.source(CHECK_V2, 0);
     let observation = source.upgrade_check().unwrap();
     let report = observation.report.unwrap();
     assert_eq!(report.report_version, REPORT_VERSION);
@@ -160,11 +168,11 @@ fn current_cli_v2_report_is_read_with_grouped_plan_targets() {
 #[test]
 fn snapshots_and_rollback_are_explicit_and_use_exact_manifest_without_overwrite() {
     let t = Tree::new();
-    let runner = t.runner(r#"{"ok":true,"data":{"status":"created","id":"example","manifest_path":"/example/snapshots/example/manifest.json","complete":true,"gaps":[],"files":[{"path":"/example/file","label":"names only"}]}}"#,0);
-    let snapshot = upgrade_io::snapshot(&runner).unwrap();
+    let source = t.source(r#"{"ok":true,"data":{"status":"created","id":"example","manifest_path":"/example/snapshots/example/manifest.json","complete":true,"gaps":[],"files":[{"path":"/example/file","label":"names only"}]}}"#,0);
+    let snapshot = upgrade_io::snapshot(&source).unwrap();
     assert!(snapshot.manifest().is_some());
-    let runner = t.runner(r#"{"ok":true,"data":{"status":"incomplete","results":[{"path":"/example/file","status":"conflict","kept_as":"/example/file.kept","message":"File changed"}]}}"#,1);
-    let result = upgrade_io::rollback(&runner, &snapshot).unwrap();
+    let source = t.source(r#"{"ok":true,"data":{"status":"incomplete","results":[{"path":"/example/file","status":"conflict","kept_as":"/example/file.kept","message":"File changed"}]}}"#,1);
+    let result = upgrade_io::rollback(&source, &snapshot).unwrap();
     assert_eq!(
         result.results[0].kept_as.as_deref(),
         Some("/example/file.kept")
@@ -176,9 +184,9 @@ fn snapshots_and_rollback_are_explicit_and_use_exact_manifest_without_overwrite(
     );
     let mut incomplete = snapshot;
     incomplete.complete = Some(false);
-    assert!(upgrade_io::rollback(&runner, &incomplete).is_err());
+    assert!(upgrade_io::rollback(&source, &incomplete).is_err());
     assert_eq!(std::fs::read_to_string(t.0.join("calls")).unwrap(), calls);
-    let refused: Snapshot = upgrade_io::snapshot(&t.runner(
+    let refused: Snapshot = upgrade_io::snapshot(&t.source(
         r#"{"ok":true,"data":{"status":"refused","message":"refused"}}"#,
         1,
     ))
@@ -258,7 +266,7 @@ fn readiness_reads_the_daemon_version_from_the_cli_socket_path() {
 case "$*" in
 'version --json') printf '{{"ok":true,"data":{{"schema":"hack.version.v1","version":"5.0.0"}}}}\n';;
 'daemon status --json') printf '{{"status":"running","running":true,"socket_path":"{}"}}';;
-*) /bin/cat "$DATA";;
+*) /bin/cat "$HOME/data";;
 esac
 "#,
             sock.display()
@@ -269,13 +277,105 @@ esac
     std::fs::write(t.0.join("data"), REPORT).unwrap();
     let source = LiveSource {
         runner: CliRunner::new(program)
-            .with_env("DATA", t.0.join("data").to_str().unwrap())
             .with_env("HOME", t.0.to_str().unwrap())
-            .with_env("HACK_HOME", t.0.join("hack").to_str().unwrap()),
+            .with_env("HACK_HOME", t.0.join("hack").to_str().unwrap())
+            .with_env("PATH", t.0.join("bin").to_str().unwrap()),
         daemon: None,
     };
     let observation = source.upgrade_check().unwrap();
     assert_eq!(observation.daemon.as_deref(), Some("5.0.0"));
     server.join().unwrap();
     let _ = std::fs::remove_dir_all(socket_dir);
+}
+
+/// Every upgrade read and write runs the CLI with only Doctor's private
+/// wrapper PATH (alive for the whole operation) and no interpreter startup
+/// variables, and the observation keeps the context copied commands use.
+#[test]
+fn upgrade_operations_see_only_the_private_tool_path_and_no_startup_variables() {
+    let t = Tree::new();
+    let source = LiveSource {
+        runner: t.runner(REPORT, 1).with_env("BASH_ENV", "/example/startup"),
+        daemon: None,
+    };
+    let observation = source.upgrade_check().unwrap();
+    let context = observation.context.as_ref().expect("checked context");
+    assert_eq!(context.value("HACK_HOME"), t.0.join("hack").to_str());
+    assert_eq!(context.value("PATH"), t.0.join("bin").to_str());
+    let manifest = r#"{"ok":true,"data":{"status":"created","id":"example","manifest_path":"/example/snapshots/example/manifest.json","complete":true,"gaps":[],"files":[]}}"#;
+    std::fs::write(t.0.join("data"), manifest).unwrap();
+    let snapshot = source.upgrade_snapshot().unwrap();
+    std::fs::write(
+        t.0.join("data"),
+        r#"{"ok":true,"data":{"status":"restored","results":[]}}"#,
+    )
+    .unwrap();
+    source.upgrade_rollback(&snapshot).unwrap();
+    let env = std::fs::read_to_string(t.0.join("env")).unwrap();
+    let lines: Vec<_> = env.lines().collect();
+    assert_eq!(lines.len(), 5, "{env}");
+    for line in lines {
+        let [args, path, bash_env, listing] = line.splitn(4, '|').collect::<Vec<_>>()[..] else {
+            panic!("unexpected receipt: {line}");
+        };
+        assert!(
+            !path.contains(':'),
+            "{args}: one private directory, got {path}"
+        );
+        let dir = std::path::Path::new(path);
+        assert!(
+            dir.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("hack-desktop-tools-"),
+            "{args}: {path}"
+        );
+        assert_ne!(dir, t.0.join("bin"));
+        assert_eq!(bash_env, "unset", "{args}");
+        assert_eq!(
+            listing.trim(),
+            "git",
+            "{args}: wrappers exist while the CLI runs"
+        );
+        assert!(!dir.exists(), "{args}: wrappers are removed afterwards");
+    }
+}
+
+#[test]
+fn an_unsafe_tool_on_path_fails_every_upgrade_operation_closed() {
+    let t = Tree::new();
+    let shared = t.0.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let docker = shared.join("docker");
+    std::fs::write(&docker, "#!/bin/sh\nexit 0\n").unwrap();
+    // Writable by other users: it cannot be trusted to stand for docker.
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let path = format!("{}:{}", shared.display(), t.0.join("bin").display());
+    let source = LiveSource {
+        runner: t.runner(REPORT, 0).with_env("PATH", &path),
+        daemon: None,
+    };
+    let error = source.upgrade_check().unwrap_err();
+    assert!(error.contains("docker"), "{error}");
+    assert!(error.contains("other users can change"), "{error}");
+    assert!(
+        !error.contains("R14") && !error.contains("Doctor"),
+        "{error}"
+    );
+    let error = source.upgrade_snapshot().unwrap_err();
+    assert!(error.contains("docker"), "{error}");
+    let complete = Snapshot {
+        status: "created".into(),
+        id: Some("example".into()),
+        manifest_path: Some("/example/snapshots/example/manifest.json".into()),
+        complete: Some(true),
+        gaps: Some(vec![]),
+    };
+    assert!(source.upgrade_rollback(&complete).is_err());
+    assert!(
+        !t.0.join("calls").exists(),
+        "the CLI never ran with an unchecked tool on PATH"
+    );
 }

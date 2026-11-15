@@ -138,6 +138,11 @@ pub fn load(name: &str) -> Option<Flow> {
             app: Some("5.0.0".into()),
             daemon: Some("5.0.0".into()),
             report: Some(report()),
+            context: crate::execution::ExecutionContext::from_values(&[
+                ("HOME".into(), "/example/home".into()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+            ])
+            .ok(),
         },
         ..Flow::default()
     };

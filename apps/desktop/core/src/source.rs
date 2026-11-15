@@ -361,14 +361,14 @@ pub(crate) fn trusted_interpreter(real: &Path, uid: u32, depth: u8, wrapper_path
 /// Wrappers exec the original absolute path so shims keep their normal $0.
 /// No credential/context values are stored. Drop removes only this owned scratch.
 #[derive(Debug)]
-struct ProbeTools {
+pub(crate) struct ProbeTools {
     dir: PathBuf,
-    coverage: Option<&'static str>,
-    unchecked: std::collections::BTreeSet<&'static str>,
+    pub(crate) coverage: Option<&'static str>,
+    pub(crate) unchecked: std::collections::BTreeSet<&'static str>,
 }
 
 impl ProbeTools {
-    fn path(&self) -> &std::ffi::OsStr {
+    pub(crate) fn path(&self) -> &std::ffi::OsStr {
         self.dir.as_os_str()
     }
 }
@@ -379,7 +379,7 @@ impl Drop for ProbeTools {
     }
 }
 
-fn trusted_probe_path(path: &std::ffi::OsStr) -> Result<ProbeTools, String> {
+pub(crate) fn trusted_probe_path(path: &std::ffi::OsStr) -> Result<ProbeTools, String> {
     trusted_probe_path_with_limits(path, 64, 8192)
 }
 
@@ -806,13 +806,13 @@ impl Source for LiveSource {
         crate::upgrade_io::check(self)
     }
     fn upgrade_snapshot(&self) -> Result<crate::upgrade::Snapshot, String> {
-        crate::upgrade_io::snapshot(&self.runner)
+        crate::upgrade_io::snapshot(self)
     }
     fn upgrade_rollback(
         &self,
         snapshot: &crate::upgrade::Snapshot,
     ) -> Result<crate::upgrade::Rollback, String> {
-        crate::upgrade_io::rollback(&self.runner, snapshot)
+        crate::upgrade_io::rollback(self, snapshot)
     }
 
     fn cli_program(&self) -> Result<String, String> {

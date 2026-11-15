@@ -1,5 +1,10 @@
 //! Bounded CLI-only adapters. No file bytes, keys, automatic updates or admin fixes.
-use crate::{runner::CliRunner, source::LiveSource, upgrade::*};
+use crate::{
+    execution::ExecutionContext,
+    runner::CliRunner,
+    source::{LiveSource, ProbeTools, trusted_probe_path},
+    upgrade::*,
+};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 
@@ -29,61 +34,116 @@ pub fn read<T: DeserializeOwned>(runner: &CliRunner, args: &[&str]) -> Result<T,
         .data
         .ok_or_else(|| "The CLI returned no upgrade report".into())
 }
+/// One checked CLI operation: the resolved executable, the non-secret
+/// execution context it runs with, and a runner bound to both plus Doctor's
+/// private tool PATH. The wrapper directory lives as long as this value, so
+/// keep it alive until every child of the operation has exited.
+struct Checked {
+    runner: CliRunner,
+    program: String,
+    context: ExecutionContext,
+    _tools: ProbeTools,
+}
+
+/// Bind the selected CLI to the checked context. Its children (docker, git
+/// and other tools) resolve only through wrappers for executables no other
+/// user can change, with interpreter startup variables removed. Anything
+/// that cannot be established refuses the operation before the CLI runs.
+fn checked(source: &LiveSource) -> Result<Checked, String> {
+    let program = source
+        .runner
+        .resolve_program()
+        .map_err(|_| "The Hack CLI is unavailable or in a location other users can change")?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "The Hack CLI path is not UTF-8")?;
+    let context = ExecutionContext::capture(&source.runner)?;
+    let tools = trusted_probe_path(std::ffi::OsStr::new(
+        context.value("PATH").unwrap_or_default(),
+    ))
+    .map_err(|_| "Could not prepare a private tool PATH, so the CLI was not run")?;
+    if tools.coverage.is_some() {
+        return Err(
+            "PATH has too many entries to check every tool, so the CLI was not run. Shorten PATH, then check again."
+                .into(),
+        );
+    }
+    if !tools.unchecked.is_empty() {
+        let names = tools
+            .unchecked
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "These tools on PATH are in locations other users can change: {names}. The CLI was not run. Fix their permissions or remove them from PATH, then check again."
+        ));
+    }
+    let tool_path = tools
+        .path()
+        .to_str()
+        .ok_or("The private tool PATH is not UTF-8, so the CLI was not run")?
+        .to_owned();
+    let runner = context
+        .runner(&program)?
+        .with_env("PATH", &tool_path)
+        .without_interpreter_startup()
+        .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .with_cwd("/");
+    Ok(Checked {
+        runner,
+        program,
+        context,
+        _tools: tools,
+    })
+}
+
 pub fn check(source: &LiveSource) -> Result<Observation, String> {
-    let report: Report = read(&source.runner, &["upgrade", "check", "--json"])?;
+    let checked = checked(source)?;
+    let report: Report = read(&checked.runner, &["upgrade", "check", "--json"])?;
     if report.report_version != REPORT_VERSION {
         return Err("This upgrade report version is not supported".into());
     }
+    let cli = checked.runner.version(Duration::from_secs(5)).ok();
+    // The injected client is a test seam; a normal launch finds the socket
+    // in the selected CLI's own read-only `daemon status` answer.
+    let status = checked
+        .runner
+        .run_raw(
+            &["daemon", "status", "--json"],
+            None,
+            Duration::from_secs(5),
+        )
+        .ok()
+        .and_then(|(out, _, _)| serde_json::from_str::<serde_json::Value>(&out).ok());
+    let daemon = source
+        .effective_daemon(status.as_ref())
+        .and_then(|d| d.status().ok())
+        .map(|d| d.version);
     Ok(Observation {
-        cli_program: source
-            .runner
-            .resolve_program()
-            .map_err(|_| "CLI unavailable")?
-            .to_string_lossy()
-            .into_owned(),
-        cli: source
-            .runner
-            .clone()
-            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .with_cwd("/")
-            .version(Duration::from_secs(5))
-            .ok(),
-        // The injected client is a test seam; a normal launch finds the socket
-        // in the selected CLI's own read-only `daemon status` answer.
-        daemon: source
-            .effective_daemon(
-                source
-                    .runner
-                    .clone()
-                    .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-                    .with_cwd("/")
-                    .run_raw(
-                        &["daemon", "status", "--json"],
-                        None,
-                        Duration::from_secs(5),
-                    )
-                    .ok()
-                    .and_then(|(out, _, _)| serde_json::from_str::<serde_json::Value>(&out).ok())
-                    .as_ref(),
-            )
-            .and_then(|d| d.status().ok())
-            .map(|d| d.version),
+        cli_program: checked.program,
+        cli,
+        daemon,
         // No verified R14 install/target evidence: never probe update --check or
         // infer Homebrew ownership from PATH/current version. No daily poll.
         app: None,
         report: Some(report),
+        // Copied commands carry the same home, backend and guards as this read.
+        context: Some(checked.context),
     })
 }
-pub fn snapshot(runner: &CliRunner) -> Result<Snapshot, String> {
-    read(runner, &["upgrade", "snapshot", "--json"])
+pub fn snapshot(source: &LiveSource) -> Result<Snapshot, String> {
+    let checked = checked(source)?;
+    read(&checked.runner, &["upgrade", "snapshot", "--json"])
 }
-pub fn rollback(runner: &CliRunner, snapshot: &Snapshot) -> Result<Rollback, String> {
+pub fn rollback(source: &LiveSource, snapshot: &Snapshot) -> Result<Rollback, String> {
     let path = snapshot
         .manifest()
         .ok_or("A complete snapshot is required")?;
+    let checked = checked(source)?;
     // No --overwrite. The CLI owns validation and conflict preservation.
     read(
-        runner,
+        &checked.runner,
         &["upgrade", "rollback", "--rollback-manifest", path, "--json"],
     )
 }

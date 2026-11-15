@@ -9,7 +9,7 @@ use gpui_kit::{
     AnyElement, ClipboardItem, Context, FontWeight, IntoElement, ParentElement, Styled, div,
     prelude::*,
 };
-use hack_desktop_core::upgrade::{Flow, State, display_step};
+use hack_desktop_core::upgrade::{Flow, State};
 pub fn render(flow: &Flow, machine_busy: bool, cx: &mut Context<HackApp>) -> AnyElement {
     let t = cx.theme().clone();
     let busy = machine_busy || flow.busy;
@@ -100,30 +100,39 @@ pub fn render(flow: &Flow, machine_busy: bool, cx: &mut Context<HackApp>) -> Any
                 )))
                 .child(div().text_sm().child(step.why.clone()));
             if step.targets.len() > 1 {
-                let names: Vec<&str> = step.targets.iter().map(|t| t.scope.as_str()).collect();
-                card = card.child(div().text_xs().child(format!(
-                    "{} checkouts: {}",
-                    step.count,
-                    names.join(", ")
-                )));
+                card = card.child(div().text_xs().child(format!("{} checkouts:", step.count)));
             }
             if let Some(action) = &step.action {
                 card = card.child(div().text_sm().child(action.clone()));
             }
+            // Copy only: the reviewed CLI bound to the reviewed context. With
+            // no checked context there is no command to offer.
             if let Some(command) = step
                 .args
                 .as_ref()
-                .and_then(|a| display_step(&flow.observation.cli_program, a).ok())
+                .and_then(|a| flow.observation.copy_command(a))
             {
-                card = card.child(div().text_xs().child(command.clone())).child(
-                    Button::new(("upgrade-copy", i))
-                        .label("Copy command")
-                        .small()
-                        .ghost()
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(command.clone()))
-                        }),
-                );
+                card = card.child(copy_row(format!("upgrade-copy-{i}"), command));
+            }
+            for (j, row) in step.target_rows(&flow.observation).into_iter().enumerate() {
+                let mut target = v_flex()
+                    .pl_3()
+                    .gap_1()
+                    .border_l_1()
+                    .border_color(t.border)
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(row.scope),
+                    );
+                if let Some(action) = row.action {
+                    target = target.child(div().text_sm().child(action));
+                }
+                if let Some(command) = row.command {
+                    target = target.child(copy_row(format!("upgrade-copy-{i}-{j}"), command));
+                }
+                card = card.child(target);
             }
             body = body.child(card);
         }
@@ -260,4 +269,20 @@ pub fn render(flow: &Flow, machine_busy: bool, cx: &mut Context<HackApp>) -> Any
                 .child(actions),
         )
         .into_any_element()
+}
+
+/// A quoted command shown in full with a copy button. Never executed here.
+fn copy_row(id: String, command: String) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .child(div().text_xs().child(command.clone()))
+        .child(
+            Button::new(id)
+                .label("Copy command")
+                .small()
+                .ghost()
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(command.clone()))
+                }),
+        )
 }

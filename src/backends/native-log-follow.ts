@@ -52,6 +52,7 @@ export function assertNativeLogFlags(options: {
   readonly compose?: boolean;
   readonly loki?: boolean;
   readonly services?: string;
+  readonly maxLineBytes?: number;
   readonly query?: string;
   readonly since?: string;
   readonly until?: string;
@@ -60,17 +61,18 @@ export function assertNativeLogFlags(options: {
   readonly noFollow?: boolean;
   readonly timestamps?: boolean;
 }): void {
-  for (const name of [
-    "profile",
-    "compose",
-    "loki",
-    "services",
-    "query",
-    "until",
-    "pretty",
+  for (const [name, flag] of [
+    ["profile", "--profile"],
+    ["compose", "--compose"],
+    ["loki", "--loki"],
+    ["services", "--services"],
+    ["maxLineBytes", "--max-line-bytes"],
+    ["query", "--query"],
+    ["until", "--until"],
+    ["pretty", "--pretty"],
   ] as const) {
     if (options[name] !== undefined && options[name] !== false) {
-      throw new CliUsageError(`Native logs do not support --${name}.`);
+      throw new CliUsageError(`Native logs do not support ${flag}.`);
     }
   }
   if (options.follow && options.noFollow) {

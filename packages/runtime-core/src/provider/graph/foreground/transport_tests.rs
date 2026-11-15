@@ -1,4 +1,5 @@
 use super::*;
+use crate::owned_tmp_root::OwnedTmpRoot;
 use serde_json::json;
 
 #[test]
@@ -6,9 +7,9 @@ fn publication_refuses_a_replaced_operation_lock_and_preserves_it() {
     let fixture = super::super::super::tests::Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();
     let run = "a".repeat(32);
+    let directory = OwnedTmpRoot::new(root(&candidate, &run).unwrap());
     let publication = Publication::bind(&candidate, &run).unwrap();
     publication.verify().unwrap();
-    let directory = root(&candidate, &run).unwrap();
     fs::rename(
         directory.join("operation.lock"),
         directory.join("original.lock"),
@@ -30,8 +31,11 @@ fn pool_gate_excludes_publication_before_engine_for_every_run() {
     let fixture = super::super::super::tests::Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();
     let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
+    let _roots = ["a".repeat(32), "b".repeat(32)]
+        .map(|run| OwnedTmpRoot::new(root(&candidate, &run).unwrap()));
     for run in ["a".repeat(32), "b".repeat(32)] {
         assert!(Publication::bind(&candidate, &run).is_err());
+        // owner-root: path-only
         assert!(!root(&candidate, &run).unwrap().exists());
     }
     gate.verify(&candidate).unwrap();
@@ -41,9 +45,6 @@ fn pool_gate_excludes_publication_before_engine_for_every_run() {
     let mut second = Publication::bind(&candidate, &"b".repeat(32)).unwrap();
     first.finish().unwrap();
     second.finish().unwrap();
-    for run in ["a".repeat(32), "b".repeat(32)] {
-        fs::remove_dir_all(root(&candidate, &run).unwrap()).unwrap();
-    }
 }
 
 #[test]
@@ -84,12 +85,12 @@ fn abandoned_publisher() -> (
     Candidate,
     String,
     String,
-    PathBuf,
+    OwnedTmpRoot,
 ) {
     let fixture = super::super::super::tests::Fixture::new();
     let candidate = Candidate::discover(&fixture.0).unwrap();
     let run = "a".repeat(32);
-    let root = root(&candidate, &run).unwrap();
+    let root = OwnedTmpRoot::new(root(&candidate, &run).unwrap());
     let publication = Publication::bind(&candidate, &run).unwrap();
     let mut record: Record = state::read(&root.join("owner.json")).unwrap();
     drop(publication);
@@ -151,7 +152,7 @@ fn recovered_retirement_child() {
     drop(retired);
     retire_recovered_publisher(&candidate, &run, &owner, &receipt).unwrap();
     assert!(retire_recovered_publisher(&candidate, &run, &owner, &"e".repeat(64)).is_err());
-    fs::remove_dir_all(root).unwrap();
+    drop(root);
 }
 
 #[cfg(target_os = "macos")]
@@ -169,8 +170,8 @@ fn cleanup_fence_child() {
         let receipt = "f".repeat(64);
         let before = fs::read(directory.join("owner.json")).unwrap();
         let sibling_run = "b".repeat(32);
+        let sibling_root = OwnedTmpRoot::new(root(&candidate, &sibling_run).unwrap());
         let mut sibling = Publication::bind(&candidate, &sibling_run).unwrap();
-        let sibling_root = root(&candidate, &sibling_run).unwrap();
         let sibling_before = fs::read(sibling_root.join("owner.json")).unwrap();
         let lock = state::Lock::acquire_existing(&directory).unwrap();
         let calls = std::cell::Cell::new(0);
@@ -276,9 +277,9 @@ fn cleanup_fence_child() {
         );
         sibling.verify().unwrap();
         sibling.finish().unwrap();
-        fs::remove_dir_all(sibling_root).unwrap();
+        drop(sibling_root);
         drop(lock);
-        fs::remove_dir_all(directory).unwrap();
+        drop(directory);
     }
 }
 
@@ -323,7 +324,7 @@ fn retired_pending_proof_child() {
     fs::rename(root.join("owner.json"), &record).unwrap();
     verify().unwrap();
     drop(retired);
-    fs::remove_dir_all(root).unwrap();
+    drop(root);
 }
 
 #[cfg(target_os = "macos")]
@@ -371,7 +372,7 @@ fn retired_identity_recheck_child() {
         assert!(saved.exists());
         drop(listener);
         drop(retired);
-        fs::remove_dir_all(root).unwrap();
+        drop(root);
     }
 }
 
@@ -406,7 +407,7 @@ fn interrupted_socket_move_child() {
     drop(lock);
     retire_recovered_publisher(&candidate, &run, &owner, &receipt).unwrap();
     assert!(Retired::acquire(&candidate, &run).unwrap().is_some());
-    fs::remove_dir_all(root).unwrap();
+    drop(root);
 
     let (_fixture, candidate, run, owner, root) = abandoned_publisher();
     let receipt = "f".repeat(64);
@@ -431,7 +432,7 @@ fn interrupted_socket_move_child() {
     drop(lock);
     assert!(retire_recovered_publisher(&candidate, &run, &owner, &receipt).is_err());
     assert_eq!(fs::read(root.join("owner.json")).unwrap(), b"foreign");
-    fs::remove_dir_all(root).unwrap();
+    drop(root);
 }
 
 #[cfg(target_os = "macos")]
@@ -489,7 +490,7 @@ fn legacy_device_socket_move_child() {
             .is_err()
     );
     drop(retired);
-    fs::remove_dir_all(root).unwrap();
+    drop(root);
 }
 
 #[cfg(target_os = "macos")]
@@ -517,7 +518,7 @@ fn dead_owner_guard_child() {
     drop(dead);
     fs::remove_file(&pathname).unwrap();
     fs::rename(&saved, &pathname).unwrap();
-    fs::remove_dir_all(root).unwrap();
+    drop(root);
 }
 
 #[cfg(target_os = "macos")]
@@ -530,7 +531,7 @@ fn replaced_socket_or_inherited_listener_refuses_retirement() {
     assert!(retire_recovered_publisher(&candidate, &run, &owner, &"f".repeat(64)).is_err());
     assert!(root.join("owner.json").is_file());
     drop(foreign);
-    fs::remove_dir_all(root).unwrap();
+    drop(root);
 
     let (_fixture, candidate, run, _owner, root) = abandoned_publisher();
     let socket = root.join("control.sock");
@@ -545,7 +546,7 @@ fn replaced_socket_or_inherited_listener_refuses_retirement() {
     assert!(retire_recovered_publisher(&candidate, &run, &owner, &"f".repeat(64)).is_err());
     assert!(socket.exists());
     drop(inherited);
-    fs::remove_dir_all(root).unwrap();
+    drop(root);
 }
 
 #[test]

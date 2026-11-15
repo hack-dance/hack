@@ -11,6 +11,10 @@ Inspect masked values and provenance rather than printing credentials. Scope
 values to the intended service/overlay. A linked worktree can inherit the primary
 checkout's key; a separate host needs its own approved runtime delivery mechanism.
 
+`hack env list --json` reports `key_state` (`ok`, `missing`, `unreadable` or
+`not_checked`), so a script or app can tell whether this checkout can read the
+project key without printing it. See [Environment and secrets](../../env.md).
+
 For encrypted-file storage, possession of the project key grants decryption of
 values encrypted with it. Keep an approved backup separate from the repository.
 Git access and secret access are different grants. Removing someone's repository

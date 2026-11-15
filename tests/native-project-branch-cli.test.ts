@@ -15,6 +15,7 @@ import {
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 
 // Each case spawns the source CLI (bounded at 10 s below) one or more times; a cold
@@ -74,6 +75,7 @@ async function fixture(approveSource = false) {
   await writeFile(
     binary,
     `#!/bin/sh
+${nativeSetupShellReply()}
 if [ "$4" = "check-project-share" ]; then
   touch "$HOME/preflight-ran"
   ${approveSource ? `printf '%s\\n' '{"source_admitted":true,"pool_initialized":false}'\n  exit 0` : "exit 71"}

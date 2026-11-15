@@ -383,7 +383,7 @@ Each is small enough for one PR.
 10. **R7b — exists.** `hack doctor --fix --only <id> --yes --json` executes one allowlisted safe fix and rechecks it. Initially only `hack gitignore` is safe; other IDs and mixed modes refuse before writes. Results use `{ok,data:{schema:1,checks,summary,counts,fix}}`; `fix` records `id`, `changed`, `confirmed`.
 11. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
 12. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
-13. **R9** (optional) Push updates: `GET /v1/projects?wait=<generated_at>` long-poll.
+13. **R9 — exists** Push updates: `GET /v1/projects?wait=<state_token>&wait_timeout_ms=<ms>` long-poll ([waiting for changes](../../docs/reference/project-state.md#waiting-for-changes)). `generated_at` changes on every response, so the marker is the response's `state_token`, a digest that ignores per-response and refresh-timestamp fields. Answers on change, or at the timeout (default 25 s, max 55 s).
 14. **R10 — exists** Env key state: `key_state: ok | missing | unreadable | not_checked` in `hack env list --json` (no values). `not_checked` is the legacy `hack.env.json` contract. The payload keeps its published bare-object shape; no envelope was added.
 15. **R11** Admin argv plan: `hack global install|trust --plan --json` listing the root-only argv lines.
 16. **R12a** Always-on persistence and `hack autostart add|remove|list|pause|resume` ([section 6](#6-always-on-hack-2213-proposed-contract)).

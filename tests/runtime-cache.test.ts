@@ -961,3 +961,38 @@ test("an event refresh retains known job completion and publishes a subsequent c
     false,
   ]);
 });
+
+test("nextRefresh wakes on a completed refresh, its deadline or an abort", async () => {
+  const cache = createRuntimeCache({});
+  const never = new AbortController().signal;
+
+  let woke = false;
+  const waiting = cache
+    .nextRefresh({ signal: never, deadlineMs: Date.now() + 60_000 })
+    .then(() => {
+      woke = true;
+    });
+  await Bun.sleep(5);
+  expect(woke).toBe(false);
+  await cache.refresh({ reason: "test" });
+  await waiting;
+  expect(woke).toBe(true);
+
+  const started = Date.now();
+  await cache.nextRefresh({ signal: never, deadlineMs: Date.now() + 20 });
+  expect(Date.now() - started).toBeLessThan(5000);
+
+  const controller = new AbortController();
+  const aborted = cache.nextRefresh({
+    signal: controller.signal,
+    deadlineMs: Date.now() + 60_000,
+  });
+  controller.abort();
+  await aborted;
+  const already = new AbortController();
+  already.abort();
+  await cache.nextRefresh({
+    signal: already.signal,
+    deadlineMs: Date.now() + 60_000,
+  });
+});

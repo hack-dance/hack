@@ -295,6 +295,7 @@ mod tests {
         State {
             version: 1,
             name: "worker".into(),
+            display_name: None,
             owner_token: "synthetic".into(),
             guard_pid: 44,
             process_group_id: 44,

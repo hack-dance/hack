@@ -1114,6 +1114,8 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
     let stop_pid = stop.id() as i32;
     // SAFETY: the stop request is this test's own child.
     assert_eq!(unsafe { libc::kill(stop_pid, libc::SIGSTOP) }, 0);
+    // Resume the stop request even if any assertion below fails first.
+    let resume = ResumeOnDrop(stop_pid);
     eventually(|| process_is_stopped(stop_pid).then_some(()));
     // SAFETY: the frozen guard belongs to this fixture.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
@@ -1122,8 +1124,6 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
     }
     // Resume stop only after the guard incarnation has no process record left,
     // zombie included, so no guard can witness a fresh capture.
-    // Resume the stop request even if an assertion below fails first.
-    let resume = ResumeOnDrop(stop_pid);
     eventually(|| (process_birth(guard) != Some(guard_birth)).then_some(()));
     drop(resume);
     let receipt = receive(stop.stdout.as_mut().unwrap());

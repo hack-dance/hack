@@ -344,6 +344,9 @@ pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<NativePin, &'static
     Ok(found.map_or(NativePin::Absent, NativePin::Adjacent))
 }
 
+/// Relative to the private wrapper directory; see [`NativePin::apply`].
+pub(crate) const UNAVAILABLE_NATIVE: &str = "native-unavailable/hack-native";
+
 /// The native runtime selection Doctor's runs use when `HACK_NATIVE_BINARY`
 /// is unset. Every variant has been checked; [`NativePin::apply`] keeps the
 /// CLI from choosing anything else.
@@ -363,7 +366,10 @@ pub(crate) enum NativePin {
 
 impl NativePin {
     /// `private_dir` must be Doctor's private wrapper directory, which only
-    /// this user can write, so the pinned unavailable path stays absent.
+    /// this user can write. The wrapper scan creates only regular files there
+    /// (named after PATH tools), so a path one level below any entry name can
+    /// never exist: the unavailable pin stays absent even if a PATH tool is
+    /// named like its first component.
     pub(crate) fn apply(&self, runner: CliRunner, private_dir: &Path) -> CliRunner {
         match self {
             Self::Selected | Self::Absent => runner,
@@ -371,7 +377,7 @@ impl NativePin {
                 Some(path) => runner.with_env("HACK_NATIVE_BINARY", path),
                 None => Self::Unavailable.apply(runner, private_dir),
             },
-            Self::Unavailable => match private_dir.join("hack-native-unavailable").to_str() {
+            Self::Unavailable => match private_dir.join(UNAVAILABLE_NATIVE).to_str() {
                 Some(path) => runner.with_env("HACK_NATIVE_BINARY", path),
                 // The wrapper PATH is required to be UTF-8 before this runs.
                 None => runner,

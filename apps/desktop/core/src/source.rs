@@ -1836,8 +1836,31 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         );
         assert_eq!(
             pinned(base(&launcher)),
-            Some(private.join("hack-native-unavailable").into())
+            Some(private.join("native-unavailable/hack-native").into())
         );
+        // A trusted PATH tool named like the pin's first component is wrapped
+        // as a file, so the pinned path still cannot exist.
+        let tools_dir = root.join("collide");
+        std::fs::create_dir(&tools_dir).unwrap();
+        std::fs::set_permissions(&tools_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for name in ["native-unavailable", "hack-native", "sh"] {
+            let tool = tools_dir.join(name);
+            std::fs::write(&tool, b"\x7fELF fixture").unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let tools = trusted_probe_path(tools_dir.as_os_str()).unwrap();
+        let wrappers = Path::new(tools.path());
+        assert!(wrappers.join("native-unavailable").is_file());
+        let pin = NativePin::Unavailable
+            .apply(base(&launcher), wrappers)
+            .env_value("HACK_NATIVE_BINARY")
+            .unwrap();
+        assert_eq!(
+            Path::new(&pin),
+            wrappers.join(crate::doctor_plugins::UNAVAILABLE_NATIVE)
+        );
+        assert!(std::fs::symlink_metadata(&pin).is_err());
+        drop(tools);
         // A compiled CLI (no #!): its own directory is the fallback.
         let compiled = root.join("compiled");
         std::fs::create_dir(&compiled).unwrap();

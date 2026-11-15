@@ -52,3 +52,25 @@ fn absent_home_override_stays_absent_and_context_does_not_rediscover_program() {
             .is_err()
     );
 }
+#[test]
+fn absolute_xdg_config_home_is_kept_and_relative_is_ignored_like_the_cli() {
+    let base = [
+        ("HOME".to_owned(), "/work/user".to_owned()),
+        ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+    ];
+    let with = |value: &str| {
+        let mut values = base.to_vec();
+        values.push(("XDG_CONFIG_HOME".into(), value.into()));
+        ExecutionContext::from_values(&values).unwrap()
+    };
+    assert_eq!(
+        with("/work/user/cfg").value("XDG_CONFIG_HOME"),
+        Some("/work/user/cfg")
+    );
+    assert_eq!(with("relative/cfg").value("XDG_CONFIG_HOME"), None);
+    let runner = with("/work/user/cfg").runner("/checked/hack").unwrap();
+    assert_eq!(
+        runner.effective_env("XDG_CONFIG_HOME").as_deref(),
+        Some(std::ffi::OsStr::new("/work/user/cfg"))
+    );
+}

@@ -295,7 +295,11 @@ Only the explicit `local ca trust` check can prove Compose trust; `caddy local c
 only proves export. Older CLIs without R16 leave trust Unknown.
 
 Setup observes with a version-matched hackd snapshot, native `ps`, `daemon status
---json`, socket status and bounded Doctor reads. CLI project listing is refused
+--json`, socket status and bounded Doctor reads. Every automatic `daemon status`
+read (Setup, project polling, the install pre-check) runs with Doctor's private
+tool PATH, interpreter startup variables removed and no `docker` at all: the
+CLI's status command would otherwise run `docker info` and the service manager
+from the ordinary PATH, although the JSON answer uses neither Docker result. CLI project listing is refused
 until R18 because it writes the registry; unavailable project coverage stays Unknown. It never observes through
 `global status`. A setup refresh has a 120-second budget (plus the bounded socket
 read); individual commands and Doctor cleanup also have deadlines. Native checks

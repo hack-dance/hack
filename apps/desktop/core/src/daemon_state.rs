@@ -168,11 +168,17 @@ pub fn observe(
             return o;
         }
     }
-    match runner.run_raw(
-        &["daemon", "status", "--json", "--no-interactive"],
-        None,
-        Duration::from_secs(15),
-    ) {
+    // An automatic read: never start Docker or unchecked tools (see
+    // `with_status_tools`).
+    let read = crate::source::with_status_tools(runner, |runner| {
+        runner.run_raw(
+            &["daemon", "status", "--json", "--no-interactive"],
+            None,
+            Duration::from_secs(15),
+        )
+    })
+    .unwrap_or_else(|why| Err(RunError::Spawn(why)));
+    match read {
         Ok((out, _, Some(0 | 1))) => match serde_json::from_str::<serde_json::Value>(&out)
             .map_err(|e| e.to_string())
             .and_then(|value| {

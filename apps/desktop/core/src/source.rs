@@ -425,6 +425,50 @@ impl Drop for ProbeTools {
     }
 }
 
+/// `hack daemon status` is read automatically (Setup, polling, the daemon
+/// card, the install pre-check). The CLI's status command also probes Docker
+/// (`docker info`) and the service manager from its PATH, though the JSON
+/// answer uses neither Docker result. `read` runs with Doctor's private
+/// wrapper PATH (only tools no other user can change), interpreter startup
+/// variables removed, and no `docker` at all, so an automatic read never
+/// starts Docker or its helpers. The wrapper directory outlives `read`.
+pub(crate) fn with_status_tools<T>(
+    runner: &CliRunner,
+    read: impl FnOnce(&CliRunner) -> T,
+) -> Result<T, String> {
+    let tools = trusted_probe_path(runner.effective_env("PATH").unwrap_or_default().as_os_str())?;
+    match std::fs::remove_file(tools.dir.join("docker")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("Could not prepare the daemon status read".into()),
+    }
+    let path = tools
+        .path()
+        .to_str()
+        .ok_or("The private tool PATH is not UTF-8")?
+        .to_owned();
+    let value = read(
+        &runner
+            .clone()
+            .with_env("PATH", &path)
+            .without_interpreter_startup(),
+    );
+    drop(tools);
+    Ok(value)
+}
+
+/// `hack daemon status --json` through [`with_status_tools`].
+pub(crate) fn read_daemon_status(
+    runner: &CliRunner,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    with_status_tools(runner, |runner| {
+        runner
+            .run_json::<serde_json::Value>(&["daemon", "status", "--json"], None, timeout)
+            .map_err(|e| e.to_string())
+    })?
+}
+
 fn trusted_probe_path(path: &std::ffi::OsStr) -> Result<ProbeTools, String> {
     trusted_probe_path_with_limits(path, 64, 8192)
 }
@@ -961,13 +1005,7 @@ impl Source for LiveSource {
         let runner = self.read_runner()?;
         let cli_version = runner.version(Duration::from_secs(5))?;
         let raw = if self.daemon.is_none() {
-            runner
-                .run_json::<serde_json::Value>(
-                    &["daemon", "status", "--json"],
-                    None,
-                    Duration::from_secs(5),
-                )
-                .ok()
+            read_daemon_status(&runner, Duration::from_secs(5)).ok()
         } else {
             None
         };
@@ -1669,6 +1707,50 @@ esac
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
+    }
+
+    /// Automatic status reads never reach a `docker` on PATH (the CLI's
+    /// status command would run `docker info`), and see only private
+    /// wrappers with startup variables removed.
+    #[test]
+    fn daemon_status_reads_never_see_docker() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack(
+            "status-no-docker",
+            r#"if command -v docker >/dev/null 2>&1; then d=yes; else d=no; fi
+printf '{"docker":"%s","path":"%s","bash_env":"%s","git":"%s"}\n' "$d" "$PATH" "${BASH_ENV-unset}" "$(command -v git >/dev/null 2>&1 && echo yes || echo no)""#,
+        );
+        let root = std::fs::canonicalize(hack.parent().unwrap()).unwrap();
+        let tools = root.join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let docker = tools.join("docker");
+        std::fs::write(&docker, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = format!(
+            "{}:{}",
+            tools.display(),
+            root.join("fixture-tools").display()
+        );
+        let runner = fixture_runner(&hack)
+            .with_env("PATH", &path)
+            .with_env("BASH_ENV", "/example/startup");
+        // Positive control: the same runner would find docker.
+        let (plain, _, _) = runner
+            .run_raw(&["x"], None, Duration::from_secs(10))
+            .unwrap();
+        assert!(plain.contains(r#""docker":"yes""#), "{plain}");
+        let seen = read_daemon_status(&runner, Duration::from_secs(10)).unwrap();
+        assert_eq!(seen["docker"], "no");
+        assert_eq!(seen["git"], "yes", "other checked tools stay available");
+        assert_eq!(seen["bash_env"], "unset");
+        let dir = seen["path"].as_str().unwrap();
+        assert!(!dir.contains(':'), "{dir}");
+        assert!(
+            !Path::new(dir).exists(),
+            "the private directory is removed after the read"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn fake_hack(tag: &str, body: &str) -> std::path::PathBuf {

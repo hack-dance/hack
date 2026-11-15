@@ -335,8 +335,8 @@ fn upgrade_operations_see_only_the_private_tool_path_and_no_startup_variables() 
         assert_eq!(bash_env, "unset", "{args}");
         assert_eq!(
             listing.trim(),
-            "git",
-            "{args}: wrappers exist while the CLI runs"
+            "dirname git",
+            "{args}: wrappers (git, plus dirname for candidate launchers) exist while the CLI runs"
         );
         assert!(!dir.exists(), "{args}: wrappers are removed afterwards");
     }

@@ -11,6 +11,7 @@ const KEYS: &[&str] = &[
     "HACK_LAUNCHD_DISABLE",
     "HACK_SYSTEMD_DISABLE",
     "HACK_DAEMON_AUTOSTART_DISABLE",
+    "HACK_HOST_PROBES_DISABLE",
     "XDG_RUNTIME_DIR",
     "XDG_CONFIG_HOME",
     "DOCKER_CONTEXT",
@@ -91,6 +92,11 @@ impl ExecutionContext {
         }
         // Observers and fixes never opt into incidental daemon autostart.
         entries.push(("HACK_DAEMON_AUTOSTART_DISABLE".into(), "1".into()));
+        // The CLI's hard deny on host probes is kept whenever it is set; a
+        // checked read or copied command must never re-enable them.
+        if get("HACK_HOST_PROBES_DISABLE").map(str::trim) == Some("1") {
+            entries.push(("HACK_HOST_PROBES_DISABLE".into(), "1".into()));
+        }
         if let Some(dir) = get("XDG_RUNTIME_DIR") {
             if !Path::new(dir).is_absolute() {
                 return Err("XDG_RUNTIME_DIR must be absolute; hand-off refused".into());

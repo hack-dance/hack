@@ -247,6 +247,20 @@ pub const DOCTOR_BUDGET: Duration = Duration::from_secs(90);
 /// The reason shown for projects the budget did not reach.
 pub const NOT_CHECKED_BUDGET: &str = "not checked (time budget)";
 
+/// Doctor and the upgrade check invoke Git read commands in registered
+/// checkouts. Repository config must never turn those observations into
+/// fsmonitor or hook execution, so these command-line config entries (which
+/// take precedence over repository config) are applied to every such run.
+pub(crate) fn git_reads_only(runner: CliRunner) -> CliRunner {
+    runner
+        .with_env("GIT_CONFIG_PARAMETERS", "")
+        .with_env("GIT_CONFIG_COUNT", "2")
+        .with_env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+        .with_env("GIT_CONFIG_VALUE_0", "false")
+        .with_env("GIT_CONFIG_KEY_1", "core.hooksPath")
+        .with_env("GIT_CONFIG_VALUE_1", "/dev/null")
+}
+
 /// Read one doctor report. Exit 1 still carries a report; a payload
 /// without a `checks` array is not a report.
 fn read_doctor(
@@ -254,16 +268,7 @@ fn read_doctor(
     root: Option<&Path>,
     timeout: Duration,
 ) -> Result<crate::models::DoctorReport, String> {
-    // Doctor invokes Git read commands. Repository config must never turn
-    // those observations into fsmonitor or hook execution.
-    let v: serde_json::Value = runner
-        .clone()
-        .with_env("GIT_CONFIG_PARAMETERS", "")
-        .with_env("GIT_CONFIG_COUNT", "2")
-        .with_env("GIT_CONFIG_KEY_0", "core.fsmonitor")
-        .with_env("GIT_CONFIG_VALUE_0", "false")
-        .with_env("GIT_CONFIG_KEY_1", "core.hooksPath")
-        .with_env("GIT_CONFIG_VALUE_1", "/dev/null")
+    let v: serde_json::Value = git_reads_only(runner.clone())
         .run_json(&["doctor", "--json"], root, timeout)
         .map_err(|e| e.to_string())?;
     if !v

@@ -42,6 +42,7 @@ impl Tree {
 [ "$PWD" = / ] || exit 98
 printf '%s\n' "$*" >> "$HOME/calls"
 printf '%s|%s|%s|%s\n' "$*" "$PATH" "${{BASH_ENV-unset}}" "$(/bin/ls "$PATH" 2>/dev/null | /usr/bin/tr '\n' ' ')" >> "$HOME/env"
+printf '%s|%s=%s|%s=%s|%s|%s\n' "${{GIT_CONFIG_COUNT-unset}}" "${{GIT_CONFIG_KEY_0-}}" "${{GIT_CONFIG_VALUE_0-}}" "${{GIT_CONFIG_KEY_1-}}" "${{GIT_CONFIG_VALUE_1-}}" "${{HACK_HOST_PROBES_DISABLE-unset}}" "${{HACK_NATIVE_BINARY-unset}}" >> "$HOME/guards"
 if [ "$*" = 'version --json' ]; then printf '{{"ok":true,"data":{{"schema":"hack.version.v1","version":"5.0.0"}}}}\n'; exit 0; fi
 /bin/cat "$HOME/data"
 exit {exit}
@@ -342,6 +343,60 @@ fn upgrade_operations_see_only_the_private_tool_path_and_no_startup_variables() 
     }
 }
 
+/// `upgrade check` runs Git in registered checkouts: every upgrade CLI run
+/// carries Doctor's command-line Git overrides (fsmonitor off, hooks to
+/// /dev/null; proved against real Git by Doctor's
+/// `doctor_git_reads_disable_repository_fsmonitor`). The CLI's host-probe hard
+/// deny survives into the checked run and copied commands, and the native
+/// runtime is pinned to the checked selection.
+#[test]
+fn upgrade_runs_keep_git_overrides_and_the_host_probe_guard() {
+    let t = Tree::new();
+    let source = LiveSource {
+        runner: t
+            .runner(REPORT, 1)
+            .with_env("HACK_HOST_PROBES_DISABLE", "1"),
+        daemon: None,
+    };
+    let observation = source.upgrade_check().unwrap();
+    let context = observation.context.as_ref().expect("checked context");
+    assert_eq!(context.value("HACK_HOST_PROBES_DISABLE"), Some("1"));
+    let copied = observation
+        .copy_command(&["upgrade".into(), "check".into()])
+        .expect("copied command");
+    assert!(copied.contains("HACK_HOST_PROBES_DISABLE=1"), "{copied}");
+    let guards = std::fs::read_to_string(t.0.join("guards")).unwrap();
+    assert!(!guards.is_empty());
+    for line in guards.lines() {
+        let [count, fsmonitor, hooks, probes, native] = line.split('|').collect::<Vec<_>>()[..]
+        else {
+            panic!("unexpected receipt: {line}");
+        };
+        assert_eq!(count, "2");
+        assert_eq!(fsmonitor, "core.fsmonitor=false");
+        assert_eq!(hooks, "core.hooksPath=/dev/null");
+        assert_eq!(probes, "1", "the host-probe hard deny reaches the CLI");
+        // The fake CLI is a #! script, so its fallback is pinned absent.
+        assert!(native.ends_with("/hack-native-unavailable"), "{native}");
+    }
+    // Without the guard the run does not invent one.
+    let t = Tree::new();
+    let source = LiveSource {
+        runner: t.runner(REPORT, 1),
+        daemon: None,
+    };
+    let observation = source.upgrade_check().unwrap();
+    assert_eq!(
+        observation
+            .context
+            .as_ref()
+            .unwrap()
+            .value("HACK_HOST_PROBES_DISABLE"),
+        None
+    );
+    let guards = std::fs::read_to_string(t.0.join("guards")).unwrap();
+    assert!(guards.lines().all(|l| l.split('|').nth(3) == Some("unset")));
+}
 #[test]
 fn an_unsafe_tool_on_path_fails_every_upgrade_operation_closed() {
     let t = Tree::new();

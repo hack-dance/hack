@@ -381,10 +381,14 @@ CLI's own read-only `daemon status --json` answer.
 
 Every upgrade read and write (readiness, CLI version, daemon status, snapshot and
 rollback) runs the CLI by its checked absolute path with the same non-secret
-execution context as Setup (home, `HACK_HOME`, backend, service guards and Docker
-selectors; nothing else from the app's environment) and Doctor's private tool
+execution context as Setup (home, `HACK_HOME`, backend, service guards, the CLI's
+`HACK_HOST_PROBES_DISABLE=1` hard deny when it is set, and Docker selectors;
+nothing else from the app's environment) and Doctor's private tool
 PATH: per-operation wrappers only for tools no other user can change, with
-interpreter startup variables such as `BASH_ENV` removed. If that PATH cannot be
+interpreter startup variables such as `BASH_ENV` removed. Like Doctor, every run
+disables repository `core.fsmonitor` and hooks through command-line Git config,
+because `upgrade check` reads Git in registered checkouts, and pins the native
+runtime Doctor checked. Copied commands keep the host-probe hard deny too. If that PATH cannot be
 built, or a tool such as `docker` or `git` on PATH is in a location other users can
 change, or PATH is too long to check fully, the operation is refused before the CLI
 runs and the message names the tools. No `update --check` probe or daily check runs. The

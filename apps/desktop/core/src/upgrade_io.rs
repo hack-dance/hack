@@ -84,19 +84,26 @@ fn checked(source: &LiveSource) -> Result<Checked, String> {
         .to_str()
         .ok_or("The private tool PATH is not UTF-8, so the CLI was not run")?
         .to_owned();
-    let runner = context
-        .runner(&program)?
-        .with_env("PATH", &tool_path)
-        .without_interpreter_startup()
-        .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-        .with_cwd("/");
-    // The checks call docker too: apply Doctor's helper and Docker preflight
-    // (local socket only, checked plugins and helpers) before anything runs.
-    crate::doctor_plugins::validate_helpers(&runner)
-        .and_then(|()| {
+    // `upgrade check` runs `git ls-files` in registered checkouts: apply
+    // Doctor's Git overrides so repository config cannot run fsmonitor or hooks.
+    let runner = crate::source::git_reads_only(
+        context
+            .runner(&program)?
+            .with_env("PATH", &tool_path)
+            .without_interpreter_startup()
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .with_cwd("/"),
+    );
+    // The checks call docker and the native runtime too: apply Doctor's
+    // helper and Docker preflight (local socket only, checked plugins and
+    // helpers) before anything runs, and pin the checked native runtime.
+    let native = crate::doctor_plugins::validate_helpers(&runner)
+        .and_then(|pin| {
             crate::doctor_plugins::validate(&crate::doctor_plugins::Discovery::from_runner(&runner))
+                .map(|()| pin)
         })
         .map_err(|why| format!("{why}. The CLI was not run."))?;
+    let runner = native.apply(runner, std::path::Path::new(tools.path()));
     Ok(Checked {
         runner,
         program,

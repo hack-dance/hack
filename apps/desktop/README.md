@@ -203,9 +203,9 @@ observations, not locks against concurrent same-user changes.
 
 ## What v0 does not do yet
 
-Logs and Activity tabs, CPU and memory, always-on, broader
-daemon controls and upgrades come in later units. The design and the CLI/daemon
-requests they need are in `DESIGN.md` (PR #800).
+The Activity tab, CPU and memory, always-on, broader daemon controls and
+upgrades come in later units. The design and the CLI/daemon requests they need
+are in `DESIGN.md` (PR #800).
 
 ## Setup
 
@@ -390,12 +390,6 @@ The paused-search fixture shows its active query in the search field. Finite
 reads for observed stopped projects include that state alongside the stream status.
 The paused fixture also demonstrates the overflow count. Pause has no timeout;
 following resumes through Resume, not automatically when scrolling to the bottom.
-
-## Not yet
-
-The Activity tab, CPU and memory, onboarding, always-on, daemon actions and
-upgrades come in later units. The design and the CLI/daemon requests they
-need are in `DESIGN.md`.
 
 ## Env tab (names only)
 

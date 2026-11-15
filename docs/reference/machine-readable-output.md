@@ -24,12 +24,12 @@ Both retain the partial plan, including its schema, at `error.detail.plan`.
 Unknown/offline state in an observation is still a successful observation;
 it is not a claim that the runtime is healthy.
 
-The previously unpublished version, observe-only project/status and admin-plan
-outputs now follow this rule. Plain `projects --json` and other published legacy
-outputs keep their shapes. A consumer must not use the new observe-only parser
-for a plain projects result. Streaming interfaces remain NDJSON and have their
-own event contracts. No published payload is silently wrapped by this change.
-The unpublished Activity output also carries `data.schema: "hack.activity.v1"`.
+The version, Activity, observe-only project/status and admin-plan outputs
+follow this rule from next.18. They first shipped in 5.0.0-next.17 with other
+shapes; the [next.18 release notes](../guides/v5-release-notes.md) say how to
+migrate. Plain `projects --json` and other older legacy outputs keep their
+shapes. A consumer must not use the new observe-only parser for a plain projects
+result. Streaming interfaces remain NDJSON and have their own event contracts.
 
 ![JSON command boundary](./machine-readable-output.svg)
 
@@ -71,6 +71,7 @@ success behavior stays covered by command-specific suites.
 | `hack env explain --json` | Legacy bare object (no `data` envelope) |
 | `hack env hydrate --json` | Legacy bare object (no `data` envelope) |
 | `hack env list --json` | Legacy bare object (no `data` envelope) |
+| `hack env migrate --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack env protect --json` | Legacy bare object (no `data` envelope) |
 | `hack exec --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack exec-sessions --json` | Legacy bare object (no `data` envelope) |
@@ -134,4 +135,5 @@ success behavior stays covered by command-specific suites.
 | `hack version --json` | Envelope; versioned `data.schema`: `hack.version.v1` |
 | `hack projects --json --observe` | Envelope; `data.schema: hack.projects.observe.v1` |
 | `hack global status --json --observe` | Envelope; `data.schema: hack.global-status.observe.v1` |
+| `hack usage --json --by-service` | Envelope; `data.schema: hack.usage.by-service.v1` |
 <!-- json-inventory:end -->

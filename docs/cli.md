@@ -207,7 +207,8 @@ Historical remote guides are excluded from the supported documentation.
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
 - A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
   from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
-  `config get`/`set`, `env ...`, `host exec`/`shell` and `project owner`/`target`/`task`, for
+  `config get`/`set`, `env ...`, `host exec`/`shell`, `usage --by-service` and
+  `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
   error envelope; without `--json` it is one closed error message, `E_PROJECT_NOT_FOUND: <message>`,
   and no stack trace. The logger decides how it looks: the console logger (`HACK_LOGGER=console`)

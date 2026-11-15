@@ -21,6 +21,19 @@ use std::{
 const GRACE: Duration = Duration::from_secs(5);
 const IDLE_TICK: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(20);
+/// Time after KILL for a stop to confirm absence.
+const CONFIRM_BOUND: Duration = Duration::from_secs(2);
+/// A stop's timers allow two TERM-to-KILL bounds: the guard path, then orphan
+/// recovery after a late guard loss. The wait outlasts those timers, so a
+/// waiter normally gets its own outcome. Admission, census and signalling run
+/// outside the timers, so it is not a hard bound: an expired wait returns an
+/// `unknown` receipt with reason `stop-lock-wait-expired` and acts on nothing.
+pub(crate) const STOP_LOCK_WAIT: Duration =
+    Duration::from_secs(2 * (GRACE.as_secs() + CONFIRM_BOUND.as_secs()) + 2);
+/// Bounded wait for a previous command owner to release its lock.
+const COMMAND_LOCK_WAIT: Duration = Duration::from_secs(10);
+/// Bounded wait for another project supervisor to release the instance lock.
+pub(crate) const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(10);
 const LINE_LIMIT: usize = 64 * 1024;
 
 #[derive(Serialize)]
@@ -32,6 +45,9 @@ pub(crate) struct Receipt {
     processes: Vec<State>,
     live_process_names: Vec<String>,
     unknown_process_names: Vec<String>,
+    /// Why a stop or status request did not complete; absent on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
 impl Receipt {
@@ -54,8 +70,118 @@ impl Receipt {
             processes,
             live_process_names,
             unknown_process_names,
+            reason: None,
         }
     }
+}
+
+/// Answer one `stop` or `status` request. Every request that reaches this
+/// point ends with exactly one framed receipt, including refusals and expired
+/// waits, so a caller can tell an incomplete request from a crash. A failure
+/// keeps the nonzero exit and reports outcome `refused` (no request was
+/// admitted) or `unknown`, with a `reason` code.
+fn control(action: &str) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    let admitted = protocol::read::<Control>(&mut std::io::stdin()).and_then(|request| {
+        protocol::validate_control(request.version, &request.root, &request.owner_token)?;
+        let root = Root::open(&request.root)?;
+        Ok((request, root))
+    });
+    let (request, root) = match admitted {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            let mut receipt = Receipt::new(0, "refused", Vec::new());
+            receipt.reason = Some("invalid-request");
+            protocol::write(&mut stdout, &receipt)?;
+            return Err(error);
+        }
+    };
+    let mut reason = "io-error";
+    let mut result = control_effects(action, &request, &root, &mut reason);
+    // Receipts are atomically replaced files, so this read is safe without the
+    // lock, also after a lock wait expired. A failed read never reports
+    // success: it keeps an earlier error, or becomes `io-error` itself.
+    let processes = match root.states() {
+        Ok(states) => states
+            .into_iter()
+            .filter(|state| state.owner_token == request.owner_token)
+            .collect(),
+        Err(error) => {
+            if result.is_ok() {
+                reason = "io-error";
+                result = Err(error);
+            }
+            Vec::new()
+        }
+    };
+    let outcome = match (&result, action) {
+        (Err(_), _) => "unknown",
+        (Ok(()), "stop") => "stopped",
+        (Ok(()), _) => "observed",
+    };
+    let mut receipt = Receipt::new(0, outcome, processes);
+    if result.is_err() {
+        receipt.reason = Some(reason);
+    }
+    protocol::write(&mut stdout, &receipt)?;
+    result
+}
+
+fn control_effects(
+    action: &str,
+    request: &Control,
+    root: &Root,
+    reason: &mut &'static str,
+) -> Result<()> {
+    let _stop_lock = if action == "stop" {
+        match root.lock_wait(".stop.lock", STOP_LOCK_WAIT) {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    // Another stop or a launch still holds the lock; act on nothing.
+                    *reason = "stop-lock-wait-expired";
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        // Status waits for a stop in progress, but never creates the lock file.
+        match root.existing_lock_wait(".stop.lock", STOP_LOCK_WAIT) {
+            Ok(lock) => lock,
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    *reason = "stop-lock-wait-expired";
+                }
+                return Err(error);
+            }
+        }
+    };
+    let mut states = Vec::new();
+    for state in root.states()? {
+        if state.owner_token == request.owner_token {
+            states.push(state);
+        } else if os::recorded_live(&state, false)? {
+            // Old terminal receipts survive renames and new generations.
+            // Guard-written terminal phases prove completed retirement;
+            // non-terminal receipts require native identity evidence.
+            *reason = "foreign-live-process";
+            return Err(refused());
+        }
+    }
+    if action == "stop" {
+        root.retire(&request.owner_token)?;
+        *reason = "stop-incomplete";
+        return stop(&states);
+    }
+    if root.assert_not_retired(&request.owner_token).is_err()
+        && states
+            .iter()
+            .any(|state| !matches!(os::observe_state(state), os::Observation::Absent))
+    {
+        *reason = "retired-owner-live";
+        return Err(refused());
+    }
+    Ok(())
 }
 
 pub fn main() -> Result<()> {
@@ -80,57 +206,7 @@ fn dispatch() -> Result<()> {
         Some("serve") => crate::incremental::serve(protocol::read(&mut std::io::stdin())?),
         Some("add") => crate::incremental::add(protocol::read(&mut std::io::stdin())?),
         Some("guard") => guard(protocol::read(&mut std::io::stdin())?),
-        Some("stop") | Some("status") => {
-            let request: Control = protocol::read(&mut std::io::stdin())?;
-            protocol::validate_control(request.version, &request.root, &request.owner_token)?;
-            let root = Root::open(&request.root)?;
-            let _stop_lock = if args[0] == "stop" {
-                Some(root.lock_wait(".stop.lock")?)
-            } else {
-                root.existing_lock_wait(".stop.lock")?
-            };
-            let mut states = Vec::new();
-            for state in root.states()? {
-                if state.owner_token == request.owner_token {
-                    states.push(state);
-                } else if os::recorded_live(&state, false)? {
-                    // Old terminal receipts survive renames and new generations.
-                    // Guard-written terminal phases prove completed retirement;
-                    // non-terminal receipts require native identity evidence.
-                    return Err(refused());
-                }
-            }
-            let result = if args[0] == "stop" {
-                root.retire(&request.owner_token)?;
-                stop(&states)
-            } else if root.assert_not_retired(&request.owner_token).is_err()
-                && states
-                    .iter()
-                    .any(|state| !matches!(os::observe_state(state), os::Observation::Absent))
-            {
-                Err(refused())
-            } else {
-                Ok(())
-            };
-            protocol::write(
-                &mut std::io::stdout(),
-                &Receipt::new(
-                    0,
-                    if result.is_err() {
-                        "unknown"
-                    } else if args[0] == "stop" {
-                        "stopped"
-                    } else {
-                        "observed"
-                    },
-                    root.states()?
-                        .into_iter()
-                        .filter(|state| state.owner_token == request.owner_token)
-                        .collect(),
-                ),
-            )?;
-            result
-        }
+        Some(action @ ("stop" | "status")) => control(action),
         _ => Err(refused()),
     }
 }
@@ -162,10 +238,10 @@ fn run(request: Launch) -> Result<()> {
     let root = Root::open(&request.root)?;
     let _instance_lock = match root.lock(".instance.lock") {
         Ok(lock) => lock,
-        Err(_) => root.lock_wait(".instance.lock")?,
+        Err(_) => root.lock_wait(".instance.lock", INSTANCE_LOCK_WAIT)?,
     };
     os::census_preflight()?;
-    let launch_lock = root.lock_wait(".stop.lock")?;
+    let launch_lock = root.lock_wait(".stop.lock", STOP_LOCK_WAIT)?;
     root.assert_not_retired(&request.owner_token)?;
     // Validate every old claim before starting any new command. A guard survives
     // project-owner death; its command lock also closes concurrent restart races.
@@ -201,7 +277,7 @@ fn run(request: Launch) -> Result<()> {
         detach_stdio()?;
         loop {
             if os::STOP.load(Ordering::Relaxed) {
-                match root.lock_wait(".stop.lock") {
+                match root.lock_wait(".stop.lock", STOP_LOCK_WAIT) {
                     Ok(_lock) => {
                         stop(&root.states()?)?;
                     }
@@ -287,7 +363,7 @@ pub(crate) fn rollback(children: &mut [Child]) {
             libc::kill(pid, libc::SIGTERM);
         }
     }
-    let deadline = Instant::now() + GRACE + Duration::from_secs(2);
+    let deadline = Instant::now() + GRACE + CONFIRM_BOUND;
     while Instant::now() < deadline {
         if children
             .iter_mut()
@@ -305,7 +381,8 @@ fn guard(request: GuardLaunch) -> Result<()> {
     protocol::validate_control(request.version, &request.root, &request.owner_token)?;
     request.process.validate()?;
     let root = Root::open(&request.root)?;
-    let _command_lock = root.lock_wait(&format!("{}.lock", request.process.name))?;
+    let _command_lock =
+        root.lock_wait(&format!("{}.lock", request.process.name), COMMAND_LOCK_WAIT)?;
     if let Some(previous) = root.load(&request.process.name)?
         && os::recorded_live(&previous, false)?
     {
@@ -580,7 +657,7 @@ fn stop(states: &[State]) -> Result<()> {
                     None => self.recover()?,
                     Some(false) => return Ok(false),
                     Some(true) => {
-                        if start.elapsed() >= GRACE + Duration::from_secs(2) {
+                        if start.elapsed() >= GRACE + CONFIRM_BOUND {
                             return Err(refused());
                         }
                         return Ok(true);
@@ -592,7 +669,7 @@ fn stop(states: &[State]) -> Result<()> {
                 return Ok(false);
             }
             let elapsed = self.orphan_term.ok_or_else(refused)?.elapsed();
-            if elapsed >= GRACE + Duration::from_secs(2) {
+            if elapsed >= GRACE + CONFIRM_BOUND {
                 return Err(refused());
             }
             if elapsed >= GRACE {

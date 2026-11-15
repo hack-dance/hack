@@ -218,9 +218,9 @@ fn connect() -> Result<UnixStream> {
 pub(crate) fn serve(request: Launch) -> Result<()> {
     supervisor::validate_launch(&request)?;
     let root = Root::open(&request.root)?;
-    let _instance_lock = root.lock_wait(".instance.lock")?;
+    let _instance_lock = root.lock_wait(".instance.lock", crate::supervisor::INSTANCE_LOCK_WAIT)?;
     os::census_preflight()?;
-    let launch_lock = root.lock_wait(".stop.lock")?;
+    let launch_lock = root.lock_wait(".stop.lock", crate::supervisor::STOP_LOCK_WAIT)?;
     root.assert_not_retired(&request.owner_token)?;
     for state in root.states()? {
         if os::recorded_live(&state, false)? {
@@ -322,7 +322,7 @@ fn handle_add(
     {
         return Err(refused());
     }
-    let _stop_lock = root.lock_wait(".stop.lock")?;
+    let _stop_lock = root.lock_wait(".stop.lock", crate::supervisor::STOP_LOCK_WAIT)?;
     root.assert_not_retired(owner)?;
     let process = request.processes.into_iter().next().ok_or_else(refused)?;
     let states = root.states()?;

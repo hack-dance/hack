@@ -318,6 +318,11 @@ impl CliRunner {
         self
     }
 
+    /// The absolute executable this runner would start, without starting it.
+    pub(crate) fn program_path(&self) -> Option<PathBuf> {
+        self.resolve_program().ok()
+    }
+
     /// Read one authored non-secret key without enumerating the environment.
     pub fn effective_env(&self, key: &str) -> Option<std::ffi::OsString> {
         self.env

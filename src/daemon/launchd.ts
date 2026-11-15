@@ -406,25 +406,34 @@ function normalizeHackExecutablePath(raw: string | null): string | null {
 }
 
 /**
- * Whether two paths name the same executable file: the same path, the same
- * resolved path, or the same device and inode (a hard link or a bind
- * mount). False when either cannot be read. A service whose program is
- * the same file as this CLI's runs this version; any other existing
- * program may be one the user chose (HACK-2216).
+ * Whether two paths name the same executable file now: both are resolved
+ * (every symlink followed) and the files they resolve to must have the
+ * same device and inode. Equal path strings are not enough: a pathname can
+ * be replaced after this CLI was started from it. A hard link or a bind
+ * mount counts as the same file. False when either cannot be read. A
+ * service whose program is the same file as this CLI's runs this version;
+ * any other existing program may be one the user chose (HACK-2216).
  */
 export async function isSameExecutableFile(
   a: string,
-  b: string
+  b: string,
+  io: {
+    /** Defaults to `fs.realpath`; tests inject it. */
+    readonly realpath?: (path: string) => Promise<string>;
+    /** Defaults to `fs.stat`; tests inject it. */
+    readonly stat?: (
+      path: string
+    ) => Promise<{ readonly dev: number; readonly ino: number }>;
+  } = {}
 ): Promise<boolean> {
-  if (a === b) {
-    return true;
-  }
+  const resolvePath = io.realpath ?? realpath;
+  const statPath = io.stat ?? stat;
   try {
-    const [realA, realB] = await Promise.all([realpath(a), realpath(b)]);
-    if (realA === realB) {
-      return true;
-    }
-    const [statA, statB] = await Promise.all([stat(realA), stat(realB)]);
+    const [realA, realB] = await Promise.all([resolvePath(a), resolvePath(b)]);
+    const [statA, statB] = await Promise.all([
+      statPath(realA),
+      statPath(realB),
+    ]);
     return statA.dev === statB.dev && statA.ino === statB.ino;
   } catch {
     return false;
@@ -506,6 +515,9 @@ export function hasBoundedLaunchdOutput(opts: {
  * `retarget-refused`: the program is gone, but the `hack` it would be
  * retargeted to is not fit for a login service
  * ({@link checkLaunchdRetargetTarget}), left as it is;
+ * `refresh-refused`: the plist is stale, but the program a refresh would
+ * keep fails the same checks (a source file, a non-durable location, or
+ * one another account can replace), left as it is;
  * `failed`: a rewrite was needed but did not complete (unload, write or
  * load failed, or no installable hack resolves); the service may be
  * stopped.
@@ -519,6 +531,7 @@ export type LaunchdProgramRepairResult =
   | "home-binding"
   | "unproven-owner"
   | "retarget-refused"
+  | "refresh-refused"
   | "unmanaged"
   | "not-installed"
   | "failed";
@@ -764,7 +777,8 @@ export async function repairLaunchdProgramIfInvalid(opts: {
   }
   const { program, target } = decided;
   // A retarget writes a new program into the login service: the same
-  // checks a systemd retarget makes (HACK-2216).
+  // checks a systemd retarget makes (HACK-2216). Checked early so nothing
+  // else is read for an unfit target, and again just before the write.
   if (program === null) {
     const refused = await (opts.validateRetarget ?? checkLaunchdRetargetTarget)(
       target
@@ -773,35 +787,20 @@ export async function repairLaunchdProgramIfInvalid(opts: {
       return "retarget-refused";
     }
   }
-  // A rewrite unloads the loaded job and replaces its plist: it must be
-  // this home's (HACK-2216). The plist must not bind another home, and a
-  // running job must be this home's proven hackd. Unknown refuses.
-  if (!plistKeepsThisHome({ plistText })) {
-    return "home-binding";
+  const owner = await refuseJobRewrite({ ...opts, plistText, target });
+  if (owner !== null) {
+    return owner;
   }
-  const status = await (
-    opts.readStatus ?? (() => getLaunchdServiceStatus({ paths: opts.paths }))
-  )();
-  const running =
-    opts.daemonRunning === true || status.running || status.pid !== null;
-  if (running) {
-    const refused = await refuseRunningRewrite({
-      target,
-      executing:
-        opts.executing === undefined
-          ? resolveExecutingCliPath()
-          : opts.executing,
-    });
-    if (refused !== null) {
-      return refused;
-    }
-  }
-  const proven = await (
-    opts.proveJob ??
-    (() => proveLaunchdJobOwnership({ paths: opts.paths, status }))
-  )();
-  if (!proven) {
-    return "unproven-owner";
+  // Last, right before the plist is written and the job booted out and
+  // bootstrapped: the program the rewritten plist runs, kept by a refresh
+  // or new for a retarget, gets the full target checks (HACK-2216). A
+  // refresh of a pathname another account can replace would bootstrap
+  // whatever they put there.
+  const unfit = await (opts.validateRetarget ?? checkLaunchdRetargetTarget)(
+    target
+  );
+  if (unfit !== null) {
+    return program === null ? "retarget-refused" : "refresh-refused";
   }
   const result = await installLaunchdService({
     paths: opts.paths,
@@ -817,6 +816,49 @@ export async function repairLaunchdProgramIfInvalid(opts: {
     return "failed";
   }
   return program === null ? "repaired" : "refreshed";
+}
+
+/**
+ * A rewrite unloads the loaded job and replaces its plist: it must be this
+ * home's (HACK-2216). The plist must not bind another home
+ * (`home-binding`), a running hackd may only be restarted by an eligible
+ * CLI ({@link refuseRunningRewrite}), and the job must be proven this
+ * home's (`unproven-owner`). Unknown refuses. Null when the rewrite may go on.
+ */
+async function refuseJobRewrite(opts: {
+  readonly paths: DaemonPaths;
+  readonly plistText: string;
+  readonly target: string;
+  readonly proveJob?: () => Promise<boolean>;
+  readonly executing?: string | null;
+  readonly daemonRunning?: boolean;
+  readonly readStatus?: () => Promise<LaunchdServiceStatus>;
+}): Promise<LaunchdProgramRepairResult | null> {
+  if (!plistKeepsThisHome({ plistText: opts.plistText })) {
+    return "home-binding";
+  }
+  const status = await (
+    opts.readStatus ?? (() => getLaunchdServiceStatus({ paths: opts.paths }))
+  )();
+  const running =
+    opts.daemonRunning === true || status.running || status.pid !== null;
+  if (running) {
+    const refused = await refuseRunningRewrite({
+      target: opts.target,
+      executing:
+        opts.executing === undefined
+          ? resolveExecutingCliPath()
+          : opts.executing,
+    });
+    if (refused !== null) {
+      return refused;
+    }
+  }
+  const proven = await (
+    opts.proveJob ??
+    (() => proveLaunchdJobOwnership({ paths: opts.paths, status }))
+  )();
+  return proven ? null : "unproven-owner";
 }
 
 /**
@@ -892,6 +934,23 @@ async function readFileHead(path: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * The program a content refresh of this plist would keep, or null when
+ * {@link repairLaunchdProgramIfInvalid} would not refresh it (current,
+ * unmanaged, another or unreadable program, or a retarget instead). Reads
+ * only; for the check before a running daemon is stopped (HACK-2216).
+ */
+export async function readLaunchdRefreshTarget(opts: {
+  readonly paths: DaemonPaths;
+  readonly plistText: string;
+  readonly executing?: string | null;
+}): Promise<string | null> {
+  const decided = await decideLaunchdRewrite(opts);
+  return decided.kind === "rewrite" && decided.program !== null
+    ? decided.target
+    : null;
 }
 
 /**

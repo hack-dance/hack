@@ -768,9 +768,50 @@ test("executable identity follows links, not path strings", async () => {
     expect(await isSameExecutableFile(join(dir, "hack-hard"), real)).toBe(true);
     expect(await isSameExecutableFile(other, real)).toBe(false);
     expect(await isSameExecutableFile(join(dir, "missing"), real)).toBe(false);
+    // Equal strings are compared too: a path that no longer exists is not
+    // the same file as itself.
+    const gone = join(dir, "gone");
+    expect(await isSameExecutableFile(gone, gone)).toBe(false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// Codex security finding on PR #854 (HACK-2216): equal path strings are
+// never taken as the same file.
+
+test("equal path strings with a different device or inode are not the same file", async () => {
+  // The pathname was replaced between the two reads: each stat of the same
+  // resolved path sees another file.
+  let ino = 100;
+  const io = {
+    realpath: (path: string) => Promise.resolve(path),
+    stat: () => {
+      ino += 1;
+      return Promise.resolve({ dev: 1, ino });
+    },
+  };
+  expect(
+    await isSameExecutableFile("/srv/tools/hack", "/srv/tools/hack", io)
+  ).toBe(false);
+  // Same string, another device.
+  let dev = 0;
+  expect(
+    await isSameExecutableFile("/srv/tools/hack", "/srv/tools/hack", {
+      realpath: (path: string) => Promise.resolve(path),
+      stat: () => {
+        dev += 1;
+        return Promise.resolve({ dev, ino: 7 });
+      },
+    })
+  ).toBe(false);
+  // Same device and inode: the same file.
+  expect(
+    await isSameExecutableFile("/srv/tools/hack", "/srv/tools/hack", {
+      realpath: (path: string) => Promise.resolve(path),
+      stat: () => Promise.resolve({ dev: 1, ino: 7 }),
+    })
+  ).toBe(true);
 });
 
 test("after an update, a stale pid file is not a running daemon", async () => {

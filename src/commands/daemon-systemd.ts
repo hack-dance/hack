@@ -151,6 +151,29 @@ export interface SystemdCommandHooks {
   readonly trustUid?: number;
 }
 
+/**
+ * The last check before an automatic restart (HACK-2216): the ownership
+ * proof and loaded-program read before it take time, so the program the
+ * unit runs is checked again ({@link checkServiceExecutableTrusted}) and a
+ * pathname replaced meanwhile is not what the restart starts. Exit code 1
+ * (reported, `blocked: "rewrite-refused"`) or null to restart.
+ */
+async function refuseUntrustedProgramLast(opts: {
+  readonly hooks: Pick<SystemdCommandHooks, "trace">;
+  readonly unitPath: string;
+}): Promise<number | null> {
+  const untrusted = await checkUnitProgramTrusted({ unitPath: opts.unitPath });
+  if (untrusted === null) {
+    return null;
+  }
+  if (opts.hooks.trace) {
+    opts.hooks.trace.action = "none";
+    opts.hooks.trace.blocked = "rewrite-refused";
+  }
+  logger.error({ message: withInstallStep(untrusted) });
+  return 1;
+}
+
 /** A refusal that ends with the `hack daemon install` step. */
 function withInstallStep(message: string): string {
   return message.includes("hack daemon install")
@@ -843,6 +866,10 @@ async function restartReconciledUnit(opts: {
   });
   if (unproven !== null) {
     return unproven;
+  }
+  const replaced = await refuseUntrustedProgramLast({ hooks, unitPath });
+  if (replaced !== null) {
+    return replaced;
   }
   const why = plan.reasons.includes("version-mismatch")
     ? "it runs another hack version"

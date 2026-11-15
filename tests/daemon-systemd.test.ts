@@ -5663,3 +5663,38 @@ linuxTest(
     expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
   }
 );
+
+// Codex security finding on PR #854 (HACK-2216): the program an automatic
+// restart runs is checked again last, after the ownership proof.
+
+linuxTest(
+  "an automatic restart is refused when the program becomes replaceable during the final ownership proof",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.calls.length = 0;
+    const base = runningHooks(fake, "1.0.0");
+    let proofs = 0;
+    const hooks = {
+      ...base,
+      proveMainProcess: async (pid: number, daemonRoot: string) => {
+        proofs += 1;
+        if (proofs === 2) {
+          // The final proof, after every earlier program check: meanwhile
+          // the program's directory became writable by the group.
+          await chmod(join(root, "bin"), 0o775);
+        }
+        return await base.proveMainProcess(pid, daemonRoot);
+      },
+    };
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(proofs).toBe(2);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(hooks.trace.action).toBe("none");
+    expect(hooks.trace.blocked).toBe("rewrite-refused");
+  }
+);

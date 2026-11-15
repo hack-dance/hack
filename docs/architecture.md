@@ -583,8 +583,10 @@ to the running CLI. The service is stale when:
 On Linux, `start` rewrites a `content`-stale unit automatically only when both
 of these hold:
 
-- the unit runs this CLI's executable: the same path, or a path that resolves to
-  the same file (same resolved path, or same device and inode);
+- the unit runs this CLI's executable: a path that resolves (every symlink
+  followed) to a file with the same device and inode as this CLI's, checked
+  when the decision is made. Equal path strings alone do not count, because a
+  pathname can be replaced after the CLI started from it;
 - its main file starts with Hack's managed header
   (`# Managed by hack: written by \`hack daemon install\`...`), whose next line
   says local changes are replaced on the next install.
@@ -750,6 +752,19 @@ Such a plist is never replaced automatically; `start` reports it and
   output paths are not `/dev/null` (the earlier output repair). launchd then
   restarts hackd from it. One that is not Hack's (no marker and another
   `Label`) is only reported.
+- Every automatic rewrite, a refresh included, checks the program the new
+  plist will run last, right before the plist is written and the job is
+  booted out and bootstrapped. A refresh keeps the plist's program, and that
+  program must pass the retarget checks: not a source file or bun script,
+  durable, and safe from other accounts along its whole path. Otherwise
+  nothing is written, unloaded or loaded, and start refuses
+  (`blocked: "rewrite-refused"`) with `hack daemon install` as the next step.
+  Without this check, someone able to replace that pathname would have
+  launchd start their program as this user. The check that runs before `start`
+  or `restart` stops a running hackd makes the same check for a refresh the
+  start would run. On Linux, the program a rewritten unit keeps passes
+  install's program checks just before the unit is written, and an automatic
+  restart checks the unit's program once more as its last step.
 - A plist that runs another existing `hack` is left as it is, even an older
   versioned install path. A running hackd of another version under it is
   refused with `hack daemon install`. A stopped service under it is not

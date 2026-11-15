@@ -77,10 +77,12 @@ export type ServiceUnitState =
  * - `unproven-owner`: a restart was needed, but the service's main process
  *   is not proven to be this home's hackd (the same proof `stop` needs), so
  *   restarting it could stop another home's daemon;
- * - `rewrite-refused`: the unit needs a rewrite before it can start, but
- *   the rewrite would be refused (no durable `hack` to retarget to, or a
- *   program or service PATH that fails install's checks), so a running
- *   daemon was not stopped to make room for it;
+ * - `rewrite-refused`: the service needs a rewrite, or an automatic
+ *   restart, but the program it would run fails the checks (no durable
+ *   `hack` to retarget to, a refreshed plist's kept program that is not
+ *   durable or that another account could replace, or a program or service
+ *   PATH that fails install's checks), so nothing was written, reloaded or
+ *   restarted, and a running daemon was not stopped to make room for it;
  * - `service-pending`: a replaced daemon's service start failed, but the
  *   manager may still start it (a queued job, restart timer or KeepAlive
  *   retry) or could not be checked, so hackd was not started directly

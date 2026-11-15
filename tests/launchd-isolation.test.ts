@@ -347,6 +347,7 @@ test("repairs legacy output paths even when the installed program is still curre
       HACK_HOME: join(fixture.home, ".hack"),
       HACK_TEST_LAUNCHCTL_JOB: "stopped",
       DRIVER_EXECUTING_CLI: join(fixture.root, "tools", "hack"),
+      DRIVER_DURABLE_TARGET: "1",
     }),
   });
   expect(run.code).toBe(0);
@@ -383,6 +384,10 @@ async function repairPlist(
       HACK_TEST_LAUNCHCTL_JOB: "stopped",
       // The stub `hack` on PATH stands for the executing CLI.
       DRIVER_EXECUTING_CLI: join(fixture.root, "tools", "hack"),
+      // Its temp-dir path stands for a durable install: every rewrite, a
+      // refresh included, checks the program it runs (HACK-2216). A test
+      // about a temporary location passes "0".
+      DRIVER_DURABLE_TARGET: "1",
       ...extraEnv,
     }),
   });
@@ -479,6 +484,31 @@ test("a managed plist for this hack with an older environment is refreshed (HACK
   expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
   expect(after).toBe(current);
   expect(verbs).toEqual(["print", "bootout", "bootstrap"]);
+});
+
+// Codex security finding on PR #854 (HACK-2216): a refresh checks the
+// program it keeps, right before the plist is written and the job reloaded.
+
+test("a refresh whose kept program has a group-writable ancestor is refused, nothing changed", async () => {
+  let stale = "";
+  const { results, after, verbs } = await repairPlist((fixture) => {
+    stale = renderLaunchdPlist({
+      hackBinPath: join(fixture.root, "tools", "hack"),
+      home: fixture.home,
+      runAtLoad: false,
+      guiSessionOnly: false,
+    }).replace(":/opt/homebrew/bin", "");
+    // Another account in the group could replace the program's pathname.
+    chmodSync(join(fixture.root, "tools"), 0o775);
+    return stale;
+  });
+  expect(results).toEqual({
+    repair: "refresh-refused",
+    secondRepair: "refresh-refused",
+  });
+  expect(after).toBe(stale);
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
 });
 
 // Review round 2 (HACK-2216).
@@ -861,10 +891,13 @@ test("a compiled CLI that is the retarget target repairs a running daemon's plis
 
 test("a retarget to a hack in a temporary location is refused, nothing changed", async () => {
   let written = "";
-  const { results, after, verbs } = await repairPlist((fixture) => {
-    written = missingProgramPlist(fixture);
-    return written;
-  });
+  const { results, after, verbs } = await repairPlist(
+    (fixture) => {
+      written = missingProgramPlist(fixture);
+      return written;
+    },
+    { DRIVER_DURABLE_TARGET: "0" }
+  );
   expect(results).toEqual({
     repair: "retarget-refused",
     secondRepair: "retarget-refused",

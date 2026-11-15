@@ -9,6 +9,7 @@ import {
   plistKeepsThisHome,
   proveLaunchdJobOwnership,
   readLaunchdProgramState,
+  readLaunchdRefreshTarget,
   refuseRunningRewrite,
   repairLaunchdProgramIfInvalid,
 } from "../daemon/launchd.ts";
@@ -198,13 +199,16 @@ type ReplacementBlock =
   | "home-binding"
   | "unproven-owner"
   | "other-program"
-  | "retarget-refused";
+  | "retarget-refused"
+  | "refresh-refused";
 
 /** The `--json` blocked reason for a {@link ReplacementBlock}. */
 function blockedReason(
   block: ReplacementBlock
 ): "home-binding" | "unproven-owner" | "other-program" | "rewrite-refused" {
-  return block === "retarget-refused" ? "rewrite-refused" : block;
+  return block === "retarget-refused" || block === "refresh-refused"
+    ? "rewrite-refused"
+    : block;
 }
 
 function describeReplacementBlock(block: ReplacementBlock): string {
@@ -215,6 +219,8 @@ function describeReplacementBlock(block: ReplacementBlock): string {
       return "the loaded launchd job is not proven to be this Hack home's, or this CLI cannot be shown to be what it would run (a source checkout)";
     case "other-program":
       return "the launchd job would be retargeted to a hack that is not this CLI";
+    case "refresh-refused":
+      return "the launchd plist is stale and the program a refresh would keep is not fit for a login service (a source file, a temporary location or one others can change)";
     default:
       return "the launchd job's program is gone and the hack it would be retargeted to is not fit for a login service";
   }
@@ -256,7 +262,7 @@ async function launchdJobBlocksReplacement(opts: {
   }
   const program = await readProgram(hooks);
   if (program.kind !== "missing") {
-    return null;
+    return await refreshBlocksReplacement({ hooks, plistText });
   }
   if (program.resolved === null) {
     return "retarget-refused";
@@ -274,6 +280,31 @@ async function launchdJobBlocksReplacement(opts: {
         ? resolveExecutingCliPath()
         : hooks.executing,
   });
+}
+
+/**
+ * The start after the stop would refresh a stale plist for the program it
+ * keeps: that program must pass the same checks the refresh makes just
+ * before it writes ({@link checkLaunchdRetargetTarget}), or nothing is
+ * stopped (`refresh-refused`). Null when no refresh would run or it may.
+ */
+async function refreshBlocksReplacement(opts: {
+  readonly hooks: LaunchdStartHooks;
+  readonly plistText: string;
+}): Promise<ReplacementBlock | null> {
+  const { hooks } = opts;
+  const target = await readLaunchdRefreshTarget({
+    paths: hooks.paths,
+    plistText: opts.plistText,
+    executing: hooks.executing,
+  });
+  if (target === null) {
+    return null;
+  }
+  const unfit = await (hooks.validateRetarget ?? checkLaunchdRetargetTarget)(
+    target
+  );
+  return unfit === null ? null : "refresh-refused";
 }
 
 /**
@@ -372,6 +403,13 @@ export async function startViaLaunchdIfLoaded(
     });
     return 1;
   }
+  if (repair === "refresh-refused") {
+    logger.error({
+      message:
+        "Not starting hackd through launchd: its plist is stale and the program a refresh would keep is not fit for a login service; nothing was changed | Install hack to a stable location, then run: hack daemon install",
+    });
+    return 1;
+  }
   if (repair === "home-binding" || repair === "unproven-owner") {
     // The loaded job is not provably this home's: kickstarting it would
     // (re)start another home's daemon.
@@ -458,6 +496,14 @@ function noteRepair(opts: {
       logger.warn({
         message:
           "The launchd service's program is gone, and the hack it would be retargeted to is not fit for a login service (a source file, a bun script, a temporary location or one others can change) | Install hack to a stable location, then run: hack daemon install",
+      });
+      return false;
+    case "refresh-refused":
+      trace.stale.add("content");
+      trace.blocked = "rewrite-refused";
+      logger.warn({
+        message:
+          "The launchd plist is stale, but the program a refresh would keep is not fit for a login service (a source file, a bun script, a temporary location or one others can change), so it was not rewritten or restarted | Install hack to a stable location, then run: hack daemon install",
       });
       return false;
     case "unmanaged":

@@ -584,7 +584,7 @@ pub fn parse_result(stdout: &str, stderr: &str, code: Option<i32>) -> Result<Val
     }
 }
 
-/// Strict parser for the unpublished contracts migrated by HACK-2238.
+/// Strict parser for the envelope contracts migrated by HACK-2238 (changed after next.17).
 /// A nonzero result can never be accepted as successful data.
 pub fn parse_schema_result(
     stdout: &str,

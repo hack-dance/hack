@@ -191,6 +191,19 @@ test("observe runtime explicitly opts in to Docker reads without registering dis
     expect(result.code).toBe(0);
     const payload = machineData(result.stdout, "hack.projects.observe.v1");
     expect(payload.runtime_requested).toBe(true);
+    // R2's observer has run even without a native selection. Re-projecting
+    // here would replace its result with native-observer-required (and discard
+    // live service evidence when a native selection is available).
+    expect(
+      payload.projects.find(
+        (row: { name: string }) => row.name === "native-app"
+      )
+    ).toMatchObject({
+      backend: "native",
+      state: "unknown",
+      state_reason: "observation-unavailable",
+      services: [],
+    });
     expect(
       payload.projects.find(
         (row: { name: string }) => row.name === "unregistered-app"

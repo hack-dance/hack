@@ -11,7 +11,7 @@ publish.workspace = true
 default = []
 # libghostty-vt emulation and the GPUI terminal view. Off by default until
 # desktop CI provides Zig 0.17.1 on Linux (see DECISION.md, "Build and CI").
-ghostty = ["dep:ghostty-vt", "dep:gpui-kit"]
+ghostty = ["dep:ghostty-vt", "dep:gpui-kit", "dep:sha2", "dep:ttf-parser"]
 # Offscreen PNG capture of the spike window (GPUI test-support).
 screenshots = ["ghostty", "gpui-kit/test-support", "dep:image"]
 
@@ -20,6 +20,14 @@ libc.workspace = true
 ghostty-vt = { workspace = true, optional = true }
 gpui-kit = { workspace = true, optional = true }
 image = { version = "=0.25.10", optional = true, default-features = false, features = ["png"] }
+# Reads glyph outlines from the embedded symbols font. Already in the
+# lockfile through GPUI's Linux text system.
+ttf-parser = { version = "=0.25.1", optional = true, default-features = false, features = ["std"] }
+
+[build-dependencies]
+# Verifies the embedded symbols font against its pinned sha256. Already in
+# the lockfile through ghostty-vt-sys's build script.
+sha2 = { version = "=0.10.9", optional = true }
 
 [[example]]
 name = "term_spike"

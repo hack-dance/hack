@@ -18,6 +18,7 @@
 //! find navigation and scrolling are actions ([`crate::actions`]) that the
 //! app binds to keys; each is also a public method here.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui_kit::component::ActiveTheme as _;
@@ -32,8 +33,10 @@ use gpui_kit::{
 use crate::actions;
 use crate::emulator::{CursorShape, Emulator, Frame, KeyInput, Rgb, SearchState, TermTheme};
 use crate::ghostty_config::GhosttyLook;
+use crate::glyphs::{self, SymbolFallback};
 use crate::launch::{SessionKind, SessionPlan};
 use crate::pty::{PtyOptions, QUIT_GRACE};
+use crate::sprite::{self, Seg, Shape};
 use crate::stream::StreamSource;
 pub use crate::terminal::Status;
 use crate::terminal::TerminalCore;
@@ -72,6 +75,16 @@ pub struct Rendered {
     pub notice: Option<String>,
 }
 
+/// Where the grid was laid out last, in logical pixels: for tests that
+/// look at rendered cells.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridMetrics {
+    /// The top-left corner of the first cell.
+    pub origin: (f32, f32),
+    /// One cell's width and height.
+    pub cell: (f32, f32),
+}
+
 /// Font settings. Defaults to the theme's monospace family.
 #[derive(Clone, Debug)]
 pub struct TermFont {
@@ -107,6 +120,10 @@ pub struct TerminalView {
     look: GhosttyLook,
     look_pending: bool,
     rendered: Rendered,
+    /// Which symbols the terminal's font lacks, remembered across frames.
+    symbols: SymbolFallback,
+    /// The symbols the last frame took from the symbols font.
+    fallback_symbols: Vec<char>,
 }
 
 impl TerminalView {
@@ -183,6 +200,8 @@ impl TerminalView {
             look: GhosttyLook::default(),
             look_pending: false,
             rendered: Rendered::default(),
+            symbols: SymbolFallback::default(),
+            fallback_symbols: Vec::new(),
         }
     }
 
@@ -213,6 +232,20 @@ impl TerminalView {
     /// What the last render drew.
     pub fn rendered(&self) -> &Rendered {
         &self.rendered
+    }
+
+    /// Where the grid was laid out last.
+    pub fn grid_metrics(&self) -> GridMetrics {
+        GridMetrics {
+            origin: (f32::from(self.origin.x), f32::from(self.origin.y)),
+            cell: (f32::from(self.cell.0), f32::from(self.cell.1)),
+        }
+    }
+
+    /// The symbols the last frame drew from the bundled symbols font,
+    /// because the terminal's own font has no glyph for them. Sorted.
+    pub fn fallback_symbols(&self) -> &[char] {
+        &self.fallback_symbols
     }
 
     /// Open the find field.
@@ -489,7 +522,14 @@ impl TerminalView {
     }
 
     /// Size the grid to the canvas (and tell the PTY), then build the frame.
-    fn layout(&mut self, bounds: Bounds<Pixels>, cell: (Pixels, Pixels)) -> Option<Frame> {
+    fn layout(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        cell: (Pixels, Pixels),
+        font: &Font,
+        font_size: Pixels,
+        window: &Window,
+    ) -> Option<(Frame, HashSet<char>)> {
         self.cell = cell;
         let pad = self.pad();
         self.origin = point(
@@ -507,7 +547,23 @@ impl TerminalView {
             f32::from(cell.1).round() as u16,
         );
         self.core.resize(cols, rows, cw, ch);
-        self.core.emulator().frame().ok()
+        let frame = self.core.emulator().frame().ok()?;
+        // Which symbols on screen the terminal's font lacks: those are
+        // drawn from the bundled symbols font.
+        let mut from_symbols = HashSet::new();
+        for cell in frame.rows.iter().flatten() {
+            if let Some(ch) = single_char(&cell.text)
+                && !sprite::covers(ch)
+                && glyphs::in_symbols_font(ch)
+                && !from_symbols.contains(&ch)
+                && self.symbols.uses_symbols_font(ch, font, font_size, window)
+            {
+                from_symbols.insert(ch);
+            }
+        }
+        self.fallback_symbols = from_symbols.iter().copied().collect();
+        self.fallback_symbols.sort_unstable();
+        Some((frame, from_symbols))
     }
 }
 
@@ -566,10 +622,17 @@ impl Render for TerminalView {
         // A log stream has no input, so it has no cursor.
         let show_cursor = !self.core.read_only();
 
+        let layout_font = base_font.clone();
         let surface = canvas(
-            move |bounds, _window, cx| entity.update(cx, |v, _| v.layout(bounds, (cell_w, cell_h))),
-            move |bounds, frame, window, cx| {
-                let Some(frame) = frame else { return };
+            move |bounds, window, cx| {
+                entity.update(cx, |v, _| {
+                    v.layout(bounds, (cell_w, cell_h), &layout_font, font_size, window)
+                })
+            },
+            move |bounds, laid_out, window, cx| {
+                let Some((frame, symbols)) = laid_out else {
+                    return;
+                };
                 paint_frame(
                     &PaintArgs {
                         bounds,
@@ -581,6 +644,7 @@ impl Render for TerminalView {
                         show_cursor,
                         theme,
                         pad,
+                        symbols: &symbols,
                     },
                     window,
                     cx,
@@ -707,6 +771,117 @@ struct PaintArgs<'a> {
     show_cursor: bool,
     theme: TermTheme,
     pad: Pad,
+    /// Symbols to draw from the bundled symbols font.
+    symbols: &'a HashSet<char>,
+}
+
+/// The cell's character, when it holds exactly one.
+fn single_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => Some(ch),
+        _ => None,
+    }
+}
+
+/// A cell that is not drawn as ordinary text.
+#[derive(Clone, Copy)]
+enum Special {
+    /// Drawn as geometry: box drawing, blocks, powerline separators.
+    Sprite(char),
+    /// Drawn from the bundled symbols font.
+    Symbol(char),
+}
+
+/// Draw one self-drawn glyph into a cell given in whole device pixels.
+fn paint_sprite(ch: char, cell: [f32; 4], scale: f32, color: Hsla, window: &mut Window) {
+    let [x0, y0, x1, y1] = cell;
+    let (w, h) = (x1 - x0, y1 - y0);
+    let Some(shapes) = sprite::shapes(ch, w, h, sprite::line_thickness(w)) else {
+        return;
+    };
+    let at = |x: f32, y: f32| point(px((x0 + x) / scale), px((y0 + y) / scale));
+    let trace = |builder: &mut gpui_kit::PathBuilder, path: &[Seg]| {
+        for seg in path {
+            match *seg {
+                Seg::Move(x, y) => builder.move_to(at(x, y)),
+                Seg::Line(x, y) => builder.line_to(at(x, y)),
+                Seg::Cubic(a, b, to) => {
+                    builder.cubic_bezier_to(at(to.0, to.1), at(a.0, a.1), at(b.0, b.1));
+                }
+                Seg::Close => builder.close(),
+            }
+        }
+    };
+    for shape in shapes {
+        match shape {
+            Shape::Rect {
+                x0,
+                y0,
+                x1,
+                y1,
+                alpha,
+            } => window.paint_quad(fill(
+                Bounds::from_corners(at(x0, y0), at(x1, y1)),
+                color.opacity(alpha),
+            )),
+            Shape::Fill(path) => {
+                let mut builder = gpui_kit::PathBuilder::fill();
+                trace(&mut builder, &path);
+                builder.close();
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, color);
+                }
+            }
+            Shape::Stroke { path, width } => {
+                let mut builder = gpui_kit::PathBuilder::stroke(px(width / scale));
+                trace(&mut builder, &path);
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, color);
+                }
+            }
+        }
+    }
+}
+
+/// Draw one symbol from the bundled symbols font into the room it has:
+/// its own cell, or that cell and the next when the next one is blank.
+///
+/// Each glyph in that font sits in a box one em wide and about one line
+/// tall. The box is sized to the room (never taller than the cell) and
+/// centred in it, and the glyph's outline is filled as a vector path.
+/// Fitting the box to a single narrow cell makes icons small, which is why
+/// a blank cell after a symbol is used too: prompt themes put a space after
+/// their icons, and Ghostty and other terminals treat that space the same
+/// way.
+fn paint_symbol(ch: char, room: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+    let Some(outline) = glyphs::outline(ch) else {
+        return;
+    };
+    let (room_w, room_h) = (f32::from(room.size.width), f32::from(room.size.height));
+    // Pixels per font unit: one em is as wide as the room, or as tall as
+    // the cell if that is less.
+    let k = room_w.min(room_h) / outline.units_per_em;
+    let left = f32::from(room.origin.x) + (room_w - outline.advance * k) / 2.0;
+    let line = (outline.ascender - outline.descender) * k;
+    let baseline = f32::from(room.origin.y) + (room_h - line) / 2.0 + outline.ascender * k;
+    // Font units have y pointing up.
+    let at = |(x, y): (f32, f32)| point(px(left + x * k), px(baseline - y * k));
+    // TrueType outlines are filled with the non-zero rule.
+    let mut builder = gpui_kit::PathBuilder::fill().with_style(gpui_kit::PathStyle::Fill(
+        gpui_kit::FillOptions::default().with_fill_rule(gpui_kit::FillRule::NonZero),
+    ));
+    for seg in &outline.path {
+        match *seg {
+            Seg::Move(x, y) => builder.move_to(at((x, y))),
+            Seg::Line(x, y) => builder.line_to(at((x, y))),
+            Seg::Cubic(a, b, to) => builder.cubic_bezier_to(at(to), at(a), at(b)),
+            Seg::Close => builder.close(),
+        }
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
 }
 
 /// Paint backgrounds, highlights, the cursor, then text. Text is shaped in
@@ -717,9 +892,31 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
     let ox = a.bounds.origin.x + px(a.pad.left);
     let oy = a.bounds.origin.y + px(a.pad.top);
     let at = |col: u16, row: usize| point(ox + cw * f32::from(col), oy + ch * row as f32);
-    let rect = |col: u16, row: usize, n: u16| Bounds {
-        origin: at(col, row),
-        size: size(cw * f32::from(n), ch),
+    // Cell edges on whole device pixels. Backgrounds, highlights, the
+    // cursor and the self-drawn glyphs all use them, so neighbouring cells
+    // tile without seams at any font size.
+    let scale = window.scale_factor();
+    let edge_x = |col: usize| ((f32::from(ox) + f32::from(cw) * col as f32) * scale).round();
+    let edge_y = |row: usize| ((f32::from(oy) + f32::from(ch) * row as f32) * scale).round();
+    let rect = |col: u16, row: usize, n: u16| {
+        let col = usize::from(col);
+        Bounds::from_corners(
+            point(px(edge_x(col) / scale), px(edge_y(row) / scale)),
+            point(
+                px(edge_x(col + usize::from(n)) / scale),
+                px(edge_y(row + 1) / scale),
+            ),
+        )
+    };
+    let special = |cell: &crate::emulator::FrameCell| {
+        let ch = single_char(&cell.text)?;
+        if sprite::covers(ch) {
+            Some(Special::Sprite(ch))
+        } else if a.symbols.contains(&ch) {
+            Some(Special::Symbol(ch))
+        } else {
+            None
+        }
     };
     window.paint_quad(fill(a.bounds, hsla(a.frame.background)));
 
@@ -792,6 +989,33 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
                 x += 1;
                 continue;
             }
+            if let Some(kind) = special(&row[x]) {
+                let c = &row[x];
+                let on_cursor = block_cursor && a.frame.cursor == Some((x as u16, y as u16));
+                let mut color = hsla(if on_cursor { a.frame.background } else { c.fg });
+                if c.faint {
+                    color = color.opacity(0.6);
+                }
+                match kind {
+                    Special::Sprite(ch) => paint_sprite(
+                        ch,
+                        [edge_x(x), edge_y(y), edge_x(x + 1), edge_y(y + 1)],
+                        scale,
+                        color,
+                        window,
+                    ),
+                    Special::Symbol(ch) => {
+                        // A blank cell after the symbol is room for it too.
+                        let next_blank = row.get(x + 1).is_some_and(|n| {
+                            !n.spacer && !n.wide && (n.text.is_empty() || n.text == " ")
+                        });
+                        let room = rect(x as u16, y, if next_blank { 2 } else { 1 });
+                        paint_symbol(ch, room, color, window);
+                    }
+                }
+                x += 1;
+                continue;
+            }
             let start = x;
             let mut text = String::new();
             let mut runs: Vec<TextRun> = Vec::new();
@@ -844,7 +1068,12 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
                 }
                 text.push_str(glyph);
                 x += 1;
-                if wide || x >= row.len() || row[x].wide || row[x].spacer {
+                if wide
+                    || x >= row.len()
+                    || row[x].wide
+                    || row[x].spacer
+                    || special(&row[x]).is_some()
+                {
                     break;
                 }
             }

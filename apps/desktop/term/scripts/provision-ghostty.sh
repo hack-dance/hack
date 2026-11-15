@@ -7,6 +7,8 @@
 #   Linux: Zig 0.17.1 (official tarball) plus the libghostty-vt 1.0.1 source
 #          and Zig-package tarballs (built from source).
 #   macOS: the libghostty-vt 1.0.1 prebuilt XCFramework (no Zig).
+#   Both:  Symbols Nerd Font Mono 3.5.1, the terminal's fallback font for
+#          prompt symbols. It is embedded in the build.
 #
 # Usage:
 #   eval "$(bash term/scripts/provision-ghostty.sh)"              # shell
@@ -16,8 +18,10 @@
 # Checksums: libghostty-vt files from
 # https://release.files.ghostty.org/libghostty-vt/1.0.1/SHA256SUMS (they match
 # ghostty-vt-sys 0.9.0's GHOSTTY.lock); Zig from
-# https://ziglang.org/download/index.json. To change a version, change the
-# URL and the checksum together.
+# https://ziglang.org/download/index.json; the font archive from the Nerd
+# Fonts release's SHA-256.txt, and the font file from that archive. To
+# change a version, change the URL and the checksum together (the font
+# file's checksum is also pinned in term/build.rs).
 set -euo pipefail
 
 ghostty_version=1.0.1
@@ -28,6 +32,13 @@ ghostty_deps="libghostty-vt-${ghostty_version}-deps.tar.gz"
 ghostty_deps_sha=91a4e10960a52bf5bf4b15aa2a2cddaff8a89d6cd903d3055bda4fd17de3356d
 ghostty_xcframework="ghostty-vt-${ghostty_version}.xcframework.zip"
 ghostty_xcframework_sha=c0f9631277f726154c8f521954d17cdc41aac4626fc0df8cf925a19ee58e829b
+
+nerd_version=3.5.1
+nerd_url="https://github.com/ryanoasis/nerd-fonts/releases/download/v${nerd_version}/NerdFontsSymbolsOnly.tar.xz"
+nerd_archive="NerdFontsSymbolsOnly-${nerd_version}.tar.xz"
+nerd_archive_sha=01172f37db8543edb102e5cb5c64101c9f4686630804d49b419aa07b23a69996
+nerd_font=SymbolsNerdFontMono-Regular.ttf
+nerd_font_sha=fe471e538392f51910faab985fa8e192a39dd3426125edd15b71b3680df0e749
 
 zig_version=0.17.1
 zig_base="https://ziglang.org/download/${zig_version}"
@@ -113,9 +124,25 @@ case "$(uname -s)" in
   *) echo "provision-ghostty: unsupported platform $(uname -s)" >&2; exit 2 ;;
 esac
 
+# The symbols font, on every platform: the font file plus the archive's
+# licence and its list of icon-set licences, kept beside it.
+fetch "$nerd_archive" "$nerd_url" "$nerd_archive_sha"
+nerd_dir="$dir/nerd-fonts-symbols-${nerd_version}"
+if [[ ! -f "$nerd_dir/$nerd_font" || "$(sha256_of "$nerd_dir/$nerd_font")" != "$nerd_font_sha" ]]; then
+  rm -rf -- "${nerd_dir:?}" "${nerd_dir:?}.extract"
+  mkdir "$nerd_dir.extract"
+  tar -xJf "$dir/$nerd_archive" -C "$nerd_dir.extract" "$nerd_font" LICENSE README.md
+  mv -- "$nerd_dir.extract" "$nerd_dir"
+fi
+if [[ "$(sha256_of "$nerd_dir/$nerd_font")" != "$nerd_font_sha" ]]; then
+  echo "provision-ghostty: sha256 mismatch for $nerd_font" >&2
+  exit 1
+fi
+
 put() {
   if [[ "$emit" == github ]]; then printf '%s=%s\n' "$1" "$2"
   else printf 'export %s=%q\n' "$1" "$2"; fi
 }
 put GHOSTTY_RELEASE_DIR "$dir"
+put HACK_TERM_SYMBOLS_FONT "$nerd_dir/$nerd_font"
 if [[ -n "$zig" ]]; then put ZIG "$zig"; fi

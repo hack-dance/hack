@@ -107,7 +107,7 @@ jobs:
         run: cargo build --locked -p hack-desktop
 
   # The terminal surface's libghostty-vt feature (HACK-2252). The provision
-  # step is the only one that fetches libghostty-vt or Zig, and it verifies
+  # step is the only one that fetches libghostty-vt, Zig or the symbols font, and it verifies
   # each file against a sha256 committed in the script. The build, lint and
   # tests then run in a network namespace with no interfaces but a down
   # loopback, so they cannot download anything.
@@ -125,7 +125,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
-            libx11-xcb-dev libssl-dev libzstd-dev libvulkan-dev pkg-config xz-utils
+            libx11-xcb-dev libssl-dev libzstd-dev libvulkan-dev pkg-config xz-utils \
+            mesa-vulkan-drivers
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
@@ -149,5 +150,9 @@ jobs:
           echo "$RUNNER_TEMP/desktop-nextest" >> "$GITHUB_PATH"
       - name: Fetch locked crates
         run: cargo fetch --locked
+      # The render test draws glyphs offscreen and inspects the pixels. Mesa's
+      # software Vulkan driver (installed above) is its renderer here.
       - name: Build, lint and test the ghostty feature with networking disabled
+        env:
+          HACK_TERM_REQUIRE_RENDERER: "1"
         run: bash term/scripts/no-network.sh bash term/scripts/check-ghostty.sh

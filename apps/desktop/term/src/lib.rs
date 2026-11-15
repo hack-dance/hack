@@ -18,6 +18,9 @@
 //!   padding, read from their config.
 //! - [`panel`] and [`actions`] (feature `ghostty`): the tabbed panel and
 //!   its keyboard actions.
+//! - [`sprite`]: box-drawing, block and powerline glyphs as cell-exact
+//!   geometry; [`glyphs`] (feature `ghostty`): the bundled symbols font
+//!   used when the terminal's font has no glyph for a Nerd Font symbol.
 //!
 //! The crate never logs terminal contents, never types secrets and never
 //! puts values in argv beyond the program and arguments its caller passes.
@@ -32,12 +35,15 @@ pub mod color;
 pub mod emulator;
 mod fdio;
 pub mod ghostty_config;
+#[cfg(feature = "ghostty")]
+pub mod glyphs;
 pub mod launch;
 #[cfg(feature = "ghostty")]
 pub mod panel;
 pub mod pty;
 mod queue;
 pub mod session;
+pub mod sprite;
 pub mod stream;
 #[cfg(feature = "ghostty")]
 pub mod terminal;

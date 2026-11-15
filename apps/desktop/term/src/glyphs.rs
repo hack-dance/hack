@@ -96,6 +96,73 @@ pub struct SymbolOutline {
     pub bounds: [f32; 4],
 }
 
+/// Where a glyph goes in its room: `scale` is pixels per font unit, `left`
+/// is where the glyph's box starts and `baseline` is where y = 0 falls,
+/// both measured from the room's top left corner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub scale: f32,
+    pub left: f32,
+    pub baseline: f32,
+}
+
+impl Placement {
+    /// The glyph's ink in the room: left, top, right, bottom.
+    pub fn ink(&self, outline: &SymbolOutline) -> [f32; 4] {
+        let [x0, y0, x1, y1] = outline.bounds;
+        [
+            self.left + x0 * self.scale,
+            self.baseline - y1 * self.scale,
+            self.left + x1 * self.scale,
+            self.baseline - y0 * self.scale,
+        ]
+    }
+}
+
+impl SymbolOutline {
+    /// Place the glyph in a room `room_w` by `room_h`, so that all of its
+    /// ink is inside the room.
+    ///
+    /// The glyph's box is one em wide and about one line tall. The em is
+    /// made as wide as the room, or as tall if that is less, and the box is
+    /// centred, so glyphs of one size line up with each other. The font's
+    /// metrics do not bound the ink, though: some glyphs rise above the
+    /// ascender or hang past their advance. So the scale is then reduced
+    /// until the ink fits the room, and the glyph is moved by as little as
+    /// brings its ink inside.
+    pub fn place(&self, room_w: f32, room_h: f32) -> Placement {
+        let [x0, y0, x1, y1] = self.bounds;
+        let mut scale = room_w.min(room_h) / self.units_per_em;
+        if x1 > x0 {
+            scale = scale.min(room_w / (x1 - x0));
+        }
+        if y1 > y0 {
+            scale = scale.min(room_h / (y1 - y0));
+        }
+        let line = (self.ascender - self.descender) * scale;
+        let left = (room_w - self.advance * scale) / 2.0;
+        let baseline = (room_h - line) / 2.0 + self.ascender * scale;
+        // The ink is no larger than the room, so each pair of limits is in
+        // order (but for rounding, which `max` then `min` tolerates).
+        Placement {
+            scale,
+            left: left.max(-x0 * scale).min(room_w - x1 * scale),
+            baseline: baseline.max(y1 * scale).min(room_h + y0 * scale),
+        }
+    }
+}
+
+/// When a symbol is drawn from the bundled symbols font.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BundledSymbols {
+    /// When the terminal's font has no glyph for it; see the module docs.
+    #[default]
+    WhenMissing,
+    /// Every symbol the bundled font has, whatever the terminal's font
+    /// has: symbols then look the same with any font.
+    Always,
+}
+
 fn face() -> Option<&'static ttf_parser::Face<'static>> {
     static FACE: OnceLock<Option<ttf_parser::Face<'static>>> = OnceLock::new();
     FACE.get_or_init(|| ttf_parser::Face::parse(SYMBOLS_FONT, 0).ok())
@@ -301,6 +368,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn every_glyph_is_placed_with_all_its_ink_inside_its_room() {
+        // One cell and two cells at several font sizes, a room wider than
+        // tall, and rooms too small to be useful.
+        let rooms = [
+            (9.0, 20.0),
+            (18.0, 20.0),
+            (7.8, 16.9),
+            (15.6, 16.9),
+            (31.0, 34.0),
+            (40.0, 12.0),
+            (3.0, 5.0),
+            (1.0, 1.0),
+        ];
+        let mut seen = 0;
+        let mut beyond_metrics = 0;
+        for &(a, b) in &SYMBOL_RANGES {
+            for cp in a..=b {
+                let ch = char::from_u32(cp).unwrap();
+                let Some(o) = outline(ch) else {
+                    // A glyph with no contours, such as a space.
+                    continue;
+                };
+                seen += 1;
+                let [_, y0, _, y1] = o.bounds;
+                beyond_metrics += usize::from(y1 > o.ascender || y0 < o.descender);
+                for (w, h) in rooms {
+                    let at = o.place(w, h);
+                    let [l, t, r, b] = at.ink(&o);
+                    let e = 1e-3;
+                    assert!(
+                        l >= -e && t >= -e && r <= w + e && b <= h + e,
+                        "U+{cp:04X} in {w}x{h}: ink {l} {t} {r} {b}"
+                    );
+                    assert!(at.scale > 0.0 && at.scale <= w.min(h) / o.units_per_em + e);
+                }
+            }
+        }
+        assert!(seen > 10_000, "the whole font was checked: {seen}");
+        // The case this guards: ink outside the font's own line metrics.
+        assert!(beyond_metrics > 0, "some glyphs exceed the line metrics");
+        // The two sort arrows rise above the ascender; in a two-cell room
+        // they are moved down, not cut off.
+        for ch in ['\u{f0dc}', '\u{f0de}'] {
+            let o = outline(ch).unwrap();
+            assert!(o.bounds[3] > o.ascender, "{ch:?} rises above the ascender");
+            let [_, top, _, bottom] = o.place(18.0, 20.0).ink(&o);
+            assert!(
+                top >= -1e-3 && bottom <= 20.0 + 1e-3,
+                "{ch:?}: {top} {bottom}"
+            );
+        }
+        // A glyph that already fits keeps its centred box: the branch.
+        let o = outline('\u{e0a0}').unwrap();
+        let at = o.place(18.0, 20.0);
+        assert_eq!(at.scale, 18.0 / o.units_per_em);
+        assert_eq!(at.left, (18.0 - o.advance * at.scale) / 2.0);
     }
 
     #[test]

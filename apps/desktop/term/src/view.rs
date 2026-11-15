@@ -23,17 +23,17 @@ use std::time::Duration;
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta, ScrollEvent,
-    SharedString, StrikethroughStyle, Styled as _, TextAlign, TextRun, UnderlineStyle, Window,
-    canvas, div, fill, point, px, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, FocusHandle, Focusable, Font, FontStyle,
+    FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
+    ScrollDelta, ScrollEvent, SharedString, StrikethroughStyle, Styled as _, TextAlign, TextRun,
+    UnderlineStyle, Window, canvas, div, fill, point, px, size,
 };
 
 use crate::actions;
 use crate::emulator::{CursorShape, Emulator, Frame, KeyInput, Rgb, SearchState, TermTheme};
 use crate::ghostty_config::GhosttyLook;
-use crate::glyphs::{self, SymbolFallback};
+use crate::glyphs::{self, BundledSymbols, SymbolFallback};
 use crate::launch::{SessionKind, SessionPlan};
 use crate::pty::{PtyOptions, QUIT_GRACE};
 use crate::sprite::{self, Seg, Shape};
@@ -91,6 +91,8 @@ pub struct TermFont {
     pub family: Option<SharedString>,
     pub size: Pixels,
     pub line_height: f32,
+    /// When symbols come from the bundled symbols font.
+    pub symbols: BundledSymbols,
 }
 
 impl Default for TermFont {
@@ -99,6 +101,7 @@ impl Default for TermFont {
             family: None,
             size: px(13.),
             line_height: 1.3,
+            symbols: BundledSymbols::default(),
         }
     }
 }
@@ -556,7 +559,8 @@ impl TerminalView {
                 && !sprite::covers(ch)
                 && glyphs::in_symbols_font(ch)
                 && !from_symbols.contains(&ch)
-                && self.symbols.uses_symbols_font(ch, font, font_size, window)
+                && (self.font.symbols == BundledSymbols::Always
+                    || self.symbols.uses_symbols_font(ch, font, font_size, window))
             {
                 from_symbols.insert(ch);
             }
@@ -794,6 +798,8 @@ enum Special {
 }
 
 /// Draw one self-drawn glyph into a cell given in whole device pixels.
+/// Nothing is drawn outside the cell: a diagonal's stroke, for one, is
+/// wider than the cell at its corners and is cut off at the cell's edges.
 fn paint_sprite(ch: char, cell: [f32; 4], scale: f32, color: Hsla, window: &mut Window) {
     let [x0, y0, x1, y1] = cell;
     let (w, h) = (x1 - x0, y1 - y0);
@@ -801,6 +807,19 @@ fn paint_sprite(ch: char, cell: [f32; 4], scale: f32, color: Hsla, window: &mut 
         return;
     };
     let at = |x: f32, y: f32| point(px((x0 + x) / scale), px((y0 + y) / scale));
+    let bounds = Bounds::from_corners(at(0., 0.), at(w, h));
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        paint_shapes(shapes, &at, scale, color, window);
+    });
+}
+
+fn paint_shapes(
+    shapes: Vec<Shape>,
+    at: &dyn Fn(f32, f32) -> Point<Pixels>,
+    scale: f32,
+    color: Hsla,
+    window: &mut Window,
+) {
     let trace = |builder: &mut gpui_kit::PathBuilder, path: &[Seg]| {
         for seg in path {
             match *seg {
@@ -844,27 +863,38 @@ fn paint_sprite(ch: char, cell: [f32; 4], scale: f32, color: Hsla, window: &mut 
     }
 }
 
-/// Draw one symbol from the bundled symbols font into the room it has:
-/// its own cell, or that cell and the next when the next one is blank.
+/// How many cells a symbol from the bundled font has to draw in, starting
+/// at `row[x]`.
 ///
-/// Each glyph in that font sits in a box one em wide and about one line
-/// tall. The box is sized to the room (never taller than the cell) and
-/// centred in it, and the glyph's outline is filled as a vector path.
-/// Fitting the box to a single narrow cell makes icons small, which is why
-/// a blank cell after a symbol is used too: prompt themes put a space after
-/// their icons, and Ghostty and other terminals treat that space the same
-/// way.
+/// A double-width character has the two cells the emulator gave it. A
+/// narrow one has its own cell, and the next cell as well when that one is
+/// blank: fitting an icon to a single narrow cell makes it small, prompt
+/// themes put a space after their icons, and Ghostty and other terminals
+/// treat that space the same way. A double-width symbol is not widened
+/// further: it already has the two cells the blank-cell rule exists to give.
+fn symbol_cells(row: &[crate::emulator::FrameCell], x: usize) -> u16 {
+    if row[x].wide {
+        return 2;
+    }
+    let next_blank = row
+        .get(x + 1)
+        .is_some_and(|n| !n.spacer && !n.wide && (n.text.is_empty() || n.text == " "));
+    if next_blank { 2 } else { 1 }
+}
+
+/// Draw one symbol from the bundled symbols font into its room (see
+/// [`symbol_cells`]). The glyph's outline is placed so that all its ink is
+/// inside the room (see [`glyphs::SymbolOutline::place`]) and filled as a
+/// vector path; the room is also the clip, so nothing can land in a
+/// neighbouring cell.
 fn paint_symbol(ch: char, room: Bounds<Pixels>, color: Hsla, window: &mut Window) {
     let Some(outline) = glyphs::outline(ch) else {
         return;
     };
-    let (room_w, room_h) = (f32::from(room.size.width), f32::from(room.size.height));
-    // Pixels per font unit: one em is as wide as the room, or as tall as
-    // the cell if that is less.
-    let k = room_w.min(room_h) / outline.units_per_em;
-    let left = f32::from(room.origin.x) + (room_w - outline.advance * k) / 2.0;
-    let line = (outline.ascender - outline.descender) * k;
-    let baseline = f32::from(room.origin.y) + (room_h - line) / 2.0 + outline.ascender * k;
+    let place = outline.place(f32::from(room.size.width), f32::from(room.size.height));
+    let left = f32::from(room.origin.x) + place.left;
+    let baseline = f32::from(room.origin.y) + place.baseline;
+    let k = place.scale;
     // Font units have y pointing up.
     let at = |(x, y): (f32, f32)| point(px(left + x * k), px(baseline - y * k));
     // TrueType outlines are filled with the non-zero rule.
@@ -880,7 +910,9 @@ fn paint_symbol(ch: char, room: Bounds<Pixels>, color: Hsla, window: &mut Window
         }
     }
     if let Ok(path) = builder.build() {
-        window.paint_path(path, color);
+        window.with_content_mask(Some(ContentMask { bounds: room }), |window| {
+            window.paint_path(path, color);
+        });
     }
 }
 
@@ -1005,11 +1037,7 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
                         window,
                     ),
                     Special::Symbol(ch) => {
-                        // A blank cell after the symbol is room for it too.
-                        let next_blank = row.get(x + 1).is_some_and(|n| {
-                            !n.spacer && !n.wide && (n.text.is_empty() || n.text == " ")
-                        });
-                        let room = rect(x as u16, y, if next_blank { 2 } else { 1 });
+                        let room = rect(x as u16, y, symbol_cells(row, x));
                         paint_symbol(ch, room, color, window);
                     }
                 }
@@ -1082,5 +1110,44 @@ fn paint_frame(a: &PaintArgs<'_>, window: &mut Window, cx: &mut App) {
             // Centre the font's line box in the cell.
             let _ = line.paint(at(start as u16, y), ch, TextAlign::Left, None, window, cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::symbol_cells;
+    use crate::emulator::FrameCell;
+
+    fn cell(text: &str) -> FrameCell {
+        FrameCell {
+            text: text.into(),
+            ..FrameCell::default()
+        }
+    }
+
+    #[test]
+    fn a_symbol_gets_the_cells_the_emulator_gave_it_then_a_blank_neighbour() {
+        let wide = FrameCell {
+            wide: true,
+            ..cell("\u{26a1}")
+        };
+        let spacer = FrameCell {
+            spacer: true,
+            ..FrameCell::default()
+        };
+        // A double-width symbol has two cells whatever follows its spacer.
+        for after in ["x", " ", ""] {
+            let row = [wide.clone(), spacer.clone(), cell(after)];
+            assert_eq!(symbol_cells(&row, 0), 2, "followed by {after:?}");
+        }
+        assert_eq!(symbol_cells(&[wide.clone(), spacer.clone()], 0), 2);
+        // A narrow symbol borrows a blank cell after it, and nothing else.
+        let icon = cell("\u{f07b}");
+        assert_eq!(symbol_cells(&[icon.clone(), cell(" ")], 0), 2);
+        assert_eq!(symbol_cells(&[icon.clone(), cell("")], 0), 2);
+        assert_eq!(symbol_cells(&[icon.clone(), cell("x")], 0), 1);
+        assert_eq!(symbol_cells(&[icon.clone(), icon.clone()], 0), 1);
+        assert_eq!(symbol_cells(&[icon.clone(), wide, spacer], 0), 1);
+        assert_eq!(symbol_cells(&[icon], 0), 1, "at the end of the row");
     }
 }

@@ -159,6 +159,18 @@ function withInstallStep(message: string): string {
 }
 
 /**
+ * Records an untrusted-unit refusal for `--json`: the systemd service was
+ * found, nothing changed, `blocked: "untrusted-unit"`.
+ */
+function recordUntrustedUnit(trace: DaemonCommandTrace | undefined): void {
+  if (trace) {
+    trace.manager = "systemd";
+    trace.action = "none";
+    trace.blocked = "untrusted-unit";
+  }
+}
+
+/**
  * {@link checkSystemdUnitTrustedBeforeChange} for a command: null, or the
  * refusal after recording `blocked: "untrusted-unit"` (nothing changed).
  */
@@ -172,9 +184,8 @@ async function refuseUntrustedUnit(opts: {
     deps: opts.deps,
     uid: opts.hooks.trustUid,
   });
-  if (untrusted !== null && opts.hooks.trace) {
-    opts.hooks.trace.action = "none";
-    opts.hooks.trace.blocked = "untrusted-unit";
+  if (untrusted !== null) {
+    recordUntrustedUnit(opts.hooks.trace);
   }
   return untrusted;
 }
@@ -384,7 +395,8 @@ export async function startViaSystemdIfInstalled(
     uid: hooks.trustUid,
   });
   if (untrusted !== null) {
-    logger.error({ message: untrusted });
+    recordUntrustedUnit(hooks.trace);
+    logger.error({ message: withInstallStep(untrusted) });
     return 1;
   }
   const hackHome = dirname(hooks.paths.root);

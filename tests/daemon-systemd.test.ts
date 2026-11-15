@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
@@ -28,7 +29,10 @@ import type {
   DaemonProcessProof,
 } from "../src/daemon/process.ts";
 import type { ProcessImage } from "../src/daemon/process-image.ts";
-import { createDaemonCommandTrace } from "../src/daemon/reconcile.ts";
+import {
+  buildDaemonCommandData,
+  createDaemonCommandTrace,
+} from "../src/daemon/reconcile.ts";
 import { summarizeSystemdService } from "../src/daemon/service-summary.ts";
 import {
   buildDaemonRepairMessage,
@@ -5186,8 +5190,11 @@ linuxTest(
       })
     ).toBe(1);
     expect(requested).toBe(0);
-    // Nothing reached the trace: the outcome, not the trace, decides.
-    expect(trace.manager).toBe("none");
+    // The trace records why (review round 24), but the start hook, not the
+    // trace, decides whether systemd was asked.
+    expect(trace.manager).toBe("systemd");
+    expect(trace.action).toBe("none");
+    expect(trace.blocked).toBe("untrusted-unit");
     expect(fake.calls).not.toContain("systemctl --user start hackd.service");
 
     // A usable unit: systemd is asked, and the hook says so first.
@@ -5577,6 +5584,58 @@ linuxTest(
     expect(Buffer.compare(await readFile(unitPath), before)).toBe(0);
     expect(systemctlMutations(fake)).toEqual([]);
     expect(trace.blocked).toBe("untrusted-unit");
+  }
+);
+
+// Review round 24 (HACK-2216): the stopped start's early unit-file refusal
+// reports the same JSON reason as the later trust gate.
+
+linuxTest(
+  "a stopped start refuses an untrusted main unit with blocked untrusted-unit in its JSON data",
+  async () => {
+    const fake = fakeSystemd();
+    const before = await writePlantedMissingProgramUnit(fake);
+    const startData = (trace: ReturnType<typeof createDaemonCommandTrace>) =>
+      buildDaemonCommandData({
+        command: "start",
+        trace,
+        daemon: { running: false, pid: null, version: null },
+        cliVersion: "2.0.0",
+      });
+
+    // The unit file is another account's.
+    const foreign = createDaemonCommandTrace();
+    expect(
+      await startViaSystemdIfInstalled({
+        ...startHooks(fake),
+        trace: foreign,
+        trustUid: otherUid(),
+      })
+    ).toBe(1);
+    expect(startData(foreign)).toMatchObject({
+      schema: "hack.daemon-start/v1",
+      manager: "systemd",
+      action: "none",
+      blocked: "untrusted-unit",
+      fallback: null,
+    });
+
+    // The unit is a link, not a file Hack wrote.
+    const moved = `${unitPath}.real`;
+    await rename(unitPath, moved);
+    await symlink(moved, unitPath);
+    const linked = createDaemonCommandTrace();
+    expect(
+      await startViaSystemdIfInstalled({ ...startHooks(fake), trace: linked })
+    ).toBe(1);
+    expect(startData(linked)).toMatchObject({
+      manager: "systemd",
+      action: "none",
+      blocked: "untrusted-unit",
+    });
+
+    expect(systemctlMutations(fake)).toEqual([]);
+    expect(Buffer.compare(await readFile(moved), before)).toBe(0);
   }
 );
 

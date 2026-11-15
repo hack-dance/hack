@@ -316,10 +316,11 @@ fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
     let Some(end) = line.iter().position(|b| *b == b'\n') else {
         return false;
     };
-    let mut tokens = line[..end]
+    let tokens: Vec<&[u8]> = line[..end]
         .split(|b| *b == b' ' || *b == b'\t')
-        .filter(|token| !token.is_empty());
-    let Some(interpreter) = tokens.next() else {
+        .filter(|token| !token.is_empty())
+        .collect();
+    let Some((interpreter, args)) = tokens.split_first() else {
         return false;
     };
     let trusted_program = |token: &[u8]| {
@@ -329,13 +330,34 @@ fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
             && trusted_tool_path(program, uid, false)
                 .is_some_and(|next| trusted_interpreter(&next, uid, depth - 1))
     };
-    // Arguments matter too: `#!/usr/bin/env /shared/interp` runs that path
-    // directly, and `env PATH=...` would bypass the private wrapper PATH.
-    // Any path-like argument must be a trusted program; assignments refuse.
-    trusted_program(interpreter)
-        && tokens.all(|token| {
-            !token.contains(&b'=') && (!token.contains(&b'/') || trusted_program(token))
+    // Arguments can name programs too (`#!/usr/bin/env /shared/interp`,
+    // `env PATH=...`, `env -S ${VAR}`). Allow only a literal grammar: plain
+    // words or trusted absolute programs. For env, the only option is -S
+    // and the command it runs must be a plain name, which the private
+    // wrapper PATH resolves.
+    let plain = |token: &[u8]| {
+        token
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+    };
+    let is_env = trusted_tool_path(
+        Path::new(std::ffi::OsStr::from_bytes(interpreter)),
+        uid,
+        false,
+    )
+    .is_some_and(|real| real.file_name() == Some(std::ffi::OsStr::new("env")));
+    let args_ok = if is_env {
+        let command = args.iter().position(|t| *t != b"-S");
+        command.is_some_and(|i| {
+            args[..i].iter().all(|t| *t == b"-S")
+                && plain(args[i])
+                && !args[i].starts_with(b"-")
+                && args[i + 1..].iter().all(|t| plain(t) || trusted_program(t))
         })
+    } else {
+        args.iter().all(|t| plain(t) || trusted_program(t))
+    };
+    trusted_program(interpreter) && args_ok
 }
 
 /// A per-read private PATH containing only wrappers for checked executables.
@@ -1956,6 +1978,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         write(&nested, &unsafe_interpreter);
         let unsafe_env = format!("/usr/bin/env {}", unsafe_interpreter.display());
         let env_path = format!("/usr/bin/env PATH={} sh", shared.display());
+        let env_split_absolute = format!("/usr/bin/env -S {}", unsafe_interpreter.display());
         for (shebang, trusted) in [
             ("/bin/sh", true),
             ("/usr/bin/env sh", true),
@@ -1963,6 +1986,11 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             (nested.to_str().unwrap(), false),
             (unsafe_env.as_str(), false),
             (env_path.as_str(), false),
+            ("/usr/bin/env -S sh", true),
+            ("/usr/bin/env -S ${TOOL_INTERPRETER}", false),
+            (env_split_absolute.as_str(), false),
+            ("/usr/bin/env -P bin sh", false),
+            ("/usr/bin/env -- sh", false),
         ] {
             write(&docker, Path::new(shebang));
             let tools = trusted_probe_path(bin.as_os_str()).unwrap();

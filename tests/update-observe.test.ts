@@ -48,7 +48,7 @@ async function executable(relative: string): Promise<string> {
   return path;
 }
 
-const base = { env: {}, homeDir: "/example/user" } as const;
+const base = { env: {} } as const;
 
 test("candidate versions sort before their release and by next number", () => {
   const parse = (raw: string) => {
@@ -112,6 +112,20 @@ test("a Homebrew install is reported, not refused, with the brew upgrade", async
   ]);
 });
 
+/** The environment a native `hack-next` launch exports for one channel root. */
+function candidateEnv(channel: string, version: string) {
+  return {
+    HACK_CANDIDATE_ENTRYPOINT: "hack-next",
+    HACK_NATIVE_BINARY: join(
+      channel,
+      "versions",
+      version,
+      "bundle",
+      "hack-native"
+    ),
+  };
+}
+
 test("a candidate picks the newest same-major next release and its manager upgrade", async () => {
   const read = releases({
     list: [
@@ -124,9 +138,11 @@ test("a candidate picks the newest same-major next release and its manager upgra
       "not a release",
     ],
   });
+  // A custom channel root: the command must name this root's launcher.
+  const channel = join(root, "custom-channel");
+  const launcher = await executable("custom-channel/bin/hack-next");
   const report = await observeUpdate({
-    env: { HACK_CANDIDATE_ENTRYPOINT: "hack-next" },
-    homeDir: "/example/user",
+    env: candidateEnv(channel, "5.0.0-next.17"),
     version: "5.0.0-next.17",
     executable: "/example/bun",
     compiled: false,
@@ -139,7 +155,7 @@ test("a candidate picks the newest same-major next release and its manager upgra
     available: true,
     install_kind: "candidate",
     upgrade_command: [
-      "/example/user/.hack-next/bin/hack-next",
+      launcher,
       "--manager",
       "upgrade",
       "--version",
@@ -295,7 +311,6 @@ test.each([
 test("a candidate launcher without the manager gets no upgrade command", async () => {
   const report = await observeUpdate({
     env: { HACK_CANDIDATE_ENTRYPOINT: "/example/bundle/bin/hack-v5" },
-    homeDir: "/example/user",
     version: "5.0.0-next.17",
     executable: "/example/bun",
     compiled: false,
@@ -348,4 +363,38 @@ test("a full page proves 'up to date' only when it holds the running release", a
     available: false,
     reason: null,
   });
+});
+
+test("a hack-next command needs the running root's own launcher", async () => {
+  const channel = join(root, "channel");
+  const observe = (env: Record<string, string>) =>
+    observeUpdate({
+      env,
+      version: "5.0.0-next.17",
+      executable: "/example/bun",
+      compiled: false,
+      fetch: releases({ list: [{ tag_name: "v5.0.0-next.18" }] }).fetch,
+    });
+  // No launcher file at <root>/bin/hack-next.
+  expect(
+    (await observe(candidateEnv(channel, "5.0.0-next.17"))).upgrade_command
+  ).toBeNull();
+  await executable("channel/bin/hack-next");
+  // A Compose launch exports no executor, so the root is unknown.
+  expect(
+    (await observe({ HACK_CANDIDATE_ENTRYPOINT: "hack-next" })).upgrade_command
+  ).toBeNull();
+  // An executor for another version does not identify this CLI's root.
+  expect(
+    (await observe(candidateEnv(channel, "5.0.0-next.16"))).upgrade_command
+  ).toBeNull();
+  expect(
+    (await observe(candidateEnv(channel, "5.0.0-next.17"))).upgrade_command
+  ).toEqual([
+    join(channel, "bin", "hack-next"),
+    "--manager",
+    "upgrade",
+    "--version",
+    "5.0.0-next.18",
+  ]);
 });

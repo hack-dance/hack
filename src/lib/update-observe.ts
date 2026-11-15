@@ -5,8 +5,9 @@
  * registry write, daemon or engine contact. Missing evidence is reported as
  * `null` with a closed `reason`, never as "up to date".
  */
+import { lstat } from "node:fs/promises";
+import { isAbsolute, join, sep } from "node:path";
 import { isRecord } from "./guards.ts";
-import { upgradeCommandPrefix } from "./upgrade-check.ts";
 import { buildVersionReport } from "./version-report.ts";
 
 const RELEASES_API = "https://api.github.com/repos/hack-dance/hack/releases";
@@ -199,26 +200,49 @@ async function resolveLatest(opts: {
       };
 }
 
+/**
+ * The `hack-next` launcher of the channel root running this CLI, or `null`.
+ * The launcher exports the same marker for every root, so the root comes from
+ * the native executor it pinned: `<root>/versions/<current>/bundle/hack-native`.
+ * A Compose-backend launch carries no root and gets no command.
+ */
+async function candidateLauncher(opts: {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly current: string;
+}): Promise<string | null> {
+  // Only `hack-next` has the standalone manager; other candidate launchers
+  // (such as a bundle's `hack-v5`) forward every argument to the CLI.
+  if ((opts.env.HACK_CANDIDATE_ENTRYPOINT ?? "").trim() !== "hack-next") {
+    return null;
+  }
+  const executor = (opts.env.HACK_NATIVE_BINARY ?? "").trim();
+  const suffix = join("versions", opts.current, "bundle", "hack-native");
+  if (!(isAbsolute(executor) && executor.endsWith(`${sep}${suffix}`))) {
+    return null;
+  }
+  const root = executor.slice(0, -suffix.length - 1);
+  const launcher = join(root, "bin", "hack-next");
+  const info = await lstat(launcher).catch(() => null);
+  return info?.isFile() ? launcher : null;
+}
+
 /** A supported, self-contained upgrade path for this install, or `null`. */
-function upgradeCommand(opts: {
+async function upgradeCommand(opts: {
   readonly installKind: UpdateCheckInstallKind;
   readonly channel: VersionReport["channel"];
+  readonly current: string;
   readonly latest: string;
   readonly binaryPath: string;
   readonly env: Readonly<Record<string, string | undefined>>;
-  readonly homeDir: string;
-}): readonly string[] | null {
+}): Promise<readonly string[] | null> {
   if (opts.installKind === "candidate") {
-    // Only the `hack-next` launcher has the standalone manager; other
-    // candidate launchers (such as a bundle's `hack-v5`) forward every argument.
-    if ((opts.env.HACK_CANDIDATE_ENTRYPOINT ?? "").trim() !== "hack-next") {
-      return null;
-    }
-    const prefix = upgradeCommandPrefix({
+    const launcher = await candidateLauncher({
       env: opts.env,
-      homeDir: opts.homeDir,
+      current: opts.current,
     });
-    return [...prefix.argv, "--manager", "upgrade", "--version", opts.latest];
+    return launcher === null
+      ? null
+      : [launcher, "--manager", "upgrade", "--version", opts.latest];
   }
   if (opts.channel !== "stable") {
     // `hack update` and Homebrew install the latest stable release only.
@@ -238,7 +262,6 @@ export async function observeUpdate(opts: {
   readonly executable: string;
   readonly compiled: boolean;
   readonly env: Readonly<Record<string, string | undefined>>;
-  readonly homeDir: string;
   readonly fetch?: typeof fetch;
 }): Promise<UpdateCheckReport> {
   const identity = await buildVersionReport({
@@ -287,13 +310,13 @@ export async function observeUpdate(opts: {
     install_kind: installKind,
     upgrade_command:
       available === true
-        ? upgradeCommand({
+        ? await upgradeCommand({
             installKind,
             channel: identity.channel,
+            current: identity.version,
             latest: latest.version,
             binaryPath: identity.binary_path,
             env: opts.env,
-            homeDir: opts.homeDir,
           })
         : null,
     reason: available === null ? "version-unrecognized" : null,

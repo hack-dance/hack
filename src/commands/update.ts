@@ -1,5 +1,4 @@
 import { access, rm } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 
 import { confirm, isCancel } from "@clack/prompts";
@@ -304,7 +303,6 @@ const handleObserve: CommandHandlerFor<Spec> = async ({ ctx, args }) => {
     executable: process.execPath,
     compiled: Bun.main.startsWith("/$bunfs/"),
     env: process.env,
-    homeDir: homedir(),
   });
   emitCliResult({
     result: machineSuccess({

@@ -2730,16 +2730,19 @@ export async function checkSystemdStopHooks(opts: {
   readonly uid?: number;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
-  // The unit file itself (owner, mode, not a link), as start checks it: an
-  // account that could edit it could add OnSuccess= there too.
-  const loadPaths =
-    (await checkSystemdUnitTrusted({ unitPath: opts.unitPath, uid })) ??
-    (await checkSystemdUnitLoadPaths({ deps: opts.deps, uid }));
-  if (loadPaths !== null) {
-    return loadPaths.replace(
-      `Not using ${SYSTEMD_UNIT_NAME}:`,
-      `Not stopping ${SYSTEMD_UNIT_NAME}:`
-    );
+  // The unit file itself (a regular file this user owns that others cannot
+  // write): an account that could edit it could add OnSuccess= there too.
+  // A stop loads and runs no new unit code and Hack never reloads to stop
+  // (owner decision, HACK-2216). So the checks that guard what a later
+  // reload or start would load are not made here: load-directory and
+  // unit-directory modes, and hackd.service.wants/.requires/.upholds.
+  // Nothing is repaired either. What systemd has loaded is checked below.
+  const unitFile = await checkUnitFileItself({
+    unitPath: opts.unitPath,
+    uid,
+  });
+  if (unitFile !== null) {
+    return `Not stopping ${SYSTEMD_UNIT_NAME}: ${unitFile}`;
   }
   const files = await checkLoadedUnitFiles({
     unitPath: opts.unitPath,
@@ -2759,6 +2762,33 @@ export async function checkSystemdStopHooks(opts: {
   return hook
     ? `Not stopping ${SYSTEMD_UNIT_NAME}: it has ${hook.key}=${hook.argv}, which Hack does not write or vouch for`
     : null;
+}
+
+/**
+ * The unit file alone, for a stop: a regular file (not a link) owned by
+ * `uid` that group and others cannot write. Its directories are not judged
+ * and nothing is changed. Null, or why not.
+ */
+async function checkUnitFileItself(opts: {
+  readonly unitPath: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(opts.unitPath);
+  } catch (error: unknown) {
+    return `could not inspect ${opts.unitPath}: ${errorMessage(error)}`;
+  }
+  if (!info.isFile()) {
+    return `${opts.unitPath} is not a regular file (a symlink or other entry Hack did not write). Review and remove it, then run: hack daemon install`;
+  }
+  const owner = Number(info.uid);
+  if (opts.uid >= 0 && owner !== opts.uid) {
+    return `${opts.unitPath} is owned by another user (uid ${owner}). Review and remove it, then run: hack daemon install`;
+  }
+  return (Number(info.mode) & 0o022) === 0
+    ? null
+    : `${opts.unitPath} was writable by other users (mode ${(Number(info.mode) & 0o777).toString(8)}), so its contents cannot be trusted. Review and remove it, then run: hack daemon install`;
 }
 
 function errorMessage(error: unknown): string {

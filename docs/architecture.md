@@ -459,7 +459,9 @@ the enabled unit runs code as you at the next login. Only an explicit
 the reconcile after `hack update`, the check before a running daemon is
 stopped) refuses a group- or other-writable unit or drop-in directory with
 `blocked: "untrusted-unit"` and changes nothing. While such a directory was
-writable, another account may already have planted a unit there. For the same reason,
+writable, another account may already have planted a unit there.
+`hack daemon stop` neither repairs nor refuses such a directory (see below).
+For the same reason,
 `install` and `start` check `hackd.service.d/` and `service.d/`: every drop-in
 there must be a file you own that others cannot write, or they refuse to use the
 unit until you review it. `start` (and autostart) also runs the unit only when
@@ -640,7 +642,13 @@ these (`systemctl enable` links into `default.target.wants/`). So before any
 reload, start or restart, each must be absent, or an empty directory owned by
 you or root that others cannot write. A link, any entry in one, or a writable
 one refuses with `blocked: "untrusted-unit"`, and nothing is reloaded,
-started or restarted. `hack daemon stop` and `install` make the same check.
+started or restarted. `install` makes the same check. `hack daemon stop` does
+not, and is not blocked by a writable unit directory either. A stop loads and
+runs no new unit code and Hack never reloads to stop, so it should not stop
+you from shutting hackd down exactly when something looks wrong. Stop keeps
+its own checks: that the daemon it stops is this home's, that the unit file is
+a regular file you own that others cannot write, that the files systemd has
+loaded are trusted, and that there are no stop hooks.
 
 The rewrite keeps the program path as written, so a stable symlink stays a
 symlink, and an enabled unit stays enabled while a disabled one stays disabled.

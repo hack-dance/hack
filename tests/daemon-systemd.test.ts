@@ -5932,3 +5932,78 @@ linuxTest(
     expect(fake.calls).not.toContain("systemctl --user start hackd.service");
   }
 );
+
+// Owner decision on PR #854 (HACK-2216): `hack daemon stop` is not blocked
+// by the relationship-directory or writable-unit-directory checks (a stop
+// loads no new unit code), and never reloads. Start and restart still are.
+
+linuxTest(
+  "stop still stops this home's daemon past a planted hackd.service.wants link, while start and restart refuse",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const userDir = join(root, "config", "systemd", "user");
+    const payload = join(userDir, "payload.service");
+    await writeFile(payload, "[Service]\nExecStart=/bin/true\n");
+    const wants = join(userDir, "hackd.service.wants");
+    await mkdir(wants);
+    await chmod(wants, 0o755);
+    await symlink(payload, join(wants, "payload.service"));
+
+    // An automatic restart still refuses it.
+    fake.calls.length = 0;
+    const running = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(running)).toBe(1);
+    expect(running.trace.blocked).toBe("untrusted-unit");
+    expect(systemctlMutations(fake)).toEqual([]);
+
+    // stop: this home's proven daemon is stopped, without a reload.
+    fake.calls.length = 0;
+    const stopped = await stopViaSystemdIfInstalled({
+      proveDaemon: proveFor(fake),
+      pid: 4242,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+      isPidInUnit: () => Promise.resolve(true),
+    });
+    expect(stopped.refused).toBeNull();
+    expect(stopped.handled).toBe(true);
+    expect(fake.calls).toContain("systemctl --user stop hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+
+    // A start after it still refuses.
+    fake.calls.length = 0;
+    expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+    expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+  }
+);
+
+linuxTest(
+  "stop works with a group-writable unit directory and does not chmod it",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const userDir = join(root, "config", "systemd", "user");
+    await chmod(userDir, 0o775);
+    fake.calls.length = 0;
+    const stopped = await stopViaSystemdIfInstalled({
+      proveDaemon: proveFor(fake),
+      pid: 4242,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+      isPidInUnit: () => Promise.resolve(true),
+    });
+    expect(stopped.refused).toBeNull();
+    expect(fake.calls).toContain("systemctl --user stop hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect((await stat(userDir)).mode & 0o777).toBe(0o775);
+  }
+);

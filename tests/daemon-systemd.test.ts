@@ -2090,12 +2090,28 @@ linuxTest("start runs only a unit file this user controls", async () => {
   expect((await stat(unitPath)).mode & 0o777).toBe(0o644);
   expect(await readFile(unitPath, "utf8")).toBe(unitText());
 
-  // This user's unit directory, writable by the group: repaired, started
-  // (the files inside are checked separately).
+  // This user's unit directory, writable by the group: an automatic start
+  // never repairs it (another account may already have planted units
+  // there, HACK-2216). Refused, NOT chmodded, nothing started.
   await chmod(userDir, 0o775);
   fake.calls.length = 0;
-  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect((await stat(userDir)).mode & 0o777).toBe(0o775);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  // An explicit install still repairs its own directories, then start runs.
+  expect(
+    (
+      await installSystemdUnit({
+        unitPath,
+        unitText: unitText(),
+        deps: fake.deps,
+      })
+    ).ok
+  ).toBe(true);
   expect((await stat(userDir)).mode & 0o777).toBe(0o755);
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
   expect(fake.calls).toContain("systemctl --user start hackd.service");
 
   // A symlinked unit is not one Hack wrote: refused, not started.
@@ -2566,10 +2582,15 @@ linuxTest("a drop-in masked with a link to /dev/null is accepted", async () => {
   }
   await symlink("/dev/null", join(dropInDir, "override.conf"));
   expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
-  // The mask's own directory is still checked (this one is the user's, so
-  // group/other write is removed).
+  // The mask's own directory is still checked. By default (every automatic
+  // path) a writable one is refused and left as it is (HACK-2216); only
+  // explicit install repairs this user's own directory.
   await chmod(dropInDir, 0o777);
-  expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
+  expect(await checkSystemdUnitDropIns({ unitPath })).toContain(
+    "writable by other users"
+  );
+  expect((await stat(dropInDir)).mode & 0o777).toBe(0o777);
+  expect(await checkSystemdUnitDropIns({ unitPath, repair: true })).toBeNull();
   expect((await stat(dropInDir)).mode & 0o777).toBe(0o755);
   // A link elsewhere is not a mask: its target must be a trusted file.
   const other = join(root, "elsewhere.conf");
@@ -5812,5 +5833,102 @@ linuxTest(
     expect(proofs).toBe(2);
     expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
     expect(hooks.trace.blocked).toBe("rewrite-refused");
+  }
+);
+
+// Codex security finding on PR #854 (HACK-2216): automatic paths never
+// repair a writable unit directory, and refuse relationship directories
+// (hackd.service.wants/.requires/.upholds) Hack did not create.
+
+linuxTest(
+  "an automatic restart refuses a group-writable unit directory without chmod-ing it",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const userDir = join(root, "config", "systemd", "user");
+    await chmod(userDir, 0o775);
+    fake.calls.length = 0;
+    const hooks = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(hooks.trace.blocked).toBe("untrusted-unit");
+    // Not repaired: the mode is exactly what it was.
+    expect((await stat(userDir)).mode & 0o777).toBe(0o775);
+    expect(systemctlMutations(fake)).toEqual([]);
+    // The check before a direct daemon is stopped refuses it the same way.
+    const refusal = await refuseSystemdStartBeforeReplacing(startHooks(fake));
+    expect(refusal?.blocked).toBe("untrusted-unit");
+    expect((await stat(userDir)).mode & 0o777).toBe(0o775);
+  }
+);
+
+linuxTest(
+  "a planted hackd.service.wants entry stops every automatic reload, start and restart",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const userDir = join(root, "config", "systemd", "user");
+    // A sibling payload unit and a link that pulls it in with hackd.
+    const payload = join(userDir, "payload.service");
+    await writeFile(payload, "[Service]\nExecStart=/bin/true\n");
+    const wants = join(userDir, "hackd.service.wants");
+    await mkdir(wants);
+    await chmod(wants, 0o755);
+    await symlink(payload, join(wants, "payload.service"));
+    fake.calls.length = 0;
+
+    // Automatic restart of a running daemon: nothing reloaded or restarted.
+    const running = runningHooks(fake, "1.0.0");
+    expect(await reconcileRunningSystemdDaemon(running)).toBe(1);
+    expect(running.trace.blocked).toBe("untrusted-unit");
+    expect(systemctlMutations(fake)).toEqual([]);
+
+    // The check before a direct daemon is stopped: nothing stopped.
+    const refusal = await refuseSystemdStartBeforeReplacing(startHooks(fake));
+    expect(refusal?.blocked).toBe("untrusted-unit");
+    expect(refusal?.message).toContain("payload.service");
+
+    // A stopped start: not started.
+    fake.active = false;
+    fake.calls.length = 0;
+    expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+    expect(systemctlMutations(fake)).toEqual([]);
+
+    // .requires and .upholds are refused the same way.
+    await rm(wants, { recursive: true });
+    for (const suffix of [".requires", ".upholds"]) {
+      const dir = join(userDir, `hackd.service${suffix}`);
+      await mkdir(dir);
+      await chmod(dir, 0o755);
+      await symlink(payload, join(dir, "payload.service"));
+      fake.calls.length = 0;
+      expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+      expect(systemctlMutations(fake)).toEqual([]);
+      await rm(dir, { recursive: true });
+    }
+
+    // Control: with no relationship directory (absent), the start proceeds;
+    // an empty one this user owns that others cannot write does too.
+    fake.calls.length = 0;
+    expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+    expect(fake.calls).toContain("systemctl --user start hackd.service");
+    await mkdir(wants);
+    await chmod(wants, 0o755);
+    fake.active = false;
+    fake.calls.length = 0;
+    expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+    // A writable empty one is refused (others could add to it).
+    await chmod(wants, 0o777);
+    fake.active = false;
+    fake.calls.length = 0;
+    expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+    expect(fake.calls).not.toContain("systemctl --user start hackd.service");
   }
 );

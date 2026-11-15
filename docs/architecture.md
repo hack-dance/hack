@@ -454,7 +454,12 @@ sure `$XDG_CONFIG_HOME`, `systemd/` and `systemd/user/` are directories you own
 that your group and other users cannot write: it creates them `0755` whatever
 the umask and removes group or other write from ones you own, and it refuses
 (with the `chmod` to run) when that is not possible, because whoever can replace
-the enabled unit runs code as you at the next login. For the same reason,
+the enabled unit runs code as you at the next login. Only an explicit
+`install` repairs those modes. Every automatic path (`start` and `restart`,
+the reconcile after `hack update`, the check before a running daemon is
+stopped) refuses a group- or other-writable unit or drop-in directory with
+`blocked: "untrusted-unit"` and changes nothing. While such a directory was
+writable, another account may already have planted a unit there. For the same reason,
 `install` and `start` check `hackd.service.d/` and `service.d/`: every drop-in
 there must be a file you own that others cannot write, or they refuse to use the
 unit until you review it. `start` (and autostart) also runs the unit only when
@@ -627,6 +632,15 @@ nothing is written, reloaded, stopped or restarted, and `start` exits 1 with
 must come first because a rewrite replaces the file as this user: a check after
 it would pass for directives another account planted, such as a `Wants=` of
 its own unit, which a retarget keeps.
+
+systemd also starts every unit listed in `hackd.service.wants/`,
+`hackd.service.requires/` and `hackd.service.upholds/`, in any user-unit load
+directory, together with hackd. Hack's renderer and `install` create none of
+these (`systemctl enable` links into `default.target.wants/`). So before any
+reload, start or restart, each must be absent, or an empty directory owned by
+you or root that others cannot write. A link, any entry in one, or a writable
+one refuses with `blocked: "untrusted-unit"`, and nothing is reloaded,
+started or restarted. `hack daemon stop` and `install` make the same check.
 
 The rewrite keeps the program path as written, so a stable symlink stays a
 symlink, and an enabled unit stays enabled while a disabled one stays disabled.

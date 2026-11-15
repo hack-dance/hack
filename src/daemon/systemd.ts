@@ -1402,7 +1402,10 @@ export async function installSystemdUnit(opts: {
   // one of the load paths.
   const dropIns =
     (await checkSystemdUnitDirectoryChain({ unitPath: opts.unitPath })) ??
-    (await checkSystemdUnitDropIns({ unitPath: opts.unitPath })) ??
+    (await checkSystemdUnitDropIns({
+      unitPath: opts.unitPath,
+      repair: true,
+    })) ??
     (await checkSystemdUnitLoadPaths({ deps: opts.deps }));
   if (dropIns !== null) {
     return { ok: false, error: dropIns };
@@ -1419,7 +1422,10 @@ export async function installSystemdUnit(opts: {
     { createMode: 0o644 }
   );
   // An unchanged file is not rewritten: it must already be this user's.
-  const unitFile = await checkSystemdUnitFile({ unitPath: opts.unitPath });
+  const unitFile = await checkSystemdUnitFile({
+    unitPath: opts.unitPath,
+    repair: true,
+  });
   if (unitFile !== null) {
     return { ok: false, error: unitFile };
   }
@@ -1490,8 +1496,11 @@ export async function ensureOwnerWritableOnlyDirectories(opts: {
   }
   for (const dir of opts.dirs) {
     const created = await createDirectoryExactly(dir);
+    // Install creates and secures its own directories: the one place that
+    // repairs group/other write (HACK-2216).
     const error =
-      created ?? (await checkOwnerWritableOnlyDirectory({ dir, uid }));
+      created ??
+      (await checkOwnerWritableOnlyDirectory({ dir, uid, repair: true }));
     if (error !== null) {
       return { ok: false, error };
     }
@@ -1542,22 +1551,31 @@ async function createDirectoryExactly(dir: string): Promise<string | null> {
   }
 }
 
-/** Null when `dir` is this user's and not group/other-writable (fixed if possible). */
+/**
+ * Null when `dir` is this user's and not group/other-writable. With
+ * `repair` (explicit `hack daemon install` only), group/other write is
+ * removed from a directory this user owns; otherwise it is refused
+ * (HACK-2216: an automatic path never repairs, because another account
+ * could already have planted units there).
+ */
 async function checkOwnerWritableOnlyDirectory(opts: {
   readonly dir: string;
   readonly uid: number;
+  readonly repair?: boolean;
 }): Promise<string | null> {
   return await checkOwnerControlledPath({
     path: opts.dir,
     uid: opts.uid,
     directory: true,
+    repair: opts.repair === true,
   });
 }
 
 /**
  * Null when `path` (resolved) is owned by `uid` and not writable by group or
- * others; group/other write is removed when this user owns it. `directory`
- * says which kind it must be.
+ * others. A directory this user owns that is group/other-writable is fixed
+ * only with `repair`, and refused otherwise; a file is always refused.
+ * `directory` says which kind it must be.
  */
 async function checkOwnerControlledPath(opts: {
   readonly path: string;
@@ -1565,6 +1583,8 @@ async function checkOwnerControlledPath(opts: {
   readonly directory: boolean;
   /** Also accept root-owned (system configuration such as /etc/systemd/user). */
   readonly allowRoot?: boolean;
+  /** Remove group/other write from an owned directory (install only). */
+  readonly repair?: boolean;
 }): Promise<string | null> {
   let real: string;
   let info: Awaited<ReturnType<typeof stat>>;
@@ -1588,6 +1608,11 @@ async function checkOwnerControlledPath(opts: {
   if (!opts.directory) {
     // Its contents may already be someone else's: a chmod would keep them.
     return `${shown} was writable by other users (mode ${(info.mode & 0o777).toString(8)}), so its contents cannot be trusted`;
+  }
+  if (opts.repair !== true) {
+    // Never repaired on an automatic path (HACK-2216): another account may
+    // already have added units or links while it was writable.
+    return `${shown} is writable by other users (mode ${(info.mode & 0o777).toString(8)}), so what is in it cannot be trusted | Review it, run: chmod go-w ${real}, then run: hack daemon install`;
   }
   try {
     await chmod(real, info.mode & 0o7755);
@@ -1613,6 +1638,8 @@ export async function checkSystemdUnitDropIns(opts: {
   readonly unitPath: string;
   /** Defaults to this process's uid. */
   readonly uid?: number;
+  /** Explicit `hack daemon install` only: see checkOwnerWritableOnlyDirectory. */
+  readonly repair?: boolean;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
   const unitDir = dirname(opts.unitPath);
@@ -1626,8 +1653,11 @@ export async function checkSystemdUnitDropIns(opts: {
       return `Not using ${SYSTEMD_UNIT_NAME}: its drop-in ${dangling}`;
     }
     const error =
-      (await checkOwnerWritableOnlyDirectory({ dir, uid })) ??
-      (await checkDropInEntries({ dir, uid }));
+      (await checkOwnerWritableOnlyDirectory({
+        dir,
+        uid,
+        repair: opts.repair,
+      })) ?? (await checkDropInEntries({ dir, uid }));
     if (error !== null) {
       return `Not using ${SYSTEMD_UNIT_NAME}: its drop-in ${error}. Review and remove it, then run: hack daemon install`;
     }
@@ -1755,11 +1785,17 @@ export async function checkSystemdUnitFile(opts: {
   readonly unitPath: string;
   /** Defaults to this process's uid. */
   readonly uid?: number;
+  /** Explicit `hack daemon install` only: see checkOwnerWritableOnlyDirectory. */
+  readonly repair?: boolean;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
   const unitDir = dirname(opts.unitPath);
   for (const dir of [dirname(dirname(unitDir)), dirname(unitDir), unitDir]) {
-    const error = await checkOwnerWritableOnlyDirectory({ dir, uid });
+    const error = await checkOwnerWritableOnlyDirectory({
+      dir,
+      uid,
+      repair: opts.repair,
+    });
     if (error !== null) {
       return `Not using ${SYSTEMD_UNIT_NAME}: ${error}`;
     }
@@ -1811,6 +1847,8 @@ export async function checkSystemdUnitDirectoryChain(opts: {
 export async function checkSystemdUnitTrusted(opts: {
   readonly unitPath: string;
   readonly uid?: number;
+  /** Explicit `hack daemon install` only; every automatic path refuses. */
+  readonly repair?: boolean;
 }): Promise<string | null> {
   return (
     (await checkSystemdUnitFile(opts)) ?? (await checkSystemdUnitDropIns(opts))
@@ -2073,7 +2111,67 @@ async function checkUnitLoadDirectory(opts: {
       return error;
     }
   }
+  return await checkUnitRelationshipDirectories({
+    loadDir: existing,
+    uid: opts.uid,
+  });
+}
+
+/** Directories whose entries systemd pulls in with hackd.service. */
+const RELATIONSHIP_SUFFIXES = [".wants", ".requires", ".upholds"] as const;
+
+/**
+ * `hackd.service.wants/`, `.requires/` and `.upholds/` in a load directory
+ * (HACK-2216): systemd loads every unit listed there and starts it with
+ * hackd.service, so one another account planted would run as this user at
+ * the next reload and start. Hack's renderer and install create none of
+ * them (`systemctl enable` links into `default.target.wants/`). So each may
+ * only be absent, or an empty directory owned by this user or root that
+ * others cannot add to. A link, any entry, or anything else is refused.
+ * Null, or the refusal.
+ */
+async function checkUnitRelationshipDirectories(opts: {
+  readonly loadDir: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  for (const suffix of RELATIONSHIP_SUFFIXES) {
+    const dir = resolve(opts.loadDir, `${SYSTEMD_UNIT_NAME}${suffix}`);
+    const refused = await checkRelationshipDirectory({ dir, uid: opts.uid });
+    if (refused !== null) {
+      return refused;
+    }
+  }
   return null;
+}
+
+async function checkRelationshipDirectory(opts: {
+  readonly dir: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  const { dir } = opts;
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(dir);
+  } catch (error: unknown) {
+    return (error as { code?: unknown }).code === "ENOENT"
+      ? null
+      : `${dir} could not be inspected: ${errorMessage(error)}`;
+  }
+  const remedy = `Hack creates none; a unit listed there starts with ${SYSTEMD_UNIT_NAME} as this user. Review and remove it, then run: hack daemon install`;
+  if (!info.isDirectory()) {
+    return `${dir} is a link or other entry, not a directory. ${remedy}`;
+  }
+  const entries = await readdir(dir);
+  if (entries.length > 0) {
+    return `${dir} lists ${entries.sort().join(", ")}. ${remedy}`;
+  }
+  const owner = Number(info.uid);
+  if (opts.uid >= 0 && owner !== opts.uid && owner !== 0) {
+    return `${dir} is owned by another user (uid ${owner}). ${remedy}`;
+  }
+  return (Number(info.mode) & 0o022) === 0
+    ? null
+    : `${dir} lets other users add units (mode ${(Number(info.mode) & 0o777).toString(8)}). ${remedy}`;
 }
 
 /** True when an existing unit file is a link, another user's, or writable by others. */

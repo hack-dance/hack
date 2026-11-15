@@ -136,6 +136,7 @@ impl Fixture {
         fs::read_to_string(self.root.join("lifecycle.log")).unwrap_or_default()
     }
 
+    #[track_caller]
     fn await_log(&self, needle: &str) {
         eventually(|| self.log().contains(needle).then_some(()));
     }
@@ -525,6 +526,46 @@ fn output_bursts_and_long_lines_include_partial_tail() {
         let fields: Vec<_> = line.splitn(4, '\t').collect();
         assert_eq!(fields.len(), 4);
         assert_eq!(fields[1], "worker");
+        assert!(fields[0].ends_with('Z'));
+    }
+}
+
+/// Without a log lock, each record is one O_APPEND write. Two guards bursting
+/// at once, including 64 KiB records far above PIPE_BUF, must still leave only
+/// whole records: every line parses, belongs to one guard and is not mixed.
+#[test]
+fn concurrent_guards_append_whole_records_without_a_lock() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![
+        f.process("alpha", "burst"),
+        f.process("beta", "burst"),
+    ]);
+    assert!(wait(&mut caller, TIMEOUT).success());
+    let text = f.log();
+    for name in ["alpha", "beta"] {
+        let own: Vec<_> = text
+            .lines()
+            .filter(|line| line.split('\t').nth(1) == Some(name))
+            .collect();
+        assert_eq!(
+            own.iter().filter(|l| l.contains("\tburst-record-")).count(),
+            2000
+        );
+        let xs: usize = own
+            .iter()
+            .filter_map(|line| line.splitn(4, '\t').nth(3))
+            .filter(|message| message.starts_with('X'))
+            .map(|message| {
+                assert!(message.bytes().all(|b| b == b'X'), "mixed record");
+                message.len()
+            })
+            .sum();
+        assert_eq!(xs, 300_000);
+    }
+    for line in text.lines() {
+        let fields: Vec<_> = line.splitn(4, '\t').collect();
+        assert_eq!(fields.len(), 4, "split record: {line:.80}");
+        assert!(matches!(fields[1], "alpha" | "beta"), "{line:.80}");
         assert!(fields[0].ends_with('Z'));
     }
 }
@@ -1431,6 +1472,34 @@ fn live_task(pid: i32) -> bool {
                 .flatten()
                 .is_some_and(|state| state != b'Z' && state != b'X')
         })
+}
+
+/// A guard stopped while it held a lock on the shared log (SIGSTOP between
+/// lock and unlock) must not stall sibling guards. The test holds an exclusive
+/// flock on the log from outside for the whole run, as such a frozen guard
+/// would: a guard's output must still reach the log and its project must
+/// still stop with a framed `stopped` receipt within the normal bounds.
+#[test]
+fn held_log_lock_never_stalls_a_guard() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    let log = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(f.root.join("lifecycle.log"))
+        .unwrap();
+    // SAFETY: flock only borrows this live descriptor.
+    assert_eq!(unsafe { libc::flock(log.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    f.await_log("fixture-ready");
+    let start = Instant::now();
+    let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    assert!(wait(&mut stop, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "stopped");
+    assert!(start.elapsed() < Duration::from_secs(7));
+    assert!(wait(&mut caller, TIMEOUT).success());
+    drop(log);
 }
 
 fn process_is_zombie(pid: i32) -> bool {

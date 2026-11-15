@@ -12,7 +12,8 @@ import {
   type ActivityRecord,
   readActivity,
 } from "../lib/activity-log.ts";
-import { emitCliResult, errorResult, okResult } from "../lib/cli-result.ts";
+import { emitCliResult, errorResult } from "../lib/cli-result.ts";
+import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 
 const WHOLE_NUMBER = /^[1-9][0-9]*$/;
 
@@ -97,7 +98,10 @@ async function handleActivity({
   }
   if (json) {
     emitCliResult({
-      result: okResult({ data: { version: ACTIVITY_SCHEMA_VERSION, entries } }),
+      result: machineSuccess({
+        schema: MACHINE_SCHEMAS.activity,
+        data: { version: ACTIVITY_SCHEMA_VERSION, entries },
+      }),
     });
     return 0;
   }

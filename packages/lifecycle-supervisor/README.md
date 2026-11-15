@@ -60,7 +60,7 @@ replaces stdio with `/dev/null`. Supervisor death therefore cannot let stop pass
 unpublished guard that might later spawn. Authored children get their own stderr
 pipe and never inherit that lease. Startup closes inherited descriptors with Linux
 `close_range` or enumeration of actual `/proc/self/fd` / `/dev/fd` entries; its cost
-is independent of the descriptor limit. Log flock acquisition and release retry EINTR.
+is independent of the descriptor limit. Log records are single unlocked `O_APPEND` writes, so no guard waits on a sibling to log.
 
 A usable process census is required before authored spawn. Linux preflight rejects
 known `hidepid` mounts and requires a readable self identity in the census. An

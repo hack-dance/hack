@@ -70,6 +70,9 @@ fails. A failed request exits nonzero and carries a `reason`:
 | `foreign-live-process` | `unknown` | A receipt from another owner token still has live members. |
 | `stop-incomplete` | `unknown` | Stop could not confirm that every member is gone. |
 | `retired-owner-live` | `unknown` | Status for a retired owner whose members are not proven absent. |
+| `stop-lock-failed` | `unknown` | Taking `.stop.lock` failed for a reason other than the wait expiring. |
+| `receipt-read-failed` | `unknown` | The process receipts could not be read. |
+| `retire-failed` | `unknown` | Stop could not durably retire the owner token; nothing was signalled. |
 | `io-error` | `unknown` | Any other local failure. |
 
 A successful reply has no `reason`. The sixteen-second stop-lock wait exceeds the
@@ -144,6 +147,8 @@ leader identity and each remaining member's UID, birth and session. Recovery
 delivers TERM individually, grants a fresh five-second grace, then KILL to the captured incarnations and
 confirms absence. The capture remains authoritative if TERM ends the witness;
 every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux).
+Readers that open a receipt while a guard atomically replaces it reopen the name, so a
+concurrent update never reads as a refusal.
 On Linux a thread-group leader whose main thread exited while other threads run shows
 `Z` in `/proc/<pid>/stat`; it counts as live until no thread in `/proc/<pid>/task` is. A pidfd open that
 reports the process missing (`ESRCH`, or `EINVAL` on Linux 6.8 when the PID survives only as a group or

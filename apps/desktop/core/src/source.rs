@@ -289,53 +289,29 @@ fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
     let Some((interpreter, args)) = tokens.split_first() else {
         return false;
     };
-    let trusted_program = |token: &[u8]| {
-        let program = Path::new(std::ffi::OsStr::from_bytes(token));
-        depth > 0
-            && program.is_absolute()
-            && trusted_tool_path(program, uid, false)
-                .is_some_and(|next| trusted_interpreter(&next, uid, depth - 1))
+    let interpreter = Path::new(std::ffi::OsStr::from_bytes(interpreter));
+    if depth == 0 || !interpreter.is_absolute() {
+        return false;
+    }
+    let Some(real_interpreter) = trusted_tool_path(interpreter, uid, false) else {
+        return false;
     };
-    // Arguments can name programs too (`#!/usr/bin/env /shared/interp`,
-    // `env PATH=...`, `env -S ${VAR}`). Allow only a literal grammar: plain
-    // words or trusted absolute programs. For env, the only option is -S
-    // and the command it runs must be a plain name, which the private
-    // wrapper PATH resolves.
-    let plain = |token: &[u8]| {
-        token
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
-    };
-    // Identify env by its real path, never by file name: a renamed copy
-    // would otherwise take the generic branch with env's options.
-    let is_env = trusted_tool_path(
-        Path::new(std::ffi::OsStr::from_bytes(interpreter)),
-        uid,
-        false,
-    )
-    .is_some_and(|real| real == Path::new("/usr/bin/env"));
-    // Generic interpreters get no options beyond common shell flags; any
-    // other option could change how a program is found (for example a
-    // renamed env's -P), so it fails closed.
-    let generic = |token: &[u8]| {
-        if token.starts_with(b"-") {
-            matches!(token, b"-e" | b"-u" | b"-x" | b"-eu" | b"-ex")
-        } else {
-            plain(token) || trusted_program(token)
+    // Only two forms are accepted; anything else (options, file or path
+    // arguments, variables, assignments) fails closed as Unknown:
+    // - `#!<trusted interpreter>` with no arguments;
+    // - exactly `#!/usr/bin/env <name>` (env identified by real path), whose
+    //   name resolves only through Doctor's private wrapper PATH.
+    match args {
+        [] => trusted_interpreter(&real_interpreter, uid, depth - 1),
+        [name] => {
+            real_interpreter == Path::new("/usr/bin/env")
+                && !name.starts_with(b"-")
+                && name
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
         }
-    };
-    let args_ok = if is_env {
-        let command = args.iter().position(|t| *t != b"-S");
-        command.is_some_and(|i| {
-            args[..i].iter().all(|t| *t == b"-S")
-                && plain(args[i])
-                && !args[i].starts_with(b"-")
-                && args[i + 1..].iter().all(|t| generic(t))
-        })
-    } else {
-        args.iter().all(|t| generic(t))
-    };
-    trusted_program(interpreter) && args_ok
+        _ => false,
+    }
 }
 
 /// A per-read private PATH containing only wrappers for checked executables.
@@ -1859,7 +1835,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let nested = bin.join("nested-interp");
         let docker = bin.join("docker");
         let write = |path: &Path, shebang: &Path| {
-            std::fs::write(path, format!("#!{} -e\necho '{{}}'\n", shebang.display())).unwrap();
+            std::fs::write(path, format!("#!{}\necho '{{}}'\n", shebang.display())).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         write(&nested, &unsafe_interpreter);
@@ -1878,13 +1854,16 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             (nested.to_str().unwrap(), false),
             (unsafe_env.as_str(), false),
             (env_path.as_str(), false),
-            ("/usr/bin/env -S sh", true),
+            ("/usr/bin/env -S sh", false),
             ("/usr/bin/env -S ${TOOL_INTERPRETER}", false),
             (env_split_absolute.as_str(), false),
             ("/usr/bin/env -P bin sh", false),
             ("/usr/bin/env -- sh", false),
             (renamed_env.as_str(), false),
-            ("/bin/sh -eu", true),
+            ("/bin/sh -eu", false),
+            // A plain argument can be a script file the shell would run.
+            ("/bin/sh payload", false),
+            ("/usr/bin/env sh extra", false),
         ] {
             write(&docker, Path::new(shebang));
             let tools = trusted_probe_path(bin.as_os_str()).unwrap();

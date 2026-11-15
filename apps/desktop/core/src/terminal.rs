@@ -120,6 +120,7 @@ impl Script {
         if !temp_root.is_absolute() || temp_root.to_str().is_none() {
             return Err("Terminal temp root must be an absolute UTF-8 path".into());
         }
+        safe_temp_root(temp_root)?;
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
@@ -198,6 +199,37 @@ impl Drop for Script {
         }
     }
 }
+/// Another user must not be able to rename the private script directory
+/// out of `root` and substitute a script before the terminal runs it. The
+/// root must be owned by this user and not writable by group or others, or
+/// owned by root and either not writable by others or sticky (as `/tmp` is);
+/// every directory above it follows the same rule, and ACLs may not grant
+/// changes (Doctor's ACL check).
+fn safe_temp_root(root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    const REFUSED: &str =
+        "The temporary directory can be changed by other users; terminal hand-off refused";
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let real = std::fs::canonicalize(root).map_err(|_| REFUSED.to_owned())?;
+    if !std::fs::metadata(&real).is_ok_and(|m| m.is_dir()) {
+        return Err(REFUSED.into());
+    }
+    for dir in real.ancestors() {
+        let Ok(meta) = std::fs::metadata(dir) else {
+            return Err(REFUSED.into());
+        };
+        let writable_by_others = meta.mode() & 0o022 != 0;
+        let sticky = meta.mode() & 0o1000 != 0;
+        let ok = (meta.uid() == uid && !writable_by_others)
+            || (meta.uid() == 0 && (!writable_by_others || sticky));
+        if !ok || !crate::doctor_acl::controlled(dir) {
+            return Err(REFUSED.into());
+        }
+    }
+    Ok(())
+}
+
 /// Discover only the Linux adapter; never fall back to typing into a pane.
 /// It runs as this user before any confirmation, so it must pass the same
 /// ownership, write and `#!` interpreter rules as the CLI (no env form);

@@ -287,7 +287,7 @@ fn copied_commands_are_bound_to_the_reviewed_context_or_not_offered() {
         "'HACK_HOME=/example/isolated'",
         "'HACK_RUNTIME_BACKEND=native'",
         "'HACK_DAEMON_AUTOSTART_DISABLE=1'",
-        "'/example/bin/hack' 'upgrade' 'snapshot'",
+        "'HACK_MCP_COMMAND=/example/bin/hack' '/example/bin/hack' 'upgrade' 'snapshot'",
     ] {
         assert!(command.contains(part), "{part} missing from {command}");
     }

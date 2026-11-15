@@ -379,3 +379,21 @@ fn an_unsafe_tool_on_path_fails_every_upgrade_operation_closed() {
         "the CLI never ran with an unchecked tool on PATH"
     );
 }
+#[test]
+fn a_remote_docker_endpoint_fails_every_upgrade_operation_closed() {
+    let t = Tree::new();
+    let source = LiveSource {
+        runner: t
+            .runner(REPORT, 0)
+            .with_env("PATH", t.0.join("bin").to_str().unwrap())
+            .with_env("DOCKER_HOST", "ssh://user@example"),
+        daemon: None,
+    };
+    let error = source.upgrade_check().unwrap_err();
+    assert!(error.contains("remote endpoint"), "{error}");
+    assert!(source.upgrade_snapshot().is_err());
+    assert!(
+        !t.0.join("calls").exists(),
+        "the CLI never ran with a remote Docker endpoint"
+    );
+}

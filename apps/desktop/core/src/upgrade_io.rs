@@ -90,6 +90,13 @@ fn checked(source: &LiveSource) -> Result<Checked, String> {
         .without_interpreter_startup()
         .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
         .with_cwd("/");
+    // The checks call docker too: apply Doctor's helper and Docker preflight
+    // (local socket only, checked plugins and helpers) before anything runs.
+    crate::doctor_plugins::validate_helpers(&runner)
+        .and_then(|()| {
+            crate::doctor_plugins::validate(&crate::doctor_plugins::Discovery::from_runner(&runner))
+        })
+        .map_err(|why| format!("{why}. The CLI was not run."))?;
     Ok(Checked {
         runner,
         program,

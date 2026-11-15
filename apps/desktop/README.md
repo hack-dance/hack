@@ -382,7 +382,9 @@ CLI now has a read-only update check (R14), but this desktop adapter does not
 consume it yet, so availability stays Unknown for every live install kind, including candidates and
 Homebrew. Readiness is separate from update availability. Actual Upgrade stays
 disabled until verified target and installation evidence exists; the current
-live adapter never supplies that evidence.
+live adapter never supplies that evidence. Doctor's
+helper and Docker preflight also runs first, so a remote Docker endpoint (for
+example `DOCKER_HOST=ssh://...`) refuses the operation as well.
 
 **Save file snapshot** is an explicit CLI write, available after a complete ready
 review. The app accepts a recovery point only for `status: created`, `complete:
@@ -398,7 +400,8 @@ adapter quotes each argument, displays the sequence and waits for Enter. It neve
 runs finding `command` text. Plan argv may be displayed/copied only after quoting,
 bound like Setup's commands to the reviewed CLI and context (`/usr/bin/env -i
 HOME=… HACK_HOME=… <cli> …`), so a terminal run addresses the reviewed home,
-backend and guards. A review without a checked context offers no copy;
+backend and guards, plus `HACK_MCP_COMMAND` naming the reviewed CLI so a copied
+daemon command restarts that CLI. A review without a checked context offers no copy;
 R17 safe metadata and an authored allowlist are required before any plan fix can
 be run in the app. Today those cards offer Copy and documentation only. No admin
 action, password prompt, self update or relaunch happens in the app.

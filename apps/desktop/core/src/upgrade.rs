@@ -225,14 +225,20 @@ impl Observation {
     /// The reviewed CLI and context bound to `args`, quoted for copying.
     /// Without a checked context there is nothing safe to copy.
     pub fn copy_command(&self, args: &[String]) -> Option<String> {
-        self.context
+        let mut spec = self
+            .context
             .as_ref()?
             .bind(&crate::terminal::CommandSpec {
                 program: self.cli_program.clone(),
                 args: args.to_vec(),
             })
-            .and_then(|spec| spec.display())
-            .ok()
+            .ok()?;
+        // The CLI starts the daemon by invoking itself and would otherwise
+        // prefer whatever `hack` is first on PATH: pin the reviewed one.
+        let at = spec.args.iter().position(|a| *a == self.cli_program)?;
+        spec.args
+            .insert(at, format!("HACK_MCP_COMMAND={}", self.cli_program));
+        spec.display().ok()
     }
 }
 /// One checkout of a grouped step as shown: its name, its own instruction

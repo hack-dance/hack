@@ -245,6 +245,7 @@ import {
   readProjectConfig,
   readProjectDefaultEnvConfig,
   readProjectDevHost,
+  resolveEffectiveProjectName,
 } from "../lib/project.ts";
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
@@ -4036,11 +4037,10 @@ export async function assertTrackedEnvMigrationConsent(opts: {
   if (!project) {
     return;
   }
-  const config = await readProjectConfig(project);
   const preview = await previewEnvMigration({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
-    projectName: config.name ?? "project",
+    projectName: await resolveEffectiveProjectName(project),
     serviceNames: await discoverComposeServiceNames({
       composeFile: project.composeFile,
     }),
@@ -4084,11 +4084,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
   if (!project) {
     return;
   }
-  const config = await readProjectConfig(project);
   const migrationProject = {
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
-    projectName: config.name ?? "project",
+    projectName: await resolveEffectiveProjectName(project),
     serviceNames: await discoverComposeServiceNames({
       composeFile: project.composeFile,
     }),
@@ -4343,12 +4342,11 @@ async function buildEnvMigrationPlanStep(opts: {
     throw error;
   }
   if (modernExists) {
-    const config = await readProjectConfig(opts.project);
     const composeFile = opts.project.composeFile;
     const preview = await previewEnvMigration({
       projectRoot: opts.project.projectRoot,
       projectDir: opts.project.projectDir,
-      projectName: config.name ?? "project",
+      projectName: await resolveEffectiveProjectName(opts.project),
       serviceNames: await discoverComposeServiceNames({
         composeFile,
       }),

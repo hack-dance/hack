@@ -18,7 +18,10 @@ import {
 } from "../lib/env-migration.ts";
 import { envMigrationSnapshots } from "../lib/env-migration-snapshot.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
-import { findProjectContext, readProjectConfig } from "../lib/project.ts";
+import {
+  findProjectContext,
+  resolveEffectiveProjectName,
+} from "../lib/project.ts";
 import { discoverComposeServiceNames } from "../lib/project-env-config.ts";
 
 const optApply = defineOption({
@@ -109,11 +112,10 @@ export async function handleEnvMigrate({
   if (!context) {
     throw new MissingProjectContextError();
   }
-  const config = await readProjectConfig(context);
   const project = {
     projectRoot: context.projectRoot,
     projectDir: context.projectDir,
-    projectName: config.name ?? "project",
+    projectName: await resolveEffectiveProjectName(context),
     serviceNames: await discoverComposeServiceNames({
       composeFile: context.composeFile,
     }),

@@ -65,14 +65,21 @@ afterEach(async () => {
   }
 });
 
-async function fixture() {
-  const projectRoot = join(root, "project");
+async function fixture(
+  opts: {
+    /** Checkout directory name; the legacy store is keyed by it when unnamed. */
+    readonly dir?: string;
+    /** Configured project name; null omits `name` from the config. */
+    readonly name?: string | null;
+  } = {}
+) {
+  const projectRoot = join(root, opts.dir ?? "project");
   const projectDir = join(projectRoot, ".hack");
   await mkdir(projectDir, { recursive: true });
   await writeFile(
     join(projectDir, "hack.config.json"),
     JSON.stringify({
-      name: "provider",
+      ...(opts.name === null ? {} : { name: opts.name ?? "provider" }),
       controlPlane: {
         secrets: {
           backend: "encrypted_file",
@@ -99,7 +106,8 @@ async function fixture() {
   const project = {
     projectRoot,
     projectDir,
-    projectName: "provider",
+    projectName:
+      opts.name === null ? (opts.dir ?? "project") : (opts.name ?? "provider"),
     serviceNames: ["api"],
   };
   await (await resolveSecretStore(project)).set({
@@ -514,6 +522,47 @@ for (const damage of ["manifest", "missing-blob", "changed-blob"] as const) {
         .api?.SECRET
     ).toBe(sentinel);
   });
+}
+
+for (const route of ["env migrate", "doctor"] as const) {
+  test(
+    `${route}: an unnamed legacy project migrates the secrets stored under its directory name`,
+    async () => {
+      // Legacy `hack env set` keyed the store by the directory slug when the
+      // config has no name. A decoy under the generic "project" scope must not
+      // be used.
+      const project = await fixture({ dir: "unnamed-app", name: null });
+      await (
+        await resolveSecretStore({ ...project, projectName: "project" })
+      ).set({ key: "SECRET", value: "synthetic-decoy-value" });
+      if (route === "env migrate") {
+        const applied = await cli(project.projectRoot, [
+          "--apply",
+          "--accept-tracked-env-changes",
+        ]);
+        expect(applied.exitCode, applied.stderr).toBe(0);
+        expect(applied.envelope).toMatchObject({
+          ok: true,
+          data: { status: "applied" },
+        });
+      } else {
+        // Doctor may exit 1 for unrelated host checks in this fixture; the
+        // migrated layer is the evidence.
+        await runCliCommand(project.projectRoot, [
+          "doctor",
+          "--migrate-env-config",
+          "--accept-tracked-env-changes",
+          "--path",
+          project.projectRoot,
+        ]);
+      }
+      expect(
+        (await resolveProjectEnvConfig({ ...project, envName: null }))
+          ?.serviceEnv.api?.SECRET
+      ).toBe(sentinel);
+    },
+    DOCTOR_WORKFLOW_TIMEOUT_MS
+  );
 }
 
 test("production snapshot provider backs source CLI apply, no-op and guarded rollback", async () => {

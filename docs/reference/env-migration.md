@@ -35,7 +35,7 @@ The preview's `data` has these stable fields:
 | Field | Meaning |
 | --- | --- |
 | `version` | Integer `1`; consumers must reject unsupported versions. |
-| `project` | `projectRoot`, `projectDir`, `projectName` and `serviceNames`; paths are absolute and canonical. |
+| `project` | `projectRoot`, `projectDir`, `projectName` and `serviceNames`; paths are absolute and canonical. `projectName` is the configured `name`, else the checkout directory, as a slug: the name legacy secret stores are keyed by. |
 | `status` | `ready` for unfinished migration work; `complete` when migration has completed; `recovery_required` for interrupted cleanup/rollback or an unavailable deferred Compose repair. |
 | `composeRepair` | Optional `"unavailable"` when completed env migration still has Compose references but their repair cannot be verified. The preview exits 0 with no file actions; apply still refuses. Existing env layers remain usable. |
 | `action` | `preview`, or `cleanup` with `--cleanup`. |

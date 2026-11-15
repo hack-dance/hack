@@ -662,6 +662,7 @@ impl LiveSource {
                     .runner
                     .clone()
                     .with_env("PATH", tool_path)
+                    .without_interpreter_startup()
                     .with_cwd(dir)
                     .with_term_grace(DOCTOR_TERM_GRACE),
                 None,
@@ -679,6 +680,7 @@ impl LiveSource {
                         let runner = pinned
                             .runner_for(t.native)
                             .with_env("PATH", tool_path)
+                            .without_interpreter_startup()
                             .with_term_grace(DOCTOR_TERM_GRACE);
                         let timeout = per_call.min(left());
                         s.spawn(move || {
@@ -710,6 +712,7 @@ impl LiveSource {
                                     let compose = pinned
                                         .runner_for(false)
                                         .with_env("PATH", tool_path)
+                                        .without_interpreter_startup()
                                         .with_term_grace(DOCTOR_TERM_GRACE);
                                     if let Ok(report) = read(&compose, Some(&t.repo_root), timeout)
                                         && crate::doctor::adopted_project_evidence(

@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { resolveLifecycleSupervisorRoot } from "../../../src/lib/lifecycle-supervisor.ts";
 import { restoreEnv } from "../../helpers/env.ts";
+import { registerPrivateTmuxRoot } from "../../helpers/tmux-socket-guard.ts";
 
 import { createMonorepoFixture } from "../fixture.ts";
 import { expect, expectExit, runCommand, type Scenario } from "../harness.ts";
@@ -63,6 +64,9 @@ export const lifecycleHostProcessScenario: Scenario = {
     }
 
     const previousTmuxRoot = process.env.TMUX_TMPDIR;
+    // The run's tmux socket guard admits only registered private roots; this
+    // scenario owns its fixture root (mkdtemp, 0700) for its own tmux server.
+    const unregisterTmuxRoot = registerPrivateTmuxRoot(ctx.tempRoot);
     process.env.TMUX_TMPDIR = ctx.tempRoot;
     const cli: typeof ctx.cli = (invocation) =>
       ctx.cli({
@@ -336,8 +340,16 @@ export const lifecycleHostProcessScenario: Scenario = {
       try {
         await downBestEffort({ ctx: { ...ctx, cli }, fixture });
       } finally {
-        await runCommand({ argv: ["tmux", "kill-server"], cwd: fixture.root });
-        restoreEnv("TMUX_TMPDIR", previousTmuxRoot);
+        try {
+          await runCommand({
+            argv: ["tmux", "kill-server"],
+            cwd: fixture.root,
+          });
+        } finally {
+          // Never leak this fixture's socket root into later scenarios.
+          restoreEnv("TMUX_TMPDIR", previousTmuxRoot);
+          unregisterTmuxRoot();
+        }
       }
     }
   },

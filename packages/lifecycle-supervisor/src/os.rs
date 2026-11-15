@@ -467,7 +467,11 @@ fn signal_member(expected: &Identity, signal: i32) -> Result<()> {
         let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, expected.pid, 0u32) };
         if raw < 0 {
             let error = io::Error::last_os_error();
-            if absent_error(&error) {
+            // Some kernels (observed on 6.8) return EINVAL, not ESRCH, for a PID
+            // kept alive only as a process-group or session ID after its process
+            // exited. Flags are zero, so EINVAL means no thread-group leader
+            // exists for that PID; liveness is still decided by `inspect` later.
+            if absent_error(&error) || error.raw_os_error() == Some(libc::EINVAL) {
                 return Ok(());
             }
             return Err(error);

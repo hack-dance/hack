@@ -108,6 +108,10 @@ async function makeFixture(): Promise<Fixture> {
       `printf '%s\\n' "$*" >> "${launchctlLog}"`,
       // HACK_TEST_LAUNCHCTL_FAIL=<verb> makes that verb fail (HACK-2216).
       'if [ -n "$HACK_TEST_LAUNCHCTL_FAIL" ] && [ "$1" = "$HACK_TEST_LAUNCHCTL_FAIL" ]; then echo "simulated $1 failure" >&2; exit 5; fi',
+      // HACK_TEST_LAUNCHCTL_SWAP: on bootout, another file replaces the
+      // plist (HACK_TEST_LAUNCHCTL_SWAP_TARGET), between the checked read
+      // and the bootstrap (HACK-2216).
+      'if [ "$1" = "bootout" ] && [ -n "$HACK_TEST_LAUNCHCTL_SWAP" ]; then cp "$HACK_TEST_LAUNCHCTL_SWAP" "$HACK_TEST_LAUNCHCTL_SWAP_TARGET.swap" && mv "$HACK_TEST_LAUNCHCTL_SWAP_TARGET.swap" "$HACK_TEST_LAUNCHCTL_SWAP_TARGET"; fi',
       // HACK_TEST_LAUNCHCTL_JOB=missing: launchd's own answer for a service
       // it does not have (exit 113).
       `if [ "$1" = "print" ] && [ "$HACK_TEST_LAUNCHCTL_JOB" = "missing" ]; then printf 'Bad request.\\nCould not find service "dance.hack.hackd" in domain for port\\n' >&2; exit 113; fi`,
@@ -758,6 +762,113 @@ test("a Hack plist that sets no PATH is refreshed, and the refresh writes one", 
   expect(stale).not.toContain("<key>PATH</key>");
   expect(results).toEqual({ repair: "refreshed", secondRepair: "ok" });
   expect(after).toContain("<key>PATH</key>");
+});
+
+// Review round 32 (HACK-2216): the plist is trusted and bound to the
+// checked bytes before any unload or bootstrap.
+
+/**
+ * Runs autostart on a stopped job whose loaded configuration is stale, so
+ * a reload of the (safe) plist is due. Returns the launchctl verbs.
+ */
+async function autostartWithStaleLoadedJob(opts: {
+  readonly fixture: Fixture;
+  readonly extraEnv?: Readonly<Record<string, string>>;
+}): Promise<string[]> {
+  const { fixture } = opts;
+  await writeLoadedJob(fixture, { path: "/srv/old/bin" });
+  const hackHome = join(fixture.home, GLOBAL_HACK_DIR_NAME);
+  const run = await runAsDarwin({
+    argv: [DRIVER, "autostart"],
+    cwd: fixture.root,
+    env: fixture.env({
+      HACK_HOME: hackHome,
+      HACK_TEST_LAUNCHCTL_JOB: "stopped",
+      HACK_NO_INTERACTIVE: undefined,
+      HACK_TEST_STUB_SOCKET: join(
+        hackHome,
+        GLOBAL_DAEMON_DIR_NAME,
+        GLOBAL_DAEMON_SOCKET_FILENAME
+      ),
+      ...opts.extraEnv,
+    }),
+  });
+  expect(run.code).toBe(0);
+  return (await launchctlCalls(fixture)).map(
+    (line) => line.split(" ")[0] ?? ""
+  );
+}
+
+test("positive control: a stale loaded job under a safe plist is reloaded and kickstarted", async () => {
+  const fixture = await makeFixture();
+  await writeFile(fixture.plistPath, safeFixturePlist(fixture));
+  const verbs = await autostartWithStaleLoadedJob({ fixture });
+  // The stub keeps reporting the old loaded job; after a successful reload
+  // a positive mismatch refuses, so the bootstrap ran but no kickstart.
+  expect(verbs).toContain("bootout");
+  expect(verbs).toContain("bootstrap");
+});
+
+test("a plist replaced between its check and the reload is not bootstrapped or kickstarted", async () => {
+  const fixture = await makeFixture();
+  const safe = safeFixturePlist(fixture);
+  await writeFile(fixture.plistPath, safe);
+  // What replaces it: the same plist with another command.
+  const swapped = join(fixture.root, "swapped.plist");
+  await writeFile(
+    swapped,
+    safe.replace(
+      "<string>--foreground</string>",
+      "<string>--foreground</string>\n    <string>--other</string>"
+    )
+  );
+  const verbs = await autostartWithStaleLoadedJob({
+    fixture,
+    extraEnv: {
+      HACK_TEST_LAUNCHCTL_SWAP: swapped,
+      HACK_TEST_LAUNCHCTL_SWAP_TARGET: fixture.plistPath,
+    },
+  });
+  expect(verbs).toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+  expect(verbs).not.toContain("kickstart");
+});
+
+test("a group-writable plist is refused before any unload", async () => {
+  const fixture = await makeFixture();
+  await writeFile(fixture.plistPath, safeFixturePlist(fixture));
+  await chmod(fixture.plistPath, 0o664);
+  const verbs = await autostartWithStaleLoadedJob({ fixture });
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+  expect(verbs).not.toContain("kickstart");
+});
+
+test("a group-writable LaunchAgents directory is refused before any unload", async () => {
+  const fixture = await makeFixture();
+  await writeFile(fixture.plistPath, safeFixturePlist(fixture));
+  await chmod(join(fixture.home, "Library", "LaunchAgents"), 0o775);
+  const verbs = await autostartWithStaleLoadedJob({ fixture });
+  expect(verbs).not.toContain("bootout");
+  expect(verbs).not.toContain("bootstrap");
+  expect(verbs).not.toContain("kickstart");
+});
+
+test("an install into a group-writable LaunchAgents directory unloads and loads nothing", async () => {
+  const fixture = await makeFixture();
+  await chmod(join(fixture.home, "Library", "LaunchAgents"), 0o775);
+  const run = await runAsDarwin({
+    argv: [DRIVER],
+    cwd: fixture.root,
+    env: fixture.env({ HACK_HOME: join(fixture.home, ".hack") }),
+  });
+  expect(run.code).toBe(0);
+  const results = JSON.parse(run.stdout) as Record<string, unknown>;
+  expect(results.install).toMatchObject({ ok: false, untrustedPlist: true });
+  const verbs = (await launchctlCalls(fixture)).map(
+    (line) => line.split(" ")[0]
+  );
+  expect(verbs).not.toContain("bootstrap");
 });
 
 // Review round 2 (HACK-2216).

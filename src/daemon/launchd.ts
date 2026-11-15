@@ -1,4 +1,5 @@
-import { realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { DAEMON_LAUNCHD_LABEL, GLOBAL_HACK_DIR_NAME } from "../constants.ts";
@@ -9,10 +10,14 @@ import {
   ensureDir,
   pathExists,
   readTextFile,
-  writeTextFile,
+  writeTextFileAtomicIfChanged,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
+import {
+  checkReplaceableChain,
+  lettingOthersCreate,
+} from "../lib/path-trust.ts";
 import { boundedTimeoutMs } from "../lib/process-deadline.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
 import { resolveExecutingCliPath } from "./executing-cli.ts";
@@ -389,15 +394,131 @@ export function loadedJobMatchesPlist(opts: {
   );
 }
 
-/** Unloads the job and loads the plist on disk again. */
-async function reloadLaunchdPlist(
-  paths: DaemonPaths
-): Promise<LaunchctlResult> {
+/**
+ * The plist launchd loads, and every directory above it, must be safe from
+ * other accounts before Hack unloads, writes or bootstraps anything
+ * (HACK-2216): the directory chain up to `/` is not replaceable
+ * (`checkReplaceableChain`), `~/Library/LaunchAgents` itself does not let
+ * others add or replace entries, and an existing plist is a regular file
+ * (not a link) owned by this user that nobody else can write. Nothing is
+ * repaired: a file others could write may already hold their content.
+ * Null, or why not (reported as `blocked: "untrusted-unit"`).
+ */
+export async function checkLaunchdPlistTrusted(opts: {
+  readonly plistPath: string;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const dir = dirname(opts.plistPath);
+  const chain = checkReplaceableChain({ path: dir, uid, hackHome: null });
+  if (chain !== null) {
+    return `the launchd plist's directory ${dir} is not safe from other accounts: ${chain}`;
+  }
+  const creatable = lettingOthersCreate(dir);
+  if (creatable !== null) {
+    return `${dir} lets other users replace the launchd plist (${creatable}); run: chmod go-w ${dir}`;
+  }
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(opts.plistPath);
+  } catch (error: unknown) {
+    return (error as { code?: unknown }).code === "ENOENT"
+      ? null
+      : `could not inspect ${opts.plistPath}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  if (!info.isFile()) {
+    return `${opts.plistPath} is not a regular file (a link or other entry Hack did not write)`;
+  }
+  if (uid >= 0 && info.uid !== uid) {
+    return `${opts.plistPath} is owned by another user (uid ${info.uid})`;
+  }
+  return (Number(info.mode) & 0o022) === 0
+    ? null
+    : `${opts.plistPath} is writable by other users (mode ${(Number(info.mode) & 0o777).toString(8)}), so its contents cannot be trusted`;
+}
+
+/** A plist read through a descriptor that does not follow a link. */
+interface BoundPlist {
+  readonly text: string;
+  readonly dev: number;
+  readonly ino: number;
+}
+
+/**
+ * Reads the plist without following a link at its path (`O_NOFOLLOW`), with
+ * the identity of the file read. Null when it is a link, not a regular
+ * file, or cannot be read.
+ */
+async function readBoundPlist(plistPath: string): Promise<BoundPlist | null> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(plistPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      return null;
+    }
+    const text = await handle.readFile("utf8");
+    return { text, dev: Number(info.dev), ino: Number(info.ino) };
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+
+/**
+ * Bootstraps the plist only when the file at its path is still exactly the
+ * one checked (HACK-2216): read again through `O_NOFOLLOW` right before
+ * `launchctl bootstrap`, with the same bytes and the same device and inode.
+ * Otherwise nothing is loaded.
+ */
+async function bootstrapBoundPlist(opts: {
+  readonly plistPath: string;
+  readonly bound: BoundPlist;
+}): Promise<LaunchctlResult> {
+  const now = await readBoundPlist(opts.plistPath);
+  if (
+    now === null ||
+    now.text !== opts.bound.text ||
+    now.dev !== opts.bound.dev ||
+    now.ino !== opts.bound.ino
+  ) {
+    return {
+      ok: false,
+      error: `${opts.plistPath} changed after it was checked, so it was not loaded`,
+    };
+  }
+  return await loadLaunchdService({ plistPath: opts.plistPath });
+}
+
+/**
+ * Unloads the job and loads the plist on disk again, bound to the checked
+ * bytes: the file must still be the one read (same bytes, device and
+ * inode) both before the unload and right before the bootstrap.
+ */
+async function reloadLaunchdPlist(opts: {
+  readonly paths: DaemonPaths;
+  readonly bound: BoundPlist;
+}): Promise<LaunchctlResult> {
+  const plistPath = opts.paths.launchdPlistPath;
+  const before = await readBoundPlist(plistPath);
+  if (
+    before === null ||
+    before.text !== opts.bound.text ||
+    before.dev !== opts.bound.dev ||
+    before.ino !== opts.bound.ino
+  ) {
+    return {
+      ok: false,
+      error: `${plistPath} changed after it was checked, so the job was not reloaded`,
+    };
+  }
   const unloaded = await unloadLaunchdService();
   if (!(unloaded.ok || unloaded.notLoaded)) {
     return unloaded;
   }
-  return await loadLaunchdService({ plistPath: paths.launchdPlistPath });
+  return await bootstrapBoundPlist({ plistPath, bound: opts.bound });
 }
 
 /**
@@ -433,10 +554,23 @@ export async function verifyLaunchdJobBeforeKickstart(opts: {
     readonly ok: boolean;
     readonly error?: string;
   }>;
-}): Promise<string | null> {
+  /** Test seam for the plist file and directory owner check. */
+  readonly uid?: number;
+}): Promise<LaunchdStartRefusal | null> {
+  const untrusted = await checkLaunchdPlistTrusted({
+    plistPath: opts.paths.launchdPlistPath,
+    uid: opts.uid,
+  });
+  if (untrusted !== null) {
+    return { reason: untrusted, blocked: "untrusted-unit" };
+  }
+  const refused = (reason: string): LaunchdStartRefusal => ({
+    reason,
+    blocked: "rewrite-refused",
+  });
   const unsafe = await checkLaunchdJobBeforeStart(opts);
   if (unsafe !== null) {
-    return unsafe;
+    return refused(unsafe);
   }
   const read = opts.readLoaded ?? readLaunchdLoadedJob;
   const loaded = await read();
@@ -448,13 +582,15 @@ export async function verifyLaunchdJobBeforeKickstart(opts: {
       ? `its loaded configuration could not be read (${loaded.reason})`
       : "its loaded configuration differs from the checked plist";
   if (await opts.isRunning()) {
-    return `launchd would restart hackd from a configuration that was not checked: ${why}, and hackd runs, so it was not reloaded`;
+    return refused(
+      `launchd would restart hackd from a configuration that was not checked: ${why}, and hackd runs, so it was not reloaded`
+    );
   }
-  const reloaded = await (
-    opts.reload ?? (() => reloadLaunchdPlist(opts.paths))
-  )();
+  const reloaded = await (opts.reload ?? (() => reloadChecked(opts)))();
   if (!reloaded.ok) {
-    return `${why}, and reloading the checked plist failed: ${reloaded.error ?? "unknown error"}`;
+    return refused(
+      `${why}, and reloading the checked plist failed: ${reloaded.error ?? "unknown error"}`
+    );
   }
   const again = await read();
   if (again.kind === "unknown") {
@@ -462,7 +598,32 @@ export async function verifyLaunchdJobBeforeKickstart(opts: {
   }
   return loadedJobMatchesPlist({ loaded: again, plistText: opts.plistText })
     ? null
-    : `${why}, and it still differs after reloading the checked plist`;
+    : refused(`${why}, and it still differs after reloading the checked plist`);
+}
+
+/** Why an automatic launchd start was refused, with its `--json` reason. */
+export interface LaunchdStartRefusal {
+  readonly reason: string;
+  readonly blocked: "untrusted-unit" | "rewrite-refused";
+}
+
+/**
+ * The default reload: the plist file read through `O_NOFOLLOW` must hold
+ * exactly the bytes that were checked, and stays bound to them (same
+ * device and inode) up to the bootstrap.
+ */
+async function reloadChecked(opts: {
+  readonly paths: DaemonPaths;
+  readonly plistText: string;
+}): Promise<LaunchctlResult> {
+  const bound = await readBoundPlist(opts.paths.launchdPlistPath);
+  if (bound === null || bound.text !== opts.plistText) {
+    return {
+      ok: false,
+      error: `${opts.paths.launchdPlistPath} is not the plist that was checked (changed, or a link)`,
+    };
+  }
+  return await reloadLaunchdPlist({ paths: opts.paths, bound });
 }
 
 /**
@@ -556,6 +717,11 @@ export interface LaunchdInstallResult {
    * `checkServiceExecutableTrusted`; nothing was unloaded, written or loaded.
    */
   readonly unsafeProgram?: true;
+  /**
+   * Set when the plist file or its directories failed
+   * {@link checkLaunchdPlistTrusted}; nothing was unloaded, written or loaded.
+   */
+  readonly untrustedPlist?: true;
 }
 
 /**
@@ -638,6 +804,15 @@ export async function installLaunchdService({
   await ensureDir(dirname(paths.launchdPlistPath));
   await ensureDir(paths.root);
 
+  // The plist file and its directories, before anything is unloaded,
+  // written or loaded (HACK-2216).
+  const untrustedPlist = await checkLaunchdPlistTrusted({
+    plistPath: paths.launchdPlistPath,
+  });
+  if (untrustedPlist !== null) {
+    return { ok: false, error: untrustedPlist, untrustedPlist: true };
+  }
+
   const existingPlist = await readTextFile(paths.launchdPlistPath);
   if (existingPlist !== null) {
     if (existingPlist === plistContent) {
@@ -652,10 +827,23 @@ export async function installLaunchdService({
     }
   }
 
-  await writeTextFile(paths.launchdPlistPath, plistContent);
-
-  const loadResult = await loadLaunchdService({
+  // A fresh file renamed onto the path itself (a link there is refused,
+  // never written through), then loaded only while it still holds exactly
+  // these bytes.
+  await writeTextFileAtomicIfChanged(paths.launchdPlistPath, plistContent, {
+    noFollowTarget: true,
+    createMode: 0o644,
+  });
+  const bound = await readBoundPlist(paths.launchdPlistPath);
+  if (bound === null || bound.text !== plistContent) {
+    return {
+      ok: false,
+      error: `${paths.launchdPlistPath} changed after it was written, so it was not loaded`,
+    };
+  }
+  const loadResult = await bootstrapBoundPlist({
     plistPath: paths.launchdPlistPath,
+    bound,
   });
   if (!loadResult.ok) {
     return { ok: false, error: `Failed to load service: ${loadResult.error}` };
@@ -836,6 +1024,9 @@ export function hasBoundedLaunchdOutput(opts: {
  * `refresh-refused`: the plist is stale, but the program a refresh would
  * keep fails the same checks (a source file, a non-durable location, or
  * one another account can replace), left as it is;
+ * `untrusted-plist`: the plist file or a directory above it could have
+ * been written by another account ({@link checkLaunchdPlistTrusted}), so
+ * nothing was unloaded, written or loaded;
  * `failed`: a rewrite was needed but did not complete (unload, write or
  * load failed, or no installable hack resolves); the service may be
  * stopped.
@@ -850,6 +1041,7 @@ export type LaunchdProgramRepairResult =
   | "unproven-owner"
   | "retarget-refused"
   | "refresh-refused"
+  | "untrusted-plist"
   | "unmanaged"
   | "not-installed"
   | "failed";
@@ -1135,6 +1327,9 @@ export async function repairLaunchdProgramIfInvalid(opts: {
     hackBinPath: target,
     systemPathDirectories: opts.systemPathDirectories,
   });
+  if (result.untrustedPlist) {
+    return "untrusted-plist";
+  }
   if (result.unsafePath || result.unsafeProgram) {
     return refused;
   }

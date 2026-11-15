@@ -798,8 +798,25 @@ Such a plist is never replaced automatically; `start` reports it and
   check. Reading real `launchctl print` output is a compatibility point that
   has not been verified against every macOS release, and this fallback keeps
   the service available if that format moves.
+- The plist file itself is checked before anything is unloaded, written or
+  bootstrapped: install, refresh, retarget, reload and autostart's implicit
+  install. It must be a regular file (not a link), owned by this user and
+  not writable by group or others. `~/Library/LaunchAgents` must not let
+  others add or replace entries, and no directory above it may be
+  replaceable by another account. Nothing is repaired, because a file others
+  could write may already hold their content. A failure refuses with
+  `blocked: "untrusted-unit"`. The bytes are bound too:
+  - a reload reads the plist through a descriptor that does not follow
+    links, and those bytes must be exactly the ones checked;
+  - right before `launchctl bootstrap` it reads the plist the same way
+    again, and requires the same bytes, device and inode;
+  - an install writes a fresh file renamed onto the path (a link there is
+    refused) and binds the bootstrap to those bytes the same way.
+
+  A plist replaced in between is not loaded, and so not kickstarted.
 - On a refusal launchd is not asked to start the job, and `start` exits 1
-  (`blocked: "rewrite-refused"`, `hack daemon install` as the next step).
+  (`blocked: "rewrite-refused"`, or `untrusted-unit` for the plist file,
+  with `hack daemon install` as the next step).
   Before `start` or `restart` stops a running hackd under a current plist,
   it makes the same plist checks and refuses a loaded configuration it cannot
   read. So a running daemon is never stopped for a start that would be

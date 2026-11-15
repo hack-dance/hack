@@ -1,6 +1,7 @@
 import { resolveExecutingCliPath } from "../daemon/executing-cli.ts";
 import {
   checkLaunchdJobBeforeStart,
+  checkLaunchdPlistTrusted,
   checkLaunchdRetargetTarget,
   checkLaunchdServicePath,
   getLaunchdServiceStatus,
@@ -8,6 +9,7 @@ import {
   type LaunchdProgramRepairResult,
   type LaunchdProgramState,
   type LaunchdServiceStatus,
+  type LaunchdStartRefusal,
   launchdJobMayBeRunning,
   plistKeepsThisHome,
   proveLaunchdJobOwnership,
@@ -63,6 +65,11 @@ export interface LaunchdStartHooks {
   /** Defaults to {@link readLaunchdLoadedJob}; tests pin it. */
   readonly readLoaded?: () => Promise<LaunchdLoadedJob>;
   /** Defaults to bootout plus bootstrap of the plist; tests pin it. */
+  /**
+   * The uid the plist file and directory checks compare owners to; defaults
+   * to this process's. Tests model another account's file with another uid.
+   */
+  readonly trustUid?: number;
   readonly reloadJob?: () => Promise<{
     readonly ok: boolean;
     readonly error?: string;
@@ -220,12 +227,21 @@ type ReplacementBlock =
   | "other-program"
   | "retarget-refused"
   | "refresh-refused"
-  | "start-refused";
+  | "start-refused"
+  | "untrusted-plist";
 
 /** The `--json` blocked reason for a {@link ReplacementBlock}. */
 function blockedReason(
   block: ReplacementBlock
-): "home-binding" | "unproven-owner" | "other-program" | "rewrite-refused" {
+):
+  | "home-binding"
+  | "unproven-owner"
+  | "other-program"
+  | "rewrite-refused"
+  | "untrusted-unit" {
+  if (block === "untrusted-plist") {
+    return "untrusted-unit";
+  }
   return block === "retarget-refused" ||
     block === "refresh-refused" ||
     block === "start-refused"
@@ -245,6 +261,8 @@ function describeReplacementBlock(block: ReplacementBlock): string {
       return "the launchd plist is stale and the program a refresh would keep, or the PATH it would give hackd, is not fit for a login service (a source file, a temporary location, or a program or PATH directory others can change)";
     case "start-refused":
       return "the program the launchd service runs, or a directory of the PATH it gives hackd, is not safe from other accounts, or the configuration launchd has loaded cannot be read, so launchd would not be asked to start it";
+    case "untrusted-plist":
+      return "the launchd plist, or a directory above it, could have been written by another account";
     default:
       return "the launchd job's program is gone and the hack it would be retargeted to is not fit for a login service";
   }
@@ -271,6 +289,16 @@ async function launchdJobBlocksReplacement(opts: {
   readonly status: LaunchdServiceStatus;
 }): Promise<ReplacementBlock | null> {
   const { hooks, status } = opts;
+  // Nothing is stopped for a plist another account could have written: the
+  // start after the stop would refuse it before anything else.
+  if (
+    (await checkLaunchdPlistTrusted({
+      plistPath: hooks.paths.launchdPlistPath,
+      uid: hooks.trustUid,
+    })) !== null
+  ) {
+    return "untrusted-plist";
+  }
   const plistText = await (
     hooks.readPlist ?? (() => readTextFile(hooks.paths.launchdPlistPath))
   )();
@@ -463,6 +491,13 @@ export async function startViaLaunchdIfLoaded(
     });
     return 1;
   }
+  if (repair === "untrusted-plist") {
+    logger.error({
+      message:
+        "Not starting hackd through launchd: its plist, or a directory above it, could have been written by another account; nothing was changed | Make it and ~/Library/LaunchAgents writable only by you, then run: hack daemon install",
+    });
+    return 1;
+  }
   if (repair === "refresh-refused") {
     logger.error({
       message:
@@ -521,9 +556,9 @@ async function refuseUnsafeLaunchdStart(
     return null;
   }
   hooks.trace.action = "none";
-  hooks.trace.blocked = "rewrite-refused";
+  hooks.trace.blocked = unsafe.blocked;
   logger.error({
-    message: `Not starting hackd through launchd: ${unsafe}; nothing was started | Make the program and its PATH directories writable only by you (chmod go-w), then run: hack daemon install`,
+    message: `Not starting hackd through launchd: ${unsafe.reason}; nothing was started | Make the plist, the program and its PATH directories writable only by you (chmod go-w), then run: hack daemon install`,
   });
   return 1;
 }
@@ -531,12 +566,15 @@ async function refuseUnsafeLaunchdStart(
 /** Why launchd must not start the job as its plist is now, or null. */
 async function launchdStartIsUnsafe(
   hooks: LaunchdStartHooks
-): Promise<string | null> {
+): Promise<LaunchdStartRefusal | null> {
   const plistText = await (
     hooks.readPlist ?? (() => readTextFile(hooks.paths.launchdPlistPath))
   )();
   if (plistText === null) {
-    return "the launchd plist could not be read";
+    return {
+      reason: "the launchd plist could not be read",
+      blocked: "rewrite-refused",
+    };
   }
   return await verifyLaunchdJobBeforeKickstart({
     paths: hooks.paths,
@@ -550,6 +588,7 @@ async function launchdStartIsUnsafe(
     systemDirectories: hooks.systemPathDirectories,
     readLoaded: hooks.readLoaded,
     reload: hooks.reloadJob,
+    uid: hooks.trustUid,
   });
 }
 
@@ -616,6 +655,13 @@ function noteRepair(opts: {
       logger.warn({
         message:
           "The launchd plist is stale, but the program a refresh would keep, or the PATH it would give hackd, is not fit for a login service (a source file, a bun script, a temporary location, or a program or PATH directory others can change), so it was not rewritten or restarted | Fix that, then run: hack daemon install",
+      });
+      return false;
+    case "untrusted-plist":
+      trace.blocked = "untrusted-unit";
+      logger.warn({
+        message:
+          "The launchd plist, or a directory above it, could have been written by another account, so it was not rewritten, unloaded or loaded | Make it and ~/Library/LaunchAgents writable only by you, then run: hack daemon install",
       });
       return false;
     case "unmanaged":

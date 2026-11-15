@@ -90,9 +90,10 @@ export type ServiceUnitState =
  *   next to it;
  * - `untrusted-unit`: the unit file, the directories above it, a user-unit
  *   load directory or a drop-in systemd loads could have been written by
- *   another account (the checks install and enable run), so Hack did not
- *   read it to rewrite, retarget, reload or restart it, and did not stop
- *   a running daemon for it; `hack daemon install` is the next step.
+ *   another account (the checks install and enable run), or the same for
+ *   the launchd plist and `~/Library/LaunchAgents`, so Hack did not read it
+ *   to rewrite, retarget, reload or restart it, and did not stop a running
+ *   daemon for it; `hack daemon install` is the next step.
  */
 export type DaemonReconcileBlock =
   | "read-only"

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import {
   chmod,
   link,
@@ -65,6 +65,23 @@ import {
 } from "../src/daemon/systemd.ts";
 
 /** HACK-2216: the reconcile decision and its `--json` contract, no I/O. */
+
+/**
+ * A home whose `~/Library/LaunchAgents` exists and is safe from other
+ * accounts: the launchd paths these in-process tests use. Every launchd
+ * start checks the plist file and its directories first (HACK-2216). No
+ * plist is written there; the tests pin what a plist read returns.
+ */
+const LAUNCHD_HOME = await mkdtemp(join(tmpdir(), "hack-launchd-home-"));
+await mkdir(join(LAUNCHD_HOME, "Library", "LaunchAgents"), {
+  recursive: true,
+  mode: 0o755,
+});
+await chmod(join(LAUNCHD_HOME, "Library"), 0o755);
+await chmod(join(LAUNCHD_HOME, "Library", "LaunchAgents"), 0o755);
+afterAll(async () => {
+  await rm(LAUNCHD_HOME, { recursive: true, force: true });
+});
 
 const base: DaemonReconcileInput = {
   unit: "current",
@@ -550,7 +567,7 @@ test("launchd: a loaded job without a readable pid counts as inside (review roun
   const trace = createDaemonCommandTrace();
   const ancestry: number[] = [];
   const hooks = {
-    paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+    paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
     trace,
     pid: 4242,
     waitForReady: () => Promise.reject(new Error("must not start")),
@@ -600,7 +617,7 @@ test("launchd: a failed refresh is an error, never 'already running' (review rou
     const trace = createDaemonCommandTrace();
     expect(
       await startViaLaunchdIfLoaded({
-        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
         trace,
         onlyIfStale,
         waitForReady: () => Promise.resolve(true),
@@ -622,7 +639,7 @@ test("launchd: a stopped service running another program is not kickstarted (rev
     const trace = createDaemonCommandTrace();
     expect(
       await startViaLaunchdIfLoaded({
-        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
         trace,
         waitForReady: () => Promise.resolve(true),
         readStatus: loadedLaunchd(),
@@ -703,7 +720,7 @@ test("process ancestry walks parent pids and reports an unreadable chain", async
 test("launchd: inside the job, a running hackd is kept or refused, never restarted", async () => {
   const trace = createDaemonCommandTrace();
   const hooks = {
-    paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+    paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
     trace,
     pid: 4242,
     waitForReady: () => Promise.reject(new Error("must not start")),
@@ -1057,7 +1074,7 @@ test("a plist keeps this home only without HACK_HOME and with this HOME", () => 
 });
 
 test("a loaded launchd job is this home's only when it runs nothing or its pid is proven", async () => {
-  const paths = resolveDaemonPaths({ home: "/nonexistent-home" });
+  const paths = resolveDaemonPaths({ home: LAUNCHD_HOME });
   const status = (running: boolean, pid: number | null) => ({
     installed: true,
     loaded: true,
@@ -1112,7 +1129,7 @@ test("only launchd's exit 113 'Could not find service' is absence", () => {
 });
 
 test("an unloaded job is this home's only when launchd reported it absent", async () => {
-  const paths = resolveDaemonPaths({ home: "/nonexistent-home" });
+  const paths = resolveDaemonPaths({ home: LAUNCHD_HOME });
   const unloaded = (
     observation: "reported" | "not-found" | "failed" | undefined
   ) => ({
@@ -1193,7 +1210,7 @@ test("launchd: an incompatible direct daemon is not replaced when the loaded job
     readonly plist: string;
     readonly proven: boolean;
   }) => ({
-    paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+    paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
     trace: createDaemonCommandTrace(),
     pid: 777,
     compatible: false,
@@ -1259,7 +1276,7 @@ test("launchd: a current plist with an unsafe PATH stops nothing and kickstarts 
     await chmod(job.dir, 0o775);
     const effects: string[] = [];
     const hooks = (running: boolean) => ({
-      paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+      paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
       trace: createDaemonCommandTrace(),
       waitForReady: () => Promise.reject(new Error("must not start")),
       readStatus: () =>
@@ -1354,7 +1371,7 @@ test("launchd: a safe plist with an unsafe loaded PATH never kickstarts the load
       let reads = 0;
       let statusReads = 0;
       return {
-        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
         trace: createDaemonCommandTrace(),
         waitForReady: () => Promise.resolve(true),
         readStatus: () => {
@@ -1523,7 +1540,7 @@ test("launchd: an automatic start needs the plist's own PATH and exactly Hack's 
       const effects: string[] = [];
       const trace = createDaemonCommandTrace();
       const code = await startViaLaunchdIfLoaded({
-        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
         trace,
         waitForReady: () => Promise.resolve(true),
         readStatus: () =>
@@ -1769,7 +1786,7 @@ test("restart's launchd check refuses a job bound to another home before any sto
   const trace = createDaemonCommandTrace();
   const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>HACK_HOME</key>\n    <string>/srv/other/.hack</string>\n  </dict>\n</dict>\n</plist>\n`;
   const code = await refuseLaunchdBeforeReplacing({
-    paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+    paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
     trace,
     waitForReady: () => Promise.reject(new Error("must not start")),
     readStatus: () =>
@@ -1856,7 +1873,7 @@ test("a compatible running daemon is restarted after a repair only when the repa
     const kicked: string[] = [];
     const trace = createDaemonCommandTrace();
     const code = await startViaLaunchdIfLoaded({
-      paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+      paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
       trace,
       onlyIfStale: true,
       waitForReady: () => Promise.resolve(true),
@@ -1910,7 +1927,7 @@ test("an incompatible launchd daemon with a missing plist program is only replac
       const trace = createDaemonCommandTrace();
       const effects: string[] = [];
       const code = await checkRunningLaunchdDaemon({
-        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
         trace,
         pid: 777,
         compatible: false,
@@ -1982,7 +1999,7 @@ test("an incompatible launchd daemon with a missing plist program is only replac
     const restartTrace = createDaemonCommandTrace();
     expect(
       await refuseLaunchdBeforeReplacing({
-        paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+        paths: resolveDaemonPaths({ home: LAUNCHD_HOME }),
         trace: restartTrace,
         waitForReady: () => Promise.reject(new Error("must not start")),
         readStatus: () =>

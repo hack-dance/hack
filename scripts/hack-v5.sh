@@ -56,8 +56,14 @@ if [ ! -x "$bundle/hack-cli" ] || [ ! -x "$bundle/hack-native" ]; then
   echo "Incomplete candidate bundle: hack-cli and hack-native are required." >&2
   exit 69
 fi
-# Candidate CLIs refuse self-update on either backend.
-export HACK_CANDIDATE_ENTRYPOINT=hack-v5
+# Candidate CLIs refuse self-update on either backend. The marker also names
+# the launcher printed commands should use: the channel manager runs this
+# script as `hack-next` (~/.hack-next/bin/hack-next) and that value is kept;
+# every other run is this script, `hack-v5`. No other value reaches the CLI.
+if [ "${HACK_CANDIDATE_ENTRYPOINT:-}" != hack-next ]; then
+  HACK_CANDIDATE_ENTRYPOINT=hack-v5
+fi
+export HACK_CANDIDATE_ENTRYPOINT
 # Candidate runs never start hackd implicitly: autostart would start the
 # stable hackd (launchd plist or the `hack` on PATH), on Compose beside the
 # candidate on the same Hack home (HACK-1368).

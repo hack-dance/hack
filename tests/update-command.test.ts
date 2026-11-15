@@ -13,6 +13,9 @@ import { join } from "node:path";
 
 import { runCli } from "../src/cli/run.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
+import { hackNextLauncherPath } from "../src/lib/candidate-launcher.ts";
+import { resolveUserHomeDir } from "../src/lib/home-dir.ts";
+import { quoteShellWord } from "../src/lib/logs.ts";
 
 const ENV_KEYS = [
   "HACK_RUNTIME_BACKEND",
@@ -170,10 +173,14 @@ test.each([
   });
   const result = await capturedRun(["update", "--yes", "--json"]);
   expect(result.exitCode).toBe(1);
+  // hack-next names its channel manager by path; a bundle run has no command.
+  const launcher = quoteShellWord(hackNextLauncherPath(resolveUserHomeDir()));
   expect(JSON.parse(result.stdout)).toEqual({
     ok: false,
     error:
-      "Refusing to self-update the opt-in native candidate. Install a separately reviewed candidate bundle to update it.",
+      entrypoint === "hack-next"
+        ? `Refusing to self-update the opt-in native candidate. Upgrade it through its channel manager: ${launcher} --manager upgrade --version <newer prerelease> (${launcher} --manager status shows the selected version).`
+        : "Refusing to self-update the opt-in native candidate. Install a separately reviewed candidate bundle to update it.",
   });
   expect(fetch).not.toHaveBeenCalled();
   expect(lookup).not.toHaveBeenCalled();

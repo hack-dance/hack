@@ -316,17 +316,26 @@ fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
     let Some(end) = line.iter().position(|b| *b == b'\n') else {
         return false;
     };
-    let Some(interpreter) = line[..end]
+    let mut tokens = line[..end]
         .split(|b| *b == b' ' || *b == b'\t')
-        .find(|token| !token.is_empty())
-    else {
+        .filter(|token| !token.is_empty());
+    let Some(interpreter) = tokens.next() else {
         return false;
     };
-    let interpreter = Path::new(std::ffi::OsStr::from_bytes(interpreter));
-    depth > 0
-        && interpreter.is_absolute()
-        && trusted_tool_path(interpreter, uid, false)
-            .is_some_and(|next| trusted_interpreter(&next, uid, depth - 1))
+    let trusted_program = |token: &[u8]| {
+        let program = Path::new(std::ffi::OsStr::from_bytes(token));
+        depth > 0
+            && program.is_absolute()
+            && trusted_tool_path(program, uid, false)
+                .is_some_and(|next| trusted_interpreter(&next, uid, depth - 1))
+    };
+    // Arguments matter too: `#!/usr/bin/env /shared/interp` runs that path
+    // directly, and `env PATH=...` would bypass the private wrapper PATH.
+    // Any path-like argument must be a trusted program; assignments refuse.
+    trusted_program(interpreter)
+        && tokens.all(|token| {
+            !token.contains(&b'=') && (!token.contains(&b'/') || trusted_program(token))
+        })
 }
 
 /// A per-read private PATH containing only wrappers for checked executables.
@@ -1945,19 +1954,19 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         write(&nested, &unsafe_interpreter);
+        let unsafe_env = format!("/usr/bin/env {}", unsafe_interpreter.display());
+        let env_path = format!("/usr/bin/env PATH={} sh", shared.display());
         for (shebang, trusted) in [
-            (Path::new("/bin/sh"), true),
-            (unsafe_interpreter.as_path(), false),
-            (nested.as_path(), false),
+            ("/bin/sh", true),
+            ("/usr/bin/env sh", true),
+            (unsafe_interpreter.to_str().unwrap(), false),
+            (nested.to_str().unwrap(), false),
+            (unsafe_env.as_str(), false),
+            (env_path.as_str(), false),
         ] {
-            write(&docker, shebang);
+            write(&docker, Path::new(shebang));
             let tools = trusted_probe_path(bin.as_os_str()).unwrap();
-            assert_eq!(
-                tools.dir.join("docker").exists(),
-                trusted,
-                "{}",
-                shebang.display()
-            );
+            assert_eq!(tools.dir.join("docker").exists(), trusted, "{shebang}");
             assert_eq!(tools.unchecked.contains("docker"), !trusted);
         }
         let _ = std::fs::remove_dir_all(root);

@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { dirname } from "node:path";
+import { readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { types } from "node:util";
 import {
   NativeComposeGenerationError,
   NativeComposeInspectionError,
@@ -92,7 +94,13 @@ const ERROR_CLASSES: readonly [
 ];
 /** Source frames kept per failure; enough for a refusal helper and its callers. */
 const MAX_SITES = 4;
-const SOURCE_FRAME = /\(?([^\s()]+\.ts):(\d+):\d+\)?\s*$/;
+/** A V8/JSC frame line only: message text and other lines never count as frames. */
+const SOURCE_FRAME =
+  /^ {4}at (?:.{0,200} \()?([^\s()]{1,400}\.ts):(\d{1,6}):\d{1,6}\)?$/;
+/** Bounds before any matching, so a huge message cannot stall failure handling. */
+const MAX_STACK_CHARS = 16_384;
+const MAX_FRAME_CHARS = 640;
+const MAX_SOURCE_FILES = 8192;
 /** This checkout's `src/`; frames outside it (tests, dependencies, a bundle) are dropped. */
 const SOURCE_ROOT = `${dirname(import.meta.dir)}/`;
 const SITE_PATH = /^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*\.ts$/;
@@ -186,47 +194,91 @@ export function nativeAuthoredArtifactError(
   }
 }
 
-/** Read only own data properties: getters and proxy traps never run here. */
-function ownData(value: object, key: string): unknown {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor && "value" in descriptor ? descriptor.value : undefined;
-  } catch {
-    return undefined;
+/**
+ * Whether a value or anything on its prototype chain is a proxy. Checked before any
+ * reflection or `instanceof`, which would otherwise run its traps. `types.isProxy`
+ * and `Object.getPrototypeOf` on a non-proxy run no user code.
+ */
+function involvesProxy(value: object): boolean {
+  let current: object | null = value;
+  for (let depth = 0; current !== null; depth += 1) {
+    if (depth === 64 || types.isProxy(current)) {
+      return true;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
   }
+  return false;
 }
 
-function errorClass(error: unknown): ErrorClass | null {
+/** One read of an own data property; accessors are never invoked. Callers exclude proxies. */
+function ownData(value: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+function errorClass(error: unknown): ErrorClass {
+  for (const [builtIn, name] of ERROR_CLASSES) {
+    if (error instanceof builtIn) {
+      return name;
+    }
+  }
+  return "non_error";
+}
+
+let sourceInventory: ReadonlySet<string> | undefined;
+/**
+ * Hack's own `src/` files, relative to it, read once. A site must name one of them,
+ * so a forged stack can only point at a real source file, never carry other text.
+ * Empty in a compiled bundle, where frames name no checkout files.
+ */
+function sources(): ReadonlySet<string> {
+  if (sourceInventory) {
+    return sourceInventory;
+  }
+  const found = new Set<string>();
+  const pending = [""];
   try {
-    for (const [builtIn, name] of ERROR_CLASSES) {
-      if (error instanceof builtIn) {
-        return name;
+    while (pending.length > 0 && found.size < MAX_SOURCE_FILES) {
+      const relative = pending.pop() ?? "";
+      for (const entry of readdirSync(join(SOURCE_ROOT, relative), {
+        withFileTypes: true,
+      })) {
+        const path = relative === "" ? entry.name : `${relative}/${entry.name}`;
+        if (entry.isDirectory()) {
+          pending.push(path);
+        } else if (entry.isFile() && SITE_PATH.test(path)) {
+          found.add(path);
+        }
       }
     }
-    return "non_error";
   } catch {
-    return null;
+    // No readable source tree: no sites.
   }
+  sourceInventory = found;
+  return found;
 }
 
-/** Keep Hack source locations relative to `src/`; the checkout prefix never leaves. */
-function sourceSites(error: unknown): string[] {
-  if (typeof error !== "object" || error === null) {
-    return [];
-  }
+/**
+ * Hack source locations relative to `src/`, from frame lines only, naming files in
+ * the source inventory. The checkout prefix, message and any other text never leave.
+ */
+function sourceSites(error: object): string[] {
   const stack = ownData(error, "stack");
   if (typeof stack !== "string") {
     return [];
   }
   const sites: string[] = [];
-  for (const line of stack.split("\n", 64)) {
+  for (const line of stack.slice(0, MAX_STACK_CHARS).split("\n", 64)) {
+    if (line.length > MAX_FRAME_CHARS) {
+      continue;
+    }
     const match = SOURCE_FRAME.exec(line);
     const path = match?.[1];
     if (!(path?.startsWith(SOURCE_ROOT) && match?.[2])) {
       continue;
     }
     const relative = path.slice(SOURCE_ROOT.length);
-    if (!SITE_PATH.test(relative) || match[2].length > 6) {
+    if (!sources().has(relative)) {
       continue;
     }
     sites.push(`${relative}:${match[2]}`);
@@ -237,47 +289,76 @@ function sourceSites(error: unknown): string[] {
   return sites;
 }
 
+/** Each field is read once as an own data property; a subclass getter yields null. */
 function inspectionFields(
   error: NativeComposeInspectionError
 ): Pick<Diagnostic, "cause_code" | "inspection" | "elapsed_ms"> {
+  const outcome = ownData(error, "outcome");
+  const observation = ownData(error, "observation");
+  const elapsed = ownData(error, "elapsedMs");
   const cause =
-    error.outcome === "timeout" || error.outcome === "malformed"
-      ? error.outcome
-      : "failed";
+    outcome === "timeout" || outcome === "malformed" ? outcome : "failed";
   return {
     cause_code: INSPECTION_CAUSES[cause],
     inspection:
-      error.observation === "boot-session" ||
-      error.observation === "process-birth"
-        ? error.observation
+      observation === "boot-session" || observation === "process-birth"
+        ? observation
         : null,
     elapsed_ms:
-      Number.isSafeInteger(error.elapsedMs) &&
-      error.elapsedMs >= 0 &&
-      error.elapsedMs <= 300_000
-        ? error.elapsedMs
+      typeof elapsed === "number" &&
+      Number.isSafeInteger(elapsed) &&
+      elapsed >= 0 &&
+      elapsed <= 300_000
+        ? elapsed
         : null,
   };
+}
+
+/**
+ * A reissued diagnostic, or the generic refusal for a proxy. A proxy is refused
+ * before any reflection, so none of its traps ever runs. Undefined otherwise.
+ */
+function settledWithoutReflection(
+  error: object,
+  phase: NativeAuthoredArtifactPhase
+): NativeAuthoredArtifactError | undefined {
+  const original = issuedDiagnostics.get(error);
+  if (original) {
+    return closedFailure(original);
+  }
+  if (involvesProxy(error)) {
+    return closedFailure({
+      phase,
+      cause_code: phase === "action" ? "action_failed" : "artifact_refused",
+      inspection: null,
+      elapsed_ms: null,
+      system_code: null,
+      error_class: null,
+      sites: [],
+    });
+  }
+  return undefined;
 }
 
 function classifyArtifactError(
   error: unknown,
   phase: NativeAuthoredArtifactPhase
 ): NativeAuthoredArtifactError {
+  const isObject =
+    (typeof error === "object" && error !== null) ||
+    typeof error === "function";
+  const settled = isObject ? settledWithoutReflection(error, phase) : undefined;
+  if (settled) {
+    return settled;
+  }
   const base = {
     phase,
     inspection: null,
     elapsed_ms: null,
     system_code: null,
     error_class: errorClass(error),
-    sites: sourceSites(error),
+    sites: isObject ? sourceSites(error) : [],
   } as const;
-  if (typeof error === "object" && error !== null) {
-    const original = issuedDiagnostics.get(error);
-    if (original) {
-      return closedFailure(original);
-    }
-  }
   if (error instanceof NativeComposeInspectionError) {
     return closedFailure({
       ...base,
@@ -288,7 +369,7 @@ function classifyArtifactError(
     return closedFailure({
       ...base,
       cause_code:
-        error.code === "E_NATIVE_COMPOSE_BUSY"
+        ownData(error, "code") === "E_NATIVE_COMPOSE_BUSY"
           ? "lock_busy"
           : "artifact_refused",
     });
@@ -308,11 +389,7 @@ function classifyArtifactError(
       cause_code: "mux_presence_unknown",
     });
   }
-  // An arbitrary callback can reject with a proxy. Its traps are not diagnostics.
-  const code =
-    typeof error === "object" && error !== null
-      ? ownData(error, "code")
-      : undefined;
+  const code = isObject ? ownData(error, "code") : undefined;
   if (typeof code === "string" && SYSTEM_CODES.has(code)) {
     return closedFailure({
       ...base,

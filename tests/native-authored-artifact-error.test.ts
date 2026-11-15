@@ -185,3 +185,88 @@ test("errno names outside the original set are reported, unknown codes are not",
   expect(unknown.diagnostic.cause_code).toBe("action_failed");
   expect(unknown.diagnostic.system_code).toBeNull();
 });
+
+test("a proxy error, or one with a proxy prototype, runs none of its traps", () => {
+  const calls: string[] = [];
+  const handler: ProxyHandler<object> = new Proxy(
+    {},
+    {
+      get(_target, trap) {
+        calls.push(String(trap));
+        return () => {
+          throw new Error(CANARY);
+        };
+      },
+    }
+  );
+  const direct = new Proxy(new Error(CANARY), handler);
+  const inherited = Object.create(
+    new Proxy(Error.prototype, handler)
+  ) as object;
+  for (const error of [direct, inherited]) {
+    const failure = nativeAuthoredArtifactError(error, "action");
+    expect(failure.diagnostic).toMatchObject({
+      cause_code: "action_failed",
+      error_class: null,
+      system_code: null,
+      sites: [],
+    });
+    expect(JSON.stringify(failure)).not.toContain(CANARY);
+  }
+  expect(calls).toEqual([]);
+});
+
+test("subclass getters for inspection fields and codes are never read", () => {
+  let reads = 0;
+  class Forged extends NativeComposeInspectionError {}
+  Object.defineProperty(Forged.prototype, "outcome", {
+    get() {
+      reads += 1;
+      return "timeout";
+    },
+  });
+  const forged = Object.create(
+    Forged.prototype
+  ) as NativeComposeInspectionError;
+  Object.defineProperty(forged, "code", {
+    get() {
+      reads += 1;
+      return "E_NATIVE_COMPOSE_BUSY";
+    },
+  });
+  const failure = nativeAuthoredArtifactError(forged, "action");
+  expect(failure.diagnostic.cause_code).toBe("lock_inspection_failed");
+  expect(failure.diagnostic.inspection).toBeNull();
+  expect(reads).toBe(0);
+});
+
+test("sites come only from frame lines that name a real Hack source file", () => {
+  const root = `${dirname(import.meta.dir)}/src`;
+  const real = "backends/native-authored-artifact-error.ts";
+  const failure = nativeAuthoredArtifactError(
+    Object.assign(new Error(CANARY), {
+      stack: [
+        `Error: ${root}/${CANARY}.ts:12:1`,
+        `    at x (${root}/${CANARY}.ts:12:1)`,
+        `    at y (${root}/lib/${CANARY}/a.ts:3:1)`,
+        `  at z (${root}/${real}:7:1)`,
+        `    at w (${root}/${real}:9:2)`,
+        `    at ${root}/${real}:11:3`,
+      ].join("\n"),
+    }),
+    "action"
+  );
+  expect(failure.diagnostic.sites).toEqual([`${real}:9`, `${real}:11`]);
+  expect(JSON.stringify(failure)).not.toContain(CANARY);
+});
+
+test("an oversized stack is bounded before matching", () => {
+  const huge = `    at x (${"a".repeat(200_000)}`;
+  const started = performance.now();
+  const failure = nativeAuthoredArtifactError(
+    Object.assign(new Error(CANARY), { stack: `Error\n${huge}\n${huge}` }),
+    "action"
+  );
+  expect(performance.now() - started).toBeLessThan(250);
+  expect(failure.diagnostic.sites).toEqual([]);
+});

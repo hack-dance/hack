@@ -104,7 +104,7 @@ fn control(action: &str) -> Result<()> {
             .collect(),
         Err(error) => {
             if result.is_ok() {
-                reason = "io-error";
+                reason = "receipt-read-failed";
                 result = Err(error);
             }
             Vec::new()
@@ -133,10 +133,12 @@ fn control_effects(
         match root.lock_wait(".stop.lock", STOP_LOCK_WAIT) {
             Ok(lock) => Some(lock),
             Err(error) => {
-                if error.kind() == std::io::ErrorKind::TimedOut {
+                *reason = if error.kind() == std::io::ErrorKind::TimedOut {
                     // Another stop or a launch still holds the lock; act on nothing.
-                    *reason = "stop-lock-wait-expired";
-                }
+                    "stop-lock-wait-expired"
+                } else {
+                    "stop-lock-failed"
+                };
                 return Err(error);
             }
         }
@@ -144,7 +146,9 @@ fn control_effects(
         None
     };
     let mut states = Vec::new();
+    *reason = "receipt-read-failed";
     for state in root.states()? {
+        *reason = "io-error";
         if state.owner_token == request.owner_token {
             states.push(state);
         } else if os::recorded_live(&state, false)? {
@@ -155,7 +159,9 @@ fn control_effects(
             return Err(refused());
         }
     }
+    *reason = "io-error";
     if action == "stop" {
+        *reason = "retire-failed";
         root.retire(&request.owner_token)?;
         *reason = "stop-incomplete";
         return stop(&states);

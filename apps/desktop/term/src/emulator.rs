@@ -625,6 +625,21 @@ impl Emulator {
         self.search_state()
     }
 
+    /// Bring the search up to date with the terminal and return its state.
+    ///
+    /// The search learns about new output only when it is run: feeding the
+    /// terminal does not run it. Call this, not [`Self::search_state`],
+    /// before showing a count next to a frame's highlights, so that both
+    /// come from the same pass.
+    pub fn search_refresh(&mut self) -> SearchState {
+        if let Some(search) = self.search.as_mut() {
+            let _ = search.run(&self.term);
+        }
+        self.search_state()
+    }
+
+    /// The search's state as of the last time it ran. See
+    /// [`Self::search_refresh`].
     pub fn search_state(&self) -> SearchState {
         let Some(search) = self.search.as_ref() else {
             return SearchState::default();

@@ -113,6 +113,47 @@ fn a_rejected_paste_shows_its_notice_in_the_next_frame_without_other_events() {
 }
 
 #[test]
+fn the_find_count_matches_the_highlights_when_output_arrives_and_then_stops() {
+    let home = TempHome::new();
+    let mut cx = app();
+    // One match; two more when the test says so; then silence.
+    let source = sh_source(
+        "echo 'needle one'; while [ ! -e go ]; do sleep 0.02; done; \
+         echo 'needle two'; echo 'needle three'; exec sleep 120",
+        &home,
+    );
+    let (_window, view) = open(&mut cx, move |cx| {
+        TerminalView::new_stream(&source, 1_000, cx).expect("spawn")
+    });
+    assert!(settle_until(&mut cx, &view, |t| t.contains("needle one")).contains("needle one"));
+    let found = cx.update(|cx| view.update(cx, |v, cx| v.search("needle", cx)));
+    assert_eq!(found.total, 1);
+    let before = cx.update(|cx| view.read(cx).rendered().clone());
+    assert_eq!(
+        (before.find.map(|f| f.total), before.highlights),
+        (Some(1), 1),
+        "{before:?}"
+    );
+
+    // Find is open. Output arrives that adds two matches.
+    std::fs::write(home.path().join("go"), "").unwrap();
+    assert!(settle_until(&mut cx, &view, |t| t.contains("needle three")).contains("needle three"));
+
+    // The source is quiet now: nothing more is pumped, typed or clicked.
+    // The last frame is the one drawn for the output that arrived, and its
+    // count has to be right already, because no later frame is coming.
+    let after = cx.update(|cx| view.read(cx).rendered().clone());
+    assert_eq!(after.highlights, 3, "all three are on screen: {after:?}");
+    assert_eq!(
+        after.find.map(|f| f.total),
+        Some(after.highlights),
+        "the count shown is the number of highlighted matches: {after:?}"
+    );
+    let later = cx.update(|cx| view.read(cx).rendered().clone());
+    assert_eq!(later, after, "and no further frame was drawn to get there");
+}
+
+#[test]
 fn quitting_the_app_ends_a_stream_process_that_ignores_sigterm_and_its_descendant() {
     let home = TempHome::new();
     let mut cx = app();

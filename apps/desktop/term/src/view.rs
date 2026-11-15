@@ -73,6 +73,11 @@ pub struct Rendered {
     pub count: u64,
     /// The notice shown in that render, if any.
     pub notice: Option<String>,
+    /// The match count and selection the find overlay showed in that
+    /// render; `None` when find was closed.
+    pub find: Option<SearchState>,
+    /// How many match highlights that frame drew: the matches on screen.
+    pub highlights: usize,
 }
 
 /// Where the grid was laid out last, in logical pixels: for tests that
@@ -358,9 +363,8 @@ impl TerminalView {
     fn pump(&mut self, cx: &mut Context<Self>) -> bool {
         let busy = self.core.pump();
         if busy {
-            if self.search_open {
-                self.search = self.core.emu().search_state();
-            }
+            // The find count is brought up to date in `render`, in the
+            // same pass as the frame's highlights.
             cx.notify();
         }
         busy
@@ -551,6 +555,16 @@ impl TerminalView {
         );
         self.core.resize(cols, rows, cw, ch);
         let frame = self.core.emulator().frame().ok()?;
+        self.rendered.highlights = frame.matches.len();
+        // `render` read the find count before this resize. If the resize
+        // changed it (text reflowed), draw again with the new count.
+        if self.search_open {
+            let now = self.core.emu().search_state();
+            if now != self.search {
+                self.search = now;
+                window.request_animation_frame();
+            }
+        }
         // Which symbols on screen the terminal's font lacks: those are
         // drawn from the bundled symbols font.
         let mut from_symbols = HashSet::new();
@@ -657,6 +671,14 @@ impl Render for TerminalView {
         )
         .size_full();
 
+        // New output may have added or removed matches, and the search
+        // only learns of it when it is run. Run it before reading the
+        // count, so the overlay and the highlights `layout` takes below
+        // come from the same pass. Without this the count stays one batch
+        // of output behind, for as long as the source is then quiet.
+        if self.search_open {
+            self.search = self.core.emulator().search_refresh();
+        }
         let overlay = self.search_open.then(|| {
             let t = cx.theme();
             let count = match (self.search.total, self.search.selected) {
@@ -703,6 +725,8 @@ impl Render for TerminalView {
         self.rendered = Rendered {
             count: self.rendered.count + 1,
             notice: self.core.notice().map(str::to_owned),
+            find: self.search_open.then_some(self.search),
+            highlights: self.rendered.highlights,
         };
         let status = status.map(|s| {
             let t = cx.theme();

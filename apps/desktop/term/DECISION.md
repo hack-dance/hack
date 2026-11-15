@@ -791,7 +791,9 @@ Feature `screenshots`, `tests/render.rs`: the pixel test described under
 
 Feature `screenshots` (GPUI test support; no display or GPU needed),
 `tests/view.rs`: a rejected paste to a quiet child shows its notice in
-exactly one new frame with no other event; quitting the app ends a stream
+exactly one new frame with no other event; with find open, output that
+adds matches and then stops leaves the count shown equal to the number of
+highlighted matches, with no further frame; quitting the app ends a stream
 process that ignores SIGTERM, with its descendant, and a PTY session that
 ignores SIGHUP; with no bindings the usual chords are not shortcuts, the
 `Find`, `CloseFind`, `Paste` and `Copy` actions do their work, and a chord

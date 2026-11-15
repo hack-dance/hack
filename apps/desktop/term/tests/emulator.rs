@@ -90,6 +90,25 @@ fn ten_thousand_lines_with_follow_off_keep_the_viewport_still() {
 }
 
 #[test]
+fn the_search_counts_new_output_once_it_is_refreshed() {
+    let mut e = emu(40, 6, true);
+    e.feed(b"needle one\n");
+    assert_eq!(e.search(Some("needle")).total, 1);
+    e.feed(b"needle two\nneedle three\n");
+    // Feeding the terminal does not run the search: this is why a count
+    // read with `search_state` alone is one batch of output behind.
+    assert_eq!(e.search_state().total, 1, "not run since the output");
+    let refreshed = e.search_refresh();
+    assert_eq!(refreshed.total, 3);
+    // The frame's highlights come from the same pass and agree.
+    assert_eq!(e.frame().unwrap().matches.len(), 3);
+    assert_eq!(e.search_state(), refreshed);
+    // With no search there is nothing to refresh.
+    e.search(None);
+    assert_eq!(e.search_refresh().total, 0);
+}
+
+#[test]
 fn search_counts_matches_in_scrollback_and_scrolls_to_them() {
     let mut e = emu(40, 5, true);
     let mut text = lines(0..2_000);

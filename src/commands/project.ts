@@ -263,6 +263,13 @@ import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
 import {
+  beginLifecycleProgress,
+  closeLifecycleProgress,
+  isLifecycleProgressRequested,
+  prepareLifecycleProgress,
+  reportLifecycleProgress,
+} from "../lib/lifecycle-progress.ts";
+import {
   createLifecycleLogSink,
   drainLifecycleOutput,
   type LifecycleLogSink,
@@ -563,6 +570,13 @@ const initOptions = [
   optNoDiscovery,
   optWith,
 ] as const;
+const optProgress = defineOption({
+  name: "progress",
+  type: "boolean",
+  long: "--progress",
+  description:
+    "With --json: stream ndjson progress lines before the result envelope (Compose backend)",
+} as const);
 const upOptions = [
   optPath,
   optProject,
@@ -572,6 +586,7 @@ const upOptions = [
   optProfile,
   optTarget,
   optJson,
+  optProgress,
 ] as const;
 const downOptions = [
   optPath,
@@ -590,6 +605,7 @@ const downOptions = [
   } as const),
   optYes,
   optJson,
+  optProgress,
   defineOption({
     name: "recoverNativeCompose",
     type: "boolean",
@@ -606,6 +622,7 @@ const restartOptions = [
   optProfile,
   optTarget,
   optJson,
+  optProgress,
   optRecoverFrontend,
   optExpectFinalizationAttempt,
   optExpectFrontendPid,
@@ -1135,6 +1152,10 @@ function trackComposeStartupPhase(): {
   return {
     onStartupPhase: (phase) => {
       current = phase;
+      reportLifecycleProgress({
+        service: null,
+        phase: phase === "images" ? "images" : "starting",
+      });
       if (phase === "start") {
         startedAt = performance.now();
       }
@@ -1169,12 +1190,16 @@ function composeStartupIncompleteMessage(
 
 /**
  * Emit the `--json` envelope for a lifecycle command and map it to the
- * standard 0/1 exit semantics.
+ * standard 0/1 exit semantics. A started `--progress` stream closes with it
+ * as one compact line; otherwise it is the ordinary pretty envelope.
  */
 function emitLifecycleResult(opts: {
   readonly result: CliResult<LifecycleJsonData>;
   readonly exitCode: number;
 }): number {
+  if (closeLifecycleProgress({ result: opts.result })) {
+    return opts.exitCode;
+  }
   emitCliResult({ result: opts.result });
   return opts.exitCode;
 }
@@ -1207,6 +1232,10 @@ function emitRemoteLifecycleJson(opts: {
   readonly branch: string | null;
   readonly startedAtMs?: number;
 }): number {
+  const composeProject = opts.branch
+    ? `${opts.project}--${opts.branch}`
+    : opts.project;
+  beginLifecycleProgress({ project: composeProject });
   if (opts.exitCode !== 0) {
     return emitLifecycleResult({
       result: errorResult({
@@ -1223,9 +1252,7 @@ function emitRemoteLifecycleJson(opts: {
         action: opts.action,
         project: opts.project,
         branch: opts.branch,
-        composeProject: opts.branch
-          ? `${opts.project}--${opts.branch}`
-          : opts.project,
+        composeProject,
         durationMs: Date.now() - (opts.startedAtMs ?? Date.now()),
       }),
     }),
@@ -5913,6 +5940,10 @@ async function runRemoteLifecycleCommand(opts: {
   if (target.resolvedTarget === "local") {
     return null;
   }
+  if (isLifecycleProgressRequested()) {
+    // Dispatch output would precede `start`; remote targets are unsupported.
+    throw new CliUsageError("--progress is not supported for remote targets.");
+  }
 
   const projectSelector = await resolveDispatchProjectSelector({
     project: opts.project,
@@ -6370,6 +6401,7 @@ async function restartNativeImageProject({
             removeData: false,
             yes: false,
             recoverNativeCompose: false,
+            progress: false,
           },
           positionals: {},
           raw: args.raw,
@@ -6409,6 +6441,12 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
+  prepareLifecycleProgress({
+    action: "up",
+    progress: args.options.progress,
+    json: args.options.json,
+    backend: process.env.HACK_RUNTIME_BACKEND,
+  });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
   if (resolveNativeRuntimeSelection()) {
@@ -6486,7 +6524,7 @@ async function handleUp({
     json: args.options.json,
     detach: args.options.detach,
     services: args.positionals.services,
-    unsupportedOptions: Boolean(args.options.target),
+    unsupportedOptions: Boolean(args.options.target || args.options.progress),
   });
   if (authored !== null) {
     return authored;
@@ -6618,6 +6656,7 @@ async function runUpCommand({
     projectName,
     branch,
   });
+  beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
   const devHost = await resolveRuntimeDevHost({ project, branch });
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
   const internalSettings = resolveInternalSettings(cfg);
@@ -7159,6 +7198,12 @@ async function handleDown({
   /** The native runtime requests of this down; a restart starts them in their own process group. */
   readonly invoke?: typeof invokeNativeRuntime;
 }): Promise<number> {
+  prepareLifecycleProgress({
+    action: "down",
+    progress: args.options.progress,
+    json: args.options.json,
+    backend: process.env.HACK_RUNTIME_BACKEND,
+  });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
   const authored = await tryNativeComposeCommand({
@@ -7179,6 +7224,7 @@ async function handleDown({
       args.options.pruneCaches,
       args.options.removeData,
       args.options.yes,
+      args.options.progress,
     ].some(Boolean),
   });
   if (authored !== null) {
@@ -7457,6 +7503,7 @@ async function runDownCommand({
     projectName,
     branch,
   });
+  beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
   const effectiveEnvName = await resolveStoredRuntimeEnvName({
     requestedEnvName: envName,
     projectDir: project.projectDir,
@@ -7520,6 +7567,7 @@ async function runDownCommand({
       cfg,
       composeProject: lifecycleComposeProject,
     });
+    reportLifecycleProgress({ service: null, phase: "stopping" });
     code = await composeRuntimeBackend.down({
       composeFiles: [project.composeFile],
       composeProject: composeProjectName,
@@ -7552,6 +7600,7 @@ async function runDownCommand({
     }
     return code;
   }
+  reportLifecycleProgress({ service: null, phase: "stopped" });
   if (helperReleaseFailures.length > 0) {
     const message = sharedHelperReleaseFailureMessage(helperReleaseFailures);
     if (json) {
@@ -8408,6 +8457,12 @@ async function handleRestart({
   const expectAttempt = args.options.expectFinalizationAttempt;
   const legacyPid = args.options.expectFrontendPid;
   validateFrontendRecoveryOptions({ recover, expectAttempt, legacyPid });
+  prepareLifecycleProgress({
+    action: "restart",
+    progress: args.options.progress,
+    json: args.options.json,
+    backend: process.env.HACK_RUNTIME_BACKEND,
+  });
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
   const authored = await tryNativeComposeCommand({
@@ -8425,6 +8480,7 @@ async function handleRestart({
       recover,
       expectAttempt,
       legacyPid,
+      args.options.progress,
     ].some(Boolean),
   });
   if (authored !== null) {
@@ -8544,6 +8600,7 @@ async function runRestartCommand({
     baseProjectName,
     branch,
   });
+  beginLifecycleProgress({ project: composeProjectName ?? baseProjectName });
   const projectName = sanitizeProjectSlug(baseProjectName);
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const requestedServices = resolveRequestedComposeServices({
@@ -8620,6 +8677,7 @@ async function runRestartCommand({
     envByService: preflightEnv.preflightEnvByService,
   });
 
+  reportLifecycleProgress({ service: null, phase: "stopping" });
   const downPhase = await runRestartDownPhase({
     project,
     cfg,
@@ -8666,6 +8724,7 @@ async function runRestartCommand({
     return downCode;
   }
 
+  reportLifecycleProgress({ service: null, phase: "stopped" });
   await removeProjectRuntimeStateEntry({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,

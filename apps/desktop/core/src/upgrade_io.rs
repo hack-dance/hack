@@ -48,9 +48,24 @@ pub fn check(source: &LiveSource) -> Result<Observation, String> {
             .with_cwd("/")
             .version(Duration::from_secs(5))
             .ok(),
+        // The injected client is a test seam; a normal launch finds the socket
+        // in the selected CLI's own read-only `daemon status` answer.
         daemon: source
-            .daemon
-            .as_ref()
+            .effective_daemon(
+                source
+                    .runner
+                    .clone()
+                    .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+                    .with_cwd("/")
+                    .run_raw(
+                        &["daemon", "status", "--json"],
+                        None,
+                        Duration::from_secs(5),
+                    )
+                    .ok()
+                    .and_then(|(out, _, _)| serde_json::from_str::<serde_json::Value>(&out).ok())
+                    .as_ref(),
+            )
             .and_then(|d| d.status().ok())
             .map(|d| d.version),
         // No verified R14 install/target evidence: never probe update --check or

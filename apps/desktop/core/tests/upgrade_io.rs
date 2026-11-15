@@ -63,7 +63,10 @@ fn nonzero_valid_check_envelope_is_retained_without_update_or_other_effects() {
     assert_eq!(observation.cli.as_deref(), Some("5.0.0"));
     assert!(observation.app.is_none());
     let calls = std::fs::read_to_string(t.0.join("calls")).unwrap();
-    assert_eq!(calls, "upgrade check --json\n--version\n");
+    assert_eq!(
+        calls,
+        "upgrade check --json\n--version\ndaemon status --json\n"
+    );
 }
 #[test]
 fn malformed_envelopes_missing_required_fields_and_unsupported_version_are_refused() {
@@ -151,4 +154,65 @@ fn any_normal_nonzero_exit_retains_a_valid_envelope() {
     let report: Report =
         upgrade_io::read(&t.runner(REPORT, 7), &["upgrade", "check", "--json"]).unwrap();
     assert!(!report.ready());
+}
+#[test]
+fn readiness_reads_the_daemon_version_from_the_cli_socket_path() {
+    use std::io::{Read, Write};
+    let t = Tree::new();
+    let socket_dir = PathBuf::from(format!(
+        "/tmp/uio-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    ));
+    std::fs::create_dir(&socket_dir).unwrap();
+    std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sock = socket_dir.join("hackd.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(60)))
+            .unwrap();
+        let mut buf = [0; 1024];
+        let n = stream.read(&mut buf).unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("GET /v1/status "));
+        let body = r#"{"status":"ok","version":"5.0.0"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let program = t.0.join("fake-cli");
+    std::fs::write(
+        &program,
+        format!(
+            r#"#!/bin/sh
+case "$*" in
+--version) printf '5.0.0\n';;
+'daemon status --json') printf '{{"status":"running","running":true,"socket_path":"{}"}}';;
+*) /bin/cat "$DATA";;
+esac
+"#,
+            sock.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(t.0.join("data"), REPORT).unwrap();
+    let source = LiveSource {
+        runner: CliRunner::new(program)
+            .with_env("DATA", t.0.join("data").to_str().unwrap())
+            .with_env("HOME", t.0.to_str().unwrap())
+            .with_env("HACK_HOME", t.0.join("hack").to_str().unwrap()),
+        daemon: None,
+    };
+    let observation = source.upgrade_check().unwrap();
+    assert_eq!(observation.daemon.as_deref(), Some("5.0.0"));
+    server.join().unwrap();
+    let _ = std::fs::remove_dir_all(socket_dir);
 }

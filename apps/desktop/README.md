@@ -328,7 +328,8 @@ launchd exit status; these states need attention even if hackd runs separately.
 
 **Upgrade Hack** opens without probing for updates. **Review readiness** runs the
 selected CLI's read-only `upgrade check --json` on a background worker, keeping
-valid reports from exit 1. No `update --check` probe or daily check runs: R14's
+valid reports from exit 1. The hackd version comes from the socket named in the
+CLI's own read-only `daemon status --json` answer. No `update --check` probe or daily check runs: R14's
 observe-only target and installation contract is still missing. Availability
 therefore stays Unknown for every live install kind, including candidates and
 Homebrew. Readiness is separate from update availability. Actual Upgrade stays

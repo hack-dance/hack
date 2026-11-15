@@ -5,8 +5,10 @@ owner for Linux and macOS. It has no dependency on runtime-core, a terminal
 multiplexer, Python, or a shell wrapper. Authored shell commands can still
 explicitly select a shell in their argv.
 
-The first slice is exercised by a fake caller. It does not select a new CLI runner
-or install the executable. See [the protocol, state model and delivery gates](../../docs/lifecycle-supervisor.md).
+The CLI can select this owner with `lifecycle.runner: "supervisor"`; the default
+remains `"mux"`. Fake-caller contracts and the real CLI integration have separate
+regressions. Distribution packaging remains a separate change. See
+[the protocol, state model and delivery gates](../../docs/lifecycle-supervisor.md).
 
 Build and verify from the repository root with the pinned toolchain:
 
@@ -23,9 +25,11 @@ processes and cleans them up. CI runs the same crate on Linux x86_64, macOS arm6
 and macOS x86_64. A cross-target `cargo check` checks compilation only; it does not
 qualify platform signal, process identity, output or recovery behavior.
 
-`run` must be spawned as a fresh child without the caller making it a process-group
+`run` and `serve` must be spawned as fresh children without the caller making them process-group
 leader. The supervisor calls `setsid` itself and detaches its standard descriptors
-after the framed ready receipt. `stop` and `status` are finite framed requests.
+after the framed ready receipt. `serve` accepts later `add` requests through a
+private local socket, preserving persistent-hook ordering. `add`, `stop`, and
+`status` are finite framed requests.
 Frames, not pipe closure, delimit delivery. The per-command guard publishes kernel
 identity before executing authored argv and retains ownership after the project
 supervisor dies. A killed guard with surviving session members prevents a fresh
@@ -89,7 +93,11 @@ never ordered across processes. A reused numeric SID alone never authorizes a si
 Terminal receipts prove the old guard completed cleanup; uncertain legacy or
 newer-member-only sessions remain unknown without effects. See
 [resource and qualification boundaries](../../docs/lifecycle-supervisor.md#resource-and-qualification-boundaries)
-for offline rotation, Darwin different-UID limits and remaining crash-test gaps.
+for offline rotation, Darwin different-UID limits and crash-window qualification.
 The ignored idle measurement has a native Darwin variant using proc_pid_rusage
 over 60 seconds; its kernel idle/interrupt wakeups differ from Linux context switches.
 Descriptor-limit and functional prepublication lease tests run on both platforms.
+
+Deterministic crash checkpoints are available only with the test-hooks feature.
+Run cargo test --features test-hooks guard_killed_after_ to exercise both save/spawn
+windows. Never enable this feature in shipped/default/release artifacts.

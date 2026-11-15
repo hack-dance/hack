@@ -165,8 +165,9 @@ alias; expected shim paths come from the fixture's canonical root, never from
 the runner's real Homebrew installation or filesystem modes.
 
 The fixed absolute Mutagen override (`HACK_MUTAGEN_PATH`) or managed
-`HACK_HOME/bin/mutagen` candidate, an absolute `HACK_NATIVE_BINARY` and every
-discovered Docker plugin are checked before Doctor too, including the same `#!`
+`HACK_HOME/bin/mutagen` candidate, an absolute `HACK_NATIVE_BINARY` (or, when it
+is unset, the `hack-native` the CLI would take from beside its own executable)
+and every discovered Docker plugin are checked before Doctor too, including the same `#!`
 interpreter rule (the native runtime does not get the `env` form); Doctor's
 runs also remove inherited interpreter startup and preload variables
 (`BASH_ENV`, `ENV`, `SHELLOPTS`, `PS4`, exported Bash functions, Perl, Python,
@@ -174,6 +175,11 @@ Ruby and Node options and paths, and every `LD_*` and `DYLD_*` loader
 variable), so a checked tool script cannot be made to load code from the
 environment; missing candidates
 require protected ancestry, and relative/unprovable selections are refused.
+Doctor's runs pin the checked native runtime through `HACK_NATIVE_BINARY`. When the
+CLI is a `#!` launcher, the executable it finally runs (and so its fallback
+directory) cannot be known, so Doctor pins an absent path inside its private
+wrapper directory and native checks report the runtime as unavailable; set
+`HACK_NATIVE_BINARY` to check a bundled runtime in that layout.
 Docker plugin preflight preserves HOME, DOCKER_CONFIG and DOCKER_CONTEXT. Doctor's
 automatic checks only use a local Docker socket: a non-`unix://` `DOCKER_HOST`,
 or a selected context whose endpoint is remote (for example `ssh://`) or cannot

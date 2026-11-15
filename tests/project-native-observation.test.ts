@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { NativeProjectPsResult } from "../src/backends/native-project-observe.ts";
-import { observeNativeProject } from "../src/lib/project-native-observation.ts";
+import {
+  NATIVE_OBSERVATION_LIMIT,
+  observeNativeProject,
+} from "../src/lib/project-native-observation.ts";
 import type { ProjectView } from "../src/lib/project-views.ts";
 
 let original: Record<string, string | undefined>;
@@ -145,4 +148,51 @@ test("verified native runtime degradation is distinct from unavailable observati
   });
   expect(report.state).toBe("degraded");
   expect(report.state_reason).toBe("native-runtime-degraded");
+});
+
+const notStarted = (): NativeProjectPsResult =>
+  ({ backend: "native", status: "not_started" }) as NativeProjectPsResult;
+
+test("native reads are bounded process-wide across concurrent callers", async () => {
+  let running = 0;
+  let peak = 0;
+  const ps = async () => {
+    running++;
+    peak = Math.max(peak, running);
+    await Bun.sleep(5);
+    running--;
+    return notStarted();
+  };
+  // Separate "requests", each with its own projects, all at once.
+  const reports = await Promise.all(
+    Array.from({ length: 3 * NATIVE_OBSERVATION_LIMIT + 1 }, (_, index) =>
+      observeNativeProject({
+        view: {
+          ...view,
+          repoRoot: `/example/project-${index}`,
+          projectDir: `/example/project-${index}/.hack`,
+        },
+        ps,
+      })
+    )
+  );
+  expect(peak).toBe(NATIVE_OBSERVATION_LIMIT);
+  expect(reports.every((report) => report.state === "stopped")).toBe(true);
+});
+
+test("concurrent reads of one project share a single native read", async () => {
+  let calls = 0;
+  const ps = async () => {
+    calls++;
+    await Bun.sleep(5);
+    return notStarted();
+  };
+  const reports = await Promise.all(
+    [1, 2, 3].map(() => observeNativeProject({ view, ps }))
+  );
+  expect(calls).toBe(1);
+  expect(new Set(reports).size).toBe(1);
+  // Settled reads are not cached: the next caller reads fresh state.
+  await observeNativeProject({ view, ps });
+  expect(calls).toBe(2);
 });

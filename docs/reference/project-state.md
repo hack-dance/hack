@@ -75,7 +75,10 @@ provider errors are omitted. An explicitly verified native runtime degradation
 reports `degraded` with `state_reason: "native-runtime-degraded"`, without claiming
 service readiness. Native observations cover the registered root's
 base instance; branch observations remain a separate interface. At most four
-native project status reads run concurrently.
+native project status reads run at once in one process, across all concurrent
+callers (for example parallel `/v1/projects` requests to hackd). Callers that
+ask for the same project at the same time share one read; settled results are
+not cached.
 
 Observation boundaries from [observe-only listing](../cli.md) are preserved:
 `hack projects --json --observe` reads no engine or native provider and leaves

@@ -83,6 +83,7 @@ export type GlobalInfraProbe = {
 };
 
 export type NativePreflightProbe = {
+  /** Configuration blockers only; runtime setup and admission are not inspected. */
   readonly ready: boolean;
   readonly consentNeeded: number;
   readonly blockers: number;

@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { NativePreflightReport } from "../src/backends/native-preflight.ts";
 import { nativePreflightProbeFromReport } from "../src/lib/upgrade-check-probes.ts";
+import { nativeSetupInspection } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -68,6 +69,12 @@ async function fixture(compose: Record<string, unknown>) {
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${stub}/calls'
+if [ "$3" = runtime ] && [ "$4" = setup ]; then
+  if [ "$#" != 6 ] || [ "$5" != inspect ] || [ "$6" != --json ]; then
+    printf '%s' 'fixture refuses setup mutation' >&2
+    exit 1
+  fi
+fi
 reply="$3-$4"
 # The second review names the adapted document: keep a copy and, when the
 # test scripted one, answer it separately from the review of the original.
@@ -88,6 +95,7 @@ exit 1
   );
   const write = async (name: string, value: unknown) =>
     await writeFile(join(stub, name), JSON.stringify(value));
+  await write("runtime-setup.out", nativeSetupInspection());
   return {
     root,
     project,
@@ -142,7 +150,15 @@ exit 1
       (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
         .split("\n")
         .filter(Boolean)
-        .map((line) => line.split(" ").slice(2, 4).join(" ")),
+        .map((line) => {
+          const args = line.split(" ").slice(2);
+          const command = args.slice(0, 2).join(" ");
+          if (command === "runtime setup") {
+            // Assert full argv before shortening the observation for callers.
+            expect(args).toEqual(["runtime", "setup", "inspect", "--json"]);
+          }
+          return command;
+        }),
     native: {
       HACK_RUNTIME_BACKEND: "native",
       HACK_NATIVE_BINARY: binary,
@@ -297,9 +313,63 @@ test("preflight and start share env-file admission and never publish file values
     expect(up.code).toBe(1);
     expect(up.output).not.toContain(PRIVATE);
     expect(report.output).not.toContain(PRIVATE);
-    expect((await f.calls()).slice(before.length)).toEqual([]);
+    // Detached up inspects setup in the parent and the foreground child.
+    expect((await f.calls()).slice(before.length)).toEqual([
+      "runtime setup",
+      "runtime setup",
+    ]);
   }
 }, 30_000);
+
+test("preflight and start refuse the project key as an env file before reading it", async () => {
+  const f = await fixture({
+    services: { web: { image: IMAGE, env_file: "../.hack.secret.key" } },
+  });
+  await chmod(f.project, 0o700);
+  const keyFile = join(f.project, ".hack.secret.key");
+  await writeFile(keyFile, `${PRIVATE}\n`, { mode: 0o600 });
+  await f.review([], { services: { web: { active: true } } });
+  const env = { ...f.native, ...GRANT };
+  const report = await preflight(f, env);
+  expect(codes(report.report, "cli")).toContain("environment_file_input:web");
+  expect(report.output).toContain(
+    "Hack key and secret-store files cannot be environment sources"
+  );
+  expect(report.output).not.toContain(PRIVATE);
+  const before = await f.argv();
+  // Foreground start: a detached owner discards the refusal text.
+  const up = await cli(f, ["up"], env);
+  expect(up.code).toBe(1);
+  expect(up.output).toContain(
+    "Hack key and secret-store files cannot be environment sources"
+  );
+  expect(up.output).not.toContain(PRIVATE);
+  const after = await f.argv();
+  expect(after.join("\n")).not.toContain(PRIVATE);
+  // Start may review the plan and, with first-use setup guidance, inspect the
+  // runtime setup read-only. Nothing else may run: no pool, file delivery or
+  // start call reaches the runtime.
+  const readOnly = (line: string) => {
+    const words = line.split(" ").slice(2);
+    if (words[0] === "project" && words[1] === "plan") {
+      return true;
+    }
+    const [runtime, setup, inspect, ...flags] = words;
+    return (
+      runtime === "runtime" &&
+      setup === "setup" &&
+      inspect === "inspect" &&
+      flags.includes("--json") &&
+      flags.every((flag) => flag === "--json" || flag === "--quiescence")
+    );
+  };
+  const started = after.slice(before.length);
+  expect(started.filter((line) => !readOnly(line))).toEqual([]);
+  expect(readOnly("--home h runtime setup --no-interactive --json")).toBe(
+    false
+  );
+  expect(readOnly("--home h project start --json")).toBe(false);
+});
 
 test("preflight and static start refuse oversized file delivery before pool effects", async () => {
   const f = await fixture({
@@ -321,11 +391,9 @@ test("preflight and static start refuse oversized file delivery before pool effe
   expect(up.code).toBe(1);
   expect(up.output).toContain("32 KiB");
   expect(up.output).not.toContain("private-quota-canary");
-  expect(
-    (await f.calls())
-      .slice(before.length)
-      .every((call) => call === "project plan")
-  ).toBe(true);
+  const [setup, ...reviews] = (await f.calls()).slice(before.length);
+  expect(setup).toBe("runtime setup");
+  expect(reviews.every((call) => call === "project plan")).toBe(true);
 });
 
 test(
@@ -354,14 +422,18 @@ test(
     const up = await cli(f, ["up"], env);
     expect(up.code).toBe(1);
     expect(up.output).toContain("overlap an environment source");
-    expect((await f.calls()).slice(before.length)).toEqual([]);
+    expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
     expect(report.output).not.toContain(PRIVATE);
     expect(up.output).not.toContain(PRIVATE);
     expect((await f.argv()).join("\n")).not.toContain(PRIVATE);
+    const beforeDetached = await f.calls();
     const detached = await cli(f, ["up", "--json"], env);
     expect(detached.code).toBe(1);
     expect(detached.output).not.toContain(PRIVATE);
-    expect((await f.calls()).slice(before.length)).toEqual([]);
+    expect((await f.calls()).slice(beforeDetached.length)).toEqual([
+      "runtime setup",
+      "runtime setup",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -441,7 +513,9 @@ test(
       PRIVATE
     );
     expect(
-      (await f.calls()).every((line) => line.includes("project plan"))
+      (await f.calls()).every(
+        (line) => line === "runtime setup" || line.includes("project plan")
+      )
     ).toBe(true);
   },
   SPAWN_TIMEOUT_MS
@@ -537,8 +611,8 @@ test("preflight and start refuse ignored root dotenv in a native build before ef
     )?.message
   ).toContain('source "../.env"');
   expect(report.output).not.toContain(PRIVATE);
-  const before = await f.calls();
   for (const args of [["up"], ["up", "--json"]]) {
+    const before = await f.calls();
     const started = await cli(f, args, env);
     expect(started.code).toBe(1);
     if (args.includes("--json")) {
@@ -550,7 +624,11 @@ test("preflight and start refuse ignored root dotenv in a native build before ef
       expect(started.output).toContain("overlap an environment source");
     }
     expect(started.output).not.toContain(PRIVATE);
-    expect((await f.calls()).slice(before.length)).toEqual([]);
+    expect((await f.calls()).slice(before.length)).toEqual(
+      args.includes("--json")
+        ? ["runtime setup", "runtime setup"]
+        : ["runtime setup"]
+    );
   }
 });
 
@@ -574,7 +652,7 @@ test("preflight requires the same decryption key as start and closes key errors"
   expect(up.code).toBe(1);
   expect(up.output).toContain("E_CONFIG_INVALID");
   expect(up.output).not.toContain(PRIVATE);
-  expect((await f.calls()).slice(before.length)).toEqual([]);
+  expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
 });
 
 test("old runtimes cannot silently ignore explicit environment unsets", async () => {
@@ -698,8 +776,12 @@ test(
     // Authored values and the runtime's own text never reach the output.
     expect(output).not.toContain(PRIVATE);
     expect(output).not.toContain("runtime text");
-    // The only runtime requests are the two reviews: nothing is started.
-    expect(await f.calls()).toEqual(["project plan", "project plan"]);
+    // Installation inspection and the two project reviews start nothing.
+    expect(await f.calls()).toEqual([
+      "runtime setup",
+      "project plan",
+      "project plan",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -743,6 +825,7 @@ test(
     expect(human.stdout).toBe(
       [
         "Native preflight for .hack/docker-compose.yml",
+        "Runtime setup: ready. Native runtime is set up.",
         "Runtime review: completed.",
         "",
         "No blockers. Native up should admit this project.",
@@ -841,7 +924,9 @@ test(
       gate: "runtime",
       code: "invalid_mount",
     });
-    expect(first.report.blockers[0]?.message).toContain("Anonymous volumes");
+    expect(first.report.blockers[0]?.message).toContain(
+      "not in a form native accepts"
+    );
     expect(first.report.blockers[0]?.fix).toContain(
       "run the preflight again after fixing it"
     );
@@ -966,7 +1051,7 @@ test(
     expect(up.output).toContain(
       "Run `hack doctor --native-preflight` to list every blocker with its fix."
     );
-    expect(await f.calls()).toEqual([]);
+    expect(await f.calls()).toEqual(["runtime setup"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -1051,7 +1136,8 @@ test(
     expect((await f.normalized()).networks?.shared).toMatchObject({
       "x-hack-isolated": true,
     });
-    const [original, normalized] = await f.argv();
+    const [setup, original, normalized] = await f.argv();
+    expect(setup).toContain("runtime setup inspect --json");
     expect(original).toContain("project plan --project ");
     expect(original).toContain("--profile dev --profile ops --json");
     expect(original).not.toContain("--normalized-file");
@@ -1096,7 +1182,7 @@ test(
       code: "native_adaptation_invalid",
     });
     expect(codes(invalidAdaptation.report, "runtime")).toEqual([]);
-    expect(await adaptation.calls()).toEqual([]);
+    expect(await adaptation.calls()).toEqual(["runtime setup"]);
 
     const config = await fixture({ services: { web: { image: IMAGE } } });
     await writeFile(join(config.projectDir, "hack.config.json"), "{ not json");
@@ -1620,7 +1706,8 @@ test("preflight reports the Compose budget before sending context for more than 
     result.report.blockers.some((entry) => entry.code === "service_budget")
   ).toBe(true);
   const args = await f.argv();
-  expect(args).toHaveLength(1);
+  expect(args).toHaveLength(2);
+  expect(args[0]).toContain("runtime setup inspect --json");
   expect(args.join("\n")).not.toContain("--start-managed-service");
   expect(args.join("\n")).not.toContain(PRIVATE);
 });

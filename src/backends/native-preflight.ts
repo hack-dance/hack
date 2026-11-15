@@ -46,6 +46,11 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import {
+  inspectNativeSetup,
+  type NativeSetupState,
+  nativeSetupGuidance,
+} from "./native-runtime-setup.ts";
 import { NATIVE_START_REFUSAL_ENTRIES } from "./native-start-refusal-entries.ts";
 import { readNativeStartRefusals } from "./native-start-refusals.ts";
 
@@ -62,16 +67,16 @@ import { readNativeStartRefusals } from "./native-start-refusals.ts";
  * Invariants:
  * - Read-only for the project and the runtime. It starts no VM, pulls no
  *   image, runs no lifecycle hook and writes nothing to the project. The only
- *   runtime requests are `project plan` reviews, which read the project and
- *   need no running runtime; the adapted Compose document they review lives
+ *   runtime requests are read-only `runtime setup inspect` and `project plan`
+ *   reviews, which need no running runtime; the adapted Compose document lives
  *   in a private temporary directory that is removed afterwards.
  * - It judges what `hack up` judges: the Compose document after the selected
  *   native adaptation and project-wide host aliases are applied, not the raw
  *   file.
  * - Value-free. A finding carries a closed code, a service name, a field path
- *   and fixed sentences. Authored values (environment values, label keys and
- *   values, paths, image names) are never printed, and neither is the
- *   runtime's own message text.
+ *   and fixed sentences. Environment-file findings may name source paths.
+ *   Environment values, label keys and values, image names and the runtime's
+ *   own message text are never printed.
  * - Not an admission decision. `hack up` still decides with its own checks; a
  *   clean report does not start anything and does not skip any of them.
  */
@@ -111,6 +116,12 @@ export type NativePreflightReport = {
   readonly compose_file: string;
   /** No blocker or missing consent, and the runtime review completed. */
   readonly ready: boolean;
+  readonly runtime_setup: {
+    readonly state: NativeSetupState;
+    readonly installation_state?: NativeSetupState;
+    readonly code: string;
+    readonly fix: string;
+  };
   readonly runtime_review: {
     readonly status: NativePreflightReviewStatus;
     /**
@@ -273,9 +284,13 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     fix: "Select at most 64 profiles.",
   },
   invalid_mount: {
+    message: "A mount is not in a form native accepts.",
+    fix: "Write each mount as source:target, or as one absolute container path for an anonymous volume. A bind mount needs a source, and a volume subpath needs a named volume.",
+  },
+  reserved_volume_name: {
     message:
-      "A mount is not in a form native accepts. Anonymous volumes, such as a bare /app/node_modules, are not supported.",
-    fix: "Write each mount as source:target, and replace an anonymous volume with a named volume declared under volumes.",
+      "A volume name starts with hack-anonymous-, which native reserves for anonymous volumes.",
+    fix: "Rename the volume.",
   },
   reserved_mount_target: {
     message: "A mount replaces a system or runtime directory in the container.",
@@ -466,6 +481,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
       "extra_hosts entries reach the host only through a reviewed host dependency binding.",
     fix: "Nothing to do if a dependency file is selected for this environment; otherwise select one with HACK_NATIVE_DEPENDENCIES.",
   },
+  anonymous_volume_named: {
+    message:
+      "An anonymous volume is stored as a named volume this project owns. Unlike Compose, it is kept across hack down and is not refilled from a rebuilt image.",
+    fix: "Nothing to do. Run hack down --remove-data to recreate it from the image on the next start, or declare a named volume to choose its name.",
+  },
   mount_host_hint_ignored: {
     message:
       "A mount carries a host-only hint (cached, delegated, consistent, z or Z), which is ignored.",
@@ -533,6 +553,7 @@ export const REVIEW_STOP_CODES: ReadonlySet<string> = new Set([
   "profile_budget",
   "registry_template_invalid",
   "registry_template_unsafe",
+  "reserved_volume_name",
   "service_budget",
   "source_budget",
   "source_case_collision",
@@ -1568,6 +1589,44 @@ export type NativePreflightOptions = {
   readonly invoke?: typeof invokeNativeRuntime;
 };
 
+function hasSelectedRuntime(
+  runtime: NativePreflightOptions["runtime"]
+): runtime is NativeRuntimeSelection {
+  return runtime !== null && runtime !== "incomplete";
+}
+
+async function collectSetupFinding(
+  opts: NativePreflightOptions
+): Promise<NativePreflightReport["runtime_setup"]> {
+  let runtimeSetup: NativePreflightReport["runtime_setup"] = {
+    state: "unavailable",
+    code: "native_selection_unavailable",
+    fix: "Select a native candidate to inspect its installation; run this command through hack-next or the candidate bundle.",
+  };
+  if (hasSelectedRuntime(opts.runtime)) {
+    try {
+      const inspected = await inspectNativeSetup({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        invoke: opts.invoke,
+      });
+      runtimeSetup = {
+        state: inspected.state,
+        installation_state: inspected.installation_state,
+        code: inspected.code,
+        fix: nativeSetupGuidance(inspected),
+      };
+    } catch {
+      runtimeSetup = {
+        state: "unavailable",
+        code: "native_setup_unavailable",
+        fix: "Native runtime installation could not be inspected; update the selected candidate and check access to its home.",
+      };
+    }
+  }
+  return runtimeSetup;
+}
+
 function deliveryFindings(
   document: NonNullable<AdaptedProject["document"]>,
   plan: unknown
@@ -1580,12 +1639,22 @@ function deliveryFindings(
   }
 }
 
-/** Runs both gates over one project and merges their findings. */
+/** Runs installation, CLI and runtime gates over the same selected project. */
 export async function collectNativePreflight(
   opts: NativePreflightOptions
 ): Promise<NativePreflightReport> {
+  const runtimeSetup = await collectSetupFinding(opts);
   const adapted = await adaptForPreflight(opts);
   const cli = [...opts.settings, ...adapted.findings];
+  if (hasSelectedRuntime(opts.runtime) && runtimeSetup.state !== "ready") {
+    cli.push({
+      severity: "blocker",
+      gate: "cli",
+      code: "native_runtime_setup",
+      message: `Native runtime setup: ${runtimeSetup.state.replaceAll("_", " ")}.`,
+      fix: runtimeSetup.fix,
+    });
+  }
   let runtime: RuntimeReview = {
     review:
       opts.runtime === "incomplete"
@@ -1608,7 +1677,10 @@ export async function collectNativePreflight(
         review: { status: "skipped", code: "native_adaptation_invalid" },
         findings: [],
       };
-    } else if (opts.runtime !== null && opts.runtime !== "incomplete") {
+    } else if (
+      hasSelectedRuntime(opts.runtime) &&
+      runtimeSetup.state === "ready"
+    ) {
       runtime = await collectNativeRuntimeFindings({
         runtime: opts.runtime,
         projectRoot: opts.projectRoot,
@@ -1664,7 +1736,9 @@ export async function collectNativePreflight(
     ready:
       blockers.length === 0 &&
       !all.some((found) => found.severity === "consent") &&
-      runtime.review.status === "completed",
+      runtime.review.status === "completed" &&
+      runtimeSetup.state === "ready",
+    runtime_setup: runtimeSetup,
     consent_needed: all.filter((found) => found.severity === "consent"),
     runtime_review: runtime.review,
     blockers,
@@ -1712,6 +1786,7 @@ export function renderNativePreflightReport(
 ): string {
   const lines = [
     `Native preflight for ${report.compose_file}`,
+    `Runtime setup: ${report.runtime_setup.state.replaceAll("_", " ")}. ${report.runtime_setup.fix}`,
     reviewLine(report.runtime_review),
     "",
   ];

@@ -18,6 +18,7 @@ const plan = {
     warning("labels_not_applied", "services.web.labels"),
     warning("logging_not_applied", "services.web.logging"),
     warning("mount_host_hint_ignored", "services.api.volumes"),
+    warning("anonymous_volume_named", "services.api.volumes"),
     // Two hinted mounts on one service are one notice.
     warning("mount_host_hint_ignored", "services.api.volumes"),
     // Inactive services, other codes, errors and malformed entries say nothing.
@@ -37,6 +38,7 @@ const plan = {
 
 test("each ignored Compose setting is reported once per active service, without values", () => {
   expect(nativeIgnoredSettingNotices(plan)).toEqual([
+    "Service api: anonymous volumes are stored as named volumes this project owns. They are kept across hack down and are not refilled from a rebuilt image; hack down --remove-data deletes them.",
     "Service api: host-only mount hints (cached, delegated, consistent, z, Z) are ignored on the native backend.",
     "Service web: labels are not applied to native containers.",
     "Service web: logging configuration is not applied; read container logs with hack logs.",
@@ -59,5 +61,5 @@ test("notices go through the caller's warning channel in order", () => {
   const lines: string[] = [];
   reportNativeIgnoredSettingNotices(plan, (line) => lines.push(line));
   expect(lines).toEqual(nativeIgnoredSettingNotices(plan));
-  expect(lines).toHaveLength(3);
+  expect(lines).toHaveLength(4);
 });

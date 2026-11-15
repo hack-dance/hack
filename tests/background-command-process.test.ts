@@ -49,6 +49,7 @@ import {
   readCommandEvents,
 } from "../src/lib/background-command/reader.ts";
 import { acceptCommand } from "../src/lib/background-command/store.ts";
+import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
 // ---------------------------------------------------------------------------
 // HACK-2085: real detached supervisors and children, on this host's kernel.
@@ -511,7 +512,28 @@ describe("background command processes", () => {
         events.filter((event) => event.type === "command.ended")
       ).toHaveLength(1);
       expect(endedPayload(events)?.outcome).toBe("cancelled");
-      const audit = await readFile(join(fixture.store, "audit.log"), "utf8");
+      // The supervisor appends the audit `end` line after its final journal
+      // record, and cancel returns on that record (HACK-2248). The audit log is
+      // best-effort and not part of what cancel confirms, so wait for the
+      // line, bounded.
+      const audit = await waitForFileContent({
+        path: join(fixture.store, "audit.log"),
+        what: "audit end line",
+        budgetMs: 5000,
+        complete: (text) =>
+          text
+            .split("\n")
+            .slice(0, -1)
+            .some((line) => {
+              const entry = JSON.parse(line) as Record<string, unknown>;
+              return (
+                entry.event === "end" &&
+                entry.commandId === journal.meta.commandId
+              );
+            })
+            ? text
+            : undefined,
+      });
       expect(audit).toContain('"event":"start"');
       expect(audit).toContain('"event":"cancel"');
       expect(audit).toContain('"event":"end"');

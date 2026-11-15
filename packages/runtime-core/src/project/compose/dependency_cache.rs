@@ -145,6 +145,10 @@ pub(super) fn parse(value: Option<&Value>) -> Result<Option<DependencyCachePlan>
         .unwrap_or_default();
     if super::fields::identifier(&volume).is_err() {
         findings.push(detail(VOLUME, "The dependency cache has no literal named-volume identifier.", "Set hack.dependencies.cache-volume to one declared named volume, without interpolation."));
+    } else if findings.is_empty() && volume.starts_with(super::service::ANONYMOUS_PREFIX) {
+        // A generated anonymous volume belongs to one service and is never a
+        // cache. Same precedence as before: only when nothing earlier refused.
+        return Err(super::service::reserved_volume_name());
     }
     let lockfiles = paths(labels.get(LOCKFILES), DEFAULT_LOCKFILES);
     let runtime = paths(labels.get(RUNTIME), DEFAULT_RUNTIME);

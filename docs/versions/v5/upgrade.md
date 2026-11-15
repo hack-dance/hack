@@ -122,3 +122,22 @@ login service still points at the old executable, use the chosen install's
 `hack daemon install`. Keep this outside the shared-home candidate trial;
 [daemon and service details](guides/upgrade-from-v4.md#daemon-old-lock-and-missing-checkouts)
 explain the difference.
+
+## Desktop app preview
+
+The desktop preview has an **Upgrade Hack** pane that wraps the same commands.
+It does not upgrade anything yet:
+
+- **Review readiness** runs `hack upgrade check --json` and shows its findings.
+  It never checks whether an update exists, so availability stays Unknown.
+- **Save file snapshot** runs the CLI's snapshot after a ready review. Only a
+  complete snapshot counts as a recovery point.
+- **Restore files from snapshot** runs `hack upgrade rollback` for that exact
+  snapshot. It restores files only; versions, containers and services do not
+  change.
+- **Upgrade** stays disabled until Hack can verify the target version and who
+  owns the installation. Plan fixes are shown as commands to copy, never run.
+
+The preview does not replace the backup, daemon and rollback steps above.
+Details are in the desktop app README (`apps/desktop/README.md`, "Upgrade
+review").

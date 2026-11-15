@@ -139,6 +139,12 @@ or effective ACL ordering. Native ACL fixtures need hosted macOS qualification. 
 counts as absent ACL only when pre/post link and target metadata show the path
 still exists unchanged; missing, changed or unreadable metadata remains
 untrusted. These observations cannot lock out same-user/root ABA changes.
+Doctor checks each tool's executable and its `#!` interpreter chain, not the
+shared libraries a compiled tool loads. Library search paths embedded in a binary
+(ELF `RUNPATH`/`RPATH`, Mach-O `LC_RPATH` and `@rpath`/`@loader_path` load
+commands), the system loader configuration and the dyld shared cache are not
+validated; inherited loader variables are removed, but a library in another
+user's writable directory named by the binary itself would still load.
 
 Each refresh creates one private temporary PATH of wrappers that exec the checked
 absolute tool paths, preserving normal shim script locations and nested lookup.

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Stats } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -5696,5 +5697,85 @@ linuxTest(
     expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
     expect(hooks.trace.action).toBe("none");
     expect(hooks.trace.blocked).toBe("rewrite-refused");
+  }
+);
+
+// Review round 27 (HACK-2216): the last check reads the exact pathname
+// systemd will run, not only the main file's program.
+
+linuxTest(
+  "an automatic restart is refused when a drop-in's alias of this hack becomes replaceable during the final proof",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    // A retained drop-in runs another pathname for the same file (a hard
+    // link): identity and the earlier trust checks pass.
+    const aliasDir = join(root, "alias-bin");
+    await mkdir(aliasDir);
+    await chmod(aliasDir, 0o755);
+    const alias = join(aliasDir, "hack");
+    await link(program, alias);
+    withLoadedExec(fake, () => [execStart(alias)]);
+    fake.calls.length = 0;
+    const base = runningHooks(fake, "1.0.0");
+    let proofs = 0;
+    const hooks = {
+      ...base,
+      proveMainProcess: async (pid: number, daemonRoot: string) => {
+        proofs += 1;
+        if (proofs === 2) {
+          // Only the alias's directory becomes writable by the group; the
+          // main file's program stays safe.
+          await chmod(aliasDir, 0o775);
+        }
+        return await base.proveMainProcess(pid, daemonRoot);
+      },
+    };
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(proofs).toBe(2);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(hooks.trace.blocked).toBe("rewrite-refused");
+
+    // Control: with the alias's directory safe, the same restart goes on.
+    await chmod(aliasDir, 0o755);
+    expect(
+      await reconcileRunningSystemdDaemon(runningHooks(fake, "1.0.0"))
+    ).toBe(0);
+    expect(fake.calls).toContain("systemctl --user restart hackd.service");
+  }
+);
+
+linuxTest(
+  "an automatic restart is refused when the loaded program cannot be read at the last check",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    let loadedLines = [execStart(program)];
+    withLoadedExec(fake, () => loadedLines);
+    fake.calls.length = 0;
+    const base = runningHooks(fake, "1.0.0");
+    let proofs = 0;
+    const hooks = {
+      ...base,
+      proveMainProcess: async (pid: number, daemonRoot: string) => {
+        proofs += 1;
+        if (proofs === 2) {
+          // Two ExecStart entries by the last check: not one program.
+          loadedLines = [execStart(program), execStart(program)];
+        }
+        return await base.proveMainProcess(pid, daemonRoot);
+      },
+    };
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(hooks.trace.blocked).toBe("unproven-owner");
   }
 );

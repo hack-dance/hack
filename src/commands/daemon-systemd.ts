@@ -153,24 +153,52 @@ export interface SystemdCommandHooks {
 
 /**
  * The last check before an automatic restart (HACK-2216): the ownership
- * proof and loaded-program read before it take time, so the program the
- * unit runs is checked again ({@link checkServiceExecutableTrusted}) and a
- * pathname replaced meanwhile is not what the restart starts. Exit code 1
- * (reported, `blocked: "rewrite-refused"`) or null to restart.
+ * proof and loaded-program read before it take time, so the program is
+ * checked again ({@link checkServiceExecutableTrusted}) and a pathname
+ * replaced meanwhile is not what the restart starts. Both the main file's
+ * program and the exact pathname systemd will run are checked: the single
+ * loaded `ExecStart` ({@link readSystemdLoadedProgram}), which a retained
+ * drop-in can point at another path to the same file, with its symlinks
+ * and every directory above it. Exit code 1 (reported) or null to restart:
+ * `blocked: "unproven-owner"` when the loaded program cannot be read or is
+ * not exactly one entry, `rewrite-refused` when a program fails the checks.
  */
 async function refuseUntrustedProgramLast(opts: {
   readonly hooks: Pick<SystemdCommandHooks, "trace">;
   readonly unitPath: string;
+  readonly deps: SystemdDeps;
 }): Promise<number | null> {
-  const untrusted = await checkUnitProgramTrusted({ unitPath: opts.unitPath });
-  if (untrusted === null) {
-    return null;
+  const loaded = await readSystemdLoadedProgram({ deps: opts.deps });
+  if (loaded.kind === "unknown") {
+    return refuseLastCheck({
+      hooks: opts.hooks,
+      blocked: "unproven-owner",
+      message: `Not restarting ${SYSTEMD_UNIT_NAME}: the program systemd would run could not be read again just before the restart (${loaded.reason})`,
+    });
   }
+  const untrusted =
+    (await checkServiceExecutableTrusted({ path: loaded.path })) ??
+    (await checkUnitProgramTrusted({ unitPath: opts.unitPath }));
+  return untrusted === null
+    ? null
+    : refuseLastCheck({
+        hooks: opts.hooks,
+        blocked: "rewrite-refused",
+        message: untrusted,
+      });
+}
+
+/** Records and reports a refusal of {@link refuseUntrustedProgramLast}. */
+function refuseLastCheck(opts: {
+  readonly hooks: Pick<SystemdCommandHooks, "trace">;
+  readonly blocked: "unproven-owner" | "rewrite-refused";
+  readonly message: string;
+}): number {
   if (opts.hooks.trace) {
     opts.hooks.trace.action = "none";
-    opts.hooks.trace.blocked = "rewrite-refused";
+    opts.hooks.trace.blocked = opts.blocked;
   }
-  logger.error({ message: withInstallStep(untrusted) });
+  logger.error({ message: withInstallStep(opts.message) });
   return 1;
 }
 
@@ -867,7 +895,7 @@ async function restartReconciledUnit(opts: {
   if (unproven !== null) {
     return unproven;
   }
-  const replaced = await refuseUntrustedProgramLast({ hooks, unitPath });
+  const replaced = await refuseUntrustedProgramLast({ hooks, unitPath, deps });
   if (replaced !== null) {
     return replaced;
   }

@@ -2413,6 +2413,10 @@ fn fixture_process() {
             std::io::stdout().flush().unwrap();
             loop {
                 if TERMINATED.swap(false, Ordering::SeqCst) {
+                    // Saved before the fork: a child first scheduled after this
+                    // process died would otherwise read its reaper's PID.
+                    // SAFETY: getpid has no preconditions.
+                    let parent = unsafe { libc::getpid() };
                     // SAFETY: the fork child uses only async-signal-safe libc
                     // calls and never returns into Rust state.
                     let child = unsafe { libc::fork() };
@@ -2430,7 +2434,6 @@ fn fixture_process() {
                             // deadline. Tie the exit to the parent's death, not
                             // to a fixed time, so a slow host cannot push it
                             // past the deadline.
-                            let parent = libc::getppid();
                             while libc::getppid() == parent {
                                 libc::usleep(10_000);
                             }

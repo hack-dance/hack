@@ -173,11 +173,30 @@ impl Script {
         &self.path
     }
     /// Linux requires a discovered absolute xdg-terminal-exec path; absent means
-    /// Copy command. macOS opens the .command in a new Terminal window, background.
+    /// Copy command. macOS opens the .command in a new window of the system
+    /// Terminal bundle, in the background.
     pub fn open(
+        self,
+        platform: Platform,
+        linux_terminal: Option<&Path>,
+        launcher: &dyn Launcher,
+    ) -> Result<(), String> {
+        self.open_with(
+            platform,
+            linux_terminal,
+            Path::new(MAC_TERMINAL_APP),
+            launcher,
+        )
+    }
+    /// `open` with the macOS Terminal bundle path supplied (a test seam). The
+    /// bundle is passed to `open -a` by path, never by application name, so
+    /// another account cannot register a competing "Terminal" that would run
+    /// as this user before the script's Enter prompt.
+    pub fn open_with(
         mut self,
         platform: Platform,
         linux_terminal: Option<&Path>,
+        mac_terminal: &Path,
         launcher: &dyn Launcher,
     ) -> Result<(), String> {
         let (program, args) = match platform {
@@ -186,7 +205,7 @@ impl Script {
                 vec![
                     "-g".into(),
                     "-a".into(),
-                    "Terminal".into(),
+                    system_bundle(mac_terminal)?.into_os_string(),
                     self.path.as_os_str().into(),
                 ],
             ),
@@ -212,6 +231,28 @@ impl Drop for Script {
         }
     }
 }
+/// The system Terminal bundle (sealed system volume on supported macOS).
+pub const MAC_TERMINAL_APP: &str = "/System/Applications/Utilities/Terminal.app";
+
+/// The bundle must be a real directory at exactly this path (no symlink),
+/// owned by root and not writable by group or others, with the same rule for
+/// every directory above it. Otherwise the hand-off fails closed to Copy.
+fn system_bundle(bundle: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    const REFUSED: &str = "The system Terminal app is unavailable; use Copy command";
+    let real = std::fs::canonicalize(bundle).map_err(|_| REFUSED.to_owned())?;
+    if real != bundle || !std::fs::metadata(&real).is_ok_and(|m| m.is_dir()) {
+        return Err(REFUSED.into());
+    }
+    for dir in real.ancestors() {
+        let ok = std::fs::metadata(dir).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0);
+        if !ok || !crate::doctor_acl::controlled(dir) {
+            return Err(REFUSED.into());
+        }
+    }
+    Ok(real)
+}
+
 /// Another user must not be able to rename the private script directory
 /// out of `root` and substitute a script before the terminal runs it. The
 /// root must be owned by this user and not writable by group or others, or

@@ -1,5 +1,5 @@
 //! Scripts run only fake executables. Launch adapters record argv, never open GUI.
-use hack_desktop_core::terminal::{CommandSpec, Launcher, Platform, Script};
+use hack_desktop_core::terminal::{CommandSpec, Launcher, MAC_TERMINAL_APP, Platform, Script};
 use std::os::unix::fs::PermissionsExt;
 use std::{
     ffi::OsString,
@@ -67,7 +67,33 @@ fn private_script_fixed_adapters_and_failure_cleanup() {
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o700
     );
-    assert!(script.open(Platform::Mac, None, &fake).is_err());
+    // A bundle that is not a root-owned system directory is refused before
+    // anything launches, and the unlaunched script is removed.
+    let fake_bundle = t.0.join("Terminal.app");
+    std::fs::create_dir(&fake_bundle).unwrap();
+    let refused = Script::create(&t.0, &spec()).unwrap();
+    let refused_path = refused.path().to_owned();
+    assert!(
+        refused
+            .open_with(Platform::Mac, None, &fake_bundle, &fake)
+            .is_err()
+    );
+    assert!(!refused_path.exists());
+    assert!(fake.calls.borrow().is_empty());
+    if !Path::new(MAC_TERMINAL_APP).exists() {
+        let missing = Script::create(&t.0, &spec()).unwrap();
+        let missing_path = missing.path().to_owned();
+        assert!(missing.open(Platform::Mac, None, &fake).is_err());
+        assert!(!missing_path.exists());
+        assert!(fake.calls.borrow().is_empty());
+    }
+    // A root-owned, non-writable directory stands in for the system bundle:
+    // `open -a` receives that absolute path, never an application name.
+    assert!(
+        script
+            .open_with(Platform::Mac, None, Path::new("/usr"), &fake)
+            .is_err()
+    );
     assert!(!path.exists());
     let calls = fake.calls.borrow();
     assert_eq!(calls[0].0, Path::new("/usr/bin/open"));
@@ -76,7 +102,7 @@ fn private_script_fixed_adapters_and_failure_cleanup() {
         [
             OsString::from("-g"),
             OsString::from("-a"),
-            OsString::from("Terminal")
+            OsString::from("/usr")
         ]
     );
     drop(calls);

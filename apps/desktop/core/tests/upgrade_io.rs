@@ -30,7 +30,7 @@ impl Tree {
 [ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 97
 [ "$PWD" = / ] || exit 98
 printf '%s\n' "$*" >> "$CALLS"
-if [ "$*" = 'version --json' ]; then printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}\n'; exit 0; fi
+if [ "$*" = 'version --json' ]; then printf '{{"ok":true,"data":{{"schema":"hack.version.v1","version":"5.0.0"}}}}\n'; exit 0; fi
 /bin/cat "$DATA"
 exit {exit}
 "#
@@ -193,7 +193,7 @@ fn readiness_reads_the_daemon_version_from_the_cli_socket_path() {
         format!(
             r#"#!/bin/sh
 case "$*" in
-'version --json') printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}\n';;
+'version --json') printf '{{"ok":true,"data":{{"schema":"hack.version.v1","version":"5.0.0"}}}}\n';;
 'daemon status --json') printf '{{"status":"running","running":true,"socket_path":"{}"}}';;
 *) /bin/cat "$DATA";;
 esac

@@ -127,7 +127,9 @@ whose interpreter lives in a shared writable directory is excluded and its
 checks become Unknown. Only two `#!` forms are accepted: a trusted interpreter
 with no arguments, or exactly `#!/usr/bin/env <name>` (env identified by its
 real path), whose name resolves only through the private wrapper PATH. Any
-other form, including shell flags such as `-e`, makes that tool Unknown. macOS ACL mutation grants
+other form, including shell flags such as `-e`, makes that tool Unknown. A tool
+this user cannot read is not used either: its `#!` line cannot be checked, yet
+the kernel would still follow it. macOS ACL mutation grants
 (write/append/delete, child deletion, attributes, security or owner changes) are
 refused for any principal; deny/read-only entries remain supported. Linux access
 ACLs are conservatively refused. Unreadable ACL metadata is untrusted. The same

@@ -799,7 +799,7 @@ async function autostartWithStaleLoadedJob(opts: {
   );
 }
 
-test("positive control: a stale loaded job under a safe plist is reloaded and kickstarted", async () => {
+test("positive control: a stale loaded job under a safe plist is reloaded (bootout, bootstrap)", async () => {
   const fixture = await makeFixture();
   await writeFile(fixture.plistPath, safeFixturePlist(fixture));
   const verbs = await autostartWithStaleLoadedJob({ fixture });

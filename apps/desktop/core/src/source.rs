@@ -306,22 +306,34 @@ fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
     };
+    // Identify env by its real path, never by file name: a renamed copy
+    // would otherwise take the generic branch with env's options.
     let is_env = trusted_tool_path(
         Path::new(std::ffi::OsStr::from_bytes(interpreter)),
         uid,
         false,
     )
-    .is_some_and(|real| real.file_name() == Some(std::ffi::OsStr::new("env")));
+    .is_some_and(|real| real == Path::new("/usr/bin/env"));
+    // Generic interpreters get no options beyond common shell flags; any
+    // other option could change how a program is found (for example a
+    // renamed env's -P), so it fails closed.
+    let generic = |token: &[u8]| {
+        if token.starts_with(b"-") {
+            matches!(token, b"-e" | b"-u" | b"-x" | b"-eu" | b"-ex")
+        } else {
+            plain(token) || trusted_program(token)
+        }
+    };
     let args_ok = if is_env {
         let command = args.iter().position(|t| *t != b"-S");
         command.is_some_and(|i| {
             args[..i].iter().all(|t| *t == b"-S")
                 && plain(args[i])
                 && !args[i].starts_with(b"-")
-                && args[i + 1..].iter().all(|t| plain(t) || trusted_program(t))
+                && args[i + 1..].iter().all(|t| generic(t))
         })
     } else {
-        args.iter().all(|t| plain(t) || trusted_program(t))
+        args.iter().all(|t| generic(t))
     };
     trusted_program(interpreter) && args_ok
 }
@@ -1854,6 +1866,11 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         let unsafe_env = format!("/usr/bin/env {}", unsafe_interpreter.display());
         let env_path = format!("/usr/bin/env PATH={} sh", shared.display());
         let env_split_absolute = format!("/usr/bin/env -S {}", unsafe_interpreter.display());
+        // An owned copy of env under another name gets no env options.
+        let env_copy = bin.join("env-copy");
+        std::fs::copy("/usr/bin/env", &env_copy).unwrap();
+        std::fs::set_permissions(&env_copy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let renamed_env = format!("{} -S -P bin sh", env_copy.display());
         for (shebang, trusted) in [
             ("/bin/sh", true),
             ("/usr/bin/env sh", true),
@@ -1866,6 +1883,8 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             (env_split_absolute.as_str(), false),
             ("/usr/bin/env -P bin sh", false),
             ("/usr/bin/env -- sh", false),
+            (renamed_env.as_str(), false),
+            ("/bin/sh -eu", true),
         ] {
             write(&docker, Path::new(shebang));
             let tools = trusted_probe_path(bin.as_os_str()).unwrap();

@@ -51,8 +51,11 @@ a failed capture does not prevent that healthy guard from handling shutdown. If 
 is lost during stop, recovery prefers a fresh capture and falls back to those
 admitted identities, rechecking each before TERM/KILL. Each recovered target gets
 its own five-second TERM grace and two-second confirmation bound. Recovery begins
-at most once per target; late guard loss can extend stop to roughly fourteen seconds. Unobserved descendants
-still report unknown. A failed or expired target does not abandon other admitted
+at most once per target; late guard loss can extend stop to roughly fourteen seconds. A waiting
+stop or launch waits up to sixteen seconds for `.stop.lock`, longer than that worst case, so it
+gets its own receipt instead of a lock-wait failure. Descendants forked after the capture are never
+signalled: once no captured member is left, stop waits until the target's own deadline for them to
+exit and reports unknown only if they are still alive. A failed or expired target does not abandon other admitted
 targets: stop drives them to their own outcomes before returning unknown.
 
 Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
@@ -126,7 +129,7 @@ leader identity and each remaining member's UID, birth and session. Recovery
 delivers TERM individually, grants a fresh five-second grace, then KILL to the captured incarnations and
 confirms absence. The capture remains authoritative if TERM ends the witness;
 every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux).
-Unobserved descendants never inherit this authority and retain an unknown outcome. Unverified identity never authorizes signals or a successful
+Unobserved descendants never inherit this authority; stop waits for them until its deadline and reports unknown if they remain. Unverified identity never authorizes signals or a successful
 stop. Launch and stop share a bounded lock; a startup descriptor lease keeps
 admission locked through guard publication even if the project owner dies.
 The guard temporarily inherits this stop-lock lease on stderr (fd 2), then closes

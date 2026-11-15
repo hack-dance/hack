@@ -179,7 +179,10 @@ impl CliRunner {
         // SAFETY: getuid has no preconditions and cannot fail.
         let uid = unsafe { libc::getuid() };
         let found = resolve_on_path(name, path).ok_or(RunError::NotFound).and_then(|p| {
+            // The CLI's own #! interpreter must pass the same rule; its
+            // children use the ordinary PATH, so the env form is refused.
             crate::source::trusted_tool_path(&p, uid, false)
+                .filter(|real| crate::source::trusted_interpreter(real, uid, 4, false))
                 .map(|_| p)
                 .ok_or_else(|| {
                     RunError::Spawn(
@@ -891,6 +894,28 @@ mod tests {
             "no pin remains after a refused discovery"
         );
         assert!(!marker.exists(), "an untrusted CLI never runs");
+        // A trusted CLI script whose interpreter another user can replace,
+        // or that uses env with the ordinary PATH, is refused too.
+        std::fs::set_permissions(&early, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shared = root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::copy("/bin/sh", shared.join("interp")).unwrap();
+        for shebang in [
+            shared.join("interp").display().to_string(),
+            "/usr/bin/env sh".into(),
+        ] {
+            std::fs::remove_file(early.join("hack")).unwrap();
+            crate::test_support::script(
+                &early.join("hack"),
+                format!("#!{shebang}\n: > '{}'\n", marker.display()),
+            );
+            assert!(
+                matches!(runner.rediscover(), Err(RunError::Spawn(_))),
+                "{shebang}"
+            );
+            assert!(!marker.exists());
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

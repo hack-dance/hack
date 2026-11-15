@@ -299,7 +299,10 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
 /// once env is trusted: Doctor children see only the private wrapper PATH.
 /// A file this user cannot read cannot be interpreted, so it is treated as a
 /// binary; any other read failure or unparsable line refuses the tool.
-pub(crate) fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
+/// `wrapper_path`: the program's children see only Doctor's private wrapper
+/// PATH, so `#!/usr/bin/env <name>` resolves to a checked tool. Callers whose
+/// children use an ordinary PATH must pass false, which refuses the env form.
+pub(crate) fn trusted_interpreter(real: &Path, uid: u32, depth: u8, wrapper_path: bool) -> bool {
     use std::io::Read;
     use std::os::unix::ffi::OsStrExt;
     let mut file = match std::fs::File::open(real) {
@@ -336,9 +339,10 @@ pub(crate) fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
     // - exactly `#!/usr/bin/env <name>` (env identified by real path), whose
     //   name resolves only through Doctor's private wrapper PATH.
     match args {
-        [] => trusted_interpreter(&real_interpreter, uid, depth - 1),
+        [] => trusted_interpreter(&real_interpreter, uid, depth - 1, wrapper_path),
         [name] => {
-            real_interpreter == Path::new("/usr/bin/env")
+            wrapper_path
+                && real_interpreter == Path::new("/usr/bin/env")
                 && !name.starts_with(b"-")
                 && name
                     .iter()
@@ -462,7 +466,7 @@ fn trusted_probe_path_with_limits(
                 continue;
             }
             if trusted_tool_path(&entry.path(), uid, false)
-                .is_none_or(|real| !trusted_interpreter(&real, uid, 4))
+                .is_none_or(|real| !trusted_interpreter(&real, uid, 4, true))
             {
                 if let Some(tool) = crate::doctor_tools::NAMES
                     .iter()

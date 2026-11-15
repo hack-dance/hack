@@ -114,3 +114,18 @@ fn docker_selectors_are_kept_when_supported_and_refused_otherwise() {
         assert!(with(&[bad]).is_err(), "{bad:?}");
     }
 }
+#[test]
+fn native_runtime_selectors_are_kept_when_absolute() {
+    let with = |key: &str, value: &str| {
+        ExecutionContext::from_values(&[
+            ("HOME".to_owned(), "/work/user".to_owned()),
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            (key.to_owned(), value.to_owned()),
+        ])
+    };
+    for key in ["HACK_NATIVE_HOME", "HACK_NATIVE_BINARY"] {
+        let context = with(key, "/work/user/native").unwrap();
+        assert_eq!(context.value(key), Some("/work/user/native"));
+        assert!(with(key, "relative/native").is_err(), "{key}");
+    }
+}

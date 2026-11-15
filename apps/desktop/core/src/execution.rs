@@ -16,6 +16,8 @@ const KEYS: &[&str] = &[
     "DOCKER_CONTEXT",
     "DOCKER_HOST",
     "DOCKER_CONFIG",
+    "HACK_NATIVE_HOME",
+    "HACK_NATIVE_BINARY",
 ];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionContext {
@@ -102,6 +104,19 @@ impl ExecutionContext {
                 "XDG_CONFIG_HOME".into(),
                 normalized(Path::new(dir)).to_string_lossy().into_owned(),
             ));
+        }
+        // Native runtime selectors decide which runtime native reads and
+        // actions address; the CLI requires absolute paths.
+        for key in ["HACK_NATIVE_HOME", "HACK_NATIVE_BINARY"] {
+            if let Some(path) = get(key) {
+                if !Path::new(path).is_absolute() {
+                    return Err(format!("{key} must be absolute; hand-off refused"));
+                }
+                entries.push((
+                    key.into(),
+                    normalized(Path::new(path)).to_string_lossy().into_owned(),
+                ));
+            }
         }
         // Docker selectors decide which engine Compose checks and repairs
         // address. Keep validated ones; refuse anything else rather than

@@ -282,7 +282,8 @@ pins that executable for every later read and action; only setup checks
 (startup and **Check again**) search PATH again, so installing into an existing
 PATH directory recovers through **Check again** without restarting. A `hack`
 whose file or any directory above it is writable by group or others, or owned
-by another user, is refused before it runs. A script CLI's `#!` interpreter must
+by another user, is refused before it runs. An explicit `HACK_DESKTOP_CLI` selection gets the same
+check before every use; a missing one is a missing CLI. A script CLI's `#!` interpreter must
 pass the same rule with no arguments (`#!/usr/bin/env` is refused here because
 the CLI uses the ordinary PATH). The app inherits PATH at launch; a changed PATH still needs a
 relaunch. Follow the installation page's platform limits and existing-v4 migration
@@ -297,7 +298,9 @@ daemon-autostart guard, optional XDG_RUNTIME_DIR and an absolute XDG_CONFIG_HOME
 selectors are kept when supported (`DOCKER_CONTEXT` as a plain name, an absolute
 `DOCKER_CONFIG`, and a `unix://` absolute, `tcp://` or `ssh://` `DOCKER_HOST`);
 any other value refuses the checked context rather than silently addressing a
-different Docker engine. An absent HACK_HOME stays
+different Docker engine. Absolute `HACK_NATIVE_HOME` and `HACK_NATIVE_BINARY` are kept
+the same way (relative values refuse), so native reads and actions address one
+runtime. An absent HACK_HOME stays
 absent so a candidate launcher can keep its own private-home default. Context is
 captured before version checking. `runner(checked_program)` pins that absolute
 executable, clears the child environment and applies the context for all reads

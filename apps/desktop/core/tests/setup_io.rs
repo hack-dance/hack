@@ -163,12 +163,39 @@ fn explicit_cli_selection_is_absolute_and_never_falls_back() {
     );
     let t = Tree::new();
     let selected = t.0.join("candidate");
+    // A missing explicit selection is a missing CLI, never a fallback.
+    assert!(matches!(
+        CliRunner::selected(Some(selected.as_os_str())).resolve_program(),
+        Err(hack_desktop_core::runner::RunError::NotFound)
+    ));
+    std::fs::write(&selected, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
         CliRunner::selected(Some(selected.as_os_str()))
             .resolve_program()
             .unwrap(),
         selected
     );
+    // Writable by others, or an interpreter others can replace: refused.
+    std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(matches!(
+        CliRunner::selected(Some(selected.as_os_str())).resolve_program(),
+        Err(hack_desktop_core::runner::RunError::Spawn(_))
+    ));
+    std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shared = t.0.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::copy("/bin/sh", shared.join("interp")).unwrap();
+    std::fs::write(
+        &selected,
+        format!("#!{}\n", shared.join("interp").display()),
+    )
+    .unwrap();
+    assert!(matches!(
+        CliRunner::selected(Some(selected.as_os_str())).resolve_program(),
+        Err(hack_desktop_core::runner::RunError::Spawn(_))
+    ));
 }
 fn service_source(
     t: &Tree,

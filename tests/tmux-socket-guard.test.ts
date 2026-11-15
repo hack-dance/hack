@@ -18,6 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
 import { privateTmux } from "./helpers/private-tmux.ts";
 import {
   assertPrivateTmuxSocket,
@@ -38,10 +39,11 @@ test("exact compiler environment scope preserves only its pure fixture command",
       { mode: 0o700 }
     );
     const run = () =>
-      Bun.spawnSync([binary], {
+      spawnSyncBounded([binary], {
         env: { PATH: "/usr/bin:/bin" },
         stdout: "pipe",
         stderr: "pipe",
+        timeout: 10_000,
       });
     withCompilerFixtureEnvironment({
       binary,
@@ -49,9 +51,14 @@ test("exact compiler environment scope preserves only its pure fixture command",
         const exact = run();
         expect(exact.exitCode).toBe(0);
         expect(JSON.parse(exact.stdout.toString())).toEqual(["PATH"]);
-        const peer = Bun.spawnSync(
+        const peer = spawnSyncBounded(
           [process.execPath, "-e", childEnvironmentScript],
-          { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" }
+          {
+            env: { PATH: "/usr/bin:/bin" },
+            stdout: "pipe",
+            stderr: "pipe",
+            timeout: 10_000,
+          }
         );
         expect(peer.exitCode).toBe(0);
         expect(JSON.parse(peer.stdout.toString())).toEqual({
@@ -118,9 +125,9 @@ test("Bun and Node children receive private sockets with omitted or minimal envs
     process.env.TMUX = "/not-a-real-socket/default,1,0";
     const minimal = { PATH: process.env.PATH };
     for (const env of [undefined, minimal]) {
-      const synchronous = Bun.spawnSync(
+      const synchronous = spawnSyncBounded(
         [process.execPath, "-e", childEnvironmentScript],
-        { env, stdout: "pipe", stderr: "pipe" }
+        { env, stdout: "pipe", stderr: "pipe", timeout: 10_000 }
       );
       expect(synchronous.exitCode, synchronous.stderr.toString()).toBe(0);
       expect(JSON.parse(synchronous.stdout.toString())).toEqual({
@@ -142,18 +149,23 @@ test("Bun and Node children receive private sockets with omitted or minimal envs
         execFileSync(process.execPath, ["-e", childEnvironmentScript], {
           env: minimal,
           encoding: "utf8",
+          timeout: 10_000,
         })
       )
     ).toEqual({ root, tmux: null });
     const nodeChild = spawnSync(
       process.execPath,
       ["-e", childEnvironmentScript],
-      { env: minimal, encoding: "utf8" }
+      { env: minimal, encoding: "utf8", timeout: 10_000 }
     );
     expect(nodeChild.status).toBe(0);
     expect(JSON.parse(nodeChild.stdout)).toEqual({ root, tmux: null });
     expect(
-      execSync('printf "%s" "$TMUX_TMPDIR"', { env: minimal, encoding: "utf8" })
+      execSync('printf "%s" "$TMUX_TMPDIR"', {
+        env: minimal,
+        encoding: "utf8",
+        timeout: 10_000,
+      })
     ).toBe(root);
   } finally {
     mux.close();
@@ -239,26 +251,27 @@ test.skipIf(!Bun.which("tmux"))(
         const pid=Bun.spawnSync(["tmux","display-message","-p","#{pid}"],{stdout:"pipe",stderr:"pipe"});
         process.stdout.write(pid.stdout);
       `;
-        const child = Bun.spawnSync([process.execPath, "-e", script], {
+        const child = spawnSyncBounded([process.execPath, "-e", script], {
           env,
           stdout: "pipe",
           stderr: "pipe",
+          timeout: 10_000,
         });
         expect(child.exitCode, child.stderr.toString()).toBe(0);
         pids.push(Number(child.stdout.toString().trim()));
       }
-      const pid = Bun.spawnSync(["tmux", "display-message", "-p", "#{pid}"], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      const pid = spawnSyncBounded(
+        ["tmux", "display-message", "-p", "#{pid}"],
+        { stdout: "pipe", stderr: "pipe", timeout: 10_000 }
+      );
       expect(pid.exitCode).toBe(0);
       expect(pids).toEqual([
         Number(pid.stdout.toString().trim()),
         Number(pid.stdout.toString().trim()),
       ]);
-      const sessions = Bun.spawnSync(
+      const sessions = spawnSyncBounded(
         ["tmux", "list-sessions", "-F", "#{session_name}"],
-        { stdout: "pipe", stderr: "pipe" }
+        { stdout: "pipe", stderr: "pipe", timeout: 10_000 }
       );
       expect(sessions.exitCode).toBe(0);
       expect(sessions.stdout.toString().trim().split("\n").sort()).toEqual([
@@ -284,6 +297,7 @@ test("both spawn forms refuse an unsafe explicit tmux socket before executing", 
       Bun.spawnSync({
         cmd: [tmux, "list-sessions"],
         env: { TMUX_TMPDIR: "/tmp" },
+        timeout: 10_000,
       })
     ).toThrow("tmux-socket-guard");
   } finally {
@@ -436,14 +450,14 @@ test.skipIf(!Bun.which("tmux"))(
         ["-L", "named-fixture"],
         ["-S", join(root, "explicit.sock")],
       ]) {
-        const made = Bun.spawnSync(
+        const made = spawnSyncBounded(
           ["tmux", ...client, "new-session", "-d", "-s", "extra", "sleep 60"],
-          { stdout: "pipe", stderr: "pipe" }
+          { stdout: "pipe", stderr: "pipe", timeout: 10_000 }
         );
         expect(made.exitCode, made.stderr.toString()).toBe(0);
-        const pid = Bun.spawnSync(
+        const pid = spawnSyncBounded(
           ["tmux", ...client, "display-message", "-p", "#{pid}"],
-          { stdout: "pipe", stderr: "pipe" }
+          { stdout: "pipe", stderr: "pipe", timeout: 10_000 }
         );
         expect(pid.exitCode).toBe(0);
         pids.push(Number(pid.stdout.toString().trim()));

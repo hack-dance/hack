@@ -204,7 +204,7 @@ impl ExecutionContext {
         if !Path::new(program).is_absolute() {
             return Err("A checked absolute CLI executable is required".into());
         }
-        let mut runner = CliRunner::new(program).with_clean_env();
+        let mut runner = CliRunner::verified(program).with_clean_env();
         for (k, v) in &self.entries {
             runner = runner.with_env(k, v);
         }

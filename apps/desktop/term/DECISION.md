@@ -85,62 +85,150 @@ emulator is a contained change.
   upstream Linux prebuilt. Then (c) or a self-hosted prebuilt static lib.
 - Measured GPUI text rendering of large, fast output (for example a
   full-screen TUI at 120 Hz) falling short where Ghostty's renderer does
-  not. Not measured in this spike.
+  not. See "Performance" for the first numbers.
 - (a) gaining X11, the stable ABI, and solved overlay/clipping composition.
+
+## Why not (a), even though it matches Ghostty's pixels
+
+Option (a) would give exactly Ghostty's rendering. It still loses for this
+app, for five reasons:
+
+1. **The stable ABI does not cover it.** The 1.0 stability promise is for
+   libghostty-vt, the emulation core. Option (a) builds Ghostty's whole app
+   runtime and its Metal and OpenGL renderers, which have no such promise.
+2. **It patches Ghostty internals and is alpha.** `gpui-libghostty` carries
+   its own patches to Ghostty's embedded runtime, font and renderer sources,
+   says "expect bugs and instability", and has about two contributors. Any
+   Ghostty update can break it.
+3. **No X11, and more system requirements.** It supports macOS and Linux on
+   Wayland only, and on Linux needs EGL, desktop OpenGL 4.3 and libc++ 22,
+   which Ubuntu 24.04 does not ship by default.
+4. **A native child surface fights the rest of the window.** The Logs tab
+   needs a search bar over the terminal, menus and toasts above it,
+   clipping inside a scrolling panel, and focus moving between it and other
+   controls. With a separate native surface each of these crosses a toolkit
+   boundary; on Wayland a subsurface sits wholly above or below the parent,
+   not between GPUI layers. *This is reasoning from how such surfaces work.
+   It was not tested here.*
+5. **Ghostty's runtime would own the shell.** Its API starts the process
+   itself. The guarantees in "PTY ownership" below (we hold the session,
+   end every member on close, never leave a process or zombie, never block
+   the UI) would move into code we do not control.
+
+### What (b) still has to prove
+
+- **Throughput and smoothness** with full-screen programs (`vim`, `top`)
+  and log floods, in the real window. The numbers under "Performance"
+  below are a first measurement of emulation and CPU-side paint cost on one
+  Linux machine; they are not display latency and not a Mac.
+- **macOS.** Nothing in this crate has been run on a Mac except what hosted
+  CI runs of the default-feature tests show.
+- **Polish we have to build ourselves**: cursor shapes and blink, IME,
+  mouse reporting to programs, plain-URL detection, ligature policy,
+  per-row caching keyed on libghostty's row ids, waking on output instead
+  of the spike's timer.
+
+### Optional: a spike of (a)
+
+If the owner wants evidence rather than reasoning for point 4, a short
+spike of `gpui-libghostty` on Linux (Wayland) and macOS would answer:
+
+1. Does a GPUI overlay (search bar, menu, tooltip) draw above the terminal
+   surface, on both platforms?
+2. Is the surface clipped correctly inside a scrolling or resizing panel,
+   and does it track the layout without lag or tearing during resize?
+3. Does keyboard focus move correctly between the surface and GPUI
+   controls, including IME?
+4. Can it show a byte stream we feed it (logs), or only a process it
+   spawns?
+5. Who owns the child: can we get the session id and enforce our teardown,
+   and what is left running when the surface is dropped or the app quits?
+6. Does it build offline from pinned inputs with the system packages our
+   CI has, and how does it behave on X11 (expected: not at all)?
+
+A "yes" to 1 to 5 on both platforms, plus an X11 answer we can live with,
+would reopen the decision.
 
 ## Build and CI
 
-- libghostty-vt is built by `ghostty-vt-sys`'s build script:
-  - **macOS**: links the official prebuilt static library from the
-    1.0.1 XCFramework, checked against its pinned sha256. No Zig.
-  - **Linux**: builds the official 1.0.1 source tarball with **Zig 0.17.x**,
-    resolving Zig packages from the release's deps tarball
-    (`zig build --system`), so Zig fetches nothing. Both tarballs are
-    checked against pinned sha256s. A cold debug build of the crate,
-    GPUI included, took about 4.5 minutes on the Linux host; the libghostty
-    step was not timed separately.
-  - Inputs come from `GHOSTTY_RELEASE_DIR` when set (fully offline), else
-    from `https://release.files.ghostty.org/libghostty-vt/1.0.1/` with the
-    same checksum check. A tampered tarball fails the build with a sha256
-    mismatch; a missing Zig fails with a clear error (both checked).
-- **Default chosen for this PR (flagged):** the libghostty emulator and the
-  GPUI view are behind the crate feature **`ghostty`, off by default**, so
-  the existing desktop CI (which has no Zig) stays green without a workflow
-  change. The PTY, session teardown and stream code, and their tests, build
-  and run by default on both hosts.
-- **Recommended CI default (flagged, needs a workflow change this PR does
-  not make):** build from the pinned, checksummed source rather than
-  vendoring prebuilt binaries into the repo. Steps for the desktop jobs:
-  1. Linux: download Zig **0.17.1**
-     `https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz`,
-     sha256 `3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a`
-     (from ziglang.org's `index.json`), and export `ZIG`.
-  2. Both: fetch `libghostty-vt-1.0.1.tar.gz`
-     (`333dfce97641ef9b536bb9e08907ad86abaaada50e8f7417b70d9284adef37aa`),
-     `libghostty-vt-1.0.1-deps.tar.gz`
-     (`91a4e10960a52bf5bf4b15aa2a2cddaff8a89d6cd903d3055bda4fd17de3356d`) and,
-     for macOS, `ghostty-vt-1.0.1.xcframework.zip`
-     (`c0f9631277f726154c8f521954d17cdc41aac4626fc0df8cf925a19ee58e829b`)
-     into a directory, verify with `sha256sum -c`/`shasum -a 256 -c`, cache
-     it keyed on those hashes, and export `GHOSTTY_RELEASE_DIR`.
-  3. Run clippy and `bash scripts/test.sh` again with
-     `--features hack-desktop-term/ghostty` (and clippy with
-     `hack-desktop-term/screenshots`).
-  Cargo then builds with no network. Turning the feature on by default (or
-  making the app depend on it) should wait for that change.
-- Locally: `mise install zig@0.17.1` (the repo root pins Zig 0.15.2 for
-  other tooling, so set `ZIG` explicitly), or set `GHOSTTY_RELEASE_DIR` to
-  pre-fetched files for an offline build.
+libghostty-vt is built by the `ghostty-vt-sys` build script:
+
+- **macOS**: links the official prebuilt static library from the 1.0.1
+  XCFramework. No Zig.
+- **Linux**: builds the official 1.0.1 source tarball with **Zig 0.17.x**
+  (we pin **0.17.1**), resolving Zig packages from the release's deps
+  tarball (`zig build --system`), so Zig fetches nothing.
+
+**The build never downloads.** Left alone, that build script fetches its
+release archives when `GHOSTTY_RELEASE_DIR` is unset. Three things stop it:
+
+1. `term/scripts/provision-ghostty.sh` is the one step that uses the
+   network. It fetches the pinned inputs into a cache directory, verifies
+   each against a sha256 committed in the script, and prints the
+   environment to export (`GHOSTTY_RELEASE_DIR`, and `ZIG` on Linux).
+   Re-running it verifies the cache; `--offline` only verifies.
+2. `apps/desktop/.cargo/config.toml` sets the build script's download base
+   (`GHOSTTY_RELEASE_URL`) to a URL with a scheme that cannot be fetched.
+   Without provisioned inputs the dependency fails at once with "unknown
+   scheme", before any network use. `GHOSTTY_RELEASE_DIR` takes precedence
+   when set. This applies to cargo run from `apps/desktop` or below, which
+   is how the scripts, CI and README run it.
+3. `term/build.rs` fails with instructions when the `ghostty` feature is on
+   and the inputs or `ZIG` are missing. (Cargo may run the dependency's
+   script first; either way the build stops and names the script.)
+
+The dependency's build script also verifies each archive's sha256 against
+its own lock file, so a file changed after provisioning fails the build.
+
+| Input | sha256 |
+|---|---|
+| `libghostty-vt-1.0.1.tar.gz` | `333dfce97641ef9b536bb9e08907ad86abaaada50e8f7417b70d9284adef37aa` |
+| `libghostty-vt-1.0.1-deps.tar.gz` | `91a4e10960a52bf5bf4b15aa2a2cddaff8a89d6cd903d3055bda4fd17de3356d` |
+| `ghostty-vt-1.0.1.xcframework.zip` (macOS) | `c0f9631277f726154c8f521954d17cdc41aac4626fc0df8cf925a19ee58e829b` |
+| `zig-x86_64-linux-0.17.1.tar.xz` | `3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a` |
+| `zig-aarch64-linux-0.17.1.tar.xz` | `a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795` |
+
+Sources: `release.files.ghostty.org/libghostty-vt/1.0.1/SHA256SUMS` and
+`ziglang.org/download/index.json`.
+
+```sh
+cd apps/desktop
+eval "$(bash term/scripts/provision-ghostty.sh)"     # network, checksummed
+cargo fetch --locked                                  # network, crates
+bash term/scripts/no-network.sh bash term/scripts/check-ghostty.sh   # Linux: build, clippy, tests with no network
+bash term/scripts/check-ghostty.sh                    # macOS: same checks (cargo --offline; no namespace)
+```
+
+**CI.** `.github/workflows/desktop.yml` has a job, "Desktop terminal
+surface (Linux, libghostty-vt, offline build)": provision (cached, keyed on
+the script), fetch crates, then build, clippy and tests of
+`hack-desktop-term --features ghostty` inside a network namespace whose
+only interface is a down loopback. There is no macOS job for the feature
+yet; the Mac commands are in the PR.
+
+**Defaults chosen (flagged for the owner):**
+
+- The `ghostty` feature stays **off by default**. The app does not depend
+  on it yet, and the two existing desktop jobs are unchanged.
+- Inputs are **provisioned from upstream and checksummed**, not vendored
+  into the repository (about 67 MB with Zig) and not prebuilt by us.
+- `ZIG` must be set explicitly for a Linux build of the feature; a Zig that
+  happens to be on `PATH` is not used as the pinned one. The repo root
+  pins Zig 0.15.2 for other tooling.
+- `apps/desktop/.cargo/config.toml` is a new workspace file outside this
+  crate's directory; it is the only place the download base can be set for
+  every cargo invocation in the workspace.
 
 ## The spike
 
 ```sh
 cd apps/desktop
-export ZIG="$(mise where zig@0.17.1)/bin/zig"   # Linux only
+eval "$(bash term/scripts/provision-ghostty.sh)"
 cargo run -p hack-desktop-term --features ghostty --example term_spike
 cargo run -p hack-desktop-term --features ghostty --example term_spike -- --file some.log
 cargo run -p hack-desktop-term --features ghostty --example term_spike -- --cmd /bin/sh -c 'ls --color=always /'
 cargo run -p hack-desktop-term --features screenshots --example term_spike -- --theme dark --screenshot /tmp/term.png
+cargo run --release -p hack-desktop-term --features screenshots --example term_bench
 bash scripts/test.sh --features hack-desktop-term/ghostty
 ```
 
@@ -159,37 +247,134 @@ Renders (offscreen, 2560×1520):
 ### PTY ownership
 
 `pty::Pty` starts the child with `setsid()` and `TIOCSCTTY` (its own
-session and process group, the PTY as controlling terminal), marks every
-inherited descriptor above stderr close-on-exec in the child, and owns the
-master. Drop sends SIGHUP and SIGCONT to the process group **and to every
-live process in the session** (an interactive shell puts each job in its
-own group), closes the master, then a reaper thread escalates to SIGKILL
-after 300 ms and reaps. Drop never blocks the UI thread;
-`terminate_blocking` is used on app quit. A descendant that calls
-`setsid()` itself is out of reach without cgroups/job objects.
-Session members come from `/proc` on Linux and `proc_listallpids` +
-`getsid` on macOS (type-checked for `aarch64-apple-darwin`, not run).
+session and process group, the PTY as controlling terminal) and marks
+every inherited descriptor above stderr close-on-exec in the child.
 
-`stream::ByteStream` runs a process in its own process group with stdin
-closed and stdout+stderr on one pipe; Drop sends SIGTERM, then SIGKILL.
+**Teardown** (`session::OwnedSession`). The session leader is held
+**unreaped** until the last signal has been sent. While it is unreaped its
+pid cannot be reused, so neither can the group id or session id: `killpg`
+on the leader's group reaches our group or nothing, and a process whose
+session id is the leader is ours. Exit is observed with `waitid(WNOWAIT)`,
+which does not reap. Members in other process groups (an interactive
+shell's jobs) are found by scanning the process table and re-verified at
+the moment of signalling:
+
+- Linux: `pidfd_open`, re-read `/proc/<pid>/stat` and require the session
+  id to still match, then `pidfd_send_signal`. The pidfd names one process
+  for life, so the signal reaches the verified process or nobody.
+- macOS: no pidfd. `getsid` and the process status are re-checked
+  immediately before `kill`. A residual race remains (exit, reap and pid
+  reuse between those two calls); it is documented in `session.rs`.
+
+Drop sends SIGHUP and SIGCONT, then a reaper thread sends SIGKILL after
+300 ms, re-sends it every 50 ms to catch late forks, and reaps the leader
+last. A descendant that calls `setsid()` itself is out of reach without
+cgroups or job objects.
+
+**No blocking on the UI thread.**
+
+- Output: a worker reads the terminal into a queue bounded at 1 MiB of
+  pending bytes. When the consumer stalls the worker stops reading and the
+  child blocks on its own write (backpressure). Closing cancels the worker.
+- Input: `Pty::write` only queues (bound 1 MiB). A second worker delivers
+  with non-blocking writes and handles partial writes. Input that does not
+  fit is refused **whole** (a truncated paste could run half a command)
+  and the view shows a notice.
+- Quit: the view ends the session on GPUI's background executor with a
+  100 ms SIGKILL grace, inside GPUI's 200 ms shutdown window.
+
+**End of output is not child exit.** The terminal core keeps pumping until
+the terminal reports end of file. If the child has exited but something
+still holds the terminal (a background job), it waits 500 ms without
+output, at most 5 s, then closes.
+
+**Thread-spawn failure.** If a worker cannot be started the child is
+killed and reaped before the error returns. If the reaper cannot be
+started, Drop kills the session and reaps on the calling thread. A session
+dropped on any other path is killed and reaped by its own Drop.
+
+`stream::ByteStream` runs a process in its own session (no controlling
+terminal) with stdin closed and stdout+stderr on one pipe, through the same
+bounded queue and the same teardown (SIGTERM first).
 
 ### Tests (hermetic)
 
-`tests/process_cleanup.rs` (default build): a shell with a same-group
-sleeper, a SIGHUP/SIGTERM-ignoring sleeper and a `set -m` job in another
-group; all must be gone after Drop within a 60 s scheduling deadline, after
-proving they were alive and that the job really is in another group.
-Removing the session scan makes it fail (checked). Also: blocking
-terminate, resize reaching the child (`stty size`), session leadership with
-a controlling tty, process-stream group teardown, 10,000-line file stream.
+Children run `/bin/sh` and POSIX tools with an emptied environment, a fixed
+`PATH` and a private temporary `HOME`. Tests signal only pids they
+recorded; nothing matches processes by name. Deadlines are 60 s scheduling
+bounds.
 
-`tests/emulator.rs` (feature `ghostty`): ANSI 16/256/truecolour and
-attributes, LNM for bare-LF logs, bounded scrollback with 30,000 lines,
-follow off keeps the viewport still under 10,000+ lines, search across
-scrollback with newest-first stepping and scroll-to-match, selection and
-plain-text copy, reflow on resize, wide characters, OSC 8 links, query
-replies, key encoding (including application cursor mode), paste hardening,
-theme palette.
+Default build (both CI hosts run these):
+
+- Session teardown: a same-group sleeper, a SIGHUP/SIGTERM-ignoring one and
+  a `set -m` job in another group are all gone after Drop, and the leader
+  is reaped.
+- Identity: a scan that returns a pid from another session and a pid that
+  does not exist; both are skipped, the other session is untouched.
+- Anchor: after the shell exits, its pid still exists and its job is still
+  found by session id; after teardown both are gone.
+- Escalation: SIGKILL is reported only for a session that ignores SIGHUP,
+  and only after the grace period.
+- Writes: 16 MiB offered to a child in raw mode that never reads returns
+  at once, the queue stays within its bound, the excess is reported as
+  dropped, and teardown cancels the parked writer.
+- Queues: a fast producer with a stalled consumer stops at the bound
+  (unit test, and end to end with `yes` through a stream).
+- Final output: a tiny and a 300,000-line output followed by exit arrive
+  complete, with end of file after the last byte.
+- Thread-spawn failure, injected for the reader, the writer and the reaper,
+  for PTY and stream: no running child and no zombie.
+- Also: resize reaching the child, session leadership with a controlling
+  tty, the child's environment, a 10,000-line file stream.
+
+The identity, anchor, queue-bound, final-output-in-grid and
+thread-spawn-failure tests were each checked to fail when the fix they
+cover is removed (mutations run by hand, sources restored). The
+spawn-failure tests only fail when both cleanup layers are removed, because
+either one alone still kills and reaps the child.
+
+Feature `ghostty`: `tests/emulator.rs` (colours and attributes, LNM,
+bounded scrollback at 80 and 200 columns, follow, search, selection and
+copy, reflow, wide characters, OSC 8, query replies, key encoding, paste hardening, theme)
+and `tests/terminal.rs` (a real child's final output is in the grid and
+scrollback; a descendant holding the terminal does not keep it open; a
+stream's last line).
+
+### Performance
+
+A first measurement, from `term_bench` (three runs, release build without
+LTO, Linux, a 10-core desktop Intel CPU with a discrete GPU). It is a
+sanity check on one machine, not a qualification.
+
+| What | Result |
+|---|---|
+| Emulation, coloured log flood (64 MiB) | 217 to 223 MiB/s |
+| Emulation, full-screen 200×60 repaints | 230 to 253 MiB/s, about 10,000 repaints/s |
+| Building a `Frame` for 200×60, every row changed | 0.84 to 0.89 ms mean, 1.4 ms worst |
+| One offscreen GPUI frame of a 208×60 grid, every row changed | 3.0 ms mean, 5.1 ms worst |
+| The same with nothing changed | 2.9 to 3.0 ms mean, 4.7 ms worst |
+
+Reading: emulation is far faster than any program prints. Frame building
+plus paint is about 4 ms of CPU for a full-screen change on this machine,
+inside one 120 Hz frame (8.3 ms).
+
+What this does **not** show: GPU time, presentation latency, key-to-screen
+latency, a laptop, or anything on macOS. "Paint" is the CPU side of a GPUI
+frame (layout, text shaping, scene building, submission) with the offscreen
+renderer.
+
+Known costs still on the table, none optimised yet:
+
+- An unchanged frame costs as much as a changed one. libghostty reports
+  dirty rows and stable row ids; the view rebuilds and repaints every row.
+- `Emulator::frame` allocates a `String` per cell.
+- The view polls for output on a timer (8 ms when busy, 33 ms idle), which
+  adds up to one tick of latency. It should wake on output.
+
+One thing the benchmark caught: libghostty's default 10 MB scrollback byte
+limit applies before the line limit, and on a 200-column grid kept only
+about 5,500 lines. The emulator now sets its own byte ceiling (256 MiB) so
+the 10,000-line bound is the one that applies; a test covers it.
 
 ## Uses
 
@@ -206,7 +391,8 @@ process.
 `TerminalView::new_pty` running `hack exec <service> -- <shell>` on the
 app-owned PTY, in the project root, as the user. Closing the tab or window,
 or quitting the app, ends that PTY's session (and with it the `hack exec`
-client). Which shell to request is a product choice; default to `sh`.
+client). Processes inside the container are ended by `hack exec` and the
+engine, not by this crate. Which shell to request is a product choice; default to `sh`.
 
 **Security rules.**
 

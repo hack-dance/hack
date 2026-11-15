@@ -95,29 +95,32 @@ impl WindowData {
     }
 }
 
-/// Doctor check names that describe routing and DNS (`src/commands/doctor.ts`,
-/// `src/commands/global-mac-dns.ts`, `src/lib/proxy-loopback.ts`). Optional
-/// tool probes such as "caddy (optional)" are not routing state.
-const ROUTING_CHECKS: [&str; 11] = [
-    "caddy hosts",
+/// Machine-scope Doctor checks in the `routing_dns` and `certificates` areas
+/// of Doctor's canonical classification (`MACHINE_AREAS` in
+/// `src/lib/doctor-metadata.ts`), without optional tool probes. A test keeps
+/// this list equal to that table.
+const ROUTING_CHECKS: [&str; 14] = [
     "caddy local ca",
     "coredns forwarding",
+    "global files",
+    "host tls trust",
+    "linux dns route",
     "local ca trust",
-    "native hack.local route",
-    "native https route",
-    "native https owner",
-    "native host dns",
-    "native root trust",
     "native ca repair",
+    "native hack.local repair",
+    "native hack.local route",
+    "native root trust",
+    "proxy network",
     "proxy ports",
+    "superseded caddy roots",
+    "dnsmasq:53",
 ];
-const ROUTING_PREFIXES: [&str; 3] = ["dns:", "resolver:", "dnsmasq.conf:"];
+/// Prefixes Doctor classifies as `routing_dns`.
+const ROUTING_PREFIXES: [&str; 5] = ["network:", "resolver:", "dnsmasq.conf:", "dnsmasq:", "dns:"];
 
 fn is_routing_check(id: &str) -> bool {
     let id = id.trim().to_ascii_lowercase();
-    ROUTING_CHECKS.contains(&id.as_str())
-        || id == "dnsmasq:53"
-        || ROUTING_PREFIXES.iter().any(|p| id.starts_with(p))
+    ROUTING_CHECKS.contains(&id.as_str()) || ROUTING_PREFIXES.iter().any(|p| id.starts_with(p))
 }
 
 /// Routing and DNS state from Doctor's routing checks (worst wins). `None`
@@ -789,6 +792,51 @@ mod tests {
         assert_eq!(
             routing_status([("proxy ports", "error"), ("coredns forwarding", "ok")].into_iter()),
             Some(Status::Failed)
+        );
+    }
+
+    #[test]
+    fn every_routing_area_check_counts() {
+        for id in [
+            "linux dns route",
+            "proxy network",
+            "host tls trust",
+            "network:hack subnet",
+        ] {
+            assert_eq!(
+                routing_status([("dns:hack", "ok"), (id, "error")].into_iter()),
+                Some(Status::Failed),
+                "{id}"
+            );
+        }
+    }
+
+    /// The list must match Doctor's canonical machine classification.
+    #[test]
+    fn routing_list_matches_doctor_metadata() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../src/lib/doctor-metadata.ts"
+        );
+        let src = std::fs::read_to_string(path).expect("read doctor-metadata.ts");
+        let start = src.find("const MACHINE_AREAS").expect("MACHINE_AREAS");
+        let block = &src[start..start + src[start..].find("};").expect("end of table")];
+        let mut doctor: Vec<String> = block
+            .lines()
+            .filter(|l| l.contains("\"routing_dns\"") || l.contains("\"certificates\""))
+            .filter_map(|l| l.trim().split('"').nth(1).map(str::to_owned))
+            .filter(|id| !id.contains("(optional)"))
+            .collect();
+        doctor.sort();
+        let mut ours: Vec<String> = ROUTING_CHECKS
+            .iter()
+            .filter(|id| !id.contains(':'))
+            .map(|s| (*s).to_owned())
+            .collect();
+        ours.sort();
+        assert_eq!(
+            ours, doctor,
+            "update ROUTING_CHECKS from doctor-metadata.ts"
         );
     }
 

@@ -166,10 +166,9 @@ Machine section at the bottom.
   has a dot (a ring while routing status is not read). Doctor has an amber
   count pill when it reports findings, a green dot when clean, a ring when
   unknown. Routing and DNS shows a solid state dot whenever its state is
-  known (from Doctor's routing checks, listed by name in `ui/src/window.rs`:
-  caddy hosts and local CA, CoreDNS forwarding, local CA trust, native
-  hack.local / HTTPS route and owner, host DNS, root trust, CA repair, proxy
-  ports, and `dns:` / `resolver:` checks; optional tool probes excluded; worst wins:
+  known (from Doctor's checks in its `routing_dns` and `certificates`
+  areas, as classified in `src/lib/doctor-metadata.ts`, optional tool probes
+  excluded; a test keeps the list in sync; worst wins:
   green ok, amber warn, red error) and a ring only when nothing has reported.
   The live app needs the core to expose this; the gallery derives it from the
   fixture's Doctor checks.
@@ -281,7 +280,9 @@ both app modes as in the approved mockup, 12.5 / 19 in the app's mono font:
 | `strip_border` | `#3A3A37` | | `yellow` | `#EF9F27` |
 | `tab_fg` | `#B4B2A9` | | `red` | `#F07B7A` |
 | `badge_warn_bg` / `_fg` | `#633806` / `#FAC775` | | `cyan` | `#6CCFD9` |
-| `badge_bg` / `_fg` | `#3A3A37` / `#D3D1C7` | | | | Prompt themes (zsh, oh-my-zsh, starship) come from the real shell in a
+| `badge_bg` / `_fg` | `#3A3A37` / `#D3D1C7` | | | |
+
+Prompt themes (zsh, oh-my-zsh, starship) come from the real shell in a
 real PTY (`TERM`, `COLORTERM=truecolor`); tmux is not involved.
 
 Keyboard (shortcuts that would reach the shell are never taken; on Linux the

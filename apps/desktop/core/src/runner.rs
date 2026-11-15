@@ -72,7 +72,36 @@ pub struct CliRunner {
     missing: bool,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
     term_grace: Duration,
+    /// Remove inherited variables that make interpreters load code.
+    strip_startup: bool,
 }
+
+/// Inherited variables that make a shell or language runtime load and run
+/// code at startup, or preload libraries. Doctor's tool runs remove them.
+pub const INTERPRETER_STARTUP_VARS: &[&str] = &[
+    "BASH_ENV",
+    "ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PS4",
+    "ZDOTDIR",
+    "PERL5OPT",
+    "PERL5LIB",
+    "PERLLIB",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "RUBYOPT",
+    "RUBYLIB",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+];
 
 /// Default grace after SIGTERM. The CLI forwards SIGTERM to the detached
 /// subprocess groups it owns (for example a Compose build) and waits for
@@ -89,6 +118,7 @@ impl CliRunner {
             cwd: None,
             missing: false,
             term_grace: TERM_GRACE,
+            strip_startup: false,
         }
     }
 
@@ -136,6 +166,16 @@ impl CliRunner {
     }
 
     /// Effective selector without reading any configuration or secret value.
+    /// Remove inherited interpreter startup and preload variables
+    /// ([`INTERPRETER_STARTUP_VARS`] and exported Bash functions) from every
+    /// child, so a tool script cannot be made to load code from the
+    /// environment.
+    #[must_use]
+    pub fn without_interpreter_startup(mut self) -> Self {
+        self.strip_startup = true;
+        self
+    }
+
     pub(crate) fn env_value(&self, key: &str) -> Option<std::ffi::OsString> {
         self.env
             .iter()
@@ -160,6 +200,18 @@ impl CliRunner {
         }
         for (k, v) in &self.env {
             cmd.env(k, v);
+        }
+        if self.strip_startup {
+            for key in INTERPRETER_STARTUP_VARS {
+                cmd.env_remove(key);
+            }
+            // Exported Bash functions run as code in every Bash child. Only
+            // names are read here, never values.
+            for (key, _) in std::env::vars_os() {
+                if key.as_encoded_bytes().starts_with(b"BASH_FUNC_") {
+                    cmd.env_remove(key);
+                }
+            }
         }
         if let Some(dir) = &self.cwd {
             cmd.current_dir(dir);
@@ -832,6 +884,25 @@ mod tests {
             .parse()
             .unwrap();
         assert_retired(pid);
+    }
+
+    #[test]
+    fn interpreter_startup_variables_never_reach_doctor_children() {
+        let f = FakeHack::new(r#"printf '%s|%s' "${BASH_ENV-unset}" "${NODE_OPTIONS-unset}""#);
+        let runner = f
+            .runner()
+            .with_env("BASH_ENV", "/example/startup")
+            .with_env("NODE_OPTIONS", "--require=/example/preload");
+        let (seen, _, _) = runner.run_raw(&["x"], None, T).unwrap();
+        assert_eq!(
+            seen, "/example/startup|--require=/example/preload",
+            "positive control"
+        );
+        let (stripped, _, _) = runner
+            .without_interpreter_startup()
+            .run_raw(&["x"], None, T)
+            .unwrap();
+        assert_eq!(stripped, "unset|unset");
     }
 
     #[test]

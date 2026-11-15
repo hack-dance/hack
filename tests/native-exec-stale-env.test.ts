@@ -318,6 +318,48 @@ function preparedInput(
 }
 
 describe("native image exec stale env check", () => {
+  test("managed stale checks do not acquire or evaluate ephemeral env files", async () => {
+    const f = await project();
+    const composeFile = join(f.projectDir, "docker-compose.yml");
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: {
+          web: {
+            image: "fixture",
+            env_file: "missing.env",
+            environment: { FROM_SHELL: "${REQUIRES_SHELL:?}" },
+          },
+        },
+      })
+    );
+    await writeFile(
+      join(f.projectDir, "hack.env.default.yaml"),
+      JSON.stringify({
+        version: 1,
+        environment: "default",
+        secretsprovider: "project_key",
+        values: { web: { [KEY]: SECRET_AFTER } },
+      })
+    );
+    await recordImage({
+      projectDir: f.projectDir,
+      env: { web: { [KEY]: SECRET_BEFORE } },
+    });
+    const warning = await resolveNativeImageExecStaleEnvWarning({
+      scope: {
+        projectRoot: f.root,
+        projectDir: f.projectDir,
+        nativeHome: f.root,
+        branch: null,
+      },
+      service: "web",
+      composeFile,
+      loadRun: async () => imageMapping(),
+    });
+    expect(warning).toContain("hack restart");
+    expectValueFree(warning ?? "");
+  });
   async function resolve(opts: {
     readonly projectDir: string;
     readonly root: string;

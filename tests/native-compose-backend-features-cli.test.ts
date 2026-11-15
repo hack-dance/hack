@@ -16,6 +16,7 @@ import { NATIVE_CONFIGURATION_REFUSAL } from "../src/backends/native-project-sta
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { foreignComposeNetworkNames } from "../src/lib/native-hack-compose-conventions.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -37,9 +38,9 @@ const STACK_FRAME = /^\s+at /m;
 const SPAWN_TIMEOUT_MS = 60_000;
 const IMAGE = `sha256:${"e".repeat(64)}`;
 const ADMITTED_START_REQUESTS = [
+  "project plan",
+  "project plan",
   "runtime check-project-share",
-  "project plan",
-  "project plan",
   "runtime up",
 ];
 const SELECTION =
@@ -78,6 +79,7 @@ async function fixture(compose: Record<string, unknown>) {
   await writeFile(
     binary,
     `#!/bin/sh
+${nativeSetupShellReply()}
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
 printf '%s' '{"code":"runtime_not_running"}' >&2
@@ -155,9 +157,17 @@ async function cli(
   return { code, output: stdout + stderr };
 }
 
+/** The activity log every lifecycle command appends to, refused ones too. */
+const ACTIVITY_ENTRIES = new Set([
+  join("user-home", ".hack"),
+  join("user-home", ".hack", "activity.jsonl"),
+]);
+
 /**
- * Every file under the fixture except the stub's own request log and Bun's
- * transpiler cache, which the spawned source CLI writes under its HOME.
+ * Every file under the fixture except the stub's own request log, Bun's
+ * transpiler cache, which the spawned source CLI writes under its HOME, and
+ * the activity log (HACK-2218), which records the refused action by name
+ * only. Any other write to the Hack home still shows.
  */
 async function tree(root: string): Promise<string[]> {
   const entries = await readdir(root, { recursive: true });
@@ -167,7 +177,8 @@ async function tree(root: string): Promise<string[]> {
       (entry) =>
         !(
           entry.startsWith("stub") ||
-          entry.startsWith(join("user-home", "Library"))
+          entry.startsWith(join("user-home", "Library")) ||
+          ACTIVITY_ENTRIES.has(entry)
         )
     )
     .sort();
@@ -416,8 +427,8 @@ test(
         : refusal;
       expectOneClosedLine(result, `E_NATIVE_PROJECT_UNSUPPORTED: ${expected}`);
       expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
-      // The check passed: native up went on to its own source preflight.
-      expect(await f.calls()).toEqual(["runtime check-project-share"]);
+      // Static input admission refuses before the provider share check.
+      expect(await f.calls()).toEqual([]);
     }
   },
   SPAWN_TIMEOUT_MS
@@ -479,7 +490,7 @@ test(
     expect(result.output).not.toContain(secret);
     // The Compose backend would record the value in the image history too.
     expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
-    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+    expect(await f.calls()).toEqual([]);
   },
   SPAWN_TIMEOUT_MS
 );

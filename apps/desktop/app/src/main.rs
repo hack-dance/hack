@@ -33,7 +33,7 @@ pub(crate) struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--upgrade-fixture <state>] [--setup-fixture missing-cli|partial|ready|native-unknown] [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
+        "usage: hack-desktop [--upgrade-fixture <state>] [--setup-fixture missing-cli|partial|ready|native-unknown|service-unavailable] [--fixtures <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
     );
     std::process::exit(2)
 }
@@ -141,14 +141,14 @@ fn main() {
                 app.watch_window(window, cx);
                 if let Some(f) = fixture {
                     app.select(fixtures::selected(f));
-                    if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
-                        app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
-                    }
                     if fixtures::loads_doctor(f) {
                         app.show_doctor_now();
                         if !fixtures::opens_doctor(f) {
                             app.show_project();
                         }
+                    }
+                    if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
+                        app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
                     }
                 }
                 if let Some(report) = setup_fixture

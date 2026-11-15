@@ -531,6 +531,10 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
+  /** Private same-filesystem staging for snapshot-owned upgrade writes. */
+  readonly stagingDirectory?: string;
+  /** Last snapshot identity check before atomic publication. */
+  readonly beforePublish?: () => Promise<void>;
   /** Test seam; see {@link HackDirGitignoreWriteAccess}. */
   readonly checkWriteAccess?: HackDirGitignoreWriteAccess;
 }): Promise<HackDirGitignoreEnsureResult> {
@@ -555,8 +559,13 @@ export async function ensureHackDirGitignore(opts: {
   }
   await replacePrivateFileAtomic({
     ...options,
+    staging:
+      opts.stagingDirectory === undefined
+        ? undefined
+        : { directory: opts.stagingDirectory },
     text: next,
     mode: current ? current.mode & 0o777 : 0o644,
+    beforeRename: opts.beforePublish,
   });
   return { changed: true, readOnly: false };
 }
@@ -686,7 +695,7 @@ function hackDirGitignoreFileOptions(opts: {
   };
 }
 
-function mergeHackDirGitignore(opts: {
+export function mergeHackDirGitignore(opts: {
   readonly existing: string | null;
 }): string {
   return mergeManagedGitignoreBlock({
@@ -5134,6 +5143,39 @@ async function resolveProjectEnvKey(opts: {
     );
   }
   return null;
+}
+
+/**
+ * Whether the project env key can be read, by the same priority the runtime
+ * uses (checkout-local, shared common-dir, primary checkout, then
+ * `HACK_ENV_SECRET_KEY`).
+ *
+ * - `ok`: a key is present and readable.
+ * - `missing`: no key file and no `HACK_ENV_SECRET_KEY`. An empty or
+ *   whitespace-only file counts as absent, as it does for the runtime.
+ * - `unreadable`: a key file exists but is refused (symlink, not a regular
+ *   file, unreadable or oversized), so the runtime cannot use it.
+ *
+ * Read-only: never creates, repairs or rotates a key. The key text stays in
+ * this function; callers receive only the state. It does not check that the
+ * key decrypts existing values; `hack doctor` reports undecryptable layers.
+ */
+export type ProjectEnvKeyState = "ok" | "missing" | "unreadable";
+
+export async function probeProjectEnvKeyState(opts: {
+  readonly projectRoot: string;
+}): Promise<ProjectEnvKeyState> {
+  try {
+    const keyText = await resolveProjectEnvKey({
+      projectRoot: opts.projectRoot,
+      required: false,
+    });
+    return keyText === null ? "missing" : "ok";
+  } catch {
+    // Every refusal and read failure means the runtime cannot use the key.
+    // Listing names must still succeed, so this never throws.
+    return "unreadable";
+  }
 }
 
 /**

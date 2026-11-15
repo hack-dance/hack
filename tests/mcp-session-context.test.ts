@@ -27,7 +27,7 @@ afterEach(async () => {
   );
 });
 
-async function fixture(marker: string, delayMs = 20) {
+async function fixture(marker: string, delayMs = 20, origin?: string) {
   const root = await mkdtemp(join(tmpdir(), "hack-mcp-context-"));
   roots.push(root);
   const project = join(root, "repo");
@@ -60,7 +60,7 @@ async function fixture(marker: string, delayMs = 20) {
   const command = join(project, "command");
   await writeFile(
     command,
-    `#!${process.execPath}\nawait Bun.write("request-started", String(process.pid));\nawait Bun.sleep(${delayMs});\nconsole.log(JSON.stringify({ marker: process.env.SYNTHETIC_SESSION_MARKER, noInteractive: process.env.HACK_NO_INTERACTIVE ?? null, cwd: process.cwd(), args: Bun.argv.slice(2) }));\n`
+    `#!${process.execPath}\nawait Bun.write("request-started", String(process.pid));\nawait Bun.sleep(${delayMs});\nconsole.log(JSON.stringify({ marker: process.env.SYNTHETIC_SESSION_MARKER, origin: process.env.HACK_ORIGIN ?? null, noInteractive: process.env.HACK_NO_INTERACTIVE ?? null, cwd: process.cwd(), args: Bun.argv.slice(2) }));\n`
   );
   await chmod(command, 0o755);
   const env = {
@@ -74,6 +74,10 @@ async function fixture(marker: string, delayMs = 20) {
     HACK_NO_INTERACTIVE: "0",
     SYNTHETIC_SESSION_MARKER: marker,
   };
+  Reflect.deleteProperty(env, "HACK_ORIGIN");
+  if (origin !== undefined) {
+    Object.assign(env, { HACK_ORIGIN: origin });
+  }
   const server = createMcpServer({ cwd: project, env });
   // Mutating the caller's object after creation must not affect the session.
   env.SYNTHETIC_SESSION_MARKER = "changed-after-capture";
@@ -123,6 +127,25 @@ test("MCP sessions preserve independent cwd, environment, registry selection and
   expect(process.cwd()).toBe(cwdBefore);
   expect(process.env.SYNTHETIC_SESSION_MARKER).toBe(markerBefore);
   expect(process.listenerCount("SIGTERM")).toBe(signalListeners);
+});
+
+test.each([
+  { origin: undefined, expected: "agent" },
+  { origin: "app", expected: "app" },
+])("MCP child origin is $expected when session origin is $origin", async ({
+  origin,
+  expected,
+}) => {
+  const { client } = await fixture("origin-fixture", 0, origin);
+  const result = await client.callTool({
+    name: "hack.project.status",
+    arguments: { projectName: "shared-name" },
+  });
+  expect(result.isError).toBeUndefined();
+  expect(result.structuredContent).toMatchObject({
+    ok: true,
+    data: { origin: expected, noInteractive: "1" },
+  });
 });
 
 test("MCP path authorization uses only that session's registry", async () => {

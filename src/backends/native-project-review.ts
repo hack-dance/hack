@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { nativeEnvironmentUnsetsReviewed } from "./native-environment-unsets.ts";
 import {
   nativeProjectBranchArgs,
   prepareNativeProjectBranch,
@@ -337,6 +338,16 @@ export async function withNativeProjectReview<T>(opts: {
     ) {
       throw new ClosedCliError(
         "Native project returned an invalid reviewed identity."
+      );
+    }
+    if (
+      !nativeEnvironmentUnsetsReviewed({
+        compose: JSON.parse(opts.input.normalizedComposeJson),
+        plan: report.plan,
+      })
+    ) {
+      throw new ClosedCliError(
+        "The selected native runtime cannot confirm explicit environment removals. Update it and retry; no VM was started."
       );
     }
     return await opts.run({

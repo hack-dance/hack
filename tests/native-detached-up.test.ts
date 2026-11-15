@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
+import { NATIVE_ROOT_DOTENV_IGNORED_NOTICE } from "../src/lib/native-environment-notices.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const fixture = join(import.meta.dir, "fixtures", "native-detached-owner.ts");
@@ -42,6 +43,7 @@ for (const mode of [
   "ready",
   "shell-names",
   "shell-names-empty",
+  "shell-names-root-dotenv",
   "unsafe-failure",
   "fail",
   "provider-pin",
@@ -82,13 +84,16 @@ for (const mode of [
           ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
           : mode === "shell-names-empty"
             ? "Forwarding shell variables: (none).\n"
-            : ""
+            : mode === "shell-names-root-dotenv"
+              ? `Forwarding shell variables: (none).\n${NATIVE_ROOT_DOTENV_IGNORED_NOTICE}\n`
+              : ""
       );
       if (
         [
           "ready",
           "shell-names",
           "shell-names-empty",
+          "shell-names-root-dotenv",
           "unsafe-failure",
         ].includes(mode)
       ) {
@@ -144,6 +149,7 @@ for (const mode of [
           [
             "ready",
             "shell-names",
+            "shell-names-root-dotenv",
             "shell-names-empty",
             "unsafe-failure",
           ].includes(mode)

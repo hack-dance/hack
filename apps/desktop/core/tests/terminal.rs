@@ -140,7 +140,18 @@ fn enter_required_quoted_argv_and_cleanup_after_command() {
     stdout.read_line(&mut line).unwrap();
     assert!(line.contains("Press Enter"));
     assert!(!marker.exists());
-    child.stdin.take().unwrap().write_all(b"\n").unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"\n").unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    assert!(line.contains("Press Enter to close"));
+    assert!(line.contains("exit 7"));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "output remains visible until close confirmation"
+    );
+    assert!(path.exists());
+    input.write_all(b"\n").unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(7));
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap(),
@@ -215,4 +226,36 @@ fn authored_sequence_waits_for_enter_runs_both_and_stops_on_failure() {
         );
         assert!(!script.path().exists());
     }
+}
+
+#[test]
+fn system_launcher_drains_launcher_output_and_passes_only_listed_environment() {
+    // A stand-in launcher (no terminal opens): 256 KB on each stream would
+    // fill an undrained pipe, so it can only finish if output is discarded.
+    // HACK_HOME is set for the test process but is not on the launch list.
+    assert!(
+        std::env::var_os("HACK_HOME").is_some(),
+        "precondition: run through scripts/test.sh"
+    );
+    let tree = Tree::new();
+    let marker = tree.0.join("done");
+    let script = format!(
+        "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2; printf '%s' \"${{HACK_HOME-unset}}\" > '{}'",
+        marker.display()
+    );
+    hack_desktop_core::terminal::SystemLauncher
+        .launch(
+            Path::new("/bin/sh"),
+            &[OsString::from("-c"), OsString::from(script)],
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::fs::read_to_string(&marker).map_or(true, |s| s.is_empty()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "launcher blocked on its output"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "unset");
 }

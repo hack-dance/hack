@@ -291,6 +291,9 @@ pub struct ServicePlan {
     pub dependencies: BTreeMap<String, DependencyPlan>,
     pub mounts: Vec<MountPlan>,
     pub environment: BTreeMap<String, RedactedText>,
+    /// Explicit names removed from image defaults, separate from private bindings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_unsets: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_hosts: Vec<ExtraHostPlan>,
     pub environment_files: Vec<String>,

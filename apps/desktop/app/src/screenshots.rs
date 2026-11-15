@@ -94,6 +94,10 @@ pub fn run(dir: &Path) {
             };
             img.save(dir.join(format!("setup-{name}-{suffix}.png")))
                 .expect("save setup");
+            if name == "partial" {
+                img.save(dir.join(format!("setup-{suffix}.png")))
+                    .expect("save documented setup alias");
+            }
             cx.update_window(handle, |_, w, _| w.remove_window()).ok();
         }
         for f in Fixture::ALL {
@@ -109,14 +113,14 @@ pub fn run(dir: &Path) {
                         cx.new(|cx| {
                             let mut app = HackApp::new(crate::source_for(Some(f)), false, cx);
                             app.select(fixtures::selected(f));
-                            if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
-                                app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
-                            }
                             if fixtures::loads_doctor(f) {
                                 app.show_doctor_now();
                                 if !fixtures::opens_doctor(f) {
                                     app.show_project();
                                 }
+                            }
+                            if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
+                                app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
                             }
                             if let Some(a) = fixtures::local(f).in_flight {
                                 app.simulate_in_flight(a);

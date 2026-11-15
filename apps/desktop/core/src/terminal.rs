@@ -40,21 +40,73 @@ pub trait Launcher {
 pub struct SystemLauncher;
 impl Launcher for SystemLauncher {
     fn launch(&self, program: &Path, args: &[OsString]) -> Result<(), String> {
-        let mut child = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        // The shared spawn boundary closes every unlisted descriptor on macOS,
+        // so the launcher cannot inherit a pipe or file another thread has
+        // not yet marked close-on-exec. `launch_command` cleared the
+        // environment, so the boundary must not rebuild it from the parent.
+        let mut child = crate::process::spawn(
+            &mut launch_command(program, args, |key| std::env::var_os(key)),
+            false,
+        )
+        .map_err(|e| e.to_string())?;
         // Terminal launchers can wait for the new terminal to close. Reap our
         // child without blocking GPUI, and never signal the terminal itself.
+        // On macOS the boundary always pipes stdout/stderr: discard them so a
+        // talkative launcher can never block on a full pipe.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
         std::thread::spawn(move || {
+            let errors = std::thread::spawn(move || discard(stderr));
+            discard(stdout);
+            let _ = errors.join();
             let _ = child.wait();
         });
         Ok(())
     }
 }
+fn discard(output: Option<impl std::io::Read>) {
+    if let Some(mut output) = output {
+        let _ = std::io::copy(&mut output, &mut std::io::sink());
+    }
+}
+/// UI routing metadata only, separate from the checked CLI context embedded in
+/// the script. Never pass the app's credential/wrapper environment to a terminal.
+const LAUNCH_ENV: &[&str] = &[
+    "HOME",
+    "PATH",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "XDG_CURRENT_DESKTOP",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+fn launch_command(
+    program: &Path,
+    args: &[OsString],
+    environment: impl Fn(&str) -> Option<OsString>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command
+        .env_clear()
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for key in LAUNCH_ENV {
+        if let Some(value) = environment(key) {
+            command.env(
+                key,
+                if *key == "PATH" {
+                    crate::runner::sanitize_path(&value)
+                } else {
+                    value
+                },
+            );
+        }
+    }
+    command
+}
+
 /// A private, one-use script. Drop cleans failed/unlaunched handoffs. After a
 /// successful launch the script owns cleanup via EXIT/HUP/INT/TERM traps. If the
 /// terminal never executes it, the private OS temp directory can remain.
@@ -93,12 +145,12 @@ impl Script {
             handed_off: false,
         };
         let cleanup = format!(
-            "rm -f -- {}; rmdir -- {}",
+            "/bin/rm -f -- {}; /bin/rmdir -- {}",
             quote(&script.path.to_string_lossy())?,
             quote(&dir.to_string_lossy())?
         );
         let text = format!(
-            "#!/bin/sh\ntrap {} EXIT\ntrap 'exit 130' HUP INT TERM\nprintf '%s\\n' {} 'Press Enter to run this command, or close this window to cancel.'\nIFS= read -r answer || exit 1\n{command}\nresult=$?\nexit \"$result\"\n",
+            "#!/bin/sh\ntrap {} EXIT\ntrap 'exit 130' HUP INT TERM\nprintf '%s\\n' {} 'Press Enter to run this command, or close this window to cancel.'\nIFS= read -r answer || exit 1\n{command}\nresult=$?\nprintf 'Command finished (exit %s). Press Enter to close.\\n' \"$result\"\nIFS= read -r answer || :\nexit \"$result\"\n",
             quote(&cleanup)?,
             quote(&command)?
         );
@@ -160,4 +212,41 @@ impl Drop for Script {
 /// Discover only the Linux adapter; never fall back to typing into a pane.
 pub fn linux_adapter() -> Option<PathBuf> {
     crate::runner::resolve_on_path("xdg-terminal-exec", std::env::var_os("PATH").as_deref())
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    #[test]
+    fn launcher_reads_only_authored_ui_metadata_without_forwarding_app_environment() {
+        let queried = std::cell::RefCell::new(Vec::new());
+        let command = launch_command(
+            Path::new("/fake/terminal"),
+            &["/private/setup.command".into()],
+            |key| {
+                queried.borrow_mut().push(key.to_owned());
+                Some("fixture".into())
+            },
+        );
+        assert_eq!(queried.borrow().len(), LAUNCH_ENV.len());
+        assert!(
+            queried
+                .borrow()
+                .iter()
+                .all(|key| LAUNCH_ENV.contains(&key.as_str()))
+        );
+        assert!(command.get_envs().all(|(key, _)| {
+            LAUNCH_ENV
+                .iter()
+                .any(|allowed| key == std::ffi::OsStr::new(allowed))
+        }));
+        assert_eq!(
+            command.get_program(),
+            std::ffi::OsStr::new("/fake/terminal")
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("/private/setup.command")]
+        );
+    }
 }

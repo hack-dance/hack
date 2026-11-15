@@ -1315,6 +1315,7 @@ describe("hosted test CI fan-in", () => {
       "test-shard",
       "test-focus",
       "linux-process-lifetime",
+      "config-compiler",
     ]);
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
@@ -1323,6 +1324,12 @@ describe("hosted test CI fan-in", () => {
     expect(gate?.env?.SHARD_RESULT).toBe("${{ needs.test-shard.result }}");
     expect(gate?.env?.FOCUS_RESULT).toBe("${{ needs.test-focus.result }}");
     expect(gate?.env?.CHANGES_RESULT).toBe("${{ needs.changes.result }}");
+    expect(gate?.env?.COMPILER_RESULT).toBe(
+      "${{ needs.config-compiler.result }}"
+    );
+    expect(gate?.env?.COMPILER_ENABLED).toBe(
+      "${{ needs.changes.outputs.compiler_hosts != '[]' }}"
+    );
     expect(gate?.env?.LIFETIME_RESULT).toBe(
       "${{ needs.linux-process-lifetime.result }}"
     );
@@ -1367,6 +1374,8 @@ describe("hosted test CI fan-in", () => {
           TEST_FOCUS: focus,
           SHARD_RESULT: shards,
           FOCUS_RESULT: focused,
+          COMPILER_ENABLED: "false",
+          COMPILER_RESULT: "skipped",
           LIFETIME_ENABLED: "false",
           LIFETIME_RESULT: "skipped",
         },
@@ -1398,6 +1407,8 @@ describe("hosted test CI fan-in", () => {
           SUITE: "true",
           SHARD_RESULT: "success",
           FOCUS_RESULT: "success",
+          COMPILER_ENABLED: "false",
+          COMPILER_RESULT: "skipped",
           LIFETIME_ENABLED: enabled,
           LIFETIME_RESULT: result,
         },
@@ -1405,6 +1416,38 @@ describe("hosted test CI fan-in", () => {
         timeout: 5000,
       });
       expect(run.exitCode, `lifetime enabled=${enabled} result=${result}`).toBe(
+        exitCode
+      );
+    }
+    for (const [enabled, result, exitCode] of [
+      ["true", "success", 0],
+      ["true", "failure", 1],
+      ["true", "cancelled", 1],
+      ["true", "skipped", 1],
+      ["true", "", 1],
+      ["false", "skipped", 0],
+      ["false", "failure", 1],
+      ["false", "success", 1],
+      ["", "skipped", 1],
+    ] as const) {
+      const run = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
+        env: {
+          ...process.env,
+          PR_DRAFT: "false",
+          CHANGES_RESULT: "success",
+          SCOPE: "fixture",
+          SUITE: "true",
+          SHARD_RESULT: "success",
+          FOCUS_RESULT: "success",
+          LIFETIME_ENABLED: "false",
+          LIFETIME_RESULT: "skipped",
+          COMPILER_ENABLED: enabled,
+          COMPILER_RESULT: result,
+        },
+        stdout: "ignore",
+        timeout: 5000,
+      });
+      expect(run.exitCode, `compiler enabled=${enabled} result=${result}`).toBe(
         exitCode
       );
     }

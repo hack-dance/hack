@@ -128,6 +128,15 @@ function awsMount(value: unknown, home: string): boolean {
   return true;
 }
 
+/** Exact authored mount forms consumed privately by AWS adaptation. No file is read. */
+export function nativeAwsCredentialMount(value: unknown): boolean {
+  try {
+    return awsMount(value, "");
+  } catch {
+    return false;
+  }
+}
+
 function serviceEnvironment(value: unknown): Record<string, unknown> {
   if (value === undefined) {
     return {};

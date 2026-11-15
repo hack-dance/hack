@@ -65,6 +65,12 @@ and [Worktrees and watchers](../guides/development-runtime-safety.md).
 ## Use Hack from an agent or script
 
 Agents use the same CLI. `--json` returns structured results with stable error codes
-and `--no-interactive` prevents a command from waiting for input. No plugin, server
+and `--no-interactive` prevents a command from waiting for input. On the Compose
+backend, `hack up|down|restart --json --progress` streams ndjson progress lines
+before the final envelope. No plugin, server
 or account is required. [Agent handoff](agent-handoff.md) and
 [Agent integrations](../integrations.md) cover the optional extras.
+
+## Interactive workspaces
+
+Use `hack session` for a persistent interactive workspace. v5 requires tmux; `sessions.mux=auto` detects tmux only. If upgrading from zellij, install tmux and unset `sessions.mux` or set it to `tmux`. See the [upgrade checklist](guides/upgrade-from-v4.md#breaking-change-zellij-workspaces-removed).

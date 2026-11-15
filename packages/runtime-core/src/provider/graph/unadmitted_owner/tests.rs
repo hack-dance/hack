@@ -1,4 +1,5 @@
 use super::*;
+use crate::owned_tmp_root::OwnedTmpRoot;
 use crate::provider::{DependencySocketIntent, identity, state::Owner};
 use retained_startup::tests::Fixture;
 use std::{
@@ -19,10 +20,12 @@ fn receipt_sha(fixture: &Fixture) -> String {
     )
 }
 fn publication(fixture: &Fixture) -> PathBuf {
+    // owner-root: path-only
     foreground::transport::root(&fixture.candidate, &fixture.run).unwrap()
 }
 fn relay_control(fixture: &Fixture) -> PathBuf {
     let owner = Owner::load(&fixture.candidate).unwrap();
+    // owner-root: path-only
     startup::control_root(
         &fixture.candidate.state_root,
         &owner.token,
@@ -37,17 +40,13 @@ fn reservation(fixture: &Fixture) -> PathBuf {
         .state_root
         .join(format!("run/dependency-assignments/{}.json", fixture.run))
 }
-/// Paths under the shared temporary directory that this fixture's run created.
-struct Scratch(Vec<PathBuf>);
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        for path in &self.0 {
-            let _ = fs::remove_dir_all(path);
-        }
-    }
-}
-fn scratch(fixture: &Fixture) -> Scratch {
-    Scratch(vec![publication(fixture), relay_control(fixture)])
+/// Owner roots under the shared temporary directory that this fixture's run created,
+/// removed when dropped.
+fn scratch(fixture: &Fixture) -> [OwnedTmpRoot; 2] {
+    [
+        OwnedTmpRoot::new(publication(fixture)),
+        OwnedTmpRoot::new(relay_control(fixture)),
+    ]
 }
 fn with_dependency_capacity(fixture: &Fixture) {
     let mut owner = Owner::load(&fixture.candidate).unwrap();

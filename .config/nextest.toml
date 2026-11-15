@@ -1,0 +1,25 @@
+# Both CI hosts use a separate process for every Rust test. Keep ignored fixtures
+# ignored: their parent tests invoke them explicitly with the stock test binary.
+[profile.default]
+retries = 0
+
+[profile.ci]
+retries = 0
+fail-fast = true
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# The old crate mutex cannot serialize separate processes. Preserve its bound on
+# whole-host lsof scans, without serializing unrelated runtime tests.
+[test-groups.host-disk-probes]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(provider::lifecycle::admission_pool::tests::)'
+test-group = 'host-disk-probes'
+
+[[profile.ci.overrides]]
+filter = 'test(provider::lifecycle::admission_pool::tests::)'
+test-group = 'host-disk-probes'

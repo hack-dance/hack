@@ -1,0 +1,12 @@
+---
+title: NSS observe-only read admission
+---
+flowchart TD
+  discover[Discover selected profiles] --> guard{Read safety proven?}
+  guard -->|No| unknown[Unknown without query]
+  guard -->|Yes| query[Query SQL database]
+  query --> recheck{Pinned identities unchanged?}
+  recheck -->|No| discard[Unknown; discard result]
+  recheck -->|Yes| result[Report database trust]
+  class unknown,discard wait
+  class result ok

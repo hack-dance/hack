@@ -4,7 +4,13 @@ use crate::{
     models::{DoctorCheck, DoctorReport, ProjectsPayload},
     setup::{self, Platform, Report},
 };
-pub const NAMES: [&str; 4] = ["missing-cli", "partial", "ready", "native-unknown"];
+pub const NAMES: [&str; 5] = [
+    "missing-cli",
+    "partial",
+    "ready",
+    "native-unknown",
+    "service-unavailable",
+];
 pub fn load(name: &str) -> Option<Report> {
     if !NAMES.contains(&name) {
         return None;
@@ -54,9 +60,8 @@ pub fn load(name: &str) -> Option<Report> {
         ],
         ..Default::default()
     }));
-    let daemon =
-        serde_json::json!({"running":name!="partial","service":{"installed":name!="partial"}});
-    Some(setup::derive(
+    let daemon = serde_json::json!({"running":name!="partial","socket_path":"/work/user/.hack/daemon/hackd.sock","service":{"available":name!="service-unavailable","installed":name!="partial" && name!="service-unavailable"}});
+    let mut report = setup::derive(
         if name == "missing-cli" {
             Err("missing")
         } else {
@@ -67,5 +72,10 @@ pub fn load(name: &str) -> Option<Report> {
         Some(&daemon),
         &[machine],
         Platform::Linux,
-    ))
+    );
+    report.context =
+        crate::execution::ExecutionContext::from_values(&[("HOME".into(), "/work/user".into())])
+            .ok();
+    setup::qualify_login(&mut report, Some(&daemon));
+    Some(report)
 }

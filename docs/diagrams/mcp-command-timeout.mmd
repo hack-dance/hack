@@ -1,0 +1,9 @@
+flowchart TD
+    S[Start command group] --> R{Observe owned work}
+    R -->|command and output finish| N[Return command result]
+    R -->|server deadline| T[Stop command group]
+    R -->|client cancellation| C[Cancel command group]
+    R -->|output budget| L[Return output-limit error]
+    T --> E[Return timeout error]
+    E --> M[timedOut true]
+    C --> O[No timeout marker]

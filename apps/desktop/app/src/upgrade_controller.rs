@@ -11,10 +11,8 @@ impl HackApp {
         cx.notify();
     }
     fn upgrade_gated(&self) -> bool {
-        self.upgrade.busy
-            || self.setup.action_busy
+        self.action_busy()
             || self.setup.loading
-            || self.recovery_busy
             || !self.action_started.is_empty()
             || (self.live && !self.setup.report.cli_ready())
     }

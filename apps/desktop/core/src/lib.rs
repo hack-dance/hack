@@ -12,8 +12,12 @@
 
 pub mod daemon;
 pub mod doctor;
+mod doctor_acl;
+mod doctor_plugins;
+mod doctor_tools;
 pub mod fixtures;
 pub mod models;
+mod process;
 pub mod runner;
 pub mod setup;
 pub mod setup_fixtures;
@@ -25,3 +29,9 @@ pub mod upgrade;
 pub mod upgrade_fixtures;
 pub mod upgrade_io;
 pub mod viewmodel;
+
+pub mod execution;
+
+mod setup_login;
+#[cfg(test)]
+mod test_support;

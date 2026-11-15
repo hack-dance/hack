@@ -208,7 +208,14 @@ impl HackApp {
     pub fn watch_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.window_visible = window.is_visible();
         self._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() && !this.setup.loading && !this.setup.action_busy {
+            if window.is_window_active()
+                && hack_desktop_core::setup::should_recheck_on_focus(
+                    this.pane == Pane::Setup,
+                    this.setup.pending_fix,
+                    this.setup.loading,
+                    this.machine_action_busy(),
+                )
+            {
                 this.load_setup(cx);
             }
         }));
@@ -346,7 +353,7 @@ impl HackApp {
     }
 
     fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
-        if self.recovery_busy || self.setup.action_busy || self.upgrade.busy {
+        if self.machine_action_busy() {
             return;
         }
         let Some(row) = self.model.selected_row() else {
@@ -416,8 +423,12 @@ impl HackApp {
         snap: Result<Snapshot, SourceError>,
         cx: &mut Context<Self>,
     ) -> bool {
+        let previous = self.selected_root();
         if !self.model.finish_refresh(token, snap) {
             return false;
+        }
+        if previous != self.selected_root() {
+            self.tail = Ok(Vec::new());
         }
         let current = self.doctor_target_keys();
         self.doctor.targets_seen(current.as_deref());
@@ -426,8 +437,16 @@ impl HackApp {
         true
     }
 
+    /// Shared by setup, recovery and the daemon/upgrade machine controls.
+    pub(crate) fn action_busy(&self) -> bool {
+        self.machine_action_busy() || self.model.has_in_flight()
+    }
+    pub(crate) fn machine_action_busy(&self) -> bool {
+        self.recovery_busy || self.setup.action_busy || self.upgrade.busy
+    }
+
     fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
-        if self.recovery_busy || self.setup.action_busy || self.upgrade.busy || !self.live {
+        if self.action_busy() || !self.live {
             return;
         }
         self.recovery_busy = true;
@@ -702,9 +721,7 @@ impl HackApp {
                         Button::new("recover-hackd")
                             .label(action.label())
                             .small()
-                            .disabled(
-                                self.recovery_busy || self.setup.action_busy || self.upgrade.busy,
-                            )
+                            .disabled(self.action_busy())
                             .loading(self.recovery_busy)
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
@@ -727,9 +744,10 @@ impl HackApp {
             if !d.actions.contains(&a) {
                 continue;
             }
-            let mut b = Button::new(a.label()).label(a.label()).small().disabled(
-                d.busy || self.recovery_busy || self.setup.action_busy || self.upgrade.busy,
-            );
+            let mut b = Button::new(a.label())
+                .label(a.label())
+                .small()
+                .disabled(d.busy || self.machine_action_busy());
             b = match a {
                 Action::Start => b.primary(),
                 Action::Stop => b.outline(),
@@ -1111,7 +1129,7 @@ impl Render for HackApp {
         let (bg, fg, font) = (t.background, t.foreground, t.font_family.clone());
         let main: AnyElement = match &list.phase {
             _ if self.pane == Pane::Setup => {
-                crate::setup_view::render(&self.setup, self.recovery_busy || self.upgrade.busy, cx)
+                crate::setup_view::render(&self.setup, self.action_busy(), cx)
             }
             _ if self.pane == Pane::Upgrade => crate::upgrade_view::render(
                 &self.upgrade,

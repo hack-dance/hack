@@ -62,6 +62,7 @@ export async function resolveNativeImageExecStaleEnvWarning(opts: {
       projectDir: opts.scope.projectDir,
       composeFile: opts.composeFile,
       envName: mapping.effectiveEnvName,
+      managedOnly: true,
     });
     if (input.effectiveEnvName !== mapping.effectiveEnvName) {
       return null;

@@ -218,8 +218,10 @@ export type ReplaceablePrivateFileOptions = {
    * the target (see `private-staging.ts`), so a copy left by a crash is
    * never visible to git; `"sibling"` uses a `.<name>.<uuid>.tmp` sibling,
    * for files outside any checkout whose directory must hold nothing else.
+   * A directory option keeps ignored staging under an existing private recovery
+   * directory instead. It must share the target filesystem for atomic rename.
    */
-  readonly staging?: "ignored" | "sibling";
+  readonly staging?: "ignored" | "sibling" | { readonly directory: string };
   /**
    * Directories (normally the file's parent inside the project) that must be
    * real directories rather than symlinks, with a stable identity across the
@@ -284,7 +286,10 @@ async function stagingFor(opts: ReplaceablePrivateFileOptions): Promise<{
   }
   try {
     return await preparePrivateStaging({
-      target: opts.path,
+      target:
+        typeof opts.staging === "object"
+          ? join(opts.staging.directory, basename(opts.path))
+          : opts.path,
       refusal: opts.refusal,
     });
   } catch (error: unknown) {

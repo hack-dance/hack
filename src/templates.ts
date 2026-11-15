@@ -619,7 +619,7 @@ export function renderProjectConfigSchemaJson(): string {
         type: "object",
         additionalProperties: true,
         properties: {
-          mux: { type: "string", enum: ["auto", "tmux", "zellij", "none"] },
+          mux: { type: "string", enum: ["auto", "tmux", "none"] },
         },
       },
       startup: {

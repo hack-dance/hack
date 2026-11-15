@@ -578,7 +578,13 @@ impl Session<'_, '_> {
             let resource = &self.receipt.resources[&format!("container:{name}")];
             let value = inspect_resource(&self.engine, &self.receipt, resource)?
                 .ok_or_else(|| error("graph_probe_identity", "Restart container disappeared."))?;
-            self.verify_config(name, &value)?;
+            Self::verify_config(
+                &self.receipt,
+                name,
+                &self.configs[name],
+                &self.expected_environment[name],
+                &value,
+            )?;
             if !matches!(observation(&value)?, Observation::Exited { .. }) {
                 return Err(error(
                     "graph_probe_running",

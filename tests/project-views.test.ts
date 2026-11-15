@@ -640,7 +640,7 @@ test("buildProjectViews matches tmux sessions when path is a symlink to repo roo
   ]);
 });
 
-test("buildProjectViews includes zellij sessions when session name matches project name", async () => {
+test("buildProjectViews includes tmux sessions when session name matches project name", async () => {
   const alpha = await createProject({ name: "alpha", services: ["api"] });
 
   const views = await buildProjectViews({
@@ -652,7 +652,7 @@ test("buildProjectViews includes zellij sessions when session name matches proje
     muxSessions: [
       {
         name: "alpha--research",
-        backend: "zellij",
+        backend: "tmux",
         attached: false,
         path: null,
         windows: null,
@@ -666,7 +666,7 @@ test("buildProjectViews includes zellij sessions when session name matches proje
     "alpha--research",
   ]);
   expect(alphaView?.sessions.map((session) => session.backend)).toEqual([
-    "zellij",
+    "tmux",
   ]);
 });
 
@@ -748,6 +748,7 @@ test("project views accept an unambiguous legacy alias without rewriting runtime
     runtimeOk: true,
     filter: "my-app",
     includeUnregistered: true,
+    muxSessions: [],
   });
   expect(views).toHaveLength(1);
   expect(views[0]?.name).toBe("my_app");
@@ -760,6 +761,7 @@ test("project views accept an unambiguous legacy alias without rewriting runtime
       runtimeOk: true,
       filter: "my_app",
       includeUnregistered: true,
+      muxSessions: [],
     })
   ).rejects.toThrow("Ambiguous project name");
 });

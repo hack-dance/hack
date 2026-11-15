@@ -185,6 +185,27 @@ pub fn resolve(
     value: &str,
     allow_credentials: bool,
 ) -> Result<PathBuf, CandidateError> {
+    resolve_inner(project, base, value, allow_credentials, false)
+}
+
+/// Resolve ownership of an optional env-file path, including a currently absent
+/// tail. This grants no read or mount authority: callers must retain the path as
+/// a source exclusion even if the file or its parent appears after review.
+pub(super) fn resolve_optional_env_file(
+    project: &Path,
+    base: &Path,
+    value: &str,
+) -> Result<PathBuf, CandidateError> {
+    resolve_inner(project, base, value, true, true)
+}
+
+fn resolve_inner(
+    project: &Path,
+    base: &Path,
+    value: &str,
+    allow_credentials: bool,
+    optional: bool,
+) -> Result<PathBuf, CandidateError> {
     if value.is_empty() || value.contains('$') || value.contains('\0') || value.contains('~') {
         return Err(problem(
             "unresolved_source_path",
@@ -224,12 +245,18 @@ pub fn resolve(
     let mut current = project.to_owned();
     for part in relative.components() {
         current.push(part);
-        let metadata = fs::symlink_metadata(&current).map_err(|_| {
-            problem(
-                "missing_source",
-                "Declared source does not exist or cannot be inspected.",
-            )
-        })?;
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(resolved);
+            }
+            Err(_) => {
+                return Err(problem(
+                    "missing_source",
+                    "Declared source does not exist or cannot be inspected.",
+                ));
+            }
+        };
         if metadata.file_type().is_symlink() {
             return Err(problem(
                 "source_symlink",
@@ -350,6 +377,11 @@ pub fn inventory(
     )];
     let mut entries = Vec::new();
     let mut excluded_paths = Vec::new();
+    // Ownership declarations may use an alias accepted by a case-insensitive or
+    // Unicode-normalizing host. Match directory entries by the same collision
+    // key used for source admission, including currently absent optional files.
+    let environment_files: BTreeSet<_> = environment_files.iter().map(|p| folded_name(p)).collect();
+    let mut excluded_environment_names = BTreeSet::new();
     let mut folded = BTreeSet::new();
     let mut ignore_files = BTreeMap::new();
     let mut visited = 0;
@@ -384,7 +416,14 @@ pub fn inventory(
                     "Source names must be valid UTF-8.",
                 )
             })?;
-            if excluded(path) || environment_files.contains(text) {
+            let environment_file = environment_files.contains(&folded_name(text));
+            if environment_file && !excluded_environment_names.insert(folded_name(text)) {
+                return Err(problem(
+                    "source_case_collision",
+                    "Environment input paths collide under Unicode canonical normalization and case folding.",
+                ));
+            }
+            if excluded(path) || environment_file {
                 excluded_paths.push(text.to_owned());
                 continue;
             }
@@ -533,6 +572,31 @@ mod tests {
         assert_eq!(folded_name("src/café"), folded_name("src/cafe\u{301}"));
         assert_eq!(folded_name("src/Straße"), folded_name("src/STRASSE"));
         assert_ne!(folded_name("src/資料"), folded_name("src/other"));
+    }
+
+    #[test]
+    fn ambiguous_environment_file_aliases_refuse_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "hack-env-alias-{}-{}",
+            std::process::id(),
+            crate::next_test_scratch()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("Values.txt"), "PRIVATE_UPPER_CANARY").unwrap();
+        fs::write(root.join("values.txt"), "PRIVATE_LOWER_CANARY").unwrap();
+        let distinct = fs::metadata(root.join("Values.txt")).unwrap().ino()
+            != fs::metadata(root.join("values.txt")).unwrap().ino();
+        let result = inventory(&root, &BTreeSet::from(["VALUES.txt".into()]), &mut vec![]);
+        fs::remove_dir_all(&root).unwrap();
+        if distinct {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "source_case_collision");
+            assert!(!error.message.contains("PRIVATE_"));
+        } else {
+            let selection = result.unwrap();
+            assert!(selection.entries.is_empty());
+            assert_eq!(selection.excluded_paths.len(), 1);
+        }
     }
 
     #[test]

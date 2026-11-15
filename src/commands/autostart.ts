@@ -22,10 +22,11 @@ import {
   readAutostartServiceReady,
   serializeAutostartGlobal,
 } from "../lib/autostart-view.ts";
-import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import { emitCliResult } from "../lib/cli-result.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { isLinkedGitWorktree } from "../lib/git-worktree.ts";
 import { resolveUserHomeDir } from "../lib/home-dir.ts";
+import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { findProjectContext, sanitizeBranchSlug } from "../lib/project.ts";
 import { ProjectInputSelectionError } from "../lib/project-input-selection.ts";
 import { PROJECT_SELECTOR_PATTERN } from "../lib/project-name.ts";
@@ -41,6 +42,9 @@ import {
   setProjectAutostartPaused,
 } from "../lib/projects-registry.ts";
 import { display } from "../ui/display.ts";
+
+/** Every `hack autostart … --json` success payload (machine-readable output rule). */
+export const AUTOSTART_JSON_SCHEMA = MACHINE_SCHEMAS.autostart;
 
 const projectPositionals = [{ name: "project", required: false }] as const;
 const addSpec = defineCommand({
@@ -123,7 +127,8 @@ async function writeMutation(opts: {
       await readAutostartServiceReady()
     );
     emitCliResult({
-      result: okResult({
+      result: machineSuccess({
+        schema: AUTOSTART_JSON_SCHEMA,
         data: {
           action: opts.action,
           autostart_global: global,
@@ -342,9 +347,20 @@ const list: CommandHandlerFor<typeof listSpec> = async ({ args }) => {
     await readAutostartServiceReady()
   );
   if (args.options.json) {
-    process.stdout.write(
-      `${JSON.stringify({ autostart_global: global, projects: projects.map((project) => ({ project_id: project.id, name: project.name, autostart: projectAutostartFromGlobal({ project, global }) })) })}\n`
-    );
+    emitCliResult({
+      result: machineSuccess({
+        schema: AUTOSTART_JSON_SCHEMA,
+        data: {
+          action: "list",
+          autostart_global: global,
+          projects: projects.map((project) => ({
+            project_id: project.id,
+            name: project.name,
+            autostart: projectAutostartFromGlobal({ project, global }),
+          })),
+        },
+      }),
+    });
     return 0;
   }
   if (global.paused) {
@@ -399,7 +415,8 @@ const run: CommandHandlerFor<typeof runSpec> = async ({ args }) => {
         await readAutostartServiceReady()
       );
       emitCliResult({
-        result: okResult({
+        result: machineSuccess({
+          schema: AUTOSTART_JSON_SCHEMA,
           data: {
             action: "run",
             waiting_for_engine: result.waitingForEngine,

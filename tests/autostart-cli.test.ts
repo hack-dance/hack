@@ -2,7 +2,10 @@ import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
 import { parsePositionalsForCommand } from "../src/cli/command.ts";
 import { runCli } from "../src/cli/run.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
-import { autostartCommand } from "../src/commands/autostart.ts";
+import {
+  AUTOSTART_JSON_SCHEMA,
+  autostartCommand,
+} from "../src/commands/autostart.ts";
 import { __testOnlyProjectsCommand } from "../src/commands/projects.ts";
 import { serializeAutostartGlobal } from "../src/lib/autostart-view.ts";
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
@@ -219,31 +222,36 @@ test("autostart list JSON exposes stable policy and result fields without admiss
     })
   );
   expect(JSON.parse(result.output)).toEqual({
-    autostart_global: serializeAutostartGlobal(
-      getDefaultAutostartGlobal(),
-      false
-    ),
-    projects: [
-      {
-        project_id: "example-id",
-        name: "example",
-        autostart: {
-          enabled: true,
-          state: "on",
-          paused_reason: null,
-          failures: {
-            count: 0,
-            last_at: null,
-            failed_services: [],
-            last_error_code: null,
+    ok: true,
+    data: {
+      schema: AUTOSTART_JSON_SCHEMA,
+      action: "list",
+      autostart_global: serializeAutostartGlobal(
+        getDefaultAutostartGlobal(),
+        false
+      ),
+      projects: [
+        {
+          project_id: "example-id",
+          name: "example",
+          autostart: {
+            enabled: true,
+            state: "on",
+            paused_reason: null,
+            failures: {
+              count: 0,
+              last_at: null,
+              failed_services: [],
+              last_error_code: null,
+            },
+            max_failures: 3,
+            branch: null,
+            paused: false,
+            last_result: null,
           },
-          max_failures: 3,
-          branch: null,
-          paused: false,
-          last_result: null,
         },
-      },
-    ],
+      ],
+    },
   });
   expect(result.output).not.toContain("private-admission-id");
   expect(serializeProjectAutostart(undefined)).toEqual({
@@ -369,6 +377,7 @@ for (const action of ["add", "remove", "pause", "resume"]) {
       expect(JSON.parse(result.output)).toMatchObject({
         ok: true,
         data: {
+          schema: AUTOSTART_JSON_SCHEMA,
           action,
           projects: [
             {
@@ -413,6 +422,7 @@ test("explicit autostart run intentionally invokes the scheduler and emits JSON"
     expect(JSON.parse(result.output)).toMatchObject({
       ok: true,
       data: {
+        schema: AUTOSTART_JSON_SCHEMA,
         action: "run",
         waiting_for_engine: false,
         autostart_global: { paused: false },

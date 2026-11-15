@@ -3,6 +3,7 @@ import { type CliOkResult, okResult } from "./cli-result.ts";
 /** HACK-2218 machine contracts use an envelope and a versioned payload schema. */
 export const MACHINE_SCHEMAS = {
   activity: "hack.activity.v1",
+  autostart: "hack.autostart.v1",
   version: "hack.version.v1",
   projectsObserve: "hack.projects.observe.v1",
   globalAdminPlan: "hack.global-admin-plan.v1",

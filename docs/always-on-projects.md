@@ -40,8 +40,10 @@ hack autostart remove --project sample  # forget the marker; leave services alon
 ```
 
 The positional project spelling remains accepted. All commands accept
-`--json --no-interactive`; mutations return the usual `{ok,data}` or
-`{ok:false,error}` envelope. `list --json` returns a bare object.
+`--json --no-interactive`. Every `hack autostart … --json` success, `list`
+included, uses the [machine-readable envelope](reference/machine-readable-output.md):
+`{"ok":true,"data":{"schema":"hack.autostart.v1","action":…,"autostart_global":…,"projects":[…]}}`;
+failures use `{ok:false,error}`.
 Global pause also covers projects marked afterwards. Global resume preserves
 projects paused by a manual `down`; start one with `hack up` or explicitly
 `hack autostart resume --project sample` to clear that manual pause.

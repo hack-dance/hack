@@ -52,6 +52,12 @@ success behavior stays covered by command-specific suites.
 | Canonical command / variant | Success shape |
 |---|---|
 | `hack activity --json` | Envelope; versioned `data.schema`: `hack.activity.v1` |
+| `hack autostart add --json` | Envelope; versioned `data.schema`: `hack.autostart.v1` |
+| `hack autostart list --json` | Envelope; versioned `data.schema`: `hack.autostart.v1` |
+| `hack autostart pause --json` | Envelope; versioned `data.schema`: `hack.autostart.v1` |
+| `hack autostart remove --json` | Envelope; versioned `data.schema`: `hack.autostart.v1` |
+| `hack autostart resume --json` | Envelope; versioned `data.schema`: `hack.autostart.v1` |
+| `hack autostart run --json` | Envelope; versioned `data.schema`: `hack.autostart.v1` |
 | `hack commands cancel --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack commands read --json` | NDJSON events / terminal event, not a single envelope |
 | `hack commands show --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |

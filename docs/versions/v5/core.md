@@ -65,7 +65,9 @@ and [Worktrees and watchers](../guides/development-runtime-safety.md).
 ## Use Hack from an agent or script
 
 Agents use the same CLI. `--json` returns structured results with stable error codes
-and `--no-interactive` prevents a command from waiting for input. No plugin, server
+and `--no-interactive` prevents a command from waiting for input. On the Compose
+backend, `hack up|down|restart --json --progress` streams ndjson progress lines
+before the final envelope. No plugin, server
 or account is required. [Agent handoff](agent-handoff.md) and
 [Agent integrations](../integrations.md) cover the optional extras.
 

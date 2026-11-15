@@ -44,6 +44,7 @@ export const JSON_COMMAND_SHAPES = {
   "config adopt": "legacy-object",
   "setup sync": "error-only",
   "setup migrate": "envelope",
+  "native setup": "runtime-passthrough",
   "session panes": "ndjson",
   "session capture": "ndjson",
   "session tail": "ndjson",

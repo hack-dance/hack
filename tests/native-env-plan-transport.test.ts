@@ -14,6 +14,7 @@ import {
   parseNativeEnvironmentPlan,
 } from "../src/lib/native-env-plan-protocol.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { withCompilerFixtureEnvironment } from "./helpers/tmux-socket-guard.ts";
 
 const PROTOCOL = {
   transport_version: 1,
@@ -214,14 +215,18 @@ test("preserves immutable original documents, tri-state selection, and PATH-only
       body: `const received=JSON.parse(await Bun.stdin.text()); const result=${JSON.stringify(SUCCESS)}; result.plan.received=received; result.plan.arguments=process.argv.slice(2); result.plan.environment=process.env; process.stdout.write(JSON.stringify(result));`,
     });
     for (const explicitOverlay of [undefined, null, "qa"]) {
-      const result = await planNativeConfig({
-        input,
-        primaryLocal,
-        checkoutLocal,
-        explicitOverlay,
-        envMetadata: METADATA,
-        profiles: ["with spaces", "--unsafe"],
+      const result = await withCompilerFixtureEnvironment({
         binary,
+        run: () =>
+          planNativeConfig({
+            input,
+            primaryLocal,
+            checkoutLocal,
+            explicitOverlay,
+            envMetadata: METADATA,
+            profiles: ["with spaces", "--unsafe"],
+            binary,
+          }),
       });
       expect(result.ok).toBe(true);
       if (!result.ok) {

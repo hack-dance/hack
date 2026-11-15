@@ -31,6 +31,7 @@ export const HACK_ERROR_CODES = [
   "E_STARTUP_INCOMPLETE",
   "E_PLAN_REFUSED",
   "E_PLAN_INCOMPLETE",
+  "E_NATIVE_SETUP_REQUIRED",
   "E_DEPENDENCY_BOOTSTRAP_FAILED",
   "E_STARTUP_TIMEOUT",
   "E_CANCELLED",
@@ -101,12 +102,15 @@ export function errorResult(opts: {
 }
 
 /**
- * Serialize an envelope for stdout (pretty-printed, trailing newline).
+ * Serialize an envelope for stdout with a trailing newline: pretty-printed
+ * by default, or as one line with `compact` (the closing line of an ndjson
+ * stream such as `--progress`).
  */
 export function renderCliResult(opts: {
   readonly result: CliResult<unknown>;
+  readonly compact?: boolean;
 }): string {
-  return `${JSON.stringify(opts.result, null, 2)}\n`;
+  return `${JSON.stringify(opts.result, null, opts.compact ? undefined : 2)}\n`;
 }
 
 /**

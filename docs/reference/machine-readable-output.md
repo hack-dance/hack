@@ -43,9 +43,10 @@ command-specific parser. Do not infer a success shape from an error envelope.
 
 Regenerate with `bun scripts/generate-machine-output-reference.ts`. Tests compare
 the inventory to the command definitions and exercise every command's shared
-usage-error boundary without entering its handler. The migrated success variants
-also have real CLI-boundary contract tests; existing legacy success behavior
-remains covered by its command-specific suites.
+usage-error boundary without entering its handler. Every listed command that can
+succeed without a runtime, engine or project is also run for real and checked
+against its row; legacy objects there pin their top-level keys. The remaining
+success behavior stays covered by command-specific suites.
 
 <!-- json-inventory:start -->
 | Canonical command / variant | Success shape |
@@ -79,6 +80,7 @@ remains covered by its command-specific suites.
 | `hack global trust --plan --json` | Envelope; versioned `data.schema`: `hack.global-admin-plan.v1` |
 | `hack host ps --json` | Legacy bare object (no `data` envelope) |
 | `hack logs --json` | NDJSON logs; finite native modes may return a legacy snapshot object |
+| `hack native setup --json` | Native runtime result passed through unchanged (`status`, `files`, `probe`; no `data` envelope) |
 | `hack node add --json` | Legacy bare object (no `data` envelope) |
 | `hack node devcontainer attach --json` | Legacy bare object (no `data` envelope) |
 | `hack node devcontainer down --json` | Legacy bare object (no `data` envelope) |

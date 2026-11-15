@@ -63,14 +63,17 @@ CI also lints those scripts and runs their transport tests; lint changed ones ex
 Rust default gates are `bun run check:local` and `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
-Candidate CI on Linux and macOS runs pinned cargo-nextest 0.9.151, one process per
+Candidate and config-compiler CI on Linux and macOS runs pinned cargo-nextest 0.9.151, one process per
 test and zero retries, then `cargo test --doc` with the same feature selection.
 Explicit target selections (`--lib`, `--test <name>`, etc.) skip doctests, matching
 Cargo; explicit `--doc` uses Cargo alone.
 Pass Cargo build, feature and target options through this wrapper; use
 `cargo nextest` directly for nextest-specific options such as `-E`.
 This prevents another test's spawned child from inheriting a briefly non-CLOEXEC
-macOS descriptor and delaying EOF. `bun run test:local` probes `cargo nextest
+macOS descriptor and delaying EOF. `bun run test:local` and `bun run test:config-compiler` share the isolating runner.
+A name filter matching nothing exits 4 with pinned nextest 0.9.151, whereas
+stock Cargo exits 0 with zero tests. The wrapper preserves that nonzero result.
+`bun run test:local` probes `cargo nextest
 --version`, matching the subcommand it executes. A missing or different version
 prints one fallback line and retains `cargo test` (one libtest thread on macOS),
 leaving the installed nextest alone. CI and qualification reports/repetitions
@@ -100,6 +103,29 @@ source provenance. Raw `bun test <paths>` remains available for focused tests;
 it bypasses the suite preflight and does not prepare compiler-dependent fixtures.
 
 All test files share one Bun process. `bunfig.toml` preloads
+private tmux isolation before the state guard: every run owns a short socket
+directory and stops its server in `afterAll`, including assertion failures.
+`privateCliEnv` forwards that socket root, never inherited `TMUX`. Direct
+`Bun.spawn`/`spawnSync` tmux calls require a private 0700 directory registered
+by the fixture with `registerPrivateTmuxRoot`; a separate socket fixture must
+stop its own server before removing its root. The E2E scenario runner owns a
+separate tmux scope and closes it in `finally`. All Bun and Node child-process
+calls receive an explicit live environment with inherited `TMUX` removed and
+a registered private `TMUX_TMPDIR`, even when a caller supplies a minimal env.
+Scripts therefore inherit isolation too; a script that deliberately resets its
+environment or names an explicit socket must maintain that isolation itself.
+`Bun.$` uses the live environment by default, but an explicit `.env(...)` is
+not wrapped: supply the private `TMUX_TMPDIR` in that object too.
+The exact-environment compiler transport tests use
+`withCompilerFixtureEnvironment` only around a freshly-created pure compiler
+fixture that reports its input/env and never invokes tmux. Only that exact
+executable keeps the explicit compiler env; other children in the callback
+and every child outside it remain isolated. Keep the PATH-only assertions.
+The fixed `/usr/bin/env -0` native-state probe remains unwrapped so the global
+state guard can still detect Bun's stale native environment. Tmux cleanup is
+registered last, after the checkout guard has finished spawning Git children.
+
+`bunfig.toml` also preloads
 [the global-state guard](../../../tests/helpers/global-state-guard-preload.ts) for
 every `bun test` run: a test or file that leaves the environment, cwd, umask,
 exit code, a guarded global function or a process listener changed fails with a
@@ -149,7 +175,11 @@ does not mean CI ran.
 Hosted CI runs the `bun run test` file set on eight `test shard i/8` jobs;
 light PRs run only the five Linux shards and report selected macOS paths as
 deferred to the integration run. `ci:mac`/`ci:e2e` opt into selected tiers;
-`ci:full` opts into all ordinary PR tiers. Ready Rust-input PRs retain Linux
+`ci:full` opts into all ordinary PR tiers. Ready CLI-source PRs (`src/`, `index.ts`, `packages/cli/`) retain Linux x64
+Config compiler and relocated acceptance, including refusal HOME/output contracts.
+The required test fan-in rejects selected compiler failures, cancellations and
+unexpected skips. This adds no default Mac minutes; the existing Linux lane also
+builds the release bundle. Ready Rust-input PRs retain Linux
 candidate/compiler checks while deferring macOS. Full tiers run automatically on
 ready PRs changing protected CI inputs or targeting
 `main`; the latter retains Intel. Light PRs skip build smoke, macOS and Docker;
@@ -160,7 +190,9 @@ The required `test` check is their fan-in. Every planned shard and the enabled
 Linux process-lifetime job must succeed; failure, cancellation or an unexpected
 skip fails. A planned out-of-scope lifetime skip passes. Drafts deliberately fail with
 `skipped: draft`. Next pushes can select tests only after a successful predecessor;
-superseded pushes cancel. Main and explicit full dispatches retain release-host
+the active next push finishes while newer pushes replace only the pending run.
+After a batch merges, no further merge proceeds until a next run completes,
+unless the batch verifier ran the same checks on the combined tree. Main and explicit full dispatches retain release-host
 coverage. Prerelease plan/publish require exact-head `release-full` evidence from
 the selected run's latest attempt, including every shard and compiler host.
 [`scripts/test-shard-plan.ts`](../../../scripts/test-shard-plan.ts) splits the files

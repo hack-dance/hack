@@ -168,6 +168,7 @@ mod tests {
         .unwrap();
         let boot = "11111111-1111-1111-1111-111111111111";
         assert!(require_scoped_root(&candidate, &receipt, boot).is_err());
+        // owner-root: guarded below
         let root = startup::legacy_control_root(
             &candidate.state_root,
             &receipt.owner,

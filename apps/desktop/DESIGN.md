@@ -137,7 +137,7 @@ Source: `hack env list --json --path <root>`.
 |---|---|
 | Normal | Table: name, layer (`layer` / `resolved_from`), scope, kind (`storage.kind`), set (`has_value` ✓/✗), required. |
 | Missing required | Red rows from `missing_required`, first. |
-| Locked | Env key missing or unreadable: lock icon, "Names are shown; values cannot be resolved", Copy `hack doctor`. Needs R10. |
+| Locked | `key_state` is `missing` or `unreadable`: lock icon, "Names are shown; values cannot be resolved", Copy `hack doctor`. `ok` does not prove the key decrypts the values. |
 | No env config | "This project has no env layers" + docs link. |
 
 Editing is "later". Never a reveal button.
@@ -199,7 +199,7 @@ is removed after use. The app never types into an existing terminal or pane.
 
 Source: `hack doctor --json --path <root>` per registered project, plus one run
 outside any project for machine checks (until R7c), on open and every 10
-minutes while visible. Today it gives `checks[{id,status,detail}]`.
+minutes while visible. The versioned audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a).
 
 | Card part | Content |
 |---|---|
@@ -209,9 +209,13 @@ minutes while visible. Today it gives `checks[{id,status,detail}]`.
 | One action | Run safe fix (R7b) · Open Terminal (admin) · Copy command · Open doc |
 
 Machine findings are de-duplicated by check `id` and shown once; project
-findings link from that project's header. Until R7a adds `area`, `scope` and
-`fix`, `core` maps known `id`s to areas and shows unknown ones under "Other"
-with only Copy and Open doc. No Run button appears without a `fix.kind: safe`.
+findings link from that project's header. Schema 1 supplies `area`, `scope` and
+`fix`; older CLI versions still need `core`'s known-ID mapping. Unknown checks
+appear under "Other" with only Copy and Open doc. No Run button appears without
+a `fix.kind: safe`.
+
+Browser observations and native hostname DNS/HTTPS route checks are project-scoped:
+each describes the selected exact target and must not be de-duplicated across projects.
 
 ## 4. Upgrades
 
@@ -371,16 +375,16 @@ Each is small enough for one PR.
 2. **R2** Exists (see [project state](../../docs/reference/project-state.md)): backend-aware project state in `/v1/projects` and `hack projects --json` (full and summary rows): `backend`, `state` (`running | degraded | starting | stopping | stopped | failed | unknown`), `started_at`, and per service `{state, ready, completed, health, exit_code, started_at}`; native projects included.
 3. **R2b** Native lifecycle the app can drive: a `--json` contract for native `restart` and authored `down`/`restart`, and qualification of the existing detached `up --json` for app use.
 4. **R3** Per-service usage: `hack usage --json --path <root> --by-service` with `cpuPercent`, `memUsedBytes`.
-5. **R4** Logs: document the `--json` ndjson as stable; `--services a,b` honoured by every backend; `--max-line-bytes <n>` setting `entry.truncated`.
+5. **R4** Logs: document the `--json` ndjson as stable; `--services a,b` honoured by every backend; `--max-line-bytes <n>` setting `entry.truncated`. Compose and Loki exist ([Logs JSON stream](../../docs/reference/logs-json.md): `schema: "hack.logs.v1"` on `start`, one closing `end`); native multi-service, native `--max-line-bytes` and native `--no-follow` as the stream are open.
 6. **R5a** Activity writer: append-only `activity.jsonl` in the Hack home, one line per `up`/`down`/`restart`/autostart (`ts, project, branch, action, origin, outcome, failed_services, duration_ms`), `O_APPEND` writes under one line size limit, rotation at a size cap, `origin` from `HACK_ORIGIN` (the app sets `app`).
 7. **R5b** Activity reader: `hack activity --json [--project] [--limit]`.
-8. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope.
-9. **R7a** Doctor metadata (a new doctor schema): per check `area`, `scope: machine | project`, `fix: {kind: safe | admin | manual, args[], doc_url}`.
-10. **R7b** One fix without prompts: `hack doctor --fix --only <id> --yes --json`, only for `kind: safe`.
+8. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope. The Compose slice exists; see [Lifecycle progress stream](../../docs/reference/lifecycle-progress.md). Native backend support is open.
+9. **R7a — exists.** Doctor audit schema 1 adds per-check `area`, `scope: machine | project` and `fix: {kind: safe | admin | manual, args[], doc_url}` inside the existing `{ok,data}` envelope. Unknown checks default to Other/manual with no executable args. A category is guidance, not permission to run it.
+10. **R7b — exists.** `hack doctor --fix --only <id> --yes --json` executes one allowlisted safe fix and rechecks it. Initially only `hack gitignore` is safe; other IDs and mixed modes refuse before writes. Results use `{ok,data:{schema:1,checks,summary,counts,fix}}`; `fix` records `id`, `changed`, `confirmed`.
 11. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
 12. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
 13. **R9** (optional) Push updates: `GET /v1/projects?wait=<generated_at>` long-poll.
-14. **R10** Env key state: `key_state: ok | missing | unreadable` in `hack env list --json` (no values).
+14. **R10 — exists** Env key state: `key_state: ok | missing | unreadable | not_checked` in `hack env list --json` (no values). `not_checked` is the legacy `hack.env.json` contract. The payload keeps its published bare-object shape; no envelope was added.
 15. **R11** Admin argv plan: `hack global install|trust --plan --json` listing the root-only argv lines.
 16. **R12a** Always-on persistence and `hack autostart add|remove|list|pause|resume` ([section 6](#6-always-on-hack-2213-proposed-contract)).
 17. **R12b** Always-on fields in project payloads and `autostart_global`.

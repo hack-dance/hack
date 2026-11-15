@@ -1,8 +1,28 @@
 import { HackCliError } from "./cli-result.ts";
+import { ProjectEnvLayerRefusalError } from "./project-env-layer-path.ts";
 import { CommandError } from "./shell.ts";
 
+export type UpgradeCheckFailureClass =
+  | "env-layer-refused"
+  | "command-error"
+  | "cli-refusal"
+  | "type-error"
+  | "parse-error"
+  | "range-error"
+  | "permission-denied"
+  | "missing-path"
+  | "not-a-directory"
+  | "io-error"
+  | "timeout"
+  | "unexpected-error";
+
 /** Closed failure classes only: error messages, arbitrary names/codes and process output can contain values. */
-export function upgradeCheckFailureClass(error: unknown): string {
+export function upgradeCheckFailureClass(
+  error: unknown
+): UpgradeCheckFailureClass {
+  if (error instanceof ProjectEnvLayerRefusalError) {
+    return "env-layer-refused";
+  }
   if (error instanceof CommandError) {
     return "command-error";
   }

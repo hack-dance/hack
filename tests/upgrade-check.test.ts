@@ -235,6 +235,34 @@ test("a project with only the legacy TOML config or only a Compose file is live,
   expect(report.registry.missing).toEqual([]);
 });
 
+for (const ready of [true, false]) {
+  test(`upgrade native configuration finding does not claim runtime readiness: ${ready}`, async () => {
+    const project = await liveProject("native-config-only");
+    const findings = await inspectUpgradeProject({
+      project: { ...project, project: project.name },
+      homeDir: home,
+      deadline: Date.now() + 60_000,
+      nativePreflight: async () => ({
+        ready,
+        blockers: ready ? 0 : 3,
+        warnings: 0,
+      }),
+    });
+    const finding = findings.find((value) => value.id === "native-preflight");
+    expect(finding?.status).toBe(ready ? "ok" : "info");
+    expect(finding?.summary).toContain(
+      "runtime setup and runtime review were not checked"
+    );
+    expect(finding?.summary).not.toContain("Ready for the native backend");
+    if (ready) {
+      expect(finding?.summary).toContain("hack native setup");
+      expect(finding?.summary).toContain("hack doctor --native-preflight");
+    } else {
+      expect(finding?.summary).toContain("3 blocker(s)");
+    }
+  });
+}
+
 test("once the time budget is spent, project checks report not checked without running", async () => {
   const project = await liveProject("app-late");
   let ran = false;

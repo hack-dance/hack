@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmod, copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveNativeHome } from "../src/backends/native-runtime-client.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -138,12 +139,45 @@ test.each([
   );
 });
 
-test("native selection refuses without an absolute private home", async () => {
-  for (const home of [undefined, "", "relative"]) {
+test("native selection refuses a relative private home", async () => {
+  for (const home of ["relative"]) {
     const refused = await launch({ HACK_NATIVE_HOME: home }, ["up"]);
     expect(refused.exitCode).toBe(64);
     expect(refused.stdout).toBe("");
   }
+});
+
+test("shell and TypeScript select the same default private home without creating it", async () => {
+  for (const selected of [
+    { HACK_NATIVE_HOME: undefined, HACK_HOME: `${root}/isolated` },
+    { HACK_NATIVE_HOME: " ", HACK_HOME: " " },
+    { HACK_NATIVE_HOME: ` ${root}/explicit `, HACK_HOME: "relative" },
+  ]) {
+    const reply = await launch(selected, ["native", "setup"]);
+    expect(reply.exitCode).toBe(7);
+    expect(reply.stdout.split("\n")[2]).toBe(
+      resolveNativeHome(launcherEnv(selected))
+    );
+  }
+});
+
+test.each([
+  { prefix: [] },
+  { prefix: ["--no-interactive"] },
+])("explicit native setup keeps the native home in a Compose shell ($prefix)", async ({
+  prefix,
+}) => {
+  const result = await launch({ HACK_RUNTIME_BACKEND: "compose" }, [
+    ...prefix,
+    "native",
+    "setup",
+  ]);
+  expect(result.exitCode).toBe(7);
+  expect(result.stdout.split("\n").slice(0, 3)).toEqual([
+    "native",
+    `${root}/hack-native`,
+    `${root}/private home`,
+  ]);
 });
 
 test.each([

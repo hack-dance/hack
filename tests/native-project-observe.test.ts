@@ -582,7 +582,7 @@ exit 2
   }
 });
 
-test("unsupported native forms and missing restart consent refuse before Docker or hooks", async () => {
+test("native admission errors and missing restart consent refuse before Docker or hooks", async () => {
   const { writeFile, readFile, chmod } = await import("node:fs/promises");
   const { resolve } = await import("node:path");
   const opts = await fixture(false);
@@ -638,7 +638,7 @@ test("unsupported native forms and missing restart consent refuse before Docker 
       expect(code).not.toBe(0);
       expect(stdout + stderr).toContain(
         operation === "up"
-          ? "E_STARTUP_INCOMPLETE: Native detached startup was not confirmed."
+          ? "E_STARTUP_INCOMPLETE: Native runtime installation could not be inspected; check the selected home's access and retry."
           : operation === "restart"
             ? "E_PERMISSION: Native restart requires HACK_NATIVE_SHARED_SOURCE=1"
             : operation === "exec"

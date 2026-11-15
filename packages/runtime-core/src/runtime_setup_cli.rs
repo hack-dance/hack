@@ -15,6 +15,42 @@ pub fn run(candidate: &Candidate, arguments: &[&str]) -> Result<(), CandidateErr
     )
 }
 
+/// Installed entrypoint dispatches here before eager discovery: a first-use home
+/// does not exist yet. Neither a refused consent nor an unsupported host creates it.
+pub fn run_home(home: &Path, arguments: &[&str]) -> Result<(), CandidateError> {
+    let options = parse(arguments)?;
+    setup::validate_home_path(home)?;
+    if home.try_exists().map_err(|_| {
+        CandidateError::new("native_setup_unavailable", "Cannot inspect native home.")
+    })? {
+        return run(&Candidate::discover_installed(home)?, arguments);
+    }
+    if options.offline.is_none() {
+        confirm_downloads(home, &options)?;
+    }
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return Err(CandidateError::new(
+            "unsupported_host",
+            "Native setup requires Apple Silicon macOS.",
+        ));
+    }
+    let candidate = setup::create_home(home)?;
+    let inputs = options
+        .offline
+        .map(|(archive, engine, packages)| setup::OfflineInputs {
+            archive: Path::new(archive),
+            engine_archive: Path::new(engine),
+            network_tools: Path::new(packages),
+        });
+    let result = setup::run(&candidate, inputs, inputs.is_none())?;
+    writeln!(
+        io::stdout().lock(),
+        "{}",
+        serde_json::to_string(&result).expect("setup result is serializable")
+    )
+    .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))
+}
+
 fn execute(
     candidate: &Candidate,
     arguments: &[&str],
@@ -36,17 +72,6 @@ fn execute(
         .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))?;
         return Ok(());
     }
-    let pins = setup::pins()?;
-    let interactive = !options.no_interactive
-        && io::stdin().is_terminal()
-        && io::stderr().is_terminal()
-        && !truthy_env(std::env::var("HACK_NO_INTERACTIVE").ok().as_deref());
-    if interactive && !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        return Err(CandidateError::new(
-            "unsupported_host",
-            "Native setup requires Apple Silicon macOS.",
-        ));
-    }
     if let Some((archive, engine, packages)) = options.offline {
         let result = install(
             candidate,
@@ -64,6 +89,34 @@ fn execute(
         )
         .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))?;
         return Ok(());
+    }
+    confirm_downloads(&candidate.checkout, &options)?;
+    let result = install(candidate, None, true)?;
+    writeln!(
+        output,
+        "{}",
+        serde_json::to_string(&result).expect("setup result is serializable")
+    )
+    .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))?;
+    Ok(())
+}
+
+fn confirm_downloads(home: &Path, options: &Options<'_>) -> Result<(), CandidateError> {
+    // The frontend already displayed the compiled pins before explicit consent.
+    // Raw callers passing this flag have also supplied their consent in advance.
+    if options.accept {
+        return Ok(());
+    }
+    let pins = setup::pins()?;
+    let interactive = !options.no_interactive
+        && io::stdin().is_terminal()
+        && io::stderr().is_terminal()
+        && !truthy_env(std::env::var("HACK_NO_INTERACTIVE").ok().as_deref());
+    if interactive && !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return Err(CandidateError::new(
+            "unsupported_host",
+            "Native setup requires Apple Silicon macOS.",
+        ));
     }
     eprintln!("Pinned native runtime files (exact compressed byte lengths):");
     for pin in &pins {
@@ -85,11 +138,11 @@ fn execute(
     }
     eprintln!(
         "Private download cache: {}",
-        setup::download_directory(candidate).display()
+        home.join(".hack-local/setup/downloads").display()
     );
     eprintln!(
         "Install destination: {}",
-        candidate.state_root.join("providers").display()
+        home.join(".hack-local/providers").display()
     );
     setup::consent(options.accept, interactive, || {
         eprint!("Download and prepare these pinned files? [y/N] ");
@@ -106,15 +159,7 @@ fn execute(
             answer.trim().to_ascii_lowercase().as_str(),
             "y" | "yes"
         ))
-    })?;
-    let result = install(candidate, None, true)?;
-    writeln!(
-        output,
-        "{}",
-        serde_json::to_string(&result).expect("setup result is serializable")
-    )
-    .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))?;
-    Ok(())
+    })
 }
 
 fn truthy_env(value: Option<&str>) -> bool {

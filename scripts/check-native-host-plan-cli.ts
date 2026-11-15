@@ -278,7 +278,11 @@ try {
     "local settings cannot inject host commands"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
-  await assertNativePlanHome({ home, failedUps: 0 });
+  await assertNativePlanHome({
+    home,
+    failedUps: 0,
+    privateInputs: [canary, directory],
+  });
   const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
     HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
@@ -288,7 +292,6 @@ try {
     runtime.exit !== 0 && (runtime.stdout + runtime.stderr).includes("E_USAGE"),
     "native detached service selection refuses before input or runtime work"
   );
-  await assertNativePlanHome({ home, failedUps: 1 });
   assert(
     !(
       (await Bun.file(marker).exists()) ||
@@ -298,6 +301,11 @@ try {
     ),
     "no hooks, process, registry or runtime effects"
   );
+  await assertNativePlanHome({
+    home,
+    failedUps: 1,
+    privateInputs: [canary, directory],
+  });
   process.stdout.write(
     `Relocated native host planning: ${checks} checks passed; no host execution or secret delivery\n`
   );

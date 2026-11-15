@@ -28,6 +28,11 @@ The first command is a finite snapshot. The second follows live output until
 Ctrl-C. Loki history needs the global logging stack running on that host and is
 unavailable in slim environments.
 
+`--services api,worker` reads several services at once. For scripts,
+`hack logs --json` is a stable line-per-event stream; `--max-line-bytes <n>`
+bounds each line. The stream's fields are in the "Logs JSON stream" reference
+page of the current source.
+
 ## Stop
 
 Use `hack activity --json --project <name> --limit 50` to read recent lifecycle

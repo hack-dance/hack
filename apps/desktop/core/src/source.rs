@@ -295,6 +295,42 @@ pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Optio
     Some(real)
 }
 
+/// A script's `#!` interpreter runs with the script's authority, so it must
+/// pass the same ownership and write rules as the script (recursively, for
+/// interpreters that are scripts themselves). `#!/usr/bin/env name` is safe
+/// once env is trusted: Doctor children see only the private wrapper PATH.
+/// A file this user cannot read cannot be interpreted, so it is treated as a
+/// binary; any other read failure or unparsable line refuses the tool.
+fn trusted_interpreter(real: &Path, uid: u32, depth: u8) -> bool {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    let mut file = match std::fs::File::open(real) {
+        Ok(file) => file,
+        Err(e) => return e.kind() == std::io::ErrorKind::PermissionDenied,
+    };
+    let mut head = [0_u8; 512];
+    let Ok(read) = file.read(&mut head) else {
+        return false;
+    };
+    let Some(line) = head[..read].strip_prefix(b"#!") else {
+        return true;
+    };
+    let Some(end) = line.iter().position(|b| *b == b'\n') else {
+        return false;
+    };
+    let Some(interpreter) = line[..end]
+        .split(|b| *b == b' ' || *b == b'\t')
+        .find(|token| !token.is_empty())
+    else {
+        return false;
+    };
+    let interpreter = Path::new(std::ffi::OsStr::from_bytes(interpreter));
+    depth > 0
+        && interpreter.is_absolute()
+        && trusted_tool_path(interpreter, uid, false)
+            .is_some_and(|next| trusted_interpreter(&next, uid, depth - 1))
+}
+
 /// A per-read private PATH containing only wrappers for checked executables.
 /// Wrappers exec the original absolute path so shims keep their normal $0.
 /// No credential/context values are stored. Drop removes only this owned scratch.
@@ -408,7 +444,9 @@ fn trusted_probe_path_with_limits(
             if names.contains(&name) {
                 continue;
             }
-            if trusted_tool_path(&entry.path(), uid, false).is_none() {
+            if trusted_tool_path(&entry.path(), uid, false)
+                .is_none_or(|real| !trusted_interpreter(&real, uid, 4))
+            {
                 if let Some(tool) = crate::doctor_tools::NAMES
                     .iter()
                     .find(|tool| name == std::ffi::OsStr::new(**tool))
@@ -1882,6 +1920,45 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             ));
         }
         assert!(!after.is_clean());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn script_tools_require_a_trusted_interpreter_chain() {
+        use std::os::unix::fs::PermissionsExt;
+        let hack = fake_hack("doctor-shebang", "echo '{}'");
+        let root = hack.parent().unwrap();
+        let bin = root.join("bin");
+        let shared = root.join("shared");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&shared).unwrap();
+        // Another account could replace anything in this directory.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let unsafe_interpreter = shared.join("interp");
+        std::fs::copy("/bin/sh", &unsafe_interpreter).unwrap();
+        // An owned interpreter that is itself a script pointing at it.
+        let nested = bin.join("nested-interp");
+        let docker = bin.join("docker");
+        let write = |path: &Path, shebang: &Path| {
+            std::fs::write(path, format!("#!{} -e\necho '{{}}'\n", shebang.display())).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write(&nested, &unsafe_interpreter);
+        for (shebang, trusted) in [
+            (Path::new("/bin/sh"), true),
+            (unsafe_interpreter.as_path(), false),
+            (nested.as_path(), false),
+        ] {
+            write(&docker, shebang);
+            let tools = trusted_probe_path(bin.as_os_str()).unwrap();
+            assert_eq!(
+                tools.dir.join("docker").exists(),
+                trusted,
+                "{}",
+                shebang.display()
+            );
+            assert_eq!(tools.unchecked.contains("docker"), !trusted);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

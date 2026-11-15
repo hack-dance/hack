@@ -112,7 +112,11 @@ every intermediate symlink target and canonical ancestor must be owned by this u
 or root, with no group/other-write bits. A root-owned sticky ancestor such as
 `/tmp` is allowed above a private entry; a shared writable PATH entry itself is
 not. An unsafe executable is excluded individually, so it does not hide safe
-siblings such as Git. Foreign-owned executable targets are excluded too. macOS ACL mutation grants
+siblings such as Git. Foreign-owned executable targets are excluded too. A
+script tool's `#!` interpreter must pass the same rules (recursively); a script
+whose interpreter lives in a shared writable directory is excluded and its
+checks become Unknown. `#!/usr/bin/env name` resolves only through the private
+wrapper PATH. macOS ACL mutation grants
 (write/append/delete, child deletion, attributes, security or owner changes) are
 refused for any principal; deny/read-only entries remain supported. Linux access
 ACLs are conservatively refused. Unreadable ACL metadata is untrusted. The same

@@ -271,8 +271,8 @@ try {
     (unsupported.stdout + unsupported.stderr).includes(
       "E_USAGE"
     ), "native detached service selection refuses before input or runtime work");
-  // Whole-project detach is admitted. Invalid input keeps this relocated-bundle
-  // check offline on supported hosts; unsupported hosts also fail before ready.
+  // A missing executor refuses at setup inspection, before detached admission
+  // or reading the deliberately invalid authored input.
   await Bun.write(join(checkout, ".hack/hack.project.json"), "{");
   const detached = await invoke(["up", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
@@ -280,13 +280,16 @@ try {
     HACK_NATIVE_HOME: join(home, "native"),
   });
   const detachedResult = record(JSON.parse(detached.stdout));
+  const setupError = record(detachedResult.error);
   require(detached.exit === 1 &&
     detached.stderr === "" &&
     detachedResult.ok === false &&
-    record(detachedResult.error).code ===
-      "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
+    setupError.code === "E_STARTUP_INCOMPLETE" &&
+    record(setupError.detail).runtime_setup ===
+      "unavailable", "missing executor returns one setup-unavailable JSON refusal before detached admission");
   // Lifecycle attempts record names-only activity even when input admission
-  // refuses. Planning above remains read-only; neither refusal starts runtime.
+  // or setup inspection refuses. Planning above remains read-only; neither
+  // refusal starts runtime.
   await assertNativePlanRefusalActivity({
     home,
     before: beforeStartup,
@@ -296,7 +299,7 @@ try {
   });
   require(!(await readdir(join(checkout, ".hack"))).some(
     (name) => name === ".internal" || name === ".branch"
-  ), "refused startup creates no generated runtime state");
+  ), "refused startup creates no registry or generated runtime state");
   process.stdout.write(
     "Relocated native env plan acceptance: offline validation, metadata-only output, missing overlays/refs, immutable directives, separate hashes, real linked-worktree layers, CI/slim/opt-out, unsafe-input and runtime refusal passed\n"
   );

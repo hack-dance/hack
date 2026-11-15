@@ -93,5 +93,6 @@ export async function assertNativePlanRefusalActivity(opts: {
     preparedHackFiles: opts.before.has(".hack/hack.config.json")
       ? ["hack.config.json"]
       : [],
+    privateInputs: [opts.sentinel, opts.fixtureRoot],
   });
 }

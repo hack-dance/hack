@@ -748,6 +748,7 @@ test("project views accept an unambiguous legacy alias without rewriting runtime
     runtimeOk: true,
     filter: "my-app",
     includeUnregistered: true,
+    muxSessions: [],
   });
   expect(views).toHaveLength(1);
   expect(views[0]?.name).toBe("my_app");
@@ -760,6 +761,7 @@ test("project views accept an unambiguous legacy alias without rewriting runtime
       runtimeOk: true,
       filter: "my_app",
       includeUnregistered: true,
+      muxSessions: [],
     })
   ).rejects.toThrow("Ambiguous project name");
 });

@@ -16,6 +16,7 @@ import { join, resolve } from "node:path";
 import { previewNativeConfigImport } from "../src/lib/native-config-import-preview.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { withCompilerFixtureEnvironment } from "./helpers/tmux-socket-guard.ts";
 
 const CANARY = "synthetic-private-import-owner";
 const PROTOCOL = { transport_version: 1, authored_version: 1, plan_version: 1 };
@@ -109,7 +110,10 @@ test("owner validates private candidate in memory and leaves exact selected inpu
   await symlink(join(root, "absent-key"), join(projectDir, "hack.env.key"));
   const before = await readdir(projectDir);
   const binary = await compiler();
-  const result = await previewNativeConfigImport({ projectRoot, binary });
+  const result = await withCompilerFixtureEnvironment({
+    binary,
+    run: () => previewNativeConfigImport({ projectRoot, binary }),
+  });
   expect(result.report.complete).toBe(true);
   expect(result.candidate).toMatchObject({
     name: "fixture",

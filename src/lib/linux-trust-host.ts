@@ -1,4 +1,11 @@
-import { lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readlink,
+  realpath,
+  stat,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { readTextFile } from "./fs.ts";
@@ -67,6 +74,27 @@ export function createLinuxTrustHost(opts?: {
           isFile: info.isFile() && !entry.isSymbolicLink(),
           identity: `${info.dev}:${info.ino}`,
         };
+      } catch {
+        return null;
+      }
+    },
+    inspectEntry: async (path) => {
+      try {
+        const info = await lstat(path);
+        return {
+          uid: info.uid,
+          mode: info.mode,
+          identity: `${info.dev}:${info.ino}`,
+          isDirectory: info.isDirectory(),
+          isSymbolicLink: info.isSymbolicLink(),
+        };
+      } catch {
+        return null;
+      }
+    },
+    readLink: async (path) => {
+      try {
+        return await readlink(path);
       } catch {
         return null;
       }

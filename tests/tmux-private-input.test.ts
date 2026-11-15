@@ -7,12 +7,14 @@ import type { ExecOptions } from "../src/lib/shell.ts";
 import { findExecutableInPath } from "../src/lib/shell.ts";
 import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+import { registerPrivateTmuxRoot } from "./helpers/tmux-socket-guard.ts";
 
 // Staging sweeps the temp directory: never the developer's real one.
 isolateMuxTempDir();
 
 const tmux = findExecutableInPath("tmux");
 const root = await mkdtemp(join(tmpdir(), "tmux-private-test-"));
+const unregister = registerPrivateTmuxRoot(root);
 const socket = join(root, "socket");
 const calls: (readonly string[])[] = [];
 async function privateExec(
@@ -57,6 +59,7 @@ afterAll(async () => {
     await privateExec([tmux, "-S", socket, "kill-server"], { stdin: "ignore" });
   }
   await rm(root, { recursive: true, force: true });
+  unregister();
 });
 
 test.skipIf(!tmux)(

@@ -103,6 +103,26 @@ impl Fixture {
         }
     }
 
+    /// Take the fixture's stop lock once its current holder releases it. A
+    /// launch writes its ready receipt just before it drops this lock, and a
+    /// guard keeps its startup lease until publication, so the lock can still
+    /// be held briefly after `start` returns.
+    fn take_stop_lock(&self) -> fs::File {
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.root.join(".stop.lock"))
+            .unwrap();
+        eventually(|| {
+            // SAFETY: flock only borrows this live descriptor.
+            (unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0)
+                .then_some(())
+        });
+        lock
+    }
+
     fn state(&self, name: &str) -> Value {
         eventually(|| {
             fs::read(self.root.join(format!("{name}.json")))
@@ -1060,6 +1080,8 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
     }
     let (mut caller, _) = f.start(processes);
     let blocked_guard = blocked.then(|| pid(&f.state("blocked"), "guardPid"));
+    // Freeze only after launch and guard startup leases released the stop lock.
+    drop(f.take_stop_lock());
     if let Some(guard) = blocked_guard {
         assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
     }
@@ -1312,18 +1334,7 @@ fn stop_waiting_past_lock_bound_reports_unknown_without_acting() {
     let state = f.state("worker");
     let worker = identity(pid(&state, "commandPid")).expect("command identity");
     // Hold the fixture's stop lock as a stuck stop would.
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(f.root.join(".stop.lock"))
-        .unwrap();
-    // SAFETY: flock only borrows this live descriptor.
-    assert_eq!(
-        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-        0
-    );
+    let lock = f.take_stop_lock();
     let start = Instant::now();
     let mut stop = command(&f.root, "stop").spawn().unwrap();
     send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
@@ -1395,6 +1406,9 @@ fn unreaped_matching_guard_proves_legacy_session_ownership() {
     let mut caller = ForeignChild(caller);
     f.await_log("fixture-ready");
     let mut state = f.state("worker");
+    // Freeze the parent only after launch has released the stop lock;
+    // otherwise the frozen parent would hold it and stop could never run.
+    drop(f.take_stop_lock());
     // Keep the parent from reaping its guard, then exercise legacy birth absence.
     assert_eq!(
         unsafe { libc::kill(caller.0.id() as i32, libc::SIGSTOP) },
@@ -1440,6 +1454,8 @@ fn guard_dying_during_stop_gets_a_fresh_authored_term_grace() {
     f.await_log("fixture-ready");
     let guard = pid(&f.state("worker"), "guardPid");
     let birth = identity(guard).unwrap();
+    // Freeze only after launch and guard startup leases released the stop lock.
+    drop(f.take_stop_lock());
     // Suspend this owned guard so its pending TERM cannot reach the command.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
     let mut stop = command(&f.root, "stop").spawn().unwrap();
@@ -1687,6 +1703,8 @@ fn unresponsive_guard_stop_remains_unknown() {
     f.await_log("fixture-ready");
     let state = f.state("worker");
     let guard = pid(&state, "guardPid");
+    // Freeze only after launch and guard startup leases released the stop lock.
+    drop(f.take_stop_lock());
     // SAFETY: the guard belongs to this fixture and its receipt is immutable.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
     let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));

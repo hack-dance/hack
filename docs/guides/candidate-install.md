@@ -246,7 +246,7 @@ launcher the command ran through:
 
 | You ran | Printed commands start with |
 | --- | --- |
-| `hack-next` | `$HOME/.hack-next/bin/hack-next` (the full path, since it is not on PATH) |
+| `hack-next` | your channel's launcher by full path, `$HOME/.hack-next/bin/hack-next` by default or `<root>/bin/hack-next` for a `--root` install (it is not on PATH) |
 | a bundle's `hack-v5` | that bundle's `hack-v5`, by its full path |
 | stable `hack` | `hack` |
 

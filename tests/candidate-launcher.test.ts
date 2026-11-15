@@ -71,6 +71,32 @@ test("each install kind resolves to a command the user can run", () => {
   });
 });
 
+test("hack-next resolves the launcher of the channel root that holds the running bundle", async () => {
+  // Codex review of #863: `--root` installs live outside ~/.hack-next; the
+  // printed launcher must be that installation's own.
+  const channel = join(root, "my channel");
+  const custom = join(channel, "versions", "5.0.0-next.18", "bundle");
+  await Bun.write(join(custom, "hack-cli"), "");
+  await Bun.write(join(custom, "hack-v5"), "#!/bin/sh\n");
+  await Bun.write(join(channel, "bin", "hack-next"), "#!/bin/sh\n");
+  const launcher = resolve("hack-next", join(custom, "hack-cli"));
+  expect(launcher).toEqual({
+    kind: "hack-next",
+    command: join(channel, "bin", "hack-next"),
+    bundle: join(custom, "hack-v5"),
+  });
+  expect(composeBackendCommand(["up"], launcher)).toBe(
+    `HACK_RUNTIME_BACKEND=compose '${join(channel, "bin", "hack-next")}' up`
+  );
+  expect(candidateUpdateRefusal(launcher)).toContain(
+    `'${join(channel, "bin", "hack-next")}' --manager upgrade --version`
+  );
+  // A bundle that is not inside a channel root falls back to the default.
+  expect(resolve("hack-next").command).toBe(
+    join(home, ".hack-next", "bin", "hack-next")
+  );
+});
+
 test("upgrade check and apply print the hack-next launcher on either backend", () => {
   const launcher = join(home, ".hack-next", "bin", "hack-next");
   for (const [backend, env] of [

@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { resolveUserHomeDir } from "./home-dir.ts";
 import { quoteShellWord } from "./logs.ts";
 
@@ -13,7 +13,8 @@ import { quoteShellWord } from "./logs.ts";
  *
  * - `stable`: no candidate marker; the command is `hack`.
  * - `hack-next`: the channel manager's launcher at
- *   `~/.hack-next/bin/hack-next` (not on PATH).
+ *   `<root>/bin/hack-next` of the channel root holding the running bundle
+ *   (default root `~/.hack-next`; not on PATH).
  * - `bundle`: the bundle's own `hack-v5` script, run by path. It sits next to
  *   the bundle's `hack-cli`, which is the running executable. When that file
  *   cannot be found (a source run with the marker set by hand), the name
@@ -41,6 +42,29 @@ export function hackNextLauncherPath(homeDir: string): string {
   return join(homeDir, ".hack-next", "bin", "hack-next");
 }
 
+/**
+ * The `hack-next` launcher of the channel root that holds the running
+ * bundle, if there is one. The manager runs `<root>/versions/<v>/bundle/
+ * hack-cli` on both backends, and `--root` installs live anywhere, so the
+ * root comes from the running executable, not from HOME.
+ */
+export function bundleChannelLauncher(execPath: string): string | null {
+  const bundle = dirname(execPath);
+  if (basename(bundle) !== "bundle") {
+    return null;
+  }
+  const versions = dirname(dirname(bundle));
+  if (basename(versions) !== "versions") {
+    return null;
+  }
+  const path = join(dirname(versions), "bin", "hack-next");
+  try {
+    return statSync(path).isFile() ? path : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The bundle's `hack-v5` next to the running `hack-cli`, if it is a file. */
 export function adjacentBundleLauncher(execPath: string): string | null {
   const path = join(dirname(execPath), "hack-v5");
@@ -61,12 +85,15 @@ export function resolveCandidateLauncher(opts: {
   if (entry === "") {
     return { kind: "stable", command: "hack" };
   }
-  const bundle =
-    adjacentBundleLauncher(opts.execPath ?? process.execPath) ?? "hack-v5";
+  const execPath = opts.execPath ?? process.execPath;
+  const bundle = adjacentBundleLauncher(execPath) ?? "hack-v5";
   if (entry === "hack-next") {
     return {
       kind: "hack-next",
-      command: hackNextLauncherPath(opts.homeDir),
+      // The installation's own launcher; the default root only when the
+      // running bundle is not inside a channel root (a source run).
+      command:
+        bundleChannelLauncher(execPath) ?? hackNextLauncherPath(opts.homeDir),
       bundle,
     };
   }

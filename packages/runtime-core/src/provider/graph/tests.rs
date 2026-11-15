@@ -1083,6 +1083,163 @@ fn graph_volume_budget_admits_sixteen_named_volumes_and_refuses_seventeen() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
+fn graph_anonymous_volume_counts_toward_the_selected_volume_budget() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    for named in [15, 16] {
+        let mut mounts: Vec<Value> = (0..named)
+            .map(|index| json!(format!("data-{index}:/data/{index}")))
+            .collect();
+        mounts.push(json!("/anonymous"));
+        let volumes: serde_json::Map<String, Value> = (0..named)
+            .map(|index| (format!("data-{index}"), json!({})))
+            .collect();
+        state::write(&fixture.0.join("compose.yaml"), &json!({
+            "services":{"job":{"image":image,"network_mode":"none","command":["true"],"volumes":mounts}},
+            "volumes":volumes
+        })).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        assert_eq!(review.plan.volumes.len(), named + 1);
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let result = config::prepare(
+            inputs,
+            &BTreeMap::from([("job".into(), Condition::Completed)]),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+        );
+        if named == 16 {
+            assert_eq!(result.err().unwrap().code, "graph_budget");
+        } else {
+            let prepared = result.unwrap();
+            assert_eq!(
+                prepared
+                    .resources
+                    .values()
+                    .filter(|r| r.kind == Kind::Volume)
+                    .count(),
+                16
+            );
+        }
+    }
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
+fn graph_inactive_anonymous_volume_is_planned_but_not_created_or_counted() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let mounts: Vec<_> = (0..16)
+        .map(|index| format!("data-{index}:/data/{index}"))
+        .collect();
+    let volumes: serde_json::Map<String, Value> = (0..16)
+        .map(|index| (format!("data-{index}"), json!({})))
+        .collect();
+    state::write(&fixture.0.join("compose.yaml"), &json!({
+        "services":{
+            "job":{"image":image,"network_mode":"none","command":["true"],"volumes":mounts},
+            "debug":{"image":image,"network_mode":"none","profiles":["debug"],"volumes":["/anonymous"]}
+        },"volumes":volumes
+    })).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let inactive = &review.plan.services["debug"];
+    assert!(!inactive.active);
+    let generated = inactive.mounts[0].source.clone();
+    assert!(generated.starts_with("hack-anonymous-"));
+    assert!(review.plan.volumes.contains_key(&generated));
+    let inputs = project::inputs::compile(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let prepared = config::prepare(
+        inputs,
+        &BTreeMap::from([("job".into(), Condition::Completed)]),
+        &"a".repeat(32),
+        &"b".repeat(32),
+        None,
+    )
+    .unwrap();
+    assert!(!prepared.configs.contains_key("debug"));
+    assert!(
+        !prepared
+            .resources
+            .contains_key(&format!("volume:{generated}"))
+    );
+    assert_eq!(
+        prepared
+            .resources
+            .values()
+            .filter(|r| r.kind == Kind::Volume)
+            .count(),
+        16
+    );
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
+fn graph_anonymous_volume_lowers_to_owned_storage_with_image_copy_up() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    state::write(&fixture.0.join("compose.yaml"), &json!({
+        "services":{"web":{"image":format!("sha256:{}", "a".repeat(64)),"network_mode":"none","volumes":["/data"]}}
+    })).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let generated = review.plan.services["web"].mounts[0].source.clone();
+    let inputs = project::inputs::compile(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let run = "a".repeat(32);
+    let owner = "b".repeat(32);
+    let prepared = config::prepare(
+        inputs,
+        &BTreeMap::from([("web".into(), Condition::Started)]),
+        &run,
+        &owner,
+        None,
+    )
+    .unwrap();
+    let volume = &prepared.resources[&format!("volume:{generated}")];
+    assert_eq!(volume.kind, Kind::Volume);
+    assert_eq!(volume.phase, "reserved");
+    assert!(volume.name.starts_with(&format!("hkg-{run}-volume-")));
+    assert!(volume.cache.is_none());
+    let owned = labels(&owner, &run, &prepared.namespace, &prepared.plan_id, volume);
+    assert_eq!(owned["io.hack-local.owner"], owner);
+    assert_eq!(owned["io.hack-local.resource"], generated);
+    let mount = &prepared.configs["web"]["HostConfig"]["Mounts"][0];
+    assert_eq!(mount["Type"], "volume");
+    assert_eq!(mount["Source"], volume.name);
+    assert_eq!(mount["Target"], "/data");
+    assert_eq!(mount["ReadOnly"], false);
+    assert!(mount.get("VolumeOptions").is_none());
+    image_volumes::admit(
+        &json!({"/data":{}}),
+        &prepared.configs["web"],
+        &prepared.resources,
+    )
+    .unwrap();
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
 fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
     let fixture = Fixture::new();
     let candidate_root = Fixture::new();

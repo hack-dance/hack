@@ -15,7 +15,7 @@ administrator password, and never changes a trust store or NSS database.
 | all | the exported CA, `~/.hack/caddy/pki/caddy-local-authority.crt` | the file | — |
 | macOS | the System keychain | `security find-certificate -a -p /Library/Keychains/System.keychain`, then `security verify-cert -c <exported CA> -p ssl -l -k /Library/Keychains/System.keychain -L -q` (local trust settings only, no network) | 5 s each |
 | Linux | the distribution's system bundle (from `/etc/os-release`: Debian/Ubuntu `/etc/ssl/certs/ca-certificates.crt`, Fedora `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, SUSE `/var/lib/ca-certificates/ca-bundle.pem`, Arch `/etc/ssl/certs/ca-certificates.crt`) | the file | — |
-| Linux | each NSS database that exists (the shared user database and Chromium/Firefox profiles, as `hack global trust` finds them) | `certutil -d sql:<db> -L`, then `certutil -d sql:<db> -L -n "Hack Caddy Local CA" -a` | 5 s each |
+| Linux | each discovered NSS database candidate (the shared user database and Chromium/Firefox profiles, as `hack global trust` finds them) | `certutil -d sql:<db> -L`, then `certutil -d sql:<db> -L -n "Hack Caddy Local CA" -a` | 5 s each |
 
 `certutil` is the vetted absolute path `hack global trust` uses; queries run with
 Hack's fixed helper environment. `certutil -L` opens databases read-only.
@@ -42,7 +42,8 @@ evaluation that failed) means not trusted.
 - Linux system: trusted when the bundle contains the exact CA; a missing bundle is
   not trusted.
 - Linux NSS: trusted when Hack's entry carries TLS issuer trust (`C`) and holds the
-  exact CA. A profile without `cert9.db` is not a database and is not listed.
+  exact CA. A discovered candidate with missing or unreadable database/module
+  metadata is unknown. Optional browser roots that do not exist are not stores.
 
 The overall state is `not_trusted` if any store is, otherwise `unknown` if any is,
 otherwise `trusted`. The check is `ok` when trusted and a warning otherwise; the
@@ -68,3 +69,68 @@ message says which store and why. Fix: `hack global trust`.
 `ca.state` is `valid`, `missing`, `unreadable` or `invalid` (not a CA, expired or
 not yet valid); when it is not `valid`, every store is `unknown`. Paths in the
 report are absolute.
+
+## Linux NSS read safety
+
+![NSS read admission](../diagrams/nss-read-safety.svg)
+
+[Diagram source](../diagrams/nss-read-safety.mmd).
+
+Opening an NSS database can load PKCS#11 code even for `certutil -L`. Doctor
+therefore applies the existing trust-install ownership and identity guard before
+admitting a read. The selected home, XDG config and XDG data roots are preserved;
+there is no substitute HOME, copied profile, NSS initialization or repair.
+
+A candidate must resolve inside those selected roots. Its directory and both traversed and resolved
+ancestors must be owned by the user or root and not writable by another user;
+`cert9.db`, `key4.db` and `pkcs11.txt` must be private regular files owned by the
+current user. Database and metadata file links, including dangling links, are
+refused. Profile-directory aliases contained within the selected roots remain
+supported only when every intermediate symlink hop and its traversed ancestor
+chain can be checked, with at most 40 link expansions and 256 visited entries.
+A safe final target does not excuse a shared writable directory on the route.
+Missing or unreadable required files are Unknown, never proof that
+trust is absent or healthy.
+
+Module discovery is deliberately conservative. `pkcs11.txt` is limited to 16 KiB
+and must exactly match a supported single built-in `NSS Internal PKCS #11 Module`
+template: empty `library`, the selected SQL configuration directory, empty
+certificate/key prefixes, empty or `optimizeSpace` storage flags, the literal `secmod.db` parameter, and absent
+or empty update parameters. The internal module flags are exactly
+`internal,critical`. Supported layouts come from a pinned upstream NSS golden
+fixture and default-module producer definitions, including the serialized
+`slotParams` form, its trailing spaces and final blank line. The exact source
+and variants are recorded in `tests/fixtures/nss-read/README.md`; these are not
+newly captured distribution or browser profiles. Escapes, comments, unsupported
+quoting/case/order, duplicate keys, extra records and other configurations are
+unsupported. Doctor does not run NSS to interpret them. All external module
+libraries, including apparently owned ones, are refused. A legacy `secmod.db`,
+`cert8.db` or `key3.db` file, or a SQLite `-wal`, `-shm` or `-journal` sidecar for
+either SQL database, also makes the result Unknown, avoiding migration or journal
+recovery during observation. The metadata parameter `secmod='secmod.db'` is
+allowed only while that legacy file is provably absent.
+
+Immediately before and after each query, Doctor rechecks the pinned database,
+directory, ancestor and complete symlink-traversal identities, module-file identity and metadata digest,
+and the absence of legacy/sidecar files. It discards results if a check fails
+and starts no later query for that database. Queries use the vetted absolute
+`certutil`, explicit `-d sql:<selected database>` and the existing fixed helper
+environment, which removes inherited NSS and loader selectors while preserving
+the selected home. Discovery admits at most 256 entries per directory; oversized
+or unreadable discovery is Unknown. The existing 16-database and 20-second limits
+also cover these safety checks.
+
+These path checks are not an atomic binding to NSS's later opens. A process
+running as the same user can still swap a database or metadata after the last
+check and restore it before the next check, or edit database contents in place.
+Doctor accepts that residual same-user race; it does not claim to isolate NSS
+from a hostile process with the same user identity. Unknown does not prove the
+browser distrusts the CA: external modules such as p11-kit may provide trust that
+this observer deliberately refuses to load. A completed negative result concerns
+Hack's entry in that admitted user database, not every browser trust source.
+
+If the system bundle is trusted but the selected shared NSS database has never
+been created, NSS and the overall report are Unknown rather than an all-clear.
+Review the selected browser profile and intended trust setup, then rerun Doctor.
+`hack global trust` is a separate, explicitly changing setup operation; Doctor
+does not run it or create the missing database.

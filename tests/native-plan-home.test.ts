@@ -83,3 +83,11 @@ test("rejects a torn activity record", async () => {
     "Expected one complete activity record per failed up"
   );
 });
+
+test("rejects private fixture inputs in otherwise valid activity", async () => {
+  const privateInput = "synthetic-private-plan-home-value";
+  await writeActivity([{ ...failedUp, unexpected: privateInput }]);
+  await expect(
+    assertNativePlanHome({ home, failedUps: 1, privateInputs: [privateInput] })
+  ).rejects.toThrow("Unexpected private input in lifecycle activity");
+});

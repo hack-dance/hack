@@ -1,0 +1,7 @@
+flowchart TD
+    A[Compose mount] --> B{Anonymous volume?}
+    B -->|no| C[Existing mount review]
+    B -->|yes| D[Normalize container target]
+    D --> E[Derive service-scoped name]
+    E --> F[Declare project-owned volume]
+    F --> G[Warn about retention]

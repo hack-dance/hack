@@ -1,10 +1,14 @@
 import { afterAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmod,
   link,
   mkdir,
   mkdtemp,
+  readFile,
+  rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -23,9 +27,12 @@ import {
   startReplacementDaemon,
 } from "../src/commands/daemon-replace.ts";
 import {
+  type InstalledBinary,
   observePostUpdateDaemon,
+  type PostUpdateDaemonResult,
   parseStartEnvelope,
   reconcileDaemonAfterUpdate,
+  verifyInstalledBinary,
 } from "../src/commands/daemon-upgrade.ts";
 import {
   executingDaemonArgv,
@@ -350,6 +357,8 @@ test("after an update, the new executable's start --json reconciles the service"
   const ran: string[][] = [];
   const result = await reconcileDaemonAfterUpdate({
     binaryPath: "/opt/hack/bin/hack",
+    // The installed binary checks out (verifyInstalledBinary has its own tests).
+    verifyBinary: () => Promise.resolve(null),
     observe: () =>
       Promise.resolve({ serviceInstalled: true, daemonRunning: true }),
     runCli: (argv) => {
@@ -404,6 +413,7 @@ test("a failed or unreadable post-update reconcile is reported, never fatal", as
   expect(
     await reconcileDaemonAfterUpdate({
       binaryPath: "/opt/hack/bin/hack",
+      verifyBinary: () => Promise.resolve(null),
       observe: () =>
         Promise.resolve({ serviceInstalled: true, daemonRunning: true }),
       runCli: () => Promise.reject(new Error("spawn failed")),
@@ -885,6 +895,7 @@ test("after an update, a daemon that stopped before the child ran is not started
   const ran: Record<string, string | undefined>[] = [];
   const result = await reconcileDaemonAfterUpdate({
     binaryPath: "/opt/hack/bin/hack",
+    verifyBinary: () => Promise.resolve(null),
     observe: () =>
       Promise.resolve({ serviceInstalled: true, daemonRunning: true }),
     runCli: () => {
@@ -2107,4 +2118,130 @@ test("an incompatible launchd daemon with a missing plist program is only replac
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// Codex security finding on PR #854 (HACK-2216): the post-update step runs
+// the new executable only from a trusted path, while it is still exactly
+// the file the update published.
+
+/** A published `hack` in its own directory, with the identity publish saw. */
+async function publishedBinary(): Promise<{
+  readonly dir: string;
+  readonly path: string;
+  readonly installed: InstalledBinary;
+}> {
+  const dir = await mkdtemp(join(tmpdir(), "hack-installed-"));
+  await chmod(dir, 0o755);
+  const path = join(dir, "hack");
+  await writeFile(path, "#!/bin/sh\necho new\n");
+  await chmod(path, 0o755);
+  const info = await stat(path);
+  return {
+    dir,
+    path,
+    installed: {
+      dev: Number(info.dev),
+      ino: Number(info.ino),
+      sha256: createHash("sha256")
+        .update(await readFile(path))
+        .digest("hex"),
+    },
+  };
+}
+
+/** The post-update step on a running service, recording what it runs. */
+async function reconcileWith(opts: {
+  readonly path: string;
+  readonly installed: InstalledBinary;
+}): Promise<{
+  readonly result: PostUpdateDaemonResult;
+  readonly ran: string[][];
+}> {
+  const ran: string[][] = [];
+  const result = await reconcileDaemonAfterUpdate({
+    binaryPath: opts.path,
+    installed: opts.installed,
+    observe: () =>
+      Promise.resolve({ serviceInstalled: true, daemonRunning: true }),
+    runCli: (argv) => {
+      ran.push([...argv]);
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          ok: true,
+          data: {
+            schema: "hack.daemon-start.v1",
+            manager: "systemd",
+            action: "none",
+            stale_reasons: [],
+          },
+        }),
+      });
+    },
+  });
+  return { result, ran };
+}
+
+test("after an update, the new executable runs only when its path is trusted and it is the published file", async () => {
+  const published = await publishedBinary();
+  try {
+    // Control: trusted and unchanged, so it runs.
+    const control = await reconcileWith(published);
+    expect(control.ran).toEqual([
+      [published.path, "daemon", "start", "--json"],
+    ]);
+    expect(control.result.status).toBe("reconciled");
+
+    // A link at the final component is never run.
+    const link = join(published.dir, "hack-link");
+    await symlink(published.path, link);
+    const linked = await reconcileWith({ ...published, path: link });
+    expect(linked.ran).toEqual([]);
+    expect(linked.result).toMatchObject({
+      status: "failed",
+      next_step: "hack daemon start",
+    });
+
+    // The binary was replaced after publish (another inode, same path).
+    const replacement = join(published.dir, "payload");
+    await writeFile(replacement, "#!/bin/sh\necho payload\n");
+    await chmod(replacement, 0o755);
+    await rename(replacement, published.path);
+    const replaced = await reconcileWith(published);
+    expect(replaced.ran).toEqual([]);
+    expect(replaced.result).toMatchObject({
+      status: "failed",
+      next_step: "hack daemon start",
+    });
+    expect(
+      replaced.result.status === "failed" ? replaced.result.message : ""
+    ).toContain("replaced after the update installed it");
+  } finally {
+    await rm(published.dir, { recursive: true, force: true });
+  }
+});
+
+test("after an update, an install directory others can write is never run from", async () => {
+  const published = await publishedBinary();
+  try {
+    // Another account could rename a payload over the binary.
+    await chmod(published.dir, 0o777);
+    const untrusted = await reconcileWith(published);
+    expect(untrusted.ran).toEqual([]);
+    expect(untrusted.result).toMatchObject({
+      status: "failed",
+      next_step: "hack daemon start",
+    });
+    // The update itself is never failed by this step.
+    expect(untrusted.result.status).not.toBe("reconciled");
+  } finally {
+    await chmod(published.dir, 0o755);
+    await rm(published.dir, { recursive: true, force: true });
+  }
+});
+
+test("an update that did not record its binary runs nothing", async () => {
+  expect(
+    await verifyInstalledBinary({ path: "/srv/hack", installed: undefined })
+  ).toContain("did not record");
 });

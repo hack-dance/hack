@@ -220,7 +220,17 @@ export async function publishRelease(opts: {
         await syncDirectory(dirname(opts.assetsDir));
         opts.checkpoint?.("binary-published");
         complete = true;
-        return { backupManifest: join(backup, "manifest.json") };
+        return {
+          backupManifest: join(backup, "manifest.json"),
+          // The file now at binaryPath, as verified here: the rename keeps
+          // the staged inode. The post-update step re-checks it before it
+          // runs that path (HACK-2216).
+          installedBinary: {
+            dev: Number(binaryIdentity.dev),
+            ino: Number(binaryIdentity.ino),
+            sha256: manifest.installedSha256,
+          },
+        };
       } catch (error) {
         try {
           if (binaryPublished) {

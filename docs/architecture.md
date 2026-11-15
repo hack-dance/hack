@@ -956,6 +956,19 @@ reported in the update result (`daemon.status: "failed"`) with
 `hack daemon install` as the next step. A stopped service picks up the new
 version at its next `hack daemon start`.
 
+The new executable is run only after two checks, made right before the
+spawn:
+- its path must be safe from other accounts (the program checks a login
+  service gets), with no link at the final component;
+- it must still be the file `hack update` published: the same device, inode
+  and sha256 that the publish step recorded.
+
+With a custom install directory that another account can write, a payload
+could otherwise be renamed over the binary and run as the updating user. If
+either check fails, nothing is run, and the update result records
+`daemon.status: "failed"` with `hack daemon start` as the next step. The
+update itself still succeeds.
+
 `hack daemon start|stop|restart|install --json` print one envelope and nothing
 else on stdout (human lines go to stderr). They follow the shared rule in
 [Machine-readable output](reference/machine-readable-output.md): exactly `ok`

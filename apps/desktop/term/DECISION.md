@@ -519,12 +519,34 @@ symbols) comes from it only when the terminal's font has no glyph for it.
 - *U+E0A0..U+E0A3 come from the bundled font, not from hand-drawn paths.*
   They are pictographs, not cell geometry. Ghostty makes the same split.
 
-**Size of a symbol.** Each glyph in the bundled font sits in a box one em
-wide. Fitted to one narrow cell it would be about 60% of the text's size.
-So a symbol followed by a blank cell uses that cell too (prompt themes put
-a space after their icons, and Ghostty and other terminals treat that space
-the same way): the box is as wide as the room, never taller than the cell,
-and centred. A symbol with no blank cell after it is fitted to one cell.
+**Room, size and clipping of a symbol.** A symbol's room is the cells it
+may draw in. A double-width symbol (U+26A1, say) has the two cells the
+emulator gave it. A narrow one has its own cell, and the next cell too when
+that one is blank: each glyph in the bundled font sits in a box one em wide,
+which fitted to one narrow cell is about 60% of the text's size, prompt
+themes put a space after their icons, and Ghostty and other terminals treat
+that space the same way. A double-width symbol is not widened into a third
+cell: it already has the two cells the blank-cell rule exists to give.
+
+In its room the glyph's em is made as wide as the room, never taller than
+the cell, and its box is centred, so symbols of one size line up. The font's
+metrics do not bound the ink, though: U+F0DC and U+F0DE rise to y = 1804
+where the ascender is 1638, and other glyphs hang past their advance. So
+the scale is then reduced until the glyph's ink box fits the room, and the
+glyph is moved by as little as brings its ink inside
+(`SymbolOutline::place`; a unit test places every glyph of the font in
+eight room sizes and checks the ink is inside). Most glyphs are not moved
+at all.
+
+Everything self-drawn is also clipped to its room: a symbol to its one or
+two cells, and box drawing, blocks and separators to their one cell. A
+diagonal's stroke is wider than the cell at its corners and is cut off at
+the cell's edges, so nothing self-drawn can land in a neighbouring cell.
+
+`TermFont::symbols` can be set to `BundledSymbols::Always`: every symbol
+the bundled font has is then drawn from it, whatever the terminal's font
+has. The default is the rule above. The render test uses it to exercise a
+double-width symbol on any machine, since many fonts have U+26A1.
 
 **Licence and size.** The archive's licence file is MIT (Nerd Fonts). The
 font is a collection, and the archive's README lists each icon set's own
@@ -536,16 +558,15 @@ licence:
 | Material Design | Apache 2.0 |
 | Pomicons | OFL 1.1 (reserved font name) |
 | Weather Icons | OFL 1.1 |
-| Font Logos | "unlicensed", as the README words it; its upstream licence was not checked |
+| Font Logos 1.3.0 | The Unlicense, a public-domain dedication ([LICENSE at v1.3.0](https://github.com/lukas-w/font-logos/blob/v1.3.0/LICENSE)); the archive's README writes this as "unlicensed" |
 | Devicons, Octicons, Seti, Powerline, Powerline Extra, IEC power symbols, Font Awesome Extension, extra glyphs from Hack | MIT |
 
-The named licences are all permissive and none is copyleft, so embedding
-is allowed; the one entry without a named licence (Font Logos) should be
-confirmed before the app ships. CC BY 4.0 and the OFL require attribution: a shipped app must carry the Nerd Fonts
-licence and that list, as it must carry Ghostty's notice. Ghostty ships the
-same collection. 2.6 MB in the binary is acceptable for a desktop app (the
-window toolkit alone is far larger); it is the same order as what Ghostty
-embeds. **Both points are flagged for the owner.**
+These are all permissive or public domain and none is copyleft, so
+embedding is allowed. CC BY 4.0 and the OFL require attribution: a shipped
+app must carry the Nerd Fonts licence and that list, as it must carry
+Ghostty's notice. Ghostty ships the same collection. 2.6 MB in the binary
+is acceptable for a desktop app (the window toolkit alone is far larger);
+it is the same order as what Ghostty embeds.
 
 **Limits.**
 
@@ -558,23 +579,41 @@ embeds. **Both points are flagged for the owner.**
 - The app's default monospace font on the capture machine has no italic
   face, so italics show only with a font that has one.
 
-**The render test** (`tests/render.rs`) draws a row offscreen: the two
-solid powerline arrows, branch U+E0A0, three icons (U+F418, U+E718,
-U+F07B), four box-drawing characters and two blocks, plus U+E050, a
-private-use code point no font has, as this machine's missing-glyph
-reference. It fails if any glyph is blank, matches the missing-glyph
-rendering, is identical to another icon (missing-glyph boxes all look
-alike), or is a speck less than half the cell tall. It also fails if the
-view did not take the four icons from the bundled font, or if an icon's
-ink is not as wide for its height as that font's outline (within a
-quarter); without these two checks the test passed on a machine whose
-own fonts cover the same code points. It also checks the
-geometry in pixels: the full block fills its cell, the half block fills
-exactly the lower half, lines reach the edges their arms point at and no
-others, and each arrow is flat and full height on one side and comes to a
-point on the other. It caught the wrong-font branch glyph described above.
-It needs an offscreen renderer; CI installs Mesa's software Vulkan driver
-for it and requires it there.
+**The render tests** (`tests/render.rs`). The first draws a row offscreen
+with blank cells and blank rows around every glyph: the two solid powerline
+arrows, branch U+E0A0, three icons (U+F418, U+E718, U+F07B), the two sort
+arrows whose ink rises above the ascender (U+F0DC, U+F0DE), four
+box-drawing characters, two diagonals (U+2571, U+2573) and two blocks, plus
+U+E050, a private-use code point no font has, as this machine's
+missing-glyph reference. It fails if:
+
+- a glyph is blank, matches the missing-glyph rendering, is identical to
+  another icon (missing-glyph boxes all look alike), or is a speck less
+  than half the cell tall;
+- the view did not take the symbols from the bundled font (without this
+  the test passed on a machine whose own fonts cover the same code points);
+- a symbol's ink box is not where the placement rule puts the bundled
+  glyph, to a pixel and a half on each side: this catches a glyph cut off
+  by the clip, or one of the wrong size or shape;
+- **any pixel around a glyph's room differs from the background**: the
+  rows above and below it and the blank cells before and after it;
+- the geometry is off: the full block fills its cell, the half block fills
+  exactly the lower half, lines reach the edges their arms point at and no
+  others, and each arrow is flat and full height on one side and comes to
+  a point on the other.
+
+The second draws the double-width U+26A1 with an "x" straight after it and
+fails unless the symbol is placed in both of its cells, is taller than it
+would be in one, reaches into the second cell, and paints nothing above,
+below or before them.
+
+Each check was tried against the fault it is for: without the sprite clip
+the diagonal paints 4 pixels outside its cell; with the old em-and-ascender
+placement U+F0DC is cut off at the top of its room; with a one-cell room
+the double-width symbol is half the size. The first version of the test
+also caught the wrong-font branch glyph described above. The tests need an
+offscreen renderer; CI installs Mesa's software Vulkan driver for them and
+requires it there.
 
 ### What the renders and tests show
 
@@ -842,8 +881,7 @@ embedded font). The last two were already in the lockfile through GPUI and
 
 Embedded, not a crate: **Symbols Nerd Font Mono**, Nerd Fonts v3.5.1,
 2.6 MB. MIT for the collection, with the icon-set licences listed under
-"Glyphs" (CC BY 4.0, Apache 2.0, OFL 1.1, MIT, and one set listed as
-"unlicensed").
+"Glyphs" (CC BY 4.0, Apache 2.0, OFL 1.1, MIT, and the Unlicense).
 
 Every package this branch adds to `Cargo.lock`:
 

@@ -78,7 +78,8 @@ export type ServiceUnitState =
  *   is not proven to be this home's hackd (the same proof `stop` needs), so
  *   restarting it could stop another home's daemon;
  * - `rewrite-refused`: the service needs a rewrite, or an automatic
- *   restart, but the program it would run fails the checks (no durable
+ *   start or restart, but the program it would run, or a directory of the
+ *   PATH it gives hackd, fails the checks (no durable
  *   `hack` to retarget to, a refreshed plist's kept program that is not
  *   durable or that another account could replace, or a program or service
  *   PATH that fails install's checks), so nothing was written, reloaded or

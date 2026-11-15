@@ -1148,12 +1148,35 @@ test("any continued line in the main unit file counts as a home binding", () => 
   expect(findDroppedHomeBinding({ unitText: rendered, rendered })).toBeNull();
 });
 
+/**
+ * A launchd job whose program and PATH are safe from other accounts: a
+ * `hack` in a directory of this test's own, which is also the plist's only
+ * PATH directory. Every kickstart checks both (HACK-2216). `plist(env)`
+ * adds `env` entries to its EnvironmentVariables; `dir` is removed by the
+ * caller.
+ */
+async function safeLaunchdJob(): Promise<{
+  readonly dir: string;
+  readonly plist: (env?: string) => string;
+}> {
+  const dir = await mkdtemp(join(tmpdir(), "hack-launchd-job-"));
+  await chmod(dir, 0o755);
+  const program = join(dir, "hack");
+  await writeFile(program, "#!/bin/sh\n");
+  await chmod(program, 0o755);
+  return {
+    dir,
+    plist: (env = "") =>
+      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${program}</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>${dir}</string>\n${env}\n  </dict>\n</dict>\n</plist>\n`,
+  };
+}
+
 // Codex finding on PR #854: refuse before stopping a direct daemon.
 
 test("launchd: an incompatible direct daemon is not replaced when the loaded job is another home's", async () => {
   const effects: string[] = [];
-  const plistWith = (env: string) =>
-    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>dance.hack.hackd</string>\n  <key>EnvironmentVariables</key>\n  <dict>\n${env}\n  </dict>\n</dict>\n</plist>\n`;
+  const job = await safeLaunchdJob();
+  const plistWith = (env: string) => job.plist(env);
   const hooks = (opts: {
     readonly plist: string;
     readonly proven: boolean;
@@ -1210,6 +1233,88 @@ test("launchd: an incompatible direct daemon is not replaced when the loaded job
   expect(await checkRunningLaunchdDaemon(ours)).toBeNull();
   // Nothing was repaired or kickstarted while deciding.
   expect(effects).toEqual([]);
+  await rm(job.dir, { recursive: true, force: true });
+});
+
+// Codex security finding on PR #854 (HACK-2216): every kickstart of the
+// launchd job, current plist or not, checks its program and PATH first.
+
+test("launchd: a current plist with an unsafe PATH stops nothing and kickstarts nothing", async () => {
+  const job = await safeLaunchdJob();
+  try {
+    // The plist's only PATH directory becomes writable by the group.
+    await chmod(job.dir, 0o775);
+    const effects: string[] = [];
+    const hooks = (running: boolean) => ({
+      paths: resolveDaemonPaths({ home: "/nonexistent-home" }),
+      trace: createDaemonCommandTrace(),
+      waitForReady: () => Promise.reject(new Error("must not start")),
+      readStatus: () =>
+        Promise.resolve({
+          installed: true,
+          loaded: true,
+          running,
+          pid: running ? 4242 : null,
+          exitStatus: null,
+          observation: "reported" as const,
+        }),
+      isAncestor: () => Promise.resolve(false),
+      readProgram: () =>
+        Promise.resolve({
+          kind: "ours" as const,
+          program: join(job.dir, "hack"),
+          resolved: join(job.dir, "hack"),
+        }),
+      readPlist: () => Promise.resolve(job.plist()),
+      proveJob: () => Promise.resolve(true),
+      // No refresh is predicted (a source run): launchd starts the plist
+      // as it is, which is what the check before a kickstart covers.
+      executing: null,
+      repair: () => {
+        effects.push("repair");
+        return Promise.resolve("ok" as const);
+      },
+      kickstart: () => {
+        effects.push("kickstart");
+        return Promise.resolve({ ok: true });
+      },
+    });
+
+    // An incompatible running daemon under a current plist (a version
+    // mismatch after an update): refused before anything is stopped.
+    const replace = { ...hooks(true), pid: 4242, compatible: false };
+    expect(await checkRunningLaunchdDaemon(replace)).toBe(1);
+    expect(replace.trace.blocked).toBe("rewrite-refused");
+    expect([...replace.trace.stale]).toEqual(["version-mismatch"]);
+
+    // restart's check before its stop refuses the same job.
+    const restart = hooks(true);
+    expect(await refuseLaunchdBeforeReplacing(restart)).toBe(1);
+    expect(restart.trace.blocked).toBe("rewrite-refused");
+    expect(effects).toEqual([]);
+
+    // A stopped service: start is not asked to kickstart it.
+    const stopped = hooks(false);
+    expect(await startViaLaunchdIfLoaded(stopped)).toBe(1);
+    expect(stopped.trace.blocked).toBe("rewrite-refused");
+    expect(stopped.trace.action).toBe("none");
+    expect(effects).toEqual(["repair"]);
+
+    // Control: with the directory safe again, the stopped service starts.
+    await chmod(job.dir, 0o755);
+    const safe = { ...hooks(false), waitForReady: () => Promise.resolve(true) };
+    expect(await startViaLaunchdIfLoaded(safe)).toBe(0);
+    expect(effects).toEqual(["repair", "repair", "kickstart"]);
+    expect(
+      await checkRunningLaunchdDaemon({
+        ...hooks(true),
+        pid: 4242,
+        compatible: false,
+      })
+    ).toBeNull();
+  } finally {
+    await rm(job.dir, { recursive: true, force: true });
+  }
 });
 
 // Review rounds 10 and 11 (HACK-2216): a replacement does not leave hackd
@@ -1505,6 +1610,7 @@ test("a launchd retarget target must be an installed, durable, trusted hack", as
 });
 
 test("a compatible running daemon is restarted after a repair only when the repair ran", async () => {
+  const job = await safeLaunchdJob();
   const run = async (
     repair: "repaired" | "unproven-owner" | "other-program"
   ) => {
@@ -1515,6 +1621,7 @@ test("a compatible running daemon is restarted after a repair only when the repa
       trace,
       onlyIfStale: true,
       waitForReady: () => Promise.resolve(true),
+      readPlist: () => Promise.resolve(job.plist()),
       readStatus: () =>
         Promise.resolve({
           installed: true,
@@ -1542,6 +1649,7 @@ test("a compatible running daemon is restarted after a repair only when the repa
     expect(kept.kicked).toEqual([]);
     expect(kept.trace.blocked).toBe(refused);
   }
+  await rm(job.dir, { recursive: true, force: true });
 });
 
 // Review round 19 (HACK-2216): replacing an incompatible launchd daemon

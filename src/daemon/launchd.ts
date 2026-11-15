@@ -248,6 +248,87 @@ export async function checkLaunchdServicePath(opts: {
     : `the PATH the launchd service would give hackd is not safe: ${error.replace("the hackd.service PATH", "its PATH")}`;
 }
 
+/** launchd's PATH for an agent whose plist sets none. */
+const LAUNCHD_DEFAULT_PATH_DIRECTORIES = [
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+] as const;
+
+/**
+ * The PATH directories a plist gives hackd: its own `PATH`, or launchd's
+ * default when it sets none. With the test seam, the system directories
+ * among them are replaced by `systemDirectories`. Null when the PATH is
+ * not a plain string or the plist cannot be read.
+ */
+function launchdPlistPathDirectories(opts: {
+  readonly plistText: string;
+  readonly systemDirectories?: readonly string[];
+}): readonly string[] | null {
+  const env = parseLaunchdPlistEnvironment({ plistText: opts.plistText });
+  if (env.kind === "unknown") {
+    return null;
+  }
+  const raw = env.env.get("PATH");
+  if (raw === null) {
+    return null;
+  }
+  const dirs =
+    raw === undefined ? [...LAUNCHD_DEFAULT_PATH_DIRECTORIES] : raw.split(":");
+  const seam = opts.systemDirectories;
+  if (seam === undefined) {
+    return dirs;
+  }
+  const system = new Set<string>([
+    ...LAUNCHD_SYSTEM_PATH_DIRECTORIES,
+    ...LAUNCHD_DEFAULT_PATH_DIRECTORIES,
+  ]);
+  return [...dirs.filter((dir) => !system.has(dir)), ...seam];
+}
+
+/**
+ * The last check before launchd is asked to start this job (HACK-2216): a
+ * kickstart of a loaded job, current plist or not, for `start`, `restart`,
+ * the post-update reconcile, a stopped-service start or autostart. The
+ * plist's program must be safe from other accounts along its whole path
+ * (`checkServiceExecutableTrusted`), and every directory of the PATH it
+ * gives hackd (its own `PATH`, or launchd's default) must pass the checks
+ * systemd makes for its unit's PATH (`checkServicePathDirectories`):
+ * hackd runs helpers such as `docker` by bare name. A plist whose program
+ * or PATH cannot be read is refused. Null, or why launchd must not start it.
+ */
+export async function checkLaunchdJobBeforeStart(opts: {
+  readonly plistText: string;
+  /** Test seam; see {@link renderedLaunchdPathDirectories}. */
+  readonly systemDirectories?: readonly string[];
+}): Promise<string | null> {
+  const program = parseLaunchdPlistProgram({ plistText: opts.plistText });
+  if (program.kind !== "path") {
+    return "the program the launchd service runs cannot be read";
+  }
+  const dirs = launchdPlistPathDirectories(opts);
+  if (dirs === null) {
+    return "the PATH the launchd service gives hackd cannot be read";
+  }
+  // Loaded lazily: systemd.ts imports this module.
+  const { checkServiceExecutableTrusted, checkServicePathDirectories } =
+    await import("./systemd.ts");
+  const untrusted = await checkServiceExecutableTrusted({
+    path: program.path,
+  });
+  if (untrusted !== null) {
+    return untrusted.replace(
+      "hackd.service would run",
+      "the launchd service would run"
+    );
+  }
+  const unsafePath = await checkServicePathDirectories({ dirs });
+  return unsafePath === null
+    ? null
+    : `the PATH the launchd service gives hackd is not safe: ${unsafePath.replace("the hackd.service PATH", "its PATH")}`;
+}
+
 /**
  * Generates the launchd plist XML for hackd.
  */

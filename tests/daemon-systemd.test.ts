@@ -5779,3 +5779,38 @@ linuxTest(
     expect(hooks.trace.blocked).toBe("unproven-owner");
   }
 );
+
+// Codex security finding on PR #854 (HACK-2216): the last check before an
+// automatic restart covers the effective service PATH too.
+
+linuxTest(
+  "an automatic restart is refused when a service PATH directory becomes writable during the final proof",
+  async () => {
+    const fake = fakeSystemd({ active: true, mainPid: 4242 });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.calls.length = 0;
+    const base = runningHooks(fake, "1.0.0");
+    let proofs = 0;
+    const hooks = {
+      ...base,
+      proveMainProcess: async (pid: number, daemonRoot: string) => {
+        proofs += 1;
+        if (proofs === 2) {
+          // The service PATH's system directory (hackd runs `docker` by
+          // bare name) becomes writable by the group; the program stays
+          // safe.
+          await chmod(sysBin, 0o775);
+        }
+        return await base.proveMainProcess(pid, daemonRoot);
+      },
+    };
+    expect(await reconcileRunningSystemdDaemon(hooks)).toBe(1);
+    expect(proofs).toBe(2);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(hooks.trace.blocked).toBe("rewrite-refused");
+  }
+);

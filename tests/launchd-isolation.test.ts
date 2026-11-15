@@ -27,6 +27,7 @@ import {
 import {
   LAUNCHD_ALLOW_ISOLATED_ENV,
   LAUNCHD_DISABLE_ENV,
+  renderedLaunchdPathDirectories,
   renderLaunchdPlist,
   resolveLaunchdAccess,
 } from "../src/daemon/launchd.ts";
@@ -520,6 +521,23 @@ test("a refresh whose kept program has a group-writable ancestor is refused, not
 
 // Codex security finding on PR #854 (HACK-2216): the PATH a rewritten
 // plist gives hackd is checked like systemd's rendered unit PATH.
+
+/**
+ * A current-shape plist for the fixture's `hack` whose PATH is only the
+ * fixture's own `sysbin`, so the check before a kickstart inspects nothing
+ * of the host's (HACK-2142).
+ */
+function safeFixturePlist(fixture: Fixture): string {
+  return renderLaunchdPlist({
+    hackBinPath: join(fixture.root, "tools", "hack"),
+    home: fixture.home,
+    runAtLoad: false,
+    guiSessionOnly: false,
+  }).replace(
+    renderedLaunchdPathDirectories({ home: fixture.home }).join(":"),
+    join(fixture.root, "sysbin")
+  );
+}
 
 /** A stale managed plist for the fixture's `hack` (an older PATH). */
 function stalePlist(fixture: Fixture): string {
@@ -1273,12 +1291,29 @@ const AUTOSTART_CASES = [
   },
   {
     // Positive control: the same driver does reach launchd without a marker.
+    // The installed plist is a real one whose program and PATH are safe:
+    // every kickstart checks both (HACK-2216).
     label: "positive control: a stable run on the default hack home",
     env: {},
     denied: false,
     isolated: false,
+    safePlist: true,
     launchctl: ["print", "kickstart"],
     hack: [],
+  },
+  {
+    // The same run with the plist's PATH directory writable by the group:
+    // launchd is not asked to start it, and the fallback `hack daemon
+    // start` runs instead (it refuses the same job with the reason).
+    label:
+      "a plist whose PATH has a group-writable directory is not kickstarted",
+    env: {},
+    denied: false,
+    isolated: false,
+    safePlist: true,
+    unsafePath: true,
+    launchctl: ["print"],
+    hack: ["daemon start"],
   },
   {
     // Positive control: and runs the `hack` on PATH when launchd is denied.
@@ -1294,6 +1329,12 @@ const AUTOSTART_CASES = [
 for (const autostartCase of AUTOSTART_CASES) {
   test(`daemon request autostart: ${autostartCase.label}`, async () => {
     const fixture = await makeFixture();
+    if ("safePlist" in autostartCase) {
+      await writeFile(fixture.plistPath, safeFixturePlist(fixture));
+    }
+    if ("unsafePath" in autostartCase) {
+      await chmod(join(fixture.root, "sysbin"), 0o775);
+    }
     const before = await plistSnapshot(fixture);
     const hackHome = autostartCase.isolated
       ? fixture.isolatedHackHome

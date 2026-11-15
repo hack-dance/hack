@@ -1,5 +1,6 @@
 import { resolveExecutingCliPath } from "../daemon/executing-cli.ts";
 import {
+  checkLaunchdJobBeforeStart,
   checkLaunchdRetargetTarget,
   checkLaunchdServicePath,
   getLaunchdServiceStatus,
@@ -207,13 +208,16 @@ type ReplacementBlock =
   | "unproven-owner"
   | "other-program"
   | "retarget-refused"
-  | "refresh-refused";
+  | "refresh-refused"
+  | "start-refused";
 
 /** The `--json` blocked reason for a {@link ReplacementBlock}. */
 function blockedReason(
   block: ReplacementBlock
 ): "home-binding" | "unproven-owner" | "other-program" | "rewrite-refused" {
-  return block === "retarget-refused" || block === "refresh-refused"
+  return block === "retarget-refused" ||
+    block === "refresh-refused" ||
+    block === "start-refused"
     ? "rewrite-refused"
     : block;
 }
@@ -228,6 +232,8 @@ function describeReplacementBlock(block: ReplacementBlock): string {
       return "the launchd job would be retargeted to a hack that is not this CLI";
     case "refresh-refused":
       return "the launchd plist is stale and the program a refresh would keep, or the PATH it would give hackd, is not fit for a login service (a source file, a temporary location, or a program or PATH directory others can change)";
+    case "start-refused":
+      return "the program the launchd service runs, or a directory of the PATH it gives hackd, is not safe from other accounts, so launchd would not be asked to start it";
     default:
       return "the launchd job's program is gone and the hack it would be retargeted to is not fit for a login service";
   }
@@ -269,7 +275,7 @@ async function launchdJobBlocksReplacement(opts: {
   }
   const program = await readProgram(hooks);
   if (program.kind !== "missing") {
-    return await refreshBlocksReplacement({ hooks, plistText });
+    return await startBlocksReplacement({ hooks, plistText });
   }
   if (program.resolved === null) {
     return "retarget-refused";
@@ -309,13 +315,17 @@ async function rewriteTargetIsFit(opts: {
 }
 
 /**
- * The start after the stop would refresh a stale plist for the program it
- * keeps: that program and the PATH the refreshed plist gives hackd must
- * pass the checks the refresh makes just before it writes
- * ({@link rewriteTargetIsFit}), or nothing is stopped (`refresh-refused`).
- * Null when no refresh would run or it may.
+ * The start after the stop, predicted for a plist whose program exists:
+ * - when it would refresh a stale plist, the program the refresh keeps and
+ *   the PATH the refreshed plist gives hackd must pass the checks the
+ *   refresh makes just before it writes ({@link rewriteTargetIsFit}), or
+ *   nothing is stopped (`refresh-refused`);
+ * - otherwise launchd starts the plist as it is, so its program and PATH
+ *   must pass {@link checkLaunchdJobBeforeStart}, the check before the
+ *   kickstart, or nothing is stopped (`start-refused`).
+ * Null when the start may go on.
  */
-async function refreshBlocksReplacement(opts: {
+async function startBlocksReplacement(opts: {
   readonly hooks: LaunchdStartHooks;
   readonly plistText: string;
 }): Promise<ReplacementBlock | null> {
@@ -325,12 +335,16 @@ async function refreshBlocksReplacement(opts: {
     plistText: opts.plistText,
     executing: hooks.executing,
   });
-  if (target === null) {
-    return null;
+  if (target !== null) {
+    return (await rewriteTargetIsFit({ hooks, target }))
+      ? null
+      : "refresh-refused";
   }
-  return (await rewriteTargetIsFit({ hooks, target }))
-    ? null
-    : "refresh-refused";
+  const unsafe = await checkLaunchdJobBeforeStart({
+    plistText: opts.plistText,
+    systemDirectories: hooks.systemPathDirectories,
+  });
+  return unsafe === null ? null : "start-refused";
 }
 
 /**
@@ -446,6 +460,12 @@ export async function startViaLaunchdIfLoaded(
     });
     return 1;
   }
+  // Last, right before launchd is asked to start the job, current plist or
+  // just rewritten: its program and the PATH it gives hackd (HACK-2216).
+  const unsafe = await refuseUnsafeLaunchdStart(hooks);
+  if (unsafe !== null) {
+    return unsafe;
+  }
   trace.action = rewritten ? "reinstalled" : "started";
   // launchd owns the daemon: never spawn a bare process next to it —
   // two process managers for one socket is how machines end up with
@@ -466,6 +486,43 @@ export async function startViaLaunchdIfLoaded(
       "launchd kickstarted hackd but it did not report ready yet | Check: hack daemon logs --tail 200",
   });
   return 1;
+}
+
+/**
+ * {@link checkLaunchdJobBeforeStart} on the plist launchd will start, with
+ * nothing started on failure: exit code 1 (reported, `blocked:
+ * "rewrite-refused"`, `hack daemon install` step) or null to kickstart. A
+ * plist that cannot be read is refused.
+ */
+async function refuseUnsafeLaunchdStart(
+  hooks: LaunchdStartHooks
+): Promise<number | null> {
+  const unsafe = await launchdStartIsUnsafe(hooks);
+  if (unsafe === null) {
+    return null;
+  }
+  hooks.trace.action = "none";
+  hooks.trace.blocked = "rewrite-refused";
+  logger.error({
+    message: `Not starting hackd through launchd: ${unsafe}; nothing was started | Make the program and its PATH directories writable only by you (chmod go-w), then run: hack daemon install`,
+  });
+  return 1;
+}
+
+/** Why launchd must not start the job as its plist is now, or null. */
+async function launchdStartIsUnsafe(
+  hooks: LaunchdStartHooks
+): Promise<string | null> {
+  const plistText = await (
+    hooks.readPlist ?? (() => readTextFile(hooks.paths.launchdPlistPath))
+  )();
+  if (plistText === null) {
+    return "the launchd plist could not be read";
+  }
+  return await checkLaunchdJobBeforeStart({
+    plistText,
+    systemDirectories: hooks.systemPathDirectories,
+  });
 }
 
 /** Reports a repair result; true when the plist was rewritten. */

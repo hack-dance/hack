@@ -769,7 +769,21 @@ Such a plist is never replaced automatically; `start` reports it and
   An explicit `hack daemon install` on macOS makes the same PATH check before
   it touches launchd. The check that runs before `start` or `restart` stops a
   running hackd makes the program and PATH checks for a refresh or retarget
-  the start would run. On Linux, the program a rewritten unit keeps passes
+  the start would run.
+- Every automatic kickstart of the launchd job checks the plist launchd will
+  start, current or just rewritten, as its last step: `start`, `restart`, the
+  reconcile after `hack update`, a stopped-service start and autostart. The
+  plist's program must be safe from other accounts along its whole path, and
+  every directory of the PATH it gives hackd (its own `PATH`, or launchd's
+  default when it sets none) must pass the same PATH checks. A plist whose
+  program or PATH cannot be read is refused. On a refusal launchd is not
+  asked to start the job, and `start` exits 1 (`blocked: "rewrite-refused"`,
+  `hack daemon install` as the next step). Before `start` or `restart` stops
+  a running hackd under a current plist, it makes the same check, so a
+  running daemon is never stopped for a start that would be refused. On Linux,
+  a stopped-service start checks the loaded unit's programs and effective
+  PATH just before `systemctl start`, and an automatic restart checks the
+  exact loaded program and the effective PATH as its last step. On Linux, the program a rewritten unit keeps passes
   install's program checks just before the unit is written, and an automatic
   restart checks the unit's program once more as its last step.
 - A plist that runs another existing `hack` is left as it is, even an older

@@ -159,9 +159,14 @@ export interface SystemdCommandHooks {
  * program and the exact pathname systemd will run are checked: the single
  * loaded `ExecStart` ({@link readSystemdLoadedProgram}), which a retained
  * drop-in can point at another path to the same file, with its symlinks
- * and every directory above it. Exit code 1 (reported) or null to restart:
- * `blocked: "unproven-owner"` when the loaded program cannot be read or is
- * not exactly one entry, `rewrite-refused` when a program fails the checks.
+ * and every directory above it. The effective service PATH
+ * ({@link checkSystemdEffectivePath}) is checked again too. Exit code 1
+ * (reported) or null to restart: `blocked: "unproven-owner"` when the
+ * loaded program cannot be read or is not exactly one entry,
+ * `rewrite-refused` when a program or PATH directory fails the checks.
+ * The stopped start's last check before `systemctl start` is
+ * {@link checkSystemdLoadedUnitPaths}, which covers the same program and
+ * PATH checks.
  */
 async function refuseUntrustedProgramLast(opts: {
   readonly hooks: Pick<SystemdCommandHooks, "trace">;
@@ -176,9 +181,12 @@ async function refuseUntrustedProgramLast(opts: {
       message: `Not restarting ${SYSTEMD_UNIT_NAME}: the program systemd would run could not be read again just before the restart (${loaded.reason})`,
     });
   }
+  // The effective PATH too: hackd runs helpers such as `docker` by bare
+  // name, and a PATH directory may have become writable meanwhile.
   const untrusted =
     (await checkServiceExecutableTrusted({ path: loaded.path })) ??
-    (await checkUnitProgramTrusted({ unitPath: opts.unitPath }));
+    (await checkUnitProgramTrusted({ unitPath: opts.unitPath })) ??
+    (await checkSystemdEffectivePath({ deps: opts.deps }));
   return untrusted === null
     ? null
     : refuseLastCheck({

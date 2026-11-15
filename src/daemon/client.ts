@@ -1,10 +1,12 @@
 import pkg from "../../package.json";
 
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import {
+  checkLaunchdJobBeforeStart,
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
@@ -301,6 +303,17 @@ async function ensureLaunchdDaemonReady(opts: {
     if (!install.ok) {
       return false;
     }
+  }
+
+  // Last, right before launchd is asked to start the job: its program and
+  // the PATH it gives hackd (HACK-2216). On a refusal the autostart falls
+  // back to `hack daemon start`, which refuses the same job with the reason.
+  const plistText = await readTextFile(opts.paths.launchdPlistPath);
+  if (
+    plistText === null ||
+    (await checkLaunchdJobBeforeStart({ plistText })) !== null
+  ) {
+    return false;
   }
 
   const kick = await kickstartLaunchdService();

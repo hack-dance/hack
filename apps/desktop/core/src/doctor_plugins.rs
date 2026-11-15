@@ -197,7 +197,8 @@ pub(crate) fn validate_helpers(runner: &CliRunner) -> Result<(), &'static str> {
     // the same rule as PATH tools.
     if present(&candidate, uid)?
         && trusted_tool_path(&candidate, uid, false)
-            .is_none_or(|real| !crate::source::trusted_interpreter(&real, uid, 4))
+            // The CLI runs the helper under Doctor's private wrapper PATH.
+            .is_none_or(|real| !crate::source::trusted_interpreter(&real, uid, 4, true))
     {
         return Err("Doctor absolute helper or its ancestors/ACLs are untrusted");
     }

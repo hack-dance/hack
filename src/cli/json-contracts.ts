@@ -124,4 +124,9 @@ export const SCHEMA_JSON_VARIANTS = [
     flags: ["--by-service"],
     schema: "hack.usage.by-service.v1",
   },
+  {
+    command: "update",
+    flags: ["--check", "--observe"],
+    schema: "hack.update-check.v1",
+  },
 ] as const;

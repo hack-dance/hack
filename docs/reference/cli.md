@@ -2114,6 +2114,7 @@ Downloads and installs the latest stable hack release from GitHub.
 Notes:
 - Refuses to self-update when running from a Homebrew install, local dev wrapper, or symlink install.
 - Updates the current hack binary and refreshes assets.
+- `--check --json --observe` only reports: current, latest, availability, install kind and the upgrade command for this install.
 
 ### Options
 
@@ -2122,6 +2123,7 @@ Notes:
 | `--check` | Check for updates (do not install) |
 | `--yes` | Apply update without prompting |
 | `--tag <tag>` | Update to a specific release tag (e.g. v1.4.0) |
+| `--observe` | With --check --json, report updates for any install kind without installing or refusing (one release read) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

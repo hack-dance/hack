@@ -9,6 +9,7 @@ export const MACHINE_SCHEMAS = {
   globalAdminPlan: "hack.global-admin-plan.v1",
   globalStatusObserve: "hack.global-status.observe.v1",
   usageByService: "hack.usage.by-service.v1",
+  updateCheck: "hack.update-check.v1",
 } as const;
 
 export function machineSuccess<T extends object>(opts: {

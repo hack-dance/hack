@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { spawnSyncBounded } from "./bounded-spawn-sync.ts";
 import { fixtureGitEnv } from "./fixture-git.ts";
 
 /**
@@ -21,7 +22,7 @@ export function runFixtureGit(opts: {
   readonly home: string;
   readonly args: readonly string[];
 }): string {
-  const result = Bun.spawnSync(["git", ...opts.args], {
+  const result = spawnSyncBounded(["git", ...opts.args], {
     cwd: opts.cwd,
     env: fixtureGitEnv({
       env: {

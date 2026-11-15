@@ -6,11 +6,14 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optJson, optProject } from "../cli/options.ts";
+import { optJson, optPath, optProject } from "../cli/options.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { GLOBAL_CLOUDFLARE_DIR_NAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { readDaemonPid } from "../daemon/process.ts";
+import { emitCliResult, errorResult, okResult } from "../lib/cli-result.ts";
+import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
   type HostCommandRecord,
@@ -19,7 +22,12 @@ import {
   readHostCommandRecords,
   readObservedProcesses,
 } from "../lib/host-command-observation.ts";
-import { sanitizeProjectSlug } from "../lib/project.ts";
+import { MissingProjectContextError } from "../lib/missing-project-error.ts";
+import {
+  findProjectContext,
+  readProjectConfig,
+  sanitizeProjectSlug,
+} from "../lib/project.ts";
 import type {
   RuntimeContainer,
   RuntimeProject,
@@ -73,8 +81,21 @@ const optDetails = defineOption({
   description: "Show per-container usage and mount types",
 } as const);
 
+const optByService = defineOption({
+  name: "byService",
+  type: "boolean",
+  long: "--by-service",
+  description:
+    "With --json, report one project's usage per service (use --path or --project)",
+} as const);
+
+/** Schema id of `hack usage --json --by-service`; see docs/reference/usage-by-service.md. */
+export const USAGE_BY_SERVICE_SCHEMA = "hack.usage.by-service.v1";
+
 const options = [
   optProject,
+  optPath,
+  optByService,
   optDetails,
   optIncludeGlobal,
   optWatch,
@@ -97,10 +118,17 @@ const spec = defineCommand({
 type UsageArgs = CommandArgs<typeof options, typeof positionals>;
 
 const handleUsage: CommandHandlerFor<typeof spec> = async ({
+  ctx,
   args,
 }): Promise<number> => {
   if (args.options.watch && args.options.json) {
     throw new CliUsageError("--json is not supported with --watch.");
+  }
+  if (args.options.byService) {
+    return await runUsageByService({ cwd: ctx.cwd, options: args.options });
+  }
+  if (args.options.path !== undefined) {
+    throw new CliUsageError("--path is supported only with --by-service.");
   }
 
   const filter = resolveUsageFilter({ projectOpt: args.options.project });
@@ -1462,4 +1490,152 @@ export const __testOnlyUsage = {
   buildUsageReport,
   collectTrackedHostPids,
   buildHostUsageReport,
+  buildServiceUsageRows,
 };
+
+type UsageServiceRow = {
+  /** Compose project of the instance: the base name, or `<base>--<branch>`. */
+  readonly composeProject: string;
+  readonly service: string;
+  readonly containers: number;
+  readonly cpuPercent: number | null;
+  readonly memUsedBytes: number | null;
+  readonly memLimitBytes: number | null;
+};
+
+/**
+ * `hack usage --json --by-service`: one project's running Compose services,
+ * each summed over its containers (replicas), as the standard envelope with
+ * {@link USAGE_BY_SERVICE_SCHEMA}. A project with nothing running is an empty
+ * list, not an error. The Docker runtime being unreachable is
+ * `E_DOCKER_UNAVAILABLE`. Branch instances are separate rows.
+ */
+async function runUsageByService(opts: {
+  readonly cwd: string;
+  readonly options: UsageArgs["options"];
+}): Promise<number> {
+  const { options } = opts;
+  if (options.json !== true) {
+    throw new CliUsageError("--by-service requires --json.");
+  }
+  if (options.path !== undefined && options.project !== undefined) {
+    throw new CliUsageError("Use either --path or --project (not both).");
+  }
+  if (options.details || options.includeGlobal || options.noHost) {
+    throw new CliUsageError(
+      "--by-service does not combine with --details, --include-global or --no-host."
+    );
+  }
+  const project = await resolveByServiceProject({
+    cwd: opts.cwd,
+    path: options.path,
+    project: options.project,
+  });
+
+  const runtimeResult = await readRuntimeProjects({ includeGlobal: false });
+  if (!runtimeResult.ok) {
+    emitCliResult({
+      result: errorResult({
+        code: "E_DOCKER_UNAVAILABLE",
+        message: runtimeResult.error ?? "Docker runtime is not responding.",
+      }),
+    });
+    return 1;
+  }
+  const instances = runtimeResult.runtime.filter(
+    (runtime) =>
+      runtime.project === project || runtime.project.startsWith(`${project}--`)
+  );
+  const index = buildContainerIndex({ projects: instances });
+  const stats =
+    index.containerIds.length === 0
+      ? { ok: true as const, samples: [] }
+      : await readDockerStats({ containerIds: index.containerIds });
+  if (!stats.ok) {
+    emitCliResult({
+      result: errorResult({
+        code: "E_DOCKER_UNAVAILABLE",
+        message: `Container usage could not be read: ${stats.error}`,
+      }),
+    });
+    return 1;
+  }
+
+  emitCliResult({
+    result: okResult({
+      data: {
+        schema: USAGE_BY_SERVICE_SCHEMA,
+        project,
+        backend: "compose",
+        services: buildServiceUsageRows({
+          samples: stats.samples,
+          index,
+        }),
+      },
+    }),
+  });
+  return 0;
+}
+
+async function resolveByServiceProject(opts: {
+  readonly cwd: string;
+  readonly path: string | undefined;
+  readonly project: string | undefined;
+}): Promise<string> {
+  // Same selection and Compose-name precedence as `hack up`: a registered
+  // project for --project, otherwise the project at --path or the cwd.
+  const context =
+    opts.project === undefined
+      ? await findProjectContext(resolve(opts.cwd, opts.path ?? "."))
+      : await resolveRegisteredProjectOption({ projectOpt: opts.project });
+  if (!context) {
+    throw new MissingProjectContextError();
+  }
+  const cfg = await readProjectConfig(context);
+  return await resolveComposeProjectName({ project: context, cfg });
+}
+
+/** Sum samples per (Compose project, service), sorted for stable output. */
+function buildServiceUsageRows(opts: {
+  readonly samples: readonly DockerStatsSample[];
+  readonly index: Pick<ContainerIndex, "containerById">;
+}): UsageServiceRow[] {
+  const groups = new Map<
+    string,
+    { composeProject: string; service: string; samples: DockerStatsSample[] }
+  >();
+  for (const sample of opts.samples) {
+    const container = sample.containerId
+      ? opts.index.containerById.get(sample.containerId)
+      : undefined;
+    if (!container) {
+      continue;
+    }
+    const key = `${container.project}\u0000${container.service}`;
+    const group = groups.get(key) ?? {
+      composeProject: container.project,
+      service: container.service,
+      samples: [],
+    };
+    group.samples.push(sample);
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      composeProject: group.composeProject,
+      service: group.service,
+      containers: group.samples.length,
+      cpuPercent: sumNullable(group.samples.map((sample) => sample.cpuPercent)),
+      memUsedBytes: sumNullable(
+        group.samples.map((sample) => sample.memUsedBytes)
+      ),
+      memLimitBytes: sumNullable(
+        group.samples.map((sample) => sample.memLimitBytes)
+      ),
+    }))
+    .sort(
+      (a, b) =>
+        a.composeProject.localeCompare(b.composeProject) ||
+        a.service.localeCompare(b.service)
+    );
+}

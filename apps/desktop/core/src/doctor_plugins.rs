@@ -205,6 +205,18 @@ fn guarded_dir(path: &Path, uid: u32) -> Option<PathBuf> {
     trusted_tool_path(path, uid, true)
 }
 
+/// Only the PATH entries that are absolute, owner- or root-controlled
+/// directories (with the same ancestry and ACL rule as Docker plugin
+/// directories). A copied command runs later, after the app's private wrapper
+/// PATH is gone, so an entry another user can write must not reach it.
+pub(crate) fn controlled_path_entries(path: &str) -> Vec<&str> {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    path.split(':')
+        .filter(|entry| guarded_dir(Path::new(entry), uid).is_some_and(|real| real.is_dir()))
+        .collect()
+}
+
 /// Missing candidates are proven absent only below a protected existing
 /// ancestor. A dangling link, unreadable path or writable ancestor is unknown.
 fn present(path: &Path, uid: u32) -> Result<bool, &'static str> {

@@ -10,6 +10,7 @@ of the release or onboarding yet.
 |---|---|
 | `core` (`hack-desktop-core`) | Models, CLI runner with timeouts, read-only hackd client, project state, list/detail view models, fixtures. No GUI dependency. |
 | `app` (`hack-desktop`) | The window, built with [gpui-kit](https://gpui-kit.com/) `=0.9.1`. |
+| `ui` (`hack-desktop-ui`) | Design v1 tokens and components, and the `hack-desktop-gallery` fixture gallery. Spec and renders: [DESIGN-V1.md](DESIGN-V1.md). Not yet used by the window. |
 
 This is its own Cargo workspace with its own lockfile and target directory; it
 does not touch `packages/runtime-core`.

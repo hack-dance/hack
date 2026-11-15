@@ -1,0 +1,247 @@
+//! Design v1 tokens: type, spacing, radii, borders and colour, light and dark.
+//!
+//! Every value here is named in `apps/desktop/DESIGN-V1.md`; change both
+//! together. Components read tokens, never raw numbers or gpui-kit theme
+//! colours, so the window keeps one look whatever gpui-kit's defaults are.
+
+use gpui_kit::{Hsla, Pixels, Rgba, px, rgb, rgba};
+
+/// Light or dark. The app follows the system unless `--theme` says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Light,
+    Dark,
+}
+
+/// One step of the type scale: size, line height and weight.
+#[derive(Debug, Clone, Copy)]
+pub struct TypeStep {
+    pub size: Pixels,
+    pub line: Pixels,
+    pub weight: gpui_kit::FontWeight,
+}
+
+const fn step(size: f32, line: f32, weight: gpui_kit::FontWeight) -> TypeStep {
+    TypeStep {
+        size: px(size),
+        line: px(line),
+        weight,
+    }
+}
+
+/// Type scale. UI text uses the platform UI font (SF Pro on macOS); code,
+/// URLs, routes and logs use the platform monospace font.
+pub mod text {
+    use super::{TypeStep, step};
+    use gpui_kit::FontWeight;
+
+    /// Project name in the detail header.
+    pub const TITLE: TypeStep = step(17., 22., FontWeight::SEMIBOLD);
+    /// Empty and error pane headline.
+    pub const HEADLINE: TypeStep = step(15., 20., FontWeight::SEMIBOLD);
+    /// Body: rows, tabs, buttons, table cells.
+    pub const BODY: TypeStep = step(13., 18., FontWeight::NORMAL);
+    /// Selected row, selected tab, window title.
+    pub const BODY_STRONG: TypeStep = step(13., 18., FontWeight::MEDIUM);
+    /// Captions, table header, pills, status bar.
+    pub const SMALL: TypeStep = step(12., 16., FontWeight::NORMAL);
+    pub const SMALL_STRONG: TypeStep = step(12., 16., FontWeight::MEDIUM);
+    /// URLs, routes and log lines (monospace).
+    pub const MONO: TypeStep = step(12., 18., FontWeight::NORMAL);
+    /// Count inside a pill, keyboard hint.
+    pub const MICRO: TypeStep = step(11., 14., FontWeight::MEDIUM);
+}
+
+/// 4-point spacing scale.
+pub mod space {
+    use gpui_kit::{Pixels, px};
+    pub const S1: Pixels = px(2.);
+    pub const S2: Pixels = px(4.);
+    pub const S3: Pixels = px(6.);
+    pub const S4: Pixels = px(8.);
+    pub const S5: Pixels = px(10.);
+    pub const S6: Pixels = px(12.);
+    pub const S7: Pixels = px(16.);
+    pub const S8: Pixels = px(20.);
+    pub const S9: Pixels = px(24.);
+}
+
+/// Fixed sizes.
+pub mod size {
+    use gpui_kit::{Pixels, px};
+    pub const TITLE_BAR: Pixels = px(38.);
+    pub const STATUS_BAR: Pixels = px(26.);
+    pub const SIDEBAR: Pixels = px(208.);
+    pub const ROW: Pixels = px(28.);
+    pub const TABLE_ROW: Pixels = px(32.);
+    pub const CONTROL: Pixels = px(26.);
+    pub const DOT: Pixels = px(8.);
+    pub const ICON: Pixels = px(14.);
+    pub const ICON_ROW: Pixels = px(15.);
+    pub const SEARCH_W: Pixels = px(240.);
+    /// Leaves room for the macOS traffic lights in the title bar.
+    pub const TRAFFIC_LIGHTS: Pixels = px(76.);
+}
+
+/// Corner radii.
+pub mod radius {
+    use gpui_kit::{Pixels, px};
+    pub const CONTROL: Pixels = px(6.);
+    pub const PILL: Pixels = px(5.);
+    pub const PANEL: Pixels = px(8.);
+    pub const WINDOW: Pixels = px(12.);
+}
+
+/// Hairline border width: one device pixel on a 2x display.
+pub const HAIRLINE: Pixels = px(0.5);
+
+/// Colour tokens for one mode.
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    pub mode: Mode,
+    /// Window and detail pane.
+    pub surface: Hsla,
+    /// Sidebar, title bar and status bar.
+    pub chrome: Hsla,
+    /// Hover, selected row, selected tab, log block, neutral pills.
+    pub surface_1: Hsla,
+    /// Pressed or selected-and-hovered.
+    pub surface_2: Hsla,
+    pub border: Hsla,
+    pub border_strong: Hsla,
+    pub text_primary: Hsla,
+    pub text_secondary: Hsla,
+    pub text_muted: Hsla,
+    pub accent: Hsla,
+    pub states: States,
+}
+
+/// Dot, pill background and pill text for each state.
+#[derive(Debug, Clone, Copy)]
+pub struct StateColors {
+    pub dot: Hsla,
+    pub bg: Hsla,
+    pub fg: Hsla,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct States {
+    pub running: StateColors,
+    pub busy: StateColors,
+    pub degraded: StateColors,
+    pub failed: StateColors,
+    pub stopped: StateColors,
+    pub unknown: StateColors,
+}
+
+fn c(v: Rgba) -> Hsla {
+    v.into()
+}
+
+impl Palette {
+    #[must_use]
+    pub fn for_mode(mode: Mode) -> Self {
+        match mode {
+            Mode::Light => Self::light(),
+            Mode::Dark => Self::dark(),
+        }
+    }
+
+    #[must_use]
+    pub fn light() -> Self {
+        Self {
+            mode: Mode::Light,
+            surface: c(rgb(0xFFFFFF)),
+            chrome: c(rgb(0xF7F7F5)),
+            surface_1: c(rgb(0xEFEFEC)),
+            surface_2: c(rgb(0xE6E6E2)),
+            border: c(rgba(0x0000_0017)),
+            border_strong: c(rgba(0x0000_002E)),
+            text_primary: c(rgb(0x1C1C1A)),
+            text_secondary: c(rgb(0x5C5B57)),
+            text_muted: c(rgb(0x8B8A85)),
+            accent: c(rgb(0x2F6FDB)),
+            states: States {
+                running: StateColors {
+                    dot: c(rgb(0x1D9E75)),
+                    bg: c(rgb(0xE2F3EC)),
+                    fg: c(rgb(0x146B50)),
+                },
+                busy: StateColors {
+                    dot: c(rgb(0x378ADD)),
+                    bg: c(rgb(0xE5EEFA)),
+                    fg: c(rgb(0x235E9E)),
+                },
+                degraded: StateColors {
+                    dot: c(rgb(0xEF9F27)),
+                    bg: c(rgb(0xFBEFDA)),
+                    fg: c(rgb(0x8A5608)),
+                },
+                failed: StateColors {
+                    dot: c(rgb(0xE24B4A)),
+                    bg: c(rgb(0xFBE6E5)),
+                    fg: c(rgb(0xA82E2D)),
+                },
+                stopped: StateColors {
+                    dot: c(rgb(0xBDBCB6)),
+                    bg: c(rgb(0xEFEFEC)),
+                    fg: c(rgb(0x5C5B57)),
+                },
+                unknown: StateColors {
+                    dot: c(rgb(0x9C9B95)),
+                    bg: c(rgb(0xEFEFEC)),
+                    fg: c(rgb(0x5C5B57)),
+                },
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn dark() -> Self {
+        Self {
+            mode: Mode::Dark,
+            surface: c(rgb(0x1B1B1A)),
+            chrome: c(rgb(0x161615)),
+            surface_1: c(rgb(0x272725)),
+            surface_2: c(rgb(0x31312E)),
+            border: c(rgba(0xFFFF_FF14)),
+            border_strong: c(rgba(0xFFFF_FF26)),
+            text_primary: c(rgb(0xEDEDEA)),
+            text_secondary: c(rgb(0xA9A8A2)),
+            text_muted: c(rgb(0x7B7A75)),
+            accent: c(rgb(0x6EA2F5)),
+            states: States {
+                running: StateColors {
+                    dot: c(rgb(0x2DB386)),
+                    bg: c(rgba(0x1D9E_7530)),
+                    fg: c(rgb(0x6FD3AE)),
+                },
+                busy: StateColors {
+                    dot: c(rgb(0x4C98E6)),
+                    bg: c(rgba(0x378A_DD30)),
+                    fg: c(rgb(0x8DBDF0)),
+                },
+                degraded: StateColors {
+                    dot: c(rgb(0xF0A83C)),
+                    bg: c(rgba(0xEF9F_272E)),
+                    fg: c(rgb(0xF3C27A)),
+                },
+                failed: StateColors {
+                    dot: c(rgb(0xEC5D5C)),
+                    bg: c(rgba(0xE24B_4A30)),
+                    fg: c(rgb(0xF29A99)),
+                },
+                stopped: StateColors {
+                    dot: c(rgb(0x5E5D59)),
+                    bg: c(rgb(0x272725)),
+                    fg: c(rgb(0xA9A8A2)),
+                },
+                unknown: StateColors {
+                    dot: c(rgb(0x7B7A75)),
+                    bg: c(rgb(0x272725)),
+                    fg: c(rgb(0xA9A8A2)),
+                },
+            },
+        }
+    }
+}

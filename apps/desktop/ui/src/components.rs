@@ -1,0 +1,708 @@
+//! Small presentational components. Each takes data and [`Ui`], returns an
+//! element, and holds no state. Click handlers are passed in by the caller.
+
+use gpui_kit::component::{Icon, Sizable as _, switch::Switch};
+use gpui_kit::{
+    Div, ElementId, Hsla, IntoElement, ParentElement, SharedString, Stateful, Styled, div,
+    prelude::*, px,
+};
+
+use crate::icons::Glyph;
+use crate::status::Status;
+use crate::tokens::{HAIRLINE, Palette, TypeStep, radius, size, space, text};
+
+/// Everything a component needs to draw: palette and font families.
+#[derive(Clone)]
+pub struct Ui {
+    pub p: Palette,
+    pub font: SharedString,
+    pub mono: SharedString,
+}
+
+/// Type-scale and hairline helpers on any styled element.
+pub trait StyledExt: Styled + Sized {
+    fn type_step(self, t: TypeStep) -> Self {
+        self.text_size(t.size)
+            .line_height(t.line)
+            .font_weight(t.weight)
+    }
+    fn hairline_t(mut self, color: Hsla) -> Self {
+        self.style().border_widths.top = Some(HAIRLINE.into());
+        self.border_color(color)
+    }
+    fn hairline_b(mut self, color: Hsla) -> Self {
+        self.style().border_widths.bottom = Some(HAIRLINE.into());
+        self.border_color(color)
+    }
+    fn hairline_r(mut self, color: Hsla) -> Self {
+        self.style().border_widths.right = Some(HAIRLINE.into());
+        self.border_color(color)
+    }
+    fn hairline(mut self, color: Hsla) -> Self {
+        let s = self.style();
+        s.border_widths.top = Some(HAIRLINE.into());
+        s.border_widths.bottom = Some(HAIRLINE.into());
+        s.border_widths.left = Some(HAIRLINE.into());
+        s.border_widths.right = Some(HAIRLINE.into());
+        self.border_color(color)
+    }
+}
+impl<T: Styled> StyledExt for T {}
+
+/// 8px state dot. Unknown is a ring so it never reads as "stopped".
+pub fn dot(status: Status, ui: &Ui) -> Div {
+    let c = status.colors(&ui.p);
+    let d = div().size(size::DOT).rounded_full().flex_none();
+    if status == Status::Unknown {
+        d.border_color(c.dot).border(px(1.5))
+    } else {
+        d.bg(c.dot)
+    }
+}
+
+/// An icon from the app's icon set.
+pub fn icon(glyph: Glyph, px_size: gpui_kit::Pixels, color: Hsla) -> Icon {
+    Icon::default()
+        .path(glyph.path())
+        .with_size(px_size)
+        .text_color(color)
+}
+
+/// Rounded label pill: state, backend, counts.
+pub fn pill(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
+    div()
+        .flex_none()
+        .px(space::S4)
+        .py(px(1.))
+        .rounded(radius::PILL)
+        .bg(bg)
+        .text_color(fg)
+        .type_step(text::SMALL_STRONG)
+        .whitespace_nowrap()
+        .child(label.into())
+}
+
+/// State pill with the short label.
+pub fn state_pill(status: Status, label: impl Into<SharedString>, ui: &Ui) -> Div {
+    let c = status.colors(&ui.p);
+    pill(label, c.bg, c.fg)
+}
+
+/// Neutral pill (backend name).
+pub fn neutral_pill(label: impl Into<SharedString>, ui: &Ui) -> Div {
+    pill(label, ui.p.surface_1, ui.p.text_secondary)
+}
+
+/// Count pill on the Doctor row; amber when there are findings.
+pub fn count_pill(n: usize, ui: &Ui) -> Div {
+    let c = ui.p.states.degraded;
+    div()
+        .flex_none()
+        .min_w(px(18.))
+        .h(px(16.))
+        .px(space::S2)
+        .rounded(radius::PILL)
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(c.bg)
+        .text_color(c.fg)
+        .type_step(text::MICRO)
+        .child(n.to_string())
+}
+
+/// Sidebar section caption: "Running", "Stopped", "Machine".
+pub fn caption(label: impl Into<SharedString>, ui: &Ui) -> Div {
+    div()
+        .px(space::S5)
+        .pt(space::S6)
+        .pb(space::S2)
+        .type_step(text::SMALL_STRONG)
+        .text_color(ui.p.text_muted)
+        .child(label.into())
+}
+
+/// Sidebar project row: dot, name, optional always-on pin.
+pub fn project_row(
+    id: impl Into<ElementId>,
+    name: impl Into<SharedString>,
+    status: Status,
+    always_on: bool,
+    selected: bool,
+    ui: &Ui,
+) -> Stateful<Div> {
+    let dim = matches!(status, Status::Stopped | Status::Unknown) && !selected;
+    let p = ui.p;
+    div()
+        .id(id)
+        .h(size::ROW)
+        .flex_none()
+        .px(space::S5)
+        .flex()
+        .items_center()
+        .gap(space::S4)
+        .rounded(radius::CONTROL)
+        .cursor_pointer()
+        .when(selected, |d| d.bg(p.surface_1))
+        .hover(move |d| d.bg(p.surface_1))
+        .child(dot(status, ui))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .type_step(if selected {
+                    text::BODY_STRONG
+                } else {
+                    text::BODY
+                })
+                .text_color(if dim {
+                    p.text_secondary
+                } else {
+                    p.text_primary
+                })
+                .child(name.into()),
+        )
+        .when(always_on, |d| {
+            d.child(icon(Glyph::Pin, size::ICON, p.text_muted))
+        })
+}
+
+/// Sidebar machine row: leading icon, label, trailing dot or count.
+pub fn machine_row(
+    id: impl Into<ElementId>,
+    glyph: Glyph,
+    label: impl Into<SharedString>,
+    trailing: impl IntoElement,
+    ui: &Ui,
+) -> Stateful<Div> {
+    let p = ui.p;
+    div()
+        .id(id)
+        .h(size::ROW)
+        .flex_none()
+        .px(space::S5)
+        .flex()
+        .items_center()
+        .gap(space::S4)
+        .rounded(radius::CONTROL)
+        .cursor_pointer()
+        .hover(move |d| d.bg(p.surface_1))
+        .child(icon(glyph, size::ICON_ROW, p.text_secondary))
+        .child(
+            div()
+                .flex_1()
+                .type_step(text::BODY)
+                .text_color(p.text_primary)
+                .child(label.into()),
+        )
+        .child(trailing)
+}
+
+/// Header action button: icon and label, quiet until hovered.
+pub fn action_button(
+    id: impl Into<ElementId>,
+    glyph: Glyph,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    ui: &Ui,
+) -> Stateful<Div> {
+    let p = ui.p;
+    let fg = if enabled {
+        p.text_primary
+    } else {
+        p.text_muted
+    };
+    div()
+        .id(id)
+        .h(size::CONTROL)
+        .px(space::S5)
+        .flex()
+        .items_center()
+        .gap(space::S3)
+        .rounded(radius::CONTROL)
+        .hairline(p.border_strong)
+        .bg(p.surface)
+        .text_color(fg)
+        .type_step(text::BODY)
+        .when(enabled, |d| {
+            d.cursor_pointer()
+                .hover(move |d| d.bg(p.surface_1))
+                .active(move |d| d.bg(p.surface_2))
+        })
+        .child(icon(glyph, size::ICON, fg))
+        .child(label.into())
+}
+
+/// Primary action (Start on a stopped project): filled.
+pub fn primary_button(
+    id: impl Into<ElementId>,
+    glyph: Glyph,
+    label: impl Into<SharedString>,
+    ui: &Ui,
+) -> Stateful<Div> {
+    let p = ui.p;
+    let fg = p.surface;
+    div()
+        .id(id)
+        .h(size::CONTROL)
+        .px(space::S5)
+        .flex()
+        .items_center()
+        .gap(space::S3)
+        .rounded(radius::CONTROL)
+        .bg(p.text_primary)
+        .text_color(fg)
+        .type_step(text::BODY_STRONG)
+        .cursor_pointer()
+        .hover(move |d| d.opacity(0.88))
+        .child(icon(glyph, size::ICON, fg))
+        .child(label.into())
+}
+
+/// "Always on" switch (gpui-kit Switch, accent colour, small).
+pub fn always_on_switch(checked: bool, enabled: bool, ui: &Ui) -> impl IntoElement {
+    use gpui_kit::component::Disableable as _;
+    Switch::new("always-on")
+        .checked(checked)
+        .small()
+        .color(ui.p.accent)
+        .label("Always on")
+        .disabled(!enabled)
+}
+
+/// Pill tabs: the selected tab gets a filled background, not an underline.
+pub fn pill_tabs(labels: &[&'static str], selected: usize, ui: &Ui) -> Div {
+    let p = ui.p;
+    let mut row = div().flex().items_center().gap(space::S2);
+    for (i, label) in labels.iter().enumerate() {
+        let sel = i == selected;
+        row = row.child(
+            div()
+                .id(("tab", i))
+                .h(size::CONTROL)
+                .px(space::S5)
+                .flex()
+                .items_center()
+                .rounded(radius::CONTROL)
+                .cursor_pointer()
+                .type_step(if sel { text::BODY_STRONG } else { text::BODY })
+                .text_color(if sel {
+                    p.text_primary
+                } else {
+                    p.text_secondary
+                })
+                .when(sel, |d| d.bg(p.surface_1))
+                .when(!sel, |d| d.hover(move |d| d.text_color(p.text_primary)))
+                .child(*label),
+        );
+    }
+    row
+}
+
+/// Title bar: traffic-light inset (macOS), app name, search field (Cmd-K).
+pub fn title_bar(show_traffic_lights: bool, ui: &Ui) -> Div {
+    let p = ui.p;
+    let lights = div()
+        .w(size::TRAFFIC_LIGHTS)
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(space::S4)
+        .pl(space::S6)
+        .when(show_traffic_lights, |d| {
+            // Stand-in for the native controls in offscreen renders only.
+            let l = |c: u32| {
+                div()
+                    .size(px(12.))
+                    .rounded_full()
+                    .bg(gpui_kit::rgb(c))
+                    .hairline(p.border)
+            };
+            d.child(l(0xFF5F57)).child(l(0xFEBC2E)).child(l(0x28C840))
+        });
+    div()
+        .h(size::TITLE_BAR)
+        .flex_none()
+        .flex()
+        .items_center()
+        .bg(p.chrome)
+        .hairline_b(p.border)
+        .child(lights)
+        .child(
+            div()
+                .pl(space::S4)
+                .type_step(text::BODY_STRONG)
+                .text_color(p.text_primary)
+                .child("Hack"),
+        )
+        .child(div().flex_1())
+        .child(search_field(ui))
+        .child(div().w(space::S6))
+}
+
+/// The Cmd-K search affordance in the title bar.
+pub fn search_field(ui: &Ui) -> Stateful<Div> {
+    let p = ui.p;
+    div()
+        .id("search")
+        .w(size::SEARCH_W)
+        .h(px(24.))
+        .px(space::S4)
+        .flex()
+        .items_center()
+        .gap(space::S3)
+        .rounded(radius::CONTROL)
+        .bg(p.surface)
+        .hairline(p.border_strong)
+        .cursor_pointer()
+        .child(icon(Glyph::Search, size::ICON, p.text_muted))
+        .child(
+            div()
+                .flex_1()
+                .type_step(text::BODY)
+                .text_color(p.text_muted)
+                .child("Search"),
+        )
+        .child(
+            div()
+                .px(space::S2)
+                .rounded(px(4.))
+                .bg(p.surface_1)
+                .type_step(text::MICRO)
+                .text_color(p.text_secondary)
+                .child("⌘K"),
+        )
+}
+
+/// Status bar: summary items on the left, version on the right.
+pub fn status_bar(items: Vec<(Option<Status>, String)>, version: Option<String>, ui: &Ui) -> Div {
+    let p = ui.p;
+    let mut left = div().flex().items_center().gap(space::S3);
+    for (i, (status, label)) in items.into_iter().enumerate() {
+        if i > 0 {
+            left = left.child(div().text_color(p.text_muted).child("·"));
+        }
+        left = left.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(space::S3)
+                .when_some(status, |d, s| d.child(dot(s, ui).size(px(6.))))
+                .child(label),
+        );
+    }
+    div()
+        .h(size::STATUS_BAR)
+        .flex_none()
+        .px(space::S6)
+        .flex()
+        .items_center()
+        .bg(p.chrome)
+        .hairline_t(p.border)
+        .type_step(text::SMALL)
+        .text_color(p.text_secondary)
+        .child(left)
+        .child(div().flex_1())
+        .children(version)
+}
+
+/// One row of the services table.
+pub struct ServiceRow {
+    pub name: String,
+    pub status: Status,
+    pub state: String,
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    /// `Ok(route)` is shown in mono; `Err(note)` is a muted note ("internal").
+    pub route: Result<String, String>,
+}
+
+const COL_STATE: f32 = 92.;
+const COL_NUM: f32 = 64.;
+
+/// Services table: Service, State, CPU, Memory, Route. Hairline row
+/// separators, no outer box, numbers right-aligned.
+pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
+    let p = ui.p;
+    let num = |v: Option<String>, ui: &Ui| {
+        div()
+            .w(px(COL_NUM))
+            .flex_none()
+            .flex()
+            .justify_end()
+            .pr(space::S6)
+            .text_color(if v.is_some() {
+                ui.p.text_primary
+            } else {
+                ui.p.text_muted
+            })
+            .child(v.unwrap_or_else(|| "—".into()))
+    };
+    let header = div()
+        .h(px(26.))
+        .flex()
+        .items_center()
+        .type_step(text::SMALL)
+        .text_color(p.text_muted)
+        .child(div().flex_1().min_w_0().child("Service"))
+        .child(div().w(px(COL_STATE)).flex_none().child("State"))
+        .child(
+            div()
+                .w(px(COL_NUM))
+                .flex_none()
+                .flex()
+                .justify_end()
+                .pr(space::S6)
+                .child("CPU"),
+        )
+        .child(
+            div()
+                .w(px(COL_NUM))
+                .flex_none()
+                .flex()
+                .justify_end()
+                .pr(space::S6)
+                .child("Memory"),
+        )
+        .child(div().flex_1().min_w_0().pl(space::S4).child("Route"));
+    let mut table = div().flex().flex_col().child(header);
+    for (i, r) in rows.iter().enumerate() {
+        let state_color = match r.status {
+            Status::Failed => p.states.failed.fg,
+            Status::Degraded => p.states.degraded.fg,
+            Status::Running => p.text_primary,
+            _ => p.text_secondary,
+        };
+        let route = match &r.route {
+            Ok(route) => div()
+                .font_family(ui.mono.clone())
+                .type_step(text::MONO)
+                .text_color(p.text_secondary)
+                .child(route.clone()),
+            Err(note) => div().text_color(p.text_muted).child(note.clone()),
+        };
+        table = table.child(
+            div()
+                .id(("svc", i))
+                .h(size::TABLE_ROW)
+                .flex_none()
+                .flex()
+                .items_center()
+                .hairline_t(p.border)
+                .type_step(text::BODY)
+                .text_color(p.text_primary)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(space::S4)
+                        .child(dot(r.status, ui))
+                        .child(div().truncate().child(r.name.clone())),
+                )
+                .child(
+                    div()
+                        .w(px(COL_STATE))
+                        .flex_none()
+                        .truncate()
+                        .text_color(state_color)
+                        .child(r.state.clone()),
+                )
+                .child(num(r.cpu.clone(), ui))
+                .child(num(r.memory.clone(), ui))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .pl(space::S4)
+                        .truncate()
+                        .child(route),
+                ),
+        );
+    }
+    table
+}
+
+/// One line of the compact log tail.
+pub struct LogLine {
+    pub time: Option<String>,
+    pub service: Option<String>,
+    pub message: String,
+    pub level: LogLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// Compact log tail: sized to its lines (no empty box), mono, warnings and
+/// errors tinted. `title` is the caption ("Recent logs").
+pub fn log_tail(title: &str, lines: &[LogLine], empty: Option<&str>, ui: &Ui) -> Div {
+    let p = ui.p;
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .px(space::S5)
+        .py(space::S4)
+        .rounded(radius::PANEL)
+        .bg(p.surface_1)
+        .font_family(ui.mono.clone())
+        .type_step(text::MONO)
+        .child(
+            div()
+                .pb(space::S2)
+                .font_family(ui.font.clone())
+                .type_step(text::SMALL)
+                .text_color(p.text_muted)
+                .child(title.to_owned()),
+        );
+    if lines.is_empty() {
+        block = block.child(
+            div()
+                .text_color(p.text_muted)
+                .child(empty.unwrap_or("No recent log lines").to_owned()),
+        );
+    }
+    for l in lines {
+        let fg = match l.level {
+            LogLevel::Info => p.text_primary,
+            LogLevel::Warn => p.states.degraded.fg,
+            LogLevel::Error => p.states.failed.fg,
+        };
+        block = block.child(
+            div()
+                .flex()
+                .gap(space::S5)
+                .whitespace_nowrap()
+                .when_some(l.time.clone(), |d, t| {
+                    d.child(div().flex_none().text_color(p.text_muted).child(t))
+                })
+                .when_some(l.service.clone(), |d, s| {
+                    d.child(
+                        div()
+                            .w(px(52.))
+                            .flex_none()
+                            .truncate()
+                            .text_color(p.text_secondary)
+                            .child(s),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(fg)
+                        .child(l.message.clone()),
+                ),
+        );
+    }
+    block
+}
+
+/// Tone of an inline banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerTone {
+    Warn,
+    Error,
+}
+
+/// Inline banner under the title bar: icon, one line of text, optional action.
+pub fn banner(
+    tone: BannerTone,
+    message: impl Into<SharedString>,
+    action: Option<(Glyph, &'static str)>,
+    ui: &Ui,
+) -> Div {
+    let p = ui.p;
+    let c = match tone {
+        BannerTone::Warn => p.states.degraded,
+        BannerTone::Error => p.states.failed,
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(space::S4)
+        .px(space::S7)
+        .py(space::S3)
+        .bg(c.bg)
+        .hairline_b(p.border)
+        .type_step(text::BODY)
+        .text_color(p.text_primary)
+        .child(icon(Glyph::Alert, size::ICON, c.fg))
+        .child(div().flex_1().min_w_0().truncate().child(message.into()))
+        .when_some(action, |d, (glyph, label)| {
+            d.child(action_button("banner-action", glyph, label, true, ui))
+        })
+}
+
+/// Centered empty or error pane: icon, headline, body, optional command.
+pub fn empty_pane(
+    glyph: Glyph,
+    title: impl Into<SharedString>,
+    body: impl Into<SharedString>,
+    command: Option<&str>,
+    ui: &Ui,
+) -> Div {
+    let p = ui.p;
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(space::S4)
+        .child(
+            div()
+                .size(px(40.))
+                .rounded(radius::PANEL)
+                .bg(p.surface_1)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(glyph, px(20.), p.text_secondary)),
+        )
+        .child(
+            div()
+                .pt(space::S2)
+                .type_step(text::HEADLINE)
+                .text_color(p.text_primary)
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .max_w(px(360.))
+                .text_center()
+                .type_step(text::BODY)
+                .text_color(p.text_secondary)
+                .child(body.into()),
+        )
+        .when_some(command, |d, cmd| {
+            d.child(
+                div()
+                    .mt(space::S4)
+                    .px(space::S5)
+                    .py(space::S2)
+                    .rounded(radius::CONTROL)
+                    .bg(p.surface_1)
+                    .font_family(ui.mono.clone())
+                    .type_step(text::MONO)
+                    .text_color(p.text_primary)
+                    .child(cmd.to_owned()),
+            )
+        })
+}
+
+/// Placeholder skeleton bar for the loading state.
+pub fn skeleton(width: f32, ui: &Ui) -> Div {
+    div()
+        .h(px(10.))
+        .w(px(width))
+        .rounded(px(4.))
+        .bg(ui.p.surface_1)
+}

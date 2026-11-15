@@ -35,6 +35,12 @@ no longer removes legacy inputs in the same step.
 
 The full upgrade steps are in [Upgrade to v5](upgrade-to-v5.md#preview-resume-and-undo-env-migration).
 
+### Read-only update check for any install
+
+| Change | What to do |
+| --- | --- |
+| **`hack update --check --json --observe` reports whether a newer release exists, for any install kind.** It returns `current`, `channel`, `latest`, `available`, `install_kind` and `upgrade_command` with one bounded GitHub read, and never installs, prompts or refuses a Homebrew or candidate install. Unknown is `null` with a `reason`. | Use it to poll for updates (for example from the desktop app), then run the reported `upgrade_command` yourself. See [the update check](../reference/update-check.md). Plain `hack update --check` is unchanged. |
+
 ### Breaking change: next.17 machine output moves into the JSON envelope
 
 Five `--json` outputs that first shipped in next.17 now use the documented

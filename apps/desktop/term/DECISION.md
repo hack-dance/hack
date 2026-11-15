@@ -122,7 +122,9 @@ app, for five reasons:
   below are a first measurement of emulation and CPU-side paint cost on one
   Linux machine; they are not display latency and not a Mac.
 - **macOS.** Nothing in this crate has been run on a Mac except what hosted
-  CI runs of the default-feature tests show.
+  CI runs of the default-feature tests show. On macOS a job in another
+  process group that ignores SIGHUP survives a closed tab and is reported,
+  not ended (see "PTY ownership").
 - **Polish we have to build ourselves**: cursor shapes and blink, IME,
   mouse reporting to programs, plain-URL detection, ligature policy,
   per-row caching keyed on libghostty's row ids, waking on output instead
@@ -219,30 +221,222 @@ yet; the Mac commands are in the PR.
   crate's directory; it is the only place the download base can be set for
   every cargo invocation in the workspace.
 
-## The spike
+## The terminal panel
+
+Owner decision (Nov 15 2026): the terminal is a per-project bottom panel
+with tabs. The panel's design is specified in `DESIGN-V1.md`; this crate
+supplies the component, the session kinds, the tab identity and the
+actions.
 
 ```sh
 cd apps/desktop
 eval "$(bash term/scripts/provision-ghostty.sh)"
 cargo run -p hack-desktop-term --features ghostty --example term_spike
 cargo run -p hack-desktop-term --features ghostty --example term_spike -- --file some.log
-cargo run -p hack-desktop-term --features ghostty --example term_spike -- --cmd /bin/sh -c 'ls --color=always /'
-cargo run -p hack-desktop-term --features screenshots --example term_spike -- --theme dark --screenshot /tmp/term.png
+# Real CLI sessions, in a real Hack project with a running service (manual):
+cargo run -p hack-desktop-term --features ghostty --example term_spike -- \
+    --project /path/to/project --hack "$(command -v hack)" --service api --env staging --scope api
+cargo run -p hack-desktop-term --features screenshots --example term_spike -- --screenshots /tmp/shots
 cargo run --release -p hack-desktop-term --features screenshots --example term_bench
-bash scripts/test.sh --features hack-desktop-term/ghostty
+bash scripts/test.sh --features hack-desktop-term/screenshots
 ```
 
-Left pane: a read-only stream (a generated 10,000-line ANSI log by default,
-or `--file` / `--cmd`), 10,000-line scrollback cap, follow on/off (`f`,
-End, scrolling up pauses), PageUp/PageDown/Home, search (Ctrl-Shift-F or
-Cmd-F; Enter older, Shift-Enter newer, Esc). Right pane: your `$SHELL` on an
-app-owned PTY, resized with the pane, drag selection, triple-click select
-all, Ctrl-Shift-C / Cmd-C copy, Ctrl-Shift-V / Cmd-V paste (bracketed when
-the program asks), Ctrl/Cmd-click opens OSC 8 links. Closing the window
-quits and ends the shell's session.
+The example opens four tabs in one panel: `logs`, a container shell, the
+host login shell, and a host shell with an env overlay. Without `--hack`
+and `--service` the two CLI-backed tabs run a stand-in script that checks
+the argv the app would pass to `hack` and then starts a plain shell.
 
-Renders (offscreen, 2560×1520):
-[dark](screenshots/spike-dark.png), [light](screenshots/spike-light.png).
+### Sessions
+
+The app owns the PTY and runs the CLI in it. It never builds an environment
+and never sees a value. The only variables it sets are the terminal's own
+identity (`TERM=xterm-256color`, `COLORTERM=truecolor`,
+`TERM_PROGRAM=hack`); everything else is inherited, or injected by the CLI
+inside the PTY. The only strings it puts in argv are the CLI's subcommands,
+validated names and a shell name. (`launch.rs`.)
+
+| Tab | What runs, in the project root |
+|---|---|
+| Logs | Nothing here: a read-only stream fed by the app's log reader |
+| Shell in a service | `hack exec <service> -- bash`, then `hack exec <service> -- sh` if the image has no bash |
+| Host shell | The user's login shell (`$SHELL`, else the passwd entry, else `/bin/sh`), started as a login shell by the `argv[0]` convention (`-zsh`). On a PTY that makes it interactive, so profile and rc files load as in the user's own terminal |
+| Host shell with env | `hack host shell --env <overlay> --scope <scope>`. The CLI resolves and injects the values and starts `$SHELL -l` |
+
+Details that were checked against the CLI source on `next` and, for the
+last two rows, by running it:
+
+- **`hack exec`** takes `<service>` then the command after an optional
+  `--`, with `--path`, `--project`, `--env`, `--branch`, `--workdir` and
+  `--profile`. The compose backend runs `docker compose exec` and allocates
+  a TTY exactly when its own stdin and stdout are terminals, which they are
+  on our PTY. The native backend has its own interactive exec path and
+  refuses `--env` and `--profile`; we pass neither. *Not run against a real
+  container here (no Docker in this work).*
+- **bash, then sh.** There is no flag for "first shell that exists", and
+  probing first would be a second exec. The session starts `bash`; if that
+  attempt ends with exit status 126 or 127 within 10 s and before the user
+  has typed anything, the terminal is reset and `sh` is started in the same
+  tab, and the tab's label changes from `api · bash` to `api · sh`. An exit
+  with those codes after the user has typed is their session ending and is
+  not retried. *The exit status for a missing program comes from the
+  container engine; see CLI request 3.*
+- **`hack host shell`** exists, with `--path`, `--project`, `--env`,
+  `--scope` and `--target`. It runs `[$SHELL or /bin/sh, "-l"]` in the
+  project root with the process environment plus the injected values and
+  inherited stdio. *Run for real* on a pseudo-terminal in a throwaway
+  project with a temporary home: the profile loaded, the profile's prompt
+  showed, the shell was interactive, global and service-scoped overlay
+  values were present, `TERM_PROGRAM` and `COLORTERM` came through, and the
+  working directory was the project root. So it can start the user's
+  interactive login shell with their rc files, as long as `SHELL` is set.
+- **`hack env list --json`** exists. *Run for real* on the same project: it
+  returns `env_selection` (`requested`, `default`, `effective`,
+  `overlay_path`, `overlay_exists`), `scopes` (for example `["api",
+  "global"]`), `selected_scope`, `files`, and `vars` with names and
+  metadata and no `value` field unless `--show-values` is given. `is_default`
+  for the badge is `overlay == env_selection.default`. It does **not** list
+  the overlays that exist (request 1).
+- **`TERM`.** `xterm-256color` everywhere by default: containers rarely
+  have other terminfo entries, and `xterm-ghostty` breaks ssh to hosts that
+  lack it. `TermChoice::GhosttyIfPresent` switches host shells to
+  `xterm-ghostty` only when its terminfo entry is installed (first-letter
+  and macOS hex layouts are both checked). This default is flagged.
+- **Names are validated** before they reach argv: letters, digits, `_`, `-`
+  and `.`, not starting with `-` or `.`. A service called `--env` cannot
+  become an option.
+
+### CLI requests
+
+These are the smallest CLI changes that would close gaps. The app does not
+work around them.
+
+1. **`hack env list --json`: add `overlays`, the names of the overlays that
+   exist.** Today the payload carries the selection and the scopes but only
+   the files of the selected overlay, so the app cannot offer a list of
+   overlays to open a shell with. The library already has
+   `listProjectEnvOverlayNames`. Names only.
+2. **`hack host shell`: when `SHELL` is unset or empty, use the user's
+   passwd shell before falling back to `/bin/sh`.** Run for real with
+   `SHELL` unset, it started `/bin/sh`. A GUI-launched app usually has
+   `SHELL`, but not always. Until this changes, the tab is labelled by the
+   same rule the CLI uses.
+3. **`hack exec`: document, and test, that a command that cannot be started
+   in the container exits 127 (or 126) on both backends.** The bash-to-sh
+   fallback depends on it, and it is currently the engine's behaviour, not
+   the CLI's contract.
+
+Not a request, but worth knowing: `env_selection.default` is `null` for a
+project with no default overlay. Any named overlay is then "not the
+default" and its badge has the warning tone.
+
+### Why this and not attaching to tmux
+
+- **One mechanism.** The same PTY, emulator and teardown serve logs,
+  container shells and host shells. Attaching to tmux would add a second
+  terminal emulator between the program and ours, with its own scrollback,
+  key table, copy mode and resize rules to reconcile.
+- **It works without tmux.** tmux is not installed on every machine, and
+  never inside most service containers.
+- **The CLI stays the only thing that touches env values.** With `hack host
+  shell` the values go from the CLI straight into the child's environment
+  inside the PTY. A tmux route would need the app or a wrapper to place
+  values into a tmux server's environment or command line, where they
+  outlive the tab and are visible to every other pane and client of that
+  server.
+- **Ownership.** We end what we start: the session is ours, and closing a
+  tab ends it. A tmux server is a long-lived process the user owns; ending
+  "our" part of it safely is a harder and different problem.
+
+Nothing stops a user from running `tmux` inside a host shell tab.
+
+### Tab identity and badge
+
+`SessionKind` is what a tab is, with names only:
+
+| Kind | Label | Badge |
+|---|---|---|
+| `Logs` | `logs` | none |
+| `ContainerShell { service, shell }` | `api · sh` | none |
+| `HostShell { shell }` | `host · zsh` | none |
+| `HostShellWithEnv { shell, overlay, scope, is_default }` | `host · zsh` | `env staging · api`, warning tone when the overlay is not the default one |
+
+`TerminalView::kind()` and `TerminalPanel::kinds()` expose it; `label()`
+and `badge()` produce the strings and the tone. A container shell's kind
+changes if `bash` was missing.
+
+### Look: the user's Ghostty config
+
+`ghostty_config::GhosttyLook::load` reads the user's Ghostty config so the
+terminal matches their own: `font-family` (the first is the font, later
+ones are fallbacks), `font-size`, `background`, `foreground`, `palette`,
+`cursor-style`, `window-padding-x` and `window-padding-y`. Whatever is not
+set falls back to the app's tokens. Rules follow Ghostty's documentation:
+
+- Files, in load order: `$XDG_CONFIG_HOME/ghostty/config.ghostty`, then
+  `config` (`~/.config` when the variable is unset); on macOS also
+  `~/Library/Application Support/com.mitchellh.ghostty/` with the same two
+  names, after the XDG ones. Later values win.
+- `config-file` includes are processed at the end of the file that names
+  them, relative to it; `?` marks one optional; cycles end.
+- `theme = name`, an absolute path, or `light:A,dark:B` picked by the app's
+  appearance. Names are looked up in the user's `themes` directory, then in
+  Ghostty's resources. The user's own settings override the theme's. A
+  theme cannot set `theme` or `config-file`, and a name containing a path
+  separator is refused.
+
+Only those keys are parsed; every other line is skipped without being
+kept, nothing from the file is logged, and a missing, oversized or
+malformed file is treated as empty. Sizes are points as Ghostty counts
+them: a logical pixel on macOS, 96/72 of one elsewhere. Colours accept hex;
+X11 colour names are accepted when libghostty is linked in.
+
+Not mapped yet: `cursor-color`, `selection-*`, `font-feature`, bold and
+italic font overrides, `adjust-cell-height`, `background-opacity`.
+
+### Keyboard actions
+
+`actions.rs` defines the actions in the `hack_term` namespace and the
+components handle them. The crate binds no keys; bindings are listed in the
+app's spec.
+
+| Action | Handled by | Effect |
+|---|---|---|
+| `TogglePanel` | panel | Show or hide; hidden tabs keep running |
+| `NewTab` | panel | Emits `PanelEvent::NewTabRequested`; the app chooses the kind and calls `add_tab` |
+| `CloseTab` | panel | Closes the active tab and ends its session |
+| `NextTab` / `PrevTab` | panel | Move through the tabs, wrapping |
+| `ToggleMaximize` | panel | Sets `is_maximized()`; the app's layout gives it the room |
+| `Find` | view (and panel, for the active tab) | Opens find |
+
+The panel handles these when focus is inside it. For keys that must work
+when focus is elsewhere (toggling a hidden panel), the app calls the same
+public methods from its own handlers; the example shows both.
+
+### What the renders and tests show
+
+All in the same component, in the same panel:
+
+| Item | Render | Test |
+|---|---|---|
+| Truecolour, 256 and 16 colours | [host](screenshots/panel-host-dark.png) | `ansi_colours_and_attributes_reach_the_frame`, `logs_keep_their_ansi_colours_and_prompt_glyphs_exactly` |
+| Bold, italic, underline, strike, faint | host; real italics with a font that has them: [with a Ghostty look](screenshots/panel-host-ghostty-look-dark.png) | emulator tests |
+| Wide glyphs | host | `wide_characters_take_two_cells` |
+| Nerd Font prompt glyphs, a starship-style prompt | host | each private-use glyph is one cell holding that character |
+| OSC 8 hyperlinks | host, [logs](screenshots/panel-logs-dark.png) | `osc8_hyperlinks_are_readable_and_queries_get_replies`, and in the logs test |
+| Host login shell with prompt theming | host, [light](screenshots/panel-host-light.png) | a real `/bin/sh` login shell loads its profile, prompt and `ENV` file and is interactive; the same for zsh where it is installed |
+| Container shell | [container](screenshots/panel-container-dark.png) (stand-in for `hack exec`) | stand-in CLI: argv checked, shell usable, bash-to-sh fallback and its label |
+| Host shell with env, and the badge | [host with env](screenshots/panel-host-env-dark.png) (stand-in for `hack host shell`) | stand-in CLI: argv is names only; the real command was run by hand |
+| Read-only log stream | logs | ANSI kept exactly as printed; input is never sent |
+| The user's Ghostty look | [with a Ghostty look](screenshots/panel-host-ghostty-look-dark.png) | fixture config files in a temporary home |
+
+The prompt in the renders is `/bin/sh` with a fixture profile that draws a
+themed prompt, so the capture is deterministic. In the live example the tab
+runs the user's own login shell.
+
+Two things the renders make visible and that are not fixed: the app's
+default monospace font on the capture machine has no italic face, so
+italics only show with a font that has one; and wide icon glyphs are drawn
+at their natural width, where Ghostty fits them to the cell.
 
 ### PTY ownership
 
@@ -255,16 +449,29 @@ every inherited descriptor above stderr close-on-exec in the child.
 pid cannot be reused, so neither can the group id or session id: `killpg`
 on the leader's group reaches our group or nothing, and a process whose
 session id is the leader is ours. Exit is observed with `waitid(WNOWAIT)`,
-which does not reap. Members in other process groups (an interactive
-shell's jobs) are found by scanning the process table and re-verified at
-the moment of signalling:
+which does not reap.
 
-- Linux: `pidfd_open`, re-read `/proc/<pid>/stat` and require the session
-  id to still match, then `pidfd_send_signal`. The pidfd names one process
-  for life, so the signal reaches the verified process or nobody.
-- macOS: no pidfd. `getsid` and the process status are re-checked
-  immediately before `kill`. A residual race remains (exit, reap and pid
-  reuse between those two calls); it is documented in `session.rs`.
+**Signals fail closed.** A signal is sent only through a handle whose
+identity cannot be recycled:
+
+- The leader's process group, on every platform, by `killpg` under the
+  anchor. Closing the PTY master also hangs up the controlling terminal: the
+  kernel sends SIGHUP to the foreground group, and an interactive shell
+  sends its own SIGHUP to its jobs.
+- On Linux, members in other process groups (an interactive shell's jobs)
+  through a **pidfd**: open it, re-read the session id, then
+  `pidfd_send_signal`. The pidfd names one process for life.
+- Where there is no such handle (macOS, and Linux kernels before 5.3),
+  members outside the leader's group are **never signalled by number**. No
+  `kill(pid)` after a check is used anywhere, test cleanup included.
+
+The cost, on macOS: a process that is in another process group of the
+session and ignores or never receives SIGHUP can outlive the tab, as it
+would outlive any terminal app that is closed. It is found by a scan of the
+session and returned in `Teardown::survivors` (`terminate_blocking`, or
+`terminate_in_background` for a result without waiting); the panel shows
+how many processes outlived closed tabs. Teardown stops as soon as nothing
+more can be reached instead of waiting out its deadline.
 
 Drop sends SIGHUP and SIGCONT, then a reaper thread sends SIGKILL after
 300 ms, re-sends it every 50 ms to catch late forks, and reaps the leader
@@ -281,7 +488,12 @@ cgroups or job objects.
   fit is refused **whole** (a truncated paste could run half a command)
   and the view shows a notice.
 - Quit: the view ends the session on GPUI's background executor with a
-  100 ms SIGKILL grace, inside GPUI's 200 ms shutdown window.
+  100 ms SIGKILL grace, inside GPUI's 200 ms shutdown window. This is
+  registered for both kinds of backend, a PTY and a process-backed stream,
+  and GPUI awaits it.
+- Any input, and any change to the notice about undelivered input,
+  notifies the view, so it is drawn in the next frame even when the child
+  prints nothing.
 
 **End of output is not child exit.** The terminal core keeps pumping until
 the terminal reports end of file. If the child has exited but something
@@ -306,13 +518,21 @@ bounds.
 
 Default build (both CI hosts run these):
 
-- Session teardown: a same-group sleeper, a SIGHUP/SIGTERM-ignoring one and
-  a `set -m` job in another group are all gone after Drop, and the leader
-  is reaped.
+- Session teardown: a same-group sleeper and one that ignores SIGHUP and
+  SIGTERM are gone after Drop, and the leader is reaped.
+- A job in another process group: ended on Linux; on macOS left alone and
+  named in `survivors` (it then ends by itself).
+- Fail closed, with a fake process table: a pid replaced by another
+  process between verification and signalling receives nothing; without a
+  handle no per-process signal is attempted at all.
+- Fail closed, with real processes: a member that is killed and reaped at
+  that boundary is not signalled by number (Linux); with handles disabled,
+  a job in another group survives, is reported, is not signalled, and
+  teardown returns in under three seconds.
 - Identity: a scan that returns a pid from another session and a pid that
   does not exist; both are skipped, the other session is untouched.
 - Anchor: after the shell exits, its pid still exists and its job is still
-  found by session id; after teardown both are gone.
+  found by session id.
 - Escalation: SIGKILL is reported only for a session that ignores SIGHUP,
   and only after the grace period.
 - Writes: 16 MiB offered to a child in raw mode that never reads returns
@@ -324,21 +544,34 @@ Default build (both CI hosts run these):
   complete, with end of file after the last byte.
 - Thread-spawn failure, injected for the reader, the writer and the reaper,
   for PTY and stream: no running child and no zombie.
+- Sessions: labels and badges, argv and environment for each kind, name
+  validation, login shell resolution, terminfo detection; a real login
+  shell loading its profile; the CLI-backed kinds through a stand-in.
+- Ghostty config: fixture files in a temporary home (keys, malformed
+  values, resets, load order, macOS location, includes and cycles, themes).
 - Also: resize reaching the child, session leadership with a controlling
   tty, the child's environment, a 10,000-line file stream.
 
-The identity, anchor, queue-bound, final-output-in-grid and
-thread-spawn-failure tests were each checked to fail when the fix they
-cover is removed (mutations run by hand, sources restored). The
-spawn-failure tests only fail when both cleanup layers are removed, because
-either one alone still kills and reaps the child.
+Checked to fail when the fix they cover is removed (mutations run by hand,
+sources restored): the identity, anchor, queue-bound, final-output-in-grid,
+thread-spawn-failure, notice and stream-quit tests. The spawn-failure tests
+only fail when both cleanup layers are removed, because either one alone
+still kills and reaps the child.
 
 Feature `ghostty`: `tests/emulator.rs` (colours and attributes, LNM,
 bounded scrollback at 80 and 200 columns, follow, search, selection and
-copy, reflow, wide characters, OSC 8, query replies, key encoding, paste hardening, theme)
-and `tests/terminal.rs` (a real child's final output is in the grid and
-scrollback; a descendant holding the terminal does not keep it open; a
-stream's last line).
+copy, reflow, wide characters, OSC 8, query replies, key encoding, paste
+hardening, theme, the user's palette and cursor style), `tests/terminal.rs`
+(a real child's final output is in the grid and scrollback; a descendant
+holding the terminal does not keep it open; a stream's last line; the
+bash-to-sh fallback and its label; an exit 127 after input is not a
+fallback; logs keep ANSI and prompt glyphs) and the panel's tab logic.
+
+Feature `screenshots` (GPUI test support; no display or GPU needed),
+`tests/view.rs`: a rejected paste to a quiet child shows its notice in
+exactly one new frame with no other event; quitting the app ends a stream
+process that ignores SIGTERM, with its descendant, and a PTY session that
+ignores SIGHUP.
 
 ### Performance
 
@@ -378,21 +611,21 @@ the 10,000-line bound is the one that applies; a test covers it.
 
 ## Uses
 
-**Logs tab.** Replace the text panel with a read-only `TerminalView` fed by
-core's existing log stream reader; core's ndjson parser stays and decides
-what bytes to render (for structured entries, the app formats one line per
-entry with its own ANSI colours; raw lines pass through). LNM is on so bare
-`\n` lines render correctly. Follow, the scrollback cap and the search hook
-(`TerminalView::search`, `search_step`) back the tab's Follow toggle and
-Find field. The view is fed through `Emulator::feed`; core keeps owning the
-process.
+**Logs tab.** A read-only `TerminalView` fed by core's existing log stream
+reader; core's ndjson parser stays and decides what bytes to render (for
+structured entries, the app formats one line per entry with its own ANSI
+colours; raw lines pass through). ANSI printed by a service is kept exactly
+as printed. LNM is on so bare `\n` lines render correctly. Follow, the
+scrollback cap and the search hook (`TerminalView::search`, `search_step`)
+back the tab's Follow toggle and Find field.
 
-**Exec on a running service.** An action on a running service opens a
-`TerminalView::new_pty` running `hack exec <service> -- <shell>` on the
-app-owned PTY, in the project root, as the user. Closing the tab or window,
-or quitting the app, ends that PTY's session (and with it the `hack exec`
-client). Processes inside the container are ended by `hack exec` and the
-engine, not by this crate. Which shell to request is a product choice; default to `sh`.
+**Shells.** The three interactive kinds under "Sessions" above: a shell in
+a service, the host shell, and a host shell with env. Each is a
+`SessionPlan` from `launch.rs`; `TerminalCore::session(plan)` starts it and
+`TerminalView::from_core` shows it. Closing the tab or window, or quitting
+the app, ends that PTY's session (and with it the `hack` client). Processes
+inside the container are ended by `hack exec` and the engine, not by this
+crate.
 
 **Security rules.**
 
@@ -401,9 +634,13 @@ engine, not by this crate. Which shell to request is a product choice; default t
   LF) so it cannot break out of bracketed paste.
 - The app never logs terminal contents: no stream or PTY bytes go to logs,
   telemetry or crash reports. Copy goes to the clipboard only on user action.
-- The app never passes values in argv: the only argv is `hack exec`, the
-  service name, `--`, and the shell. Environment values are never
-  constructed or logged by the view.
+- The app never passes values in argv: argv holds only the CLI's
+  subcommands, validated service, overlay and scope names, and a shell
+  name. The app sets three fixed variables that say what terminal this is,
+  and nothing else; env values are resolved and injected by the CLI inside
+  the PTY and never pass through the app.
+- The user's Ghostty config is read for a fixed list of keys; nothing else
+  in it is kept, and nothing from it is logged.
 - What a service prints is shown as printed; the app does not redact,
   rewrite or interpret it beyond terminal emulation. Program-initiated
   clipboard writes (OSC 52) and notifications are not acted on by this

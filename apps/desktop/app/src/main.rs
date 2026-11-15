@@ -135,6 +135,9 @@ fn main() {
                             app.show_project();
                         }
                     }
+                    if f.name().starts_with("env-") {
+                        app.show_env_fixture();
+                    }
                     if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
                         app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
                     }

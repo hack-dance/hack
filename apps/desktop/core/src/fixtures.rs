@@ -30,6 +30,12 @@ pub enum Fixture {
     AlwaysLogin,
     AlwaysNoLogin,
     AlwaysCommandFailed,
+    EnvLoading,
+    EnvError,
+    EnvNormal,
+    EnvMissing,
+    EnvLocked,
+    EnvEmpty,
     // List states.
     Loading,
     Empty,
@@ -61,7 +67,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 40] = [
         Self::DaemonNotInstalled,
         Self::DaemonStopped,
         Self::DaemonStarting,
@@ -77,6 +83,12 @@ impl Fixture {
         Self::AlwaysLogin,
         Self::AlwaysNoLogin,
         Self::AlwaysCommandFailed,
+        Self::EnvLoading,
+        Self::EnvError,
+        Self::EnvNormal,
+        Self::EnvMissing,
+        Self::EnvLocked,
+        Self::EnvEmpty,
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -116,6 +128,12 @@ impl Fixture {
             Self::AlwaysLogin => "always-login",
             Self::AlwaysNoLogin => "always-no-login",
             Self::AlwaysCommandFailed => "always-command-failed",
+            Self::EnvLoading => "env-loading",
+            Self::EnvError => "env-error",
+            Self::EnvNormal => "env-normal",
+            Self::EnvMissing => "env-missing",
+            Self::EnvLocked => "env-locked",
+            Self::EnvEmpty => "env-empty",
             Self::Loading => "loading",
             Self::Empty => "empty",
             Self::DaemonDown => "daemon-down",

@@ -246,8 +246,10 @@ function planLines(report: UpgradeCheckReport): string[] {
     );
   }
   lines.push("");
-  lines.push(...namedLines("Blocked by", report.blockers));
-  lines.push(...namedLines("Not checked", report.incomplete, true));
+  lines.push(...namedLines("Blocked by", report.blockers, report.cli.command));
+  lines.push(
+    ...namedLines("Not checked", report.incomplete, report.cli.command, true)
+  );
   if (report.next_command !== null) {
     lines.push(`Next: ${report.next_command}`);
   } else if (report.next_action !== null) {
@@ -302,6 +304,8 @@ function machineStepPurpose(step: UpgradePlanStep): string {
 function namedLines(
   title: string,
   items: UpgradeCheckReport["blockers"],
+  /** The report's `cli.command`: the launcher the check ran through. */
+  cli: string,
   why = false
 ): string[] {
   if (items.length === 0) {
@@ -318,7 +322,7 @@ function namedLines(
       ];
   if (why && items.length > MAX_NAMED) {
     lines.push(
-      `  … and ${items.length - MAX_NAMED} more (hack upgrade check --verbose).`
+      `  … and ${items.length - MAX_NAMED} more (${cli} upgrade check --verbose).`
     );
   }
   lines.push("");

@@ -580,7 +580,7 @@ async function inspectMachine(opts: {
             id: "linux-dns",
             status: "info",
             summary:
-              "The Linux DNS route is set up by hack global install (listed above).",
+              "The Linux DNS route is set up by the global install listed above.",
             args: null,
             action: null,
           }
@@ -872,7 +872,7 @@ async function inspectGlobalSecretStore(opts: {
         "The global secret store's key file is missing; the OS keychain may hold its key, but it was not asked (asking can prompt).",
       args: ["doctor"],
       action:
-        "hack doctor asks the OS keychain and reports whether the key is there.",
+        "Doctor (the command above) asks the OS keychain and reports whether the key is there.",
     };
   }
   // Each reader's own key decides whether it is stranded: a project may
@@ -936,7 +936,7 @@ function misconfiguredReadersFinding(readers: ReaderKeyStates): UpgradeFinding {
     action:
       readers.opening.length > 0
         ? `Give ${readers.failing.join(", ")} the key that opens the store (the keyPath ${readers.opening.join(", ")} use${readers.opening.length === 1 ? "s" : ""}), or HACK_SECRETS_FILE_KEY.`
-        : "Run hack doctor to establish every reader's key before retiring or replacing the store.",
+        : "Run doctor (the command above) to establish every reader's key before retiring or replacing the store.",
   };
 }
 

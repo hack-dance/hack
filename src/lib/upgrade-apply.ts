@@ -602,8 +602,7 @@ export function validateUpgradeSelection(opts: {
     return {
       status: "refused",
       reason: "unknown-project",
-      message:
-        "No live registered project has that name; nothing was changed. hack upgrade check lists them.",
+      message: `No live registered project has that name; nothing was changed. ${opts.report.cli.command} upgrade check lists them.`,
     };
   }
   // A registration is identified by its primary checkout, which carries
@@ -750,7 +749,7 @@ async function applyTarget(opts: {
       backup_manifest: kept,
     };
   }
-  const result = agentOutcome({ target, migrated });
+  const result = agentOutcome({ target, migrated, cli: opts.cli });
   await opts.checkpoint?.("agent-written");
   if (
     migrated.status === "applied" ||
@@ -882,17 +881,18 @@ async function applyIgnoreRules(opts: {
 function agentOutcome(opts: {
   readonly target: Planned;
   readonly migrated: PluginMigrationApplyResult;
+  readonly cli: string;
 }): UpgradeApplyTarget {
-  const { target, migrated } = opts;
+  const { target, migrated, cli } = opts;
   const preview =
     target.projectDir === null
-      ? "hack setup migrate --global"
-      : "hack setup migrate --path <checkout>";
+      ? `${cli} setup migrate --global`
+      : `${cli} setup migrate --path <checkout>`;
   if (migrated.status === "nothing-to-migrate") {
     return outcome(
       target,
       "unchanged",
-      "No standalone Hack agent file to remove here; a stale AGENTS.md or CLAUDE.md section is refreshed by hack setup, not by apply."
+      `No standalone Hack agent file to remove here; a stale AGENTS.md or CLAUDE.md section is refreshed by ${cli} setup, not by apply.`
     );
   }
   if (migrated.status === "refused") {

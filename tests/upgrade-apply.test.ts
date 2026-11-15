@@ -406,6 +406,18 @@ test("apply --dry-run changes nothing; apply snapshots, journals, refreshes .git
       collect: collectUpgradeSnapshotTargets,
     })
   ).toMatchObject({ status: "refused", reason: "unknown-project" });
+  // The refusal points at the launcher the check ran through (HACK-2251).
+  expect(
+    await runUpgradeApply({
+      report: withLauncher(report),
+      dryRun: true,
+      project: "nope",
+      home,
+      collect: collectUpgradeSnapshotTargets,
+    })
+  ).toMatchObject({
+    message: expect.stringContaining(`${LAUNCHER} upgrade check lists them.`),
+  });
   expect(await tree(root)).toEqual(before);
 
   const applied = await runUpgradeApply({

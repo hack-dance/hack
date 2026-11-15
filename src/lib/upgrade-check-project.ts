@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
 import { type FileHandle, open, readdir, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-
 import { inspectDoctorAgentIntegrations } from "../commands/doctor.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -13,6 +12,7 @@ import {
   PROJECT_ENV_FILENAME,
   PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
+import { launcherCommand } from "./candidate-launcher.ts";
 import {
   gitIsLocalKeyIgnored,
   gitListTrackedKeyPaths,
@@ -116,6 +116,12 @@ export type RegisteredCheckout = {
   readonly projectDir: string;
   readonly projectDirName: string;
 };
+
+/** Renders a command line through the launcher the check ran through (HACK-2251). */
+export type CommandRenderer = (args: readonly string[]) => string;
+
+const stableCommand: CommandRenderer = (args) =>
+  launcherCommand({ kind: "stable", command: "hack" }, args);
 
 /** A registered project's primary checkout and its registered worktrees. */
 export function registeredCheckouts(
@@ -324,6 +330,7 @@ async function assertReadableEnvLayers(projectDir: string): Promise<void> {
 function envFormatFinding(opts: {
   readonly detected: Awaited<ReturnType<typeof detectEnvFormats>>;
   readonly root: string;
+  readonly command: CommandRenderer;
 }): UpgradeFinding {
   if (opts.detected.kind === "conflict") {
     return refusedEnvLayerFinding({
@@ -331,6 +338,7 @@ function envFormatFinding(opts: {
       root: opts.root,
       layer: opts.detected.layer,
       status: "blocker",
+      command: opts.command,
     });
   }
   const { formats } = opts.detected;
@@ -533,7 +541,7 @@ async function agentFinding(opts: {
 
 function nativeFinding(
   probe: NativePreflightProbe | null,
-  command: (args: readonly string[]) => string
+  command: CommandRenderer
 ): UpgradeFinding | null {
   if (probe === null) {
     return null;
@@ -708,6 +716,7 @@ async function guarded(
     readonly timeoutMs: number;
     readonly deadline: number;
     readonly root: string;
+    readonly command: CommandRenderer;
   },
   run: (timeoutMs: number) => Promise<UpgradeFinding | null>
 ): Promise<UpgradeFinding | null> {
@@ -746,6 +755,7 @@ async function guarded(
         root: limits.root,
         layer: error.layer,
         status: REQUIRED_CHECKS.has(id) ? "incomplete" : "warn",
+        command: limits.command,
       });
     }
     const code = upgradeCheckFailureClass(error);
@@ -763,14 +773,16 @@ function refusedEnvLayerFinding(input: {
   readonly root: string;
   readonly layer: string;
   readonly status: UpgradeFindingStatus;
+  readonly command: CommandRenderer;
 }): UpgradeFinding {
+  const recheck = input.command(["upgrade", "check"]);
   const canonicalName = input.layer.toLowerCase();
   const isLayer =
     canonicalName.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
     canonicalName.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX);
   const remedy = isLayer
-    ? "replace the link with a readable file in this checkout or remove the layer, then rerun hack upgrade check."
-    : "repair the readable directory inside this checkout, then rerun hack upgrade check.";
+    ? `replace the link with a readable file in this checkout or remove the layer, then rerun ${recheck}.`
+    : `repair the readable directory inside this checkout, then rerun ${recheck}.`;
   return {
     id: input.id,
     status: input.status,
@@ -782,8 +794,8 @@ function refusedEnvLayerFinding(input: {
     },
     args: ["doctor", "--path", input.root],
     action: isLayer
-      ? `Make ${input.layer} a readable regular file inside this checkout: replace the link with a real file here, or remove the layer, then rerun hack upgrade check.`
-      : `Make ${input.layer} a readable directory inside this checkout, then rerun hack upgrade check.`,
+      ? `Make ${input.layer} a readable regular file inside this checkout: replace the link with a real file here, or remove the layer, then rerun ${recheck}.`
+      : `Make ${input.layer} a readable directory inside this checkout, then rerun ${recheck}.`,
   };
 }
 
@@ -804,20 +816,23 @@ export async function inspectUpgradeProject(opts: {
    * Renders a command line for text that names one, through the launcher the
    * check ran through (HACK-2251); defaults to `hack`.
    */
-  readonly command?: (args: readonly string[]) => string;
+  readonly command?: CommandRenderer;
 }): Promise<readonly UpgradeFinding[]> {
   const root = opts.project.repoRoot;
   const projectDir = opts.project.projectDir;
+  const command = opts.command ?? stableCommand;
   const limits = {
     timeoutMs: opts.checkTimeoutMs ?? PROJECT_CHECK_TIMEOUT_MS,
     deadline: opts.deadline,
     root,
+    command,
   };
   const results = await Promise.all([
     guarded("env-format", limits, async () =>
       envFormatFinding({
         detected: await detectEnvFormats({ projectDir }),
         root,
+        command,
       })
     ),
     guarded("env-key", limits, () => envKeyFinding({ root })),
@@ -841,10 +856,7 @@ export async function inspectUpgradeProject(opts: {
       projectStoreFinding({ root, projectDir })
     ),
     guarded("native-preflight", limits, async () =>
-      nativeFinding(
-        await opts.nativePreflight({ projectRoot: root }),
-        opts.command ?? ((args) => ["hack", ...args].join(" "))
-      )
+      nativeFinding(await opts.nativePreflight({ projectRoot: root }), command)
     ),
   ]);
   return results.filter((finding) => finding !== null);

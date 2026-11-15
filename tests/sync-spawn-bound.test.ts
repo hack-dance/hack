@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { Glob } from "bun";
+import ts from "typescript";
 
 /**
  * Every synchronous spawn in `tests/` and `scripts/check-*.ts` carries a time
@@ -14,10 +15,11 @@ import { Glob } from "bun";
  * pass `timeout` to `Bun.spawnSync` / `spawnSync` / `execFileSync` /
  * `execSync` directly.
  *
- * The check is textual: a call counts as bounded when the text of its
- * argument list contains `timeout`. Options built elsewhere and passed as a
- * variable are not followed, so such a site counts as unbounded; give it an
- * explicit `timeout` or use the helper. Sites that already existed are listed
+ * The check parses each file: a call counts as bounded when one of its
+ * arguments is an object literal with a `timeout` property. Options built
+ * elsewhere and passed as a variable are not followed, so such a site counts
+ * as unbounded; give it an explicit `timeout` or use the helper. Spawns inside
+ * generated fixture scripts (code in a string) are not seen. Sites that already existed are listed
  * in KNOWN_UNBOUNDED, a ratchet: a file may not gain a site, and when a file
  * loses one its count here must be lowered so it cannot be spent again.
  */
@@ -25,15 +27,12 @@ import { Glob } from "bun";
 const ROOT = resolve(import.meta.dir, "..");
 const SCANNED = ["tests/**/*.ts", "scripts/check-*.ts"] as const;
 const SELF = "tests/sync-spawn-bound.test.ts";
-const SYNC_SPAWN = /\b(?:Bun\.spawnSync|spawnSync|execFileSync|execSync)\s*\(/g;
 
 /** Unbounded sites that predate this check, per file. Lower, never raise. */
 const KNOWN_UNBOUNDED: Readonly<Record<string, number>> = {
   "tests/background-command-journal.test.ts": 1,
   "tests/background-command-process.test.ts": 1,
-  "tests/checkout-write-guard.test.ts": 1,
   "tests/ci-change-scope.test.ts": 5,
-  "tests/cli-spawn-env-isolation.test.ts": 2,
   "tests/compose-startup-phases.test.ts": 1,
   "tests/daemon-detach.test.ts": 1,
   "tests/docker-context.test.ts": 1,
@@ -41,18 +40,15 @@ const KNOWN_UNBOUNDED: Readonly<Record<string, number>> = {
   "tests/doctor-fix-adopted-project.test.ts": 1,
   "tests/e2e-shard.test.ts": 2,
   "tests/e2e/run-dependency-cache.test.ts": 1,
-  "tests/e2e/scenarios/dependency-cache-package.ts": 2,
   "tests/env-protection.test.ts": 1,
   "tests/env-value-stdin-cli.test.ts": 1,
-  "tests/fixture-hermeticity.test.ts": 7,
+  "tests/fixture-hermeticity.test.ts": 1,
   "tests/gateway-tokens.test.ts": 1,
   "tests/git-info-exclude.test.ts": 1,
-  "tests/global-state-guard.test.ts": 1,
   "tests/lifecycle-command-child.test.ts": 2,
   "tests/lifecycle-json.test.ts": 1,
   "tests/lifecycle-private-output.test.ts": 3,
   "tests/mcp-native-adapter.test.ts": 3,
-  "tests/mcp-native-owner.test.ts": 1,
   "tests/mcp-startup-supervision.test.ts": 2,
   "tests/native-compose-adoption-worktrees-fixture.test.ts": 1,
   "tests/native-interactive-launcher.test.ts": 1,
@@ -70,40 +66,68 @@ const KNOWN_UNBOUNDED: Readonly<Record<string, number>> = {
   "tests/projects-registry.test.ts": 1,
   "tests/qualify-provider-pin.test.ts": 1,
   "tests/registry-touch-worktrees.test.ts": 1,
-  "tests/run-child-exit-status.test.ts": 1,
   "tests/run-exec-branch-default.test.ts": 1,
   "tests/session-list-stop-tmux.test.ts": 2,
   "tests/test-shard.test.ts": 4,
   "tests/tmux-backend-locale.test.ts": 2,
-  "tests/tmux-private-input.test.ts": 1,
   "tests/upgrade-apply.test.ts": 1,
   "tests/upgrade-check.test.ts": 7,
 };
 
-/** The text of a call from its name to its matching close parenthesis. */
-function callText(source: string, start: number): string {
-  let index = source.indexOf("(", start) + 1;
-  let depth = 1;
-  while (index < source.length && depth > 0) {
-    const char = source[index];
-    if (char === "(") {
-      depth += 1;
-    } else if (char === ")") {
-      depth -= 1;
-    }
-    index += 1;
+const SYNC_SPAWN_NAMES = new Set(["spawnSync", "execFileSync", "execSync"]);
+
+/** `spawnSync(...)`, `Bun.spawnSync(...)`, `childProcess.execSync(...)` and the like. */
+function isSyncSpawnCall(node: ts.CallExpression): boolean {
+  const callee = node.expression;
+  if (ts.isIdentifier(callee)) {
+    return SYNC_SPAWN_NAMES.has(callee.text);
   }
-  return source.slice(start, index);
+  return (
+    ts.isPropertyAccessExpression(callee) &&
+    SYNC_SPAWN_NAMES.has(callee.name.text)
+  );
 }
 
-/** Number of synchronous spawn calls in `source` whose arguments name no `timeout`. */
+/** Whether an argument is an object literal with its own `timeout` property. */
+function hasTimeoutOption(node: ts.CallExpression): boolean {
+  return node.arguments.some(
+    (argument) =>
+      ts.isObjectLiteralExpression(argument) &&
+      argument.properties.some(
+        (property) =>
+          (ts.isPropertyAssignment(property) ||
+            ts.isShorthandPropertyAssignment(property)) &&
+          property.name.getText() === "timeout"
+      )
+  );
+}
+
+/**
+ * Number of synchronous spawn calls in `source` with no literal `timeout`
+ * option. Parsed, not matched as text, so strings and comments neither hide a
+ * call nor lend it a bound. Code inside a string (a generated fixture script)
+ * is not a call and is not counted.
+ */
 function countUnboundedSyncSpawns(source: string): number {
+  const file = ts.createSourceFile(
+    "scan.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
   let count = 0;
-  for (const match of source.matchAll(SYNC_SPAWN)) {
-    if (!/\btimeout\b/.test(callText(source, match.index))) {
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      isSyncSpawnCall(node) &&
+      !hasTimeoutOption(node)
+    ) {
       count += 1;
     }
-  }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
   return count;
 }
 
@@ -140,6 +164,32 @@ test("the scanner tells bounded from unbounded synchronous spawns", () => {
   ).toBe(0);
   expect(
     countUnboundedSyncSpawns('Bun.spawnSync({ cmd: ["true"], timeout: 1 })')
+  ).toBe(0);
+  // Parentheses in strings do not move call boundaries (review of #857).
+  expect(
+    countUnboundedSyncSpawns(
+      `Bun.spawnSync(["/bin/sh", "-c", "printf ')'"], { timeout: 1000 });`
+    )
+  ).toBe(0);
+  expect(
+    countUnboundedSyncSpawns(
+      `Bun.spawnSync(["/bin/sh", "-c", "printf '('"]);\nBun.spawnSync(["true"], { timeout: 1000 });`
+    )
+  ).toBe(1);
+  // A comment or string that says "timeout" is not a bound.
+  expect(
+    countUnboundedSyncSpawns(
+      'spawnSync("sleep", ["timeout"]); // timeout\nexecSync("ls", { cwd: "timeout" })'
+    )
+  ).toBe(2);
+  // The option must be the call's own, not a nested object's.
+  expect(
+    countUnboundedSyncSpawns('spawnSync("ls", [], { env: { timeout: "1" } })')
+  ).toBe(1);
+  expect(
+    countUnboundedSyncSpawns(
+      'const timeout = 5; childProcess.execFileSync("ls", [], { timeout })'
+    )
   ).toBe(0);
   // The bounded helper itself is not a match.
   expect(countUnboundedSyncSpawns('spawnSyncBounded(["true"])')).toBe(0);

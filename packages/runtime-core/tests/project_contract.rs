@@ -67,6 +67,61 @@ impl Drop for Fixture {
 const BASIC: &str = "services:\n  web:\n    image: alpine:3.21\n    command: [echo, hello]\n";
 
 #[test]
+fn cache_refusal_lists_independent_fields_across_services_without_values() {
+    let service = serde_json::json!({"image":"alpine:3.21", "labels":{
+        "hack.dependencies.cache-volume":"${private-sentinel}",
+        "hack.dependencies.lockfiles":"../private-sentinel",
+        "hack.dependencies.runtime-files":"${private-sentinel}",
+        "hack.dependencies.bootstrap":"private-sentinel"
+    }});
+    let fixture =
+        Fixture::new(&serde_json::json!({"services":{"api":service,"worker":service}}).to_string());
+    let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
+    assert_eq!(error.code, "invalid_dependency_cache");
+    let wire = serde_json::to_value(error).unwrap();
+    let findings = wire["configuration_refusals"].as_array().unwrap();
+    assert_eq!(findings.len(), 8);
+    for name in ["api", "worker"] {
+        for field in ["cache-volume", "lockfiles", "runtime-files", "bootstrap"] {
+            assert!(
+                findings.iter().any(|item| item["service"] == name
+                    && item["field"] == format!("labels.hack.dependencies.{field}")),
+                "{wire}"
+            );
+        }
+    }
+    assert!(!wire.to_string().contains("private-sentinel"));
+    assert!(!fixture.candidate.state_root.exists());
+}
+
+#[test]
+fn missing_cache_declaration_and_initializer_mount_have_service_locations() {
+    let fixture = Fixture::new(
+        r#"services:
+  api:
+    image: alpine:3.21
+    labels: {hack.dependencies.cache-volume: undeclared}
+  worker:
+    image: alpine:3.21
+    labels: {hack.dependencies.cache-volume: deps}
+volumes:
+  deps: {}
+"#,
+    );
+    let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
+    let wire = serde_json::to_value(error).unwrap();
+    let findings = wire["configuration_refusals"].as_array().unwrap();
+    assert_eq!(findings.len(), 2);
+    assert_eq!(findings[0]["service"], "api");
+    assert_eq!(
+        findings[0]["field"],
+        "labels.hack.dependencies.cache-volume"
+    );
+    assert_eq!(findings[1]["service"], "worker");
+    assert_eq!(findings[1]["field"], "volumes");
+}
+
+#[test]
 fn standard_route_without_healthcheck_infers_a_reviewed_probe_without_editing_source() {
     use hack_runtime_core::provider::http_probe::HttpProbe;
     let document = format!(

@@ -116,6 +116,32 @@ See [Env and secrets](../env.md#legacy-repos-and-migration) and the
 [threat model](../security/env-secrets-threat-model.md). These are manual checks,
 not evidence that the real-machine upgrade or rollback has passed.
 
+## Preview, resume and undo env migration
+
+HACK-2191 follows next.17. In a build containing it, use `hack env migrate --json` to review names and
+file paths before applying. `hack env migrate --apply` snapshots originals outside
+the working tree and records resumable steps; repeat the same command after an
+interruption. Add `--accept-tracked-env-changes` only when consenting to the
+previewed shared edits. `doctor --migrate-env-config` still applies the migration,
+alongside its existing hygiene repairs; the env journal covers migration writes,
+not earlier doctor repairs. Use `hack env migrate --apply` for migration-only
+preview and rollback. Snapshot storage and the target files must share a
+filesystem; apply refuses before writing project files if rollback would cross one.
+Every migrating route now retains all legacy copies, including untracked dotenv files and tracked
+`hack.env.json`. Implicit migrations retain them too.
+
+After checking a successful complete-project `hack up`, preview the separate
+cleanup with `hack env migrate --cleanup --json`, then apply it explicitly with
+`--cleanup --apply`. Cleanup rechecks delivery, live inputs and the original
+snapshot. Restore with `hack env migrate --rollback-manifest <path>`; it refuses
+later edits and preserves replaced data. Keep snapshot blobs and the migration
+journal until the upgrade is accepted. See the [env migration
+protocol](../reference/env-migration.md).
+If later edits block rollback, `--rollback-manifest <path> --preserve-changes`
+explicitly restores originals and keeps those edits privately for recovery.
+Rollback retains project/shared keys and their required ignore entry because
+another checkout may already depend on them.
+
 ## After upgrading, check secrets at rest
 
 Earlier versions could leave env values and keys more exposed than v5 does:

@@ -377,7 +377,10 @@ fn upgrade_runs_keep_git_overrides_and_the_host_probe_guard() {
         assert_eq!(hooks, "core.hooksPath=/dev/null");
         assert_eq!(probes, "1", "the host-probe hard deny reaches the CLI");
         // The fake CLI is a #! script, so its fallback is pinned absent.
-        assert!(native.ends_with("/native-unavailable/hack-native"), "{native}");
+        assert!(
+            native.ends_with("/native-unavailable/hack-native"),
+            "{native}"
+        );
     }
     // Without the guard the run does not invent one.
     let t = Tree::new();

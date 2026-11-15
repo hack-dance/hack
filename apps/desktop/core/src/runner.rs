@@ -163,6 +163,15 @@ impl CliRunner {
         }
     }
 
+    /// Run `program` only after [`trusted_cli`]-style checks on every use:
+    /// ownership, write permissions, links, ACLs and its `#!` interpreter.
+    #[must_use]
+    pub fn verified(program: impl Into<PathBuf>) -> Self {
+        let mut runner = Self::new(program);
+        runner.verify_explicit = true;
+        runner
+    }
+
     /// Change the SIGTERM-to-SIGKILL grace for timed-out commands.
     #[must_use]
     pub fn with_term_grace(mut self, grace: Duration) -> Self {

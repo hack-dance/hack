@@ -410,7 +410,9 @@ example `DOCKER_HOST=ssh://...`) refuses the operation as well.
 review. The app accepts a recovery point only for `status: created`, `complete:
 true`, an empty `gaps` list and an absolute `manifest.json` path under the returned
 snapshot id. Refused, malformed and incomplete receipts enable neither Upgrade
-nor rollback. The app never opens the saved files or reads file values or keys.
+nor rollback. For a refused receipt the pane shows the CLI's own reason (control
+characters removed, at most 600 characters) so the user knows what to fix
+before retrying. The app never opens the saved files or reads file values or keys.
 The CLI remains responsible for private-manifest validation and file ownership.
 
 With proposed R14 evidence, the fixture flow offers **Upgrade in Terminal** only

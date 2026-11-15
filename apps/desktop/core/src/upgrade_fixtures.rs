@@ -104,6 +104,7 @@ pub fn snapshot() -> Snapshot {
         manifest_path: Some("/example/snapshots/example-snapshot/manifest.json".into()),
         complete: Some(true),
         gaps: Some(vec![]),
+        message: None,
     }
 }
 pub fn load(name: &str) -> Option<Flow> {

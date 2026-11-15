@@ -49,6 +49,16 @@ pub fn render(flow: &Flow, machine_busy: bool, cx: &mut Context<HackApp>) -> Any
         );
     }
     if let Some(snapshot) = &flow.snapshot {
+        if let Some(reason) = snapshot.refusal() {
+            body = body.child(
+                div()
+                    .text_sm()
+                    .p_3()
+                    .border_1()
+                    .border_color(t.warning)
+                    .child(format!("The CLI refused to create a snapshot: {reason}")),
+            );
+        }
         body = body.child(div().text_sm().child(if snapshot.manifest().is_some() {
             "Files were saved. Rollback restores files only."
         } else {

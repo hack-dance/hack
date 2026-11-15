@@ -278,8 +278,36 @@ pub struct Snapshot {
     pub manifest_path: Option<String>,
     pub complete: Option<bool>,
     pub gaps: Option<Vec<Gap>>,
+    /// The CLI's explanation when it refused to create a snapshot.
+    #[serde(default)]
+    pub message: Option<String>,
 }
 impl Snapshot {
+    /// Longest refusal explanation shown, in characters.
+    pub const REFUSAL_MAX: usize = 600;
+    /// The CLI's reason for a refused snapshot, for display: control
+    /// characters become spaces and the text is bounded. `None` unless the
+    /// status is `refused` and a non-blank message was given.
+    pub fn refusal(&self) -> Option<String> {
+        if self.status != "refused" {
+            return None;
+        }
+        let text: String = self
+            .message
+            .as_deref()?
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let mut shown: String = text.chars().take(Self::REFUSAL_MAX).collect();
+        if text.chars().count() > Self::REFUSAL_MAX {
+            shown.push('…');
+        }
+        Some(shown)
+    }
     pub fn manifest(&self) -> Option<&str> {
         if self.status != "created"
             || self.complete != Some(true)

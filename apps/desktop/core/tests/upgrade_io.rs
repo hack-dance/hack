@@ -436,6 +436,35 @@ fn copied_commands_keep_only_controlled_path_directories() {
     );
 }
 
+/// A refused snapshot is an `ok` envelope with status `refused`: the CLI's
+/// reason is kept for the pane, and the receipt never admits rollback.
+#[test]
+fn a_refused_snapshot_keeps_the_cli_reason() {
+    let t = Tree::new();
+    let source = t.source(
+        r#"{"ok":true,"data":{"status":"refused","message":"The snapshot destination is shared with other users.\u001b[31m Fix its permissions, then retry.","detail":{}}}"#,
+        1,
+    );
+    let snapshot = upgrade_io::snapshot(&source).unwrap();
+    assert!(snapshot.manifest().is_none());
+    let reason = snapshot.refusal().expect("refusal reason");
+    assert!(
+        reason.starts_with("The snapshot destination is shared"),
+        "{reason}"
+    );
+    assert!(reason.contains("Fix its permissions"), "{reason}");
+    assert!(!reason.chars().any(char::is_control), "{reason:?}");
+    // Long reasons are bounded; a created snapshot has no refusal.
+    let mut long = snapshot.clone();
+    long.message = Some("x".repeat(Snapshot::REFUSAL_MAX * 2));
+    assert_eq!(
+        long.refusal().unwrap().chars().count(),
+        Snapshot::REFUSAL_MAX + 1
+    );
+    long.status = "created".into();
+    assert_eq!(long.refusal(), None);
+}
+
 #[test]
 fn an_unsafe_tool_on_path_fails_every_upgrade_operation_closed() {
     let t = Tree::new();
@@ -466,6 +495,7 @@ fn an_unsafe_tool_on_path_fails_every_upgrade_operation_closed() {
         manifest_path: Some("/example/snapshots/example/manifest.json".into()),
         complete: Some(true),
         gaps: Some(vec![]),
+        message: None,
     };
     assert!(source.upgrade_rollback(&complete).is_err());
     assert!(

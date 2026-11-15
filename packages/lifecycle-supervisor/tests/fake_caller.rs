@@ -103,6 +103,27 @@ impl Fixture {
         }
     }
 
+    /// Take the fixture's stop lock once its current holder releases it. A
+    /// launch writes its ready receipt just before it drops this lock, and a
+    /// guard keeps its startup lease until publication, so the lock can still
+    /// be held briefly after `start` returns.
+    #[track_caller]
+    fn take_stop_lock(&self) -> fs::File {
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.root.join(".stop.lock"))
+            .unwrap();
+        eventually(|| {
+            // SAFETY: flock only borrows this live descriptor.
+            (unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0)
+                .then_some(())
+        });
+        lock
+    }
+
     fn state(&self, name: &str) -> Value {
         eventually(|| {
             fs::read(self.root.join(format!("{name}.json")))
@@ -286,6 +307,7 @@ fn send(writer: &mut impl Write, value: &Value) {
     writer.flush().unwrap();
 }
 
+#[track_caller]
 fn exact(reader: &mut (impl Read + AsRawFd), bytes: &mut [u8]) {
     let end = Instant::now() + TIMEOUT;
     let mut offset = 0;
@@ -308,6 +330,7 @@ fn exact(reader: &mut (impl Read + AsRawFd), bytes: &mut [u8]) {
     }
 }
 
+#[track_caller]
 fn receive(reader: &mut (impl Read + AsRawFd)) -> Value {
     let mut header = [0; 4];
     exact(reader, &mut header);
@@ -318,6 +341,7 @@ fn receive(reader: &mut (impl Read + AsRawFd)) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+#[track_caller]
 fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
     let end = Instant::now() + timeout;
     loop {
@@ -333,6 +357,7 @@ fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
     }
 }
 
+#[track_caller]
 fn eventually<T>(mut predicate: impl FnMut() -> Option<T>) -> T {
     let end = Instant::now() + TIMEOUT;
     loop {
@@ -1060,6 +1085,8 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
     }
     let (mut caller, _) = f.start(processes);
     let blocked_guard = blocked.then(|| pid(&f.state("blocked"), "guardPid"));
+    // Freeze only after launch and guard startup leases released the stop lock.
+    drop(f.take_stop_lock());
     if let Some(guard) = blocked_guard {
         assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
     }
@@ -1179,6 +1206,108 @@ fn orphan_recovery_keeps_observed_child_after_term_ends_witness() {
     );
 }
 
+#[test]
+fn stop_waiting_past_lock_bound_reports_unknown_without_acting() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    f.await_log("fixture-ready");
+    let state = f.state("worker");
+    let worker = identity(pid(&state, "commandPid")).expect("command identity");
+    // Hold the fixture's stop lock as a stuck stop would.
+    let lock = f.take_stop_lock();
+    let start = Instant::now();
+    let mut stop = command(&f.root, "stop").spawn().unwrap();
+    send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    // The frame arrives only after the sixteen-second wait; the reader's own
+    // timeout is shorter, so start reading part of the way through.
+    thread::sleep(Duration::from_secs(10));
+    let receipt = receive(stop.stdout.as_mut().unwrap());
+    assert!(!wait(&mut stop, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "unknown");
+    assert_eq!(receipt["reason"], "stop-lock-wait-expired");
+    assert!(start.elapsed() >= Duration::from_secs(16));
+    assert!(
+        identity(worker.pid).as_ref() == Some(&worker),
+        "stop acted while waiting"
+    );
+    assert_eq!(f.state("worker")["phase"], "running");
+    drop(lock);
+    f.stop();
+    assert!(wait(&mut caller, TIMEOUT).success());
+}
+
+#[test]
+fn invalid_control_requests_still_get_a_framed_refusal() {
+    let f = Fixture::new();
+    for action in ["stop", "status"] {
+        let (mut child, receipt) = f.request(
+            action,
+            &json!({"version": 99, "root": f.root, "ownerToken": TOKEN}),
+        );
+        assert!(!wait(&mut child, TIMEOUT).success(), "{receipt}");
+        assert_eq!(receipt["outcome"], "refused");
+        assert_eq!(receipt["reason"], "invalid-request");
+        assert_eq!(receipt["processes"], json!([]));
+    }
+}
+
+/// Linux shows a leader whose main thread called `pthread_exit` as `Z` while
+/// its worker threads run. It must count as live. After guard loss, recovery
+/// signals captured members one by one, so a member misread as a zombie is
+/// never captured: stop then reported absence while its worker survived.
+#[cfg(target_os = "linux")]
+#[test]
+fn main_thread_exit_with_live_worker_is_still_stopped() {
+    for lose_guard in [false, true] {
+        let f = Fixture::new();
+        let (mut caller, _) = f.start(vec![f.process("worker", "pthread-main-exit")]);
+        f.await_log("fixture-ready");
+        let state = f.state("worker");
+        let child = eventually(|| {
+            f.log().lines().find_map(|line| {
+                line.split("pthread-child ")
+                    .nth(1)
+                    .and_then(|pid| pid.parse::<i32>().ok())
+            })
+        });
+        f.owned
+            .borrow_mut()
+            .push(identity(child).expect("pthread child identity"));
+        eventually(|| (process_state(child) == Some(b'Z') && live_task(child)).then_some(()));
+        if lose_guard {
+            drop(f.take_stop_lock());
+            // SAFETY: the captured guard belongs to this fixture.
+            assert_eq!(
+                unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+                0
+            );
+            assert!(wait(&mut caller, TIMEOUT).success());
+        }
+        let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+        assert!(wait(&mut stop, TIMEOUT).success(), "{receipt}");
+        assert_eq!(receipt["outcome"], "stopped");
+        eventually(|| (!live_task(child)).then_some(()));
+        if !lose_guard {
+            assert!(wait(&mut caller, TIMEOUT).success());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn live_task(pid: i32) -> bool {
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|task| {
+            fs::read_to_string(task.path().join("stat"))
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.bytes().next()))
+                .flatten()
+                .is_some_and(|state| state != b'Z' && state != b'X')
+        })
+}
+
 fn process_is_zombie(pid: i32) -> bool {
     process_state(pid) == Some(b'Z')
 }
@@ -1230,6 +1359,9 @@ fn unreaped_matching_guard_proves_legacy_session_ownership() {
     let mut caller = ForeignChild(caller);
     f.await_log("fixture-ready");
     let mut state = f.state("worker");
+    // Freeze the parent only after launch has released the stop lock;
+    // otherwise the frozen parent would hold it and stop could never run.
+    drop(f.take_stop_lock());
     // Keep the parent from reaping its guard, then exercise legacy birth absence.
     assert_eq!(
         unsafe { libc::kill(caller.0.id() as i32, libc::SIGSTOP) },
@@ -1275,6 +1407,8 @@ fn guard_dying_during_stop_gets_a_fresh_authored_term_grace() {
     f.await_log("fixture-ready");
     let guard = pid(&f.state("worker"), "guardPid");
     let birth = identity(guard).unwrap();
+    // Freeze only after launch and guard startup leases released the stop lock.
+    drop(f.take_stop_lock());
     // Suspend this owned guard so its pending TERM cannot reach the command.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
     let mut stop = command(&f.root, "stop").spawn().unwrap();
@@ -1522,6 +1656,8 @@ fn unresponsive_guard_stop_remains_unknown() {
     f.await_log("fixture-ready");
     let state = f.state("worker");
     let guard = pid(&state, "guardPid");
+    // Freeze only after launch and guard startup leases released the stop lock.
+    drop(f.take_stop_lock());
     // SAFETY: the guard belongs to this fixture and its receipt is immutable.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
     let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
@@ -1903,6 +2039,44 @@ fn fixture_process() {
                 }
             }
             println!("wrapper-child {child}");
+        }
+        #[cfg(target_os = "linux")]
+        "pthread-main-exit" => {
+            extern "C" fn worker(_: *mut libc::c_void) -> *mut libc::c_void {
+                loop {
+                    // SAFETY: pause has no preconditions.
+                    unsafe {
+                        libc::pause();
+                    }
+                }
+            }
+            // The fork child is single-threaded, so its main thread is the
+            // thread-group leader. It starts one worker and ends only its main
+            // thread (as `pthread_exit` does); Linux then shows the leader as
+            // `Z` while the worker runs.
+            // SAFETY: the child calls only libc thread and exit functions and
+            // never returns into Rust/libtest state.
+            let child = unsafe { libc::fork() };
+            assert!(child >= 0);
+            if child == 0 {
+                unsafe {
+                    let mut thread: libc::pthread_t = std::mem::zeroed();
+                    if libc::pthread_create(
+                        &mut thread,
+                        std::ptr::null(),
+                        worker,
+                        std::ptr::null_mut(),
+                    ) != 0
+                    {
+                        libc::_exit(96);
+                    }
+                    // End only the main thread, as pthread_exit would, without
+                    // its unwinder: the raw exit syscall is thread-scoped.
+                    libc::syscall(libc::SYS_exit, 0);
+                    libc::_exit(95);
+                }
+            }
+            println!("pthread-child {child}");
         }
         "hold" => (),
         _ => std::process::exit(99),

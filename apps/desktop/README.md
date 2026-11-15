@@ -357,9 +357,9 @@ carry its `count` and `targets`, and a step covers the machine (no targets), one
 checkout (its name) or several (`projects`). A target must name a live checkout,
 by name and root, with exactly one finding for that step; any other report stays
 Unknown. Grouped cards list their checkouts. The hackd version comes from the socket named in the
-CLI's own read-only `daemon status --json` answer. No `update --check` probe or daily check runs: R14's
-observe-only target and installation contract is still missing. Availability
-therefore stays Unknown for every live install kind, including candidates and
+CLI's own read-only `daemon status --json` answer. No `update --check` probe or daily check runs. The
+CLI now has a read-only update check (R14), but this desktop adapter does not
+consume it yet, so availability stays Unknown for every live install kind, including candidates and
 Homebrew. Readiness is separate from update availability. Actual Upgrade stays
 disabled until verified target and installation evidence exists; the current
 live adapter never supplies that evidence.
@@ -389,8 +389,8 @@ finding that put the checkout in the step (an `apply_fix` group may differ).
 A disappeared step, missing scope, unreadable checkout or unchecked registry
 entry stays Unknown. The snapshot plan entry is proven by its separate complete
 receipt. A read adapter for `brew info --json=v2 --cask hack-desktop` uses the
-installed version, never the catalog version; it stays unwired until R14 verifies
-installation ownership. **Restart hackd** is explicit, shares the machine-action
+installed version, never the catalog version; it stays unwired until the desktop adopts
+R14's installation-ownership evidence. **Restart hackd** is explicit, shares the machine-action
 gate with setup/recovery, and re-reads versions after the command. No poll starts
 or restarts a service. Upgrade reads run only on demand, including while hidden;
 there is no eager or background daily upgrade check.

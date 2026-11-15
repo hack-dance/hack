@@ -459,24 +459,45 @@ pub fn session_signal(session: i32, signal: i32) -> Result<()> {
     Ok(())
 }
 
+/// Open a pidfd for `pid`, or `None` when no process with that thread-group
+/// leader exists any more.
+///
+/// With zero flags, `pidfd_open` reports a missing process as `ESRCH` on newer
+/// kernels, but as `EINVAL` on Linux 6.8 when the PID survives only as a
+/// process-group or session ID (its process exited while members of its group
+/// or session still run), because no thread-group leader exists for it. Both
+/// mean "no process to signal". Treating them as absent can only withhold a
+/// signal, never send one: identity-checked liveness decides the outcome later.
+#[cfg(target_os = "linux")]
+fn pidfd_open(pid: i32) -> Result<Option<std::os::fd::OwnedFd>> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    #[cfg(test)]
+    if let Some(errno) = tests::injected_pidfd_open_error(pid) {
+        return pidfd_open_failure(io::Error::from_raw_os_error(errno));
+    }
+    // SAFETY: pidfd_open returns a newly owned CLOEXEC descriptor.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+    if raw < 0 {
+        return pidfd_open_failure(io::Error::last_os_error());
+    }
+    // SAFETY: a non-negative result is a descriptor this call now owns.
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(raw as i32) }))
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_open_failure(error: io::Error) -> Result<Option<std::os::fd::OwnedFd>> {
+    if absent_error(&error) || error.raw_os_error() == Some(libc::EINVAL) {
+        return Ok(None);
+    }
+    Err(error)
+}
+
 fn signal_member(expected: &Identity, signal: i32) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        use std::os::fd::{FromRawFd, OwnedFd};
-        // SAFETY: pidfd_open returns a newly owned CLOEXEC descriptor.
-        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, expected.pid, 0u32) };
-        if raw < 0 {
-            let error = io::Error::last_os_error();
-            // Some kernels (observed on 6.8) return EINVAL, not ESRCH, for a PID
-            // kept alive only as a process-group or session ID after its process
-            // exited. Flags are zero, so EINVAL means no thread-group leader
-            // exists for that PID; liveness is still decided by `inspect` later.
-            if absent_error(&error) || error.raw_os_error() == Some(libc::EINVAL) {
-                return Ok(());
-            }
-            return Err(error);
-        }
-        let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+        let Some(fd) = pidfd_open(expected.pid)? else {
+            return Ok(());
+        };
         let Some(current) = inspect(expected.pid)? else {
             return Ok(());
         };
@@ -879,6 +900,97 @@ pub fn timestamp() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    thread_local! {
+        static PIDFD_OPEN_ERROR: std::cell::Cell<Option<(i32, i32)>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Test seam: the errno `pidfd_open` reports for one PID on this thread.
+    #[cfg(target_os = "linux")]
+    pub(super) fn injected_pidfd_open_error(pid: i32) -> Option<i32> {
+        PIDFD_OPEN_ERROR
+            .with(std::cell::Cell::get)
+            .and_then(|(target, errno)| (target == pid).then_some(errno))
+    }
+
+    /// Two real members: the first reports `errno` from its pidfd open, the
+    /// second is an ordinary survivor. Returns the recovery KILL result and
+    /// whether each member was killed.
+    #[cfg(target_os = "linux")]
+    fn kill_with_failed_first_open(errno: i32) -> (std::io::Result<()>, bool, bool) {
+        use std::os::unix::process::ExitStatusExt;
+        let spawn = || {
+            std::process::Command::new("/bin/sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn member")
+        };
+        let (mut first, mut second) = (spawn(), spawn());
+        let identity = |child: &std::process::Child| {
+            super::inspect(child.id() as i32)
+                .unwrap()
+                .expect("member identity")
+        };
+        let recovery = super::Recovery {
+            session: 0,
+            members: vec![identity(&first), identity(&second)],
+        };
+        PIDFD_OPEN_ERROR.with(|cell| cell.set(Some((first.id() as i32, errno))));
+        let result = recovery.signal(libc::SIGKILL);
+        PIDFD_OPEN_ERROR.with(|cell| cell.set(None));
+        let killed = |child: &mut std::process::Child| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    return status.signal() == Some(libc::SIGKILL);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let second_killed = killed(&mut second);
+        let first_killed = first.try_wait().unwrap().is_some();
+        let _ = first.kill();
+        let _ = first.wait();
+        let _ = second.kill();
+        let _ = second.wait();
+        (result, first_killed, second_killed)
+    }
+
+    /// Linux 6.8 reports EINVAL for a PID that survives only as a group or
+    /// session ID. That member is absent: it gets no signal, and recovery still
+    /// delivers KILL to the remaining captured member. Pinned on every kernel.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pidfd_open_einval_is_absent_and_recovery_still_kills_survivor() {
+        let (result, first_killed, second_killed) = kill_with_failed_first_open(libc::EINVAL);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!first_killed, "absent member was signalled");
+        assert!(second_killed, "surviving member did not get KILL");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pidfd_open_esrch_is_absent_and_recovery_still_kills_survivor() {
+        let (result, first_killed, second_killed) = kill_with_failed_first_open(libc::ESRCH);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!first_killed);
+        assert!(second_killed);
+    }
+
+    /// Any other open failure stays an error and authorizes no signal.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pidfd_open_other_errors_refuse_without_signalling() {
+        let (result, first_killed, second_killed) = kill_with_failed_first_open(libc::EMFILE);
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EMFILE));
+        assert!(!first_killed);
+        assert!(!second_killed);
+    }
+
     #[test]
     fn zombie_guard_birth_survives_discarded_exit_metadata() {
         let state = crate::storage::State {

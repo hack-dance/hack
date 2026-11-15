@@ -130,7 +130,9 @@ refused. Stop can recover the recorded session after verifying the boot,
 leader identity and each remaining member's UID, birth and session. Recovery
 delivers TERM individually, grants a fresh five-second grace, then KILL to the captured incarnations and
 confirms absence. The capture remains authoritative if TERM ends the witness;
-every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux).
+every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux). A pidfd open that
+reports the process missing (`ESRCH`, or `EINVAL` on Linux 6.8 when the PID survives only as a group or
+session ID) skips that member without a signal; liveness is still decided by identity afterwards.
 Unobserved descendants never inherit this authority; stop waits for them until its deadline and reports unknown if they remain. Unverified identity never authorizes signals or a successful
 stop. Launch and stop share a bounded lock; a startup descriptor lease keeps
 admission locked through guard publication even if the project owner dies.

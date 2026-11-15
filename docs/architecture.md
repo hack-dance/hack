@@ -773,9 +773,16 @@ Such a plist is never replaced automatically; `start` reports it and
 - Hack runs `launchctl` as `/bin/launchctl` and the macOS ancestry check's
   `ps` as `/bin/ps`, never looked up on PATH. These run automatically after
   `hack update` and during `start`, and a planted `launchctl` or `ps` in an
-  earlier PATH directory would otherwise run as this user. On Linux,
-  `systemctl`, `loginctl` and `getent` are still found on PATH, but one whose
-  path another account could replace is refused before it runs.
+  earlier PATH directory would otherwise run as this user. The daemon's
+  process proofs, the orphan sweep and the ownership proof an automatic
+  replacement runs, read `ps` and `lsof` only from fixed paths. On macOS
+  those are `/bin/ps` and `/usr/sbin/lsof`. On Linux they are the first of
+  `/bin/ps` or `/usr/bin/ps`, and of `/usr/bin/lsof` or `/usr/sbin/lsof`,
+  that another account cannot replace. When none qualifies, the observation
+  is unknown: nothing is stopped, and the start does not go on as if no
+  orphan held the socket. On Linux, `systemctl`, `loginctl` and `getent` are
+  still found on PATH, but one whose path another account could replace is
+  refused before it runs.
 - Every automatic start of the launchd job checks the plist launchd will
   load or start, current or just rewritten, before anything is unloaded,
   bootstrapped or kickstarted. That covers `start`, `restart`, the reconcile

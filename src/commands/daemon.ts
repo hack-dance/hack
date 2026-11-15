@@ -551,6 +551,16 @@ async function sweepOrphanDaemons(opts: {
     trackedPid: opts.trackedPid,
     daemonRoot: opts.paths.root,
   });
+  if (scan.unknown) {
+    // No trusted `ps` at a fixed path (HACK-2216): orphans are unknown, so
+    // nothing is stopped and the start does not go on as if none held
+    // the socket.
+    logger.error({
+      message:
+        "Could not read the process table (no ps at a fixed, trusted path), so orphaned hackd processes are unknown; nothing was stopped or started | Check: hack daemon status",
+    });
+    return { allStopped: false, stopped: 0 };
+  }
   for (const refused of scan.refused) {
     logger.info({
       message: `Left pid ${refused.pid} running: it looks like a hack daemon start, but ${describeDaemonProcessRefusal(refused.reason)}`,

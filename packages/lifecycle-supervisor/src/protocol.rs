@@ -111,7 +111,16 @@ impl Process {
 /// Length and deadline, never descriptor closure, delimit a handoff. Polling
 /// handles Darwin's brief inheritable-descriptor window without waiting on EOF.
 pub fn read<T: DeserializeOwned>(input: &mut (impl Read + AsRawFd)) -> Result<T> {
-    let deadline = Instant::now() + DEADLINE;
+    read_within(input, DEADLINE)
+}
+
+/// `read` with an explicit deadline, for a reply that follows a bounded wait
+/// on the other side (for example a stop-lock wait before an incremental add).
+pub fn read_within<T: DeserializeOwned>(
+    input: &mut (impl Read + AsRawFd),
+    within: Duration,
+) -> Result<T> {
+    let deadline = Instant::now() + within;
     let mut header = [0; 4];
     exact(input, &mut header, deadline)?;
     let length = u32::from_be_bytes(header) as usize;

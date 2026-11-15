@@ -279,6 +279,42 @@ fn owner_death_keeps_native_status_and_recovery_stop() {
     ));
 }
 
+/// Add waits up to the stop-lock bound (16 s) on the server side. The
+/// forwarder must keep waiting for that reply instead of reporting failure
+/// after the ordinary 10-second frame deadline while the server still launches.
+#[test]
+fn add_reply_outlasts_a_stop_lock_held_past_the_frame_deadline() {
+    let mut fixture = Fixture::new();
+    fixture.serve(fixture.process("helper", "hold"));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(fixture.root.join(".stop.lock"))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    // SAFETY: flock only borrows this live descriptor.
+    while unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        assert!(
+            Instant::now() < deadline,
+            "stop lock stayed busy after serve"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut add = fixture.command("add").spawn().unwrap();
+    send(
+        add.stdin.as_mut().unwrap(),
+        &fixture.launch(fixture.process("later", "hold")),
+    );
+    std::thread::sleep(Duration::from_secs(12));
+    drop(lock);
+    let receipt = receive(add.stdout.as_mut().unwrap());
+    assert!(wait(&mut add).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "ready");
+    assert!(fixture.root.join("later.json").exists());
+}
+
 #[test]
 fn completed_stop_cannot_be_followed_by_add_to_old_owner() {
     let mut fixture = Fixture::new();

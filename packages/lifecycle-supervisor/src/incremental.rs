@@ -132,7 +132,13 @@ pub(crate) fn add(request: Launch) -> Result<()> {
         return Err(refused());
     }
     protocol::write(&mut stream, &request)?;
-    let receipt: serde_json::Value = protocol::read(&mut stream)?;
+    // The server may wait the full stop-lock bound before it launches, then
+    // needs one ordinary frame deadline for its own work. Giving up sooner
+    // would report failure for an add the server still completes.
+    let receipt: serde_json::Value = protocol::read_within(
+        &mut stream,
+        crate::supervisor::STOP_LOCK_WAIT + protocol::DEADLINE,
+    )?;
     if receipt["version"] != 1 || !receipt["processes"].is_array() {
         return Err(refused());
     }

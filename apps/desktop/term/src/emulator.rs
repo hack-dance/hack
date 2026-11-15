@@ -172,6 +172,9 @@ pub struct Frame {
     pub selection: Vec<Option<(u16, u16)>>,
     /// Search highlights in viewport coordinates: (row, start_col, end_col, active).
     pub matches: Vec<(u16, u16, u16, bool)>,
+    /// The search's state from the same pass as `matches`: what a count
+    /// shown beside these highlights should say.
+    pub search: SearchState,
     /// Scrollback position: total rows, offset of the viewport, viewport rows.
     pub scroll: (u64, u64, u64),
 }
@@ -276,6 +279,13 @@ pub struct Emulator {
     rows_it: RowIterator,
     cells_it: CellIterator,
     search: Option<Search>,
+    /// Counts every change the search's results depend on: output, a
+    /// resize (which reflows), a viewport move, the needle and the
+    /// selected match. See [`Self::search_refresh`].
+    revision: u64,
+    /// The revision the search last ran at, and its state then.
+    searched: Option<(u64, SearchState)>,
+    search_runs: u64,
     keys: key::Encoder,
     key_event: key::Event,
     theme: TermTheme,
@@ -310,6 +320,9 @@ impl Emulator {
             rows_it: RowIterator::new()?,
             cells_it: CellIterator::new()?,
             search: None,
+            revision: 0,
+            searched: None,
+            search_runs: 0,
             keys: key::Encoder::new()?,
             key_event: key::Event::new()?,
             theme: opts.theme,
@@ -323,6 +336,9 @@ impl Emulator {
     /// Process output bytes. Returns bytes the terminal wants written back
     /// to the PTY (query responses); a read-only stream discards them.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        if !bytes.is_empty() {
+            self.revision += 1;
+        }
         self.term.vt_write(bytes);
         let mut reply = Vec::new();
         for ev in self.term.events() {
@@ -350,6 +366,7 @@ impl Emulator {
         if cols == self.cols() && rows == self.rows() {
             return;
         }
+        self.revision += 1;
         let _ = self.term.resize(cols, rows, cell_w_px, cell_h_px);
         if self.follow {
             self.term.scroll_viewport(ScrollViewport::Bottom);
@@ -402,6 +419,7 @@ impl Emulator {
     pub fn set_follow(&mut self, follow: bool) {
         self.follow = follow;
         if follow {
+            self.revision += 1;
             self.term.scroll_viewport(ScrollViewport::Bottom);
         }
     }
@@ -413,6 +431,9 @@ impl Emulator {
     /// Scroll by rows (negative is up). Scrolling up turns follow off;
     /// reaching the bottom turns it back on.
     pub fn scroll(&mut self, delta: isize) {
+        if delta != 0 {
+            self.revision += 1;
+        }
         self.term.scroll_viewport(ScrollViewport::Delta(delta));
         self.follow = self.at_bottom();
     }
@@ -587,8 +608,10 @@ impl Emulator {
     /// case-insensitively. Selects the newest match and scrolls to it.
     pub fn search(&mut self, needle: Option<&str>) -> SearchState {
         let needle = needle.filter(|n| !n.is_empty());
+        self.revision += 1;
         let Some(needle) = needle else {
             self.search = None;
+            self.searched = None;
             return SearchState::default();
         };
         if self.search.is_none() {
@@ -599,7 +622,6 @@ impl Emulator {
         };
         let _ = search.set_select_scroll(Some(Scroll::IfNeeded));
         let _ = search.set_needle(&self.term, Some(needle));
-        let _ = search.run(&self.term);
         // From no selection, "next" selects index 0: the newest match,
         // nearest the live end of the output.
         self.search_step(true)
@@ -608,10 +630,11 @@ impl Emulator {
     /// Select the next match toward older output (`older`) or newer output,
     /// and scroll it into view. Matches are indexed newest first.
     pub fn search_step(&mut self, older: bool) -> SearchState {
+        // Step among the matches as they are now.
+        self.search_refresh();
         let Some(search) = self.search.as_mut() else {
             return SearchState::default();
         };
-        let _ = search.run(&self.term);
         // libghostty indexes matches newest first; "next" moves to older
         // output. Both directions wrap.
         let moved = if older {
@@ -619,6 +642,9 @@ impl Emulator {
         } else {
             search.select_prev(&self.term)
         };
+        // The selection changed and the viewport may have moved to show
+        // it: the next pass has to run.
+        self.revision += 1;
         if moved.unwrap_or(false) {
             self.follow = self.at_bottom();
         }
@@ -627,15 +653,37 @@ impl Emulator {
 
     /// Bring the search up to date with the terminal and return its state.
     ///
-    /// The search learns about new output only when it is run: feeding the
-    /// terminal does not run it. Call this, not [`Self::search_state`],
-    /// before showing a count next to a frame's highlights, so that both
-    /// come from the same pass.
+    /// The search learns about new output and viewport moves only when it
+    /// is run; feeding the terminal does not run it. A run is not free:
+    /// libghostty checks every match it holds, so with many matches in
+    /// scrollback it costs milliseconds. So the search runs at most once
+    /// per change: output, a resize, a viewport move, a new needle or a
+    /// new selected match. Until the next change this returns the state
+    /// from that one pass, and [`Self::frame`] takes its highlights from
+    /// the same pass. Redrawing an unchanged terminal runs nothing.
+    ///
+    /// Call this, not [`Self::search_state`], before showing a count next
+    /// to a frame's highlights.
     pub fn search_refresh(&mut self) -> SearchState {
-        if let Some(search) = self.search.as_mut() {
-            let _ = search.run(&self.term);
+        let Some(search) = self.search.as_mut() else {
+            return SearchState::default();
+        };
+        if let Some((at, state)) = self.searched
+            && at == self.revision
+        {
+            return state;
         }
-        self.search_state()
+        let _ = search.run(&self.term);
+        self.search_runs += 1;
+        let state = self.search_state();
+        self.searched = Some((self.revision, state));
+        state
+    }
+
+    /// How many times the search has run over the terminal: once per
+    /// change while a search is set, however often frames are drawn.
+    pub fn search_runs(&self) -> u64 {
+        self.search_runs
     }
 
     /// The search's state as of the last time it ran. See
@@ -654,10 +702,9 @@ impl Emulator {
 
     /// The viewport as a [`Frame`].
     pub fn frame(&mut self) -> Result<Frame, VtError> {
-        // The search only sees viewport moves when fed again.
-        if let Some(search) = self.search.as_mut() {
-            let _ = search.run(&self.term);
-        }
+        // One search pass serves this frame's highlights and the count a
+        // caller shows beside them; it runs only if something changed.
+        let search = self.search_refresh();
         let matches = self.viewport_matches();
         let scroll = self
             .term
@@ -683,6 +730,7 @@ impl Emulator {
                 _ => CursorShape::Block,
             }),
             matches,
+            search,
             scroll,
             ..Frame::default()
         };
@@ -737,7 +785,7 @@ impl Emulator {
         let Ok(matches) = search.viewport_matches(&self.term) else {
             return Vec::new();
         };
-        let cols = self.cols();
+        let (cols, rows) = (self.cols(), u32::from(self.rows()));
         let mut out = Vec::new();
         for m in &matches {
             let is_active = active
@@ -751,8 +799,10 @@ impl Emulator {
             ) else {
                 continue;
             };
-            // A match can wrap across rows; split it per row.
-            for y in s.y..=e.y {
+            // A match can wrap across rows; split it per row. libghostty
+            // also lists matches that share a page with the viewport but
+            // lie below it: those rows are not on screen.
+            for y in s.y..=e.y.min(rows.saturating_sub(1)) {
                 let x0 = if y == s.y { s.x } else { 0 };
                 let x1 = if y == e.y {
                     e.x

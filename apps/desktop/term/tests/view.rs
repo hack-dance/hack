@@ -154,6 +154,45 @@ fn the_find_count_matches_the_highlights_when_output_arrives_and_then_stops() {
 }
 
 #[test]
+fn redrawing_an_unchanged_view_with_find_open_does_not_run_the_search() {
+    let home = TempHome::new();
+    let mut cx = app();
+    let source = sh_source(
+        "echo 'needle one'; echo 'needle two'; exec sleep 120",
+        &home,
+    );
+    let (_window, view) = open(&mut cx, move |cx| {
+        TerminalView::new_stream(&source, 1_000, cx).expect("spawn")
+    });
+    assert!(settle_until(&mut cx, &view, |t| t.contains("needle two")).contains("needle two"));
+    let found = cx.update(|cx| view.update(cx, |v, cx| v.search("needle", cx)));
+    assert_eq!(found.total, 2);
+    // The frame for the search has been drawn. The source is quiet.
+    let runs = |cx: &mut HeadlessAppContext| {
+        cx.update(|cx| view.update(cx, |v, _| v.emulator().search_runs()))
+    };
+    let (searched, before) = (
+        runs(&mut cx),
+        cx.update(|cx| view.read(cx).rendered().clone()),
+    );
+    assert_eq!((before.find, before.highlights), (Some(found), 2));
+
+    // Redraw three times with nothing changed, as a hover, a blink or a
+    // neighbouring view's update would.
+    for _ in 0..3 {
+        cx.update(|cx| view.update(cx, |_, cx| cx.notify()));
+    }
+    let after = cx.update(|cx| view.read(cx).rendered().clone());
+    assert_eq!(after.count, before.count + 3, "three more frames");
+    assert_eq!(
+        (after.find, after.highlights),
+        (Some(found), 2),
+        "showing the same count and highlights"
+    );
+    assert_eq!(runs(&mut cx), searched, "and the search did no work");
+}
+
+#[test]
 fn quitting_the_app_ends_a_stream_process_that_ignores_sigterm_and_its_descendant() {
     let home = TempHome::new();
     let mut cx = app();

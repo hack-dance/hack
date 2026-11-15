@@ -2,7 +2,7 @@
 //! through the same `Frame` the GPUI element paints.
 #![cfg(all(unix, feature = "ghostty"))]
 
-use hack_desktop_term::emulator::{Emulator, EmulatorOptions, Rgb};
+use hack_desktop_term::emulator::{Emulator, EmulatorOptions, Frame, Rgb, SearchState};
 
 fn emu(cols: u16, rows: u16, crlf: bool) -> Emulator {
     Emulator::new(EmulatorOptions {
@@ -106,6 +106,94 @@ fn the_search_counts_new_output_once_it_is_refreshed() {
     // With no search there is nothing to refresh.
     e.search(None);
     assert_eq!(e.search_refresh().total, 0);
+}
+
+/// Ask for the count and then the frame, as a redraw does, after one
+/// change: both come from one search pass, exactly one.
+fn one_pass(e: &mut Emulator, what: &str, runs: &mut u64) -> (SearchState, Frame) {
+    let count = e.search_refresh();
+    let frame = e.frame().unwrap();
+    assert_eq!(frame.search, count, "{what}: one state for both");
+    assert_eq!(e.search_refresh(), count, "{what}: and it is kept");
+    *runs += 1;
+    assert_eq!(e.search_runs(), *runs, "{what}: exactly one pass");
+    (count, frame)
+}
+
+#[test]
+fn the_search_runs_once_per_change_and_not_at_all_for_an_unchanged_redraw() {
+    let mut e = emu(40, 6, true);
+    e.feed(&lines(0..200));
+    e.feed(b"needle one\nneedle two\n");
+    let found = e.search(Some("needle"));
+    assert_eq!(found.total, 2);
+    let first = e.frame().unwrap();
+    assert_eq!(first.search, found, "the frame carries the same state");
+
+    // Redrawing an unchanged terminal: the count and the highlights are
+    // asked for again and again, and the search does no work.
+    let settled = e.search_runs();
+    for _ in 0..5 {
+        assert_eq!(e.search_refresh(), found);
+        assert_eq!(e.frame().unwrap(), first);
+    }
+    assert_eq!(e.search_runs(), settled, "an unchanged redraw runs nothing");
+    // Things that change nothing do not count as changes.
+    e.feed(b"");
+    e.resize(40, 6, 8, 16);
+    e.scroll(0);
+    let _ = (e.search_refresh(), e.frame().unwrap());
+    assert_eq!(e.search_runs(), settled, "no-op calls run nothing");
+
+    // Each change costs one pass, shared by the count and the frame.
+    let mut runs = settled;
+    e.feed(b"needle three\n");
+    let (count, frame) = one_pass(&mut e, "output", &mut runs);
+    assert_eq!((count.total, frame.matches.len()), (3, 3));
+    e.resize(30, 6, 8, 16);
+    assert_eq!(one_pass(&mut e, "resize", &mut runs).0.total, 3);
+    // A viewport move: the highlights are for the rows now on screen.
+    e.scroll(-100);
+    let (count, frame) = one_pass(&mut e, "scroll", &mut runs);
+    assert_eq!((count.total, frame.matches.len()), (3, 0));
+    e.set_follow(true);
+    assert_eq!(one_pass(&mut e, "follow", &mut runs).1.matches.len(), 3);
+    // The frame alone, with no count asked for first, also runs it once.
+    e.feed(b"needle four\n");
+    assert_eq!(e.frame().unwrap().search.total, 4);
+    runs += 1;
+    assert_eq!(e.search_runs(), runs, "the frame runs the pass itself");
+    assert_eq!(e.search_refresh().total, 4);
+    assert_eq!(e.search_runs(), runs, "and the count reuses it");
+
+    // Stepping selects among up-to-date matches without a pass of its own
+    // here, then the next frame needs one for the new selection.
+    let stepped = e.search_step(true);
+    assert!(
+        stepped.selected.is_some() && stepped.total == 4,
+        "{stepped:?}"
+    );
+    assert_eq!(e.search_runs(), runs, "nothing had changed before the step");
+    let (count, frame) = one_pass(&mut e, "step", &mut runs);
+    assert_eq!(count, stepped);
+    assert_eq!(frame.matches.iter().filter(|m| m.3).count(), 1);
+    // Output between frames is seen by the step itself.
+    e.feed(b"needle five\n");
+    assert_eq!(e.search_step(false).total, 5);
+
+    // A new needle: one pass to search, one for the frame after the
+    // viewport moved to the selected match.
+    let before = e.search_runs();
+    assert_eq!(e.search(Some("line 7")).total, 11);
+    let frame = e.frame().unwrap();
+    assert_eq!(frame.search.total, 11);
+    assert_eq!(e.search_runs(), before + 2);
+    // With no search there is nothing to run.
+    let before = e.search_runs();
+    e.search(None);
+    e.feed(b"more\n");
+    assert_eq!(e.frame().unwrap().search, Default::default());
+    assert_eq!(e.search_runs(), before);
 }
 
 #[test]

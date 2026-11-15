@@ -557,13 +557,11 @@ impl TerminalView {
         let frame = self.core.emulator().frame().ok()?;
         self.rendered.highlights = frame.matches.len();
         // `render` read the find count before this resize. If the resize
-        // changed it (text reflowed), draw again with the new count.
-        if self.search_open {
-            let now = self.core.emu().search_state();
-            if now != self.search {
-                self.search = now;
-                window.request_animation_frame();
-            }
+        // changed it (text reflowed), draw again with the count that goes
+        // with this frame's highlights.
+        if self.search_open && frame.search != self.search {
+            self.search = frame.search;
+            window.request_animation_frame();
         }
         // Which symbols on screen the terminal's font lacks: those are
         // drawn from the bundled symbols font.
@@ -672,10 +670,12 @@ impl Render for TerminalView {
         .size_full();
 
         // New output may have added or removed matches, and the search
-        // only learns of it when it is run. Run it before reading the
-        // count, so the overlay and the highlights `layout` takes below
-        // come from the same pass. Without this the count stays one batch
-        // of output behind, for as long as the source is then quiet.
+        // only learns of it when it is run. Bring it up to date before
+        // reading the count, so the overlay and the highlights `layout`
+        // takes below come from the same pass: the emulator runs the
+        // search once per change, and not at all for an unchanged redraw.
+        // Without this the count stays one batch of output behind, for as
+        // long as the source is then quiet.
         if self.search_open {
             self.search = self.core.emulator().search_refresh();
         }

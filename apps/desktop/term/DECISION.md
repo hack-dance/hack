@@ -774,7 +774,8 @@ only fail when both cleanup layers are removed, because either one alone
 still kills and reaps the child.
 
 Feature `ghostty`: `tests/emulator.rs` (colours and attributes, LNM,
-bounded scrollback at 80 and 200 columns, follow, search, selection and
+bounded scrollback at 80 and 200 columns, follow, search, one search run
+per change and none for an unchanged redraw, selection and
 copy, reflow, wide characters, OSC 8, query replies, key encoding, paste
 hardening, theme, the user's palette and cursor style), `tests/terminal.rs`
 (a real child's final output is in the grid and scrollback; a descendant
@@ -793,7 +794,8 @@ Feature `screenshots` (GPUI test support; no display or GPU needed),
 `tests/view.rs`: a rejected paste to a quiet child shows its notice in
 exactly one new frame with no other event; with find open, output that
 adds matches and then stops leaves the count shown equal to the number of
-highlighted matches, with no further frame; quitting the app ends a stream
+highlighted matches, with no further frame; redrawing an unchanged view
+with find open runs no search; quitting the app ends a stream
 process that ignores SIGTERM, with its descendant, and a PTY session that
 ignores SIGHUP; with no bindings the usual chords are not shortcuts, the
 `Find`, `CloseFind`, `Paste` and `Copy` actions do their work, and a chord
@@ -829,6 +831,25 @@ Known costs still on the table, none optimised yet:
 - `Emulator::frame` allocates a `String` per cell.
 - The view polls for output on a timer (8 ms when busy, 33 ms idle), which
   adds up to one tick of latency. It should wake on output.
+
+**Find with many matches.** A libghostty search learns about new output
+and viewport moves only when it is run, and each run checks every match it
+holds. The emulator therefore keeps a revision counter (output, a resize,
+a viewport move, the needle, the selected match) and runs the search at
+most once per revision; the find count and a frame's highlights come from
+that one pass, and redrawing an unchanged terminal runs nothing. Timed in
+a dev build with a 10,000-line scrollback and 390,000 matches, medians of
+30:
+
+| Unchanged terminal | Before | After |
+|---|---|---|
+| Count, then frame (what a redraw does) | 19.4 to 20.5 ms | 1.8 ms |
+| Frame alone | 11.2 to 11.6 ms | 1.8 ms |
+
+A frame after one new line of output takes 12.4 ms in the same case: one
+run, where it was two. That run is libghostty's cost for this many
+matches; making it incremental (driving `tick` and `feed` across frames)
+is not done.
 
 One thing the benchmark caught: libghostty's default 10 MB scrollback byte
 limit applies before the line limit, and on a 200-column grid kept only

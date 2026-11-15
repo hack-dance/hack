@@ -148,7 +148,7 @@ The bounds below limit each wait, not the total duration of a request:
 | `.instance.lock` | The project supervisor (`run`), for its lifetime | Yes, its whole run | Another `run` for the root: retries 1 s, then refused. Guards, `stop` and `status` never take it. |
 | `.stop.lock` | `run` from admission until its ready receipt; each new guard (inherited on fd 2) until it publishes and detaches, or through its cleanup if a step before detaching fails (five seconds plus the KILL confirmation); `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. A launch (`run`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` writes each guard's plan and reads its receipt with a 10 s deadline each, then rolls back (up to seven seconds more). The project supervisor's signal-triggered stop also waits up to 16 s, then tries again on its next loop pass. |
 | `<name>.lock` | The guard of that command, for its lifetime | Yes | Only a new guard for the same command name: up to 10 s, then refused. Never a sibling, `stop` or `status`. |
-| Receipts, retirement marker, `lifecycle.log` | No lock | No | Receipts are replaced atomically; a reader that races a replacement reopens the name. Log records are single appends (above). |
+| Receipts, retirement marker, `lifecycle.log` | No lock | No | Receipts are replaced atomically; a reader that races a replacement reads the complete version it opened. Log records are single appends (above). |
 
 A guard frozen before it detaches keeps every `stop` and `run` of the whole root
 failing, each within its bound, for as long as it stays frozen, healthy siblings
@@ -211,7 +211,8 @@ leader identity and each remaining member's UID, birth and session. Recovery
 delivers TERM individually, grants a fresh five-second grace, then KILL to the captured incarnations and
 confirms absence. The capture remains authoritative if TERM ends the witness;
 every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux).
-Readers that open a receipt while a guard atomically replaces it reopen the name, so a
+Readers that open a receipt while a guard atomically replaces it read the complete version
+they opened (the read takes effect just before the replacement), so a
 concurrent update never reads as a refusal.
 On Linux a thread-group leader whose main thread exited while other threads run shows
 `Z` in `/proc/<pid>/stat`; it counts as live while the kernel's thread count on that same

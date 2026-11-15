@@ -4,7 +4,7 @@
 //! - [`runner`]: runs the CLI as the user with timeouts.
 //! - [`daemon`]: read-only `hackd` socket client.
 //! - [`state`]: project display state and actions.
-//! - [`viewmodel`]: list and detail state machines.
+//! - [`viewmodel`]: list and detail state machines; [`logs`]: the Logs tab.
 //! - [`source`]: live and fixture data sources; [`fixtures`]: canned states.
 //!
 //! The app keeps no state of its own beyond window layout and holds no
@@ -16,6 +16,7 @@ mod doctor_acl;
 mod doctor_plugins;
 mod doctor_tools;
 pub mod fixtures;
+pub mod logs;
 pub mod models;
 mod process;
 pub mod runner;

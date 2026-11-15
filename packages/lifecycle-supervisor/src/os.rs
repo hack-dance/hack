@@ -478,13 +478,18 @@ pub fn session_signal(session: i32, signal: i32) -> Result<()> {
         .filter(|p| p.group != session)
         .map(|p| p.group)
         .collect();
+    let mut first_error = None;
     for member in members.iter().filter(|p| p.group == session) {
-        signal_member(member, signal)?;
+        if let Err(error) = signal_member(member, signal) {
+            first_error.get_or_insert(error);
+        }
     }
     for group in groups {
-        group_signal(group, signal)?;
+        if let Err(error) = group_signal(group, signal) {
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Open a pidfd for `pid`, or `None` when no process with that thread-group
@@ -1003,6 +1008,7 @@ mod tests {
         let state = crate::storage::State {
             version: 1,
             name: "worker".into(),
+            display_name: None,
             owner_token: "synthetic".into(),
             guard_pid: 44,
             process_group_id: 44,

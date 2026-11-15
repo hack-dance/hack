@@ -4,9 +4,8 @@ Many projects need host-side setup around `hack up` (auth, local proxies, tunnel
 
 Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 
-The [standalone Rust supervisor contract](./lifecycle-supervisor.md) describes
-the separately tested supervisor work. It does not change the current mux runner
-or expose a new configuration setting in this slice.
+The [Rust supervisor contract](./lifecycle-supervisor.md) describes the experimental
+`lifecycle.runner: "supervisor"` opt-in. Omission keeps the current mux runner.
 
 With the Compose backend, the first Ctrl-C during foreground `hack up` asks
 Compose to stop the project containers. Hack waits for Compose to finish stopping
@@ -688,3 +687,46 @@ Notes:
   `--no-interactive` convention used across the CLI (documented defaults or `E_INTERACTIVE_REQUIRED`).
   It does not change hook `stdin` behavior — a hook that itself blocks on interactive auth still
   blocks under `--no-interactive`.
+
+## Experimental built-in runner
+
+Set `lifecycle.runner` to `"supervisor"` to use the built-in Rust host-process
+owner; the default remains `"mux"`. The supervisor executable must be available
+beside Hack. The [supervisor contract](./lifecycle-supervisor.md) records delivery
+and platform qualification. This opt-in does not provide a PTY: stdin is null,
+stdout/stderr are pipes, and commands requiring a terminal must use a
+noninteractive mode or an interactive workspace.
+
+Supervisor lifecycle processes do not appear as tmux sessions. Watch their output
+with `hack logs -f <name>`. Stop and restart use the recorded owner even after the
+runner setting changes. Neither runner restarts a persistent command that exits or
+crashes: it stays down, its exit is recorded, and status reports it as not live.
+Run `hack restart` (or `hack up`) to start it again. Automatic restart with backoff
+is not part of this opt-in. Unknown shutdown retains the ownership record and any
+shared helper holders, and fails so `hack down` can be retried. Shared helper
+commands themselves keep their existing ownership contract in this unit.
+
+### Refused ownership state
+
+For projects that have never published supervisor ownership, an empty or
+unparsable legacy `.hack/.internal/lifecycle/state.json` is moved to a private
+`state.json.legacy-<timestamp>-<id>` sibling, with one explanation, and treated as
+empty. This recovers interrupted non-atomic writes from older mux versions.
+After a project has used the supervisor, the durable `supervisor-state` marker
+disables that fallback: losing ownership may hide running native commands. With
+that marker present, a missing `state.json` is also refused rather than read as
+"nothing running", so `hack down`, status and runner changes cannot skip native
+retirement. Removing entries rewrites the file; Hack never deletes it.
+Unsafe files (including symlinks, hard links and foreign ownership) and
+semantically invalid records still refuse under both runners. State mutations
+now serialize on `state.lock` and publish atomically with mode 0600.
+Global project listings continue and mark the affected project's
+lifecycle as `state_unreadable`; this is unknown, not stopped.
+
+To recover, inspect that project's state file and the processes or sessions it
+records. Confirm identity before stopping any leftover work; a PID alone may have
+been reused. Preserve the file for diagnosis. Once the recorded work is confirmed
+stopped, seek an ownership-state repair; do not hand-edit or discard ownership
+records while commands may still run. A
+symlink, foreign owner, or unreadable directory needs its owner to repair the path
+before Hack can safely proceed. `hack doctor --fix` does not bypass these checks.

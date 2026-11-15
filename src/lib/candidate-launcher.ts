@@ -25,7 +25,12 @@ import { quoteShellWord } from "./logs.ts";
  */
 export type CandidateLauncher =
   | { readonly kind: "stable"; readonly command: "hack" }
-  | { readonly kind: "hack-next"; readonly command: string }
+  | {
+      readonly kind: "hack-next";
+      readonly command: string;
+      /** The selected bundle's `hack-v5`, for what `hack-next` refuses. */
+      readonly bundle: string;
+    }
   | { readonly kind: "bundle"; readonly command: string };
 
 /** The marker the launchers set; see `scripts/hack-v5.sh`. */
@@ -56,14 +61,16 @@ export function resolveCandidateLauncher(opts: {
   if (entry === "") {
     return { kind: "stable", command: "hack" };
   }
+  const bundle =
+    adjacentBundleLauncher(opts.execPath ?? process.execPath) ?? "hack-v5";
   if (entry === "hack-next") {
-    return { kind: "hack-next", command: hackNextLauncherPath(opts.homeDir) };
+    return {
+      kind: "hack-next",
+      command: hackNextLauncherPath(opts.homeDir),
+      bundle,
+    };
   }
-  return {
-    kind: "bundle",
-    command:
-      adjacentBundleLauncher(opts.execPath ?? process.execPath) ?? "hack-v5",
-  };
+  return { kind: "bundle", command: bundle };
 }
 
 /** The launcher for this process, from its environment and the user's home. */
@@ -95,12 +102,9 @@ export function launcherCommand(
  * the user replaces.
  */
 export function freshNativeHomeSetupCommand(
-  launcher: CandidateLauncher,
-  execPath: string = process.execPath
+  launcher: CandidateLauncher
 ): string {
   const runner =
-    launcher.kind === "hack-next"
-      ? (adjacentBundleLauncher(execPath) ?? "hack-v5")
-      : launcher.command;
+    launcher.kind === "hack-next" ? launcher.bundle : launcher.command;
   return `HACK_NATIVE_HOME=<new private home> ${quoteShellWord(runner)} native setup`;
 }

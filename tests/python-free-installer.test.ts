@@ -135,6 +135,10 @@ fixtureTest(
       await expect(f.channel.run(["up"])).rejects.toThrow(
         "receipt-owned native home"
       );
+      // The refusal names the bundle's launcher by path; it is not on PATH.
+      await expect(f.channel.run(["up"])).rejects.toThrow(
+        join(f.channel.root, "versions/5.0.0-next.1/bundle/hack-v5")
+      );
       expect(() => f.channel.requireQuiescent("5.0.0-next.1")).not.toThrow();
       expect(f.channel.environment("5.0.0-next.1").HACK_NATIVE_HOME).toBe(
         join(f.channel.root, "versions/5.0.0-next.1/native-home")

@@ -30,7 +30,7 @@ impl Tree {
 [ "$HACK_DAEMON_AUTOSTART_DISABLE" = 1 ] || exit 97
 [ "$PWD" = / ] || exit 98
 printf '%s\n' "$*" >> "$CALLS"
-if [ "$1" = --version ]; then printf '5.0.0\n'; exit 0; fi
+if [ "$*" = 'version --json' ]; then printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}\n'; exit 0; fi
 /bin/cat "$DATA"
 exit {exit}
 "#
@@ -65,7 +65,7 @@ fn nonzero_valid_check_envelope_is_retained_without_update_or_other_effects() {
     let calls = std::fs::read_to_string(t.0.join("calls")).unwrap();
     assert_eq!(
         calls,
-        "upgrade check --json\n--version\ndaemon status --json\n"
+        "upgrade check --json\nversion --json\ndaemon status --json\n"
     );
 }
 #[test]
@@ -193,7 +193,7 @@ fn readiness_reads_the_daemon_version_from_the_cli_socket_path() {
         format!(
             r#"#!/bin/sh
 case "$*" in
---version) printf '5.0.0\n';;
+'version --json') printf '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}\n';;
 'daemon status --json') printf '{{"status":"running","running":true,"socket_path":"{}"}}';;
 *) /bin/cat "$DATA";;
 esac

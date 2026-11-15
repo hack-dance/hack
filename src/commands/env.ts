@@ -90,8 +90,10 @@ import {
   listProjectEnvPlaintextEntries,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
+  type ProjectEnvKeyState,
   type ProjectEnvResolvedMetadata,
   parseProjectEnvTarget,
+  probeProjectEnvKeyState,
   projectEnvConfigExists,
   projectEnvConfigExistsForMutation,
   protectProjectEnvEntries,
@@ -1320,6 +1322,9 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       projectDir: project.projectDir,
     });
     const materializedExists = Object.keys(materialized).length > 0;
+    const keyState = await probeProjectEnvKeyState({
+      projectRoot: project.projectRoot,
+    });
     if (json) {
       process.stdout.write(
         `${JSON.stringify(
@@ -1333,6 +1338,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
             showSecrets,
             materialized,
             materializedExists,
+            keyState,
           }),
           null,
           2
@@ -1350,6 +1356,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
         ],
         ["selected_scope", selectedScope],
         ["files", modern.files.join(", ")],
+        ["project_key", keyState],
         [
           "unknown_scopes",
           modern.unknownScopes.length > 0
@@ -1647,6 +1654,13 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
   return await run(command, { cwd: project.projectRoot, hackReexec: true });
 };
 
+/**
+ * `key_state` in `hack env list --json`: whether the project env key can be
+ * read (see {@link probeProjectEnvKeyState}), or `not_checked` for the legacy
+ * contract format, which does not use that key. Never carries key material.
+ */
+type EnvListKeyState = ProjectEnvKeyState | "not_checked";
+
 function buildModernEnvJsonPayload(input: {
   readonly project: ProjectContext;
   readonly projectName: string;
@@ -1657,6 +1671,7 @@ function buildModernEnvJsonPayload(input: {
   readonly showSecrets: boolean;
   readonly materialized: Record<string, string>;
   readonly materializedExists: boolean;
+  readonly keyState: ProjectEnvKeyState;
 }) {
   return {
     project: input.projectName,
@@ -1668,6 +1683,7 @@ function buildModernEnvJsonPayload(input: {
       overlay_exists: input.modern.selection.overlayExists,
     },
     format: "project_env_config_v1",
+    key_state: input.keyState,
     status: {
       ...MODERN_ENV_STATUS_CLASSIFICATION,
       summary: "Project env config overlays",
@@ -1899,6 +1915,8 @@ function writeEnvListJson(input: {
         status: describeEnvAggregateStatusForJson({
           storage: input.resolved.storage,
         }),
+        // The legacy contract does not use the project env key.
+        key_state: "not_checked" satisfies EnvListKeyState,
         storage: serializeEnvStorageForJson({
           storage: input.resolved.storage,
         }),

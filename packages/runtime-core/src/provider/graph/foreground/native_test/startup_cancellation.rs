@@ -151,6 +151,7 @@ fn exercise(
     let owner_key =
         serde_json::to_vec(&("hack-graph-foreground-v1", &candidate.state_root, &run)).unwrap();
     let owner_hash = format!("{:x}", Sha256::digest(owner_key));
+    // owner-root: path-only
     let owner_root = PathBuf::from(format!("/private/tmp/hkgf-{}", &owner_hash[..24]));
     for name in ["owner.json", "control.sock"] {
         assert_eq!(

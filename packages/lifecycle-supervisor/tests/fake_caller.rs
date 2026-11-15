@@ -1121,14 +1121,11 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
         assert!(wait(&mut caller, TIMEOUT).success());
     }
     // Resume stop only after the guard incarnation has no process record left,
-    // so neither a live nor a zombie guard can witness a fresh capture.
-    eventually(|| {
-        identity(guard)
-            .is_none_or(|current| current.birth != guard_birth)
-            .then_some(())
-    });
-    // SAFETY: resumes the stop request stopped above.
-    assert_eq!(unsafe { libc::kill(stop_pid, libc::SIGCONT) }, 0);
+    // zombie included, so no guard can witness a fresh capture.
+    // Resume the stop request even if an assertion below fails first.
+    let resume = ResumeOnDrop(stop_pid);
+    eventually(|| (process_birth(guard) != Some(guard_birth)).then_some(()));
+    drop(resume);
     let receipt = receive(stop.stdout.as_mut().unwrap());
     let stopped = wait(&mut stop, TIMEOUT).success();
     assert_eq!(stopped, !blocked, "{receipt}");
@@ -1258,6 +1255,93 @@ fn orphan_recovery_waits_for_unobserved_descendant_to_exit() {
 #[test]
 fn orphan_recovery_never_signals_unobserved_descendant() {
     late_descendant_case(true);
+}
+
+/// Sends SIGCONT to a stopped child of this test when dropped, so a failed
+/// assertion cannot leave the stop request suspended.
+struct ResumeOnDrop(i32);
+
+impl Drop for ResumeOnDrop {
+    fn drop(&mut self) {
+        // SAFETY: the PID is this test's own unreaped child.
+        unsafe {
+            libc::kill(self.0, libc::SIGCONT);
+        }
+    }
+}
+
+/// Birth of any process record at `pid`, zombies included, matching the
+/// production inspection (Darwin `proc_pidinfo` argument 1, no `getsid`).
+fn process_birth(pid: i32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        text.rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .nth(19)?
+            .parse()
+            .ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: native output buffer is writable and exactly sized.
+        let size = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                1,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        if size as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+    }
+}
+
+#[test]
+fn stop_waiting_past_lock_bound_reports_unknown_without_acting() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    f.await_log("fixture-ready");
+    let state = f.state("worker");
+    let worker = identity(pid(&state, "commandPid")).expect("command identity");
+    // Hold the fixture's stop lock as a stuck stop would.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.root.join(".stop.lock"))
+        .unwrap();
+    // SAFETY: flock only borrows this live descriptor.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let start = Instant::now();
+    let mut stop = command(&f.root, "stop").spawn().unwrap();
+    send(stop.stdin.as_mut().unwrap(), &f.control(TOKEN));
+    // The frame arrives only after the sixteen-second wait; the reader's own
+    // timeout is shorter, so start reading part of the way through.
+    thread::sleep(Duration::from_secs(10));
+    let receipt = receive(stop.stdout.as_mut().unwrap());
+    assert!(!wait(&mut stop, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "unknown");
+    assert!(start.elapsed() >= Duration::from_secs(16));
+    assert!(
+        identity(worker.pid).as_ref() == Some(&worker),
+        "stop acted while waiting"
+    );
+    assert_eq!(f.state("worker")["phase"], "running");
+    drop(lock);
+    f.stop();
+    assert!(wait(&mut caller, TIMEOUT).success());
 }
 
 fn process_is_zombie(pid: i32) -> bool {

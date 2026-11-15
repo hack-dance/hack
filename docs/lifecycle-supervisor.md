@@ -52,8 +52,10 @@ is lost during stop, recovery prefers a fresh capture and falls back to those
 admitted identities, rechecking each before TERM/KILL. Each recovered target gets
 its own five-second TERM grace and two-second confirmation bound. Recovery begins
 at most once per target; late guard loss can extend stop to roughly fourteen seconds. A waiting
-stop or launch waits up to sixteen seconds for `.stop.lock`, longer than that worst case, so it
-gets its own receipt instead of a lock-wait failure. Descendants forked after the capture are never
+stop or launch waits up to sixteen seconds for `.stop.lock`, longer than those timers, so it
+normally gets its own outcome. Admission and census work run outside the timers, so this is not
+a hard bound: if a stop's wait still expires, it returns an `unknown` receipt with the current
+records and acts on nothing. Descendants forked after the capture are never
 signalled: once no captured member is left, stop waits until the target's own deadline for them to
 exit and reports unknown only if they are still alive. A failed or expired target does not abandon other admitted
 targets: stop drives them to their own outcomes before returning unknown.

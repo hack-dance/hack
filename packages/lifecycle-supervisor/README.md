@@ -51,8 +51,9 @@ finds descendants whose exit does not generate SIGCHLD for this guard. Stop uses
 20 ms confirmation intervals and keeps its five-second TERM grace. Immediate
 restart retries the instance lock for at most one second. Command-lock admission
 waits at most ten seconds for a previous owner to finish releasing its lock. Stop
-and launch wait up to sixteen seconds for `.stop.lock`, which outlasts a stop that
-recovers after late guard loss (about fourteen seconds).
+and launch wait up to sixteen seconds for `.stop.lock`, longer than the timers of a
+stop that recovers after late guard loss (about fourteen seconds). A stop whose wait
+still expires returns an `unknown` receipt without acting.
 
 The project supervisor passes its launch/stop flock lease to each guard on startup
 fd 2. The guard retains it through durable publication and receipt delivery, then

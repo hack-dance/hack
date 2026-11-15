@@ -21,9 +21,11 @@ use std::{
 const GRACE: Duration = Duration::from_secs(5);
 const IDLE_TICK: Duration = Duration::from_millis(500);
 const TICK: Duration = Duration::from_millis(20);
-/// One stop holds `.stop.lock` for at most two TERM-to-KILL bounds: the guard
-/// path, then orphan recovery after a late guard loss. A waiter must outlast
-/// that holder instead of failing without a receipt.
+/// A stop's timers allow two TERM-to-KILL bounds: the guard path, then orphan
+/// recovery after a late guard loss. The wait outlasts those timers so a
+/// waiter normally gets its own outcome. It is not a hard bound: admission,
+/// census and signalling run outside the timers. If the wait still expires,
+/// stop returns an unknown receipt without acting.
 const STOP_LOCK_WAIT: Duration =
     Duration::from_secs(2 * (GRACE.as_secs() + CONFIRM_BOUND.as_secs()) + 2);
 /// Bounded wait for a previous command owner to release its lock.
@@ -79,7 +81,27 @@ pub fn main() -> Result<()> {
             protocol::validate_control(request.version, &request.root, &request.owner_token)?;
             let root = Root::open(&request.root)?;
             let _stop_lock = if args[0] == "stop" {
-                Some(root.lock_wait(".stop.lock", STOP_LOCK_WAIT)?)
+                match root.lock_wait(".stop.lock", STOP_LOCK_WAIT) {
+                    Ok(lock) => Some(lock),
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                        // Another stop or launch still holds the lock. Report the
+                        // current receipts as unknown without acting, so a waiter
+                        // always gets a frame instead of a bare failure.
+                        protocol::write(
+                            &mut std::io::stdout(),
+                            &Receipt::new(
+                                0,
+                                "unknown",
+                                root.states()?
+                                    .into_iter()
+                                    .filter(|state| state.owner_token == request.owner_token)
+                                    .collect(),
+                            ),
+                        )?;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 None
             };

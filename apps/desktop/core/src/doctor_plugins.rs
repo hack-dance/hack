@@ -122,10 +122,16 @@ fn local_endpoint(
             .map_err(|_| UNKNOWN)?
     };
     let meta = file.metadata().map_err(|_| UNKNOWN)?;
+    // The ACL check is by path; the opened descriptor must still be that path's
+    // file (same device and inode), so a swap in between is refused.
+    let same_file = std::fs::symlink_metadata(dir.join("meta.json"))
+        .is_ok_and(|path| path.dev() == meta.dev() && path.ino() == meta.ino());
     if !meta.is_file()
         || (meta.uid() != uid && meta.uid() != 0)
         || meta.mode() & 0o022 != 0
         || meta.len() > 64 * 1024
+        || !same_file
+        || !crate::doctor_acl::controlled(&dir.join("meta.json"))
     {
         return Err(UNKNOWN);
     }

@@ -187,15 +187,21 @@ pub fn preflight(candidate: &Candidate, run: &str) -> Result<Value, CandidateErr
 #[cfg(test)]
 pub(in crate::provider::graph) mod tests {
     use super::*;
+    use crate::owned_tmp_root::OwnedTmpRoot;
     use std::os::unix::fs::symlink;
 
     /// A stopped clean owned runtime with one acknowledged retained run whose
     /// previous foreground publication was retired.
+    ///
+    /// Dropping it removes the runtime-home aliases first, then (as fields drop) the
+    /// checkout and this run's foreground owner root.
     pub(in crate::provider::graph) struct Fixture {
         pub(in crate::provider::graph) root: super::super::tests::Fixture,
         pub(in crate::provider::graph) candidate: Candidate,
         pub(in crate::provider::graph) run: String,
         aliases: Vec<PathBuf>,
+        /// Held only for its `Drop`.
+        _publication: OwnedTmpRoot,
     }
     impl Fixture {
         pub(in crate::provider::graph) fn new() -> Self {
@@ -246,7 +252,8 @@ pub(in crate::provider::graph) mod tests {
             });
             owner.save(&candidate).unwrap();
             let run = "a".repeat(32);
-            let publication = foreground::transport::root(&candidate, &run).unwrap();
+            let publication =
+                OwnedTmpRoot::new(foreground::transport::root(&candidate, &run).unwrap());
             state::private_directory(&publication).unwrap();
             drop(state::Lock::acquire(&publication).unwrap());
             let graph = directory(&candidate, &run).unwrap();
@@ -264,6 +271,7 @@ pub(in crate::provider::graph) mod tests {
                 candidate,
                 run,
                 aliases: vec![alias],
+                _publication: publication,
             }
         }
         pub(in crate::provider::graph) fn graph(&self) -> PathBuf {
@@ -557,6 +565,7 @@ pub(in crate::provider::graph) mod tests {
     fn occupied_or_missing_retirement_publication_refuses() {
         for name in ["owner.json", "control.sock", "operation.lock"] {
             let fixture = Fixture::new();
+            // owner-root: path-only
             let root = foreground::transport::root(&fixture.candidate, &fixture.run).unwrap();
             if name == "operation.lock" {
                 fs::remove_file(root.join(name)).unwrap();

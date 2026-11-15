@@ -10,7 +10,11 @@ import { requireFixtureRoot } from "./fixture-root.ts";
  * `CI`, credentials and shell state. A harness passes what its test needs
  * through `env` instead.
  */
-export const PRIVATE_CLI_INHERITED_ENV = ["PATH", "TMPDIR"] as const;
+export const PRIVATE_CLI_INHERITED_ENV = [
+  "PATH",
+  "TMPDIR",
+  "TMUX_TMPDIR",
+] as const;
 
 /**
  * Set to `1` on every private child unless the test passes its own value in

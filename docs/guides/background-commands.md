@@ -381,8 +381,12 @@ read through MCP instead of the CLI.
 
 Starts, final outcomes (whoever writes them) and cancels are appended to
 `commands/audit.log` under the Hack home (no argv, output or values). Reads are
-not audited. MCP calls also write the usual `mcp-audit.log` line, except reads
-and inspects; for `hack.project.command.start` that line records the
+not audited. The audit log is best effort: a failed append never blocks or
+fails a command, and `cancel` waits for the final record in the journal, not
+for the audit line. Whoever writes the final record appends its `end` line
+just after it, so when the supervisor writes it that line can arrive shortly
+after `cancel` returns. MCP calls also write the usual `mcp-audit.log` line,
+except reads and inspects; for `hack.project.command.start` that line records the
 operation, service, `argv[0]`, the argument count and a SHA-256 of the
 arguments, never the arguments. New audit files are created mode 0600.
 

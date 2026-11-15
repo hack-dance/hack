@@ -24,7 +24,8 @@ const SERVICE_INSTANCE_REGEX = /^(.*?)-(\d+)$/;
 
 type LifecycleCompanionOptions = {
   readonly logPath: string;
-  readonly service?: string;
+  /** Lifecycle services to keep; empty or absent keeps every service. */
+  readonly services?: readonly string[];
   readonly composeDisabled?: boolean;
 };
 
@@ -39,7 +40,8 @@ export interface DockerComposeLogsParams {
   readonly cwd: string;
   readonly follow: boolean;
   readonly tail: number;
-  readonly service?: string;
+  /** Compose services to read; empty or absent reads every service. */
+  readonly services?: readonly string[];
   readonly projectName?: string;
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
@@ -55,7 +57,7 @@ export async function dockerComposeLogsPlain(
     cwd: opts.cwd,
     follow: opts.follow,
     tail: opts.tail,
-    service: opts.service,
+    services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -104,7 +106,10 @@ export async function dockerComposeLogsPlain(
   const composeExitCode = composeProc ? await composeProc.exited : null;
   await Promise.all([composeStdoutTask, composeStderrTask]);
 
+  // A follow's `tail -F` never ends, so it stops with Compose. A snapshot's
+  // `tail -n` ends by itself; killing it could drop lines it has not printed.
   if (
+    opts.follow &&
     composeProc &&
     lifecycleHandle &&
     lifecycleHandle.proc.exitCode === null
@@ -133,7 +138,7 @@ export async function dockerComposeLogsPretty(
     cwd: opts.cwd,
     follow: opts.follow,
     tail: opts.tail,
-    service: opts.service,
+    services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -212,7 +217,10 @@ export async function dockerComposeLogsPretty(
   const composeExitCode = composeProc ? await composeProc.exited : null;
   await Promise.all([composeStdoutTask, composeStderrTask]);
 
+  // A follow's `tail -F` never ends, so it stops with Compose. A snapshot's
+  // `tail -n` ends by itself; killing it could drop lines it has not printed.
   if (
+    opts.follow &&
     composeProc &&
     lifecycleHandle &&
     lifecycleHandle.proc.exitCode === null
@@ -244,7 +252,7 @@ export async function dockerComposeLogsJson(
     cwd: opts.cwd,
     follow: opts.follow,
     tail: opts.tail,
-    service: opts.service,
+    services: opts.services,
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     composeDisabled: opts.lifecycle?.composeDisabled === true,
@@ -325,7 +333,10 @@ export async function dockerComposeLogsJson(
   const composeExitCode = composeProc ? await composeProc.exited : null;
   await Promise.all([composeStdoutTask, composeStderrTask]);
 
+  // A follow's `tail -F` never ends, so it stops with Compose. A snapshot's
+  // `tail -n` ends by itself; killing it could drop lines it has not printed.
   if (
+    opts.follow &&
     composeProc &&
     lifecycleHandle &&
     lifecycleHandle.proc.exitCode === null
@@ -380,7 +391,8 @@ function spawnComposeLogs(opts: {
   readonly cwd: string;
   readonly follow: boolean;
   readonly tail: number;
-  readonly service?: string;
+  /** Compose services to read; empty or absent reads every service. */
+  readonly services?: readonly string[];
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
   readonly composeDisabled: boolean;
@@ -401,7 +413,8 @@ function buildComposeLogsCommand(opts: {
   readonly composeFile: string;
   readonly follow: boolean;
   readonly tail: number;
-  readonly service?: string;
+  /** Compose services to read; empty or absent reads every service. */
+  readonly services?: readonly string[];
   readonly composeProject?: string;
   readonly profiles?: readonly string[];
 }): string[] {
@@ -420,7 +433,7 @@ function buildComposeLogsCommand(opts: {
     String(opts.tail),
     "--timestamps",
     "--no-color",
-    ...(opts.service ? [opts.service] : []),
+    ...(opts.services ?? []),
   ];
 }
 
@@ -522,11 +535,11 @@ function matchesLifecycleServiceFilter(
   record: LifecycleLogRecord,
   lifecycle: LifecycleCompanionOptions | undefined
 ): boolean {
-  const filter = (lifecycle?.service ?? "").trim();
+  const filter = lifecycle?.services ?? [];
   if (filter.length === 0) {
     return true;
   }
-  return record.service === filter;
+  return filter.includes(record.service);
 }
 
 function rewriteComposePrefix(opts: {

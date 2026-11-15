@@ -192,3 +192,13 @@ continue, and the command can exit 0 if those steps succeed.
 
 Never send a password to an agent or put it in a command; `sudo` asks in your
 terminal.
+
+## Observing trust with Doctor
+
+`hack doctor` uses a separate observe-only admission guard before opening NSS.
+It reuses the database ownership and identity checks above and additionally
+requires a supported built-in module configuration, with no legacy database or
+SQLite sidecars. Unsafe, missing, unreadable or unsupported metadata is Unknown
+without a query; Doctor does not run `global trust`, initialize NSS, or repair the
+profile. See the [read-safety contract](../reference/local-ca-trust.md#linux-nss-read-safety)
+for exact limits and the residual same-user race.

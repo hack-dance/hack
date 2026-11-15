@@ -184,6 +184,11 @@ mod tests {
             let candidate = Candidate::discover(&parent.0).unwrap();
             let files = Files::new(&candidate.checkout);
             let run = graph::probes::token().unwrap();
+            // The child creates this run's publication root; the parent owns its
+            // removal. Declared before `owner`, so the child is reaped first.
+            let _publication = crate::owned_tmp_root::OwnedTmpRoot::new(
+                transport::root(&candidate, &run).unwrap(),
+            );
             // Use an owned short control directory, as the real managed owner
             // does; macOS Unix addresses cannot hold the host's full TMPDIR.
             let socket_home = PathBuf::from(format!("/private/tmp/hkrr-{}", &run[..16]));
@@ -256,9 +261,8 @@ mod tests {
             assert!(files.private.join("second-legacy-stop.stopped").exists());
             drop(replacement_listener);
             drop(sibling_listener);
-            // The child's Publication::finish already removed its endpoint names.
-            // Dispose only this test's now-empty publication directory/lock.
-            fs::remove_dir_all(transport::root(&candidate, &run).unwrap()).unwrap();
+            // The child's Publication::finish already removed its endpoint names;
+            // `_publication` removes the now-empty directory and lock.
             fs::remove_dir_all(socket_home).unwrap();
             files.dispose().unwrap();
         }

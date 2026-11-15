@@ -368,7 +368,11 @@ try {
     "actual resolution rejects unbound logical reference"
   );
   await authored(checkout, project);
-  await assertNativePlanHome({ home, failedUps: 0 });
+  await assertNativePlanHome({
+    home,
+    failedUps: 0,
+    privateInputs: [canary, directory],
+  });
   const runtime = await invoke(
     ["up", "web", "--detach"],
     checkout,
@@ -395,8 +399,11 @@ try {
       "no generated runtime state"
     );
   }
-
-  await assertNativePlanHome({ home, failedUps: 1 });
+  await assertNativePlanHome({
+    home,
+    failedUps: 1,
+    privateInputs: [canary, directory],
+  });
   process.stdout.write(
     `Relocated native endpoint planning: ${checks} checks passed; no hooks/DNS/trust/runtime effects\n`
   );

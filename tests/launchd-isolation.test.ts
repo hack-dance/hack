@@ -49,6 +49,11 @@ const DARWIN_PRELOAD = resolve(
   import.meta.dir,
   "helpers/darwin-platform-preload.ts"
 );
+/** Points launchd at the fixture's stub; Hack runs /bin/launchctl otherwise. */
+const LAUNCHCTL_STUB_PRELOAD = resolve(
+  import.meta.dir,
+  "helpers/launchctl-stub-preload.ts"
+);
 const SEEDED_PLIST =
   "<plist><!-- seeded by launchd-isolation.test --></plist>\n";
 const SEEDED_MTIME = new Date("2026-01-01T00:00:00Z");
@@ -208,7 +213,14 @@ async function runAsDarwin(opts: {
   readonly cwd: string;
 }): Promise<{ code: number; stdout: string; stderr: string }> {
   const child = Bun.spawn(
-    [process.execPath, "--preload", DARWIN_PRELOAD, ...opts.argv],
+    [
+      process.execPath,
+      "--preload",
+      DARWIN_PRELOAD,
+      "--preload",
+      LAUNCHCTL_STUB_PRELOAD,
+      ...opts.argv,
+    ],
     {
       cwd: opts.cwd,
       env: opts.env,

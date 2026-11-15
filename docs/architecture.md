@@ -770,6 +770,12 @@ Such a plist is never replaced automatically; `start` reports it and
   it touches launchd. The check that runs before `start` or `restart` stops a
   running hackd makes the program and PATH checks for a refresh or retarget
   the start would run.
+- Hack runs `launchctl` as `/bin/launchctl` and the macOS ancestry check's
+  `ps` as `/bin/ps`, never looked up on PATH. These run automatically after
+  `hack update` and during `start`, and a planted `launchctl` or `ps` in an
+  earlier PATH directory would otherwise run as this user. On Linux,
+  `systemctl`, `loginctl` and `getent` are still found on PATH, but one whose
+  path another account could replace is refused before it runs.
 - Every automatic start of the launchd job checks the plist launchd will
   load or start, current or just rewritten, before anything is unloaded,
   bootstrapped or kickstarted. That covers `start`, `restart`, the reconcile

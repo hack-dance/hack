@@ -128,6 +128,31 @@ type LaunchctlRun = {
 };
 
 /**
+ * The `launchctl` macOS ships. It is run by this absolute path, never
+ * looked up on PATH (HACK-2216): `hack update` and `start` reach launchd
+ * automatically, and a `launchctl` planted in an earlier PATH directory
+ * would otherwise run as this user.
+ */
+export const LAUNCHCTL_PATH = "/bin/launchctl";
+
+let launchctlBinary: string = LAUNCHCTL_PATH;
+
+/**
+ * Test-only: points every launchd operation at a stub `launchctl`, for
+ * tests that run launchd code on any host. Called only from a test
+ * `--preload` module; production code never calls it, and no environment
+ * variable selects the binary.
+ */
+export function useLaunchctlBinaryForTests(path: string): void {
+  launchctlBinary = path;
+}
+
+/** The argv of one `launchctl` run: {@link LAUNCHCTL_PATH} and `args`. */
+export function launchctlArgv(args: readonly string[]): readonly string[] {
+  return [launchctlBinary, ...args];
+}
+
+/**
  * The only place this module runs `launchctl`. It re-checks
  * {@link resolveLaunchdAccess}, so a caller that skips the check still
  * cannot reach the per-user service from an isolated HACK_HOME.
@@ -147,7 +172,7 @@ async function runLaunchctl(args: readonly string[]): Promise<LaunchctlRun> {
       stderr: "launchctl not run: deadline passed",
     };
   }
-  const proc = Bun.spawn(["launchctl", ...args], {
+  const proc = Bun.spawn([...launchctlArgv(args)], {
     env: childEnvironment(),
     stdin: "ignore",
     stdout: "pipe",

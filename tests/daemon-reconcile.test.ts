@@ -46,7 +46,9 @@ import {
   isLaunchdPlistCurrent,
   isLaunchdServiceNotFound,
   isSameExecutableFile,
+  LAUNCHCTL_PATH,
   LAUNCHD_MANAGED_MARKER,
+  launchctlArgv,
   loadedJobMatchesPlist,
   parseLaunchdPlistProgram,
   plistKeepsThisHome,
@@ -57,7 +59,11 @@ import {
 import type { LaunchdLoadedJob } from "../src/daemon/launchd-print.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import type { DaemonProcessProof } from "../src/daemon/process.ts";
-import { hasAncestorProcess } from "../src/daemon/process-ancestry.ts";
+import {
+  hasAncestorProcess,
+  PS_PATH,
+  psParentArgv,
+} from "../src/daemon/process-ancestry.ts";
 import {
   buildDaemonCommandData,
   createDaemonCommandTrace,
@@ -2244,4 +2250,19 @@ test("an update that did not record its binary runs nothing", async () => {
   expect(
     await verifyInstalledBinary({ path: "/srv/hack", installed: undefined })
   ).toContain("did not record");
+});
+
+// Codex security finding on PR #854 (HACK-2216): launchd tools run by
+// absolute path, never from PATH, where a planted binary would run as this
+// user after `hack update`.
+
+test("launchctl and ps run by absolute path, never looked up on PATH", () => {
+  expect(LAUNCHCTL_PATH).toBe("/bin/launchctl");
+  expect(launchctlArgv(["print", "gui/501/dance.hack.hackd"])).toEqual([
+    "/bin/launchctl",
+    "print",
+    "gui/501/dance.hack.hackd",
+  ]);
+  expect(PS_PATH).toBe("/bin/ps");
+  expect(psParentArgv(4242)).toEqual(["/bin/ps", "-o", "ppid=", "-p", "4242"]);
 });

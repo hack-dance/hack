@@ -40,9 +40,20 @@ function defaultReadParent(pid: number): Promise<number | null> {
     : readParentWithPs(pid);
 }
 
+/**
+ * The `ps` macOS ships, by absolute path: never looked up on PATH, where a
+ * planted `ps` would run as this user (HACK-2216).
+ */
+export const PS_PATH = "/bin/ps";
+
+/** The argv that reads `pid`'s parent pid with {@link PS_PATH}. */
+export function psParentArgv(pid: number): readonly string[] {
+  return [PS_PATH, "-o", "ppid=", "-p", String(pid)];
+}
+
 async function readParentWithPs(pid: number): Promise<number | null> {
   try {
-    const proc = Bun.spawn(["/bin/ps", "-o", "ppid=", "-p", String(pid)], {
+    const proc = Bun.spawn([...psParentArgv(pid)], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",

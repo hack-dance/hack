@@ -63,8 +63,25 @@ still report unknown. A failed or expired target does not abandon other admitted
 targets: stop drives them to their own outcomes before returning unknown.
 
 Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
-`observed`, `stopped`, or `unknown`). A stop whose confirmation times out emits
+`observed`, `stopped`, `unknown` or `refused`). A stop whose confirmation times out emits
 `unknown` and exits nonzero. Callers must inspect both the receipt and exit status.
+
+Every `stop` and `status` request ends with exactly one framed receipt, also when it
+fails. A failed request exits nonzero and carries a `reason`:
+
+| `reason` | `outcome` | Meaning |
+|---|---|---|
+| `invalid-request` | `refused` | The control frame or root was rejected; nothing was read or changed. |
+| `stop-lock-wait-expired` | `unknown` | Another stop or a launch held `.stop.lock` for the whole wait (sixteen seconds); this request acted on nothing. |
+| `foreign-live-process` | `unknown` | A receipt from another owner token still has live members. |
+| `stop-incomplete` | `unknown` | Stop could not confirm that every member is gone. |
+| `retired-owner-live` | `unknown` | Status for a retired owner whose members are not proven absent. |
+| `io-error` | `unknown` | Any other local failure. |
+
+A successful reply has no `reason`. The sixteen-second stop-lock wait exceeds the
+timers of a stop that recovers after late guard loss (about fourteen seconds), so a
+waiter normally gets its own outcome; admission and census work run outside those
+timers, which is why an expired wait still returns its own receipt.
 `run` must be spawned as a fresh child without making it a process-group leader:
 the supervisor calls `setsid` itself. A caller using `detached: true` or
 `setpgid(0, 0)` is refused before authored code starts.
@@ -133,7 +150,9 @@ refused. Stop can recover the recorded session after verifying the boot,
 leader identity and each remaining member's UID, birth and session. Recovery
 delivers TERM individually, grants a fresh five-second grace, then KILL to the captured incarnations and
 confirms absence. The capture remains authoritative if TERM ends the witness;
-every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux). A pidfd open that
+every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux).
+On Linux a thread-group leader whose main thread exited while other threads run shows
+`Z` in `/proc/<pid>/stat`; it counts as live until no thread in `/proc/<pid>/task` is. A pidfd open that
 reports the process missing (`ESRCH`, or `EINVAL` on Linux 6.8 when the PID survives only as a group or
 session ID) skips that member without a signal; liveness is still decided by identity afterwards.
 Unobserved descendants never inherit this authority and retain an unknown outcome. Unverified identity never authorizes signals or a successful

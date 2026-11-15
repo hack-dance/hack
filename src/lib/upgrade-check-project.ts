@@ -549,7 +549,7 @@ function nativeFinding(
         // Native is optional: a Compose project upgrades without it.
         id: "native-preflight",
         status: "info",
-        summary: `Native configuration has ${probe.blockers} blocker(s); runtime setup and runtime review were not checked. Compose is unaffected.`,
+        summary: `Native configuration has ${probe.blockers} blocker(s) and ${probe.consentNeeded} consent item(s); runtime setup and runtime review were not checked. Compose is unaffected.`,
         args: null,
         action: null,
       };

@@ -1,5 +1,6 @@
 use super::transport::{Pin, Publication};
 use super::*;
+use crate::owned_tmp_root::OwnedTmpRoot;
 use std::{
     fs,
     io::Write,
@@ -19,20 +20,21 @@ fn fixture() -> (super::super::tests::Fixture, Candidate, String) {
     let run = bytes.iter().map(|b| format!("{b:02x}")).collect();
     (fixture, candidate, run)
 }
-fn root(candidate: &Candidate, run: &str) -> std::path::PathBuf {
+/// This run's foreground owner root, derived independently of the transport and
+/// removed when the returned guard drops. Take it before anything can create the root.
+fn owned_root(candidate: &Candidate, run: &str) -> OwnedTmpRoot {
     use sha2::{Digest, Sha256};
     let bytes =
         serde_json::to_vec(&("hack-graph-foreground-v1", &candidate.state_root, run)).unwrap();
-    format!(
+    OwnedTmpRoot::new(format!(
         "/private/tmp/hkgf-{}",
         &format!("{:x}", Sha256::digest(bytes))[..24]
-    )
-    .into()
+    ))
 }
 #[test]
 fn fresh_restore_publication_requires_prior_retirement_and_exclusive_lock() {
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let path = owned_root(&candidate, &run);
     assert!(Publication::bind_retired(&candidate, &run).is_err());
     assert!(!path.exists());
     let mut first = Publication::bind(&candidate, &run).unwrap();
@@ -45,13 +47,12 @@ fn fresh_restore_publication_requires_prior_retirement_and_exclusive_lock() {
     assert!(Publication::bind_retired(&candidate, &run).is_err());
     second.finish().unwrap();
     drop(second);
-    fs::remove_dir_all(path).unwrap();
 }
 #[cfg(target_os = "macos")]
 #[test]
 fn retired_publication_refuses_incomplete_source_device_witness_before_binding() {
     let (_fixture, candidate, run) = fixture();
-    let publisher = root(&candidate, &run);
+    let publisher = owned_root(&candidate, &run);
     let mut first = Publication::bind(&candidate, &run).unwrap();
     first.finish().unwrap();
     drop(first);
@@ -64,12 +65,11 @@ fn retired_publication_refuses_incomplete_source_device_witness_before_binding()
     assert!(!publisher.join("control.sock").exists());
     assert!(!publisher.join("owner.json").exists());
     assert_eq!(fs::read(&pending).unwrap(), b"foreign incomplete witness");
-    fs::remove_dir_all(publisher).unwrap();
 }
 #[test]
 fn publication_serializes_and_pins_exact_server_socket() {
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let _root = owned_root(&candidate, &run);
     let mut published = Publication::bind(&candidate, &run).unwrap();
     assert!(Publication::bind(&candidate, &run).is_err());
     let pin = Pin::load(&candidate, &run).unwrap();
@@ -80,12 +80,11 @@ fn publication_serializes_and_pins_exact_server_socket() {
     assert_eq!(value, json!({"test":true}));
     published.finish().unwrap();
     drop(published);
-    fs::remove_dir_all(path).unwrap();
 }
 #[test]
 fn replaced_socket_refuses_and_is_never_unlinked() {
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let path = owned_root(&candidate, &run);
     let mut published = Publication::bind(&candidate, &run).unwrap();
     let pin = Pin::load(&candidate, &run).unwrap();
     fs::remove_file(path.join("control.sock")).unwrap();
@@ -103,7 +102,6 @@ fn replaced_socket_refuses_and_is_never_unlinked() {
         inode
     );
     drop(replacement);
-    fs::remove_dir_all(path).unwrap();
 }
 #[test]
 fn frames_require_exact_length_eof_and_bounded_wait() {
@@ -124,7 +122,7 @@ fn frames_require_exact_length_eof_and_bounded_wait() {
 #[test]
 fn missing_owner_requires_explicit_recovery_without_creating_state() {
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let path = owned_root(&candidate, &run);
     assert_eq!(
         request(&candidate, &run, None).unwrap_err().code,
         "graph_owner_recovery"
@@ -254,7 +252,7 @@ fn abandoned_client_does_not_stop_owner() {
         return;
     }
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let path = owned_root(&candidate, &run);
     let mut published = Publication::bind(&candidate, &run).unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -284,7 +282,6 @@ fn abandoned_client_does_not_stop_owner() {
     published.verify().unwrap();
     published.finish().unwrap();
     drop(published);
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -328,16 +325,7 @@ fn cross_process_status_waits_for_request_after_accept() {
         }
     }
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
-    struct OwnedDirectory(std::path::PathBuf);
-    impl Drop for OwnedDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    // This fixture never replaces/adopts a publication; remove its private test
-    // directory even when the pre-fix descriptor assertion fails.
-    let _directory = OwnedDirectory(path.clone());
+    let _root = owned_root(&candidate, &run);
     let mut published = Publication::bind(&candidate, &run).unwrap();
     let mut child = OwnedChild(Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "provider::graph::foreground::tests::cross_process_status_waits_for_request_after_accept", "--nocapture", "--quiet"])
@@ -396,7 +384,6 @@ fn cross_process_status_waits_for_request_after_accept() {
     }
     published.finish().unwrap();
     drop(published);
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -416,8 +403,8 @@ fn buffered_reply_survives_both_write_halves_closed() {
 fn never_admitted_publication_finishes_only_without_graph_state() {
     for (admitted, graph_exists) in [(false, false), (true, false), (false, true)] {
         let (_fixture, candidate, run) = fixture();
+        let control = owned_root(&candidate, &run);
         let mut publication = Publication::bind(&candidate, &run).unwrap();
-        let control = root(&candidate, &run);
         if graph_exists {
             fs::create_dir_all(super::super::directory(&candidate, &run).unwrap()).unwrap();
         }
@@ -430,14 +417,13 @@ fn never_admitted_publication_finishes_only_without_graph_state() {
             publication.finish().unwrap();
         }
         drop(publication);
-        fs::remove_dir_all(control).unwrap();
     }
 }
 
 #[test]
 fn retained_publisher_exit_wakes_owner_and_retired_watch_does_not() {
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let _root = owned_root(&candidate, &run);
     let mut publication = Publication::bind(&candidate, &run).unwrap();
     let events = signals::Events::new(&publication).unwrap();
     let spawn = || {
@@ -499,13 +485,12 @@ fn retained_publisher_exit_wakes_owner_and_retired_watch_does_not() {
     drop(events);
     publication.finish().unwrap();
     drop(publication);
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn retired_cleanup_guard_excludes_active_and_stale_publication() {
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let path = owned_root(&candidate, &run);
     let mut publication = Publication::bind(&candidate, &run).unwrap();
     assert!(
         transport::Retired::acquire(&candidate, &run)
@@ -529,13 +514,12 @@ fn retired_cleanup_guard_excludes_active_and_stale_publication() {
             .is_none()
     );
     fs::remove_file(path.join("owner.json")).unwrap();
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn dead_owner_selection_holds_lock_and_rejects_live_or_changed_records() {
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let path = owned_root(&candidate, &run);
     let published = Publication::bind(&candidate, &run).unwrap();
     assert!(super::DeadOwner::acquire(&candidate, &run).is_err());
     drop(published);
@@ -556,12 +540,11 @@ fn dead_owner_selection_holds_lock_and_rejects_live_or_changed_records() {
     crate::provider::state::write(&path.join("owner.json"), &record).unwrap();
     assert!(guard.verify().is_err());
     drop(guard);
-    fs::remove_dir_all(path).unwrap();
 }
 #[test]
 fn stopped_only_removal_never_requests_an_owner_restored_after_inspection() {
     let (_fixture, candidate, run) = fixture();
-    let path = root(&candidate, &run);
+    let _root = owned_root(&candidate, &run);
     // The confirmed stopped run's owner retired; a restore then published a live owner.
     let mut first = Publication::bind(&candidate, &run).unwrap();
     first.finish().unwrap();
@@ -592,13 +575,13 @@ fn stopped_only_removal_never_requests_an_owner_restored_after_inspection() {
     });
     restored.finish().unwrap();
     drop(restored);
-    fs::remove_dir_all(path).unwrap();
 }
 #[test]
 fn inspect_names_only_an_absent_unpublished_attempt_as_unreserved() {
     // HACK-1915: a foreground start refused before admission reserved nothing and
     // must be distinguishable from retained or damaged graph state.
     let (_fixture, candidate, run) = fixture();
+    let _root = owned_root(&candidate, &run);
     let code = |candidate: &Candidate| match super::super::inspect(candidate, &run) {
         Ok(_) => "inspected",
         Err(error) => error.code,
@@ -623,5 +606,4 @@ fn inspect_names_only_an_absent_unpublished_attempt_as_unreserved() {
         fs::remove_dir(&path).unwrap();
     }
     assert_eq!(code(&candidate), "graph_unreserved");
-    fs::remove_dir_all(root(&candidate, &run)).unwrap();
 }

@@ -225,7 +225,7 @@ impl CliRunner {
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match crate::process::spawn(&mut self.command(args, path, &program)) {
+            match crate::process::spawn(&mut self.command(args, path, &program), !self.clear_env) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;
@@ -782,6 +782,30 @@ mod tests {
             .parse()
             .unwrap();
         assert_retired(pid);
+    }
+
+    #[test]
+    fn clean_environment_reaches_the_child_on_every_platform() {
+        // The Apple spawn boundary builds the child environment itself, so a
+        // clean runner must say so explicitly; env_clear alone is not visible.
+        assert!(
+            std::env::var_os("HOME").is_some(),
+            "precondition: parent HOME"
+        );
+        let f = FakeHack::new(r#"printf '%s|%s' "${HOME-unset}" "${HACK_HOME-unset}""#);
+        let (inherited, _, code) = f.runner().run_raw(&["x"], None, T).unwrap();
+        assert_eq!(code, Some(0));
+        assert!(
+            !inherited.starts_with("unset|"),
+            "positive control: {inherited}"
+        );
+        let (clean, _, code) = f
+            .runner()
+            .with_clean_env()
+            .run_raw(&["x"], None, T)
+            .unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(clean, format!("unset|{}", f.dir.to_string_lossy()));
     }
 
     #[test]

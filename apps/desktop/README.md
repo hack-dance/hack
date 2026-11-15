@@ -323,7 +323,10 @@ On macOS, the CLI runner uses `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`
 and explicit stdin/stdout/stderr actions. This prevents a CLI child from holding
 an unrelated descriptor during another thread's non-atomic close-on-exec setup.
 The process group, selected environment, cwd, timeout and retirement contracts
-are preserved. Linux retains the standard process implementation. This product
+are preserved. A clean-environment runner (setup's checked execution context)
+passes that mode to the boundary explicitly, so its child starts from an empty
+environment on macOS as on Linux. Linux retains the standard process
+implementation. This product
 boundary is needed independently of test isolation; a mutex around runner calls
 would not cover descriptors opened by other GUI/library threads.
 

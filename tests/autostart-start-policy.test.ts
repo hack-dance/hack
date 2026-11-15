@@ -138,6 +138,18 @@ test("startup aliases, lifecycle phases, processes and shared helpers require ma
   }
 });
 
+test("a non-default lifecycle runner requires a manual start; the default mux runner does not", async () => {
+  await config({ name: "example", lifecycle: { runner: "supervisor" } });
+  expect(await autostartStartPolicyRefusal(opts)).toBe(
+    "host_commands_require_manual_start"
+  );
+  // An unknown runner is refused too (here already as invalid configuration).
+  await config({ name: "example", lifecycle: { runner: "future-runner" } });
+  expect(await autostartStartPolicyRefusal(opts)).not.toBeNull();
+  await config({ name: "example", lifecycle: { runner: "mux" } });
+  expect(await autostartStartPolicyRefusal(opts)).toBeNull();
+});
+
 test("legacy TOML startup is checked by the same canonical parser", async () => {
   await writeFile(
     join(opts.projectDir, "hack.toml"),

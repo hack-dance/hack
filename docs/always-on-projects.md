@@ -123,8 +123,8 @@ beneath `/Applications`; that default layout is accepted by the exception above.
 The app bundle itself must still be owned by you or root and not writable by
 others.
 This unit supports Compose-only unattended starts. Projects declaring startup or
-lifecycle hooks, host processes, shared helpers or dependency bootstrap require
-manual `hack up`. The login child never executes those commands, even if the
+lifecycle hooks, host processes, shared helpers, dependency bootstrap or a
+non-default `lifecycle.runner` (such as `"supervisor"`) require manual `hack up`. The login child never executes those commands, even if the
 configuration changes after the daemon's first observation. Command/cloud env
 providers also require a manual start; built-in local encrypted env layers remain
 supported without keychain fallback. Managed values that change Compose selection,

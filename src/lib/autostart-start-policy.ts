@@ -161,6 +161,12 @@ function hasHostCommands(raw: Record<string, unknown>): boolean {
   if (!isRecord(raw.lifecycle)) {
     return present(raw.lifecycle);
   }
+  // A non-default runner (the lifecycle supervisor) executes its own companion
+  // binary even with no hooks or processes; only the default "mux" is unattended.
+  const runner = raw.lifecycle.runner;
+  if (runner !== undefined && runner !== "mux") {
+    return true;
+  }
   return [
     raw.lifecycle.up,
     raw.lifecycle.down,

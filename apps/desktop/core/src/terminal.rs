@@ -40,15 +40,33 @@ pub trait Launcher {
 pub struct SystemLauncher;
 impl Launcher for SystemLauncher {
     fn launch(&self, program: &Path, args: &[OsString]) -> Result<(), String> {
-        let mut child = launch_command(program, args, |key| std::env::var_os(key))
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        // The shared spawn boundary closes every unlisted descriptor on macOS,
+        // so the launcher cannot inherit a pipe or file another thread has
+        // not yet marked close-on-exec. `launch_command` cleared the
+        // environment, so the boundary must not rebuild it from the parent.
+        let mut child = crate::process::spawn(
+            &mut launch_command(program, args, |key| std::env::var_os(key)),
+            false,
+        )
+        .map_err(|e| e.to_string())?;
         // Terminal launchers can wait for the new terminal to close. Reap our
         // child without blocking GPUI, and never signal the terminal itself.
+        // On macOS the boundary always pipes stdout/stderr: discard them so a
+        // talkative launcher can never block on a full pipe.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
         std::thread::spawn(move || {
+            let errors = std::thread::spawn(move || discard(stderr));
+            discard(stdout);
+            let _ = errors.join();
             let _ = child.wait();
         });
         Ok(())
+    }
+}
+fn discard(output: Option<impl std::io::Read>) {
+    if let Some(mut output) = output {
+        let _ = std::io::copy(&mut output, &mut std::io::sink());
     }
 }
 /// UI routing metadata only, separate from the checked CLI context embedded in

@@ -186,3 +186,35 @@ fn eof_cancels_and_controls_rejected() {
         );
     }
 }
+
+#[test]
+fn system_launcher_drains_launcher_output_and_passes_only_listed_environment() {
+    // A stand-in launcher (no terminal opens): 256 KB on each stream would
+    // fill an undrained pipe, so it can only finish if output is discarded.
+    // HACK_HOME is set for the test process but is not on the launch list.
+    assert!(
+        std::env::var_os("HACK_HOME").is_some(),
+        "precondition: run through scripts/test.sh"
+    );
+    let tree = Tree::new();
+    let marker = tree.0.join("done");
+    let script = format!(
+        "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2; printf '%s' \"${{HACK_HOME-unset}}\" > '{}'",
+        marker.display()
+    );
+    hack_desktop_core::terminal::SystemLauncher
+        .launch(
+            Path::new("/bin/sh"),
+            &[OsString::from("-c"), OsString::from(script)],
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::fs::read_to_string(&marker).map_or(true, |s| s.is_empty()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "launcher blocked on its output"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "unset");
+}

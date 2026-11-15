@@ -31,6 +31,7 @@ export const JSON_COMMAND_SHAPES = {
   "dispatch status": "legacy-object",
   "dispatch logs": "legacy-object",
   "env list": "legacy-object",
+  "env migrate": "envelope",
   "env protect": "legacy-object",
   "env explain": "legacy-object",
   "env apply": "legacy-object",
@@ -105,5 +106,10 @@ export const SCHEMA_JSON_VARIANTS = [
     command: "global trust",
     flags: ["--plan"],
     schema: "hack.global-admin-plan.v1",
+  },
+  {
+    command: "usage",
+    flags: ["--by-service"],
+    schema: "hack.usage.by-service.v1",
   },
 ] as const;

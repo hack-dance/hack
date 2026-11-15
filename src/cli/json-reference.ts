@@ -51,8 +51,11 @@ export function renderJsonInventory(cli: CliSpec): string {
     const flags = variant?.flags.join(" ") ?? "";
     return `| \`hack ${command}${flags ? ` ${flags}` : ""} --json\` | ${SHAPES[kind]}${variant ? `: \`${variant.schema}\`` : ""} |`;
   });
+  // A flag variant whose base command keeps another shape gets its own row.
   for (const variant of SCHEMA_JSON_VARIANTS.filter(
-    (entry) => entry.command === "projects" || entry.command === "global status"
+    (entry) =>
+      JSON_COMMAND_SHAPES[entry.command as keyof typeof JSON_COMMAND_SHAPES] !==
+      "schema-envelope"
   )) {
     rows.push(
       `| \`hack ${variant.command} --json ${variant.flags.join(" ")}\` | Envelope; \`data.schema: ${variant.schema}\` |`

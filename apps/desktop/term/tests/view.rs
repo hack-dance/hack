@@ -21,7 +21,7 @@ use hack_desktop_term::actions::{CloseFind, Copy, Find, Paste};
 use hack_desktop_term::panel::TerminalPanel;
 use hack_desktop_term::pty::INPUT_QUEUE_BYTES;
 use hack_desktop_term::session::{exists, is_alive};
-use hack_desktop_term::view::TerminalView;
+use hack_desktop_term::view::{Status, TerminalView};
 
 fn app() -> HeadlessAppContext {
     let mut cx = HeadlessAppContext::with_platform(
@@ -294,6 +294,90 @@ fn quitting_right_after_closing_a_tab_ends_what_the_tab_left_running() {
         "a closed tab's processes outlived the app"
     );
     assert!(!exists(leader), "the closed tab's shell was not reaped");
+    rec.done();
+}
+
+/// Pump until the view's source has ended, or the deadline.
+fn settle_until_ended(cx: &mut HeadlessAppContext, view: &Entity<TerminalView>) {
+    let start = Instant::now();
+    while start.elapsed() < DEADLINE {
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.settle(Duration::from_millis(20), Duration::from_millis(200), cx);
+            });
+        });
+        if cx.update(|cx| view.read(cx).status() != &Status::Running) {
+            return;
+        }
+    }
+    panic!("the source did not end");
+}
+
+#[test]
+fn quitting_right_after_a_stream_closes_its_output_ends_the_process_still_running() {
+    let home = TempHome::new();
+    let mut cx = app();
+    // The stream closes its output and keeps running, ignoring SIGTERM, so
+    // the end of output starts a teardown that only SIGKILL completes.
+    let script =
+        "trap '' TERM; echo \"sh=$$\"; exec >&- 2>&-; ( trap '' TERM; exec sleep 120 ) & wait";
+    let source = sh_source(script, &home);
+    let (_window, view) = open(&mut cx, move |cx| {
+        TerminalView::new_stream(&source, 1_000, cx).expect("open")
+    });
+    let text = settle_until(&mut cx, &view, |t| t.contains("sh="));
+    let leader = tagged(&text, "sh").expect("sh");
+    let mut rec = Recorded::session(leader.unsigned_abs());
+    settle_until_ended(&mut cx, &view);
+    assert!(is_alive(leader), "still running after its output closed");
+
+    cx.update(|cx| cx.shutdown());
+
+    assert!(!is_alive(leader), "the process outlived the app");
+    assert!(!exists(leader), "the process was not reaped");
+    rec.done();
+}
+
+#[test]
+fn quitting_right_after_closing_an_ended_tab_ends_what_its_session_left_running() {
+    let home = TempHome::new();
+    let mut cx = app();
+    let options = WindowOptions {
+        focus: false,
+        show: false,
+        ..WindowOptions::default()
+    };
+    let (window, panel) = cx
+        .update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(TerminalPanel::new)))
+        .expect("open a headless window");
+    // The shell exits and leaves a job that ignores the hangup and SIGTERM
+    // and does not hold the terminal, so the session ends by itself.
+    let opts = sh(
+        "( trap '' HUP TERM; exec sleep 120 ) </dev/null >/dev/null 2>&1 & echo \"kid=$!\"; echo \"sh=$$\"",
+        &home,
+    );
+    let view = cx.update(|cx| cx.new(|cx| TerminalView::new_pty(&opts, cx).expect("spawn")));
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.add_tab(view.clone(), window, cx));
+    })
+    .expect("add the tab");
+    let text = settle_until(&mut cx, &view, |t| t.contains("sh="));
+    let kid = tagged(&text, "kid").expect("kid");
+    let leader = tagged(&text, "sh").expect("sh");
+    let mut rec = Recorded::session(leader.unsigned_abs());
+    settle_until_ended(&mut cx, &view);
+    assert!(
+        is_alive(kid),
+        "the job is still running after the session ended"
+    );
+
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.close_active(window, cx));
+    })
+    .expect("close the tab");
+    cx.update(|cx| cx.shutdown());
+
+    assert!(!is_alive(kid), "the ended session's job outlived the app");
     rec.done();
 }
 

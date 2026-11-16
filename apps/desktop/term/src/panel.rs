@@ -284,8 +284,16 @@ impl TerminalPanel {
         };
         // End the session now, on a reaper thread, and keep the handle so
         // anything that could not be ended is reported.
-        if let Some(shutdown) = view.update(cx, |v, _| v.take_shutdown()) {
+        let (shutdown, retired) = view.update(cx, |v, _| (v.take_shutdown(), v.take_retired()));
+        // The view may be dropped now, and its quit handler with it, so the
+        // panel keeps every teardown it had: the one starting here and any
+        // the session started by itself.
+        let any = shutdown.is_some() || !retired.is_empty();
+        self.closing.extend(retired);
+        if let Some(shutdown) = shutdown {
             self.closing.push(shutdown.terminate_in_background());
+        }
+        if any {
             cx.spawn(async move |this, cx| {
                 // Long enough for the grace period and SIGKILL to have run.
                 for _ in 0..20 {

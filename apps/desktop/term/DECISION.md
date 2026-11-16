@@ -699,7 +699,11 @@ cgroups or job objects.
   its teardown is already on a reaper thread waiting out the 300 ms close
   grace, which GPUI would not wait for, so the panel keeps the handle, and
   on quit it cuts the grace to the same 100 ms and awaits the result
-  within the same window.
+  within the same window. The same holds for a backend the terminal ends
+  by itself: a stream whose output ended while its process runs on, a
+  session that ended, or a failed attempt replaced by the next. The core
+  keeps those teardowns until they finish; the view's quit handler cuts
+  their grace and awaits them, and closing a tab hands them to the panel.
 - Any input, and any change to the notice about undelivered input,
   notifies the view, so it is drawn in the next frame even when the child
   prints nothing.
@@ -802,7 +806,9 @@ highlighted matches, with no further frame; redrawing an unchanged view
 with find open runs no search; quitting the app ends a stream
 process that ignores SIGTERM, with its descendant, and a PTY session that
 ignores SIGHUP, and the processes of a tab closed just before quitting
-that ignore SIGHUP and SIGTERM; with no bindings the usual chords are not shortcuts, the
+that ignore SIGHUP and SIGTERM, of a stream that closed its output and
+runs on, and of a closed tab whose session had ended and left a job;
+with no bindings the usual chords are not shortcuts, the
 `Find`, `CloseFind`, `Paste` and `Copy` actions do their work, and a chord
 becomes a shortcut only once the app binds it.
 

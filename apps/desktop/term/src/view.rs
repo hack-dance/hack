@@ -172,11 +172,26 @@ impl TerminalView {
         // a process-backed stream. The signalling and the wait run on the
         // background executor, never on the UI thread, and GPUI awaits the
         // returned task inside its shutdown window.
+        //
+        // Backends the core ended by itself (end of output, the session
+        // ended, a failed attempt) may still be on a reaper thread waiting
+        // out the close grace: cut that short and await them too.
         cx.on_app_quit(|this, cx| {
             let shutdown = this.core.take_shutdown();
+            let retired = this.core.take_retired();
+            for pending in &retired {
+                pending.hurry();
+            }
             cx.background_executor().spawn(async move {
+                let deadline = std::time::Instant::now() + QUIT_DEADLINE;
                 if let Some(shutdown) = shutdown {
                     shutdown.terminate_blocking_with(QUIT_GRACE, QUIT_DEADLINE);
+                }
+                for pending in &retired {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if pending.wait(left).is_none() && left.is_zero() {
+                        break;
+                    }
                 }
             })
         })
@@ -235,6 +250,12 @@ impl TerminalView {
     /// get the result (closing a tab). The view stays, showing what it has.
     pub fn take_shutdown(&mut self) -> Option<crate::terminal::Shutdown> {
         self.core.take_shutdown()
+    }
+
+    /// Give up the teardowns of backends the session ended by itself that
+    /// are still running (see [`TerminalCore::take_retired`]).
+    pub fn take_retired(&mut self) -> Vec<crate::session::PendingTeardown> {
+        self.core.take_retired()
     }
 
     /// What the last render drew.

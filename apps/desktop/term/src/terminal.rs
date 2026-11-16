@@ -87,6 +87,10 @@ pub struct TerminalCore {
     remaining: Vec<Launch>,
     started: Instant,
     input_sent: bool,
+    /// Teardowns of backends this core ended by itself (end of stream,
+    /// the session ended, a failed attempt replaced) that have not finished.
+    /// Kept so app quit can hurry and await them; see [`Self::take_retired`].
+    retired: Vec<PendingTeardown>,
 }
 
 impl TerminalCore {
@@ -156,7 +160,30 @@ impl TerminalCore {
             remaining,
             started: Instant::now(),
             input_sent: false,
+            retired: Vec::new(),
         }
+    }
+
+    /// End a backend this core no longer uses on a reaper thread, and keep
+    /// the handle until it finishes.
+    fn retire(&mut self, backend: Backend) {
+        self.retired
+            .retain(|pending| pending.try_result().is_none());
+        let shutdown = match backend {
+            Backend::Pty(pty) => Shutdown::Pty(pty),
+            Backend::Stream(stream) => Shutdown::Stream(stream),
+            Backend::Closed => return,
+        };
+        self.retired.push(shutdown.terminate_in_background());
+    }
+
+    /// Give up the teardowns of backends this core ended by itself that
+    /// are still running, so the caller can hurry and await them (app
+    /// quit) or keep them after the view is gone (closing a tab).
+    pub fn take_retired(&mut self) -> Vec<PendingTeardown> {
+        self.retired
+            .retain(|pending| pending.try_result().is_none());
+        std::mem::take(&mut self.retired)
     }
 
     pub fn emulator(&mut self) -> &mut Emulator {
@@ -202,7 +229,9 @@ impl TerminalCore {
                         Ok(()) => "end of stream".into(),
                         Err(e) => format!("read failed: {e}"),
                     });
-                    self.backend = Backend::Closed;
+                    // The output ended; the process may still be running.
+                    let ended = std::mem::replace(&mut self.backend, Backend::Closed);
+                    self.retire(ended);
                     busy = true;
                 }
             }
@@ -236,8 +265,9 @@ impl TerminalCore {
                             Some(info) => format!("process ended ({info})"),
                             None => "terminal closed".into(),
                         });
-                        // Dropping the PTY ends whatever is left of the session.
-                        self.backend = Backend::Closed;
+                        // End whatever is left of the session.
+                        let ended = std::mem::replace(&mut self.backend, Backend::Closed);
+                        self.retire(ended);
                     }
                 }
             }
@@ -263,7 +293,8 @@ impl TerminalCore {
                 // A full reset: the failed attempt's error text is not part
                 // of the session the user asked for.
                 self.emu.feed(b"\x1bc");
-                self.backend = Backend::Pty(pty);
+                let failed = std::mem::replace(&mut self.backend, Backend::Pty(pty));
+                self.retire(failed);
                 self.kind = next.kind;
                 self.exit_seen = None;
                 self.last_output = Instant::now();

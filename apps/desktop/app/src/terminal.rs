@@ -158,6 +158,19 @@ fn for_cli(mut plan: SessionPlan, native: bool, path: Option<&std::ffi::OsStr>) 
     plan
 }
 
+/// The checkout a CLI tab runs in, validated as the app validates a root
+/// before an action (`source::trusted_root`), as its canonical path. The CLI
+/// finds the project by walking up from its working directory, so a
+/// checkout that lost its project marker, or that another user can change,
+/// could make `hack exec` or `hack host shell` act on a different project
+/// than the tab says. A plain host shell is not a CLI tab.
+fn cli_root(root: &Path) -> Result<PathBuf, String> {
+    hack_desktop_core::source::trusted_root(root).map_err(|e| match e {
+        hack_desktop_core::source::SourceError::Cli { message, .. } => message,
+        other => format!("{other:?}"),
+    })
+}
+
 /// `--branch <b>` for a branch instance, as validated names.
 fn branch_args(branch: Option<&str>) -> Result<Vec<OsString>, String> {
     match branch {
@@ -380,6 +393,7 @@ impl HackApp {
     }
 
     fn core_for(&self, d: &DetailView, tab: &NewTab) -> Result<TerminalCore, String> {
+        // `cli_root` validates the checkout a CLI tab runs in; see there.
         let hack = self.source.hack_program();
         let root = self.instance_root();
         let io = |e: std::io::Error| e.to_string();
@@ -391,7 +405,12 @@ impl HackApp {
                 ))
                 .map_err(io),
                 (Some(hack), Some((root, false, branch))) => TerminalCore::session(for_cli(
-                    logs_plan(hack, root, branch.as_deref(), d.state.is_active())?,
+                    logs_plan(
+                        hack,
+                        &cli_root(root)?,
+                        branch.as_deref(),
+                        d.state.is_active(),
+                    )?,
                     false,
                     std::env::var_os("PATH").as_deref(),
                 ))
@@ -411,7 +430,7 @@ impl HackApp {
                     return Err("A shell in a service needs the hack CLI.".into());
                 };
                 TerminalCore::session(for_cli(
-                    container_plan(hack, root, branch.as_deref(), service)?,
+                    container_plan(hack, &cli_root(root)?, branch.as_deref(), service)?,
                     *native,
                     std::env::var_os("PATH").as_deref(),
                 ))
@@ -439,7 +458,7 @@ impl HackApp {
                     return Err("A host shell with env needs the hack CLI.".into());
                 };
                 TerminalCore::session(for_cli(
-                    host_env_plan(hack, root, overlay, scope, *is_default)?,
+                    host_env_plan(hack, &cli_root(root)?, overlay, scope, *is_default)?,
                     *native,
                     std::env::var_os("PATH").as_deref(),
                 ))
@@ -1425,6 +1444,34 @@ mod tests {
             cfg!(target_os = "macos"),
             "off macOS, Ctrl-K in a terminal goes to the shell"
         );
+    }
+
+    #[test]
+    fn a_cli_tab_runs_only_in_a_checkout_the_cli_selects_exactly() {
+        let base = std::env::temp_dir().join(format!("hack-cli-root-{}", std::process::id()));
+        let project = base.join("p");
+        std::fs::create_dir_all(project.join(".hack")).unwrap();
+        std::fs::write(project.join(".hack/docker-compose.yml"), "services: {}\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        for d in [&base, &project, &project.join(".hack")] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::set_permissions(
+            project.join(".hack/docker-compose.yml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            cli_root(&project).expect("the project's own checkout"),
+            std::fs::canonicalize(&project).unwrap()
+        );
+        // A plain folder inside the project: the CLI would walk up to `p`.
+        let inner = project.join("src");
+        std::fs::create_dir_all(&inner).unwrap();
+        let refused = cli_root(&inner).expect_err("a folder without its own marker");
+        assert!(refused.starts_with("Not running this action"), "{refused}");
+        assert!(cli_root(Path::new("relative/p")).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

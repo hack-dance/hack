@@ -190,19 +190,65 @@ check-container <service> <pattern>
 quit                            implied at the end
 ```
 
+The by-hand list as one file. Replace the `<…>` names; the paste files are
+comment lines, so a shell that receives one runs nothing. Each `expect` looks
+for the result of arithmetic the shell does, never for text that is on the
+typed command line, so the echoed command cannot satisfy it:
+
 ```sh
-cat > /tmp/panel.steps <<'STEPS'
+mkdir -p /tmp/panel && cd /tmp/panel
+yes '# paste check' | head -c 2097152 > big.txt   # 2 MiB: refused whole, limit named
+yes '# paste check' | head -c 921600 > mid.txt    # 900 KiB: delivered
+cat > panel.steps <<'STEPS'
+# Logs and a host shell
 select <project>
 logs
+expect <a line the logs show> 30
 host
-type sleep 86399 &\r
+type echo host-$((40+2))\r
+expect host-42 15
+# Ctrl-C through the keymap ends a foreground job
+type sleep 30\r
+wait 500
+key ctrl-c
+type echo after-ctrl-c-$((1+1))\r
+expect after-ctrl-c-2 10
+# Pastes: 2 MiB is refused with the limit named, 900 KiB is delivered
 paste big.txt
+paste mid.txt
+# The shell's line editor takes a moment to read 900 KiB
+wait 2000
+key ctrl-c
+type echo after-paste-$((2+2))\r
+expect after-paste-4 60
+type sleep 86399 &\r
+# A shell in a service, and what it leaves inside the container
 container <service>
+type echo in-$((1+1))-container\r
+expect in-2-container 30
 type sleep 86398 &\r
 check-container <service> 86398
+# A host shell with an env overlay: the step line shows the label and
+# badge; check that a variable is set without printing it
+env <overlay> <scope>
+type [ -n "$<VARIABLE>" ] && echo env-set-$((3+3))\r
+expect env-set-6 30
+# The same on a branch instance started from a linked worktree
+select <project> <branch>
+logs
+host
+type echo branch-$((2+3))\r
+expect branch-5 15
+container <service>
+type echo branch-in-$((4+4))\r
+expect branch-in-8 30
 STEPS
-cargo run -p hack-desktop --features terminal -- --drive /tmp/panel.steps
+cargo run -p hack-desktop --features terminal -- --drive /tmp/panel/panel.steps
 ```
+
+The report gives each step's result (a paste step names the notice it got), each
+tab's session leader, `after quit + 5s: N process(es) alive in the M
+session(s) the tabs started`, the container counts and `result pass|fail`.
 
 The host-side count covers every process in a tab's session (the shell, its
 jobs, `hack`, the `docker exec` client). A process that starts its own session

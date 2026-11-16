@@ -250,10 +250,10 @@ impl CandidateError {
     pub fn with_network_request(mut self, host: &str, attempts: usize) -> Self {
         if !host.is_empty()
             && host.len() <= 253
-            && (1..=3).contains(&attempts)
+            && attempts <= 3
             && host
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+                .all(|b| b.is_ascii_alphanumeric() || b"._-:[]".contains(&b))
         {
             self.refusals.get_or_insert_default().network_request =
                 Some(NetworkRequestDiagnostic {

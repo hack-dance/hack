@@ -84,7 +84,7 @@ function fixedNativeMessage(
     : undefined;
 }
 
-const NETWORK_HOST = /^[a-zA-Z0-9.:[\]-]{1,253}$/;
+const NETWORK_HOST = /^[a-zA-Z0-9_.:[\]-]{1,253}$/;
 
 /** Render only a parsed authority and bounded count, never a runtime message or URL. */
 function networkRequestFailureMessage(
@@ -103,7 +103,7 @@ function networkRequestFailureMessage(
     !NETWORK_HOST.test(request.host) ||
     typeof request.attempts !== "number" ||
     !Number.isInteger(request.attempts) ||
-    request.attempts < 1 ||
+    request.attempts < 0 ||
     request.attempts > 3
   ) {
     return;

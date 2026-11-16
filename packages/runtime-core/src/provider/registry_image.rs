@@ -30,7 +30,7 @@ use super::image_load;
 use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::image_policy::ImagePolicy;
 use super::image_reference::{ImageReference, NamedReference, normalize};
-use super::network_retry::{ATTEMPTS, HEADER_TIMEOUT, backoff, transient};
+use super::network_retry::{ATTEMPTS, backoff, transient};
 use super::registry_credentials::{self, Credential};
 use crate::CandidateError;
 use reqwest::{
@@ -802,7 +802,7 @@ impl<'a> Fetch<'a> {
             authorization: None,
             stage: Stage::Anonymous,
             deadline: Instant::now() + ACQUISITION_DEADLINE,
-            request_timeout: HEADER_TIMEOUT,
+            request_timeout: REQUEST_TIMEOUT,
         })
     }
 
@@ -847,11 +847,24 @@ impl<'a> Fetch<'a> {
         retry: bool,
     ) -> Result<Response, CandidateError> {
         for attempt in 1..=ATTEMPTS {
+            let remaining =
+                match self.remaining() {
+                    Ok(remaining) => remaining,
+                    Err(failure) => return Err(CandidateError::new(
+                        failure.code,
+                        format!(
+                            "Registry acquisition deadline exceeded. Host {} after {} attempt(s).",
+                            url.host_str().unwrap_or("unknown"),
+                            attempt - 1
+                        ),
+                    )
+                    .with_network_request(url.host_str().unwrap_or("unknown"), attempt - 1)),
+                };
             let request = request
                 .try_clone()
                 .ok_or_else(|| error("Cannot replay registry request."))?;
             match request
-                .timeout(self.remaining()?.min(if retry {
+                .timeout(remaining.min(if retry {
                     self.request_timeout
                 } else {
                     REQUEST_TIMEOUT
@@ -887,10 +900,12 @@ impl<'a> Fetch<'a> {
 
     /// One request with redirects followed under [`redirect_allowed`]. Authorization is
     /// attached only while the request targets the registry origin.
-    fn send(&self, mut url: Url, timeout: Duration) -> Result<Response, CandidateError> {
-        let retry = url
-            .path()
-            .starts_with(&format!("/v2/{}/manifests/", self.path));
+    fn send(
+        &self,
+        mut url: Url,
+        timeout: Duration,
+        retry: bool,
+    ) -> Result<Response, CandidateError> {
         for hop in 0..=4 {
             if !self.destination_allowed(&url) {
                 return Err(local_address_refused());
@@ -943,9 +958,14 @@ impl<'a> Fetch<'a> {
     /// anonymously first, then with the host user's Docker credentials. Only a challenge
     /// from the registry origin itself is answered; a redirected host that refuses access
     /// fails without any token or credential request.
-    fn get(&mut self, url: Url, timeout: Duration) -> Result<Response, CandidateError> {
+    fn get(
+        &mut self,
+        url: Url,
+        timeout: Duration,
+        retry: bool,
+    ) -> Result<Response, CandidateError> {
         loop {
-            let response = self.send(url.clone(), timeout)?;
+            let response = self.send(url.clone(), timeout, retry)?;
             let status = response.status();
             if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
                 && !same_origin(&self.registry.origin, response.url())
@@ -1133,7 +1153,7 @@ impl<'a> Fetch<'a> {
 
     fn manifest(&mut self, reference: &str) -> Result<Vec<u8>, CandidateError> {
         let url = self.url("manifests", reference)?;
-        let response = self.get(url, REQUEST_TIMEOUT)?;
+        let response = self.get(url, REQUEST_TIMEOUT, true)?;
         if response
             .content_length()
             .is_some_and(|n| n > MAX_METADATA as u64)
@@ -1155,7 +1175,11 @@ impl<'a> Fetch<'a> {
     /// One small object (manifest or config) verified against its descriptor.
     fn object(&mut self, kind: &str, d: &Descriptor) -> Result<Vec<u8>, CandidateError> {
         Self::checked(d, MAX_METADATA as u64)?;
-        let response = self.get(self.url(kind, &d.digest)?, REQUEST_TIMEOUT)?;
+        let response = self.get(
+            self.url(kind, &d.digest)?,
+            REQUEST_TIMEOUT,
+            kind == "manifests",
+        )?;
         let bytes = bounded(response, d.size as usize)?;
         verify_object(d, &bytes)?;
         Ok(bytes)
@@ -1164,7 +1188,7 @@ impl<'a> Fetch<'a> {
     /// A layer blob as a reader that enforces its descriptor's exact size and digest.
     fn blob(&mut self, d: &Descriptor) -> Result<Verified<Response>, CandidateError> {
         let timeout = REQUEST_TIMEOUT + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND);
-        let response = self.get(self.url("blobs", &d.digest)?, timeout)?;
+        let response = self.get(self.url("blobs", &d.digest)?, timeout, false)?;
         if response.content_length().is_some_and(|n| n != d.size) {
             return Err(error("Registry object digest or size mismatch."));
         }

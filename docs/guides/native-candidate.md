@@ -983,9 +983,9 @@ and body reads; progress does not renew it. HTTP errors, body interruptions,
 length errors and checksum mismatches never trigger an automatic retry.
 
 Registry manifest GETs and token GETs use the same three-attempt/backoff policy
-before headers arrive. Their 15-second bound covers the whole individual request,
+before headers arrive. Their existing 60-second bound covers each whole request,
 including its body; the registry connection bound remains 10 seconds. Exhausting
-three header attempts takes at most 45.75 seconds per hop, also capped by the
+three header attempts takes at most 180.75 seconds per hop, also capped by the
 existing acquisition deadline. Registry blobs and OAuth refresh POSTs are not
 replayed. A 4xx/5xx response, malformed body or digest mismatch is not retried
 (the existing authentication challenge flow still applies). Final network errors

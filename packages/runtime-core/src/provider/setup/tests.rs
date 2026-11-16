@@ -932,6 +932,15 @@ fn killed_preparation_and_publication_rerun_without_network_or_partial_install()
 
 #[test]
 fn retry_stalled_headers_then_verify_download() {
+    retry_preheader_failure(false);
+}
+
+#[test]
+fn retry_closed_connection_then_verify_download() {
+    retry_preheader_failure(true);
+}
+
+fn retry_preheader_failure(close: bool) {
     use std::time::{Duration, Instant};
     let root = Fixture::new();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -945,7 +954,9 @@ fn retry_stalled_headers_then_verify_download() {
     let handle = thread::spawn(move || {
         let (mut first, _) = listener.accept().unwrap();
         request(&mut first);
-        thread::sleep(Duration::from_millis(150));
+        if !close {
+            thread::sleep(Duration::from_millis(150));
+        }
         drop(first);
         let (mut second, _) = listener.accept().unwrap();
         request(&mut second);
@@ -953,7 +964,10 @@ fn retry_stalled_headers_then_verify_download() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
             .unwrap();
     });
-    let client = download::test_client(Duration::from_millis(100), Duration::from_secs(3), None);
+    let client = download::with_header_timeout(
+        download::test_client(Duration::from_secs(2), Duration::from_secs(3), None),
+        Duration::from_millis(100),
+    );
     let start = Instant::now();
     download::acquire(&client, &root.0, &pin).unwrap();
     assert!(start.elapsed() < Duration::from_secs(3));

@@ -19,6 +19,7 @@ pub(super) struct Client {
     http: reqwest::Client,
     runtime: tokio::runtime::Runtime,
     file_timeout: Duration,
+    header_timeout: Duration,
 }
 
 fn build_client(
@@ -47,7 +48,14 @@ fn build_client(
         http,
         runtime,
         file_timeout,
+        header_timeout: HEADER_TIMEOUT,
     })
+}
+
+#[cfg(test)]
+pub(super) fn with_header_timeout(mut client: Client, timeout: Duration) -> Client {
+    client.header_timeout = timeout;
+    client
 }
 
 #[cfg(test)]
@@ -242,7 +250,7 @@ async fn response(
         let mut attempt = 0;
         let response = loop {
             attempt += 1;
-            let end = deadline.min(tokio::time::Instant::now() + HEADER_TIMEOUT);
+            let end = deadline.min(tokio::time::Instant::now() + client.header_timeout);
             let result = tokio::time::timeout_at(
                 end,
                 request

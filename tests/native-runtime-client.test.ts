@@ -1507,7 +1507,7 @@ bunTest(
       },
       { version: 1, host: "example.test\nsecret", attempts: 3 },
       { version: 1, host: "example.test", attempts: 4 },
-      { version: 1, host: "example.test", attempts: 0 },
+      { version: 1, host: "example.test", attempts: -1 },
       { version: 1, host: "example.test", attempts: 1.5 },
       { version: 1, host: "example.test", attempts: 3, extra: "secret" },
     ]) {
@@ -1518,5 +1518,23 @@ bunTest(
         }).message
       ).toBeUndefined();
     }
+  }
+);
+
+bunTest(
+  "network diagnostics retain admitted underscore hosts and zero-attempt deadlines",
+  () => {
+    expect(
+      nativeFailureDetail({
+        code: "registry_image",
+        network_request: {
+          version: 1,
+          host: "registry_fixture.test",
+          attempts: 0,
+        },
+      }).message
+    ).toBe(
+      "Network request to registry_fixture.test failed after 0 attempt(s)."
+    );
   }
 );

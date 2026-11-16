@@ -213,6 +213,9 @@ impl Registry {
                 };
                 thread_log.lock().unwrap().push(request.clone());
                 let reply = handler(&request, port);
+                if reply.status == 0 {
+                    continue;
+                }
                 let mut head = format!(
                     "HTTP/1.1 {} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n",
                     reply.status,
@@ -1971,11 +1974,23 @@ fn build_bases_accept_only_docker_hub_references() {
 
 #[test]
 fn retry_token_and_manifest_stalled_headers_within_deadline() {
+    retry_registry_preheader_failure(false);
+}
+
+#[test]
+fn retry_token_and_manifest_closed_connection_within_deadline() {
+    retry_registry_preheader_failure(true);
+}
+
+fn retry_registry_preheader_failure(close: bool) {
     for token in [true, false] {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = calls.clone();
         let fixture = Registry::serve(Box::new(move |_, _| {
             if counted.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                if close {
+                    return Reply::new(0, "");
+                }
                 std::thread::sleep(Duration::from_millis(150));
             }
             Reply::new(
@@ -2073,4 +2088,22 @@ fn retry_does_not_replay_oauth_refresh_posts() {
     let json = serde_json::to_value(failure).unwrap();
     assert_eq!(json["network_request"]["attempts"], 1);
     assert!(!json.to_string().contains("fixture-refresh"));
+}
+
+#[test]
+fn retry_expired_registry_deadline_still_names_host_and_attempt_count() {
+    let fixture = Registry::serve(Box::new(|_, _| Reply::new(200, "unused")));
+    let docker = empty_docker();
+    let policy = fixture.policy(&docker);
+    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
+    let registry = super::registry(&named, &policy).unwrap();
+    let mut fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
+    fetch.deadline = Instant::now();
+    let failure = fetch
+        .token(&registry.origin.join("/token").unwrap(), None, None)
+        .unwrap_err();
+    let json = serde_json::to_value(failure).unwrap();
+    assert_eq!(json["network_request"]["host"], "127.0.0.1");
+    assert_eq!(json["network_request"]["attempts"], 0);
+    assert!(fixture.requests().is_empty());
 }

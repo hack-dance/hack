@@ -49,7 +49,7 @@ async function fixture() {
   const invoke = (flags: readonly string[]) => {
     // Synchronous and bounded: a CLI that never starts or never exits is
     // killed and the test fails with the command's name, not a bare timeout.
-    let child: ReturnType<typeof spawnSyncBounded>;
+    let child: Bun.SyncSubprocess<"pipe", "pipe">;
     try {
       child = spawnSyncBounded(
         [

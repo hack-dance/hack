@@ -117,4 +117,9 @@ export const SCHEMA_JSON_VARIANTS = [
     flags: ["--check", "--observe"],
     schema: "hack.update-check.v1",
   },
+  {
+    command: "doctor",
+    flags: ["--machine"],
+    schema: "hack.doctor.machine.v1",
+  },
 ] as const;

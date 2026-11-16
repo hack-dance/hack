@@ -198,6 +198,7 @@ import {
   inspectSupersededMacRoots,
   type SupersededRootInventory,
 } from "../lib/mac-ca-trust.ts";
+import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -1124,6 +1125,7 @@ async function runDoctorAudit(
     results,
     hasError,
     json,
+    machine: args.options.machine === true,
     browserHintTargets: composeDoctorBrowserHintTargets({
       url: browser.url,
       defaultDomain,
@@ -1324,6 +1326,8 @@ export async function reportDoctorResults(opts: {
   readonly results: readonly TimedCheckResult[];
   readonly hasError: boolean;
   readonly json: boolean;
+  /** Machine-only audit (`--machine`); selects the schema-tagged payload. */
+  readonly machine?: boolean;
   readonly browserHintTargets: readonly string[];
   readonly renderHuman: () => Promise<void>;
   readonly noteHint?: (targets: readonly string[]) => boolean;
@@ -1333,6 +1337,7 @@ export async function reportDoctorResults(opts: {
     const code = finishDoctorJson({
       results: opts.results,
       hasError: opts.hasError,
+      machine: opts.machine === true,
     });
     noteHint(opts.browserHintTargets);
     return code;
@@ -1560,6 +1565,7 @@ async function handleNativeDoctor(opts: {
     results,
     hasError,
     json: opts.json,
+    machine: opts.machine,
     browserHintTargets: nativeDoctorBrowserHintTargets(opts.browser.url),
     renderHuman: () => renderDoctorSummary(results),
   });
@@ -1783,7 +1789,11 @@ export type DoctorJsonCheck = DoctorMetadata & {
 };
 
 export type DoctorJsonData = {
-  readonly schema: 1;
+  /**
+   * Plain `doctor --json` keeps its R7a numeric schema. The HACK-2218
+   * machine-only audit is a schema-tagged flag variant with a stable id.
+   */
+  readonly schema: 1 | typeof MACHINE_SCHEMAS.doctorMachine;
   readonly checks: readonly DoctorJsonCheck[];
   readonly summary: readonly string[];
   readonly counts: {
@@ -1798,13 +1808,15 @@ export type DoctorJsonData = {
  */
 export function buildDoctorJsonData(opts: {
   readonly results: readonly TimedCheckResult[];
+  /** `--machine`: tag the payload with `hack.doctor.machine.v1`. */
+  readonly machine?: boolean;
 }): DoctorJsonData {
   const counts = { ok: 0, warn: 0, error: 0 };
   for (const result of opts.results) {
     counts[result.status] += 1;
   }
   return {
-    schema: 1,
+    schema: opts.machine === true ? MACHINE_SCHEMAS.doctorMachine : 1,
     checks: opts.results.map((result) => ({
       id: result.name,
       ...doctorMetadata({ id: result.name, scope: result.scope }),
@@ -1844,9 +1856,15 @@ export function buildDoctorJsonData(opts: {
 function finishDoctorJson(opts: {
   readonly results: readonly TimedCheckResult[];
   readonly hasError: boolean;
+  readonly machine: boolean;
 }): number {
   emitCliResult({
-    result: okResult({ data: buildDoctorJsonData({ results: opts.results }) }),
+    result: okResult({
+      data: buildDoctorJsonData({
+        results: opts.results,
+        machine: opts.machine,
+      }),
+    }),
   });
   return opts.hasError ? 1 : 0;
 }

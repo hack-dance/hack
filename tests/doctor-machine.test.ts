@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { MACHINE_SCHEMAS } from "../src/lib/machine-output.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const cli = resolve(import.meta.dir, "../index.ts");
@@ -81,7 +82,19 @@ for (const native of [false, true]) {
     try {
       const before = await readFile(join(f.project, ".hack/hack.project.json"));
       const result = await f.invoke(["--machine", "--json"], native);
-      expect(result.json).toMatchObject({ ok: true, data: { schema: 1 } });
+      // Schema-tagged flag variant: exactly the envelope keys, and a payload
+      // with the stable id from the machine-output inventory.
+      expect(Object.keys(result.json).sort()).toEqual(["data", "ok"]);
+      expect(Object.keys(result.json.data).sort()).toEqual([
+        "checks",
+        "counts",
+        "schema",
+        "summary",
+      ]);
+      expect(result.json).toMatchObject({
+        ok: true,
+        data: { schema: MACHINE_SCHEMAS.doctorMachine },
+      });
       expect([0, 1]).toContain(result.code);
       const checks = result.json.data.checks as {
         id: string;
@@ -226,7 +239,10 @@ test("machine audit excludes gateway probes even with enabled and malformed regi
     expect(stderr).toBe("");
     expect(JSON.parse(stdout)).toEqual({ enabled: true, warning: true });
     const result = await f.invoke(["--machine", "--json"]);
-    expect(result.json).toMatchObject({ ok: true, data: { schema: 1 } });
+    expect(result.json).toMatchObject({
+      ok: true,
+      data: { schema: MACHINE_SCHEMAS.doctorMachine },
+    });
     const ids = result.json.data.checks.map(
       (check: { id: string }) => check.id
     );

@@ -103,6 +103,20 @@ pub struct TerminalCore {
     retired_survivors: usize,
 }
 
+/// The notice for input refused whole: larger than the input queue can
+/// ever hold, or the queue is full because the program is not reading.
+fn dropped_notice(bytes: usize) -> String {
+    use crate::pty::INPUT_QUEUE_BYTES;
+    if bytes > INPUT_QUEUE_BYTES {
+        format!(
+            "input not sent: {bytes} bytes is more than the {} MiB input limit",
+            INPUT_QUEUE_BYTES >> 20
+        )
+    } else {
+        format!("input not sent: {bytes} bytes (the program is not reading)")
+    }
+}
+
 /// What [`TerminalCore::take_retired`] hands out: teardowns still running,
 /// and how many processes the finished ones left running.
 #[derive(Debug, Default)]
@@ -236,6 +250,17 @@ impl TerminalCore {
         &self.kind
     }
 
+    /// The running session's leader pid, which is also its session id.
+    /// `None` for a file-backed stream or once the backend has closed. A
+    /// container shell that fell back from `bash` to `sh` has a new leader.
+    pub fn leader(&self) -> Option<u32> {
+        match &self.backend {
+            Backend::Pty(pty) => Some(pty.pid()),
+            Backend::Stream(stream) => stream.pid(),
+            Backend::Closed => None,
+        }
+    }
+
     pub fn status(&self) -> &Status {
         &self.status
     }
@@ -365,9 +390,7 @@ impl TerminalCore {
                 self.input_sent = true;
             }
             WriteOutcome::Dropped { bytes } => {
-                self.notice = Some(format!(
-                    "input not sent: {bytes} bytes (the program is not reading)"
-                ));
+                self.notice = Some(dropped_notice(bytes));
             }
             WriteOutcome::Closed => {}
         }
@@ -421,6 +444,15 @@ impl TerminalCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paste_larger_than_the_input_queue_names_the_limit() {
+        use crate::pty::INPUT_QUEUE_BYTES;
+        let over = dropped_notice(INPUT_QUEUE_BYTES + 1);
+        assert!(over.contains("more than the 1 MiB input limit"), "{over}");
+        let full = dropped_notice(INPUT_QUEUE_BYTES);
+        assert!(full.contains("the program is not reading"), "{full}");
+    }
     use crate::session::Hurry;
 
     fn finished(survivors: Vec<libc::pid_t>) -> PendingTeardown {

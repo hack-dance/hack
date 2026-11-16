@@ -438,7 +438,11 @@ impl MainWindow {
                             .child(u)
                     }))
                     .child(div().flex_1())
-                    .child(always_on_switch(d.always_on, false, ui)),
+                    .child(always_on_switch(
+                        d.always_on,
+                        Some("Always on needs the CLI's autostart commands (HACK-2213)"),
+                        ui,
+                    )),
             )
             .children(reason.map(|r| {
                 let c = if matches!(status, Status::Failed) {

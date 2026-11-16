@@ -19,7 +19,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
     std::fs::create_dir_all(dir).expect("create screenshot dir");
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
-        Arc::new(gpui_kit::assets::Assets),
+        Arc::new(hack_desktop_ui::icons::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(gpui_kit::init);

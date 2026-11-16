@@ -40,9 +40,12 @@ def launcher(root, bun, program, mode):
     child = subprocess.Popen([bun, program, mode, str(root), sys.executable, __file__])
     (root / 'wrapper.pid').write_text(str(child.pid))
     code = child.wait()
-    (root / 'completion.json').write_text(json.dumps({
+    # Existence is readiness for the observer, so publish only complete JSON.
+    completion = root / 'completion.json.pending'
+    completion.write_text(json.dumps({
         'wrapperCode': code, 'foregroundRestored': os.tcgetpgrp(0) == original,
     }))
+    completion.replace(root / 'completion.json')
     while True:
         time.sleep(1)
 

@@ -329,6 +329,14 @@ impl HackApp {
         true
     }
 
+    /// Type into the title bar search (frame sequences).
+    pub(crate) fn type_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
+        self.filter = text.trim().to_lowercase();
+        cx.notify();
+    }
+
     /// Fixtures: select a project by name.
     pub fn select(&mut self, name: &str) {
         self.model.apply(Event::Select(name.to_owned()));
@@ -427,7 +435,7 @@ impl HackApp {
         .detach();
     }
 
-    fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
+    pub(crate) fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
         if self.recovery_busy {
             return;
         }
@@ -532,14 +540,14 @@ impl HackApp {
         self.filter.is_empty() || r.name.to_lowercase().contains(&self.filter)
     }
 
-    fn select_project(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(crate) fn select_project(&mut self, name: String, cx: &mut Context<Self>) {
         self.model.apply(Event::Select(name));
         self.after_select(cx);
     }
 
     /// Everything a selection change resets: the pane, the env read, the
     /// Logs tab's stream and its service filter.
-    fn after_select(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Project;
         self.copied = None;
         self.env.begin();
@@ -558,7 +566,7 @@ impl HackApp {
         cx.notify();
     }
 
-    fn set_tab(&mut self, to: usize, cx: &mut Context<Self>) {
+    pub(crate) fn set_tab(&mut self, to: usize, cx: &mut Context<Self>) {
         let from = self.tab;
         if from == to {
             return;
@@ -576,7 +584,7 @@ impl HackApp {
         cx.notify();
     }
 
-    fn copy_url(&mut self, url: String, cx: &mut Context<Self>) {
+    pub(crate) fn copy_url(&mut self, url: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(url));
         self.copied = Some(Instant::now());
         cx.notify();

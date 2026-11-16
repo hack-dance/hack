@@ -93,3 +93,75 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
         }
     }
 }
+
+/// One step of the click-through: a name and what the click does.
+type Step = (
+    &'static str,
+    fn(&mut HackApp, &mut gpui_kit::Window, &mut gpui_kit::Context<HackApp>),
+);
+
+/// Render the window after each step of a short click-through on the
+/// `running` fixture, dark: search, select, start, tabs, Doctor. Each step
+/// calls the method its click handler calls; it is not a synthetic mouse
+/// event. Frames are written as `NN-step.png`.
+pub fn sequence(dir: &Path) {
+    std::fs::create_dir_all(dir).expect("create sequence dir");
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(hack_desktop_ui::icons::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+    cx.update(crate::view::bind_keys);
+    cx.update(|cx| Theme::change(ThemeMode::Dark, None, cx));
+    let f = Fixture::Running;
+    let opts = WindowOptions {
+        focus: false,
+        show: false,
+        ..crate::window_options()
+    };
+    let (handle, view) = cx
+        .update(|cx| {
+            gpui_kit::open_window(opts, cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut app = HackApp::new(crate::source_for(Some(f)), false, window, cx);
+                    app.select(fixtures::selected(f));
+                    app
+                })
+            })
+        })
+        .expect("open offscreen window");
+    let steps: Vec<Step> = vec![
+        ("open", |_, _, _| {}),
+        ("search-bill", |app, window, cx| {
+            app.type_search("bill", window, cx)
+        }),
+        ("select-billing-api", |app, window, cx| {
+            app.type_search("", window, cx);
+            app.select_project("billing-api".into(), cx);
+        }),
+        ("click-start", |app, _, cx| {
+            app.run_action(hack_desktop_core::state::Action::Start, cx);
+        }),
+        ("select-storefront", |app, _, cx| {
+            app.select_project("storefront".into(), cx);
+        }),
+        ("tab-env", |app, _, cx| app.set_tab(2, cx)),
+        ("tab-logs", |app, _, cx| app.set_tab(1, cx)),
+        ("tab-services", |app, _, cx| app.set_tab(0, cx)),
+        ("open-doctor", |app, _, cx| app.open_doctor(None, cx)),
+    ];
+    for (i, (name, step)) in steps.into_iter().enumerate() {
+        cx.update_window(handle, |_, window, cx| {
+            view.update(cx, |app, cx| step(app, window, cx));
+            window.render_frame(cx);
+        })
+        .expect("step");
+        let img = cx
+            .capture_screenshot(handle)
+            .expect("offscreen rendering must be available");
+        let path = dir.join(format!("{i:02}-{name}.png"));
+        img.save(&path).expect("write png");
+        println!("{}", path.display());
+    }
+}

@@ -5,6 +5,9 @@
 //! hack-desktop --fixtures running      canned data for one designed state
 //! hack-desktop --list-fixtures
 //! hack-desktop --theme light|dark      default: follow the system
+//! hack-desktop --sequence <dir>        (feature `screenshots`) render the
+//!                                      window after each step of a short
+//!                                      click-through, on fixtures
 //! hack-desktop --screenshots <dir>     (feature `screenshots`) render every
 //!                                      fixture, light and dark, offscreen
 //! ```
@@ -27,6 +30,7 @@ pub(crate) struct Args {
     pub logs_fixture: Option<hack_desktop_core::logs::fixtures::LogsFixture>,
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
+    pub sequence: Option<std::path::PathBuf>,
 }
 
 fn usage() -> ! {
@@ -42,6 +46,7 @@ fn parse_args() -> Args {
         logs_fixture: None,
         theme: None,
         screenshots: None,
+        sequence: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -81,6 +86,7 @@ fn parse_args() -> Args {
                 });
             }
             "--screenshots" => a.screenshots = Some(it.next().unwrap_or_else(|| usage()).into()),
+            "--sequence" => a.sequence = Some(it.next().unwrap_or_else(|| usage()).into()),
             "-h" | "--help" => usage(),
             _ => usage(),
         }
@@ -126,13 +132,18 @@ pub(crate) fn window_options() -> WindowOptions {
 fn main() {
     let args = parse_args();
     #[cfg(feature = "screenshots")]
+    if let Some(dir) = &args.sequence {
+        screenshots::sequence(dir);
+        return;
+    }
+    #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.screenshots {
         screenshots::run(dir, args.fixture);
         return;
     }
     #[cfg(not(feature = "screenshots"))]
-    if args.screenshots.is_some() {
-        eprintln!("--screenshots needs a build with --features screenshots");
+    if args.screenshots.is_some() || args.sequence.is_some() {
+        eprintln!("--screenshots and --sequence need a build with --features screenshots");
         std::process::exit(2);
     }
     gpui_kit::application()

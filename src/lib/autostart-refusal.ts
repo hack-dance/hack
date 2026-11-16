@@ -18,6 +18,19 @@ export function isAutostartManualStartReason(
   return typeof reason === "string" && MANUAL_START_REASONS.has(reason);
 }
 
+/**
+ * Skips that ran nothing for this project, so its claim for this boot is
+ * released and a later pass may retry it: the manual-start refusals, and an
+ * executed Hack binary that failed its re-check just before the spawn (the
+ * startup gate's refusal of the same reason never claims the project).
+ */
+export function releasesAutostartClaim(reason: unknown): boolean {
+  return (
+    isAutostartManualStartReason(reason) ||
+    reason === "executable_path_untrusted"
+  );
+}
+
 /** Retained adoption has its own runtime and does not implement unattended guards. */
 export function assertAutostartAdoptionAllowed(): void {
   if (process.env.HACK_AUTOSTART_LOGIN === "1") {

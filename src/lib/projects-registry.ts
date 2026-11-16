@@ -5,7 +5,7 @@ import { type FileHandle, open, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { GLOBAL_PROJECTS_REGISTRY_FILENAME } from "../constants.ts";
 import { assertAutostartFileAclsTrusted } from "./autostart-path-acl.ts";
-import { isAutostartManualStartReason } from "./autostart-refusal.ts";
+import { releasesAutostartClaim } from "./autostart-refusal.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, pathExists } from "./fs.ts";
@@ -1226,7 +1226,7 @@ export async function recordProjectAutostartResult(
         opts.bootId !== null &&
         opts.expectedBranch !== undefined &&
         opts.result.status === "skipped" &&
-        isAutostartManualStartReason(opts.result.reason);
+        releasesAutostartClaim(opts.result.reason);
       return {
         ...project,
         autostart: {

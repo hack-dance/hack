@@ -1229,6 +1229,38 @@ test("late child manual-start refusal releases only its unstarted claim and rema
   expect(starts.map((start) => start.id)).toEqual(["alpha"]);
 });
 
+test("an executable that fails its re-check just before the spawn releases the claim for a retry", async () => {
+  await seed(["alpha"]);
+  deps = {
+    ...deps,
+    // What the production start returns when the executed Hack binary was
+    // replaced while login waited for Docker: nothing was spawned.
+    start: async () => ({
+      status: "skipped",
+      reason: "executable_path_untrusted",
+    }),
+  };
+  await run();
+  expect(starts).toEqual([]);
+  expect(
+    (await readProjectsRegistry({ registryPath })).projects[0]?.autostart
+      ?.lastAttemptBootId
+  ).toBeNull();
+  expect((await results())[0]?.result).toMatchObject({
+    status: "skipped",
+    reason: "executable_path_untrusted",
+  });
+  deps = {
+    ...deps,
+    start: async () => {
+      starts.push({ id: "alpha", at: clock });
+      return { status: "started", reason: null };
+    },
+  };
+  await run();
+  expect(starts.map((start) => start.id)).toEqual(["alpha"]);
+});
+
 test("unsafe Docker context selection refuses before engine access without consuming a claim", async () => {
   await seed(["alpha"]);
   await mkdir(join(root, ".docker"), { mode: 0o700 });

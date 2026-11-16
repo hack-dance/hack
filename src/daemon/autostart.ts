@@ -21,7 +21,10 @@ import {
   assertAutostartExecutablePathTrusted,
   assertAutostartInvocationTrusted,
 } from "../lib/autostart-executable-trust.ts";
-import { isAutostartManualStartReason } from "../lib/autostart-refusal.ts";
+import {
+  isAutostartManualStartReason,
+  releasesAutostartClaim,
+} from "../lib/autostart-refusal.ts";
 import { autostartStartPolicyRefusal } from "../lib/autostart-start-policy.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { readTextFile } from "../lib/fs.ts";
@@ -466,8 +469,7 @@ async function startClaimedProject(
     bootId: opts.bootId,
     result: { ...result, at: new Date(opts.deps.now()).toISOString() },
     releaseUnstartedClaim:
-      result.status === "skipped" &&
-      isAutostartManualStartReason(result.reason),
+      result.status === "skipped" && releasesAutostartClaim(result.reason),
     expectedBranch: opts.project.autostart?.branch,
     registryPath: opts.registryPath,
   });

@@ -5,15 +5,13 @@ import {
   withComposeServiceEnvFingerprints,
 } from "../lib/compose-env-fingerprint.ts";
 import { deepFreeze } from "../lib/guards.ts";
-import {
-  NativeComposeHostHookError,
-  NativeHostEnvironmentNameError,
-} from "../lib/native-compose-host-contract.ts";
+import { NativeComposeHostHookError } from "../lib/native-compose-host-contract.ts";
 import {
   NATIVE_CONFIG_COMPILER_MAX_TIMEOUT_MS,
   NativeConfigCompilerError,
   nativeConfigCompilerTimeoutWithin,
 } from "../lib/native-config-compiler.ts";
+import { renderNativeEnvironmentNameError } from "../lib/native-environment-name-error.ts";
 import { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
 import {
   assertNativeFiniteHookBindings,
@@ -141,8 +139,11 @@ export class NativeAuthoredProjectStartError extends Error {
   readonly stage: Stage;
   readonly compilerCode?: string;
   readonly nativeConfigurationRefusals?: readonly NativeConfigurationRefusal[];
-  /** The authored variable name the host contract refused (HACK-2219). */
-  readonly hostEnvironmentName?: NativeHostEnvironmentNameError;
+  /** Set when the project configuration set a non-portable variable name (HACK-2219). */
+  readonly environmentName?: {
+    readonly code: "E_CONFIG_INVALID";
+    readonly reason: "environment_name_not_portable";
+  };
 
   constructor(opts: {
     readonly outcome: Outcome;
@@ -152,14 +153,15 @@ export class NativeAuthoredProjectStartError extends Error {
     readonly stage?: Stage;
     readonly compilerCode?: string;
     readonly configurationRefusals?: unknown;
-    /** Only an instance is kept; its message is fixed text plus an escaped name. */
-    readonly hostEnvironmentName?: unknown;
+    /** Only a genuine NativeEnvironmentNameError is used, by its construction-time sentence. */
+    readonly environmentName?: unknown;
   }) {
-    const hostEnvironmentName =
-      opts.hostEnvironmentName instanceof NativeHostEnvironmentNameError
-        ? opts.hostEnvironmentName
-        : undefined;
-    let nativeCode = hostEnvironmentName?.reason;
+    const environmentName = renderNativeEnvironmentNameError(
+      opts.environmentName
+    );
+    let nativeCode: string | undefined = environmentName
+      ? "environment_name_not_portable"
+      : undefined;
     if (
       nativeCode === undefined &&
       opts.nativeCode !== undefined &&
@@ -192,9 +194,14 @@ export class NativeAuthoredProjectStartError extends Error {
       )
       .join("\n");
     super(
-      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.${findings ? `\n${findings}` : ""}${hostEnvironmentName ? `\n${hostEnvironmentName.message}` : ""}`
+      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.${findings ? `\n${findings}` : ""}${environmentName ? `\n${environmentName}` : ""}`
     );
-    this.hostEnvironmentName = hostEnvironmentName;
+    if (environmentName) {
+      this.environmentName = {
+        code: "E_CONFIG_INVALID",
+        reason: "environment_name_not_portable",
+      };
+    }
     this.outcome = opts.outcome;
     this.canceled = opts.canceled;
     this.nativeCode = nativeCode;
@@ -895,7 +902,7 @@ async function failedAdmission(opts: {
     nativeCauseCode,
     stage: opts.stage,
     compilerCode: compilerDiagnostic(error),
-    hostEnvironmentName: error,
+    environmentName: error,
     // These entries have already passed the runtime decoder. Restore only its
     // literal-text marker for the startup error's independently checked boundary.
     configurationRefusals:

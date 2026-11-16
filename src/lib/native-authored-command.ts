@@ -288,8 +288,8 @@ function startupFailure(error: unknown): number {
     let code: HackCliError["code"] = "E_STARTUP_INCOMPLETE";
     if (error.nativeCode === "native_graph_subset") {
       code = "E_NATIVE_PROJECT_UNSUPPORTED";
-    } else if (error.hostEnvironmentName) {
-      code = error.hostEnvironmentName.code;
+    } else if (error.environmentName) {
+      code = error.environmentName.code;
     }
     throw new HackCliError({
       code,

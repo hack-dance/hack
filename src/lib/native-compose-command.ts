@@ -85,7 +85,6 @@ import {
 } from "./native-compose-generation.ts";
 import {
   NativeComposeHostHookError,
-  NativeHostEnvironmentNameError,
   selectNativeComposeAfterHooks,
   selectNativeComposeBeforeHooks,
   selectNativeComposeDownHooks,
@@ -152,6 +151,7 @@ import {
   selectNativeComposeProject,
 } from "./native-compose-selection.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
+import { renderNativeEnvironmentNameError } from "./native-environment-name-error.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import { run } from "./shell.ts";
 
@@ -2535,11 +2535,12 @@ function throwNativeComposeCommandError(error: unknown): never {
   if (error instanceof NativeComposeProxyAccessError) {
     throw new HackCliError({ code: error.code, message: error.message });
   }
-  if (error instanceof NativeHostEnvironmentNameError) {
+  const environmentName = renderNativeEnvironmentNameError(error);
+  if (environmentName) {
     throw new HackCliError({
-      code: error.code,
-      message: error.message,
-      detail: { reason: error.reason },
+      code: "E_CONFIG_INVALID",
+      message: environmentName,
+      detail: { reason: "environment_name_not_portable" },
     });
   }
   if (error instanceof NativeComposeHostHookError) {

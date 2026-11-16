@@ -1,12 +1,9 @@
 import { posix } from "node:path";
 import type { HostHook } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
+import { NativeEnvironmentNameError } from "./native-environment-name-error.ts";
 import { parseNativeHostTarget } from "./native-host-plan-protocol.ts";
-import {
-  displayEnvName,
-  isPortableEnvName,
-  nonPortableEnvNames,
-} from "./portable-env-name.ts";
+import { isPortableEnvName, nonPortableEnvNames } from "./portable-env-name.ts";
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 export type NativeComposeHook = Omit<HostHook, "environment"> & {
@@ -20,30 +17,6 @@ export class NativeComposeHostHookError extends Error {
       "Native Compose host hooks require finite lifecycle commands and complete selected host bindings; values omitted."
     );
     this.name = "NativeComposeHostHookError";
-  }
-}
-
-/**
- * A host hook or process sets a variable whose name is not portable (HACK-2219).
- * The configuration compiler refuses it first; this is the runtime boundary's
- * own named refusal. Names are not secret and are shown escaped; values never.
- */
-export class NativeHostEnvironmentNameError extends Error {
-  readonly code = "E_CONFIG_INVALID";
-  /** Closed reason for machine output. */
-  readonly reason = "host_environment_name_not_portable";
-  readonly invocation: string;
-  readonly variable: string;
-  constructor(opts: {
-    readonly invocation: string;
-    readonly variable: string;
-  }) {
-    super(
-      `Host command ${opts.invocation} sets environment variable ${displayEnvName(opts.variable)}, which is not a portable name (letters, digits and _, not starting with a digit). Rename it in the project configuration. Values omitted.`
-    );
-    this.name = "NativeHostEnvironmentNameError";
-    this.invocation = opts.invocation;
-    this.variable = opts.variable;
   }
 }
 
@@ -194,7 +167,7 @@ export function readNativeHostInvocation(entry: unknown): NativeComposeHook {
   );
   for (const variable of Object.keys(entry.environment ?? {})) {
     if (!isPortableEnvName(variable)) {
-      throw new NativeHostEnvironmentNameError({
+      throw NativeEnvironmentNameError.forHostCommand({
         invocation: entry.name,
         variable,
       });

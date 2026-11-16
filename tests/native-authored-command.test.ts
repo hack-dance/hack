@@ -20,7 +20,7 @@ import {
   tryNativeAuthoredCommand,
 } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
-import { NativeHostEnvironmentNameError } from "../src/lib/native-compose-host-contract.ts";
+import { NativeEnvironmentNameError } from "../src/lib/native-environment-name-error.ts";
 import { refuseUnsupportedNativeUpOptions } from "../src/lib/native-up-refusals.ts";
 import { withOwnedProcessListeners } from "./helpers/owned-process-listeners.ts";
 
@@ -338,7 +338,7 @@ macTest(
             outcome: "not-started",
             canceled: false,
             stage: "selection",
-            hostEnvironmentName: new NativeHostEnvironmentNameError({
+            environmentName: NativeEnvironmentNameError.forHostCommand({
               invocation: "tunnel",
               variable: "FOO%%",
             }),

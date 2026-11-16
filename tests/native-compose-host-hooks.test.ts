@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type NativeComposeHook,
-  NativeHostEnvironmentNameError,
   selectNativeComposeAfterHooks,
   selectNativeComposeBeforeHooks,
   selectNativeComposeDownHooks,
@@ -14,6 +13,7 @@ import {
   runNativeComposeBeforeHooks,
 } from "../src/lib/native-compose-host-hooks.ts";
 import type { NativeEnvironmentPlan } from "../src/lib/native-env-plan-protocol.ts";
+import { NativeEnvironmentNameError } from "../src/lib/native-environment-name-error.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const roots: string[] = [];
@@ -307,10 +307,10 @@ test("a hook that sets a non-portable name is refused by that name, escaped, wit
   } catch (error) {
     refusal = error;
   }
-  expect(refusal).toBeInstanceOf(NativeHostEnvironmentNameError);
-  const error = refusal as NativeHostEnvironmentNameError;
+  expect(refusal).toBeInstanceOf(NativeEnvironmentNameError);
+  const error = refusal as NativeEnvironmentNameError;
   expect(error.code).toBe("E_CONFIG_INVALID");
-  expect(error.reason).toBe("host_environment_name_not_portable");
+  expect(error.reason).toBe("environment_name_not_portable");
   expect(error.message).toContain(
     'Host command odd sets environment variable "FOO%%"'
   );

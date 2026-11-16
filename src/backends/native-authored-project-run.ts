@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { link, lstat, mkdir, realpath, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
-import { NativeHostEnvironmentNameError } from "../lib/native-compose-host-contract.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -22,6 +21,7 @@ import {
   type NativeEnvMetadata,
   parseNativeEnvMetadata,
 } from "../lib/native-env-plan-protocol.ts";
+import { isNativeEnvironmentNameError } from "../lib/native-environment-name-error.ts";
 import {
   type NativeAuthoredReceipt,
   type NativeAuthoredReview,
@@ -436,7 +436,7 @@ async function storage<T>(
     if (
       error instanceof NativeAuthoredStopUnavailableError ||
       error instanceof NativeAuthoredReservedStartError ||
-      error instanceof NativeHostEnvironmentNameError
+      isNativeEnvironmentNameError(error)
     ) {
       throw error;
     }

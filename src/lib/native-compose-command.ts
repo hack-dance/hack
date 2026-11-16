@@ -85,6 +85,7 @@ import {
 } from "./native-compose-generation.ts";
 import {
   NativeComposeHostHookError,
+  NativeHostEnvironmentNameError,
   selectNativeComposeAfterHooks,
   selectNativeComposeBeforeHooks,
   selectNativeComposeDownHooks,
@@ -2533,6 +2534,13 @@ function throwNativeComposeCommandError(error: unknown): never {
   }
   if (error instanceof NativeComposeProxyAccessError) {
     throw new HackCliError({ code: error.code, message: error.message });
+  }
+  if (error instanceof NativeHostEnvironmentNameError) {
+    throw new HackCliError({
+      code: error.code,
+      message: error.message,
+      detail: { reason: error.reason },
+    });
   }
   if (error instanceof NativeComposeHostHookError) {
     throw new HackCliError({

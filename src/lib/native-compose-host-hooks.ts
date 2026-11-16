@@ -3,6 +3,7 @@ import type { EnvironmentBinding } from "../../packages/config-compiler/generate
 import { isRecord } from "./guards.ts";
 import {
   assertHostHookContract,
+  hostInvocationUnsetKeys,
   type NativeComposeHook,
 } from "./native-compose-host-contract.ts";
 import { resolveNativeComposeEnvironment } from "./native-compose-renderer.ts";
@@ -139,9 +140,7 @@ async function runPreparedHook(opts: {
     {
       cwd: posix.join(opts.projectRoot, hook.cwd ?? "."),
       env,
-      unsetEnvKeys: Object.entries(hook.environment ?? {})
-        .filter(([, value]) => isRecord(value) && value.unset === true)
-        .map(([key]) => key),
+      unsetEnvKeys: hostInvocationUnsetKeys(hook),
       stdin: "inherit",
       stdout: opts.json ? "stderr" : "inherit",
       forwardSignals: true,

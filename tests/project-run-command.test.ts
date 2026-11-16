@@ -155,6 +155,32 @@ test("hack run -- passes child flags intact and keeps the default compose projec
   expect(runCalls[0]?.composeProject).toBeNull();
 });
 
+test("hack run is not refused by non-portable inherited names and injects only project values (HACK-2219)", async () => {
+  const projectRoot = await createProject();
+  const names = ["BASH_FUNC_hack2219%%", "FOO%%"] as const;
+  for (const name of names) {
+    process.env[name] = "fixture-odd-name";
+  }
+  try {
+    const exitCode = await runCli([
+      "run",
+      `--path=${projectRoot}`,
+      "--",
+      "api",
+      "true",
+    ]);
+    expect(exitCode).toBe(0);
+    expect(runCalls).toHaveLength(1);
+    for (const name of names) {
+      expect(Object.keys(runCalls[0]?.env ?? {})).not.toContain(name);
+    }
+  } finally {
+    for (const name of names) {
+      delete process.env[name];
+    }
+  }
+});
+
 async function runPrintenv({
   projectRoot,
   envName,

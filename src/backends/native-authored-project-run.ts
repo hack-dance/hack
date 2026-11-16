@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { link, lstat, mkdir, realpath, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import { NativeHostEnvironmentNameError } from "../lib/native-compose-host-contract.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -434,7 +435,8 @@ async function storage<T>(
     // Recovery must still acquire its leases and prove the selected state itself.
     if (
       error instanceof NativeAuthoredStopUnavailableError ||
-      error instanceof NativeAuthoredReservedStartError
+      error instanceof NativeAuthoredReservedStartError ||
+      error instanceof NativeHostEnvironmentNameError
     ) {
       throw error;
     }

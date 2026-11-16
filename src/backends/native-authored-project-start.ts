@@ -5,7 +5,10 @@ import {
   withComposeServiceEnvFingerprints,
 } from "../lib/compose-env-fingerprint.ts";
 import { deepFreeze } from "../lib/guards.ts";
-import { NativeComposeHostHookError } from "../lib/native-compose-host-contract.ts";
+import {
+  NativeComposeHostHookError,
+  NativeHostEnvironmentNameError,
+} from "../lib/native-compose-host-contract.ts";
 import {
   NATIVE_CONFIG_COMPILER_MAX_TIMEOUT_MS,
   NativeConfigCompilerError,
@@ -138,6 +141,8 @@ export class NativeAuthoredProjectStartError extends Error {
   readonly stage: Stage;
   readonly compilerCode?: string;
   readonly nativeConfigurationRefusals?: readonly NativeConfigurationRefusal[];
+  /** The authored variable name the host contract refused (HACK-2219). */
+  readonly hostEnvironmentName?: NativeHostEnvironmentNameError;
 
   constructor(opts: {
     readonly outcome: Outcome;
@@ -147,11 +152,21 @@ export class NativeAuthoredProjectStartError extends Error {
     readonly stage?: Stage;
     readonly compilerCode?: string;
     readonly configurationRefusals?: unknown;
+    /** Only an instance is kept; its message is fixed text plus an escaped name. */
+    readonly hostEnvironmentName?: unknown;
   }) {
-    const nativeCode =
-      opts.nativeCode && CODE.test(opts.nativeCode)
-        ? opts.nativeCode
+    const hostEnvironmentName =
+      opts.hostEnvironmentName instanceof NativeHostEnvironmentNameError
+        ? opts.hostEnvironmentName
         : undefined;
+    let nativeCode = hostEnvironmentName?.reason;
+    if (
+      nativeCode === undefined &&
+      opts.nativeCode !== undefined &&
+      CODE.test(opts.nativeCode)
+    ) {
+      nativeCode = opts.nativeCode;
+    }
     const stage = STAGES.includes(opts.stage ?? "selection")
       ? (opts.stage ?? "selection")
       : "selection";
@@ -177,8 +192,9 @@ export class NativeAuthoredProjectStartError extends Error {
       )
       .join("\n");
     super(
-      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.${findings ? `\n${findings}` : ""}`
+      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.${findings ? `\n${findings}` : ""}${hostEnvironmentName ? `\n${hostEnvironmentName.message}` : ""}`
     );
+    this.hostEnvironmentName = hostEnvironmentName;
     this.outcome = opts.outcome;
     this.canceled = opts.canceled;
     this.nativeCode = nativeCode;
@@ -879,6 +895,7 @@ async function failedAdmission(opts: {
     nativeCauseCode,
     stage: opts.stage,
     compilerCode: compilerDiagnostic(error),
+    hostEnvironmentName: error,
     // These entries have already passed the runtime decoder. Restore only its
     // literal-text marker for the startup error's independently checked boundary.
     configurationRefusals:

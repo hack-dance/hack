@@ -2,6 +2,11 @@ import { posix } from "node:path";
 import type { HostHook } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
 import { parseNativeHostTarget } from "./native-host-plan-protocol.ts";
+import {
+  displayEnvName,
+  isPortableEnvName,
+  nonPortableEnvNames,
+} from "./portable-env-name.ts";
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 export type NativeComposeHook = Omit<HostHook, "environment"> & {
@@ -16,6 +21,46 @@ export class NativeComposeHostHookError extends Error {
     );
     this.name = "NativeComposeHostHookError";
   }
+}
+
+/**
+ * A host hook or process sets a variable whose name is not portable (HACK-2219).
+ * The configuration compiler refuses it first; this is the runtime boundary's
+ * own named refusal. Names are not secret and are shown escaped; values never.
+ */
+export class NativeHostEnvironmentNameError extends Error {
+  readonly code = "E_CONFIG_INVALID";
+  /** Closed reason for machine output. */
+  readonly reason = "host_environment_name_not_portable";
+  readonly invocation: string;
+  readonly variable: string;
+  constructor(opts: {
+    readonly invocation: string;
+    readonly variable: string;
+  }) {
+    super(
+      `Host command ${opts.invocation} sets environment variable ${displayEnvName(opts.variable)}, which is not a portable name (letters, digits and _, not starting with a digit). Rename it in the project configuration. Values omitted.`
+    );
+    this.name = "NativeHostEnvironmentNameError";
+    this.invocation = opts.invocation;
+    this.variable = opts.variable;
+  }
+}
+
+/**
+ * Inherited variables a host hook or process launch drops: every non-portable
+ * inherited name (bash `export -f` functions, HACK-2219), then the authored
+ * `unset` destinations. Shared by the Compose and native hook runners.
+ */
+export function hostInvocationUnsetKeys(
+  hook: Pick<NativeComposeHook, "environment">
+): string[] {
+  return [
+    ...nonPortableEnvNames(),
+    ...Object.entries(hook.environment ?? {})
+      .filter(([, value]) => isRecord(value) && value.unset === true)
+      .map(([name]) => name),
+  ];
 }
 
 /** Shared host hook contract guard: every violation is the same value-free refusal. */
@@ -147,6 +192,14 @@ export function readNativeHostInvocation(entry: unknown): NativeComposeHook {
   assertHostHookContract(
     entry.environment === undefined || isRecord(entry.environment)
   );
+  for (const variable of Object.keys(entry.environment ?? {})) {
+    if (!isPortableEnvName(variable)) {
+      throw new NativeHostEnvironmentNameError({
+        invocation: entry.name,
+        variable,
+      });
+    }
+  }
   return {
     name: entry.name,
     command: entry.command,

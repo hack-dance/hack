@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type NativeComposeHook,
+  NativeHostEnvironmentNameError,
   selectNativeComposeAfterHooks,
   selectNativeComposeBeforeHooks,
   selectNativeComposeDownHooks,
@@ -250,6 +251,73 @@ test("all finite lifecycle phases select while persistent processes, traversal a
       host: { up: { before: [valid], after: [valid] } },
     })
   ).toThrow();
+});
+
+test("hooks run with non-portable inherited names and never receive them (HACK-2219)", async () => {
+  // Bash exports a function f as BASH_FUNC_f%%; `env 'FOO%%=1'` is legal too.
+  const root = await fixture();
+  const names = ["BASH_FUNC_hack2219%%", "FOO%%", "HACK_2219_AMBIENT"];
+  const saved = Object.fromEntries(
+    names.map((name) => [name, process.env[name]])
+  );
+  for (const name of names) {
+    process.env[name] = "fixture-inherited";
+  }
+  try {
+    expect(
+      await execute(root, [
+        hook("seen", {
+          exec: [
+            process.execPath,
+            "-e",
+            `await Bun.write("seen", JSON.stringify(${JSON.stringify(names)}.map((name) => process.env[name] ?? null)))`,
+          ],
+        }),
+      ])
+    ).toEqual({ outcome: "complete", value: 0 });
+  } finally {
+    for (const name of names) {
+      restoreEnv(name, saved[name]);
+    }
+  }
+  expect(JSON.parse(await readFile(join(root, "seen"), "utf8"))).toEqual([
+    null,
+    null,
+    "fixture-inherited",
+  ]);
+});
+
+test("a hook that sets a non-portable name is refused by that name, escaped, with no value", () => {
+  const select = (variable: string) =>
+    selectNativeComposeBeforeHooks({
+      host: {
+        up: {
+          before: [
+            {
+              ...hook("odd", { shell: "true" }),
+              environment: { [variable]: { literal: "fixture-secret-value" } },
+            },
+          ],
+        },
+      },
+    });
+  let refusal: unknown;
+  try {
+    select("FOO%%");
+  } catch (error) {
+    refusal = error;
+  }
+  expect(refusal).toBeInstanceOf(NativeHostEnvironmentNameError);
+  const error = refusal as NativeHostEnvironmentNameError;
+  expect(error.code).toBe("E_CONFIG_INVALID");
+  expect(error.reason).toBe("host_environment_name_not_portable");
+  expect(error.message).toContain(
+    'Host command odd sets environment variable "FOO%%"'
+  );
+  expect(error.message).not.toContain("fixture-secret-value");
+  expect(() => select("A\u001b[31m\u202e")).toThrow(
+    'variable "A\\u{1b}[31m\\u{202e}"'
+  );
 });
 
 test("wrong target report and unavailable endpoint owners refuse before value delivery", () => {

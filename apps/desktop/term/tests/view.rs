@@ -18,6 +18,7 @@ use gpui_kit::{
     KeyBinding, WindowOptions,
 };
 use hack_desktop_term::actions::{CloseFind, Copy, Find, Paste};
+use hack_desktop_term::panel::TerminalPanel;
 use hack_desktop_term::pty::INPUT_QUEUE_BYTES;
 use hack_desktop_term::session::{exists, is_alive};
 use hack_desktop_term::view::TerminalView;
@@ -247,6 +248,52 @@ fn quitting_the_app_ends_a_pty_session_that_ignores_hangup() {
         "left running after quit"
     );
     assert!(!exists(leader), "the shell was not reaped");
+    rec.done();
+}
+
+#[test]
+fn quitting_right_after_closing_a_tab_ends_what_the_tab_left_running() {
+    let home = TempHome::new();
+    let mut cx = app();
+    let options = WindowOptions {
+        focus: false,
+        show: false,
+        ..WindowOptions::default()
+    };
+    let (window, panel) = cx
+        .update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(TerminalPanel::new)))
+        .expect("open a headless window");
+    // The shell and its child ignore the hangup and SIGTERM, so only
+    // SIGKILL ends them, and the reaper sends that after a grace period
+    // longer than GPUI's whole shutdown window.
+    let opts = sh(
+        "trap '' HUP TERM; ( trap '' HUP TERM; exec sleep 120 ) & echo \"kid=$!\"; echo \"sh=$$\"; wait",
+        &home,
+    );
+    let view = cx.update(|cx| cx.new(|cx| TerminalView::new_pty(&opts, cx).expect("spawn")));
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.add_tab(view.clone(), window, cx));
+    })
+    .expect("add the tab");
+    let text = settle_until(&mut cx, &view, |t| t.contains("sh="));
+    let kid = tagged(&text, "kid").expect("kid");
+    let leader = tagged(&text, "sh").expect("sh");
+    let mut rec = Recorded::session(leader.unsigned_abs());
+    assert!(is_alive(kid) && is_alive(leader));
+
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.close_active(window, cx));
+    })
+    .expect("close the tab");
+    cx.update(|cx| cx.shutdown());
+
+    // The closed tab's teardown was hurried and awaited: when shutdown
+    // returns, the session has been killed and reaped.
+    assert!(
+        !is_alive(kid) && !is_alive(leader),
+        "a closed tab's processes outlived the app"
+    );
+    assert!(!exists(leader), "the closed tab's shell was not reaped");
     rec.done();
 }
 

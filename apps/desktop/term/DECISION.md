@@ -695,7 +695,11 @@ cgroups or job objects.
 - Quit: the view ends the session on GPUI's background executor with a
   100 ms SIGKILL grace, inside GPUI's 200 ms shutdown window. This is
   registered for both kinds of backend, a PTY and a process-backed stream,
-  and GPUI awaits it.
+  and GPUI awaits it. A tab closed just before quitting is covered too:
+  its teardown is already on a reaper thread waiting out the 300 ms close
+  grace, which GPUI would not wait for, so the panel keeps the handle, and
+  on quit it cuts the grace to the same 100 ms and awaits the result
+  within the same window.
 - Any input, and any change to the notice about undelivered input,
   notifies the view, so it is drawn in the next frame even when the child
   prints nothing.
@@ -797,7 +801,8 @@ adds matches and then stops leaves the count shown equal to the number of
 highlighted matches, with no further frame; redrawing an unchanged view
 with find open runs no search; quitting the app ends a stream
 process that ignores SIGTERM, with its descendant, and a PTY session that
-ignores SIGHUP; with no bindings the usual chords are not shortcuts, the
+ignores SIGHUP, and the processes of a tab closed just before quitting
+that ignore SIGHUP and SIGTERM; with no bindings the usual chords are not shortcuts, the
 `Find`, `CloseFind`, `Paste` and `Copy` actions do their work, and a chord
 becomes a shortcut only once the app binds it.
 

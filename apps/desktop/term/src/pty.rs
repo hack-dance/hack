@@ -39,7 +39,8 @@ use std::time::Duration;
 use crate::fdio::{self, Cancel, CancelWatch, Wait};
 use crate::queue::ByteQueue;
 use crate::session::{
-    ExitInfo, LastResort, OwnedSession, PendingTeardown, SYNC_DEADLINE, Teardown, ThreadSpawner,
+    ExitInfo, Hurry, LastResort, OwnedSession, PendingTeardown, SYNC_DEADLINE, Teardown,
+    ThreadSpawner,
 };
 
 /// How long a dropped session has after SIGHUP before SIGKILL.
@@ -416,6 +417,7 @@ impl Pty {
     /// so the caller can report [`Teardown::survivors`] without waiting.
     pub fn terminate_in_background(mut self) -> PendingTeardown {
         let (tx, rx) = std::sync::mpsc::channel();
+        let hurry = Hurry::new(QUIT_GRACE);
         match self.session.take() {
             None => {
                 let _ = tx.send(Teardown::nothing());
@@ -428,10 +430,11 @@ impl Pty {
                     TERMINATE_GRACE,
                     Box::new(move || join_all(threads)),
                     Some(tx),
+                    hurry.clone(),
                 );
             }
         }
-        PendingTeardown(rx)
+        PendingTeardown::new(rx, hurry)
     }
 
     /// Kill the session now and reap it, on this thread.
@@ -476,6 +479,7 @@ impl Drop for Pty {
             TERMINATE_GRACE,
             Box::new(move || join_all(threads)),
             None,
+            Hurry::new(QUIT_GRACE),
         );
     }
 }

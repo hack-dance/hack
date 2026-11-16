@@ -25,10 +25,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::fdio::{self, Cancel, CancelWatch, Wait};
-use crate::pty::TERMINATE_GRACE;
+use crate::pty::{QUIT_GRACE, TERMINATE_GRACE};
 use crate::queue::ByteQueue;
 use crate::session::{
-    LastResort, OwnedSession, PendingTeardown, SYNC_DEADLINE, Teardown, ThreadSpawner,
+    Hurry, LastResort, OwnedSession, PendingTeardown, SYNC_DEADLINE, Teardown, ThreadSpawner,
 };
 
 /// Most stream bytes held in memory before the reader stops reading.
@@ -244,6 +244,7 @@ impl ByteStream {
     /// End a process source on a reaper thread and get a handle to the result.
     pub fn terminate_in_background(mut self) -> PendingTeardown {
         let (tx, rx) = std::sync::mpsc::channel();
+        let hurry = Hurry::new(QUIT_GRACE);
         let threads = self.stop_io();
         match self.session.take() {
             None => {
@@ -257,10 +258,11 @@ impl ByteStream {
                     TERMINATE_GRACE,
                     Box::new(move || join_all(threads)),
                     Some(tx),
+                    hurry.clone(),
                 );
             }
         }
-        PendingTeardown(rx)
+        PendingTeardown::new(rx, hurry)
     }
 
     /// Kill the process now and reap it, on this thread.
@@ -295,6 +297,7 @@ impl Drop for ByteStream {
             TERMINATE_GRACE,
             Box::new(move || join_all(threads)),
             None,
+            Hurry::new(QUIT_GRACE),
         );
     }
 }

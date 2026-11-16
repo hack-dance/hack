@@ -44,7 +44,7 @@ use crate::terminal::TerminalCore;
 /// Padding around the grid when the user's config sets none.
 const DEFAULT_PAD: f32 = 8.0;
 /// GPUI gives quit handlers 200 ms in total.
-const QUIT_DEADLINE: Duration = Duration::from_millis(180);
+pub(crate) const QUIT_DEADLINE: Duration = Duration::from_millis(180);
 
 /// Ghostty counts font size and padding in points. On macOS a point is a
 /// logical pixel; elsewhere Ghostty assumes 96 DPI, so 72 points are 96 px.

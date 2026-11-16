@@ -47,6 +47,7 @@
 
 use std::io;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -361,7 +362,7 @@ impl OwnedSession {
         before_reap: impl FnOnce(),
         last: LastResort,
     ) -> Teardown {
-        self.finish(grace, deadline, before_reap, last)
+        self.finish(grace, deadline, before_reap, last, &Hurry::never())
     }
 
     fn finish(
@@ -370,9 +371,12 @@ impl OwnedSession {
         deadline: Duration,
         before_reap: impl FnOnce(),
         last: LastResort,
+        hurry: &Hurry,
     ) -> Teardown {
         let start = Instant::now();
         let mut killed_at: Option<Instant> = None;
+        // When the app asked this teardown to hurry (it is quitting).
+        let mut hurried_at: Option<Instant> = None;
         // Set while everything still alive is beyond our reach.
         let mut stuck_since: Option<Instant> = None;
         let gone = loop {
@@ -381,8 +385,13 @@ impl OwnedSession {
             if exited && alive.is_empty() {
                 break true;
             }
+            if hurried_at.is_none() && hurry.is_set() {
+                hurried_at = Some(Instant::now());
+            }
+            let grace_over = start.elapsed() >= grace
+                || hurried_at.is_some_and(|t| t.elapsed() >= hurry.grace());
             let rekill = killed_at.is_some_and(|t| t.elapsed() >= REKILL_EVERY);
-            if (killed_at.is_none() && start.elapsed() >= grace) || rekill {
+            if (killed_at.is_none() && grace_over) || rekill {
                 let report = self.signal(libc::SIGKILL);
                 killed_at = Some(Instant::now());
                 // SIGKILL has gone to everything we can reach. If the leader
@@ -427,6 +436,7 @@ impl OwnedSession {
         grace: Duration,
         before_reap: Box<dyn FnOnce() + Send>,
         report: Option<std::sync::mpsc::Sender<Teardown>>,
+        hurry: Arc<Hurry>,
     ) {
         type Parts = (
             OwnedSession,
@@ -439,8 +449,13 @@ impl OwnedSession {
         let in_thread = slot.clone();
         let job: Job = Box::new(move || {
             if let Some((mut session, before_reap, report)) = take(&in_thread) {
-                let done =
-                    session.finish(grace, BACKGROUND_DEADLINE, before_reap, LastResort::Block);
+                let done = session.finish(
+                    grace,
+                    BACKGROUND_DEADLINE,
+                    before_reap,
+                    LastResort::Block,
+                    &hurry,
+                );
                 if let Some(tx) = report {
                     let _ = tx.send(done);
                 }
@@ -454,6 +469,7 @@ impl OwnedSession {
                 SYNC_DEADLINE,
                 before_reap,
                 LastResort::GiveUp,
+                &Hurry::never(),
             );
             if let Some(tx) = report {
                 let _ = tx.send(done);
@@ -462,20 +478,67 @@ impl OwnedSession {
     }
 }
 
+/// A request to a reaper thread to stop waiting out its grace period: the
+/// app is quitting. Once set, SIGKILL follows within [`Hurry::grace`] of
+/// the reaper seeing it.
+#[derive(Debug)]
+pub(crate) struct Hurry {
+    set: AtomicBool,
+    grace: Duration,
+}
+
+impl Hurry {
+    pub(crate) fn new(grace: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            set: AtomicBool::new(false),
+            grace,
+        })
+    }
+
+    fn never() -> Self {
+        Self {
+            set: AtomicBool::new(false),
+            grace: Duration::ZERO,
+        }
+    }
+
+    fn is_set(&self) -> bool {
+        self.set.load(Ordering::Acquire)
+    }
+
+    fn grace(&self) -> Duration {
+        self.grace
+    }
+}
+
 /// The result of a teardown that is running on a reaper thread.
 #[derive(Debug)]
-pub struct PendingTeardown(pub(crate) std::sync::mpsc::Receiver<Teardown>);
+pub struct PendingTeardown {
+    rx: std::sync::mpsc::Receiver<Teardown>,
+    hurry: Arc<Hurry>,
+}
 
 impl PendingTeardown {
+    pub(crate) fn new(rx: std::sync::mpsc::Receiver<Teardown>, hurry: Arc<Hurry>) -> Self {
+        Self { rx, hurry }
+    }
+
     /// The result, once teardown has finished. Check
     /// [`Teardown::survivors`] to tell the user about anything left running.
     pub fn try_result(&self) -> Option<Teardown> {
-        self.0.try_recv().ok()
+        self.rx.try_recv().ok()
     }
 
     /// Wait up to `timeout` for the result.
     pub fn wait(&self, timeout: Duration) -> Option<Teardown> {
-        self.0.recv_timeout(timeout).ok()
+        self.rx.recv_timeout(timeout).ok()
+    }
+
+    /// Cut the rest of the grace period short: SIGKILL follows within the
+    /// quit grace ([`crate::pty::QUIT_GRACE`]) of the reaper seeing this.
+    /// For app quit, so a closed tab's teardown fits the quit deadline.
+    pub fn hurry(&self) {
+        self.hurry.set.store(true, Ordering::Release);
     }
 }
 
@@ -484,7 +547,13 @@ impl Drop for OwnedSession {
     /// and hand-over) is killed and reaped here, on the caller's thread.
     fn drop(&mut self) {
         if self.child.is_some() {
-            self.finish(Duration::ZERO, SYNC_DEADLINE, || {}, LastResort::GiveUp);
+            self.finish(
+                Duration::ZERO,
+                SYNC_DEADLINE,
+                || {},
+                LastResort::GiveUp,
+                &Hurry::never(),
+            );
         }
     }
 }

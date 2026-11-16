@@ -15,7 +15,7 @@
 //! session could not be ended (see `session.rs`), the panel shows how many
 //! processes were left running.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
@@ -27,7 +27,7 @@ use gpui_kit::{
 use crate::actions::{CloseTab, Find, NewTab, NextTab, PrevTab, ToggleMaximize, TogglePanel};
 use crate::launch::{BadgeTone, SessionKind};
 use crate::session::PendingTeardown;
-use crate::view::TerminalView;
+use crate::view::{QUIT_DEADLINE, TerminalView};
 
 /// Tabs, which one is active, and whether the panel is shown or maximized.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +165,26 @@ impl EventEmitter<PanelEvent> for TerminalPanel {}
 
 impl TerminalPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        // A closed tab's teardown runs on a reaper thread that GPUI does not
+        // wait for. On quit, cut every pending teardown's grace short and
+        // await them inside GPUI's shutdown window, as each open tab's own
+        // quit handler does for its session.
+        cx.on_app_quit(|this, cx| {
+            let closing = std::mem::take(&mut this.closing);
+            for pending in &closing {
+                pending.hurry();
+            }
+            cx.background_executor().spawn(async move {
+                let deadline = Instant::now() + QUIT_DEADLINE;
+                for pending in &closing {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if pending.wait(left).is_none() && left.is_zero() {
+                        break;
+                    }
+                }
+            })
+        })
+        .detach();
         Self {
             state: PanelState::default(),
             focus: cx.focus_handle(),

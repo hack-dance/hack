@@ -88,10 +88,79 @@ pub struct ProjectRow {
     /// Native branch instances are not reported here (design request R19).
     #[serde(deserialize_with = "null_default")]
     pub branch_runtime: Vec<BranchRuntime>,
+    /// Linked worktrees registered for this project (paths only are used).
+    #[serde(deserialize_with = "null_default")]
+    pub worktrees: Vec<Worktree>,
     /// Set on a row derived by [`ProjectRow::instance`]: the branch this
     /// row describes. `None` for the project's base instance.
     #[serde(skip)]
     pub branch: Option<String>,
+}
+
+/// One registered linked worktree in a `/v1/projects` row.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Worktree {
+    pub path: Option<String>,
+    pub branch: Option<String>,
+}
+
+/// The project folder names the CLI creates inside a checkout.
+const PROJECT_DIR_NAMES: [&str; 2] = [".hack", ".dev"];
+
+impl ProjectRow {
+    /// The checkout that owns a runtime, by the CLI's own ownership rule
+    /// (`assertPruneRuntimeOwnership`): its compose working directory is a
+    /// registered root (the checkout or a registered linked worktree) or
+    /// that root's project folder, and every container agrees. `None` when
+    /// it cannot be established: actions must then not run against a guess.
+    #[must_use]
+    pub fn owning_checkout(&self, runtime: &ProjectRuntime) -> Option<String> {
+        let trim = |p: &str| -> String {
+            let t = p.trim_end_matches('/');
+            if t.is_empty() {
+                "/".into()
+            } else {
+                t.to_owned()
+            }
+        };
+        let mut dirs = runtime.working_dir.iter().chain(
+            runtime
+                .services
+                .iter()
+                .flat_map(|s| &s.containers)
+                .filter_map(|c| c.working_dir.as_ref()),
+        );
+        let first = trim(dirs.next()?);
+        if dirs.any(|d| trim(d) != first) {
+            return None;
+        }
+        let plain = |p: &str| {
+            p.starts_with('/')
+                && !p
+                    .split('/')
+                    .any(|part| part == "." || part == ".." || part.contains('\0'))
+        };
+        if !plain(&first) {
+            return None;
+        }
+        let roots = self
+            .repo_root
+            .iter()
+            .chain(self.worktrees.iter().filter_map(|w| w.path.as_ref()))
+            .map(|r| trim(r))
+            .filter(|r| plain(r));
+        for root in roots {
+            let matches = first == root
+                || PROJECT_DIR_NAMES
+                    .iter()
+                    .any(|name| first == format!("{root}/{name}"));
+            if matches {
+                return Some(root);
+            }
+        }
+        None
+    }
 }
 
 /// One branch instance in `/v1/projects` `branch_runtime`.
@@ -129,14 +198,15 @@ impl ProjectRow {
     /// branch runtime: `status` is `running` when any container runs, else
     /// `stopped`; `service_hosts` come from each container's `caddy` label
     /// (already rewritten for the branch); `dev_host` is
-    /// `<branch>.<base dev_host>` when that host is routed, else the first
-    /// routed host. Summary counters and always-on do not apply.
+    /// `<branch>.<base dev_host>`, the host `hack open --branch` opens, never
+    /// a service route; `repo_root` is the checkout that started the
+    /// instance ([`ProjectRow::owning_checkout`]). Summary counters and
+    /// always-on do not apply.
     #[must_use]
     pub fn instance(&self, branch: &str) -> Option<ProjectRow> {
         let br = self.branch_runtime.iter().find(|b| b.branch == branch)?;
         let mut service_hosts: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
-        let mut all_hosts: Vec<String> = Vec::new();
         for svc in &br.runtime.services {
             for c in &svc.containers {
                 let Some(label) = c.labels.get("caddy") else {
@@ -147,16 +217,14 @@ impl ProjectRow {
                     if !hosts.iter().any(|h| h == host) {
                         hosts.push(host.to_owned());
                     }
-                    if !all_hosts.iter().any(|h| h == host) {
-                        all_hosts.push(host.to_owned());
-                    }
                 }
             }
         }
-        let preferred = self.dev_host.as_ref().map(|d| format!("{branch}.{d}"));
-        let dev_host = preferred
-            .filter(|p| all_hosts.contains(p))
-            .or_else(|| all_hosts.first().cloned());
+        // The instance's own host, by the rule `hack open --branch <b>` uses
+        // with no target: the branch label on the project's dev host. Never a
+        // service route from the labels (those belong in the services table).
+        // The OAuth alias preference is not in this read (DESIGN.md R20).
+        let dev_host = self.dev_host.as_ref().map(|d| format!("{branch}.{d}"));
         let running = br
             .runtime
             .services
@@ -167,7 +235,9 @@ impl ProjectRow {
             project_id: self.project_id.clone(),
             name: self.name.clone(),
             dev_host,
-            repo_root: self.repo_root.clone(),
+            // The checkout that started this instance, which may be a
+            // linked worktree, never a guess: `None` disables its actions.
+            repo_root: self.owning_checkout(&br.runtime),
             status: status.into(),
             runtime_status: Some(status.into()),
             kind: self.kind.clone(),
@@ -218,6 +288,9 @@ pub struct InputDiagnostic {
 #[serde(default)]
 pub struct ProjectRuntime {
     pub project: Option<String>,
+    /// Compose's project working directory: the folder of the checkout that
+    /// started this runtime (`<root>/.hack`, or `<root>` itself).
+    pub working_dir: Option<String>,
     #[serde(deserialize_with = "null_default")]
     pub services: Vec<RuntimeService>,
 }
@@ -245,6 +318,8 @@ pub struct Container {
     /// Container labels. Branch instances carry their routes in `caddy`.
     #[serde(deserialize_with = "null_default")]
     pub labels: std::collections::BTreeMap<String, String>,
+    /// The container's compose working directory.
+    pub working_dir: Option<String>,
 }
 
 impl Container {
@@ -538,6 +613,91 @@ mod tests {
       ]},
       {"name":"notes","status":"stopped","branch_runtime":null}]}"#;
 
+    fn runtime_in(dirs: &[Option<&str>]) -> ProjectRuntime {
+        ProjectRuntime {
+            project: Some("storefront--b".into()),
+            working_dir: dirs.first().copied().flatten().map(str::to_owned),
+            services: dirs
+                .iter()
+                .skip(1)
+                .map(|d| RuntimeService {
+                    service: "api".into(),
+                    containers: vec![Container {
+                        working_dir: d.map(str::to_owned),
+                        ..Container::default()
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    fn registered() -> ProjectRow {
+        ProjectRow {
+            name: "storefront".into(),
+            repo_root: Some("/work/storefront".into()),
+            worktrees: vec![Worktree {
+                path: Some("/work/wt/feature/".into()),
+                branch: Some("feature".into()),
+            }],
+            ..ProjectRow::default()
+        }
+    }
+
+    #[test]
+    fn a_branch_instance_runs_actions_in_the_checkout_that_started_it() {
+        let p = registered();
+        // The primary checkout and a registered linked worktree, as the
+        // checkout itself or its project folder.
+        for (dir, root) in [
+            ("/work/storefront/.hack", "/work/storefront"),
+            ("/work/storefront", "/work/storefront"),
+            ("/work/wt/feature/.hack", "/work/wt/feature"),
+            ("/work/wt/feature/.dev/", "/work/wt/feature"),
+        ] {
+            assert_eq!(
+                p.owning_checkout(&runtime_in(&[Some(dir), Some(dir)]))
+                    .as_deref(),
+                Some(root),
+                "{dir}"
+            );
+        }
+        // Not registered, a sibling, a traversal, a relative path, a
+        // disagreeing container, or nothing reported: no checkout.
+        for dirs in [
+            vec![Some("/work/other/.hack")],
+            vec![Some("/work/storefront-copy/.hack")],
+            vec![Some("/work/storefront/../other/.hack")],
+            vec![Some("work/storefront/.hack")],
+            vec![
+                Some("/work/storefront/.hack"),
+                Some("/work/wt/feature/.hack"),
+            ],
+            vec![None],
+        ] {
+            assert_eq!(p.owning_checkout(&runtime_in(&dirs)), None, "{dirs:?}");
+        }
+    }
+
+    #[test]
+    fn a_derived_instance_never_borrows_the_primary_checkout() {
+        let mut p = registered();
+        p.branch_runtime = vec![
+            BranchRuntime {
+                branch: "feature".into(),
+                runtime: runtime_in(&[Some("/work/wt/feature/.hack")]),
+            },
+            BranchRuntime {
+                branch: "orphan".into(),
+                runtime: runtime_in(&[Some("/elsewhere/.hack")]),
+            },
+        ];
+        assert_eq!(
+            p.instance("feature").unwrap().repo_root.as_deref(),
+            Some("/work/wt/feature")
+        );
+        assert_eq!(p.instance("orphan").unwrap().repo_root, None);
+    }
+
     #[test]
     fn branch_runtime_parses_with_null_labels_and_null_list() {
         let p: ProjectsPayload = serde_json::from_str(BRANCH_ROW).unwrap();
@@ -582,28 +742,23 @@ mod tests {
             ]
         );
         assert!(!fs.service_hosts.contains_key("db"));
-        // `<branch>.<base dev_host>` wins over the first host found.
         assert_eq!(
             fs.dev_host.as_deref(),
             Some("feature-search.storefront.hack")
         );
 
+        // Every route of this instance is a service subdomain: its URL is
+        // still the instance host `hack open --branch` opens, never a route.
         let fl = base.instance("fix-login").unwrap();
         assert_eq!(fl.status, "stopped");
-        // No `fix-login.storefront.hack` route: the first host found.
-        assert_eq!(
-            fl.dev_host.as_deref(),
-            Some("api.fix-login.storefront.hack")
-        );
+        assert_eq!(fl.service_hosts["api"], ["api.fix-login.storefront.hack"]);
+        assert_eq!(fl.dev_host.as_deref(), Some("fix-login.storefront.hack"));
 
-        let mut no_routes = base.clone();
-        for c in no_routes.branch_runtime[1].runtime.services[0]
-            .containers
-            .iter_mut()
-        {
-            c.labels.clear();
-        }
-        assert_eq!(no_routes.instance("fix-login").unwrap().dev_host, None);
+        // No base dev host: no URL, rather than a guess from the labels.
+        let mut no_host = base.clone();
+        no_host.dev_host = None;
+        assert_eq!(no_host.instance("fix-login").unwrap().dev_host, None);
+        assert_eq!(no_host.instance("feature-search").unwrap().dev_host, None);
     }
 
     #[test]

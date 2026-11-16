@@ -182,6 +182,11 @@ pub struct DetailView {
     pub note: Option<String>,
 }
 
+/// A branch instance whose checkout is not one this project registered (or
+/// is not reported): its actions would run against the wrong code, so the
+/// app offers none.
+pub const UNKNOWN_CHECKOUT_NOTE: &str = "The checkout that started this branch instance is not one this project registered, so the app does not run actions on it. Run them from that checkout: hack up / down / restart --branch <name>.";
+
 /// v0 scope: native projects are view-only. Native `restart` (and authored
 /// `down`/`restart`) stay in the foreground and refuse `--json`; native
 /// `up --json` is detached, but the app waits for one contract (design R2b).
@@ -615,12 +620,21 @@ impl AppModel {
             },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
-            actions: if row.is_native() || self.last_error.is_some() {
+            actions: if row.is_native()
+                || self.last_error.is_some()
+                || (row.branch.is_some() && row.repo_root.is_none())
+            {
                 vec![]
             } else {
                 st.actions().to_vec()
             },
-            note: row.is_native().then(|| NATIVE_ACTIONS_NOTE.to_owned()),
+            note: if row.is_native() {
+                Some(NATIVE_ACTIONS_NOTE.to_owned())
+            } else if row.branch.is_some() && row.repo_root.is_none() {
+                Some(UNKNOWN_CHECKOUT_NOTE.to_owned())
+            } else {
+                None
+            },
             busy: local.in_flight.is_some(),
             services,
             last_error: self.action_errors.get(&key).cloned(),
@@ -668,6 +682,75 @@ fn describe(e: &SourceError) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_branch_instance_url_is_its_instance_host_not_a_service_route() {
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(crate::fixtures::snapshot(
+            crate::fixtures::Fixture::Branches,
+        )));
+        let list = m.list();
+        let row = list
+            .running
+            .iter()
+            .find(|r| r.name == "storefront")
+            .expect("storefront runs through its branches");
+        let release = row
+            .branches
+            .iter()
+            .find(|b| b.branch == "release-2")
+            .expect("release-2 listed");
+        assert_eq!(
+            release.url.as_deref(),
+            Some("https://release-2.storefront.hack")
+        );
+        m.apply(Event::SelectInstance(release.key.clone()));
+        let d = m.detail().unwrap();
+        assert_eq!(d.url.as_deref(), Some("https://release-2.storefront.hack"));
+        // The routes stay per service.
+        let core = d.services.iter().find(|s| s.name == "core").unwrap();
+        assert_eq!(
+            core.route.as_deref(),
+            Some("core.release-2.storefront.hack")
+        );
+    }
+
+    #[test]
+    fn a_branch_instance_from_an_unknown_checkout_offers_no_actions() {
+        use crate::models::{BranchRuntime, ProjectRuntime};
+        let mut snap = crate::fixtures::snapshot(crate::fixtures::Fixture::Branches).unwrap();
+        let row = snap
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        row.branch_runtime.push(BranchRuntime {
+            branch: "elsewhere".into(),
+            runtime: ProjectRuntime {
+                project: Some("storefront--elsewhere".into()),
+                working_dir: Some("/unregistered/checkout/.hack".into()),
+                services: vec![],
+            },
+        });
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap)));
+        m.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "elsewhere",
+        )));
+        let d = m.detail().unwrap();
+        assert!(d.actions.is_empty(), "{:?}", d.actions);
+        assert_eq!(d.note.as_deref(), Some(UNKNOWN_CHECKOUT_NOTE));
+        // A branch started from a registered linked worktree keeps its actions.
+        m.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "fix-login",
+        )));
+        let d = m.detail().unwrap();
+        assert!(!d.actions.is_empty());
+        assert_eq!(d.note, None);
+    }
+
     use super::*;
     use crate::fixtures::{self, Fixture};
     use crate::models::LifecycleResult;
@@ -1083,7 +1166,7 @@ mod tests {
 
     #[test]
     fn branch_instances_group_and_count() {
-        // Base stopped, two branches running: the project is in the running group.
+        // Base stopped, three branches running: the project is in the running group.
         let v = model(Fixture::Branches).list();
         let names = |rows: &[Row]| rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(&v.running), ["docs-site", "storefront"]);
@@ -1092,18 +1175,18 @@ mod tests {
         assert_eq!(sf.key, InstanceKey::project("storefront"));
         assert_eq!(sf.state, ProjectState::Stopped);
         let br: Vec<_> = sf.branches.iter().map(|b| b.branch.as_str()).collect();
-        assert_eq!(br, ["feature-search", "fix-login"]);
+        assert_eq!(br, ["feature-search", "fix-login", "release-2"]);
         assert!(sf.branches.iter().all(|b| b.state.is_active()));
         assert_eq!(sf.branches[0].key, branch("feature-search"));
         assert_eq!(
             sf.branches[0].url.as_deref(),
             Some("https://feature-search.storefront.hack")
         );
-        // docs-site + two branch instances; storefront's base is not counted.
+        // docs-site + three branch instances; storefront's base is not counted.
         assert_eq!(
             v.counts,
             Counts {
-                running: 3,
+                running: 4,
                 stopped: 2,
                 unknown: 0
             }

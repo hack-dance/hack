@@ -132,6 +132,7 @@ fn container(state: &str, status: &str) -> Container {
         state: state.into(),
         status: status.into(),
         labels: BTreeMap::new(),
+        working_dir: None,
     }
 }
 
@@ -142,12 +143,26 @@ fn routed(state: &str, status: &str, caddy: &str) -> Container {
     c
 }
 
+/// The registered linked worktree of storefront (placeholder path).
+const STOREFRONT_WORKTREE: &str = "/work/storefront-wt/fix-login";
+
+/// Compose's working directory for a branch instance: `fix-login` was
+/// started from the registered linked worktree, others from the checkout.
+fn checkout_dir(branch: &str) -> String {
+    if branch == "fix-login" {
+        format!("{STOREFRONT_WORKTREE}/.hack")
+    } else {
+        "/work/storefront/.hack".into()
+    }
+}
+
 /// A running branch instance of storefront with web and api routes.
 fn running_branch(branch: &str) -> BranchRuntime {
     BranchRuntime {
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
+            working_dir: Some(checkout_dir(branch)),
             services: vec![
                 svc(
                     "api",
@@ -177,6 +192,7 @@ fn failed_branch(branch: &str) -> BranchRuntime {
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
+            working_dir: Some(checkout_dir(branch)),
             services: vec![
                 svc(
                     "api",
@@ -187,6 +203,33 @@ fn failed_branch(branch: &str) -> BranchRuntime {
                     ),
                 ),
                 svc("db", container("exited", "Exited (0) 5 minutes ago")),
+            ],
+        },
+    }
+}
+
+/// A running branch instance whose routes are all service subdomains
+/// (nothing is routed on the bare instance host).
+fn subdomain_branch(branch: &str) -> BranchRuntime {
+    let routed_at = |service: &str| {
+        svc(
+            service,
+            routed(
+                "running",
+                "Up 1 hour",
+                &format!("{service}.{branch}.storefront.hack"),
+            ),
+        )
+    };
+    BranchRuntime {
+        branch: branch.into(),
+        runtime: ProjectRuntime {
+            project: Some(format!("storefront--{branch}")),
+            working_dir: Some(checkout_dir(branch)),
+            services: vec![
+                routed_at("core"),
+                routed_at("search"),
+                routed_at("temporal-server"),
             ],
         },
     }
@@ -215,6 +258,7 @@ fn storefront(services: Vec<RuntimeService>, status: &str) -> ProjectRow {
         service_hosts: hosts,
         runtime: Some(ProjectRuntime {
             project: Some("storefront".into()),
+            working_dir: None,
             services,
         }),
         backend: Some("compose".into()),
@@ -251,6 +295,7 @@ fn simple(name: &str, status: &str, backend: &str, always_on: bool) -> ProjectRo
         },
         runtime: (backend != "native").then(|| ProjectRuntime {
             project: Some(name.into()),
+            working_dir: None,
             services: if up {
                 vec![svc("app", container("running", "Up 3 days"))]
             } else {
@@ -334,6 +379,10 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         Fixture::Running => {
             let mut r = storefront(all_up(), "running");
             r.branch_runtime = vec![running_branch("feature-search"), failed_branch("fix-login")];
+            r.worktrees = vec![crate::models::Worktree {
+                path: Some(STOREFRONT_WORKTREE.into()),
+                branch: Some("fix-login".into()),
+            }];
             r
         }
         Fixture::Branches => {
@@ -341,7 +390,12 @@ pub fn project(f: Fixture) -> ProjectsPayload {
             r.branch_runtime = vec![
                 running_branch("feature-search"),
                 running_branch("fix-login"),
+                subdomain_branch("release-2"),
             ];
+            r.worktrees = vec![crate::models::Worktree {
+                path: Some(STOREFRONT_WORKTREE.into()),
+                branch: Some("fix-login".into()),
+            }];
             r
         }
         _ => storefront(all_up(), "running"),

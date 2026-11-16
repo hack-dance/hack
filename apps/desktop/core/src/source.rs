@@ -3770,6 +3770,14 @@ esac
                 assert!(r.is_ok(), "{action:?}: {r:?}");
                 let got = argv(&b);
                 assert_eq!(got[..3], [cmd, "--branch", "fix-login"], "{action:?}");
+                // No positional target: `hack open --branch b` opens the
+                // instance's own host, never a service route.
+                assert!(
+                    got[3..]
+                        .iter()
+                        .all(|a| a.starts_with("--") || got.iter().any(|g| g == "--path")),
+                    "{action:?}: {got:?}"
+                );
                 assert!(got.iter().any(|a| a == "--json"));
             }
             src.act(&p, false, None, Action::Start).unwrap();

@@ -1,3 +1,9 @@
+## [4.3.1](https://github.com/hack-dance/hack/compare/v4.3.0...v4.3.1) (2026-11-16)
+
+### Bug Fixes
+
+* **deps:** bump next in examples/next-app to 16.4.5 (HACK-2269) ([33a8ef7](https://github.com/hack-dance/hack/commit/33a8ef7572a354e4526565e79f240d671e16bead)), closes [#60](https://github.com/hack-dance/hack/issues/60) [#60](https://github.com/hack-dance/hack/issues/60) [#60](https://github.com/hack-dance/hack/issues/60)
+
 ## [4.3.0](https://github.com/hack-dance/hack/compare/v4.2.7...v4.3.0) (2026-11-10)
 
 ### Features

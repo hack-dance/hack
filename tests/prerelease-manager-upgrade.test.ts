@@ -12,7 +12,7 @@ import {
   archiveName,
   listedDigest,
   MANAGER_ASSET,
-  PUBLISHED_ARCHIVES,
+  PUBLISHED_RELEASES,
   previousPrerelease,
 } from "../scripts/check-prerelease-upgrade.ts";
 import {
@@ -220,17 +220,24 @@ test("the release gate upgrades from the newest published prerelease before the 
   expect(() => listedDigest(sums, "missing")).toThrow("not listed");
 });
 
-test("the gate runs a previous release only from reviewed pins", () => {
-  // Release assets are mutable: the previous release's archive is pinned in
-  // review (its SHA256SUMS when it published), and its manager must be a
-  // reviewed predecessor.
-  expect(PUBLISHED_ARCHIVES).toEqual({
-    "5.0.0-next.17":
-      "6f63804f5f81935ba9cfa05ab085e1ccbffc789e89633277547b0e85da1e1466",
-    "5.0.0-next.18":
-      "da7c3e74629c049a25c40fbe95c5aa35433f241499065df372a23b27ee95aaee",
+test("the gate runs a previous release only from its own reviewed pins", () => {
+  // Release assets are mutable: each release's manager and archive are pinned
+  // together, so a later reviewed manager cannot stand in for an older one.
+  expect(PUBLISHED_RELEASES).toEqual({
+    "5.0.0-next.17": {
+      manager:
+        "85bbe4f064b3277efc88a9f79c197e81950ab8881320aef1b3443b70d95b530f",
+      archive:
+        "6f63804f5f81935ba9cfa05ab085e1ccbffc789e89633277547b0e85da1e1466",
+    },
+    "5.0.0-next.18": {
+      manager:
+        "90d1bc60bfd2b7eaad48dcf56ad45264f395c0ac1a8c4530e986be7fa194d4d9",
+      archive:
+        "da7c3e74629c049a25c40fbe95c5aa35433f241499065df372a23b27ee95aaee",
+    },
   });
-  expect(REVIEWED_PREDECESSORS).toContain(
-    "90d1bc60bfd2b7eaad48dcf56ad45264f395c0ac1a8c4530e986be7fa194d4d9"
-  );
+  for (const { manager } of Object.values(PUBLISHED_RELEASES)) {
+    expect(REVIEWED_PREDECESSORS).toContain(manager);
+  }
 });

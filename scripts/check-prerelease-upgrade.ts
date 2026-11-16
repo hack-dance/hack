@@ -48,18 +48,26 @@ export const MANAGER_ASSET = "hack-next-manager-darwin-arm64";
 const TAG = /^v(5\.\d+\.\d+-next\.\d+)$(?![\s\S])/;
 
 /**
- * Published prerelease archives, pinned in review (each release's `SHA256SUMS`
- * when it published). Release assets can be replaced after publication, so the
- * gate never executes a previous release's bytes on the strength of checksums
- * downloaded beside them: its manager must be a reviewed predecessor
- * (REVIEWED_PREDECESSORS) and its archive must be listed here. Add each release
- * when it publishes, with its manager digest.
+ * Published prereleases, pinned in review: each release's manager
+ * (`INSTALLER-SHA256SUMS`) and archive (`SHA256SUMS`) digests when it published.
+ * Release assets can be replaced after publication, so the gate executes a
+ * previous release only when both match this release's own pins; the manager
+ * must also be a reviewed predecessor. Binding the manager to its release stops
+ * a later reviewed manager from standing in for an older one and hiding exactly
+ * the incompatibility this gate exists to catch. Add each release when it
+ * publishes.
  */
-export const PUBLISHED_ARCHIVES: Readonly<Record<string, string>> = {
-  "5.0.0-next.17":
-    "6f63804f5f81935ba9cfa05ab085e1ccbffc789e89633277547b0e85da1e1466",
-  "5.0.0-next.18":
-    "da7c3e74629c049a25c40fbe95c5aa35433f241499065df372a23b27ee95aaee",
+export const PUBLISHED_RELEASES: Readonly<
+  Record<string, { readonly manager: string; readonly archive: string }>
+> = {
+  "5.0.0-next.17": {
+    manager: "85bbe4f064b3277efc88a9f79c197e81950ab8881320aef1b3443b70d95b530f",
+    archive: "6f63804f5f81935ba9cfa05ab085e1ccbffc789e89633277547b0e85da1e1466",
+  },
+  "5.0.0-next.18": {
+    manager: "90d1bc60bfd2b7eaad48dcf56ad45264f395c0ac1a8c4530e986be7fa194d4d9",
+    archive: "da7c3e74629c049a25c40fbe95c5aa35433f241499065df372a23b27ee95aaee",
+  },
 };
 
 /** A fixed environment for the managers: no token, output path or caller state. */
@@ -206,27 +214,31 @@ async function main(): Promise<number> {
     const previousArchive = join(assets, archiveName(previous));
     const sums = (name: string) => Bun.file(join(assets, name)).text();
     // The release's own checksum files are only a consistency check: they
-    // live beside the assets. Execution needs the reviewed pins.
-    const managerDigest = digest(previousManager);
-    if (
-      managerDigest !==
-        listedDigest(await sums("INSTALLER-SHA256SUMS"), MANAGER_ASSET) ||
-      !REVIEWED_PREDECESSORS.includes(managerDigest)
-    ) {
+    // live beside the assets. Execution needs this release's reviewed pins.
+    const pins = PUBLISHED_RELEASES[previous];
+    if (pins === undefined) {
       throw new Error(
-        `${previous}'s manager is not a reviewed predecessor (REVIEWED_PREDECESSORS in scripts/installer/channel.ts); add its published digest in review before this gate runs it.`
+        `${previous} is not pinned (PUBLISHED_RELEASES in scripts/check-prerelease-upgrade.ts); add its published manager and archive digests in review before this gate runs it.`
       );
     }
-    const previousSum = PUBLISHED_ARCHIVES[previous];
+    const managerDigest = digest(previousManager);
     if (
-      previousSum === undefined ||
+      managerDigest !== pins.manager ||
+      !REVIEWED_PREDECESSORS.includes(managerDigest) ||
+      listedDigest(await sums("INSTALLER-SHA256SUMS"), MANAGER_ASSET) !==
+        pins.manager
+    ) {
+      throw new Error(
+        `${previous}'s manager does not match its pin or is not a reviewed predecessor (REVIEWED_PREDECESSORS in scripts/installer/channel.ts).`
+      );
+    }
+    const previousSum = pins.archive;
+    if (
       digest(previousArchive) !== previousSum ||
       listedDigest(await sums("SHA256SUMS"), archiveName(previous)) !==
         previousSum
     ) {
-      throw new Error(
-        `${previous}'s archive is not pinned or does not match its pin (PUBLISHED_ARCHIVES in scripts/check-prerelease-upgrade.ts).`
-      );
+      throw new Error(`${previous}'s archive does not match its pin.`);
     }
     chmodSync(previousManager, 0o700);
     // Run the candidate from copies, and prove afterwards that nothing the gate

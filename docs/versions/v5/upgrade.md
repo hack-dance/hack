@@ -117,8 +117,14 @@ backup scripts, source evidence and checks still awaiting real-machine trials.
 ## The daemon after an upgrade
 
 Installing a CLI does not replace a running daemon. After choosing a durable v5
-install, use `hack daemon restart` for an unmanaged incompatible daemon. If a
-login service still points at the old executable, use the chosen install's
-`hack daemon install`. Keep this outside the shared-home candidate trial;
+install, run its `hack daemon start` (or `hack daemon restart`). When the login
+service runs that same executable, start restarts hackd on the new version and
+rewrites a stale unit that Hack wrote (it carries Hack's managed header) or a
+stale launchd plist with Hack's label, including one an earlier Hack wrote.
+`hack update` does this by itself when a service is installed and
+hackd is running. A hand-written unit, a unit that sets its own Hack home, or a
+service that points at another existing executable is reported instead: use the
+chosen install's `hack daemon install`. Add `--json` for one machine-readable result. Keep this
+outside the shared-home candidate trial;
 [daemon and service details](guides/upgrade-from-v4.md#daemon-old-lock-and-missing-checkouts)
 explain the difference.

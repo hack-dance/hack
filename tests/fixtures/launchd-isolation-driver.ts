@@ -17,9 +17,11 @@
  */
 import { requestDaemonJson } from "../../src/daemon/client.ts";
 import {
+  checkLaunchdRetargetTarget,
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
+  readLaunchdManagerState,
   repairLaunchdProgramIfInvalid,
   resolveLaunchdAccess,
   stopLaunchdService,
@@ -94,9 +96,49 @@ function recordBunEffects(): {
 }
 
 const paths = resolveDaemonPaths({});
+if (process.argv[2] === "manager-state") {
+  // The replacement fallback's launchd gate, through the stub launchctl.
+  const state = await readLaunchdManagerState();
+  process.stdout.write(`${JSON.stringify({ state })}\n`);
+  process.exit(0);
+}
+
+/**
+ * DRIVER_SYSTEM_PATH (colon-separated): the system directories of the
+ * rendered PATH the launchd PATH check inspects, instead of the host's own
+ * (HACK-2142: CI images leave some of them writable). Test-only.
+ */
+function driverSystemPath(): readonly string[] | undefined {
+  const value = process.env.DRIVER_SYSTEM_PATH;
+  return value ? value.split(":") : undefined;
+}
+
 if (process.argv[2] === "repair-output") {
-  const repair = await repairLaunchdProgramIfInvalid({ paths });
-  const secondRepair = await repairLaunchdProgramIfInvalid({ paths });
+  // This driver runs from source, which has no executable of its own; the
+  // test names the binary that stands for "this CLI" (HACK-2216).
+  // Empty: a source invocation (no executable of its own).
+  const executing = process.env.DRIVER_EXECUTING_CLI || null;
+  // DRIVER_DAEMON_RUNNING=1: start found this home's hackd running.
+  const daemonRunning = process.env.DRIVER_DAEMON_RUNNING === "1";
+  // DRIVER_DURABLE_TARGET=1: the fixture's temp-dir `hack` counts as a
+  // durable install for the retarget check (everything else still runs).
+  const validateRetarget =
+    process.env.DRIVER_DURABLE_TARGET === "1"
+      ? (path: string) =>
+          checkLaunchdRetargetTarget(path, {
+            assessDurability: () => Promise.resolve({ durable: true }),
+          })
+      : undefined;
+  const repairOnce = () =>
+    repairLaunchdProgramIfInvalid({
+      paths,
+      executing,
+      daemonRunning,
+      validateRetarget,
+      systemPathDirectories: driverSystemPath(),
+    });
+  const repair = await repairOnce();
+  const secondRepair = await repairOnce();
   process.stdout.write(`${JSON.stringify({ repair, secondRepair })}\n`);
   process.exit(0);
 }
@@ -105,10 +147,14 @@ const results = {
   platform: process.platform,
   access: resolveLaunchdAccess(),
   status: await getLaunchdServiceStatus({ paths }),
-  repair: await repairLaunchdProgramIfInvalid({ paths }),
+  repair: await repairLaunchdProgramIfInvalid({
+    paths,
+    systemPathDirectories: driverSystemPath(),
+  }),
   install: await installLaunchdService({
     paths,
     config: { installed: true, runAtLoad: false, guiSessionOnly: false },
+    systemPathDirectories: driverSystemPath(),
   }),
   kickstart: await kickstartLaunchdService(),
   stop: await stopLaunchdService(),

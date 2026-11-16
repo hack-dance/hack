@@ -200,7 +200,7 @@ is removed after use. The app never types into an existing terminal or pane.
 
 Source: `hack doctor --json --path <root>` per registered project, plus
 `hack doctor --machine --json` for machine findings, on open and every 10
-minutes while visible. The versioned audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a).
+minutes while visible. The project audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; the machine variant uses the same envelope with `data.schema: "hack.doctor.machine.v1"` (R7c). Checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a). Until the app switches to the machine variant, it still runs one plain `hack doctor --json` outside any project and de-duplicates machine checks.
 
 | Card part | Content |
 |---|---|

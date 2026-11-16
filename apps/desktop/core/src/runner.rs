@@ -92,14 +92,27 @@ pub const INTERPRETER_STARTUP_VARS: &[&str] = &[
     "PERL5OPT",
     "PERL5LIB",
     "PERLLIB",
+    // Debugger code, used by a script started with a bare `-d`.
+    "PERL5DB",
     "PYTHONSTARTUP",
     "PYTHONPATH",
     "PYTHONHOME",
     // Selects the user site directory, whose `usercustomize` Python imports
     // at startup. Doctor runs also set `PYTHONNOUSERSITE=1`.
     "PYTHONUSERBASE",
+    // Library root, executable and virtual-environment selection: each can
+    // move where Python imports its standard library and `site` from.
+    "PYTHONPLATLIBDIR",
+    "PYTHONEXECUTABLE",
+    "__PYVENV_LAUNCHER__",
     "RUBYOPT",
     "RUBYLIB",
+    // A Gemfile RubyGems evaluates at start-up, and the gem repositories
+    // and Bundler Gemfile a Ruby tool loads gems from.
+    "RUBYGEMS_GEMDEPS",
+    "GEM_HOME",
+    "GEM_PATH",
+    "BUNDLE_GEMFILE",
     "NODE_OPTIONS",
     "NODE_PATH",
     // The Hack CLI is a Bun-compiled binary: these make its runtime preload
@@ -1279,6 +1292,38 @@ mod tests {
             "BUN_BE_BUN",
             "BUN_CONFIG_REGISTRY",
             "BUN_INSPECT_CONNECT_TO",
+        ];
+        let mut runner = CliRunner::new("/example/hack");
+        for name in names {
+            runner = runner.with_env(name, "/example/value");
+        }
+        let removed = |runner: &CliRunner| {
+            let command = runner.command(&["x"], None);
+            names
+                .iter()
+                .filter(|name| {
+                    command
+                        .get_envs()
+                        .any(|(key, value)| key == std::ffi::OsStr::new(name) && value.is_none())
+                })
+                .count()
+        };
+        assert_eq!(removed(&runner), 0, "positive control: set, not removed");
+        assert_eq!(removed(&runner.without_interpreter_startup()), names.len());
+    }
+
+    #[test]
+    fn library_and_gem_selectors_are_removed_from_the_command() {
+        let names = [
+            "PYTHONUSERBASE",
+            "PYTHONPLATLIBDIR",
+            "PYTHONEXECUTABLE",
+            "__PYVENV_LAUNCHER__",
+            "PERL5DB",
+            "RUBYGEMS_GEMDEPS",
+            "GEM_HOME",
+            "GEM_PATH",
+            "BUNDLE_GEMFILE",
         ];
         let mut runner = CliRunner::new("/example/hack");
         for name in names {

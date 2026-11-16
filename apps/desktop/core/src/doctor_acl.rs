@@ -19,8 +19,9 @@ pub(crate) fn controlled(path: &Path) -> bool {
     // Identity only: device, inode, mode, owner, group. Not timestamps: a
     // directory's mtime and ctime change whenever an entry is added or
     // removed, so a busy ancestor such as the temp directory would fail
-    // this check at random. Only the owner or root can change an ACL, and
-    // their changes are outside this boundary (below).
+    // this check at random. Changing an ACL needs the owner, root, or an
+    // ACL entry granting write_security, which this check refuses; the
+    // owner's and root's changes are outside this boundary (below).
     fn witness(path: &Path) -> Option<([u64; 5], [u64; 5])> {
         fn key(m: std::fs::Metadata) -> [u64; 5] {
             [

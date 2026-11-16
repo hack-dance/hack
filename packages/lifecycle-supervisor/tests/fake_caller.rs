@@ -8,7 +8,7 @@ use std::{
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -55,6 +55,7 @@ impl Fixture {
         json!({"version":1,"root":self.root,"ownerToken":token})
     }
 
+    #[track_caller]
     fn request(&self, action: &str, request: &Value) -> (Child, Value) {
         let mut child = command(&self.root, action).spawn().unwrap();
         send(child.stdin.as_mut().unwrap(), request);
@@ -124,6 +125,7 @@ impl Fixture {
         lock
     }
 
+    #[track_caller]
     fn state(&self, name: &str) -> Value {
         eventually(|| {
             fs::read(self.root.join(format!("{name}.json")))
@@ -408,6 +410,18 @@ impl Drop for ForeignChild {
     }
 }
 
+/// A refused `stop` or `status`: exits nonzero and still answers with one
+/// framed receipt carrying the expected outcome and reason.
+#[track_caller]
+fn refused_framed(fixture: &Fixture, action: &str, request: Value, reason: &str) -> Value {
+    let (mut child, receipt) = fixture.request(action, &request);
+    assert!(!wait(&mut child, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "unknown", "{receipt}");
+    assert_eq!(receipt["reason"], reason, "{receipt}");
+    receipt
+}
+
+#[track_caller]
 fn refused(fixture: &Fixture, action: &str, request: Value) {
     let mut child = command(&fixture.root, action).spawn().unwrap();
     send(child.stdin.as_mut().unwrap(), &request);
@@ -487,7 +501,12 @@ fn foreign_owner_cannot_stop() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
     f.await_log("fixture-ready");
-    refused(&f, "stop", f.control("different-owner"));
+    refused_framed(
+        &f,
+        "stop",
+        f.control("different-owner"),
+        "foreign-live-process",
+    );
     let state = f.state("worker");
     // SAFETY: signal zero observes this fixture's process without delivering a signal.
     assert_eq!(unsafe { libc::kill(pid(&state, "commandPid"), 0) }, 0);
@@ -530,21 +549,44 @@ fn output_bursts_and_long_lines_include_partial_tail() {
     }
 }
 
-/// Without a log lock, each record is one O_APPEND write. Two guards bursting
-/// at once, including 64 KiB records far above PIPE_BUF, must still leave only
-/// whole records: every line parses, belongs to one guard and is not mixed.
+/// Without a log lock, each record is one O_APPEND write. Two guards burst
+/// with a barrier in the middle (each waits until both halves are in the log),
+/// so their appends overlap in both directions by construction, including
+/// 64 KiB records far above PIPE_BUF. Every line must be one whole record of
+/// one guard: a split anywhere, also inside the timestamp, fails a field check.
 #[test]
 fn concurrent_guards_append_whole_records_without_a_lock() {
     let f = Fixture::new();
     let (mut caller, _) = f.start(vec![
-        f.process("alpha", "burst"),
-        f.process("beta", "burst"),
+        f.process("alpha", "burst-pair-alpha"),
+        f.process("beta", "burst-pair-beta"),
     ]);
     assert!(wait(&mut caller, TIMEOUT).success());
     let text = f.log();
+    let lines: Vec<_> = text.lines().collect();
+    for line in &lines {
+        let fields: Vec<_> = line.splitn(4, '\t').collect();
+        assert_eq!(fields.len(), 4, "split record: {line:.80}");
+        assert_eq!(fields[0].len(), 20, "split timestamp: {line:.80}");
+        assert!(fields[0].ends_with('Z'), "{line:.80}");
+        assert!(matches!(fields[1], "alpha" | "beta"), "{line:.80}");
+        assert!(matches!(fields[2], "stdout" | "stderr"), "{line:.80}");
+    }
+    for (first, later) in [("alpha", "beta"), ("beta", "alpha")] {
+        let start = lines
+            .iter()
+            .position(|line| line.split('\t').nth(1) == Some(first))
+            .expect("a guard logged nothing");
+        assert!(
+            lines[start..]
+                .iter()
+                .any(|line| line.split('\t').nth(1) == Some(later)),
+            "no {later} record after the first {first} record"
+        );
+    }
     for name in ["alpha", "beta"] {
-        let own: Vec<_> = text
-            .lines()
+        let own: Vec<_> = lines
+            .iter()
             .filter(|line| line.split('\t').nth(1) == Some(name))
             .collect();
         assert_eq!(
@@ -561,12 +603,6 @@ fn concurrent_guards_append_whole_records_without_a_lock() {
             })
             .sum();
         assert_eq!(xs, 300_000);
-    }
-    for line in text.lines() {
-        let fields: Vec<_> = line.splitn(4, '\t').collect();
-        assert_eq!(fields.len(), 4, "split record: {line:.80}");
-        assert!(matches!(fields[1], "alpha" | "beta"), "{line:.80}");
-        assert!(fields[0].ends_with('Z'));
     }
 }
 
@@ -1176,11 +1212,24 @@ fn guard_lost_during_stop(delay: Duration, blocked: bool) {
         "TERM-ignoring child exited before guard loss"
     );
     let recovery_started = Instant::now();
+    // Freeze stop too, so it cannot observe the guard as an unreaped zombie:
+    // a zombie guard is still a witness, and a fresh capture would then succeed
+    // without the admission snapshot this test is about.
+    let stop_pid = stop.id() as i32;
+    // SAFETY: the stop request is this test's own child.
+    assert_eq!(unsafe { libc::kill(stop_pid, libc::SIGSTOP) }, 0);
+    // Resume the stop request even if any assertion below fails first.
+    let resume = ResumeOnDrop(stop_pid);
+    eventually(|| process_is_stopped(stop_pid).then_some(()));
     // SAFETY: the frozen guard belongs to this fixture.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
     if !blocked {
         assert!(wait(&mut caller, TIMEOUT).success());
     }
+    // Resume stop only after the guard incarnation has no process record left,
+    // zombie included, so no guard can witness a fresh capture.
+    eventually(|| (process_birth(guard) != Some(guard_birth)).then_some(()));
+    drop(resume);
     let receipt = receive(stop.stdout.as_mut().unwrap());
     let stopped = wait(&mut stop, TIMEOUT).success();
     assert_eq!(stopped, !blocked, "{receipt}");
@@ -1247,6 +1296,118 @@ fn orphan_recovery_keeps_observed_child_after_term_ends_witness() {
     );
 }
 
+/// Recovery captures the session before its TERM. A descendant forked after
+/// that capture is never signalled; stop waits until its own deadline for it.
+fn late_descendant_case(forever: bool) {
+    let f = Fixture::new();
+    let mode = if forever {
+        "fork-on-term-forever"
+    } else {
+        "fork-on-term"
+    };
+    let (mut caller, _) = f.start(vec![f.process("worker", mode)]);
+    f.await_log("fixture-ready");
+    let state = f.state("worker");
+    // SAFETY: the captured guard belongs to this fixture; its command survives.
+    assert_eq!(
+        unsafe { libc::kill(pid(&state, "guardPid"), libc::SIGKILL) },
+        0
+    );
+    assert!(wait(&mut caller, TIMEOUT).success());
+    let start = Instant::now();
+    let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    let stopped = wait(&mut stop, TIMEOUT).success();
+    let elapsed = start.elapsed();
+    let late = std::fs::read_to_string(f.root.join("late-descendant"))
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("command did not fork after recovery TERM");
+    let late_identity = identity(late);
+    if let Some(late) = &late_identity {
+        f.owned.borrow_mut().push(late.clone());
+    }
+    assert!(
+        identity(pid(&state, "commandPid")).is_none()
+            || process_is_zombie(pid(&state, "commandPid")),
+        "captured command survived recovery KILL"
+    );
+    if forever {
+        assert!(!stopped, "{receipt}");
+        assert_eq!(receipt["outcome"], "unknown");
+        assert!(
+            elapsed >= Duration::from_secs(7),
+            "stop gave up before its deadline: {elapsed:?}"
+        );
+        let late = late_identity.expect("unobserved descendant was signalled");
+        assert!(
+            !process_is_zombie(late.pid),
+            "unobserved descendant was signalled"
+        );
+    } else {
+        assert!(stopped, "{receipt}");
+        assert_eq!(receipt["outcome"], "stopped");
+        assert!(elapsed >= Duration::from_secs(5));
+        assert!(elapsed < TIMEOUT);
+    }
+}
+
+#[test]
+fn orphan_recovery_waits_for_unobserved_descendant_to_exit() {
+    late_descendant_case(false);
+}
+
+#[test]
+fn orphan_recovery_never_signals_unobserved_descendant() {
+    late_descendant_case(true);
+}
+
+/// Sends SIGCONT to a stopped child of this test when dropped, so a failed
+/// assertion cannot leave the stop request suspended.
+struct ResumeOnDrop(i32);
+
+impl Drop for ResumeOnDrop {
+    fn drop(&mut self) {
+        // SAFETY: the PID is this test's own unreaped child.
+        unsafe {
+            libc::kill(self.0, libc::SIGCONT);
+        }
+    }
+}
+
+/// Birth of any process record at `pid`, zombies included, matching the
+/// production inspection (Darwin `proc_pidinfo` argument 1, no `getsid`).
+fn process_birth(pid: i32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        text.rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .nth(19)?
+            .parse()
+            .ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: native output buffer is writable and exactly sized.
+        let size = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                1,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+            )
+        };
+        if size as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+    }
+}
+
 #[test]
 fn stop_waiting_past_lock_bound_reports_unknown_without_acting() {
     let f = Fixture::new();
@@ -1299,9 +1460,16 @@ fn invalid_control_requests_still_get_a_framed_refusal() {
 #[cfg(target_os = "linux")]
 #[test]
 fn main_thread_exit_with_live_worker_is_still_stopped() {
-    for lose_guard in [false, true] {
+    // `pthread-churn` keeps replacing its only worker thread, so a scan of the
+    // task list can miss the live replacement; the kernel's thread count cannot.
+    for (mode, lose_guard) in [
+        ("pthread-main-exit", false),
+        ("pthread-main-exit", true),
+        ("pthread-churn", false),
+        ("pthread-churn", true),
+    ] {
         let f = Fixture::new();
-        let (mut caller, _) = f.start(vec![f.process("worker", "pthread-main-exit")]);
+        let (mut caller, _) = f.start(vec![f.process("worker", mode)]);
         f.await_log("fixture-ready");
         let state = f.state("worker");
         let child = eventually(|| {
@@ -1375,6 +1543,88 @@ fn held_log_lock_never_stalls_a_guard() {
     assert!(start.elapsed() < Duration::from_secs(7));
     assert!(wait(&mut caller, TIMEOUT).success());
     drop(log);
+}
+
+/// One receipt that cannot be verified (guard gone, recorded command birth
+/// wrong, so no witness proves the session) must not keep stop from stopping
+/// the healthy commands of the same owner. The unverifiable command is never
+/// signalled, and the request answers `unknown` with `stop-incomplete`.
+#[test]
+fn unverifiable_receipt_does_not_block_healthy_targets() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![
+        f.process("healthy", "hold"),
+        f.process("unverifiable", "hold"),
+    ]);
+    eventually(|| (f.log().matches("fixture-ready").count() == 2).then_some(()));
+    let healthy = identity(pid(&f.state("healthy"), "commandPid")).expect("healthy command");
+    let mut bad = f.state("unverifiable");
+    let bad_command = identity(pid(&bad, "commandPid")).expect("unverifiable command");
+    let bad_guard = pid(&bad, "guardPid");
+    // SAFETY: the guard belongs to this fixture; its command survives it.
+    assert_eq!(unsafe { libc::kill(bad_guard, libc::SIGKILL) }, 0);
+    eventually(|| identity(bad_guard).is_none().then_some(()));
+    bad["commandStartTime"] = json!(bad["commandStartTime"].as_u64().unwrap() + 1);
+    fs::write(
+        f.root.join("unverifiable.json"),
+        serde_json::to_vec(&bad).unwrap(),
+    )
+    .unwrap();
+    let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
+    assert!(!wait(&mut stop, TIMEOUT).success(), "{receipt}");
+    assert_eq!(receipt["outcome"], "unknown");
+    assert_eq!(receipt["reason"], "stop-incomplete");
+    eventually(|| {
+        (identity(healthy.pid).as_ref() != Some(&healthy) || process_is_zombie(healthy.pid))
+            .then_some(())
+    });
+    assert!(
+        identity(bad_command.pid).as_ref() == Some(&bad_command)
+            && !process_is_zombie(bad_command.pid),
+        "unverifiable command was signalled"
+    );
+    // SAFETY: this fixture's own command, identity checked just above.
+    unsafe {
+        libc::kill(bad_command.pid, libc::SIGKILL);
+    }
+    let _ = wait(&mut caller, TIMEOUT);
+}
+
+/// Another owner's receipt whose live members no witness ties to it (guard
+/// gone, recorded command birth wrong) refuses with `foreign-unknown-process`
+/// and signals nothing.
+#[test]
+fn unverifiable_foreign_receipt_refuses_with_its_own_reason() {
+    let f = Fixture::new();
+    let (mut caller, _) = f.start(vec![f.process("worker", "hold")]);
+    f.await_log("fixture-ready");
+    let mut state = f.state("worker");
+    let command = identity(pid(&state, "commandPid")).expect("command identity");
+    let guard = pid(&state, "guardPid");
+    // SAFETY: the guard belongs to this fixture; its command survives it.
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
+    eventually(|| identity(guard).is_none().then_some(()));
+    state["commandStartTime"] = json!(state["commandStartTime"].as_u64().unwrap() + 1);
+    fs::write(
+        f.root.join("worker.json"),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    refused_framed(
+        &f,
+        "stop",
+        f.control("different-owner"),
+        "foreign-unknown-process",
+    );
+    assert!(
+        identity(command.pid).as_ref() == Some(&command),
+        "command was signalled"
+    );
+    // SAFETY: this fixture's own command, identity checked just above.
+    unsafe {
+        libc::kill(command.pid, libc::SIGKILL);
+    }
+    let _ = wait(&mut caller, TIMEOUT);
 }
 
 fn process_is_zombie(pid: i32) -> bool {
@@ -1821,8 +2071,11 @@ fn unresponsive_guard_stop_remains_unknown() {
     assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
     let (mut stop, receipt) = f.request("stop", &f.control(TOKEN));
     assert_eq!(receipt["outcome"], "unknown");
+    assert_eq!(receipt["reason"], "stop-incomplete");
     assert!(!wait(&mut stop, TIMEOUT).success());
     assert_eq!(unsafe { libc::kill(pid(&state, "commandPid"), 0) }, 0);
+    // The owner is retired but its member is not proven absent.
+    refused_framed(&f, "status", f.control(TOKEN), "retired-owner-live");
     refused(&f, "run", f.launch(vec![f.process("worker", "hold")]));
     assert_eq!(unsafe { libc::kill(guard, libc::SIGCONT) }, 0);
     f.stop();
@@ -1997,6 +2250,37 @@ fn fixture_process() {
         "command inherited caller environment"
     );
     match mode.as_str() {
+        "burst-pair-alpha" | "burst-pair-beta" => {
+            // Two guards' appends overlap by construction: each writes half its
+            // records, then waits until both halves are in the shared log
+            // before writing the rest.
+            let (own, other) = if mode == "burst-pair-alpha" {
+                ("alpha", "beta")
+            } else {
+                ("beta", "alpha")
+            };
+            let mut out = std::io::stdout().lock();
+            for i in 0..1000 {
+                writeln!(out, "burst-record-{i}").unwrap();
+            }
+            out.flush().unwrap();
+            let half = |name: &str| format!("\t{name}\tstdout\tburst-record-999\n");
+            loop {
+                let log = fs::read_to_string("lifecycle.log").unwrap_or_default();
+                if log.contains(&half(own)) && log.contains(&half(other)) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            for i in 1000..2000 {
+                writeln!(out, "burst-record-{i}").unwrap();
+            }
+            out.write_all(&vec![b'X'; 300_000]).unwrap();
+            out.write_all(b"\npartial-tail").unwrap();
+            out.flush().unwrap();
+            eprintln!("fixture-error");
+            std::process::exit(0);
+        }
         "burst" => {
             let mut out = std::io::stdout().lock();
             for i in 0..2000 {
@@ -2199,8 +2483,62 @@ fn fixture_process() {
             }
             println!("wrapper-child {child}");
         }
+        "fork-on-term" | "fork-on-term-forever" => {
+            // Fork one TERM-ignoring descendant after each TERM, so recovery
+            // meets a session member forked after its capture. Its PID goes to
+            // a file: stdout belongs to the guard, which the test kills first.
+            static TERMINATED: AtomicBool = AtomicBool::new(false);
+            extern "C" fn on_term(_: libc::c_int) {
+                TERMINATED.store(true, Ordering::SeqCst);
+            }
+            let forever = mode == "fork-on-term-forever";
+            // SAFETY: the handler only stores an atomic flag.
+            unsafe {
+                libc::signal(
+                    libc::SIGTERM,
+                    on_term as extern "C" fn(libc::c_int) as libc::sighandler_t,
+                );
+            }
+            println!("fixture-ready");
+            std::io::stdout().flush().unwrap();
+            loop {
+                if TERMINATED.swap(false, Ordering::SeqCst) {
+                    // Saved before the fork: a child first scheduled after this
+                    // process died would otherwise read its reaper's PID.
+                    // SAFETY: getpid has no preconditions.
+                    let parent = unsafe { libc::getpid() };
+                    // SAFETY: the fork child uses only async-signal-safe libc
+                    // calls and never returns into Rust state.
+                    let child = unsafe { libc::fork() };
+                    assert!(child >= 0);
+                    if child == 0 {
+                        unsafe {
+                            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                            if forever {
+                                loop {
+                                    libc::pause();
+                                }
+                            }
+                            // Outlive the parent's recovery KILL (at five
+                            // seconds), then exit well before the seven-second
+                            // deadline. Tie the exit to the parent's death, not
+                            // to a fixed time, so a slow host cannot push it
+                            // past the deadline.
+                            while libc::getppid() == parent {
+                                libc::usleep(10_000);
+                            }
+                            libc::usleep(500_000);
+                            libc::_exit(0);
+                        }
+                    }
+                    std::fs::write("late-descendant.tmp", child.to_string()).unwrap();
+                    std::fs::rename("late-descendant.tmp", "late-descendant").unwrap();
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
         #[cfg(target_os = "linux")]
-        "pthread-main-exit" => {
+        "pthread-main-exit" | "pthread-churn" => {
             extern "C" fn worker(_: *mut libc::c_void) -> *mut libc::c_void {
                 loop {
                     // SAFETY: pause has no preconditions.
@@ -2209,6 +2547,36 @@ fn fixture_process() {
                     }
                 }
             }
+            /// Thread turnover: each worker starts its replacement, then ends.
+            /// The group always has a live thread, but no single listing of
+            /// its tasks is guaranteed to see one.
+            extern "C" fn churn(_: *mut libc::c_void) -> *mut libc::c_void {
+                // SAFETY: libc thread calls only; a failed create keeps this
+                // thread alive instead of ending the group.
+                unsafe {
+                    libc::usleep(2000);
+                    let mut next: libc::pthread_t = std::mem::zeroed();
+                    if libc::pthread_create(
+                        &mut next,
+                        std::ptr::null(),
+                        churn,
+                        std::ptr::null_mut(),
+                    ) != 0
+                    {
+                        loop {
+                            libc::pause();
+                        }
+                    }
+                    libc::syscall(libc::SYS_exit, 0);
+                }
+                std::ptr::null_mut()
+            }
+            let body: extern "C" fn(*mut libc::c_void) -> *mut libc::c_void =
+                if mode == "pthread-churn" {
+                    churn
+                } else {
+                    worker
+                };
             // The fork child is single-threaded, so its main thread is the
             // thread-group leader. It starts one worker and ends only its main
             // thread (as `pthread_exit` does); Linux then shows the leader as
@@ -2223,7 +2591,7 @@ fn fixture_process() {
                     if libc::pthread_create(
                         &mut thread,
                         std::ptr::null(),
-                        worker,
+                        body,
                         std::ptr::null_mut(),
                     ) != 0
                     {

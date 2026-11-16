@@ -10,6 +10,7 @@ import {
   renderProjectManagedEnvSchemaJson,
 } from "../src/templates.ts";
 import { buildConfigCompiler } from "./build-config-compiler.ts";
+import { buildLifecycleSupervisor } from "./build-lifecycle-supervisor.ts";
 
 interface BuildArgs {
   readonly outDirRaw: string | null;
@@ -80,6 +81,7 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
   }
 
   await buildConfigCompiler();
+  await buildLifecycleSupervisor();
   const binaryPath = resolve(distRoot, "hack");
   const buildExit = await run({
     cmd: [
@@ -111,6 +113,14 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
     to: compilerPath,
   });
   await chmodExecutable({ path: compilerPath });
+
+  await copyFile({
+    from: resolve(distRoot, "hack-lifecycle-supervisor"),
+    to: resolve(releaseDir, "hack-lifecycle-supervisor"),
+  });
+  await chmodExecutable({
+    path: resolve(releaseDir, "hack-lifecycle-supervisor"),
+  });
 
   const assetsDir = resolve(releaseDir, "assets");
   const gifsDir = resolve(assetsDir, "gifs");
@@ -390,6 +400,7 @@ export function renderInstallScript(): string {
     ...installExecutableFunction(),
     'mkdir -p "$INSTALL_BIN" "$INSTALL_ASSETS"',
     'install_executable "$ROOT/hack-config-compiler" "$INSTALL_BIN/hack-config-compiler"',
+    'install_executable "$ROOT/hack-lifecycle-supervisor" "$INSTALL_BIN/hack-lifecycle-supervisor"',
     'install_executable "$ROOT/hack" "$INSTALL_BIN/hack"',
     "",
     'if [ -d "$ASSETS_DIR" ]; then',
@@ -516,6 +527,7 @@ export function renderCodexSlimInstallScript(): string {
     ...installExecutableFunction(),
     'mkdir -p "$INSTALL_BIN" "$INSTALL_ASSETS"',
     'install_executable "$ROOT/hack-config-compiler" "$INSTALL_BIN/hack-config-compiler"',
+    'install_executable "$ROOT/hack-lifecycle-supervisor" "$INSTALL_BIN/hack-lifecycle-supervisor"',
     'install_executable "$ROOT/hack" "$REAL_BIN"',
     "",
     'if [ -d "$ASSETS_DIR" ]; then',

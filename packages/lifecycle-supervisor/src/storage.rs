@@ -95,8 +95,13 @@ impl Root {
         let name = std::ffi::CString::new(name).map_err(|_| refused())?;
         // A receipt is replaced atomically (temporary file, then rename). An open
         // that races that rename can return the replaced inode, which is already
-        // unlinked (nlink 0). Reopen the name to read its current inode; any
-        // other link count is still refused. The bound only stops a livelock.
+        // unlinked (nlink 0). For a read-only open that inode is a complete
+        // receipt, the version current when the open happened, so it is read as
+        // is: the read takes effect just before the rename, and an unlinked inode
+        // has no other name a hard link could alias. Opens that may write retry
+        // the name for its current inode; the bound only stops a livelock. Any
+        // other link count is refused.
+        let read_only = flags & libc::O_ACCMODE == libc::O_RDONLY;
         for _ in 0..64 {
             // SAFETY: directory descriptor is live; name is NUL-terminated;
             // returned descriptor is newly owned and immediately wrapped in RAII.
@@ -114,13 +119,13 @@ impl Root {
             // SAFETY: fd was just returned by openat and has no other owner.
             let file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
             let metadata = file.metadata()?;
-            if metadata.nlink() == 0 {
+            if metadata.nlink() == 0 && !read_only {
                 continue;
             }
             // SAFETY: geteuid has no preconditions.
             if !metadata.is_file()
                 || metadata.uid() != unsafe { libc::geteuid() }
-                || metadata.nlink() != 1
+                || metadata.nlink() > 1
                 || metadata.mode() & 0o777 != 0o600
             {
                 return Err(refused());

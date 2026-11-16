@@ -22,6 +22,7 @@ fi
 
 repo_root="$(cd "${repo_root}" && pwd)"
 bun_bin="$(command -v bun)"
+(cd "$repo_root" && bun scripts/build-lifecycle-supervisor.ts)
 wrapper_path="${bin_dir}/hack"
 
 mkdir -p "${bin_dir}" "${assets_dir}" "${HOME}/.hack"

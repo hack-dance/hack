@@ -8,6 +8,7 @@ import {
   readLifecycleState,
   resolveLifecycleLogPath,
 } from "./lifecycle-runtime.ts";
+import { LIFECYCLE_SUPERVISOR_VERSION } from "./lifecycle-supervisor-handshake.ts";
 import { ensurePrivateDirectory } from "./private-file.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
@@ -105,9 +106,6 @@ export function resolveLifecycleSupervisorBinary(): string {
     ? resolve(dirname(process.execPath), "hack-lifecycle-supervisor")
     : resolve(import.meta.dir, "../../dist/hack-lifecycle-supervisor");
 }
-
-export const LIFECYCLE_SUPERVISOR_VERSION =
-  "hack-lifecycle-supervisor 0.1.0 protocol=1 incremental=1";
 
 /** Validate the public, value-free handshake before publishing any ownership. */
 export async function preflightLifecycleSupervisor(): Promise<{

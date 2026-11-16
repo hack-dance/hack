@@ -162,6 +162,7 @@ export function verifySignatures(bundle: string) {
     ...payload.filter(
       (name) =>
         name === "hack-config-compiler" ||
+        name === "hack-lifecycle-supervisor" ||
         (MCP.test(name) && !name.endsWith("/manifest.json"))
     ),
   ];

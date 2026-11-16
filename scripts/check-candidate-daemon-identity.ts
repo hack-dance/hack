@@ -80,7 +80,9 @@ async function processExecutable(pid: number): Promise<string> {
   if (process.platform === "linux") {
     return await readlink(`/proc/${pid}/exe`);
   }
-  const ps = Bun.spawnSync(["/bin/ps", "-o", "comm=", "-p", String(pid)]);
+  const ps = Bun.spawnSync(["/bin/ps", "-o", "comm=", "-p", String(pid)], {
+    timeout: 10_000,
+  });
   const path = ps.stdout.toString().trim();
   if (ps.exitCode !== 0 || path === "") {
     fail(`pid ${pid} is not running`);

@@ -910,11 +910,7 @@ impl<'a> Fetch<'a> {
             if !self.destination_allowed(&url) {
                 return Err(local_address_refused());
             }
-            let mut request = self
-                .client
-                .get(url.clone())
-                .timeout(self.remaining()?.min(timeout))
-                .header(ACCEPT, ACCEPT_MANIFEST);
+            let mut request = self.client.get(url.clone()).header(ACCEPT, ACCEPT_MANIFEST);
             if let Some(value) = self
                 .authorization
                 .as_ref()
@@ -929,6 +925,7 @@ impl<'a> Fetch<'a> {
                 self.send_headers(request, &url, true)?
             } else {
                 request
+                    .timeout(self.remaining()?.min(timeout))
                     .send()
                     .map_err(|e| transport_error(&e, "Registry request failed or timed out."))?
             };

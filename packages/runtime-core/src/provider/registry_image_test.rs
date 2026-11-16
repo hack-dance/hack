@@ -2099,11 +2099,15 @@ fn retry_expired_registry_deadline_still_names_host_and_attempt_count() {
     let registry = super::registry(&named, &policy).unwrap();
     let mut fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
     fetch.deadline = Instant::now();
-    let failure = fetch
-        .token(&registry.origin.join("/token").unwrap(), None, None)
-        .unwrap_err();
-    let json = serde_json::to_value(failure).unwrap();
-    assert_eq!(json["network_request"]["host"], "127.0.0.1");
-    assert_eq!(json["network_request"]["attempts"], 0);
+    for failure in [
+        fetch
+            .token(&registry.origin.join("/token").unwrap(), None, None)
+            .unwrap_err(),
+        fetch.manifest("latest").unwrap_err(),
+    ] {
+        let json = serde_json::to_value(failure).unwrap();
+        assert_eq!(json["network_request"]["host"], "127.0.0.1");
+        assert_eq!(json["network_request"]["attempts"], 0);
+    }
     assert!(fixture.requests().is_empty());
 }

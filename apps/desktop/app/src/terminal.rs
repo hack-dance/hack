@@ -221,6 +221,43 @@ pub fn host_env_plan(
     ))
 }
 
+/// "Host shell with env…" choices: each overlay × each scope, names only.
+/// The overlays are the project's default and the effective one; with no
+/// named overlay (only `hack.env.default.yaml`), the base environment
+/// (`--env base`). The badge warns unless the overlay is the default.
+pub fn env_choices(
+    selection: &hack_desktop_core::env::EnvSelection,
+    scopes: &[String],
+    selected_scope: Option<&str>,
+) -> Result<Vec<(String, NewTab)>, String> {
+    let mut overlays = selection.overlays();
+    let base_only = overlays.is_empty();
+    if base_only {
+        overlays.push("base".into());
+    }
+    let mut scopes = scopes.to_vec();
+    if scopes.is_empty() {
+        scopes.extend(selected_scope.map(str::to_owned));
+    }
+    if scopes.is_empty() {
+        return Err("No env scope reported".into());
+    }
+    let mut out = Vec::new();
+    for overlay in &overlays {
+        for scope in &scopes {
+            out.push((
+                format!("env {overlay} · {scope}"),
+                NewTab::HostWithEnv {
+                    overlay: overlay.clone(),
+                    scope: scope.clone(),
+                    is_default: base_only || selection.default.as_deref() == Some(overlay.as_str()),
+                },
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// A read-only tab showing `text` (fixtures, and notes such as "native
 /// projects have no log stream here"). The file is removed once open.
 fn note_core(text: &str) -> std::io::Result<TerminalCore> {
@@ -686,29 +723,11 @@ impl HackApp {
             EnvView::Loading => return Err("Reading overlays…".into()),
             EnvView::Unreadable => return Err("Could not read env overlays".into()),
         };
-        let selection = report.env_selection.clone().unwrap_or_default();
-        let overlays = selection.overlays();
-        let mut scopes = report.scopes.clone();
-        if scopes.is_empty() {
-            scopes.extend(report.selected_scope.clone());
-        }
-        if overlays.is_empty() || scopes.is_empty() {
-            return Err("No env overlay or scope reported".into());
-        }
-        let mut out = Vec::new();
-        for overlay in &overlays {
-            for scope in &scopes {
-                out.push((
-                    format!("env {overlay} · {scope}"),
-                    NewTab::HostWithEnv {
-                        overlay: overlay.clone(),
-                        scope: scope.clone(),
-                        is_default: selection.default.as_deref() == Some(overlay.as_str()),
-                    },
-                ));
-            }
-        }
-        Ok(out)
+        env_choices(
+            &report.env_selection.clone().unwrap_or_default(),
+            &report.scopes,
+            report.selected_scope.as_deref(),
+        )
     }
 
     fn menu(&self, d: &DetailView, menu: Menu, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
@@ -1138,6 +1157,44 @@ mod tests {
         let base =
             container_plan(Path::new("/bin/hack"), Path::new("/work/p"), None, "api").unwrap();
         assert_eq!(argv(&base)[0], ["exec", "api", "--", "bash"]);
+    }
+
+    #[test]
+    fn env_choices_offer_the_base_environment_when_no_overlay_is_named() {
+        use hack_desktop_core::env::EnvSelection;
+        let scopes = vec!["global".to_owned(), "api".to_owned()];
+        // Only hack.env.default.yaml: default and effective are null.
+        let base = env_choices(&EnvSelection::default(), &scopes, None).unwrap();
+        let labels: Vec<&str> = base.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["env base · global", "env base · api"]);
+        assert!(base.iter().all(|(_, t)| matches!(
+            t,
+            NewTab::HostWithEnv {
+                is_default: true,
+                ..
+            }
+        )));
+        // Named overlays: default (neutral) and effective (warns).
+        let named = EnvSelection {
+            requested: Some("staging".into()),
+            default: Some("local".into()),
+            effective: Some("staging".into()),
+        };
+        let choices = env_choices(&named, &scopes[1..], None).unwrap();
+        assert_eq!(
+            choices.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(),
+            ["env local · api", "env staging · api"]
+        );
+        assert!(matches!(
+            choices[1].1,
+            NewTab::HostWithEnv {
+                is_default: false,
+                ..
+            }
+        ));
+        // No scope at all: nothing to offer, said plainly.
+        assert!(env_choices(&named, &[], None).is_err());
+        assert_eq!(env_choices(&named, &[], Some("api")).unwrap().len(), 2);
     }
 
     #[test]

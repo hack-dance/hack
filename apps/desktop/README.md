@@ -146,7 +146,7 @@ the CLI in it; it passes names only and never builds an environment:
 | Logs (first, not closable) | `hack logs [--branch <b>] [--no-follow] --tail 500`, read-only, colours kept (it runs on a PTY) |
 | Shell in a service (+ menu) | `hack exec [--branch <b>] <service> -- bash`, then `sh` |
 | Host shell (+ menu) | the user's login shell |
-| Host shell with env (+ menu) | `hack host shell --env <overlay> --scope <scope>`, names from `hack env list --json`; amber badge unless the overlay is the default |
+| Host shell with env (+ menu) | `hack host shell --env <overlay> --scope <scope>`, names from `hack env list --json` (`--env base` when no overlay is named); amber badge unless the overlay is the default |
 
 A Logs stream that ended (a stopped project that now runs) restarts when its
 tab is clicked. Keys: Cmd-J (Ctrl-Shift-J) toggle, Cmd-T new tab menu,

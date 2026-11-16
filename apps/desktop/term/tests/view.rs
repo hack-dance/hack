@@ -4,6 +4,19 @@
 //! The headless app draws a window when, and only when, something marked it
 //! dirty, as the real app does on its next frame. No renderer or display
 //! is needed.
+//!
+//! These tests run under libtest, off the main thread, so they must never
+//! build the real platform: on macOS that panics ("Mac platform not created
+//! on main thread"). They use GPUI's test platform with its no-op text
+//! system, which measures every glyph the same and is enough for what they
+//! check. Tests that need real fonts go in `render.rs`, which runs on the
+//! main thread; `tests/main_thread.rs` enforces the split.
+//!
+//! Quitting here calls `App::shutdown`, the same function the real
+//! platform's quit callback calls, so every quit handler and the
+//! `SHUTDOWN_TIMEOUT` wait are the product's. What differs is the
+//! dispatcher that runs those handlers' background work: GPUI's test
+//! dispatcher here, the platform's own in the app.
 #![cfg(all(unix, feature = "screenshots"))]
 
 mod common;
@@ -25,7 +38,7 @@ use hack_desktop_term::view::{Status, TerminalView};
 
 fn app() -> HeadlessAppContext {
     let mut cx = HeadlessAppContext::with_platform(
-        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(gpui_kit::NoopTextSystem::new()),
         Arc::new(gpui_kit::assets::Assets),
         || Ok(None),
     );
@@ -214,12 +227,12 @@ fn quitting_the_app_ends_a_stream_process_that_ignores_sigterm_and_its_descendan
     cx.update(|cx| cx.shutdown());
 
     // The quit handler was awaited: by the time shutdown returns the
-    // session has been killed and reaped.
+    // session has been killed. Its reap may finish just after.
     assert!(
         !is_alive(kid) && !is_alive(leader),
         "left running after quit"
     );
-    assert!(!exists(leader), "the process was not reaped");
+    assert!(reaped(leader), "the process was not reaped");
     assert!(wait_gone(&[kid, leader]).is_empty());
     rec.done();
 }
@@ -247,7 +260,7 @@ fn quitting_the_app_ends_a_pty_session_that_ignores_hangup() {
         !is_alive(kid) && !is_alive(leader),
         "left running after quit"
     );
-    assert!(!exists(leader), "the shell was not reaped");
+    assert!(reaped(leader), "the shell was not reaped");
     rec.done();
 }
 
@@ -288,13 +301,30 @@ fn quitting_right_after_closing_a_tab_ends_what_the_tab_left_running() {
     cx.update(|cx| cx.shutdown());
 
     // The closed tab's teardown was hurried and awaited: when shutdown
-    // returns, the session has been killed and reaped.
+    // returns, the session has been killed. Its reap may finish just after.
     assert!(
         !is_alive(kid) && !is_alive(leader),
         "a closed tab's processes outlived the app"
     );
-    assert!(!exists(leader), "the closed tab's shell was not reaped");
+    assert!(reaped(leader), "the closed tab's shell was not reaped");
     rec.done();
+}
+
+/// Whether `pid` leaves the process table before the deadline.
+///
+/// Quit guarantees the kill inside GPUI's shutdown window, which the
+/// callers assert strictly. The reaper's `waitpid` can land a little after
+/// that window on a loaded machine, so the reap is awaited, not raced; a
+/// session that is never reaped still fails here.
+fn reaped(pid: libc::pid_t) -> bool {
+    let start = Instant::now();
+    while exists(pid) {
+        if start.elapsed() >= DEADLINE {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 /// Pump until the view's source has ended, or the deadline.
@@ -334,7 +364,7 @@ fn quitting_right_after_a_stream_closes_its_output_ends_the_process_still_runnin
     cx.update(|cx| cx.shutdown());
 
     assert!(!is_alive(leader), "the process outlived the app");
-    assert!(!exists(leader), "the process was not reaped");
+    assert!(reaped(leader), "the process was not reaped");
     rec.done();
 }
 

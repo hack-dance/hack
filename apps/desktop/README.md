@@ -128,6 +128,33 @@ The window follows [DESIGN-V1.md](DESIGN-V1.md).
   buttons, the Doctor and Routing rows and the daemon recovery button. The
   Activity tab is gone until it has content.
 
+### Terminal panel (feature `terminal`)
+
+```sh
+eval "$(bash term/scripts/provision-ghostty.sh)"   # libghostty-vt inputs, checksummed
+cargo run -p hack-desktop --features terminal       # live, with the panel
+```
+
+Each project and each branch instance has a panel docked under the detail
+pane (DESIGN-V1.md, "Terminal panel"): a drag handle (drag to resize, to the
+top to maximize, down to collapse; double-click to maximize), a tab strip and
+the terminal. Its state is kept per instance. The app owns every PTY and runs
+the CLI in it; it passes names only and never builds an environment:
+
+| Tab | Runs, in the instance's checkout |
+|---|---|
+| Logs (first, not closable) | `hack logs [--branch <b>] [--no-follow] --tail 500`, read-only, colours kept (it runs on a PTY) |
+| Shell in a service (+ menu) | `hack exec [--branch <b>] <service> -- bash`, then `sh` |
+| Host shell (+ menu) | the user's login shell |
+| Host shell with env (+ menu) | `hack host shell --env <overlay> --scope <scope>`, names from `hack env list --json`; amber badge unless the overlay is the default |
+
+A Logs stream that ended (a stopped project that now runs) restarts when its
+tab is clicked. Keys: Cmd-J (Ctrl-Shift-J) toggle, Cmd-T new tab menu,
+Cmd-W close, Cmd-Shift-] / [ next and previous, Cmd-Shift-Return maximize,
+Cmd-F find, Cmd-C / Cmd-V copy and paste in a terminal. Without the feature
+the window keeps its Logs tab. `term/scripts/check-ghostty.sh` builds and
+tests the app with the feature too.
+
 Renders: [running, dark](screenshots/window/running-dark.png),
 [running, light](screenshots/window/running-light.png),
 [branch instances](screenshots/window/branches-dark.png),

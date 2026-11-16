@@ -179,10 +179,37 @@ pub fn sequence(dir: &Path) {
         ("tab-services", |app, _, cx| app.set_tab(0, cx)),
         ("open-doctor", |app, _, cx| app.open_doctor(None, cx)),
     ];
+    #[cfg(feature = "terminal")]
+    let steps = {
+        let mut steps = steps;
+        steps.extend::<[Step; 5]>([
+            ("panel-back-to-storefront", |app, _, cx| {
+                app.select_project("storefront".into(), cx);
+            }),
+            ("panel-new-tab-menu", |app, _, cx| {
+                app.open_menu(crate::terminal::Menu::Main, cx);
+            }),
+            ("panel-maximized", |app, _, cx| {
+                app.open_menu(crate::terminal::Menu::Main, cx);
+                app.toggle_maximize(cx);
+            }),
+            ("panel-collapsed", |app, _, cx| {
+                app.toggle_maximize(cx);
+                app.toggle_panel(cx);
+            }),
+            ("panel-open-again", |app, _, cx| app.toggle_panel(cx)),
+        ]);
+        steps
+    };
     for (i, (name, step)) in steps.into_iter().enumerate() {
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |app, cx| step(app, window, cx));
             window.render_frame(cx);
+            #[cfg(feature = "terminal")]
+            {
+                view.update(cx, |app, cx| app.settle_terminals(cx));
+                window.render_frame(cx);
+            }
         })
         .expect("step");
         let img = cx

@@ -1084,14 +1084,23 @@ impl HackApp {
                 };
                 div().type_step(text::BODY).text_color(c).child(r)
             }))
-            .children(self.doctor_link(&d.name, ui, cx))
-            .children(self.slow_action_warning(&d.key).map(|w| {
-                div()
-                    .type_step(text::BODY)
-                    .text_color(p.states.degraded.fg)
-                    .child(w)
-            }))
-            .children(d.note.clone().map(|n| {
+            .children(
+                (!compact)
+                    .then(|| self.doctor_link(&d.name, ui, cx))
+                    .flatten(),
+            )
+            .children(
+                (!compact)
+                    .then(|| self.slow_action_warning(&d.key))
+                    .flatten()
+                    .map(|w| {
+                        div()
+                            .type_step(text::BODY)
+                            .text_color(p.states.degraded.fg)
+                            .child(w)
+                    }),
+            )
+            .children(d.note.clone().filter(|_| !compact).map(|n| {
                 div()
                     .type_step(text::SMALL)
                     .text_color(p.text_muted)

@@ -120,7 +120,7 @@ pub struct HackApp {
     /// Terminal panels, one per project or branch instance.
     #[cfg(feature = "terminal")]
     pub(crate) panels: crate::terminal::Panels,
-    live: bool,
+    pub(crate) live: bool,
     /// The title bar's project filter.
     search: Entity<InputState>,
     filter: String,

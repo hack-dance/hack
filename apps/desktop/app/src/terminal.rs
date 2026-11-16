@@ -55,6 +55,13 @@ pub struct ProjectPanel {
     pub sessions: Entity<TerminalPanel>,
     pub state: PanelState,
     pub menu: Menu,
+    /// The checkout and backend the tabs were started in. When the
+    /// instance's checkout changes (a branch recreated from another
+    /// worktree), its sessions are ended and the panel starts again.
+    origin: Option<(PathBuf, bool)>,
+    /// Whether the instance was running when last drawn: a stopped
+    /// instance's Logs tab is a finite read, restarted once when it runs.
+    was_active: bool,
 }
 
 /// The new-tab menu.
@@ -256,9 +263,38 @@ impl HackApp {
                 sessions,
                 state: PanelState::half(),
                 menu: Menu::Closed,
+                origin: self.instance_root().map(|(root, native, _)| (root, native)),
+                was_active: d.state.is_active(),
             },
         );
         self.open_tab(&d, NewTab::Logs, window, cx);
+    }
+
+    /// Keep the selected instance's panel in step with the snapshot: a new
+    /// checkout ends the old sessions and starts again; a stopped instance
+    /// that now runs gets a followed Logs stream (once per transition, so a
+    /// stream that keeps failing is not restarted on every frame).
+    fn reconcile_panel(&mut self, d: &DetailView, window: &mut Window, cx: &mut Context<Self>) {
+        let origin = self.instance_root().map(|(root, native, _)| (root, native));
+        let active = d.state.is_active();
+        let Some(panel) = self.panels.by_key.get_mut(&d.key) else {
+            return;
+        };
+        let moved = panel.origin != origin;
+        let started = active && !panel.was_active;
+        panel.was_active = active;
+        if moved {
+            panel.origin = origin;
+            let sessions = panel.sessions.clone();
+            sessions.update(cx, |s, cx| {
+                for i in (0..s.tab_count()).rev() {
+                    s.close(i, window, cx);
+                }
+            });
+            self.open_tab(d, NewTab::Logs, window, cx);
+        } else if started {
+            self.refresh_logs_tab(window, cx);
+        }
     }
 
     fn look(&mut self, cx: &App) -> GhosttyLook {
@@ -290,7 +326,14 @@ impl HackApp {
                 )?)
                 .map_err(io),
                 // Fixtures: the fixture's log lines, as a service prints them.
-                _ => note_core(&self.fixture_log_text()).map_err(io),
+                _ if !self.live => note_core(&self.fixture_log_text()).map_err(io),
+                (None, _) => {
+                    note_core("The hack CLI was not found, so logs cannot be read.\r\n").map_err(io)
+                }
+                (_, None) => {
+                    note_core("This instance has no checkout the app can read logs from.\r\n")
+                        .map_err(io)
+                }
             },
             NewTab::Container(service) => {
                 let (Some(hack), Some((root, _, branch))) = (&hack, &root) else {
@@ -932,6 +975,7 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.ensure_panel(window, cx);
+        self.reconcile_panel(d, window, cx);
         let Some(panel) = self.panels.by_key.get(&d.key) else {
             return div().into_any_element();
         };
@@ -1073,6 +1117,161 @@ mod tests {
             tab_kind(ok.kind()).badge(),
             Some(("env staging · api".into(), true)),
             "warns when not the default overlay"
+        );
+    }
+}
+
+/// The panel in a headless window, on fixtures.
+#[cfg(all(test, feature = "screenshots"))]
+mod window_tests {
+    use std::sync::Arc;
+
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AnyWindowHandle, HeadlessAppContext, WindowOptions};
+    use hack_desktop_core::fixtures::{self, Fixture};
+    use hack_desktop_core::source::FixtureSource;
+
+    use super::*;
+
+    fn open(live: bool) -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
+        let mut cx = HeadlessAppContext::with_platform(
+            gpui_kit::platform::current_platform(true).text_system(),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let options = WindowOptions {
+            focus: false,
+            show: false,
+            ..WindowOptions::default()
+        };
+        let (window, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, move |window, cx| {
+                    cx.new(|cx| {
+                        let mut app = HackApp::new(
+                            Arc::new(FixtureSource(Fixture::Running)),
+                            live,
+                            window,
+                            cx,
+                        );
+                        app.select(fixtures::selected(Fixture::Running));
+                        app
+                    })
+                })
+            })
+            .expect("open a headless window");
+        (cx, window, app)
+    }
+
+    fn draw(cx: &mut HeadlessAppContext, window: AnyWindowHandle, app: &Entity<HackApp>) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            app.update(cx, |a, cx| a.settle_terminals(cx));
+            window.render_frame(cx);
+        })
+        .expect("draw");
+    }
+
+    fn panel(cx: &mut HeadlessAppContext, app: &Entity<HackApp>) -> Entity<TerminalPanel> {
+        cx.update(|cx| {
+            let a = app.read(cx);
+            let key = a.model.selected_key().expect("selected");
+            a.panels.by_key[&key].sessions.clone()
+        })
+    }
+
+    fn logs_text(cx: &mut HeadlessAppContext, app: &Entity<HackApp>) -> String {
+        let sessions = panel(cx, app);
+        cx.update(|cx| {
+            let view = sessions.read(cx).tab(0).cloned().expect("a Logs tab");
+            view.update(cx, |v, _| {
+                let f = v.emulator().frame().expect("frame");
+                (0..f.rows.len())
+                    .map(|r| f.row_text(r))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
+    }
+
+    #[test]
+    fn a_live_window_never_shows_fixture_lines_as_logs() {
+        let (mut cx, window, app) = open(true);
+        draw(&mut cx, window, &app);
+        let text = logs_text(&mut cx, &app);
+        assert!(text.contains("hack CLI was not found"), "{text:?}");
+        assert!(
+            !text.contains("checkpoint complete"),
+            "fixture lines: {text:?}"
+        );
+        // Fixtures show fixture lines.
+        let (mut cx, window, app) = open(false);
+        draw(&mut cx, window, &app);
+        assert!(logs_text(&mut cx, &app).contains("checkpoint complete"));
+    }
+
+    #[test]
+    fn a_new_checkout_ends_the_old_sessions_and_starts_again() {
+        let (mut cx, window, app) = open(false);
+        draw(&mut cx, window, &app);
+        let sessions = panel(&mut cx, &app);
+        // A second tab, from a file: no shell is started by this test.
+        cx.update_window(window, |_, window, cx| {
+            let view = cx.new(|cx| TerminalView::from_core(note_core("second\r\n").unwrap(), cx));
+            sessions.update(cx, |s, cx| s.add_tab(view, window, cx));
+        })
+        .unwrap();
+        let first_logs = cx.update(|cx| sessions.read(cx).tab(0).cloned().unwrap());
+        assert_eq!(cx.update(|cx| sessions.read(cx).tab_count()), 2);
+        // The instance's checkout changes under the panel.
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                let key = a.model.selected_key().unwrap();
+                a.panels.by_key.get_mut(&key).unwrap().origin =
+                    Some((PathBuf::from("/elsewhere/checkout"), false));
+            });
+        });
+        draw(&mut cx, window, &app);
+        let (count, logs) = cx.update(|cx| {
+            let s = sessions.read(cx);
+            (s.tab_count(), s.tab(0).cloned().unwrap())
+        });
+        assert_eq!(count, 1, "the old tabs are closed, Logs starts again");
+        assert_ne!(
+            logs.entity_id(),
+            first_logs.entity_id(),
+            "a new Logs session"
+        );
+    }
+
+    #[test]
+    fn an_instance_that_starts_gets_its_logs_once() {
+        let (mut cx, window, app) = open(false);
+        draw(&mut cx, window, &app);
+        let sessions = panel(&mut cx, &app);
+        // The fixture's Logs tab is a finite read and has ended.
+        let ended = cx.update(|cx| sessions.read(cx).tab(0).cloned().unwrap());
+        assert!(cx.update(|cx| matches!(ended.read(cx).status(), TermStatus::Ended(_))));
+        // It was stopped when last drawn; now it runs.
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                let key = a.model.selected_key().unwrap();
+                a.panels.by_key.get_mut(&key).unwrap().was_active = false;
+            });
+        });
+        draw(&mut cx, window, &app);
+        let restarted = cx.update(|cx| sessions.read(cx).tab(0).cloned().unwrap());
+        assert_ne!(restarted.entity_id(), ended.entity_id(), "restarted once");
+        // Still running on the next frames: not restarted again, even though
+        // the (fixture) stream ends again.
+        draw(&mut cx, window, &app);
+        draw(&mut cx, window, &app);
+        let later = cx.update(|cx| sessions.read(cx).tab(0).cloned().unwrap());
+        assert_eq!(
+            later.entity_id(),
+            restarted.entity_id(),
+            "not on every frame"
         );
     }
 }

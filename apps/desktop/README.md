@@ -139,7 +139,9 @@ Each project and each branch instance has a panel docked under the detail
 pane (DESIGN-V1.md, "Terminal panel"): a drag handle (drag to resize, to the
 top to maximize, down to collapse; double-click to maximize), a tab strip and
 the terminal. Its state is kept per instance. The app owns every PTY and runs
-the CLI in it; it passes names only and never builds an environment:
+the CLI in it; it passes names only and never builds an environment. A CLI tab
+gets what every CLI call from the app gets: the instance's backend and a `PATH`
+with only absolute entries (a plain host shell keeps the user's `PATH`):
 
 | Tab | Runs, in the instance's checkout |
 |---|---|
@@ -151,7 +153,8 @@ the CLI in it; it passes names only and never builds an environment:
 A Logs stream that ended (a stopped project that now runs) restarts when its
 tab is clicked. Keys: Cmd-J (Ctrl-Shift-J) toggle, Cmd-T new tab menu,
 Cmd-W close, Cmd-Shift-] / [ next and previous, Cmd-Shift-Return maximize,
-Cmd-F find, Cmd-C / Cmd-V copy and paste in a terminal. Without the feature
+Cmd-F find, Cmd-C / Cmd-V copy and paste in a terminal. On Linux, Ctrl-K focuses
+the project search except in a terminal, where it goes to the shell. Without the feature
 the window keeps its Logs tab. `term/scripts/check-ghostty.sh` builds and
 tests the app with the feature too.
 

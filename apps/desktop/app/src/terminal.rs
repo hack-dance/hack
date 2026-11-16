@@ -16,10 +16,12 @@
 //!
 //! It passes subcommands, validated names and a shell name only. It never
 //! builds an environment and never sees a value: it sets the terminal's
-//! identity (`TERM`, `COLORTERM`, `TERM_PROGRAM`) and, for a CLI tab, the
-//! instance's backend (`HACK_RUNTIME_BACKEND=native|compose`), the same
-//! selector the core passes on every CLI call, so a shell or log stream
-//! targets the instance's own backend.
+//! identity (`TERM`, `COLORTERM`, `TERM_PROGRAM`) and, for a CLI tab, what
+//! the core sets on every CLI call: the instance's backend
+//! (`HACK_RUNTIME_BACKEND=native|compose`), so a shell or log stream targets
+//! the instance's own backend, and the app's `PATH` with empty and relative
+//! entries removed, so a file in the checkout cannot stand in for a tool the
+//! CLI runs. A plain host shell keeps the user's `PATH`.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -139,14 +141,19 @@ fn tab_kind(kind: &SessionKind) -> TabKind {
     }
 }
 
-/// Select the instance's backend for every attempt of a CLI plan.
-fn with_backend(mut plan: SessionPlan, native: bool) -> SessionPlan {
+/// Prepare every attempt of a CLI plan as the core prepares a CLI call:
+/// select the instance's backend, and give the CLI a `PATH` with only
+/// absolute entries (`path` is the app's own). An empty or relative entry
+/// would resolve against the checkout, where a file such as `.hack/docker`
+/// could stand in for a tool the CLI runs. A plain host shell is not a CLI
+/// tab and keeps the user's `PATH` as it is.
+fn for_cli(mut plan: SessionPlan, native: bool, path: Option<&std::ffi::OsStr>) -> SessionPlan {
     let backend = if native { "native" } else { "compose" };
+    let path = hack_desktop_core::runner::sanitize_path(path.unwrap_or_default());
     for attempt in &mut plan.attempts {
-        attempt
-            .options
-            .env
-            .push(("HACK_RUNTIME_BACKEND".into(), backend.into()));
+        let env = &mut attempt.options.env;
+        env.push(("HACK_RUNTIME_BACKEND".into(), backend.into()));
+        env.push(("PATH".into(), path.clone()));
     }
     plan
 }
@@ -383,9 +390,10 @@ impl HackApp {
                     hack_desktop_core::source::NATIVE_LOGS_NOTE
                 ))
                 .map_err(io),
-                (Some(hack), Some((root, false, branch))) => TerminalCore::session(with_backend(
+                (Some(hack), Some((root, false, branch))) => TerminalCore::session(for_cli(
                     logs_plan(hack, root, branch.as_deref(), d.state.is_active())?,
                     false,
+                    std::env::var_os("PATH").as_deref(),
                 ))
                 .map_err(io),
                 // Fixtures: the fixture's log lines, as a service prints them.
@@ -402,9 +410,10 @@ impl HackApp {
                 let (Some(hack), Some((root, native, branch))) = (&hack, &root) else {
                     return Err("A shell in a service needs the hack CLI.".into());
                 };
-                TerminalCore::session(with_backend(
+                TerminalCore::session(for_cli(
                     container_plan(hack, root, branch.as_deref(), service)?,
                     *native,
+                    std::env::var_os("PATH").as_deref(),
                 ))
                 .map_err(io)
             }
@@ -429,9 +438,10 @@ impl HackApp {
                 let (Some(hack), Some((root, native, _))) = (&hack, &root) else {
                     return Err("A host shell with env needs the hack CLI.".into());
                 };
-                TerminalCore::session(with_backend(
+                TerminalCore::session(for_cli(
                     host_env_plan(hack, root, overlay, scope, *is_default)?,
                     *native,
+                    std::env::var_os("PATH").as_deref(),
                 ))
                 .map_err(io)
             }
@@ -993,13 +1003,17 @@ impl HackApp {
                                 .id("term-find")
                                 .cursor_pointer()
                                 .child(icon(Glyph::Search, size::ICON, t.tab_fg))
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     if let Some(p) = this
                                         .model
                                         .selected_key()
                                         .and_then(|k| this.panels.by_key.get(&k))
                                     {
-                                        p.sessions.clone().update(cx, |s, cx| s.find(cx));
+                                        // Find takes its typing from the
+                                        // terminal's keys: focus it too.
+                                        p.sessions
+                                            .clone()
+                                            .update(cx, |s, cx| s.find_focused(window, cx));
                                     }
                                 })),
                         )
@@ -1346,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn every_cli_tab_selects_the_instance_backend_and_nothing_else() {
+    fn every_cli_tab_selects_the_instance_backend_and_an_absolute_path_and_nothing_else() {
         let hack = Path::new("/bin/hack");
         let root = Path::new("/work/p");
         for native in [false, true] {
@@ -1356,16 +1370,61 @@ mod tests {
                 logs_plan(hack, root, None, true).unwrap(),
                 host_env_plan(hack, root, "staging", "api", false).unwrap(),
             ] {
-                for env in env_of(&with_backend(plan, native)) {
+                let path = std::ffi::OsStr::new(".:/usr/bin::rel/bin:/opt/x/bin");
+                for env in env_of(&for_cli(plan, native, Some(path))) {
                     let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
                     assert_eq!(
                         names,
-                        ["TERM", "COLORTERM", "TERM_PROGRAM", "HACK_RUNTIME_BACKEND"]
+                        [
+                            "TERM",
+                            "COLORTERM",
+                            "TERM_PROGRAM",
+                            "HACK_RUNTIME_BACKEND",
+                            "PATH"
+                        ]
                     );
                     assert_eq!(env[3].1, backend, "every attempt, bash and sh alike");
+                    assert_eq!(
+                        env[4].1, "/usr/bin:/opt/x/bin",
+                        "empty and relative entries never reach the CLI"
+                    );
                 }
             }
         }
+    }
+
+    // A headless app needs GPUI's test support (the `screenshots` feature).
+    #[cfg(feature = "screenshots")]
+    #[test]
+    fn the_search_key_reaches_a_focused_terminal_off_macos() {
+        use gpui_kit::{KeyContext, Keystroke};
+        let mut cx = gpui_kit::HeadlessAppContext::with_platform(
+            std::sync::Arc::new(gpui_kit::NoopTextSystem::new()),
+            std::sync::Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(crate::view::bind_keys);
+        let keymap = cx.update(|cx| cx.key_bindings());
+        let key = Keystroke::parse(crate::view::SEARCH_KEY).expect("search key");
+        let window = KeyContext::parse("HackWindow").expect("context");
+        let terminal = KeyContext::parse("Terminal").expect("context");
+        let searches = |stack: &[KeyContext]| {
+            keymap
+                .borrow()
+                .bindings_for_input(std::slice::from_ref(&key), stack)
+                .0
+                .iter()
+                .any(|b| b.action().partial_eq(&crate::view::FocusSearch))
+        };
+        assert!(
+            searches(std::slice::from_ref(&window)),
+            "search outside a terminal"
+        );
+        assert_eq!(
+            searches(&[window, terminal]),
+            cfg!(target_os = "macos"),
+            "off macOS, Ctrl-K in a terminal goes to the shell"
+        );
     }
 
     #[test]

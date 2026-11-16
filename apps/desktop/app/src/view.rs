@@ -46,16 +46,23 @@ gpui_kit::actions!(hack_desktop, [FocusSearch]);
 
 /// The search shortcut: Cmd-K on macOS, Ctrl-K elsewhere.
 #[cfg(target_os = "macos")]
-const SEARCH_KEY: &str = "cmd-k";
+pub(crate) const SEARCH_KEY: &str = "cmd-k";
 #[cfg(not(target_os = "macos"))]
-const SEARCH_KEY: &str = "ctrl-k";
+pub(crate) const SEARCH_KEY: &str = "ctrl-k";
+/// Where the search shortcut applies. Ctrl-K belongs to the shell in a
+/// terminal (readline: delete to the end of the line), so off macOS it
+/// applies everywhere but a focused terminal. Cmd-K never reaches a shell.
+#[cfg(target_os = "macos")]
+const SEARCH_CONTEXT: Option<&str> = None;
+#[cfg(not(target_os = "macos"))]
+const SEARCH_CONTEXT: Option<&str> = Some("!Terminal");
 
 /// Why the always-on switch is disabled.
 const ALWAYS_ON_REASON: &str = "Always on needs the CLI's autostart commands (HACK-2213)";
 
 /// The window's key bindings.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(SEARCH_KEY, FocusSearch, None)]);
+    cx.bind_keys([KeyBinding::new(SEARCH_KEY, FocusSearch, SEARCH_CONTEXT)]);
     #[cfg(feature = "terminal")]
     bind_terminal_keys(cx);
 }

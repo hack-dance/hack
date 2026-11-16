@@ -461,6 +461,14 @@ impl TerminalPanel {
             view.update(cx, |v, cx| v.open_find(cx));
         }
     }
+
+    /// Open find on the active tab and focus that terminal, which takes
+    /// the find query's typing (a click on a find button, while focus may
+    /// be in another input).
+    pub fn find_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find(cx);
+        self.focus_active(window, cx);
+    }
 }
 
 impl Focusable for TerminalPanel {

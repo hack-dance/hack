@@ -159,6 +159,7 @@ fn checkout_dir(branch: &str) -> String {
 /// A running branch instance of storefront with web and api routes.
 fn running_branch(branch: &str) -> BranchRuntime {
     BranchRuntime {
+        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
@@ -189,6 +190,7 @@ fn running_branch(branch: &str) -> BranchRuntime {
 /// A branch instance whose api exited non-zero.
 fn failed_branch(branch: &str) -> BranchRuntime {
     BranchRuntime {
+        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),
@@ -222,6 +224,7 @@ fn subdomain_branch(branch: &str) -> BranchRuntime {
         )
     };
     BranchRuntime {
+        owner: None,
         branch: branch.into(),
         runtime: ProjectRuntime {
             project: Some(format!("storefront--{branch}")),

@@ -105,6 +105,24 @@ pub struct Worktree {
     pub branch: Option<String>,
 }
 
+/// A path without a trailing slash ("/" stays "/").
+fn trim_path(p: &str) -> String {
+    let t = p.trim_end_matches('/');
+    if t.is_empty() {
+        "/".into()
+    } else {
+        t.to_owned()
+    }
+}
+
+/// Absolute, with no `.` or `..` component and no NUL.
+fn plain_path(p: &str) -> bool {
+    p.starts_with('/')
+        && !p
+            .split('/')
+            .any(|part| part == "." || part == ".." || part.contains('\0'))
+}
+
 /// The project folder names the CLI creates inside a checkout.
 const PROJECT_DIR_NAMES: [&str; 2] = [".hack", ".dev"];
 
@@ -116,14 +134,13 @@ impl ProjectRow {
     /// it cannot be established: actions must then not run against a guess.
     #[must_use]
     pub fn owning_checkout(&self, runtime: &ProjectRuntime) -> Option<String> {
-        let trim = |p: &str| -> String {
-            let t = p.trim_end_matches('/');
-            if t.is_empty() {
-                "/".into()
-            } else {
-                t.to_owned()
-            }
-        };
+        self.owner_by(runtime, &|p| trim_path(p))
+    }
+
+    /// [`Self::owning_checkout`] comparing the forms `canon` gives (the
+    /// live source passes filesystem canonicalization, as the CLI's
+    /// `canonicalPath` does). Returns the root as registered.
+    fn owner_by(&self, runtime: &ProjectRuntime, canon: &dyn Fn(&str) -> String) -> Option<String> {
         // Every container must carry ownership evidence (as the CLI's
         // `assertSingleRuntimeDirectory` requires): one without a working
         // directory makes the owner unknown, not ignorable.
@@ -131,35 +148,51 @@ impl ProjectRow {
         for c in runtime.services.iter().flat_map(|s| &s.containers) {
             dirs.push(c.working_dir.as_ref()?);
         }
-        let first = trim(dirs.first()?);
-        if dirs.iter().any(|d| trim(d) != first) {
+        let first = trim_path(dirs.first()?);
+        if dirs.iter().any(|d| trim_path(d) != first) {
             return None;
         }
-        let plain = |p: &str| {
-            p.starts_with('/')
-                && !p
-                    .split('/')
-                    .any(|part| part == "." || part == ".." || part.contains('\0'))
-        };
-        if !plain(&first) {
+        if !plain_path(&first) {
             return None;
         }
+        let dir = canon(&first);
         let roots = self
             .repo_root
             .iter()
             .chain(self.worktrees.iter().filter_map(|w| w.path.as_ref()))
-            .map(|r| trim(r))
-            .filter(|r| plain(r));
+            .map(|r| trim_path(r))
+            .filter(|r| plain_path(r));
         for root in roots {
-            let matches = first == root
+            let matches = dir == canon(&root)
                 || PROJECT_DIR_NAMES
                     .iter()
-                    .any(|name| first == format!("{root}/{name}"));
+                    .any(|name| dir == canon(&format!("{root}/{name}")));
             if matches {
                 return Some(root);
             }
         }
         None
+    }
+
+    /// Resolve each branch instance's owning checkout comparing canonical
+    /// paths, so a checkout reached through a link (`/var` and
+    /// `/private/var` on macOS, or any symlinked folder) still matches.
+    /// Touches the filesystem: call it off the UI thread (the live source
+    /// does, while reading the snapshot). A path that cannot be resolved is
+    /// compared as written.
+    pub fn resolve_branch_owners(&mut self) {
+        let canon = |p: &str| {
+            std::fs::canonicalize(p)
+                .map_or_else(|_| trim_path(p), |c| trim_path(&c.to_string_lossy()))
+        };
+        let owners: Vec<Option<String>> = self
+            .branch_runtime
+            .iter()
+            .map(|b| self.owner_by(&b.runtime, &canon))
+            .collect();
+        for (b, owner) in self.branch_runtime.iter_mut().zip(owners) {
+            b.owner = Some(owner);
+        }
     }
 }
 
@@ -173,6 +206,11 @@ pub struct BranchRuntime {
     pub branch: String,
     #[serde(deserialize_with = "null_default")]
     pub runtime: ProjectRuntime,
+    /// The owning checkout resolved by [`ProjectRow::resolve_branch_owners`]
+    /// (`Some(None)`: none). `None` until resolved; then the derived row
+    /// falls back to comparing the paths as written.
+    #[serde(skip)]
+    pub owner: Option<Option<String>>,
 }
 
 /// Project views refuse canonical native projects with this code.
@@ -237,7 +275,10 @@ impl ProjectRow {
             dev_host,
             // The checkout that started this instance, which may be a
             // linked worktree, never a guess: `None` disables its actions.
-            repo_root: self.owning_checkout(&br.runtime),
+            repo_root: br
+                .owner
+                .clone()
+                .unwrap_or_else(|| self.owning_checkout(&br.runtime)),
             status: status.into(),
             runtime_status: Some(status.into()),
             kind: self.kind.clone(),
@@ -684,15 +725,69 @@ mod tests {
         }
     }
 
+    /// A checkout reached through a link (macOS `/var` vs `/private/var`,
+    /// or any symlinked folder) still owns its instance, either way round,
+    /// once the live source resolves owners by canonical path. Without that
+    /// step the paths are compared as written and nothing matches (closed).
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_reached_through_a_link_still_owns_its_instance() {
+        let tmp = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("hack-desktop-owner-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let real = tmp.join("real-checkout");
+        std::fs::create_dir_all(real.join(".hack")).unwrap();
+        let link = tmp.join("linked-checkout");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (real, link) = (
+            real.to_string_lossy().into_owned(),
+            link.to_string_lossy().into_owned(),
+        );
+        // Registered through the link, reported by Compose by its real path,
+        // and the reverse.
+        for (registered, reported) in [(&link, &real), (&real, &link)] {
+            let mut p = ProjectRow {
+                name: "storefront".into(),
+                repo_root: Some("/work/storefront".into()),
+                worktrees: vec![Worktree {
+                    path: Some(registered.clone()),
+                    branch: Some("b".into()),
+                }],
+                ..ProjectRow::default()
+            };
+            let dir = format!("{reported}/.hack");
+            p.branch_runtime = vec![BranchRuntime {
+                owner: None,
+                branch: "b".into(),
+                runtime: runtime_in(&[Some(dir.as_str()), Some(dir.as_str())]),
+            }];
+            assert_eq!(
+                p.instance("b").unwrap().repo_root,
+                None,
+                "as written: closed"
+            );
+            p.resolve_branch_owners();
+            assert_eq!(
+                p.instance("b").unwrap().repo_root.as_deref(),
+                Some(registered.as_str()),
+                "registered {registered}, reported {reported}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn a_derived_instance_never_borrows_the_primary_checkout() {
         let mut p = registered();
         p.branch_runtime = vec![
             BranchRuntime {
+                owner: None,
                 branch: "feature".into(),
                 runtime: runtime_in(&[Some("/work/wt/feature/.hack")]),
             },
             BranchRuntime {
+                owner: None,
                 branch: "orphan".into(),
                 runtime: runtime_in(&[Some("/elsewhere/.hack")]),
             },

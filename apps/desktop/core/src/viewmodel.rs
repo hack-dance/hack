@@ -725,6 +725,7 @@ mod tests {
             .find(|p| p.name == "storefront")
             .unwrap();
         row.branch_runtime.push(BranchRuntime {
+            owner: None,
             branch: "elsewhere".into(),
             runtime: ProjectRuntime {
                 project: Some("storefront--elsewhere".into()),

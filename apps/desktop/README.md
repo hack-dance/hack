@@ -114,8 +114,9 @@ The window follows [DESIGN-V1.md](DESIGN-V1.md).
   `<branch>.<dev host>`, the host `hack open --branch` opens, never a service
   route. Selecting one runs Start, Stop, Restart, Open and Logs with
   `--branch <name>` in the checkout that started it (a registered linked
-  worktree or the main checkout, from Compose's `working_dir`); when that
-  checkout is not one the project registered, the app offers no actions. A project
+  worktree or the main checkout, from Compose's `working_dir`, compared as
+  canonical paths so a checkout reached through a link still matches); when
+  that checkout is not one the project registered, the app offers no actions. A project
   whose only running instances are branches is in the Running group. Native
   branch instances are not in that read yet (DESIGN.md R19).
 - **Daemon match.** Equal version strings match. Otherwise the core asks the

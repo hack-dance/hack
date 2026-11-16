@@ -1135,6 +1135,10 @@ impl Source for LiveSource {
                 }
             },
         })?;
+        // Which checkout owns each branch instance, by canonical paths.
+        for row in &mut projects.projects {
+            row.resolve_branch_owners();
+        }
         // Project views do not read native projects; ask native ps for each.
         let native = self.runner_for(true);
         for row in projects.projects.iter_mut().filter(|r| r.is_native()) {
@@ -3737,7 +3741,9 @@ esac
 
     #[test]
     fn branch_is_passed_to_logs_and_actions() {
-        let b = base("branch-argv");
+        // Canonical once: on macOS the temp directory is reached through a
+        // link (/var -> /private/var) and the runner passes canonical roots.
+        let b = std::fs::canonicalize(base("branch-argv")).expect("canonical test root");
         let hack = argv_hack(&b);
         let src = LiveSource::new(fixture_runner(&hack), None);
         src.log_tail(&b, false, Some("feature-search"), 50).unwrap();

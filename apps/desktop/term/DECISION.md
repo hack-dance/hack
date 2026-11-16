@@ -426,7 +426,7 @@ reaches the terminal.
 | `CloseTab` | panel | Closes the active tab and ends its session |
 | `NextTab` / `PrevTab` | panel | Move through the tabs, wrapping |
 | `ToggleMaximize` | panel | Sets `is_maximized()`; the app's layout gives it the room |
-| `Copy` / `Paste` | view | Selection to the clipboard; clipboard into the program (bracketed when it asked) |
+| `Copy` / `Paste` | view | Selection to the clipboard; clipboard into the program (bracketed when it asked), or into the find query while find is open (one line, never sent to the program) |
 | `Find` | view (and panel, for the active tab) | Opens find |
 | `FindOlder` / `FindNewer` / `CloseFind` | view | Step through matches; close find |
 | `ScrollPageUp` / `ScrollPageDown` / `ScrollToTop` / `ScrollToBottom` / `ToggleFollow` | view | Scrollback and follow |

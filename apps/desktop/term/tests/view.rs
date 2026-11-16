@@ -383,6 +383,39 @@ fn quitting_right_after_closing_an_ended_tab_ends_what_its_session_left_running(
     rec.done();
 }
 
+#[test]
+fn paste_with_find_open_goes_into_the_query_and_never_reaches_the_program() {
+    let home = TempHome::new();
+    let mut cx = app();
+    let opts = sh("read line; echo \"got=[$line]\"; exec sleep 120", &home);
+    let (window, view) = open(&mut cx, move |cx| {
+        TerminalView::new_pty(&opts, cx).expect("spawn")
+    });
+    focus(&mut cx, window, &view);
+    let dispatch = |cx: &mut HeadlessAppContext, action: Box<dyn gpui_kit::Action>| {
+        cx.update_window(window, |_, window, cx| window.dispatch_action(action, cx))
+            .expect("dispatch");
+    };
+
+    dispatch(&mut cx, Box::new(Find));
+    // A newline here would run whatever the program has read so far.
+    cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("needle\nrm -x\t".into())));
+    dispatch(&mut cx, Box::new(Paste));
+    assert_eq!(
+        cx.update(|cx| view.read(cx).find_query().to_owned()),
+        "needle rm -x ",
+        "the paste is the query, on one line"
+    );
+
+    // The program got nothing: the first line it reads is the next paste,
+    // made after find is closed.
+    dispatch(&mut cx, Box::new(CloseFind));
+    cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("after\n".into())));
+    dispatch(&mut cx, Box::new(Paste));
+    let text = settle_until(&mut cx, &view, |t| t.contains("got=["));
+    assert!(text.contains("got=[after]"), "{text:?}");
+}
+
 /// Focus the terminal and draw, so key events and actions are routed to it.
 fn focus(cx: &mut HeadlessAppContext, window: AnyWindowHandle, view: &Entity<TerminalView>) {
     cx.update_window(window, |_, window, cx| {

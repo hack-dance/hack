@@ -303,11 +303,35 @@ impl TerminalView {
         }
     }
 
-    /// Paste the clipboard's text into the PTY.
+    /// Paste the clipboard's text: into the find field while it is open,
+    /// otherwise into the PTY.
     pub fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
+            return;
+        };
+        if self.search_open {
+            self.paste_into_find(&text, cx);
+        } else {
             self.paste_text(&text, cx);
         }
+    }
+
+    /// Add pasted text to the find query. The field is one line: line
+    /// breaks and other control characters become spaces. Nothing reaches
+    /// the program.
+    fn paste_into_find(&mut self, text: &str, cx: &mut Context<Self>) {
+        let line: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        self.query.push_str(&line);
+        self.search = self.core.emulator().search(Some(&self.query));
+        cx.notify();
+    }
+
+    /// The text in the find field.
+    pub fn find_query(&self) -> &str {
+        &self.query
     }
 
     /// Scroll one screen toward older (`up`) or newer output.

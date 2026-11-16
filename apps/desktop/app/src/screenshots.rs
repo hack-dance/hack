@@ -45,7 +45,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                 show: false,
                 ..crate::window_options()
             };
-            let (handle, _) = cx
+            let (handle, _app) = cx
                 .update(|cx| {
                     gpui_kit::open_window(opts, cx, |window, cx| {
                         cx.new(|cx| {
@@ -77,6 +77,15 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                 .expect("open offscreen window");
             cx.update_window(handle, |_, window, cx| window.render_frame(cx))
                 .expect("render");
+            // The terminal panel's tabs start on the first frame; let their
+            // output arrive, then draw again.
+            #[cfg(feature = "terminal")]
+            cx.update_window(handle, |_, window, cx| {
+                _app.update(cx, |app, cx| app.settle_terminals(cx));
+                window.render_frame(cx);
+                window.render_frame(cx);
+            })
+            .expect("settle");
             let img = cx
                 .capture_screenshot(handle)
                 .expect("offscreen rendering must be available");

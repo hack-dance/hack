@@ -16,6 +16,8 @@ mod doctor_view;
 mod logs_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+#[cfg(feature = "terminal")]
+mod terminal;
 mod view;
 
 use std::sync::Arc;

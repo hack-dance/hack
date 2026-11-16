@@ -79,6 +79,16 @@ impl<T> PanelState<T> {
         self.active
     }
 
+    /// Put a tab at `index` (clamped to the end), activate it and show the
+    /// panel.
+    pub fn insert(&mut self, index: usize, tab: T) -> usize {
+        let index = index.min(self.tabs.len());
+        self.tabs.insert(index, tab);
+        self.active = index;
+        self.visible = true;
+        index
+    }
+
     pub fn activate(&mut self, index: usize) -> bool {
         if index >= self.tabs.len() {
             return false;
@@ -227,6 +237,11 @@ impl TerminalPanel {
         self.state.active()
     }
 
+    /// The tab at `index`.
+    pub fn tab(&self, index: usize) -> Option<&Entity<TerminalView>> {
+        self.state.tabs().get(index)
+    }
+
     /// Each tab's kind, in order: what the labels and badges are made from.
     pub fn kinds(&self, cx: &App) -> Vec<SessionKind> {
         self.state
@@ -289,6 +304,23 @@ impl TerminalPanel {
             self.focus_active(window, cx);
             self.changed(cx);
         }
+    }
+
+    /// Replace the tab at `index` with `view`, ending the old tab's session
+    /// as [`Self::close`] does (for example a log stream that ended and is
+    /// started again).
+    pub fn replace(
+        &mut self,
+        index: usize,
+        view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close(index, window, cx);
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        self.state.insert(index, view);
+        self.focus_active(window, cx);
+        self.changed(cx);
     }
 
     /// Close the active tab and end its session.
@@ -388,7 +420,7 @@ impl Render for TerminalPanel {
                 .id("terminal-panel")
                 .track_focus(&self.focus)
                 .size_full()
-                .children(self.state.active().map(|view| view.clone()));
+                .children(self.state.active().cloned());
         }
         let root = div()
             .id("terminal-panel")
@@ -505,6 +537,15 @@ mod tests {
         assert!(p.is_visible());
         assert_eq!((p.active_index(), p.active()), (Some(1), Some(&"api · sh")));
         assert_eq!(p.tabs(), ["logs", "api · sh"]);
+    }
+
+    #[test]
+    fn inserting_puts_the_tab_in_place_and_activates_it() {
+        let mut p = panel(&["a", "c"]);
+        assert_eq!(p.insert(1, "b"), 1);
+        assert_eq!(p.tabs(), ["a", "b", "c"]);
+        assert_eq!(p.active(), Some(&"b"));
+        assert_eq!(p.insert(9, "d"), 3, "clamped to the end");
     }
 
     #[test]

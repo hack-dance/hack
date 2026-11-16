@@ -187,13 +187,16 @@ fn exact(input: &mut (impl Read + AsRawFd), bytes: &mut [u8], deadline: Instant)
 }
 
 pub fn write(output: &mut (impl Write + AsRawFd), value: &impl Serialize) -> Result<()> {
+    let fd = output.as_raw_fd();
+    // A reply attempt, even one refused below as oversized, suppresses the
+    // `refused` fallback in `supervisor::main`: that fallback means nothing was
+    // done, which a request that already acted cannot claim.
+    if fd == libc::STDOUT_FILENO {
+        STDOUT_STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut bytes = serde_json::to_vec(value).map_err(|_| refused())?;
     if bytes.is_empty() || bytes.len() > LIMIT {
         return Err(refused());
-    }
-    let fd = output.as_raw_fd();
-    if fd == libc::STDOUT_FILENO {
-        STDOUT_STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     // SAFETY: fcntl borrows this live, exclusively used protocol descriptor.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -265,6 +268,16 @@ fn send(fd: i32, bytes: &[u8], deadline: Instant) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// An oversized reply is still a reply attempt: `supervisor::main` must not
+    /// replace it with the `refused` fallback, which means nothing was done.
+    /// Nothing is written, because the size check refuses before any byte.
+    #[test]
+    fn oversized_stdout_reply_counts_as_started_and_writes_nothing() {
+        let oversized = "x".repeat(super::LIMIT + 1);
+        assert!(super::write(&mut std::io::stdout(), &oversized).is_err());
+        assert!(super::stdout_started());
+    }
+
     #[test]
     fn inherited_environment_uses_exec_constraints_not_shell_identifiers() {
         let mut process: super::Process = serde_json::from_value(serde_json::json!({

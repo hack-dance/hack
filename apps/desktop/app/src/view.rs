@@ -771,27 +771,24 @@ impl HackApp {
             .child(machine)
     }
 
-    /// Routing and DNS from Doctor's routing checks in the last snapshot
-    /// (worst wins). `None` until Doctor has reported one: a ring.
+    /// Routing and DNS: from the last completed Doctor run when there is
+    /// one, else from Doctor checks in the snapshot. `None` (a ring) until
+    /// either has reported.
     fn routing_status(&self) -> Option<Status> {
+        if let DoctorStateView::Loaded(v) = &self.doctor.result {
+            return routing_from_doctor(v);
+        }
         let checks = &self.model.snapshot()?.doctor.as_ref()?.checks;
         hack_desktop_ui::window::routing_status(
             checks.iter().map(|c| (c.id.as_str(), c.status.as_str())),
         )
     }
 
-    /// The Doctor row's trailing mark: a count of findings, a green dot when
-    /// clean, a ring while nothing has run. The full Doctor run (opened from
-    /// this row) wins over the snapshot's machine checks.
+    /// The Doctor row's trailing mark (see [`doctor_mark`]).
     fn doctor_trailing(&self, list: &ListView, ui: &Ui) -> AnyElement {
-        let (known, count) = match &self.doctor.result {
-            DoctorStateView::Loaded(v) => (true, v.attention_count()),
-            _ => (list.doctor_known, list.doctor_count),
-        };
-        match (known, count) {
-            (true, n) if n > 0 => count_pill(n, ui).into_any_element(),
-            (true, _) => dot(Status::Running, ui).into_any_element(),
-            (false, _) => dot(Status::Unknown, ui).into_any_element(),
+        match doctor_mark(&self.doctor, list) {
+            DoctorMark::Count(n) => count_pill(n, ui).into_any_element(),
+            DoctorMark::Dot(s) => dot(s, ui).into_any_element(),
         }
     }
 
@@ -1423,5 +1420,140 @@ impl Render for HackApp {
                 list.cli_version.clone().map(|v| format!("hack {v}")),
                 &ui,
             ))
+    }
+}
+
+/// What the sidebar's Doctor row shows at its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorMark {
+    /// Findings from a current run.
+    Count(usize),
+    Dot(Status),
+}
+
+/// The Doctor row's mark. A completed run decides it: its findings as a
+/// count, or a dot in the run's tone, which is green only when every run
+/// finished clean and nothing changed since (`DoctorPane::tone`). Without a
+/// run, the snapshot's machine checks; a ring while nothing has reported.
+fn doctor_mark(pane: &DoctorPane, list: &ListView) -> DoctorMark {
+    use hack_desktop_core::state::Tone;
+    let tone = |t: Tone| match t {
+        Tone::Ok => Status::Running,
+        Tone::Warn | Tone::Busy => Status::Degraded,
+        Tone::Error => Status::Failed,
+        Tone::Idle => Status::Unknown,
+    };
+    match &pane.result {
+        DoctorStateView::Loaded(v) if !pane.stale && v.attention_count() > 0 => {
+            DoctorMark::Count(v.attention_count())
+        }
+        DoctorStateView::Loaded(_) | DoctorStateView::Error(_) => {
+            DoctorMark::Dot(tone(pane.tone()))
+        }
+        DoctorStateView::NeverRun => match (list.doctor_known, list.doctor_count) {
+            (true, n) if n > 0 => DoctorMark::Count(n),
+            (true, _) => DoctorMark::Dot(Status::Running),
+            (false, _) => DoctorMark::Dot(Status::Unknown),
+        },
+    }
+}
+
+/// Routing and DNS from a completed Doctor run: the worst finding in its
+/// Routing and DNS or Certificates areas; green when the machine was
+/// checked and none was found; `None` when the machine was not checked.
+fn routing_from_doctor(v: &hack_desktop_core::doctor::DoctorView) -> Option<Status> {
+    use hack_desktop_core::doctor::{Area, Severity};
+    let rank = |s: Status| match s {
+        Status::Failed => 3,
+        Status::Degraded => 2,
+        _ => 1,
+    };
+    let worst = v
+        .groups
+        .iter()
+        .filter(|(area, _)| matches!(area, Area::RoutingDns | Area::Certificates))
+        .flat_map(|(_, cards)| cards)
+        .map(|c| match c.severity {
+            Severity::Error => Status::Failed,
+            Severity::Warn => Status::Degraded,
+            Severity::CouldNotCheck => Status::Unknown,
+        })
+        .max_by_key(|s| rank(*s));
+    worst.or_else(|| v.machine_checked.then_some(Status::Running))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hack_desktop_core::doctor::aggregate;
+    use hack_desktop_core::fixtures::Fixture;
+    use hack_desktop_core::source::FixtureSource;
+
+    fn loaded(f: Fixture) -> DoctorPane {
+        let source = FixtureSource(f);
+        let targets = source
+            .snapshot()
+            .ok()
+            .map(|s| DoctorTarget::from_projects(&s.projects))
+            .unwrap_or_default();
+        let keys = target_keys(&targets);
+        let mut pane = DoctorPane::default();
+        let generation = pane.begin(Some(&keys));
+        pane.finish(
+            generation,
+            &source.doctor_runs(&targets),
+            Some(&keys),
+            Instant::now(),
+        );
+        pane
+    }
+
+    fn list(f: Fixture) -> ListView {
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(FixtureSource(f).snapshot()));
+        m.list()
+    }
+
+    #[test]
+    fn routing_follows_the_completed_doctor_run() {
+        let DoctorStateView::Loaded(v) = &loaded(Fixture::Doctor).result else {
+            panic!("doctor fixture loads");
+        };
+        assert_eq!(
+            routing_from_doctor(v),
+            Some(Status::Failed),
+            "resolver error"
+        );
+        let DoctorStateView::Loaded(v) = &loaded(Fixture::DoctorClean).result else {
+            panic!("doctor-clean fixture loads");
+        };
+        assert_eq!(routing_from_doctor(v), Some(Status::Running));
+        let empty = aggregate(&[]);
+        assert_eq!(routing_from_doctor(&empty), None, "machine not checked");
+    }
+
+    #[test]
+    fn the_doctor_row_is_green_only_for_a_clean_current_run() {
+        let clean = loaded(Fixture::DoctorClean);
+        let l = list(Fixture::DoctorClean);
+        assert_eq!(doctor_mark(&clean, &l), DoctorMark::Dot(Status::Running));
+        // A project appears after the run: the result is stale, not green.
+        let mut stale = clean;
+        stale.targets_seen(Some(&[]));
+        assert!(stale.stale);
+        assert_ne!(doctor_mark(&stale, &l), DoctorMark::Dot(Status::Running));
+        // Findings: a count.
+        let found = loaded(Fixture::Doctor);
+        assert!(
+            matches!(doctor_mark(&found, &list(Fixture::Doctor)), DoctorMark::Count(n) if n > 0)
+        );
+        // Never run: the snapshot decides; nothing reported is a ring.
+        let never = DoctorPane::default();
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Err(SourceError::Pending)));
+        assert_eq!(
+            doctor_mark(&never, &m.list()),
+            DoctorMark::Dot(Status::Unknown)
+        );
     }
 }

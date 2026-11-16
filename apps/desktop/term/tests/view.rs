@@ -522,3 +522,49 @@ fn the_crate_binds_no_keys_and_copy_paste_and_find_are_actions() {
     press(&mut cx, window, "ctrl-shift-f");
     assert!(find_open(&mut cx, &view), "bound by the app, it opens find");
 }
+
+#[test]
+fn a_closed_tabs_session_leader_is_still_reported_by_the_panel() {
+    let home = TempHome::new();
+    let mut cx = app();
+    let options = WindowOptions {
+        focus: false,
+        show: false,
+        ..WindowOptions::default()
+    };
+    let (window, panel) = cx
+        .update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(TerminalPanel::new)))
+        .expect("open a headless window");
+    let opts = sh("echo \"sh=$$\"; exec sleep 120", &home);
+    let view = cx.update(|cx| cx.new(|cx| TerminalView::new_pty(&opts, cx).expect("spawn")));
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.add_tab(view.clone(), window, cx));
+    })
+    .expect("add the tab");
+    let text = settle_until(&mut cx, &view, |t| t.contains("sh="));
+    let leader = tagged(&text, "sh").expect("sh");
+    let mut rec = Recorded::session(leader.unsigned_abs());
+    let open: Vec<u32> = cx.update(|cx| {
+        panel
+            .read(cx)
+            .leaders(cx)
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect()
+    });
+    assert_eq!(open, [leader.unsigned_abs()]);
+
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.close_active(window, cx));
+    })
+    .expect("close the tab");
+
+    let after = cx.update(|cx| panel.read(cx).leaders(cx));
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].0, leader.unsigned_abs());
+    assert!(
+        wait_gone(&[leader]).is_empty(),
+        "the closed tab's shell outlived it"
+    );
+    rec.done();
+}

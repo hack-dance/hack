@@ -176,6 +176,9 @@ pub struct TerminalPanel {
     closing: Vec<PendingTeardown>,
     /// Processes that outlived tabs closed so far.
     left_running: usize,
+    /// The session leaders of tabs closed or replaced so far, with each
+    /// tab's label. See [`Self::leaders`].
+    retired_leaders: Vec<(u32, String)>,
     /// Embedded in a host that draws its own chrome: render only the
     /// active terminal, and leave panel actions to the host.
     embedded: bool,
@@ -210,6 +213,7 @@ impl TerminalPanel {
             focus: cx.focus_handle(),
             closing: Vec::new(),
             left_running: 0,
+            retired_leaders: Vec::new(),
             embedded: false,
         }
     }
@@ -259,6 +263,20 @@ impl TerminalPanel {
     }
 
     /// How many processes outlived tabs closed in this panel.
+    /// Every session leader any tab of this panel has started, with the
+    /// tab's label: tabs closed or replaced, then the open ones. Each
+    /// leader is also its session's id, so a caller can account for what
+    /// those sessions left running.
+    pub fn leaders(&self, cx: &App) -> Vec<(u32, String)> {
+        let mut out = self.retired_leaders.clone();
+        for view in self.state.tabs() {
+            let v = view.read(cx);
+            let label = v.kind().label();
+            out.extend(v.leaders().iter().map(|&leader| (leader, label.clone())));
+        }
+        out
+    }
+
     pub fn left_running(&self) -> usize {
         self.left_running
     }
@@ -371,6 +389,13 @@ impl TerminalPanel {
         // End the session now, on a reaper thread, and keep the handle so
         // anything that could not be ended is reported.
         let (shutdown, retired) = view.update(cx, |v, _| (v.take_shutdown(), v.take_retired()));
+        let label = view.read(cx).kind().label();
+        self.retired_leaders.extend(
+            view.read(cx)
+                .leaders()
+                .iter()
+                .map(|&leader| (leader, label.clone())),
+        );
         // The view may be dropped now, and its quit handler with it, so the
         // panel keeps every teardown it had: the one starting here and any
         // the session started by itself.

@@ -71,10 +71,71 @@ impl std::fmt::Display for RunError {
 pub struct CliRunner {
     program: PathBuf,
     env: Vec<(String, String)>,
+    cwd: Option<PathBuf>,
     /// `on_path` found no executable: spawn reports `NotFound`.
     missing: bool,
     /// How long a timed-out command gets after SIGTERM before SIGKILL.
     term_grace: Duration,
+    /// Remove inherited variables that make interpreters load code.
+    strip_startup: bool,
+}
+
+/// Inherited variables that make a shell or language runtime load and run
+/// code at startup, or preload libraries. Doctor's tool runs remove them.
+pub const INTERPRETER_STARTUP_VARS: &[&str] = &[
+    "BASH_ENV",
+    "ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PS4",
+    "ZDOTDIR",
+    "PERL5OPT",
+    "PERL5LIB",
+    "PERLLIB",
+    // Debugger code, used by a script started with a bare `-d`.
+    "PERL5DB",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    // Selects the user site directory, whose `usercustomize` Python imports
+    // at startup. Doctor runs also set `PYTHONNOUSERSITE=1`.
+    "PYTHONUSERBASE",
+    // Library root, executable and virtual-environment selection: each can
+    // move where Python imports its standard library and `site` from.
+    "PYTHONPLATLIBDIR",
+    "PYTHONEXECUTABLE",
+    "__PYVENV_LAUNCHER__",
+    "RUBYOPT",
+    "RUBYLIB",
+    // A Gemfile RubyGems evaluates at start-up, and the gem repositories
+    // and Bundler Gemfile a Ruby tool loads gems from.
+    "RUBYGEMS_GEMDEPS",
+    "GEM_HOME",
+    "GEM_PATH",
+    "BUNDLE_GEMFILE",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    // The Hack CLI is a Bun-compiled binary: these make its runtime preload
+    // code (the same set the CLI removes before re-executing itself).
+    "BUN_OPTIONS",
+    "BUN_BE_BUN",
+];
+
+/// Every variable with one of these prefixes is removed too: all dynamic
+/// loader controls (`LD_*`, `DYLD_*`, including versioned and fallback search
+/// paths), exported Bash functions, and Bun runtime configuration and
+/// inspector settings.
+pub const INTERPRETER_STARTUP_PREFIXES: &[&str] =
+    &["LD_", "DYLD_", "BASH_FUNC_", "BUN_CONFIG_", "BUN_INSPECT"];
+
+fn is_startup_var(name: &std::ffi::OsStr) -> bool {
+    let bytes = name.as_encoded_bytes();
+    INTERPRETER_STARTUP_VARS
+        .iter()
+        .any(|v| bytes == v.as_bytes())
+        || INTERPRETER_STARTUP_PREFIXES
+            .iter()
+            .any(|p| bytes.starts_with(p.as_bytes()))
 }
 
 /// Default grace after SIGTERM. The CLI forwards SIGTERM to the detached
@@ -89,8 +150,10 @@ impl CliRunner {
         Self {
             program: program.into(),
             env: vec![("HACK_NO_INTERACTIVE".into(), "1".into())],
+            cwd: None,
             missing: false,
             term_grace: TERM_GRACE,
+            strip_startup: false,
         }
     }
 
@@ -104,9 +167,10 @@ impl CliRunner {
     /// Find `name` on `PATH` and run it by absolute path.
     ///
     /// Only absolute `PATH` entries are searched: an empty or relative entry
-    /// (such as `.`) would resolve against the working directory, which
-    /// another local user may control. When nothing is found the runner
-    /// reports `NotFound` without spawning anything.
+    /// (such as `.`) would resolve against the working directory, which may
+    /// differ from the user's checkout for machine checks. When nothing is
+    /// found the runner reports `NotFound` without
+    /// spawning anything.
     #[must_use]
     pub fn on_path(name: &str) -> Self {
         let path = std::env::var_os("PATH");
@@ -120,12 +184,52 @@ impl CliRunner {
         }
     }
 
+    /// Run every command from `dir` (for checks that must run outside any
+    /// project, such as the machine-level doctor run).
+    #[must_use]
+    pub fn with_cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+
     /// Add an environment variable for every command (tests use this for
     /// a temporary `HACK_HOME`).
     #[must_use]
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
         self.env.push((key.into(), value.into()));
         self
+    }
+
+    /// Effective selector without reading any configuration or secret value.
+    /// Remove inherited interpreter startup and preload variables
+    /// ([`INTERPRETER_STARTUP_VARS`] and exported Bash functions) from every
+    /// child, so a tool script cannot be made to load code from the
+    /// environment.
+    #[must_use]
+    pub fn without_interpreter_startup(mut self) -> Self {
+        self.strip_startup = true;
+        self
+    }
+
+    /// The absolute executable this runner would start, without starting it.
+    pub(crate) fn program_path(&self) -> Option<PathBuf> {
+        if self.missing {
+            return None;
+        }
+        if self.program.is_absolute() {
+            return Some(self.program.clone());
+        }
+        let name = self.program.to_str()?;
+        resolve_on_path(name, self.env_value("PATH").as_deref())
+    }
+
+    pub(crate) fn env_value(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into())
+            .or_else(|| std::env::var_os(key))
     }
 
     fn command(&self, args: &[&str], path: Option<&Path>) -> Command {
@@ -143,6 +247,26 @@ impl CliRunner {
         }
         for (k, v) in &self.env {
             cmd.env(k, v);
+        }
+        if self.strip_startup {
+            for key in INTERPRETER_STARTUP_VARS {
+                cmd.env_remove(key);
+            }
+            // Prefix matches cover inherited and runner-set names alike. Only
+            // names are read here, never values.
+            let inherited = std::env::vars_os().map(|(key, _)| key);
+            let authored = self.env.iter().map(|(key, _)| key.into());
+            for key in inherited.chain(authored) {
+                if is_startup_var(&key) {
+                    cmd.env_remove(key);
+                }
+            }
+            // Python skips the user site directory (and its `usercustomize`)
+            // whatever its default location.
+            cmd.env("PYTHONNOUSERSITE", "1");
+        }
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -213,15 +337,26 @@ impl CliRunner {
         path: Option<&Path>,
         timeout: Option<Duration>,
     ) -> Result<(String, String, Option<i32>), RunError> {
+        // The timeout counts from before the spawn: starting the program can
+        // itself take time (an ETXTBSY retry, or macOS checking a new
+        // executable on first launch). A caller that budgets `timeout` plus
+        // the SIGTERM grace gets an end by `deadline + term_grace`: the grace
+        // is cut to what is left of that. Limit: a spawn that itself blocks
+        // past that point cannot be interrupted, and the call ends when the
+        // spawn returns and the group is killed.
+        let deadline = timeout.map(|t| (Instant::now() + t, t));
+        let term_grace = self.term_grace;
+        let grace_left =
+            move |d: Instant| (d + term_grace).saturating_duration_since(Instant::now());
         let mut child = self.spawn(args, path)?;
         let out = read_all(child.stdout.take(), Keep::Head(MAX_STDOUT));
         let err = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
-        let deadline = timeout.map(|t| (Instant::now() + t, t));
         let status = loop {
             match child.try_wait() {
                 Ok(Some(s)) => break s,
                 Ok(None) if deadline.is_some_and(|(d, _)| Instant::now() >= d) => {
-                    terminate_group(&mut child, self.term_grace);
+                    let grace = deadline.map_or(self.term_grace, |(d, _)| grace_left(d));
+                    terminate_group(&mut child, grace);
                     let after = deadline.map_or(Duration::ZERO, |(_, t)| t);
                     return Err(RunError::Timeout { after });
                 }
@@ -232,12 +367,11 @@ impl CliRunner {
         // A deadline also covers draining: a descendant that keeps a pipe
         // open after `hack` exits must not hold the caller past the timeout.
         // Without a deadline, wait for the pipes to close.
-        let grace = self.term_grace;
         let drain = |rx: &mpsc::Receiver<Drained>, child: &mut Child| match deadline {
             Some((d, t)) => {
                 let left = d.saturating_duration_since(Instant::now());
                 rx.recv_timeout(left).map_err(|_| {
-                    terminate_group(child, grace);
+                    terminate_group(child, grace_left(d));
                     RunError::Timeout { after: t }
                 })
             }
@@ -956,6 +1090,53 @@ mod tests {
 
     const T: Duration = Duration::from_secs(5);
 
+    /// A slow start (here an ETXTBSY retry while another descriptor still
+    /// has the program open for writing) counts against the timeout, and
+    /// the SIGTERM grace is cut so the call ends by `timeout + grace`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_timeout_includes_the_time_spent_starting_the_program() {
+        let fake = FakeHack::new("trap '' TERM\nwhile :; do sleep 0.05; done");
+        let program = fake.dir.join("hack");
+        // Below the spawn's ETXTBSY retry window, past the deadline.
+        let hold = Duration::from_millis(180);
+        let writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&program)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(hold);
+            drop(writer);
+        });
+        let (timeout, grace) = (Duration::from_millis(60), Duration::from_millis(300));
+        // The program must ignore SIGTERM from its first instruction, or the
+        // signal sent right after the late spawn ends it before its trap is
+        // set. An ignored disposition is inherited through exec, so ignore it
+        // here for the call (nextest runs each test in its own process).
+        // SAFETY: setting a disposition to SIG_IGN and back is async-signal-safe.
+        let previous = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+        let started = Instant::now();
+        let result =
+            fake.runner()
+                .with_term_grace(grace)
+                .run_raw(&["doctor", "--json"], None, timeout);
+        let took = started.elapsed();
+        // SAFETY: restores the disposition saved above.
+        unsafe { libc::signal(libc::SIGTERM, previous) };
+        release.join().unwrap();
+        assert!(
+            matches!(result, Err(RunError::Timeout { .. })),
+            "{result:?}"
+        );
+        // Ends by timeout + grace (360 ms) plus scheduling. A full grace
+        // after the late spawn takes 480 ms; a timeout counted from the
+        // spawn, 540 ms.
+        assert!(
+            took < timeout + grace + Duration::from_millis(80),
+            "took {took:?} for a {timeout:?} timeout and {grace:?} grace"
+        );
+    }
+
     #[test]
     fn unwraps_envelope() {
         let f = FakeHack::new(
@@ -1073,6 +1254,94 @@ mod tests {
             .parse()
             .unwrap();
         assert_retired(pid);
+    }
+
+    #[test]
+    fn interpreter_startup_variables_never_reach_doctor_children() {
+        // A run-time check with variables SIP-protected macOS shells keep;
+        // loader (DYLD_*) variables are checked on the Command below.
+        let f = FakeHack::new(
+            r#"printf '%s|%s|%s|%s' "${BASH_ENV-unset}" "${NODE_OPTIONS-unset}" "${PYTHONUSERBASE-unset}" "${PYTHONNOUSERSITE-unset}""#,
+        );
+        let runner = f
+            .runner()
+            .with_env("BASH_ENV", "/example/startup")
+            .with_env("NODE_OPTIONS", "--require=/example/preload")
+            .with_env("PYTHONUSERBASE", "/example/userbase")
+            .with_env("PYTHONNOUSERSITE", "");
+        let (seen, _, _) = runner.run_raw(&["x"], None, T).unwrap();
+        assert_eq!(
+            seen, "/example/startup|--require=/example/preload|/example/userbase|",
+            "positive control"
+        );
+        let (stripped, _, _) = runner
+            .without_interpreter_startup()
+            .run_raw(&["x"], None, T)
+            .unwrap();
+        assert_eq!(stripped, "unset|unset|unset|1");
+    }
+
+    #[test]
+    fn loader_and_function_prefixes_are_removed_from_the_command() {
+        let names = [
+            "DYLD_VERSIONED_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "LD_AUDIT",
+            "BASH_FUNC_x%%",
+            "BUN_OPTIONS",
+            "BUN_BE_BUN",
+            "BUN_CONFIG_REGISTRY",
+            "BUN_INSPECT_CONNECT_TO",
+        ];
+        let mut runner = CliRunner::new("/example/hack");
+        for name in names {
+            runner = runner.with_env(name, "/example/value");
+        }
+        let removed = |runner: &CliRunner| {
+            let command = runner.command(&["x"], None);
+            names
+                .iter()
+                .filter(|name| {
+                    command
+                        .get_envs()
+                        .any(|(key, value)| key == std::ffi::OsStr::new(name) && value.is_none())
+                })
+                .count()
+        };
+        assert_eq!(removed(&runner), 0, "positive control: set, not removed");
+        assert_eq!(removed(&runner.without_interpreter_startup()), names.len());
+    }
+
+    #[test]
+    fn library_and_gem_selectors_are_removed_from_the_command() {
+        let names = [
+            "PYTHONUSERBASE",
+            "PYTHONPLATLIBDIR",
+            "PYTHONEXECUTABLE",
+            "__PYVENV_LAUNCHER__",
+            "PERL5DB",
+            "RUBYGEMS_GEMDEPS",
+            "GEM_HOME",
+            "GEM_PATH",
+            "BUNDLE_GEMFILE",
+        ];
+        let mut runner = CliRunner::new("/example/hack");
+        for name in names {
+            runner = runner.with_env(name, "/example/value");
+        }
+        let removed = |runner: &CliRunner| {
+            let command = runner.command(&["x"], None);
+            names
+                .iter()
+                .filter(|name| {
+                    command
+                        .get_envs()
+                        .any(|(key, value)| key == std::ffi::OsStr::new(name) && value.is_none())
+                })
+                .count()
+        };
+        assert_eq!(removed(&runner), 0, "positive control: set, not removed");
+        assert_eq!(removed(&runner.without_interpreter_startup()), names.len());
     }
 
     #[test]
@@ -1294,6 +1563,7 @@ exit 1"#,
     fn path_lookup_ignores_relative_entries() {
         let f = FakeHack::new("echo '{}'");
         let dir = f.dir.to_string_lossy().into_owned();
+        // A relative entry that would resolve to the fake via the cwd.
         let rel = std::ffi::OsString::from(format!(".:{dir}"));
         assert_eq!(
             resolve_on_path("hack", Some(&rel)),

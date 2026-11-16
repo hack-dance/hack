@@ -351,9 +351,11 @@ fn quitting_right_after_closing_an_ended_tab_ends_what_its_session_left_running(
         .update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(TerminalPanel::new)))
         .expect("open a headless window");
     // The shell exits and leaves a job that ignores the hangup and SIGTERM
-    // and does not hold the terminal, so the session ends by itself.
+    // and does not hold the terminal, so the session ends by itself. The
+    // shell ignores both before starting the job, which inherits that, so
+    // the hangup at the shell's exit cannot reach the job before its trap.
     let opts = sh(
-        "( trap '' HUP TERM; exec sleep 120 ) </dev/null >/dev/null 2>&1 & echo \"kid=$!\"; echo \"sh=$$\"",
+        "trap '' HUP TERM; ( exec sleep 120 ) </dev/null >/dev/null 2>&1 & echo \"kid=$!\"; echo \"sh=$$\"",
         &home,
     );
     let view = cx.update(|cx| cx.new(|cx| TerminalView::new_pty(&opts, cx).expect("spawn")));

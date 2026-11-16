@@ -29,6 +29,13 @@ ttf-parser = { version = "=0.25.1", optional = true, default-features = false, f
 # the lockfile through ghostty-vt-sys's build script.
 sha2 = { version = "=0.10.9", optional = true }
 
+# Needs GPUI's real platform, which macOS creates only on the main thread:
+# its own `main` runs the cases there (see the file).
+[[test]]
+name = "render"
+harness = false
+required-features = ["screenshots"]
+
 [[example]]
 name = "term_spike"
 required-features = ["ghostty"]

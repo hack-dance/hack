@@ -7,7 +7,18 @@
 #   eval "$(bash term/scripts/provision-ghostty.sh)"
 #   cargo fetch --locked
 #   bash term/scripts/no-network.sh bash term/scripts/check-ghostty.sh
+#
+# Arguments after `--` go to nextest, for example
+#   bash term/scripts/check-ghostty.sh -- --no-fail-fast
 set -euo pipefail
+nextest_args=()
+if [ "${1:-}" = "--" ]; then
+  shift
+  nextest_args=("$@")
+elif [ "$#" -gt 0 ]; then
+  echo "usage: check-ghostty.sh [-- <nextest arguments>]" >&2
+  exit 2
+fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd -P)
 cd "$root/apps/desktop"
 : "${GHOSTTY_RELEASE_DIR:?run term/scripts/provision-ghostty.sh and export what it prints}"
@@ -26,5 +37,6 @@ cargo clippy --locked --offline -p hack-desktop-term --all-targets --features sc
 # The `screenshots` feature adds GPUI's test support, which the headless
 # view tests need. They open no window and need no display or GPU.
 cargo nextest run --locked --offline -p hack-desktop-term --features screenshots \
-  --build-jobs 2 --config-file "$root/.config/nextest.toml" --profile ci
+  --build-jobs 2 --config-file "$root/.config/nextest.toml" --profile ci \
+  ${nextest_args[@]+"${nextest_args[@]}"}
 cargo test --locked --offline -p hack-desktop-term --features screenshots --doc --jobs 2

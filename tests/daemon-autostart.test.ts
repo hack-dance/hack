@@ -1090,6 +1090,7 @@ test("production executable trust refuses a poisoned home bin before engine help
         expect(path.split(":")).toContain(bin);
         await assertAutostartExecutablePathTrusted({ path: bin });
       },
+      invocation: async () => {},
     }
   );
   deps = {
@@ -1238,7 +1239,7 @@ test("unsafe Docker context selection refuses before engine access without consu
   await chmod(config, 0o666);
   const production = createAutostartProductionDependencies(
     { home: root, hackHome: join(root, "state") },
-    { executablePath: async () => {} }
+    { executablePath: async () => {}, invocation: async () => {} }
   );
   deps = { ...deps, startupRefusal: production.startupRefusal };
   await run();
@@ -1363,4 +1364,42 @@ test("encrypted contracts, machine overlays and dotenv graph inputs conservative
   expect(await canAdoptAutostartEnvironment({ projectRoot, projectDir })).toBe(
     false
   );
+});
+
+test("the executed Hack binary is re-checked before every routing and project spawn", async () => {
+  // Trusted at the startup check, then replaced while login waits for Docker.
+  let trusted = true;
+  const checked: boolean[] = [];
+  const production = createAutostartProductionDependencies(
+    { home: root, hackHome: join(root, "state") },
+    {
+      executablePath: async () => {},
+      invocation: async ({ compiled }) => {
+        checked.push(compiled);
+        if (!trusted) {
+          throw new Error("Synthetic replaced executable");
+        }
+      },
+    }
+  );
+  trusted = false;
+  expect(await production.startRouting?.()).toBe(false);
+  expect(
+    await production.start({
+      id: "example-id",
+      name: "example",
+      repoRoot: join(root, "missing-project"),
+      projectDir: join(root, "missing-project/.hack"),
+      projectDirName: ".hack",
+      createdAt: "2026-01-01T00:00:00Z",
+      autostart: {
+        branch: null,
+        paused: false,
+        lastResult: null,
+        lastAttemptBootId: null,
+      },
+    })
+  ).toEqual({ status: "skipped", reason: "executable_path_untrusted" });
+  // Under `bun test` the CLI is a source checkout, which always refuses.
+  expect(checked).toEqual([false, false]);
 });

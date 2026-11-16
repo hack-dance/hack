@@ -110,6 +110,15 @@ context (for example `docker context use orbstack` or `desktop-linux`), whose
 socket lives in your home.
 A refused search
 path does not consume a project's attempt for this boot.
+The login child runs Hack itself by its executable path, not through that
+search path, so that file gets the same checks: owned by you or root, not
+writable by others, a trusted directory and symlink chain, and no mutation ACL.
+It is checked before the pass and again right before each routing and project
+start, because the file can change while login waits for Docker. An unsafe
+executable is reported as `executable_path_untrusted`. Automatic startup runs
+only from a compiled `hack`. A source checkout (`bun index.ts`) loads its whole
+source tree and dependencies, which these checks cannot cover, so a login
+service installed from a source checkout always needs manual `hack up`.
 The daemon keeps its installed PATH and continues normal status observation;
 automatic-start refusal does not change ordinary daemon operation.
 The strict policy also applies to Linux user-private groups. Check `hack doctor`

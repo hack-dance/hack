@@ -17,7 +17,10 @@ import {
 } from "../constants.ts";
 import { assertAutostartCheckoutTrusted } from "../lib/autostart-checkout-trust.ts";
 import { assertAutostartDockerConfigTrusted } from "../lib/autostart-docker-trust.ts";
-import { assertAutostartExecutablePathTrusted } from "../lib/autostart-executable-trust.ts";
+import {
+  assertAutostartExecutablePathTrusted,
+  assertAutostartInvocationTrusted,
+} from "../lib/autostart-executable-trust.ts";
 import { isAutostartManualStartReason } from "../lib/autostart-refusal.ts";
 import { autostartStartPolicyRefusal } from "../lib/autostart-start-policy.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
@@ -630,18 +633,34 @@ export function createAutostartProductionDependencies(
   runtime: AutostartRuntimeOptions,
   checks?: {
     readonly executablePath?: typeof assertAutostartExecutablePathTrusted;
+    /** Tests only: replaces {@link assertAutostartInvocationTrusted}. */
+    readonly invocation?: typeof assertAutostartInvocationTrusted;
   }
 ): AutostartDependencies {
   const env = autostartServiceEnvironment(runtime);
+  const compiled = Bun.main.startsWith("/$bunfs/");
   const invocation = [
     process.execPath,
-    ...(Bun.main.startsWith("/$bunfs/")
+    ...(compiled
       ? []
       : [
           "--no-env-file",
           fileURLToPath(new URL("../../index.ts", import.meta.url)),
         ]),
   ];
+  // Re-checked before every spawn: the executable may change while login
+  // waits for Docker.
+  const invocationTrusted = async (): Promise<boolean> => {
+    try {
+      await (checks?.invocation ?? assertAutostartInvocationTrusted)({
+        executable: process.execPath,
+        compiled,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
   return {
     projectRefusal: (project) =>
       autostartStartPolicyRefusal({
@@ -654,6 +673,9 @@ export function createAutostartProductionDependencies(
           path: env.PATH ?? "",
         });
       } catch {
+        return "executable_path_untrusted";
+      }
+      if (!(await invocationTrusted())) {
         return "executable_path_untrusted";
       }
       try {
@@ -693,6 +715,7 @@ export function createAutostartProductionDependencies(
       ).exitCode === 0,
     routingInstalled: () => autostartRoutingInstalled(runtime.hackHome),
     startRouting: async (signal) =>
+      (await invocationTrusted()) &&
       (
         await runAutostartSubprocess(
           [...invocation, "global", "up", "--no-interactive"],
@@ -706,6 +729,9 @@ export function createAutostartProductionDependencies(
       ).exitCode === 0,
     inspect: (project, signal) => inspectComposeProject(project, signal, env),
     start: async (project, signal) => {
+      if (!(await invocationTrusted())) {
+        return { status: "skipped", reason: "executable_path_untrusted" };
+      }
       const args = buildAutostartProjectInvocation({
         invocation,
         project,

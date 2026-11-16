@@ -11,7 +11,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertAutostartExecutablePathTrusted } from "../src/lib/autostart-executable-trust.ts";
+import {
+  assertAutostartExecutablePathTrusted,
+  assertAutostartInvocationTrusted,
+} from "../src/lib/autostart-executable-trust.ts";
 import {
   DARWIN_ADMIN_GID,
   DARWIN_DAEMON_GID,
@@ -259,4 +262,54 @@ test("macOS admin directories such as /Applications are accepted only on darwin,
       "darwin"
     )
   ).toBe(false);
+});
+
+test("the directly executed Hack binary is audited, and a source checkout needs a manual start", async () => {
+  const hack = join(bin, "hack");
+  await writeFile(hack, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await expect(
+    assertAutostartInvocationTrusted({ executable: hack, compiled: true })
+  ).resolves.toBeUndefined();
+  // `bun index.ts` loads a whole source tree this audit cannot bound.
+  await expect(
+    assertAutostartInvocationTrusted({ executable: hack, compiled: false })
+  ).rejects.toMatchObject({
+    code: "E_PERMISSION",
+    detail: { reason: "executable_path_untrusted" },
+  });
+  // Others can rewrite the file, or replace it through its directory.
+  await chmod(hack, 0o777);
+  await expect(
+    assertAutostartInvocationTrusted({ executable: hack, compiled: true })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await chmod(hack, 0o755);
+  await chmod(bin, 0o777);
+  await expect(
+    assertAutostartInvocationTrusted({ executable: hack, compiled: true })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await chmod(bin, 0o700);
+  // A link is followed hop by hop; its target must be trusted too.
+  const shared = join(root, "shared");
+  await mkdir(shared, { mode: 0o700 });
+  await chmod(shared, 0o777);
+  const target = join(shared, "hack");
+  await writeFile(target, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const link = join(bin, "hack-link");
+  await symlink(target, link);
+  await expect(
+    assertAutostartInvocationTrusted({ executable: link, compiled: true })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await expect(
+    assertAutostartInvocationTrusted({
+      executable: join(bin, "missing"),
+      compiled: true,
+    })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  // A message never carries the path.
+  await assertAutostartInvocationTrusted({
+    executable: link,
+    compiled: true,
+  }).catch((error: unknown) => {
+    expect(String(error)).not.toContain(root);
+  });
 });

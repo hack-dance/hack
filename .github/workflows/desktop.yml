@@ -105,6 +105,23 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build app
         run: cargo build --locked -p hack-desktop
+      # The terminal surface on a real Mac: libghostty-vt from the prebuilt,
+      # checksummed XCFramework (no Zig on macOS), and every hack-desktop-term
+      # test, including the render target whose `main` creates GPUI's macOS
+      # platform on the main thread (real fonts, Metal offscreen rendering).
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ghostty-inputs
+          key: desktop-ghostty-inputs-${{ runner.os }}-${{ hashFiles('apps/desktop/term/scripts/provision-ghostty.sh') }}
+      - name: Provision pinned libghostty-vt inputs (checksummed)
+        run: bash term/scripts/provision-ghostty.sh --dir "$RUNNER_TEMP/ghostty-inputs" --emit github >> "$GITHUB_ENV"
+      - name: Terminal surface tests (ghostty, real platform)
+        env:
+          HACK_DAEMON_AUTOSTART_DISABLE: "1"
+          HACK_TERM_REQUIRE_RENDERER: "1"
+        run: |
+          cargo nextest run --locked -p hack-desktop-term --features screenshots \
+            --build-jobs 2 --config-file ../../.config/nextest.toml --profile ci --no-fail-fast
 
   # The terminal surface's libghostty-vt feature (HACK-2252). The provision
   # step is the only one that fetches libghostty-vt, Zig or the symbols font, and it verifies

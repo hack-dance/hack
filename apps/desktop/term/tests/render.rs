@@ -5,14 +5,100 @@
 //! needs GPUI's offscreen renderer: a GPU, or a software Vulkan driver.
 //! Without one the test reports that it could not run and passes, unless
 //! `HACK_TERM_REQUIRE_RENDERER=1` is set, as it is in CI.
-#![cfg(all(unix, feature = "screenshots"))]
+//!
+//! On macOS GPUI's real platform, which these cases need for real fonts,
+//! must be created on the process's main thread, and a libtest or nextest
+//! test runs on a worker thread. So this target has `harness = false`: its
+//! `main` runs every case on the main thread, in order, and speaks the part
+//! of the libtest command line nextest uses (`--list`, `--exact <name>`).
 
+#[cfg(not(unix))]
+fn main() {}
+
+#[cfg(unix)]
+fn main() {
+    harness::run(&[
+        (
+            "prompt_symbols_separators_and_box_drawing_are_real_glyphs",
+            prompt_symbols_separators_and_box_drawing_are_real_glyphs,
+        ),
+        (
+            "a_double_width_symbol_is_drawn_in_both_of_its_cells",
+            a_double_width_symbol_is_drawn_in_both_of_its_cells,
+        ),
+        (
+            "a_missing_or_proportional_configured_font_falls_back_to_a_monospaced_one",
+            a_missing_or_proportional_configured_font_falls_back_to_a_monospaced_one,
+        ),
+    ]);
+}
+
+/// The libtest command line as nextest drives it: `--list [--format terse]
+/// [--ignored]` lists cases (`name: test`); otherwise the arguments that
+/// do not start with `-` filter cases (exactly with `--exact`), and every
+/// selected case runs on this thread. Exits 101 if a case fails.
+#[cfg(unix)]
+mod harness {
+    pub fn run(cases: &[(&'static str, fn())]) {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let has = |flag: &str| args.iter().any(|a| a == flag);
+        if has("--list") {
+            if !has("--ignored") {
+                for (name, _) in cases {
+                    println!("{name}: test");
+                }
+            }
+            return;
+        }
+        let exact = has("--exact");
+        let mut filters: Vec<&str> = Vec::new();
+        let mut skip_value = false;
+        for a in &args {
+            if skip_value {
+                skip_value = false;
+                continue;
+            }
+            match a.as_str() {
+                // Options that take a value.
+                "--test-threads" | "--format" | "--color" | "--skip" => skip_value = true,
+                s if s.starts_with('-') => {}
+                s => filters.push(s),
+            }
+        }
+        let selected = cases.iter().filter(|(name, _)| {
+            filters.is_empty()
+                || filters
+                    .iter()
+                    .any(|f| if exact { name == f } else { name.contains(f) })
+        });
+        let mut failed = 0;
+        let mut ran = 0;
+        for (name, case) in selected {
+            ran += 1;
+            let ok = std::panic::catch_unwind(*case).is_ok();
+            println!("test {name} ... {}", if ok { "ok" } else { "FAILED" });
+            if !ok {
+                failed += 1;
+            }
+        }
+        println!(
+            "test result: {}. {} passed; {failed} failed",
+            if failed == 0 { "ok" } else { "FAILED" },
+            ran - failed
+        );
+        if failed > 0 {
+            std::process::exit(101);
+        }
+    }
+}
+
+#[cfg(unix)]
 mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::TempHome;
+use common::{TempHome, sh_source};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AppContext as _, Bounds, HeadlessAppContext, WindowBounds, WindowOptions, px, size,
@@ -308,7 +394,6 @@ fn assert_placed(shot: &Capture, ch: char, col: usize, row: usize, n: usize, rep
     }
 }
 
-#[test]
 fn prompt_symbols_separators_and_box_drawing_are_real_glyphs() {
     let row: String = SAMPLES.iter().map(|(_, ch, _)| format!("{ch}  ")).collect();
     let Some(shot) = capture(&format!("\n {row}\n\n"), None, "glyphs.png") else {
@@ -482,7 +567,6 @@ fn prompt_symbols_separators_and_box_drawing_are_real_glyphs() {
     );
 }
 
-#[test]
 fn a_double_width_symbol_is_drawn_in_both_of_its_cells() {
     // U+26A1 is double width and in the bundled font. Many fonts have it
     // too, so the bundled font is asked for outright. The "x" straight
@@ -526,4 +610,90 @@ fn a_double_width_symbol_is_drawn_in_both_of_its_cells() {
     // And it stays in them. The cell after is the x, so it is not checked.
     let stray = shot.stray(1, ROW, 2, false);
     assert_eq!(stray, 0, "{stray} pixels outside the two cells{report}");
+}
+
+/// Every printable ASCII character of `family` has the same advance.
+fn fixed_advance(window: &mut gpui_kit::Window, family: &str) -> bool {
+    let ts = window.text_system();
+    let id = ts.resolve_font(&gpui_kit::font(family.to_owned()));
+    let size = gpui_kit::px(13.);
+    let widths: Vec<_> = (0x21u8..0x7f)
+        .map(|c| ts.advance(id, size, char::from(c)).map(|s| s.width).ok())
+        .collect();
+    widths.iter().all(|w| w.is_some() && *w == widths[0])
+}
+
+fn a_missing_or_proportional_configured_font_falls_back_to_a_monospaced_one() {
+    use hack_desktop_term::ghostty_config::GhosttyLook;
+    let home = TempHome::new();
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(gpui_kit::assets::Assets),
+        || Ok(None),
+    );
+    cx.update(gpui_kit::init);
+    let source = sh_source("echo ready; exec sleep 120", &home);
+    let options = WindowOptions {
+        focus: false,
+        show: false,
+        ..WindowOptions::default()
+    };
+    let (window, view) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options, cx, |_, cx| {
+                cx.new(|cx| TerminalView::new_stream(&source, 100, cx).expect("open"))
+            })
+        })
+        .expect("open a headless window");
+    let draw_with = |cx: &mut HeadlessAppContext, family: &str| {
+        let look = GhosttyLook {
+            font_families: vec![family.to_owned()],
+            ..GhosttyLook::default()
+        };
+        cx.update(|cx| view.update(cx, |v, cx| v.set_look(look, cx)));
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("draw");
+        let drawn = cx.update(|cx| view.read(cx).rendered().clone());
+        let fixed = cx
+            .update_window(window, |_, window, _| {
+                fixed_advance(window, &drawn.font_family)
+            })
+            .expect("measure");
+        (drawn, fixed)
+    };
+
+    let missing = "Hack Test Family That Is Not Installed";
+    let (drawn, fixed) = draw_with(&mut cx, missing);
+    assert_ne!(drawn.font_family, missing);
+    assert!(fixed, "{} is not monospaced", drawn.font_family);
+    let note = drawn.font_note.expect("a note says the font was not found");
+    assert!(
+        note.contains(missing) && note.contains("not installed"),
+        "{note}"
+    );
+
+    // A proportional family that is installed is refused too, when this
+    // machine has one.
+    let proportional = cx
+        .update_window(window, |_, window, _| {
+            window
+                .text_system()
+                .all_font_names()
+                .into_iter()
+                .find(|f| !fixed_advance(window, f))
+        })
+        .expect("list fonts");
+    if let Some(proportional) = proportional {
+        let (drawn, fixed) = draw_with(&mut cx, &proportional);
+        assert_ne!(drawn.font_family, proportional);
+        assert!(fixed, "{} is not monospaced", drawn.font_family);
+        assert!(
+            drawn
+                .font_note
+                .as_deref()
+                .is_some_and(|n| n.contains("not monospaced")),
+            "{:?}",
+            drawn.font_note
+        );
+    }
 }

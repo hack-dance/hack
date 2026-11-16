@@ -808,8 +808,18 @@ Feature `ghostty`, `glyphs.rs`: the embedded font is the pinned file; the
 table of its code points matches the font; outlines are closed contours
 inside the font's box; Nerd Font family names are recognised.
 
-Feature `screenshots`, `tests/render.rs`: the pixel test described under
-"Glyphs". It needs an offscreen renderer (a GPU, or software Vulkan).
+Feature `screenshots`, `tests/render.rs`: the pixel tests described under
+"Glyphs", and the monospaced font fallback (a missing or proportional
+configured family draws the grid in a monospaced one, with a note). They
+need GPUI's real platform and an offscreen renderer (a GPU, or software
+Vulkan). macOS creates that platform only on the process's main thread, and
+libtest and nextest run tests on worker threads, so this target has
+`harness = false`: its own `main` runs each case on the main thread and
+speaks the part of the libtest command line nextest uses (`--list`,
+`--exact <name>`), so nextest still lists and runs each case in its own
+process. The hosted macOS desktop job runs every `hack-desktop-term` test,
+these included, with `HACK_TERM_REQUIRE_RENDERER=1`. `check-ghostty.sh`
+passes arguments after `--` to nextest (`-- --no-fail-fast`).
 
 Feature `screenshots` (GPUI test support; no display or GPU needed),
 `tests/view.rs`: a rejected paste to a quiet child shows its notice in

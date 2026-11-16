@@ -248,6 +248,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
         root,
         "unused",
         "unused",
+        "delay-pid-publication",
       ],
       { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
     );
@@ -255,18 +256,22 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       const deadline = Date.now() + 3000;
       const ready = join(root, "grandchild.pid");
       const groupPath = join(root, "group.pid");
-      while (
-        !(
-          (await Bun.file(ready).exists()) &&
-          (await Bun.file(groupPath).exists())
-        ) &&
-        Date.now() < deadline
-      ) {
+      let group: number | undefined;
+      let grandchild: number | undefined;
+      while (Date.now() < deadline) {
+        [group, grandchild] = await Promise.all([
+          readPublishedPid(groupPath),
+          readPublishedPid(ready),
+        ]);
+        if (group !== undefined && grandchild !== undefined) {
+          break;
+        }
         await Bun.sleep(10);
       }
-      expect(await Bun.file(ready).exists()).toBe(true);
-      expect(await Bun.file(groupPath).exists()).toBe(true);
-      const group = Number(await Bun.file(groupPath).text());
+      if (group === undefined || grandchild === undefined) {
+        throw new Error("Both fixture PIDs must be published within 3 seconds");
+      }
+      expect(group).toBeGreaterThan(1);
       groups.push(group);
       process.kill(child.pid, signal);
       expect(await child.exited).toBe(0);
@@ -279,12 +284,26 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
         exit: { cancelled: true, timedOut: false },
       });
       expect(processAlive(-group)).toBe(false);
-      expect(processAlive(Number(await Bun.file(ready).text()))).toBe(false);
+      expect(processAlive(grandchild)).toBe(false);
     } finally {
       child.kill("SIGKILL");
       await child.exited;
     }
   }, 15_000);
+}
+
+/** A created file is not ready until its writer has published a safe PID. */
+async function readPublishedPid(path: string): Promise<number | undefined> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) {
+    return undefined;
+  }
+  const text = (await file.text()).trim();
+  if (!/^[1-9]\d*$/.test(text)) {
+    return undefined;
+  }
+  const pid = Number(text);
+  return Number.isSafeInteger(pid) && pid > 1 ? pid : undefined;
 }
 
 function processAlive(pid: number): boolean {

@@ -141,6 +141,7 @@ test("TTY listings hide values by default and reveal only with an explicit flag"
         cwd: root,
         env: privateCliEnv({ root, env: { HACK_NO_INTERACTIVE: undefined } }),
         terminal,
+        timeout: 10_000,
       }
     );
     try {
@@ -154,6 +155,7 @@ test("TTY listings hide values by default and reveal only with an explicit flag"
       } finally {
         clearTimeout(timeout);
       }
+      expect(output).toContain("TOKEN");
       expect(output.includes(SENTINEL)).toBe(reveal);
       if (json) {
         const row = JSON.parse(output).vars[0];
@@ -164,6 +166,8 @@ test("TTY listings hide values by default and reveal only with an explicit flag"
         }
       }
     } finally {
+      child.kill("SIGKILL");
+      await child.exited;
       child.terminal?.close();
     }
   }

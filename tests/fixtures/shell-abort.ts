@@ -2,7 +2,7 @@ import { getEventListeners } from "node:events";
 import { join } from "node:path";
 import { type RunExitEvent, run } from "../../src/lib/shell.ts";
 
-const [mode, root, python, worker] = process.argv.slice(2);
+const [mode, root, python, worker, publication] = process.argv.slice(2);
 if (!(mode && root && python && worker)) {
   throw new Error("missing synthetic fixture arguments");
 }
@@ -24,6 +24,11 @@ const options = {
   stdin: mode.startsWith("pipe-") ? ("ignore" as const) : ("inherit" as const),
   onSpawn: async ({ pid }: { readonly pid: number }) => {
     spawned = true;
+    if (publication === "delay-pid-publication") {
+      // Exercise observers that see a created file before its PID is written.
+      await Bun.write(join(root, "group.pid"), "");
+      await Bun.sleep(50);
+    }
     await Bun.write(join(root, "group.pid"), String(pid));
     options.signal = replacement.signal;
     if (mode === "active-abort") {

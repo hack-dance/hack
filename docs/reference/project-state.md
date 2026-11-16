@@ -88,3 +88,37 @@ writes. Ordinary JSON listing and daemon listing use live native reads when
 native runtime selection is configured; those reads do not start a VM or graph.
 
 ![Shared state projection](./project-state.svg)
+
+## Waiting for changes
+
+hackd's `GET /v1/projects` response also carries `state_token`, an opaque
+32-character digest of its content. It leaves out values that change without a
+state change: `generated_at`, `profiling`, `runtime_checked_at`,
+`runtime_last_ok_at` and the elapsed time in Docker's container `status` text.
+The status's leading word, health and exit code still count ("Up 12 seconds
+(healthy)" is digested as "Up (healthy)"), as do container `state` and the
+service state and health fields above. The CLI's `hack projects --json` output
+does not include it.
+
+A client can send the token back to wait for a change:
+
+```text
+GET /v1/projects?wait=<state_token>&wait_timeout_ms=25000
+```
+
+- A different current token answers at once.
+- Otherwise hackd recomputes after each runtime refresh (Docker events and its
+  30-second periodic refresh) and answers when the token changes, or at
+  `wait_timeout_ms` with a fresh build whose token may be unchanged. Ask again
+  with the latest token.
+- Use the same query parameters as the request that produced the token.
+- `wait_timeout_ms` defaults to 25000 and must be 1000–55000. A malformed
+  `wait` or timeout returns `400` (`invalid_wait`, `invalid_wait_timeout_ms`,
+  `wait_timeout_requires_wait`).
+- At most 16 requests wait at once; beyond that a request is answered
+  immediately, as without `wait`.
+- Registry-only changes, such as a new registration, show up at the next refresh
+  or at the timeout. Waiting ends when the client disconnects.
+
+hackd's socket keeps idle connections for up to 70 seconds, so a wait is not
+cut off at Bun's default 10 seconds. The unsupported gateway route does not wait.

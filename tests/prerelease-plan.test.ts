@@ -1040,6 +1040,51 @@ test("packages the compiler and both schemas beside the CLI", async () => {
   }
 });
 
+test("packages and extracts the supervisor extension with executable mode", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-supervisor-package-"));
+  try {
+    const bundle = await fixture(root);
+    await compilerFixture(bundle);
+    await writeFile(
+      join(bundle, "hack-lifecycle-supervisor"),
+      "synthetic supervisor\n",
+      { mode: 0o755 }
+    );
+    await Bun.write(
+      join(bundle, "SHA256SUMS"),
+      await renderChecksums({
+        root: bundle,
+        names: [
+          ...PRERELEASE_PAYLOAD,
+          "hack-lifecycle-supervisor",
+          ...CONFIG_COMPILER_PAYLOAD,
+        ],
+      })
+    );
+    const output = join(root, "assets");
+    await packagePrerelease({
+      plan: createPrereleasePlan(input),
+      bundle,
+      output,
+    });
+    expect(
+      await Bun.file(
+        join(`${output}-installer-fixture`, "hack-lifecycle-supervisor")
+      ).text()
+    ).toBe("synthetic supervisor\n");
+    await chmod(join(bundle, "hack-lifecycle-supervisor"), 0o644);
+    await expect(
+      packagePrerelease({
+        plan: createPrereleasePlan(input),
+        bundle,
+        output: join(root, "bad"),
+      })
+    ).rejects.toThrow("unsafe permissions");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("preserves the older complete compiler/project-schema pair", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-compiler-legacy-pair-"));
   try {
@@ -1763,6 +1808,7 @@ test("packager payload is exactly the versioned bundle the builder checksums, in
   // Packaging compares SHA256SUMS byte for byte, so order is part of the contract.
   expect(versioned.filter((name) => !name.startsWith("mcp/"))).toEqual([
     ...PRERELEASE_PAYLOAD,
+    "hack-lifecycle-supervisor",
     ...CONFIG_COMPILER_PAYLOAD,
   ]);
   // nativeCandidateMcpPayload owns this group and returns it in this order.
@@ -1821,7 +1867,7 @@ test("installer accepts exactly the versioned bundle contract with the packaged 
         "    return False",
         "print(json.dumps({",
         "    'accepted': sorted(m.payload_inventory(names | {'SHA256SUMS'})),",
-        "    'top_level': sorted(m.PAYLOAD | m.COMPILER_PAYLOAD | m.STORAGE_TOOL_PAYLOAD),",
+        "    'top_level': sorted(m.PAYLOAD | m.COMPILER_PAYLOAD | m.STORAGE_TOOL_PAYLOAD | m.SUPERVISOR_PAYLOAD),",
         "    'member_ceiling': m.MAX_ARCHIVE_MEMBERS,",
         "    'modes': {name: m.payload_mode(name) for name in sorted(names)},",
         "    'foreign_refused': refused(names | {'SHA256SUMS', 'native-storage-tool.sig'}),",

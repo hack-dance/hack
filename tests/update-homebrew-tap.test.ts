@@ -50,6 +50,7 @@ describe("Homebrew formula", () => {
   test("installs the config compiler beside the executable the wrapper runs", () => {
     const install = block("def install");
     expect(install).toContain('libexec.install "hack"');
+    expect(install).toContain('libexec.install "hack-lifecycle-supervisor"');
     expect(install).toContain(`libexec.install "${FORMULA_CONFIG_COMPILER}"`);
     // The env script execs libexec/hack, so the CLI's execPath is libexec/hack;
     // the compiler must be exactly where the CLI resolves it, never on PATH.

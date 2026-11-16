@@ -63,68 +63,76 @@ pub struct Identity {
     pub zombie: bool,
 }
 
+/// One `/proc/<pid>/stat` read: whether the thread group is dead, group,
+/// session and start time.
+///
+/// A thread-group leader that called `pthread_exit` shows `Z` while its other
+/// threads keep running; such a process is alive (it owns its PID and receives
+/// process-directed signals). The leader's own stat line carries the kernel's
+/// count of the group's threads (field 20) from the same read: a dead leader
+/// with more than one counted thread is a live process. An exiting thread stays
+/// counted until it is released, which only errs toward live. No listing of
+/// `/proc/<pid>/task` is used, because a listing cannot see a thread created
+/// after it and can miss a live replacement during thread turnover.
 #[cfg(target_os = "linux")]
-pub fn inspect(pid: i32) -> Result<Option<Identity>> {
-    let path = format!("/proc/{pid}/stat");
-    let bytes = match fs::read(&path) {
+fn linux_stat(pid: i32) -> Result<Option<(bool, i32, i32, u64)>> {
+    let bytes = match fs::read(format!("/proc/{pid}/stat")) {
         Ok(value) => value,
         Err(error) if absent_error(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let tail = proc_stat_tail(&bytes)?;
     let fields: Vec<_> = tail.split_whitespace().collect();
-    let group = fields
+    let group: i32 = fields
         .get(2)
         .and_then(|v| v.parse().ok())
         .ok_or_else(refused)?;
-    let start = fields
-        .get(19)
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(refused)?;
-    let session = fields
+    let session: i32 = fields
         .get(3)
         .and_then(|v| v.parse().ok())
         .ok_or_else(refused)?;
-    let uid = match linux_uid(pid)? {
-        Some(uid) => uid,
-        None => return Ok(None),
-    };
-    Ok(Some(Identity {
-        pid,
-        group,
-        session,
-        start,
-        uid,
-        zombie: matches!(fields.first(), Some(&"Z" | &"X")) && !linux_live_thread(pid)?,
-    }))
+    let start: u64 = fields
+        .get(19)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(refused)?;
+    let threads: u64 = fields
+        .get(17)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(refused)?;
+    let group_dead = matches!(fields.first(), Some(&"Z" | &"X")) && threads <= 1;
+    Ok(Some((group_dead, group, session, start)))
 }
 
-/// A thread-group leader that called `pthread_exit` shows `Z` in
-/// `/proc/<pid>/stat` while its other threads keep running. Such a process is
-/// alive: it still owns its PID and receives process-directed signals. Only a
-/// group with no live thread left is a zombie.
+/// The identity is assembled from two reads (`stat`, then `status`). The
+/// leader's start time is read again afterwards: if it changed, the
+/// PID was reused during the reads, so the reads are repeated rather than
+/// combining two processes. Three unstable attempts refuse.
 #[cfg(target_os = "linux")]
-fn linux_live_thread(pid: i32) -> Result<bool> {
-    let tasks = match fs::read_dir(format!("/proc/{pid}/task")) {
-        Ok(tasks) => tasks,
-        Err(error) if absent_error(&error) => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    for task in tasks {
-        let task = task?;
-        let stat = match fs::read(task.path().join("stat")) {
-            Ok(stat) => stat,
-            Err(error) if absent_error(&error) => continue,
-            Err(error) => return Err(error),
+pub fn inspect(pid: i32) -> Result<Option<Identity>> {
+    for _ in 0..3 {
+        let Some((zombie, group, session, start)) = linux_stat(pid)? else {
+            return Ok(None);
         };
-        if !matches!(
-            proc_stat_tail(&stat)?.split_whitespace().next(),
-            Some("Z" | "X")
-        ) {
-            return Ok(true);
+        let uid = match linux_uid(pid)? {
+            Some(uid) => uid,
+            None => return Ok(None),
+        };
+        match linux_stat(pid)? {
+            None => return Ok(None),
+            Some((_, _, _, again)) if again == start => {
+                return Ok(Some(Identity {
+                    pid,
+                    group,
+                    session,
+                    start,
+                    uid,
+                    zombie,
+                }));
+            }
+            Some(_) => continue,
         }
     }
-    Ok(false)
+    Err(refused())
 }
 
 #[cfg(target_os = "linux")]
@@ -411,7 +419,7 @@ fn recorded_members(state: &crate::storage::State) -> Result<Vec<Identity>> {
                         && p.uid == state.uid
                 })
             })
-            .ok_or_else(refused)?;
+            .ok_or_else(no_witness)?;
         // Recheck after enumeration: the witness held the SID throughout the census.
         if !inspect(witness.pid)?.as_ref().is_some_and(|p| {
             if witness.pid == state.guard_pid {
@@ -424,7 +432,30 @@ fn recorded_members(state: &crate::storage::State) -> Result<Vec<Identity>> {
         }
         return Ok(members);
     }
-    Err(refused())
+    Err(no_witness())
+}
+
+/// Live recorded-session members that no witness ties to the receipt (or the
+/// witness changed on every attempt). Distinct from census and I/O failures so
+/// the caller can name it; its text omits values like every other error.
+#[derive(Debug)]
+struct NoWitness;
+
+impl std::fmt::Display for NoWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Lifecycle operation refused; values omitted")
+    }
+}
+
+impl std::error::Error for NoWitness {}
+
+fn no_witness() -> std::io::Error {
+    std::io::Error::other(NoWitness)
+}
+
+/// Whether `error` came from a receipt whose live members have no witness.
+pub fn is_no_witness(error: &std::io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<NoWitness>())
 }
 
 pub fn recorded_live(state: &crate::storage::State, excluding_guard: bool) -> Result<bool> {
@@ -815,19 +846,32 @@ impl Recovery {
         Ok(())
     }
 
-    pub fn live(&self) -> Result<bool> {
+    pub fn live(&self) -> Result<RecoveryLiveness> {
         for member in &self.members {
             if inspect(member.pid)?.is_some_and(|p| !p.zombie && incarnation_matches(member, &p)) {
-                return Ok(true);
+                return Ok(RecoveryLiveness::Captured);
             }
         }
         // Unobserved descendants or an unrelated reused session cannot be
         // signalled by this snapshot, and must not be claimed as stopped.
         if live_group(self.session, Some(self.session))? {
-            return Err(refused());
+            return Ok(RecoveryLiveness::Unobserved);
         }
-        Ok(false)
+        Ok(RecoveryLiveness::Gone)
     }
+}
+
+/// What a recovery snapshot can still see of its session.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecoveryLiveness {
+    /// A captured incarnation is alive; it may still be signalled.
+    Captured,
+    /// No captured incarnation is alive, but the session still has members this
+    /// snapshot never observed. They may exit by themselves; they are never
+    /// signalled, and stop reports unknown if they outlive its deadline.
+    Unobserved,
+    /// The session has no live member.
+    Gone,
 }
 
 /// A successful census must contain our own readable identity. Known restricted
@@ -900,6 +944,20 @@ pub fn timestamp() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_missing_witness_is_classified_as_no_witness() {
+        assert!(super::is_no_witness(&super::no_witness()));
+        assert!(!super::is_no_witness(&crate::refused()));
+        assert!(!super::is_no_witness(&std::io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+        // Like every refusal, its text carries no values.
+        assert_eq!(
+            super::no_witness().to_string(),
+            "Lifecycle operation refused; values omitted"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     thread_local! {
         static PIDFD_OPEN_ERROR: std::cell::Cell<Option<(i32, i32)>> =

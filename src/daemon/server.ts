@@ -32,6 +32,11 @@ import {
 import { createDaemonLogger } from "./logger.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { removeFileIfExists, writeDaemonPid } from "./process.ts";
+import {
+  PROJECTS_WAIT_MAX_MS,
+  parseProjectsWait,
+  resolveProjectsPayload,
+} from "./projects-wait.ts";
 import { createRefreshScheduler } from "./refresh-scheduler.ts";
 import {
   type RequestTargetProxy,
@@ -69,6 +74,19 @@ type DaemonMetrics = {
   lastProjectsSerializationMs: number | null;
   lastProjectsResponseBytes: number | null;
 };
+
+/**
+ * A `/v1/projects?wait=` long-poll can last PROJECTS_WAIT_MAX_MS. Bun's default
+ * 10 s idle limit closes it, and `server.timeout(request)` cannot raise that
+ * limit (checked on Bun 1.4.4). Bun honours `idleTimeout` on unix sockets,
+ * although its types declare it only for host/port servers, hence the helper.
+ * The daemon socket is owner-only.
+ */
+function withLongPollIdleTimeout<T extends object>(options: T): T {
+  return Object.assign(options, {
+    idleTimeout: Math.ceil(PROJECTS_WAIT_MAX_MS / 1000) + 15,
+  });
+}
 
 export async function runDaemon({
   paths,
@@ -269,16 +287,18 @@ export async function runDaemon({
 
   let server: ReturnType<typeof Bun.serve>;
   let daemonProxy: RequestTargetProxy | null = null;
-  server = Bun.serve({
-    unix: daemonInternalSocketPath,
-    fetch: (req) =>
-      handleRequest({
-        req,
-        server,
-        ...requestContext,
-      }),
-    websocket: websocketHandlers,
-  });
+  server = Bun.serve(
+    withLongPollIdleTimeout({
+      unix: daemonInternalSocketPath,
+      fetch: (req) =>
+        handleRequest({
+          req,
+          server,
+          ...requestContext,
+        }),
+      websocket: websocketHandlers,
+    })
+  );
   await restrictSocketMode({ path: daemonInternalSocketPath });
   try {
     daemonProxy = await startRequestTargetProxy({
@@ -482,13 +502,25 @@ async function handleRequest({
     if (summary && includeMeta) {
       return jsonResponse({ error: "summary_incompatible_with_meta" }, 400);
     }
-    const payload = await cache.getProjectsPayload({
-      filter,
-      includeGlobal,
-      includeUnregistered,
-      includeMeta,
-      summary,
-      profile: parseBoolean({ value: url.searchParams.get("profile") }),
+    const wait = parseProjectsWait(url.searchParams);
+    if (wait.kind === "invalid") {
+      return jsonResponse({ error: wait.error }, 400);
+    }
+    const profile = parseBoolean({ value: url.searchParams.get("profile") });
+    const payload = await resolveProjectsPayload({
+      build: () =>
+        cache.getProjectsPayload({
+          filter,
+          includeGlobal,
+          includeUnregistered,
+          includeMeta,
+          summary,
+          profile,
+        }),
+      wait,
+      refreshGeneration: cache.refreshGeneration,
+      nextRefresh: cache.nextRefresh,
+      signal: req.signal,
     });
     const started = performance.now();
     const body = JSON.stringify(payload);

@@ -29,6 +29,13 @@ printf '%s\\n' "$*" >> "$MAINTENANCE_TRACE"
 if [ "$*" = "install --frozen-lockfile" ]; then
   exit "$MAINTENANCE_INSTALL_EXIT"
 fi
+if [ "$*" = "scripts/build-lifecycle-supervisor.ts" ]; then
+  [ "$MAINTENANCE_BUILD_EXIT" = "0" ] || exit "$MAINTENANCE_BUILD_EXIT"
+  mkdir -p dist
+  printf '#!/bin/sh\\nexit 0\\n' > dist/hack-lifecycle-supervisor
+  chmod 700 dist/hack-lifecycle-supervisor
+  exit 0
+fi
 printf 'unlocked install rewrote lockfile\\n' > bun.lock
 `
   );
@@ -39,9 +46,11 @@ printf 'unlocked install rewrote lockfile\\n' > bun.lock
 async function maintain({
   paths,
   installExit,
+  buildExit = 0,
 }: {
   readonly paths: Awaited<ReturnType<typeof fixture>>;
   readonly installExit: number;
+  readonly buildExit?: number;
 }) {
   const child = Bun.spawn(["/bin/bash", script, paths.project], {
     env: {
@@ -51,6 +60,7 @@ async function maintain({
       HACK_ASSETS_DIR: join(paths.root, "assets"),
       MAINTENANCE_TRACE: join(paths.root, "trace"),
       MAINTENANCE_INSTALL_EXIT: String(installExit),
+      MAINTENANCE_BUILD_EXIT: String(buildExit),
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -92,7 +102,25 @@ test("successful repeat maintenance preserves the lockfile and wrapper", async (
       "preserve this lockfile\n"
     );
     expect(await readFile(join(paths.root, "trace"), "utf8")).toBe(
-      "install --frozen-lockfile\ninstall --frozen-lockfile\n"
+      "install --frozen-lockfile\nscripts/build-lifecycle-supervisor.ts\ninstall --frozen-lockfile\nscripts/build-lifecycle-supervisor.ts\n"
+    );
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("supervisor build failure preserves the frozen lock and does not install a wrapper", async () => {
+  const paths = await fixture();
+  try {
+    expect(
+      (await maintain({ paths, installExit: 0, buildExit: 43 })).exitCode
+    ).toBe(43);
+    expect(await readFile(join(paths.project, "bun.lock"), "utf8")).toBe(
+      "preserve this lockfile\n"
+    );
+    expect(await Bun.file(join(paths.installed, "hack")).exists()).toBe(false);
+    expect(await readFile(join(paths.root, "trace"), "utf8")).toBe(
+      "install --frozen-lockfile\nscripts/build-lifecycle-supervisor.ts\n"
     );
   } finally {
     await rm(paths.root, { recursive: true, force: true });

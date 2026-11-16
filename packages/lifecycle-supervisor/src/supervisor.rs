@@ -100,7 +100,7 @@ fn control(action: &str) -> Result<()> {
     let mut result = control_effects(action, &request, &root, &mut reason);
     // Receipts are atomically replaced files, so this read is safe without the
     // lock, also after a lock wait expired. A failed read never reports
-    // success: it keeps an earlier error, or becomes `io-error` itself.
+    // success: it keeps an earlier error, or becomes `receipt-read-failed`.
     let processes = match root.states() {
         Ok(states) => states
             .into_iter()
@@ -164,12 +164,26 @@ fn control_effects(
         *reason = "io-error";
         if state.owner_token == request.owner_token {
             states.push(state);
-        } else if os::recorded_live(&state, false)? {
-            // Old terminal receipts survive renames and new generations.
-            // Guard-written terminal phases prove completed retirement;
-            // non-terminal receipts require native identity evidence.
-            *reason = "foreign-live-process";
-            return Err(refused());
+            continue;
+        }
+        // Old terminal receipts survive renames and new generations.
+        // Guard-written terminal phases prove completed retirement;
+        // non-terminal receipts require native identity evidence.
+        match os::recorded_live(&state, false) {
+            Ok(false) => (),
+            Ok(true) => {
+                *reason = "foreign-live-process";
+                return Err(refused());
+            }
+            Err(error) => {
+                // Only live members that no witness ties to that receipt are
+                // `foreign-unknown-process`; a census, inspection or boot-ID
+                // failure stays `io-error`. Neither signals or retires anything.
+                if os::is_no_witness(&error) {
+                    *reason = "foreign-unknown-process";
+                }
+                return Err(error);
+            }
         }
     }
     *reason = "io-error";
@@ -671,51 +685,65 @@ fn stop(states: &[State]) -> Result<()> {
                 }
             }
             let recovery = self.recovery.as_ref().ok_or_else(refused)?;
-            if !recovery.live()? {
+            let liveness = recovery.live()?;
+            if liveness == os::RecoveryLiveness::Gone {
                 return Ok(false);
             }
             let elapsed = self.orphan_term.ok_or_else(refused)?.elapsed();
             if elapsed >= GRACE + CONFIRM_BOUND {
                 return Err(refused());
             }
-            if elapsed >= GRACE {
+            // Only captured incarnations are signalled. Unobserved members get
+            // the rest of this target's deadline to exit on their own.
+            if elapsed >= GRACE && liveness == os::RecoveryLiveness::Captured {
                 recovery.signal(libc::SIGKILL)?;
             }
             Ok(true)
         }
     }
     let mut active = Vec::new();
+    let mut failure = None;
     // Validate admission before effects. Capture while a live guard can still
     // prove membership, so loss during the later liveness check retains authority.
+    // A receipt that cannot be verified is never signalled; it records the first
+    // failure, and the other admitted targets still get their stop.
     for state in states {
-        let guard_live = match os::inspect(state.guard_pid)? {
-            Some(identity) if !identity.zombie => {
-                if let Err(error) = os::same(state, &identity) {
-                    if !os::recorded_live(state, false)? {
-                        continue;
+        let admitted = (|| -> Result<Option<Target>> {
+            let guard_live = match os::inspect(state.guard_pid)? {
+                Some(identity) if !identity.zombie => {
+                    if let Err(error) = os::same(state, &identity) {
+                        if !os::recorded_live(state, false)? {
+                            return Ok(None);
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
+                    true
                 }
-                true
+                _ => false,
+            };
+            let (recovery, admission) = stop_capture(guard_live, || os::Recovery::capture(state))?;
+            match os::recorded_live(state, false) {
+                Ok(false) => return Ok(None),
+                Ok(true) => (),
+                Err(_) if guard_lost(state)? && (recovery.is_some() || admission.is_some()) => (),
+                Err(error) => return Err(error),
             }
-            _ => false,
-        };
-        let (recovery, admission) = stop_capture(guard_live, || os::Recovery::capture(state))?;
-        match os::recorded_live(state, false) {
-            Ok(false) => continue,
-            Ok(true) => (),
-            Err(_) if guard_lost(state)? && (recovery.is_some() || admission.is_some()) => (),
-            Err(error) => return Err(error),
+            Ok(Some(Target {
+                state: state.clone(),
+                recovery,
+                admission,
+                orphan_term: None,
+                finished: false,
+            }))
+        })();
+        match admitted {
+            Ok(Some(target)) => active.push(target),
+            Ok(None) => (),
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
         }
-        active.push(Target {
-            state: state.clone(),
-            recovery,
-            admission,
-            orphan_term: None,
-            finished: false,
-        });
     }
-    let mut failure = None;
     for target in &mut active {
         let signalled = if let Some(recovery) = &target.recovery {
             target.orphan_term = Some(Instant::now());

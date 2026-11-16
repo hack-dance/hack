@@ -16,18 +16,19 @@ pub(crate) fn controlled(path: &Path) -> bool {
         fn acl_get_perm_np(perms: *mut c_void, permission: c_int) -> c_int;
         fn acl_free(acl: *mut c_void) -> c_int;
     }
-    fn witness(path: &Path) -> Option<([u64; 9], [u64; 9])> {
-        fn key(m: std::fs::Metadata) -> [u64; 9] {
+    // Identity only: device, inode, mode, owner, group. Not timestamps: a
+    // directory's mtime and ctime change whenever an entry is added or
+    // removed, so a busy ancestor such as the temp directory would fail
+    // this check at random. Only the owner or root can change an ACL, and
+    // their changes are outside this boundary (below).
+    fn witness(path: &Path) -> Option<([u64; 5], [u64; 5])> {
+        fn key(m: std::fs::Metadata) -> [u64; 5] {
             [
                 m.dev(),
                 m.ino(),
                 u64::from(m.mode()),
                 u64::from(m.uid()),
                 u64::from(m.gid()),
-                m.mtime() as u64,
-                m.mtime_nsec() as u64,
-                m.ctime() as u64,
-                m.ctime_nsec() as u64,
             ]
         }
         Some((

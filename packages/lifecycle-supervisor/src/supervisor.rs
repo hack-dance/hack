@@ -176,8 +176,12 @@ fn control_effects(
                 return Err(refused());
             }
             Err(error) => {
-                // Live members that no witness ties to that receipt.
-                *reason = "foreign-unknown-process";
+                // Only live members that no witness ties to that receipt are
+                // `foreign-unknown-process`; a census, inspection or boot-ID
+                // failure stays `io-error`. Neither signals or retires anything.
+                if os::is_no_witness(&error) {
+                    *reason = "foreign-unknown-process";
+                }
                 return Err(error);
             }
         }

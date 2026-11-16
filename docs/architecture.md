@@ -923,10 +923,12 @@ Such a plist is never replaced automatically; `start` reports it and
   A replacement's direct start runs this CLI itself: the executing compiled
   binary, or the same runtime and entry point for a source invocation. It
   never runs the `hack` first on `PATH`. It also never gives hackd the
-  caller's `PATH`: hackd runs helpers such as `docker` by bare name, so the
-  direct start gets the `PATH` its service would give it (the systemd unit's,
-  with this CLI's directory first, or the launchd plist's) after the same
-  directory checks the service gets. If a directory on it is unsafe, the direct
+  caller's `PATH`, whether or not a service is installed: hackd runs helpers
+  such as `docker` by bare name, so the direct start gets the `PATH` a service
+  would give it (the systemd unit's, with this CLI's directory first, or the
+  launchd plist's) after the same directory checks the service gets. A fresh
+  start with no running daemon to replace keeps the caller's environment, as
+  `hack daemon start` always has. If a directory on it is unsafe, the direct
   start refuses, hackd stays stopped, and the error names the next step,
   `hack daemon install`. `hack update` runs the new binary by
   absolute path while an older `hack` may come first on `PATH`, and starting

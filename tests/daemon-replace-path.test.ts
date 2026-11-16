@@ -105,3 +105,29 @@ test("a service PATH directory others can add programs to refuses the direct sta
     })
   ).toHaveProperty("refused");
 });
+
+// Source guard (like the spawn-bound ratchet): every start of a replacement
+// hackd outside its service goes through startReplacementDirectly, which is
+// the only caller allowed to pass this CLI's own argv, and so a PATH, to
+// startDaemonDetached. Another branch would hand hackd the caller's PATH.
+test("only startReplacementDirectly starts a replacement hackd directly", async () => {
+  const source = await Bun.file(
+    join(import.meta.dir, "../src/commands/daemon.ts")
+  ).text();
+  const definition = source.indexOf("async function startReplacementDirectly(");
+  expect(definition).toBeGreaterThan(-1);
+  const end = source.indexOf("\n}\n", definition);
+  const calls = [...source.matchAll(/startDaemonDetached\(\{[^}]*\}\)/g)];
+  expect(calls.length).toBeGreaterThan(0);
+  for (const call of calls) {
+    const inside = call.index > definition && call.index < end;
+    // Outside the helper, a direct start passes only `paths`: the `hack`
+    // this CLI resolves, with the caller's environment (a fresh start).
+    expect(inside || !/\b(?:argv|path)\b/.test(call[0])).toBe(true);
+  }
+  // Both replacement routes call the helper: the start after a stop
+  // (startStoppedDaemon with `replacement`) and the service-failure retry.
+  expect(
+    source.match(/startReplacementDirectly\(\{ paths(?:: [^}]*)? \}\)/g)?.length
+  ).toBeGreaterThanOrEqual(2);
+});

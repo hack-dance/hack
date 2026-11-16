@@ -494,10 +494,14 @@ async function startStoppedDaemon(opts: {
     };
   }
 
-  const started = await startDaemonDetached({
-    paths,
-    argv: opts.replacement === true ? executingDaemonArgv() : undefined,
-  });
+  // A replacement (a running daemon was just stopped) never inherits the
+  // caller's PATH, with or without a service: it gets the service PATH,
+  // checked ({@link startReplacementDirectly}). A fresh start keeps the
+  // caller's environment, as an ordinary `hack daemon start` always has.
+  const started =
+    opts.replacement === true
+      ? await startReplacementDirectly({ paths })
+      : await startDaemonDetached({ paths });
   trace.manager = "none";
   trace.action = started === 0 ? "started" : trace.action;
   return { kind: "direct-attempted", exitCode: started, manager: null };

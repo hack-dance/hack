@@ -79,6 +79,13 @@ impl<T> PanelState<T> {
         self.active
     }
 
+    /// Put `tab` in place of the tab at `index` and return the old one.
+    /// The active tab and visibility do not change.
+    pub fn swap(&mut self, index: usize, tab: T) -> Option<T> {
+        let slot = self.tabs.get_mut(index)?;
+        Some(std::mem::replace(slot, tab))
+    }
+
     /// Put a tab at `index` (clamped to the end), activate it and show the
     /// panel.
     pub fn insert(&mut self, index: usize, tab: T) -> usize {
@@ -335,6 +342,32 @@ impl TerminalPanel {
         let Some(view) = self.state.close(index) else {
             return;
         };
+        self.retire_view(&view, cx);
+        self.focus_active(window, cx);
+        self.changed(cx);
+    }
+
+    /// Replace the tab at `index` with `view` in place, ending the old
+    /// tab's session: the active tab, focus and visibility are unchanged.
+    /// For work the user did not ask for (a log stream restarted in the
+    /// background), so it never interrupts the tab being typed in.
+    pub fn replace_in_place(
+        &mut self,
+        index: usize,
+        view: Entity<TerminalView>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        let Some(old) = self.state.swap(index, view) else {
+            return;
+        };
+        self.retire_view(&old, cx);
+        self.changed(cx);
+    }
+
+    /// End a removed tab's session on a reaper thread, keeping its
+    /// teardown so quit can await it and survivors are reported.
+    fn retire_view(&mut self, view: &Entity<TerminalView>, cx: &mut Context<Self>) {
         // End the session now, on a reaper thread, and keep the handle so
         // anything that could not be ended is reported.
         let (shutdown, retired) = view.update(cx, |v, _| (v.take_shutdown(), v.take_retired()));
@@ -362,8 +395,6 @@ impl TerminalPanel {
             })
             .detach();
         }
-        self.focus_active(window, cx);
-        self.changed(cx);
     }
 
     /// Take finished teardown results. Returns whether any are still pending.
@@ -537,6 +568,16 @@ mod tests {
         assert!(p.is_visible());
         assert_eq!((p.active_index(), p.active()), (Some(1), Some(&"api · sh")));
         assert_eq!(p.tabs(), ["logs", "api · sh"]);
+    }
+
+    #[test]
+    fn swapping_keeps_the_active_tab() {
+        let mut p = panel(&["logs", "shell"]);
+        assert_eq!(p.active(), Some(&"shell"));
+        assert_eq!(p.swap(0, "logs2"), Some("logs"));
+        assert_eq!(p.tabs(), ["logs2", "shell"]);
+        assert_eq!(p.active(), Some(&"shell"), "the shell stays active");
+        assert_eq!(p.swap(5, "x"), None);
     }
 
     #[test]

@@ -304,8 +304,8 @@ impl HackApp {
             self.open_tab(d, NewTab::Logs, window, cx);
         } else if follow_now {
             // A finite read (started while stopped), running or ended:
-            // replace it with a following stream.
-            self.open_tab(d, NewTab::Logs, window, cx);
+            // replace it with a following stream, in the background.
+            self.start_tab(d, NewTab::Logs, true, window, cx);
         }
     }
 
@@ -411,6 +411,20 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.start_tab(d, tab, false, window, cx);
+    }
+
+    /// Open a tab. `quiet`: work the user did not ask for (a Logs stream
+    /// restarted in the background); it replaces the tab in place and never
+    /// changes the active tab, focus, the menu or a collapsed panel.
+    fn start_tab(
+        &mut self,
+        d: &DetailView,
+        tab: NewTab,
+        quiet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let core = self.core_for(d, &tab);
         let look = self.look(cx);
         let Some(panel) = self.panels.by_key.get_mut(&d.key) else {
@@ -422,9 +436,11 @@ impl HackApp {
             // never on every frame.
             panel.logs_follow = d.state.is_active();
         }
-        panel.menu = Menu::Closed;
-        if panel.state == PanelState::Collapsed {
-            panel.state = PanelState::half();
+        if !quiet {
+            panel.menu = Menu::Closed;
+            if panel.state == PanelState::Collapsed {
+                panel.state = PanelState::half();
+            }
         }
         let sessions = panel.sessions.clone();
         let core = match core {
@@ -460,7 +476,9 @@ impl HackApp {
             v.set_look(look, cx);
             v
         });
-        if tab == NewTab::Logs && sessions.read(cx).tab_count() > 0 {
+        if tab == NewTab::Logs && quiet && sessions.read(cx).tab_count() > 0 {
+            sessions.update(cx, |p, cx| p.replace_in_place(0, view, cx));
+        } else if tab == NewTab::Logs && sessions.read(cx).tab_count() > 0 {
             sessions.update(cx, |p, cx| p.replace(0, view, window, cx));
         } else {
             sessions.update(cx, |p, cx| p.add_tab(view, window, cx));
@@ -1246,6 +1264,44 @@ mod window_tests {
         let (mut cx, window, app) = open(false);
         draw(&mut cx, window, &app);
         assert!(logs_text(&mut cx, &app).contains("checkpoint complete"));
+    }
+
+    #[test]
+    fn a_background_logs_restart_keeps_the_tab_focus_and_collapsed_panel() {
+        let (mut cx, window, app) = open(false);
+        draw(&mut cx, window, &app);
+        let sessions = panel(&mut cx, &app);
+        // The user works in a second tab (from a file: no shell starts) and
+        // collapses the panel.
+        cx.update_window(window, |_, window, cx| {
+            let view = cx.new(|cx| TerminalView::from_core(note_core("shell\r\n").unwrap(), cx));
+            sessions.update(cx, |s, cx| s.add_tab(view, window, cx));
+        })
+        .unwrap();
+        let logs = cx.update(|cx| sessions.read(cx).tab(0).cloned().unwrap());
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.toggle_panel(cx);
+                let key = a.model.selected_key().unwrap();
+                a.panels.by_key.get_mut(&key).unwrap().logs_follow = false;
+            });
+        });
+        draw(&mut cx, window, &app);
+        let (new_logs, active) = cx.update(|cx| {
+            let s = sessions.read(cx);
+            (s.tab(0).cloned().unwrap(), s.active_index())
+        });
+        assert_ne!(new_logs.entity_id(), logs.entity_id(), "Logs restarted");
+        assert_eq!(active, Some(1), "the tab being worked in stays active");
+        let state = cx.update(|cx| {
+            let a = app.read(cx);
+            a.panels.by_key[&a.model.selected_key().unwrap()].state
+        });
+        assert_eq!(
+            state,
+            PanelState::Collapsed,
+            "a collapsed panel stays collapsed"
+        );
     }
 
     #[test]

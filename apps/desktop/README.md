@@ -155,6 +155,53 @@ Cmd-F find, Cmd-C / Cmd-V copy and paste in a terminal. Without the feature
 the window keeps its Logs tab. `term/scripts/check-ghostty.sh` builds and
 tests the app with the feature too.
 
+Input (keys and paste) is queued up to 1 MiB for the program in the tab. A
+paste larger than that is refused whole, never cut, and the tab says so.
+
+#### Drive the panel from the command line
+
+`--drive <steps>` runs a steps file in the real window, quits the app the way
+the user does, waits 5 s, and counts every process still alive in a session a
+tab started. It exits 0 only when every step passed and nothing is left.
+`--hidden` opens the window without showing it. Each step calls what the
+matching click or key calls; tabs come from the panel's own new-tab menu.
+
+```text
+select <project> [<branch>]     select an instance; waits for live data
+logs | host                     show the Logs tab | open "Host shell"
+container <service>             open "Shell in <service>"
+env <overlay> [<scope>]         open "Host shell with env…" for it
+key <keystroke>                 e.g. key ctrl-c (through the keymap)
+type <text>                     type into the active tab (\r \n \t \\)
+paste <file>                    paste a file's text
+expect <text> [<seconds>]       wait for text on the active tab's screen
+wait <milliseconds>
+check-container <service> <pattern>
+                                after the app has quit, count processes in
+                                the service whose command line contains
+                                <pattern> (read through `hack exec`)
+quit                            implied at the end
+```
+
+```sh
+cat > /tmp/panel.steps <<'STEPS'
+select <project>
+logs
+host
+type sleep 86399 &\r
+paste big.txt
+container <service>
+type sleep 86398 &\r
+check-container <service> 86398
+STEPS
+cargo run -p hack-desktop --features terminal -- --drive /tmp/panel.steps
+```
+
+The host-side count covers every process in a tab's session (the shell, its
+jobs, `hack`, the `docker exec` client). A process that starts its own session
+(`setsid`) leaves both the panel's teardown and this count. Processes inside a
+container are not host processes; `check-container` counts them through the CLI.
+
 Renders: [running, dark](screenshots/window/running-dark.png),
 [running, light](screenshots/window/running-light.png),
 [branch instances](screenshots/window/branches-dark.png),

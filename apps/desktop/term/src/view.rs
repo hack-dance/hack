@@ -547,6 +547,11 @@ impl TerminalView {
         self.font = font;
     }
 
+    /// The running session's leader pid; see [`TerminalCore::leader`].
+    pub fn leader(&self) -> Option<u32> {
+        self.core.leader()
+    }
+
     pub fn status(&self) -> &Status {
         self.core.status()
     }

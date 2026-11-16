@@ -711,7 +711,7 @@ impl HackApp {
 
     /// The new-tab menu's entries: a shell in each running service, a host
     /// shell, and a host shell with env.
-    fn menu_entries(&self, d: &DetailView) -> Vec<(String, Glyph, Option<NewTab>)> {
+    pub(crate) fn menu_entries(&self, d: &DetailView) -> Vec<(String, Glyph, Option<NewTab>)> {
         let cli = self.source.hack_program().is_some();
         let mut out: Vec<(String, Glyph, Option<NewTab>)> = d
             .services
@@ -733,7 +733,7 @@ impl HackApp {
     }
 
     /// Overlay and scope choices for "Host shell with env…", names only.
-    fn env_entries(&self) -> Result<Vec<(String, NewTab)>, String> {
+    pub(crate) fn env_entries(&self) -> Result<Vec<(String, NewTab)>, String> {
         use hack_desktop_core::env::EnvView;
         if self.source.hack_program().is_none() {
             return Err("Needs the hack CLI".into());
@@ -1098,6 +1098,191 @@ impl HackApp {
                 .into_any_element(),
             PanelState::Maximized => base.flex_1().child(strip).child(surface).into_any_element(),
         }
+    }
+}
+
+/// What `--drive` (see `drive.rs`) calls: each is what the matching click
+/// or key calls, plus a read of the result.
+impl HackApp {
+    fn selected_panel(&self) -> Option<&ProjectPanel> {
+        self.panels.by_key.get(&self.model.detail()?.key)
+    }
+
+    fn active_view(&self, cx: &App) -> Option<Entity<TerminalView>> {
+        self.selected_panel()?.sessions.read(cx).active().cloned()
+    }
+
+    /// Select an instance and create its panel. False until live data has
+    /// it.
+    pub(crate) fn drive_select(
+        &mut self,
+        key: &InstanceKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.select_instance(key.clone(), cx);
+        if self.model.detail().is_none_or(|d| d.key != *key) {
+            return false;
+        }
+        self.ensure_panel(window, cx);
+        self.selected_panel().is_some()
+    }
+
+    pub(crate) fn drive_activate(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let panel = self.selected_panel().ok_or("no instance selected")?;
+        let sessions = panel.sessions.clone();
+        if index >= sessions.read(cx).tab_count() {
+            return Err(format!("there is no tab {index}"));
+        }
+        sessions.update(cx, |s, cx| s.activate(index, window, cx));
+        Ok(())
+    }
+
+    /// The new-tab menu entry that `want` matches.
+    pub(crate) fn drive_menu_choice(&self, want: &NewTab) -> Result<NewTab, String> {
+        let d = self.model.detail().ok_or("no instance selected")?;
+        let offered: Vec<NewTab> = self
+            .menu_entries(&d)
+            .into_iter()
+            .filter_map(|(_, _, tab)| tab)
+            .collect();
+        offered
+            .iter()
+            .find(|t| *t == want)
+            .cloned()
+            .ok_or_else(|| format!("not in the new-tab menu, which offers {offered:?}"))
+    }
+
+    /// Open a tab the menus offer, as their click does. Returns the tab
+    /// count before, so the caller can wait for the new one.
+    pub(crate) fn drive_open(
+        &mut self,
+        tab: NewTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<usize, String> {
+        let d = self.model.detail().ok_or("no instance selected")?;
+        let before = self
+            .drive_tab_count(cx)
+            .ok_or("the instance has no panel; select it first")?;
+        self.open_tab(&d, tab, window, cx);
+        Ok(before)
+    }
+
+    /// The "Host shell with env…" choice for `overlay` (and `scope`).
+    pub(crate) fn drive_env_choice(
+        &self,
+        overlay: &str,
+        scope: Option<&str>,
+    ) -> Result<NewTab, String> {
+        let entries = self.env_entries()?;
+        entries
+            .iter()
+            .map(|(_, tab)| tab)
+            .find(|tab| {
+                matches!(tab, NewTab::HostWithEnv { overlay: o, scope: s, .. }
+                    if o == overlay && scope.is_none_or(|want| want == s))
+            })
+            .cloned()
+            .ok_or_else(|| {
+                let offered: Vec<&String> = entries.iter().map(|(l, _)| l).collect();
+                format!("no env choice {overlay} (offered: {offered:?})")
+            })
+    }
+
+    pub(crate) fn drive_tab_count(&self, cx: &App) -> Option<usize> {
+        Some(self.selected_panel()?.sessions.read(cx).tab_count())
+    }
+
+    /// The active tab's label and env badge, as the strip shows them.
+    pub(crate) fn drive_active_label(&self, cx: &App) -> Option<String> {
+        let view = self.active_view(cx)?;
+        let kind = view.read(cx).kind().clone();
+        Some(match kind.badge() {
+            Some(b) => format!("{} [{} {:?}]", kind.label(), b.text, b.tone),
+            None => kind.label(),
+        })
+    }
+
+    /// Type or paste into the active tab. Reports a notice the tab shows
+    /// (a refused paste, a full input queue).
+    pub(crate) fn drive_input(
+        &mut self,
+        text: &str,
+        paste: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let view = self.active_view(cx).ok_or("no active tab")?;
+        if !view.read(cx).kind().is_interactive() {
+            return Err("the active tab is read-only".into());
+        }
+        view.update(cx, |v, cx| {
+            if paste {
+                v.paste_text(text, cx);
+            } else {
+                v.type_text(text, cx);
+            }
+        });
+        Ok(view
+            .read(cx)
+            .notice()
+            .map(|n| format!(" (notice: {n})"))
+            .unwrap_or_default())
+    }
+
+    /// The active tab's screen, row by row.
+    pub(crate) fn drive_screen(&self, cx: &mut Context<Self>) -> String {
+        let Some(view) = self.active_view(cx) else {
+            return String::new();
+        };
+        view.update(cx, |v, _| {
+            v.emulator()
+                .frame()
+                .map(|f| {
+                    (0..f.rows.len())
+                        .map(|r| f.row_text(r))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// Every running tab's session leader and label, in every panel.
+    pub(crate) fn drive_sessions(&self, cx: &App) -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        for panel in self.panels.by_key.values() {
+            let sessions = panel.sessions.read(cx);
+            for i in 0..sessions.tab_count() {
+                if let Some(view) = sessions.tab(i) {
+                    let v = view.read(cx);
+                    if let Some(leader) = v.leader() {
+                        out.push((leader, v.kind().label()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Where `check-container` runs the CLI for the selected instance.
+    pub(crate) fn drive_target(&self) -> Result<crate::drive::Target, String> {
+        let hack = self
+            .source
+            .hack_program()
+            .ok_or("needs the hack CLI (live data)")?;
+        let (root, native, branch) = self.instance_root().ok_or("no instance selected")?;
+        Ok(crate::drive::Target {
+            hack,
+            root,
+            native,
+            branch,
+        })
     }
 }
 

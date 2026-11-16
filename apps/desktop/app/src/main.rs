@@ -10,9 +10,16 @@
 //!                                      click-through, on fixtures
 //! hack-desktop --screenshots <dir>     (feature `screenshots`) render every
 //!                                      fixture, light and dark, offscreen
+//! hack-desktop --drive <steps> [--hidden]
+//!                                      (feature `terminal`) run a steps file
+//!                                      in the real window, quit, and report
+//!                                      what the terminal tabs left running
+//!                                      (see `drive.rs`)
 //! ```
 
 mod doctor_view;
+#[cfg(feature = "terminal")]
+mod drive;
 mod logs_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
@@ -33,11 +40,20 @@ pub(crate) struct Args {
     pub theme: Option<ThemeMode>,
     pub screenshots: Option<std::path::PathBuf>,
     pub sequence: Option<std::path::PathBuf>,
+    /// `--drive`: run the steps file in a child app and report.
+    pub drive: Option<std::path::PathBuf>,
+    /// `--drive-child`: this is that child.
+    pub drive_child: Option<std::path::PathBuf>,
+    /// Open the window without showing it (`--drive` on a machine where a
+    /// window should not appear).
+    pub hidden: bool,
+    /// Every argument but `--drive <steps>`, for the child.
+    pub rest: Vec<String>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>]"
+        "usage: hack-desktop [--fixtures <state> | --logs-fixture <state>] [--theme light|dark] [--list-fixtures] [--screenshots <dir>] [--drive <steps> [--hidden]]"
     );
     std::process::exit(2)
 }
@@ -49,12 +65,23 @@ fn parse_args() -> Args {
         theme: None,
         screenshots: None,
         sequence: None,
+        drive: None,
+        drive_child: None,
+        hidden: false,
+        rest: Vec::new(),
     };
-    let mut it = std::env::args().skip(1);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    let mut it = all.iter().cloned();
     while let Some(arg) = it.next() {
+        if arg == "--drive" {
+            a.drive = Some(it.next().unwrap_or_else(|| usage()).into());
+            continue;
+        }
+        a.rest.push(arg.clone());
         match arg.as_str() {
             "--fixtures" => {
                 let name = it.next().unwrap_or_else(|| usage());
+                a.rest.push(name.clone());
                 a.fixture = Some(Fixture::parse(&name).unwrap_or_else(|| {
                     eprintln!("unknown fixture {name:?}; see --list-fixtures");
                     std::process::exit(2)
@@ -62,6 +89,7 @@ fn parse_args() -> Args {
             }
             "--logs-fixture" => {
                 let name = it.next().unwrap_or_else(|| usage());
+                a.rest.push(name.clone());
                 a.logs_fixture = Some(
                     hack_desktop_core::logs::fixtures::LogsFixture::parse(&name).unwrap_or_else(
                         || {
@@ -81,7 +109,9 @@ fn parse_args() -> Args {
                 std::process::exit(0)
             }
             "--theme" => {
-                a.theme = Some(match it.next().as_deref() {
+                let mode = it.next();
+                a.rest.extend(mode.clone());
+                a.theme = Some(match mode.as_deref() {
                     Some("light") => ThemeMode::Light,
                     Some("dark") => ThemeMode::Dark,
                     _ => usage(),
@@ -89,6 +119,12 @@ fn parse_args() -> Args {
             }
             "--screenshots" => a.screenshots = Some(it.next().unwrap_or_else(|| usage()).into()),
             "--sequence" => a.sequence = Some(it.next().unwrap_or_else(|| usage()).into()),
+            "--drive-child" => {
+                let steps = it.next().unwrap_or_else(|| usage());
+                a.rest.push(steps.clone());
+                a.drive_child = Some(steps.into());
+            }
+            "--hidden" => a.hidden = true,
             "-h" | "--help" => usage(),
             _ => usage(),
         }
@@ -133,6 +169,28 @@ pub(crate) fn window_options() -> WindowOptions {
 
 fn main() {
     let args = parse_args();
+    #[cfg(feature = "terminal")]
+    if let Some(steps) = &args.drive {
+        std::process::exit(drive::supervise(steps, &args.rest));
+    }
+    #[cfg(feature = "terminal")]
+    let drive_steps = args.drive_child.as_ref().map(|path| {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("read {}: {e}", path.display());
+            std::process::exit(2)
+        });
+        drive::parse(&text, path.parent().unwrap_or(std::path::Path::new("."))).unwrap_or_else(
+            |e| {
+                eprintln!("{}: {e}", path.display());
+                std::process::exit(2)
+            },
+        )
+    });
+    #[cfg(not(feature = "terminal"))]
+    if args.drive.is_some() || args.drive_child.is_some() {
+        eprintln!("--drive needs a build with --features terminal");
+        std::process::exit(2);
+    }
     #[cfg(feature = "screenshots")]
     if let Some(dir) = &args.sequence {
         screenshots::sequence(dir);
@@ -163,7 +221,16 @@ fn main() {
             let logs_fixture = args.logs_fixture;
             let theme = args.theme;
             let source = source_for(fixture);
-            gpui_kit::open_window(window_options(), cx, move |window, cx| {
+            let options = if args.hidden {
+                WindowOptions {
+                    focus: false,
+                    show: false,
+                    ..window_options()
+                }
+            } else {
+                window_options()
+            };
+            let (window, app) = gpui_kit::open_window(options, cx, move |window, cx| {
                 match theme {
                     Some(mode) => Theme::change(mode, Some(window), cx),
                     None => Theme::sync_system_appearance(Some(window), cx),
@@ -196,5 +263,13 @@ fn main() {
                 })
             })
             .expect("failed to open the window");
+            #[cfg(feature = "terminal")]
+            if let Some(steps) = drive_steps {
+                let win = drive::Win { window, app };
+                cx.spawn(async move |cx| drive::run(win, steps, cx).await)
+                    .detach();
+            }
+            #[cfg(not(feature = "terminal"))]
+            let _ = (window, app);
         });
 }

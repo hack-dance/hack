@@ -416,6 +416,12 @@ impl HackApp {
         let Some(panel) = self.panels.by_key.get_mut(&d.key) else {
             return;
         };
+        if tab == NewTab::Logs {
+            // Recorded whether or not the stream starts: a failed start is
+            // shown and retried by a click on the tab or the next start,
+            // never on every frame.
+            panel.logs_follow = d.state.is_active();
+        }
         panel.menu = Menu::Closed;
         if panel.state == PanelState::Collapsed {
             panel.state = PanelState::half();
@@ -435,11 +441,6 @@ impl HackApp {
             v.set_look(look, cx);
             v
         });
-        if tab == NewTab::Logs
-            && let Some(p) = self.panels.by_key.get_mut(&d.key)
-        {
-            p.logs_follow = d.state.is_active();
-        }
         if tab == NewTab::Logs && sessions.read(cx).tab_count() > 0 {
             sessions.update(cx, |p, cx| p.replace(0, view, window, cx));
         } else {

@@ -14,13 +14,28 @@
  * release notes tell existing users to run it. The prerelease workflow does not
  * set it: using it is a deliberate maintainer change to that workflow.
  *
+ * It executes the previous release only when its manager is a reviewed
+ * predecessor and its archive is pinned in this file; release assets are
+ * mutable. The managers run with a fixed environment (no token, no output path),
+ * the candidate is installed from copies, and the gate fails if the packaged
+ * candidate assets changed while it ran.
+ *
  * Inputs: HACK_PRERELEASE_VERSION, HACK_PRERELEASE_OUTPUT (the packaged candidate
  * assets) and a GitHub token for `gh` (GH_TOKEN). Runs on Apple Silicon macOS
  * only; it starts no runtime and changes nothing outside its own temp directory.
  */
-import { chmodSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { REVIEWED_PREDECESSORS } from "./installer/channel.ts";
 import {
   candidateVersion,
   compareCandidateVersions,
@@ -31,6 +46,40 @@ const REPOSITORY = "hack-dance/hack";
 const PLATFORM = "darwin-arm64";
 export const MANAGER_ASSET = "hack-next-manager-darwin-arm64";
 const TAG = /^v(5\.\d+\.\d+-next\.\d+)$(?![\s\S])/;
+
+/**
+ * Published prerelease archives, pinned in review (each release's `SHA256SUMS`
+ * when it published). Release assets can be replaced after publication, so the
+ * gate never executes a previous release's bytes on the strength of checksums
+ * downloaded beside them: its manager must be a reviewed predecessor
+ * (REVIEWED_PREDECESSORS) and its archive must be listed here. Add each release
+ * when it publishes, with its manager digest.
+ */
+export const PUBLISHED_ARCHIVES: Readonly<Record<string, string>> = {
+  "5.0.0-next.17":
+    "6f63804f5f81935ba9cfa05ab085e1ccbffc789e89633277547b0e85da1e1466",
+  "5.0.0-next.18":
+    "da7c3e74629c049a25c40fbe95c5aa35433f241499065df372a23b27ee95aaee",
+};
+
+/** A fixed environment for the managers: no token, output path or caller state. */
+function managerEnvironment(work: string): Record<string, string> {
+  return {
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    HOME: join(work, "home"),
+    TMPDIR: join(work, "tmp"),
+    LC_ALL: "C",
+  };
+}
+
+/** Name to sha256 of every regular file directly in `directory`. */
+function snapshot(directory: string): Record<string, string> {
+  return Object.fromEntries(
+    readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => [entry.name, digest(join(directory, entry.name))])
+  );
+}
 
 /** The newest published prerelease older than `candidate`, or null. */
 export function previousPrerelease(
@@ -65,8 +114,13 @@ export function archiveName(version: string): string {
 
 type Step = { readonly ok: boolean; readonly output: string };
 
-function step(argv: readonly string[], timeoutMs: number): Step {
+function step(
+  argv: readonly string[],
+  timeoutMs: number,
+  env?: Record<string, string>
+): Step {
   const result = Bun.spawnSync([...argv], {
+    ...(env ? { env } : {}),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -151,26 +205,57 @@ async function main(): Promise<number> {
     const previousManager = join(assets, MANAGER_ASSET);
     const previousArchive = join(assets, archiveName(previous));
     const sums = (name: string) => Bun.file(join(assets, name)).text();
+    // The release's own checksum files are only a consistency check: they
+    // live beside the assets. Execution needs the reviewed pins.
+    const managerDigest = digest(previousManager);
     if (
-      digest(previousManager) !==
-      listedDigest(await sums("INSTALLER-SHA256SUMS"), MANAGER_ASSET)
+      managerDigest !==
+        listedDigest(await sums("INSTALLER-SHA256SUMS"), MANAGER_ASSET) ||
+      !REVIEWED_PREDECESSORS.includes(managerDigest)
     ) {
-      throw new Error(`${previous}'s manager does not match its checksums.`);
+      throw new Error(
+        `${previous}'s manager is not a reviewed predecessor (REVIEWED_PREDECESSORS in scripts/installer/channel.ts); add its published digest in review before this gate runs it.`
+      );
     }
-    const previousSum = listedDigest(
-      await sums("SHA256SUMS"),
-      archiveName(previous)
-    );
-    if (digest(previousArchive) !== previousSum) {
-      throw new Error(`${previous}'s archive does not match its checksums.`);
+    const previousSum = PUBLISHED_ARCHIVES[previous];
+    if (
+      previousSum === undefined ||
+      digest(previousArchive) !== previousSum ||
+      listedDigest(await sums("SHA256SUMS"), archiveName(previous)) !==
+        previousSum
+    ) {
+      throw new Error(
+        `${previous}'s archive is not pinned or does not match its pin (PUBLISHED_ARCHIVES in scripts/check-prerelease-upgrade.ts).`
+      );
     }
     chmodSync(previousManager, 0o700);
-    const candidateManager = join(output, MANAGER_ASSET);
-    const candidateArchive = join(output, archiveName(candidate));
+    // Run the candidate from copies, and prove afterwards that nothing the gate
+    // ran changed the assets that will be uploaded.
+    const before = snapshot(output);
+    const copies = join(work, "candidate");
+    mkdirSync(copies, { mode: 0o700 });
+    for (const name of [MANAGER_ASSET, archiveName(candidate)]) {
+      copyFileSync(join(output, name), join(copies, name));
+    }
+    const candidateManager = join(copies, MANAGER_ASSET);
+    const candidateArchive = join(copies, archiveName(candidate));
     const candidateSum = listedDigest(
       await Bun.file(join(output, "SHA256SUMS")).text(),
       archiveName(candidate)
     );
+    if (digest(candidateArchive) !== candidateSum) {
+      throw new Error("The candidate archive does not match its checksums.");
+    }
+    const env = managerEnvironment(work);
+    mkdirSync(env.HOME as string, { mode: 0o700 });
+    mkdirSync(env.TMPDIR as string, { mode: 0o700 });
+    const unchanged = () => {
+      if (JSON.stringify(snapshot(output)) !== JSON.stringify(before)) {
+        throw new Error(
+          "The candidate assets changed while the upgrade gate ran; do not publish them."
+        );
+      }
+    };
     const root = join(work, "channel");
     required(
       step(
@@ -186,7 +271,8 @@ async function main(): Promise<number> {
           "--sha256",
           previousSum,
         ],
-        600_000
+        600_000,
+        env
       ),
       `Installing ${previous} with its own manager`
     );
@@ -203,9 +289,11 @@ async function main(): Promise<number> {
           "--sha256",
           candidateSum,
         ],
-        600_000
+        600_000,
+        env
       );
     const direct = upgrade();
+    unchanged();
     if (direct.ok) {
       console.log(
         `The ${previous} manager upgrades its channel to ${candidate} with the documented command.`
@@ -218,9 +306,11 @@ async function main(): Promise<number> {
     chmodSync(candidateManager, 0o700);
     const takeover = step(
       [candidateManager, "--root", root, "upgrade-manager"],
-      600_000
+      600_000,
+      env
     );
     const retried = takeover.ok ? upgrade() : null;
+    unchanged();
     if (!(takeover.ok && retried?.ok)) {
       console.error(
         `The documented upgrade-manager step does not work either: ${takeover.ok ? retried?.output : takeover.output}`

@@ -173,7 +173,12 @@ Before anything is published, the build job also checks that an existing channel
 can take the candidate. It installs the previous published prerelease into a fresh
 root with that release's own standalone manager, then upgrades it to the candidate
 with the documented `hack-next --manager upgrade` command, which runs the retained
-older manager. If that fails, the job fails. It also reports whether the documented
+older manager. If that fails, the job fails. Release assets can be replaced after
+publication, so the gate runs the previous release only when its manager digest is
+a reviewed predecessor in `scripts/installer/channel.ts` and its archive digest is
+pinned in `scripts/check-prerelease-upgrade.ts`. Add both for each release when it
+publishes. The managers run without the workflow token, and the job fails if the
+packaged candidate changed while the gate ran. It also reports whether the documented
 `upgrade-manager` step would work. A release can pass on that step only with
 `HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1` and release notes that tell existing users to
 run it.

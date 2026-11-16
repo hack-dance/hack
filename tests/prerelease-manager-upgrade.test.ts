@@ -12,6 +12,7 @@ import {
   archiveName,
   listedDigest,
   MANAGER_ASSET,
+  PUBLISHED_ARCHIVES,
   previousPrerelease,
 } from "../scripts/check-prerelease-upgrade.ts";
 import {
@@ -217,4 +218,19 @@ test("the release gate upgrades from the newest published prerelease before the 
   expect(listedDigest(sums, MANAGER_ASSET)).toBe("a".repeat(64));
   expect(listedDigest(sums, "hack-next-install.sh")).toBe("b".repeat(64));
   expect(() => listedDigest(sums, "missing")).toThrow("not listed");
+});
+
+test("the gate runs a previous release only from reviewed pins", () => {
+  // Release assets are mutable: the previous release's archive is pinned in
+  // review (its SHA256SUMS when it published), and its manager must be a
+  // reviewed predecessor.
+  expect(PUBLISHED_ARCHIVES).toEqual({
+    "5.0.0-next.17":
+      "6f63804f5f81935ba9cfa05ab085e1ccbffc789e89633277547b0e85da1e1466",
+    "5.0.0-next.18":
+      "da7c3e74629c049a25c40fbe95c5aa35433f241499065df372a23b27ee95aaee",
+  });
+  expect(REVIEWED_PREDECESSORS).toContain(
+    "90d1bc60bfd2b7eaad48dcf56ad45264f395c0ac1a8c4530e986be7fa194d4d9"
+  );
 });

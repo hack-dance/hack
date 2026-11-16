@@ -41,6 +41,17 @@ use crate::stream::StreamSource;
 pub use crate::terminal::Status;
 use crate::terminal::TerminalCore;
 
+/// Terminal families tried last, after the theme's monospace family.
+#[cfg(target_os = "macos")]
+const PLATFORM_MONO_FAMILIES: &[&str] = &["SF Mono", "Menlo", "Monaco", "Courier New"];
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_MONO_FAMILIES: &[&str] = &[
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+    "Ubuntu Mono",
+];
+
 /// Padding around the grid when the user's config sets none.
 const DEFAULT_PAD: f32 = 8.0;
 /// GPUI gives quit handlers 200 ms in total.
@@ -78,6 +89,11 @@ pub struct Rendered {
     pub find: Option<SearchState>,
     /// How many match highlights that frame drew: the matches on screen.
     pub highlights: usize,
+    /// The font family the grid was drawn with.
+    pub font_family: String,
+    /// Shown when a configured font family was skipped: not installed, or
+    /// not monospaced.
+    pub font_note: Option<String>,
 }
 
 /// Where the grid was laid out last, in logical pixels: for tests that
@@ -127,6 +143,10 @@ pub struct TerminalView {
     /// The user's terminal look, and whether it still has to be applied.
     look: GhosttyLook,
     look_pending: bool,
+    /// Installed family names (lower case), read once per view.
+    installed_fonts: Option<std::sync::Arc<std::collections::HashSet<String>>>,
+    /// The family chosen for a list of candidates, and the note to show.
+    chosen_font: Option<(Vec<SharedString>, SharedString, Option<String>)>,
     rendered: Rendered,
     /// Which symbols the terminal's font lacks, remembered across frames.
     symbols: SymbolFallback,
@@ -222,6 +242,8 @@ impl TerminalView {
             applied_theme: None,
             look: GhosttyLook::default(),
             look_pending: false,
+            installed_fonts: None,
+            chosen_font: None,
             rendered: Rendered::default(),
             symbols: SymbolFallback::default(),
             fallback_symbols: Vec::new(),
@@ -256,6 +278,90 @@ impl TerminalView {
     /// are still running (see [`TerminalCore::take_retired`]).
     pub fn take_retired(&mut self) -> crate::terminal::Retired {
         self.core.take_retired()
+    }
+
+    /// The grid's font family: the first candidate that is installed and
+    /// monospaced. Candidates, in order: the user's terminal config
+    /// families, an explicit [`TermFont::family`], the theme's monospace
+    /// family (already resolved to an installed one), then common terminal
+    /// families. A proportional font is never used for the grid, so a
+    /// missing configured family cannot misalign the cells. When the first
+    /// configured family is skipped, the note says so.
+    fn choose_family(
+        &mut self,
+        size: Pixels,
+        window: &mut Window,
+        cx: &App,
+    ) -> (SharedString, Option<String>) {
+        let mut candidates: Vec<SharedString> = self
+            .look
+            .font_families
+            .iter()
+            .cloned()
+            .map(SharedString::from)
+            .collect();
+        candidates.extend(self.font.family.clone());
+        candidates.push(cx.theme().mono_font_family.clone());
+        candidates.extend(
+            PLATFORM_MONO_FAMILIES
+                .iter()
+                .map(|f| SharedString::from(*f)),
+        );
+        if let Some((key, family, note)) = &self.chosen_font
+            && *key == candidates
+        {
+            return (family.clone(), note.clone());
+        }
+        let installed = self
+            .installed_fonts
+            .get_or_insert_with(|| {
+                std::sync::Arc::new(
+                    window
+                        .text_system()
+                        .all_font_names()
+                        .into_iter()
+                        .map(|name| name.to_lowercase())
+                        .collect(),
+                )
+            })
+            .clone();
+        let ts = window.text_system();
+        let monospaced = |family: &SharedString| {
+            let id = ts.resolve_font(&gpui_kit::font(family.clone()));
+            let width = |c| ts.advance(id, size, c).map(|s| s.width).ok();
+            let m = width('m');
+            m.is_some_and(|m| m > px(0.)) && ['i', 'W', '.', '@'].iter().all(|c| width(*c) == m)
+        };
+        let mut skipped: Option<(SharedString, &'static str)> = None;
+        let mut chosen = None;
+        for family in &candidates {
+            let reason = if !installed.contains(&family.to_lowercase()) {
+                Some("is not installed")
+            } else if !monospaced(family) {
+                Some("is not monospaced")
+            } else {
+                None
+            };
+            match reason {
+                None => {
+                    chosen = Some(family.clone());
+                    break;
+                }
+                Some(why) if skipped.is_none() && !self.look.font_families.is_empty() => {
+                    skipped = Some((family.clone(), why));
+                }
+                Some(_) => {}
+            }
+        }
+        // Nothing qualified (no monospaced font at all): keep the theme's.
+        let family = chosen.unwrap_or_else(|| cx.theme().mono_font_family.clone());
+        let note = skipped
+            .filter(|(first, _)| {
+                self.look.font_families.first().map(String::as_str) == Some(first.as_ref())
+            })
+            .map(|(first, why)| format!("font \"{first}\" {why}; using {family}"));
+        self.chosen_font = Some((candidates, family.clone(), note.clone()));
+        (family, note)
     }
 
     /// What the last render drew.
@@ -650,17 +756,12 @@ impl Render for TerminalView {
         // Font: the user's terminal config, then an explicit `set_font`,
         // then the app's monospace family. Later families in the config are
         // fallbacks for glyphs the first one lacks (prompt symbols).
-        let mut families = self
+        let font_size_for_choice = self
             .look
-            .font_families
-            .iter()
-            .cloned()
-            .map(SharedString::from);
-        let family = families
-            .next()
-            .or_else(|| self.font.family.clone())
-            .unwrap_or_else(|| cx.theme().mono_font_family.clone());
-        let mut base_font = gpui_kit::font(family);
+            .font_size_pt
+            .map_or(self.font.size, |pt| px(points(pt)));
+        let (family, font_note) = self.choose_family(font_size_for_choice, window, cx);
+        let mut base_font = gpui_kit::font(family.clone());
         let fallbacks: Vec<String> = self.look.font_families.iter().skip(1).cloned().collect();
         if !fallbacks.is_empty() {
             base_font.fallbacks = Some(gpui_kit::FontFallbacks::from_fonts(fallbacks));
@@ -767,11 +868,16 @@ impl Render for TerminalView {
         if self.search_open {
             key_context.add("TerminalFind");
         }
+        // Lowest priority: a running session with nothing else to say shows
+        // why its font is not the configured one.
+        let status = status.or_else(|| font_note.clone());
         self.rendered = Rendered {
             count: self.rendered.count + 1,
             notice: self.core.notice().map(str::to_owned),
             find: self.search_open.then_some(self.search),
             highlights: self.rendered.highlights,
+            font_family: family.to_string(),
+            font_note,
         };
         let status = status.map(|s| {
             let t = cx.theme();

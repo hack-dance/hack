@@ -46,13 +46,48 @@ fn bare_newlines_start_a_new_line_in_stream_mode() {
     assert_eq!(f.row_text(1), "cd", "LNM: LF also returns the carriage");
 }
 
+/// Feed `count` lines one at a time and check the scrollback promise: at
+/// most `scrollback_lines` (10,000) rows, and, once full, never fewer than
+/// that minus one page. libghostty frees scrollback a whole page at a time,
+/// so a page is the largest single drop seen. A page's row count depends on
+/// the width and on the platform (pages are larger on Apple silicon), so it
+/// is measured here, not assumed; it must stay a small part of the limit.
+fn check_scrollback_bound(e: &mut Emulator, count: usize) {
+    const LIMIT: usize = 10_000;
+    let (mut previous, mut page, mut full) = (0, 0, false);
+    let mut held = Vec::with_capacity(count);
+    for i in 0..count {
+        e.feed(format!("line {i}\n").as_bytes());
+        let now = e.scrollback_rows();
+        assert!(
+            now <= LIMIT,
+            "scrollback rows {now} over the limit at line {i}"
+        );
+        if now < previous {
+            page = page.max(previous - now);
+            full = true;
+        }
+        if full {
+            held.push(now);
+        }
+        previous = now;
+    }
+    assert!(full, "{count} lines never filled the scrollback");
+    assert!(
+        page <= LIMIT / 4,
+        "one page is {page} rows: too coarse a bound"
+    );
+    let least = held.iter().copied().min().unwrap_or(0);
+    assert!(
+        least >= LIMIT - page,
+        "held {least} rows, below {LIMIT} minus one page ({page})"
+    );
+}
+
 #[test]
 fn scrollback_is_bounded_and_follow_tracks_the_newest_line() {
     let mut e = emu(40, 10, true);
-    e.feed(&lines(0..30_000));
-    let held = e.scrollback_rows();
-    // Bounded at 10,000 lines, pruned at page granularity.
-    assert!((9_000..=12_000).contains(&held), "scrollback rows: {held}");
+    check_scrollback_bound(&mut e, 30_000);
     let f = e.frame().unwrap();
     assert_eq!(f.row_text(8), "line 29999", "follow shows the newest line");
     assert!(e.at_bottom());
@@ -65,9 +100,7 @@ fn the_line_bound_holds_on_a_wide_grid() {
     // libghostty's default byte limit would keep only about 5,500 lines at
     // this width; the line bound is the one that must apply.
     let mut e = emu(200, 60, true);
-    e.feed(&lines(0..30_000));
-    let held = e.scrollback_rows();
-    assert!((9_000..=12_000).contains(&held), "scrollback rows: {held}");
+    check_scrollback_bound(&mut e, 30_000);
 }
 
 #[test]

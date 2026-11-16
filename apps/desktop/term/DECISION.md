@@ -376,7 +376,18 @@ changes if `bash` was missing.
 terminal matches their own: `font-family` (the first is the font, later
 ones are fallbacks), `font-size`, `background`, `foreground`, `palette`,
 `cursor-style`, `window-padding-x` and `window-padding-y`. Whatever is not
-set falls back to the app's tokens. Rules follow Ghostty's documentation:
+set falls back to the app's tokens.
+
+The grid is only ever drawn in a monospaced font. The view takes the first
+family that is installed and has one advance for ASCII: the config's
+families in order, then the theme's monospace family, then the platform's
+terminal families (Menlo and the like on macOS, DejaVu Sans Mono and the
+like elsewhere). When the configured family is missing or proportional,
+the panel shows a non-fatal note naming it ("font \"X\" is not installed;
+using Menlo"), and the session runs on. Before this, a missing family fell
+back to the system UI font on macOS and drew letters with uneven gaps.
+
+Rules follow Ghostty's documentation:
 
 - Files, in load order: `$XDG_CONFIG_HOME/ghostty/config.ghostty`, then
   `config` (`~/.config` when the variable is unset); on macOS also
@@ -868,6 +879,14 @@ One thing the benchmark caught: libghostty's default 10 MB scrollback byte
 limit applies before the line limit, and on a 200-column grid kept only
 about 5,500 lines. The emulator now sets its own byte ceiling (256 MiB) so
 the 10,000-line bound is the one that applies; a test covers it.
+
+What the scrollback promises: **at most 10,000 lines, and once full never
+fewer than 10,000 minus one page.** libghostty frees scrollback a whole
+page at a time, so just after a prune it holds less than the limit. A page
+is about 1,100 lines at 40 columns and about 230 at 200 columns on Linux,
+and pages are larger on Apple silicon (the first Mac run held 8,931 lines
+at 40 columns). The tests measure the page as the largest single drop and
+check both bounds after every line.
 
 ## Uses
 

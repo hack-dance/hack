@@ -95,6 +95,9 @@ pub const INTERPRETER_STARTUP_VARS: &[&str] = &[
     "PYTHONSTARTUP",
     "PYTHONPATH",
     "PYTHONHOME",
+    // Selects the user site directory, whose `usercustomize` Python imports
+    // at startup. Doctor runs also set `PYTHONNOUSERSITE=1`.
+    "PYTHONUSERBASE",
     "RUBYOPT",
     "RUBYLIB",
     "NODE_OPTIONS",
@@ -245,6 +248,9 @@ impl CliRunner {
                     cmd.env_remove(key);
                 }
             }
+            // Python skips the user site directory (and its `usercustomize`)
+            // whatever its default location.
+            cmd.env("PYTHONNOUSERSITE", "1");
         }
         if let Some(dir) = &self.cwd {
             cmd.current_dir(dir);
@@ -1241,21 +1247,25 @@ mod tests {
     fn interpreter_startup_variables_never_reach_doctor_children() {
         // A run-time check with variables SIP-protected macOS shells keep;
         // loader (DYLD_*) variables are checked on the Command below.
-        let f = FakeHack::new(r#"printf '%s|%s' "${BASH_ENV-unset}" "${NODE_OPTIONS-unset}""#);
+        let f = FakeHack::new(
+            r#"printf '%s|%s|%s|%s' "${BASH_ENV-unset}" "${NODE_OPTIONS-unset}" "${PYTHONUSERBASE-unset}" "${PYTHONNOUSERSITE-unset}""#,
+        );
         let runner = f
             .runner()
             .with_env("BASH_ENV", "/example/startup")
-            .with_env("NODE_OPTIONS", "--require=/example/preload");
+            .with_env("NODE_OPTIONS", "--require=/example/preload")
+            .with_env("PYTHONUSERBASE", "/example/userbase")
+            .with_env("PYTHONNOUSERSITE", "");
         let (seen, _, _) = runner.run_raw(&["x"], None, T).unwrap();
         assert_eq!(
-            seen, "/example/startup|--require=/example/preload",
+            seen, "/example/startup|--require=/example/preload|/example/userbase|",
             "positive control"
         );
         let (stripped, _, _) = runner
             .without_interpreter_startup()
             .run_raw(&["x"], None, T)
             .unwrap();
-        assert_eq!(stripped, "unset|unset");
+        assert_eq!(stripped, "unset|unset|unset|1");
     }
 
     #[test]

@@ -1307,8 +1307,10 @@ mod window_tests {
     use super::*;
 
     fn open(live: bool) -> (HeadlessAppContext, AnyWindowHandle, Entity<HackApp>) {
+        // GPUI's test platform with its no-op text system: libtest runs this
+        // off the main thread, where macOS cannot build the real platform.
         let mut cx = HeadlessAppContext::with_platform(
-            gpui_kit::platform::current_platform(true).text_system(),
+            Arc::new(gpui_kit::NoopTextSystem::new()),
             Arc::new(hack_desktop_ui::icons::Assets),
             || Ok(None),
         );

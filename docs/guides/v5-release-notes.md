@@ -35,6 +35,12 @@ no longer removes legacy inputs in the same step.
 
 The full upgrade steps are in [Upgrade to v5](upgrade-to-v5.md#preview-resume-and-undo-env-migration).
 
+### Waiting for project changes from hackd
+
+| Change | What to do |
+| --- | --- |
+| **hackd's `GET /v1/projects` carries `state_token` and accepts `?wait=<state_token>`.** The request answers when the projects content changes, or at `wait_timeout_ms` (default 25 s, 1–55 s). hackd's socket now keeps idle connections for up to 70 s. `hack projects --json` output is unchanged. | Long-poll instead of polling quickly: send the last `state_token` back and repeat. See [waiting for changes](../reference/project-state.md#waiting-for-changes). |
+
 ### Read-only update check for any install
 
 | Change | What to do |

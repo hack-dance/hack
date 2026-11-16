@@ -1067,3 +1067,59 @@ test("project polling observes fresh autostart progress without a runtime refres
   });
   expect(JSON.stringify(second)).not.toContain("private-");
 });
+
+test("nextRefresh wakes on a completed refresh, its deadline or an abort", async () => {
+  const cache = createRuntimeCache({});
+  const never = new AbortController().signal;
+
+  let woke = false;
+  const before = cache.refreshGeneration();
+  const waiting = cache
+    .nextRefresh({
+      after: before,
+      signal: never,
+      deadlineMs: Date.now() + 60_000,
+    })
+    .then(() => {
+      woke = true;
+    });
+  await Bun.sleep(5);
+  expect(woke).toBe(false);
+  await cache.refresh({ reason: "test" });
+  await waiting;
+  expect(woke).toBe(true);
+  expect(cache.refreshGeneration()).toBe(before + 1);
+
+  // A refresh already newer than `after` resolves at once.
+  const quick = Date.now();
+  await cache.nextRefresh({
+    after: before,
+    signal: never,
+    deadlineMs: Date.now() + 60_000,
+  });
+  expect(Date.now() - quick).toBeLessThan(1000);
+
+  const started = Date.now();
+  await cache.nextRefresh({
+    after: cache.refreshGeneration(),
+    signal: never,
+    deadlineMs: Date.now() + 20,
+  });
+  expect(Date.now() - started).toBeLessThan(5000);
+
+  const controller = new AbortController();
+  const aborted = cache.nextRefresh({
+    after: cache.refreshGeneration(),
+    signal: controller.signal,
+    deadlineMs: Date.now() + 60_000,
+  });
+  controller.abort();
+  await aborted;
+  const already = new AbortController();
+  already.abort();
+  await cache.nextRefresh({
+    after: cache.refreshGeneration(),
+    signal: already.signal,
+    deadlineMs: Date.now() + 60_000,
+  });
+});

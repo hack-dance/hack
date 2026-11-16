@@ -1561,9 +1561,12 @@ fn unverifiable_receipt_does_not_block_healthy_targets() {
     let mut bad = f.state("unverifiable");
     let bad_command = identity(pid(&bad, "commandPid")).expect("unverifiable command");
     let bad_guard = pid(&bad, "guardPid");
+    let bad_guard_birth = process_birth(bad_guard).expect("guard birth");
     // SAFETY: the guard belongs to this fixture; its command survives it.
     assert_eq!(unsafe { libc::kill(bad_guard, libc::SIGKILL) }, 0);
-    eventually(|| identity(bad_guard).is_none().then_some(()));
+    // Wait until no record of that guard is left, zombie included: on Darwin
+    // `identity` already rejects a zombie, and a zombie guard is still a witness.
+    eventually(|| (process_birth(bad_guard) != Some(bad_guard_birth)).then_some(()));
     bad["commandStartTime"] = json!(bad["commandStartTime"].as_u64().unwrap() + 1);
     fs::write(
         f.root.join("unverifiable.json"),
@@ -1601,9 +1604,11 @@ fn unverifiable_foreign_receipt_refuses_with_its_own_reason() {
     let mut state = f.state("worker");
     let command = identity(pid(&state, "commandPid")).expect("command identity");
     let guard = pid(&state, "guardPid");
+    let guard_birth = process_birth(guard).expect("guard birth");
     // SAFETY: the guard belongs to this fixture; its command survives it.
     assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
-    eventually(|| identity(guard).is_none().then_some(()));
+    // No record left, zombie included (see the test above).
+    eventually(|| (process_birth(guard) != Some(guard_birth)).then_some(()));
     state["commandStartTime"] = json!(state["commandStartTime"].as_u64().unwrap() + 1);
     fs::write(
         f.root.join("worker.json"),

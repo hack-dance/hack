@@ -133,6 +133,18 @@ export interface RuntimeCache {
   }): PsPayload;
   getSnapshot(): RuntimeSnapshot | null;
   getDiagnostics(): RuntimeCacheDiagnostics;
+  /** Count of completed refreshes; read it before building from the cache. */
+  refreshGeneration(): number;
+  /**
+   * Resolves once a refresh newer than generation `after` has completed (at
+   * once if one already has), at `deadlineMs`, or when `signal` aborts,
+   * whichever is first. Never rejects.
+   */
+  nextRefresh(opts: {
+    readonly after: number;
+    readonly signal: AbortSignal;
+    readonly deadlineMs: number;
+  }): Promise<void>;
 }
 
 export type RuntimeCacheDiagnostics = {
@@ -175,6 +187,8 @@ export function createRuntimeCache(opts: {
 
   let lastRefreshPhasesMs: Readonly<Record<string, number>> = {};
   let snapshot: RuntimeSnapshot | null = null;
+  const refreshWaiters = new Set<() => void>();
+  let generation = 0;
   let refreshTask: Promise<void> | null = null;
   let pendingRefresh: QueuedRefresh | null = null;
   let lastRefreshDurationMs: number | null = null;
@@ -294,6 +308,10 @@ export function createRuntimeCache(opts: {
       health = refreshed.health;
       snapshot = nextSnapshot;
       opts.onRefresh?.(nextSnapshot);
+      generation++;
+      for (const wake of [...refreshWaiters]) {
+        wake();
+      }
     } finally {
       const durationMs = Math.max(0, Date.now() - startedAtMs);
       lastRefreshPhasesMs = { ...profiler.timings };
@@ -494,10 +512,34 @@ export function createRuntimeCache(opts: {
     }
   }
 
+  const nextRefresh: RuntimeCache["nextRefresh"] = ({
+    after,
+    signal,
+    deadlineMs,
+  }) =>
+    new Promise<void>((resolve) => {
+      const wake = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", wake);
+        refreshWaiters.delete(wake);
+        resolve();
+      };
+      const timer = setTimeout(wake, Math.max(0, deadlineMs - Date.now()));
+      // A refresh that completed while the caller was building counts.
+      if (signal.aborted || generation > after) {
+        wake();
+        return;
+      }
+      signal.addEventListener("abort", wake, { once: true });
+      refreshWaiters.add(wake);
+    });
+
   return {
     refresh,
     getProjectsPayload,
     getPsPayload,
+    nextRefresh,
+    refreshGeneration: () => generation,
     getSnapshot: () => snapshot,
     getDiagnostics: () => {
       const inspect = getRuntimeInspectCacheDiagnostics({

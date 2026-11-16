@@ -885,7 +885,9 @@ async function outputDaemonProjects({
     daemon.json &&
     (!opts.summary || daemon.json.detail_level === "summary")
   ) {
-    const { profiling, ...cached } = daemon.json;
+    // `state_token` is the daemon's long-poll marker (`?wait=`), not part of
+    // the published `projects --json` shape.
+    const { profiling, state_token: _stateToken, ...cached } = daemon.json;
     // Policy changes do not wait for Docker's next cache refresh.
     const registry = await readProjectsRegistry();
     const payload = overlayAutostartPolicy({

@@ -254,11 +254,19 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     try {
       const deadline = Date.now() + 3000;
       const ready = join(root, "grandchild.pid");
-      while (!(await Bun.file(ready).exists()) && Date.now() < deadline) {
+      const groupPath = join(root, "group.pid");
+      while (
+        !(
+          (await Bun.file(ready).exists()) &&
+          (await Bun.file(groupPath).exists())
+        ) &&
+        Date.now() < deadline
+      ) {
         await Bun.sleep(10);
       }
       expect(await Bun.file(ready).exists()).toBe(true);
-      const group = Number(await Bun.file(join(root, "group.pid")).text());
+      expect(await Bun.file(groupPath).exists()).toBe(true);
+      const group = Number(await Bun.file(groupPath).text());
       groups.push(group);
       process.kill(child.pid, signal);
       expect(await child.exited).toBe(0);

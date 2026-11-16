@@ -275,9 +275,12 @@ export function buildCliEnv(opts: {
  * - `HACK_LAUNCHD_DISABLE=1`, which the CLI honors before any plist access or
  *   launchctl call, with the isolated-home opt-in removed;
  * - a `launchctl` shim first on PATH that refuses (exit 1) and records any
- *   call naming the hackd service, so a regression in the CLI's own guard
- *   still cannot bootstrap, kickstart or stop the real service. Other
- *   launchctl calls pass through to `/bin/launchctl` unchanged.
+ *   call naming the hackd service. Other launchctl calls pass through to
+ *   `/bin/launchctl` unchanged. The CLI's launchd module now runs
+ *   `/bin/launchctl` by absolute path (HACK-2216), so the shim no longer
+ *   sees its calls; for those, the hard deny above, which the CLI checks
+ *   before any spawn, is the guard. The shim still covers launchctl calls
+ *   made by name elsewhere.
  *
  * The plist write itself is caught after the fact by
  * {@link fingerprintLaunchAgentPlist}, which `run.ts` compares around the run.

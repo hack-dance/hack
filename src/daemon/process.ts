@@ -4,7 +4,8 @@ import { childEnvironment } from "../lib/child-environment.ts";
 
 import { readTextFile, writeTextFile } from "../lib/fs.ts";
 import { readObservedProcesses } from "../lib/host-command-observation.ts";
-import { exec, findExecutableInPath } from "../lib/shell.ts";
+import { exec } from "../lib/shell.ts";
+import { resolveSystemTool } from "../lib/system-tool.ts";
 import {
   isLinuxZombie,
   type ProcessImage,
@@ -113,6 +114,12 @@ export interface OrphanDaemonScan {
    * report them.
    */
   readonly refused: readonly RefusedDaemonProcess[];
+  /**
+   * The process table could not be read: no trusted `ps` at a fixed path
+   * ({@link resolveSystemTool}). Nothing is known about orphans, so callers
+   * must not go on as if none held the socket (HACK-2216).
+   */
+  readonly unknown?: true;
 }
 
 /**
@@ -140,6 +147,9 @@ export async function findOrphanDaemonProcesses(opts: {
   readonly expectation?: DaemonIdentityExpectation;
 }): Promise<OrphanDaemonScan> {
   const lines = opts.psLines ?? (await listProcessTable());
+  if (lines === null) {
+    return { orphans: [], refused: [], unknown: true };
+  }
   const orphans: OwnedDaemonProof[] = [];
   const refused: RefusedDaemonProcess[] = [];
   for (const line of lines) {
@@ -228,7 +238,8 @@ async function findDaemonSocketOwners(opts: {
 async function listOpenUnixSockets(opts: {
   readonly pids: readonly number[];
 }): Promise<readonly string[]> {
-  const lsof = findExecutableInPath("lsof");
+  // A fixed, trusted path, never PATH (HACK-2216).
+  const lsof = resolveSystemTool("lsof");
   if (!lsof) {
     return [];
   }
@@ -245,8 +256,17 @@ async function listOpenUnixSockets(opts: {
   }
 }
 
-async function listProcessTable(): Promise<readonly string[]> {
-  const proc = Bun.spawn(["ps", "-axo", "pid=,command="], {
+/**
+ * `ps -axo pid=,command=` lines, from a fixed, trusted `ps`
+ * ({@link resolveSystemTool}), never PATH (HACK-2216). Null when no such
+ * `ps` exists: the table is unknown.
+ */
+async function listProcessTable(): Promise<readonly string[] | null> {
+  const ps = resolveSystemTool("ps");
+  if (ps === null) {
+    return null;
+  }
+  const proc = Bun.spawn([ps, "-axo", "pid=,command="], {
     env: childEnvironment(),
     stdout: "pipe",
     stderr: "ignore",
@@ -311,7 +331,8 @@ export const defaultDaemonProcessProbe: DaemonProcessProbe = {
     if (process.platform === "linux") {
       return await findDaemonSocketOwnersFromProc({ daemonRoot, pids });
     }
-    if (!findExecutableInPath("lsof")) {
+    // No trusted lsof at a fixed path: socket owners are unknown.
+    if (resolveSystemTool("lsof") === null) {
       return null;
     }
     return await findDaemonSocketOwners({

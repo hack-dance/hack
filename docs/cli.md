@@ -25,7 +25,7 @@ terminal).
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
 - `hack upgrade check` — read-only upgrade check of this machine and every registered project: a one-screen summary, the projects with findings (worktrees folded; `--verbose` for every checkout), and a plan with one step per kind of change, then the next command; `hack upgrade apply [--only <fix>] [--project <name>] [--dry-run]` runs the plan's apply steps (`.hack/.gitignore` refresh, stale agent files) for every checkout after keeping a snapshot and a journal; `hack upgrade snapshot` and `hack upgrade rollback --rollback-manifest <manifest>` keep and restore the files the upgrade changes
-- `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
+- `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that. After an upgrade, `hack daemon start` (and `hack update`) restarts hackd on the new version when its login service runs the same executable, and rewrites a stale unit or plist that Hack wrote (managed header); `start`, `stop`, `restart` and `install` accept `--json`
 
 Candidate `hack-next doctor` and `hack-v5 doctor` report a missing hackd as optional
 for Compose workflows. They do not recommend starting the stable daemon or

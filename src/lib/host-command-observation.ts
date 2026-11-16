@@ -8,6 +8,7 @@ import {
   type ProcessSnapshotRow,
 } from "./project-lifecycle-processes.ts";
 import { exec, type RunOptions, run } from "./shell.ts";
+import { resolveSystemTool } from "./system-tool.ts";
 
 export type HostLifetime = "command" | "persistent" | "bounded";
 const identitySchema = z.object({
@@ -88,10 +89,16 @@ export function parseObservedProcesses(output: string): ObservedProcess[] {
 export async function readObservedProcesses(
   pids?: readonly number[]
 ): Promise<ObservedProcess[] | null> {
+  // A fixed, trusted `ps`, never PATH (HACK-2216): the daemon's ownership
+  // proof reads process births here. None: the snapshot is unknown.
+  const ps = resolveSystemTool("ps");
+  if (ps === null) {
+    return null;
+  }
   try {
     const result = await exec(
       [
-        "ps",
+        ps,
         ...(pids ? ["-p", pids.join(",")] : ["-A"]),
         "-o",
         "pid=,ppid=,pgid=,etime=,time=,rss=,lstart=",

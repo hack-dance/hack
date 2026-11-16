@@ -393,7 +393,16 @@ export async function downloadAndExtractRelease(opts: {
 }
 
 export type InstallReleaseResult =
-  | { readonly ok: true; readonly backupManifest: string }
+  | {
+      readonly ok: true;
+      readonly backupManifest: string;
+      /** The published binary as verified: device, inode and sha256. */
+      readonly installedBinary: {
+        readonly dev: number;
+        readonly ino: number;
+        readonly sha256: string;
+      };
+    }
   | { readonly ok: false; readonly error: string };
 
 export async function installExtractedRelease(opts: {

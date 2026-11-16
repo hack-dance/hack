@@ -15,6 +15,8 @@ import {
   RENDERED_SYSTEM_PATH_DIRECTORIES,
   UNSET_PATH_LOOKUP_DIRS,
 } from "../src/daemon/systemd.ts";
+import { spawnSyncBounded } from "./helpers/bounded-spawn-sync.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
  * `hack daemon install|status|uninstall` on Linux through the source CLI,
@@ -55,6 +57,9 @@ case "$1" in
     echo DropInPaths=
     if [ -f "$state/enabled" ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
     if alive; then echo ActiveState=active; echo "MainPID=$(cat "$main")"; else echo ActiveState=inactive; echo MainPID=0; fi
+    # The fake's processes are not in a hackd.service cgroup; a running
+    # unit reports one anyway, as systemd does.
+    if alive; then echo ControlGroup=/fake.slice/hackd.service; else echo ControlGroup=; fi
     exit 0 ;;
   show-environment) echo "HOME=$HOME"; exit 0 ;;
   daemon-reload|reset-failed) exit 0 ;;
@@ -141,6 +146,42 @@ afterEach(async () => {
 async function writeExecutable(path: string, text: string): Promise<void> {
   await writeFile(path, text);
   await chmod(path, 0o755);
+}
+
+/**
+ * Replaces the fixture's source shim with a compiled hack binary. The build
+ * runs with the fixture's private env, so it never sees the runner's HOME,
+ * and is bounded below the calling test's 90 s timeout so a stuck compiler
+ * fails with its command named.
+ */
+async function compileHack(f: Fixture): Promise<void> {
+  const outfile = f.hackBin;
+  const build = spawnSyncBounded(
+    [
+      process.execPath,
+      "build",
+      join(REPO_ROOT, "index.ts"),
+      "--compile",
+      "--no-compile-autoload-dotenv",
+      "--no-compile-autoload-bunfig",
+      "--no-compile-autoload-tsconfig",
+      "--no-compile-autoload-package-json",
+      "--outfile",
+      outfile,
+    ],
+    {
+      cwd: REPO_ROOT,
+      env: privateCliEnv({ root: f.root }),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+      timeout: 60_000,
+    }
+  );
+  if (build.exitCode !== 0) {
+    throw new Error(`compiling hack failed: ${build.stderr.toString()}`);
+  }
+  await chmod(outfile, 0o755);
 }
 
 async function createFixture(): Promise<Fixture> {
@@ -464,6 +505,221 @@ installFlowTest(
     // Clean up through the manager once stop works again.
     await rm(join(f.state, "stop-fails"));
     expect((await hack(f, ["daemon", "uninstall"])).code).toBe(0);
+  },
+  90_000
+);
+
+installFlowTest(
+  "restart --json refuses before the stop when the unit's start would be refused (HACK-2216)",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    expect((await hack(f, ["daemon", "install"])).code).toBe(0);
+    const pid = await readOwnedPid(f);
+    expect(pid).not.toBeNull();
+    // A unit file others could write: start refuses it, so restart must
+    // not stop the running daemon first.
+    await chmod(f.unitPath, 0o666);
+    const before = (await calls(f)).length;
+
+    const restart = await hack(f, ["daemon", "restart", "--json"]);
+    expect(restart.code).toBe(1);
+    expect(JSON.parse(restart.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: "E_DAEMON_SERVICE",
+        detail: {
+          schema: "hack.daemon-restart.v1",
+          manager: "systemd",
+          blocked: "untrusted-unit",
+        },
+      },
+    });
+    expect(isAlive(pid as number)).toBe(true);
+    const after = (await calls(f)).slice(before);
+    expect(after.some((call) => call.includes(" stop "))).toBe(false);
+    expect(after.some((call) => call.endsWith("stop hackd.service"))).toBe(
+      false
+    );
+
+    await chmod(f.unitPath, 0o644);
+    expect((await hack(f, ["daemon", "uninstall"])).code).toBe(0);
+  },
+  90_000
+);
+
+installFlowTest(
+  "start --json rewrites a stale unit, restarts the service and prints one envelope",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    // Automatic repairs compare the service with the executing binary
+    // (HACK-2216): a source invocation has none, so this flow runs a
+    // compiled hack, as an installed one is.
+    await compileHack(f);
+    expect((await hack(f, ["daemon", "install"])).code).toBe(0);
+    const before = await readOwnedPid(f);
+    expect(before).not.toBeNull();
+    const current = await readFile(f.unitPath, "utf8");
+    // What an older hack rendered: same program, other content (HACK-2216).
+    await writeFile(
+      f.unitPath,
+      current.replace("RestartSec=2", "RestartSec=9")
+    );
+
+    const start = await hack(f, ["daemon", "start", "--json"]);
+    expect(start.code).toBe(0);
+    const envelope = JSON.parse(start.stdout) as {
+      ok: boolean;
+      data: Record<string, unknown>;
+    };
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toMatchObject({
+      schema: "hack.daemon-start.v1",
+      manager: "systemd",
+      action: "reinstalled",
+      stale: true,
+      stale_reasons: ["content"],
+      daemon: { running: true, compatible: true },
+    });
+    expect(await readFile(f.unitPath, "utf8")).toBe(current);
+    expect(await calls(f)).toContain("--user restart hackd.service");
+    const after = await readOwnedPid(f);
+    expect(after).not.toBeNull();
+    expect(after).not.toBe(before);
+
+    // Nothing stale now: a second start changes nothing.
+    const again = await hack(f, ["daemon", "start", "--json"]);
+    expect(again.code).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({
+      ok: true,
+      data: { action: "none", stale: false, manager: "systemd" },
+    });
+
+    const stop = await hack(f, ["daemon", "stop", "--json"]);
+    expect(stop.code).toBe(0);
+    expect(JSON.parse(stop.stdout)).toMatchObject({
+      ok: true,
+      data: {
+        schema: "hack.daemon-stop.v1",
+        manager: "systemd",
+        action: "stopped",
+      },
+    });
+    expect((await hack(f, ["daemon", "uninstall"])).code).toBe(0);
+  },
+  90_000
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a replacement daemon started under reconcile-only mode still runs (HACK-2216)",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    const home = join(f.root, "isolated");
+    const env = {
+      ...f.env,
+      HACK_HOME: home,
+      HACK_DAEMON_RECONCILE_ONLY: "1",
+    };
+    // The foreground run is what a replacement spawn executes: even if the
+    // flag leaked into it, it must run the daemon, not exit as a no-op.
+    const daemon = Bun.spawn([f.hackBin, "daemon", "start", "--foreground"], {
+      env,
+      cwd: f.root,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    try {
+      let running = false;
+      for (let i = 0; i < 100 && !running; i++) {
+        const status = await hack({ ...f, env }, [
+          "daemon",
+          "status",
+          "--json",
+        ]);
+        running =
+          (JSON.parse(status.stdout) as { status?: string }).status ===
+          "running";
+        if (!running) {
+          await Bun.sleep(100);
+        }
+      }
+      expect(running).toBe(true);
+      // The reconcile-only start itself sees it running and changes nothing.
+      const reconcile = await hack({ ...f, env }, [
+        "daemon",
+        "start",
+        "--json",
+      ]);
+      expect(JSON.parse(reconcile.stdout)).toMatchObject({
+        ok: true,
+        data: { action: "none", daemon: { running: true, compatible: true } },
+      });
+    } finally {
+      const { HACK_DAEMON_RECONCILE_ONLY: _drop, ...plain } = env;
+      await hack({ ...f, env: plain }, ["daemon", "stop"]);
+      daemon.kill();
+      await daemon.exited;
+    }
+  },
+  90_000
+);
+
+test.skipIf(process.platform !== "linux")(
+  "--json with an isolated HACK_HOME: stop reports a no-op, --foreground is a usage error",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    const isolated = {
+      ...f,
+      env: { ...f.env, HACK_HOME: join(f.root, "isolated") },
+    };
+    const stop = await hack(isolated, ["daemon", "stop", "--json"]);
+    expect(stop.code).toBe(0);
+    expect(JSON.parse(stop.stdout)).toEqual({
+      ok: true,
+      data: {
+        schema: "hack.daemon-stop.v1",
+        manager: "none",
+        action: "none",
+        stale: false,
+        stale_reasons: [],
+        blocked: null,
+        fallback: null,
+        cli_version: expect.any(String),
+        daemon: { running: false, pid: null, version: null, compatible: false },
+      },
+    });
+    // The post-update child's reconcile-only mode never starts hackd.
+    const reconcileOnly = await hack(
+      {
+        ...isolated,
+        env: { ...isolated.env, HACK_DAEMON_RECONCILE_ONLY: "1" },
+      },
+      ["daemon", "start", "--json"]
+    );
+    expect(reconcileOnly.code).toBe(0);
+    expect(JSON.parse(reconcileOnly.stdout)).toMatchObject({
+      ok: true,
+      data: { action: "none", daemon: { running: false } },
+    });
+    expect(
+      await Bun.file(join(f.root, "isolated", "daemon", "hackd.pid")).exists()
+    ).toBe(false);
+    const foreground = await hack(isolated, [
+      "daemon",
+      "start",
+      "--foreground",
+      "--json",
+    ]);
+    expect(foreground.code).toBe(1);
+    expect(JSON.parse(foreground.stdout)).toMatchObject({
+      ok: false,
+      error: { code: "E_USAGE" },
+    });
+    expect(await calls(f)).toEqual([]);
   },
   90_000
 );

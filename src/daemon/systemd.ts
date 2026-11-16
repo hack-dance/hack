@@ -47,8 +47,11 @@ import {
  *   first `hack` on PATH), not its symlink target, so a stable symlink such as
  *   `~/.local/bin/hack` keeps working when an upgrade moves the real binary.
  *   When the recorded program no longer exists, `hack daemon start` rewrites
- *   the unit; any other difference is reported as drift and fixed by
- *   `hack daemon install`.
+ *   the unit. When the unit runs this CLI's executable, start restarts a
+ *   hackd of another version, and rewrites the unit when it differs from what
+ *   this CLI renders and still carries {@link SYSTEMD_MANAGED_HEADER}
+ *   (HACK-2216, `src/daemon/reconcile.ts`). A unit that runs
+ *   another existing `hack` is reported and switched by `hack daemon install`.
  * - `Restart=on-failure`: a crash restarts hackd; `hack daemon stop` (a clean
  *   stop through systemctl) does not. Start limits stop a crash loop.
  * - Keep `KillMode=control-group`: stopping or restarting the service
@@ -487,6 +490,124 @@ export const RENDERED_SYSTEM_PATH_DIRECTORIES = [
 ] as const;
 
 /**
+ * The first line of every unit Hack writes. Its second line tells the user
+ * that local changes are replaced on the next install, so only a unit that
+ * starts with it is rewritten automatically (HACK-2216).
+ */
+export const SYSTEMD_MANAGED_HEADER =
+  "# Managed by hack: written by `hack daemon install`, removed by `hack daemon uninstall`.";
+
+/** Whether the unit file's main text starts with {@link SYSTEMD_MANAGED_HEADER}. */
+export function isHackManagedUnit(opts: {
+  readonly unitText: string;
+}): boolean {
+  return opts.unitText.split("\n", 1)[0] === SYSTEMD_MANAGED_HEADER;
+}
+
+const ENVIRONMENT_SETTING =
+  /^\s*(Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment)\s*=(.*)$/;
+const HOME_BINDING_KEY = /(^|[\s"'])(HACK_HOME|HOME)(=|\s|"|'|$)/;
+/** A line systemd joins with the next (trailing backslash, maybe spaces). */
+const CONTINUED_LINE = /\\\s*$/;
+
+/**
+ * An environment line of the unit's main file that binds the service to a
+ * Hack home (`HACK_HOME` or `HOME`, or any `EnvironmentFile=`, whose
+ * contents cannot be read here) and that `rendered` would drop. Rewriting
+ * such a unit would silently move the service to another home, so the
+ * automatic rewrite is refused; null when there is none (HACK-2216).
+ *
+ * Continued lines: systemd joins a line ending in a backslash with the
+ * next one, so a home binding can sit on a physical line this per-line
+ * check would not read as a setting. The unit Hack renders has no
+ * continuation, so rather than re-implement systemd's joining, any
+ * continued line in the main file is returned as a binding: the automatic
+ * rewrite is refused and `hack daemon install` replaces the unit.
+ */
+export function findDroppedHomeBinding(opts: {
+  readonly unitText: string;
+  readonly rendered: string;
+}): string | null {
+  const continued = opts.unitText
+    .split("\n")
+    .find((line) => CONTINUED_LINE.test(line));
+  if (continued !== undefined) {
+    return continued.trim();
+  }
+  const kept = new Set(opts.rendered.split("\n").map((line) => line.trim()));
+  for (const line of opts.unitText.split("\n")) {
+    const match = ENVIRONMENT_SETTING.exec(line);
+    if (match === null || kept.has(line.trim())) {
+      continue;
+    }
+    if (
+      match[1] === "EnvironmentFile" ||
+      HOME_BINDING_KEY.test(match[2] ?? "")
+    ) {
+      return line.trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether this process runs inside hackd.service, compared by cgroup: its
+ * own `/proc/self/cgroup` path is the unit's `ControlGroup` or below it.
+ * Restarting the unit from inside it (a supervisor job running
+ * `hack daemon start`) would stop the caller itself (HACK-2216).
+ *
+ * Callers ask only while the unit runs hackd, so it must have a cgroup.
+ * `unknown` (callers then treat the caller as inside and refuse) when the
+ * query fails, reports no or an empty `ControlGroup`, or `/proc/self/cgroup`
+ * is unreadable, empty or has no well-formed `<id>:<controllers>:/<path>`
+ * line. Only a well-formed answer on both sides gives `outside`.
+ */
+export async function readInvokerInSystemdUnit(opts: {
+  readonly deps: SystemdDeps;
+  /** Defaults to reading `/proc/self/cgroup`. */
+  readonly readSelfCgroup?: () => Promise<string | null>;
+}): Promise<"inside" | "outside" | "unknown"> {
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    "--property=ControlGroup",
+  ]);
+  if (show.exitCode !== 0) {
+    return "unknown";
+  }
+  const group = (parseSystemdProperties(show.stdout).ControlGroup ?? "").trim();
+  if (!group.startsWith("/")) {
+    return "unknown";
+  }
+  const self = await (
+    opts.readSelfCgroup ?? (() => readTextFile("/proc/self/cgroup"))
+  )();
+  const paths = parseSelfCgroupPaths(self);
+  if (paths.length === 0) {
+    return "unknown";
+  }
+  const inside = paths.some(
+    (path) => path === group || path.startsWith(`${group}/`)
+  );
+  return inside ? "inside" : "outside";
+}
+
+const CGROUP_LINE = /^\d+:[^:]*:(\/.*)$/;
+
+/** The cgroup paths of well-formed `/proc/<pid>/cgroup` lines. */
+function parseSelfCgroupPaths(text: string | null): string[] {
+  if (text === null) {
+    return [];
+  }
+  return text
+    .split("\n")
+    .map((line) => CGROUP_LINE.exec(line.trimEnd())?.[1])
+    .filter((path): path is string => path !== undefined);
+}
+
+/**
  * Renders the unit file. Returns null for a program path the unit cannot
  * represent safely (relative, a compiled Bun virtual path, or containing
  * control, quote, backslash or `$` characters).
@@ -510,7 +631,7 @@ export function renderSystemdUnit(opts: {
     "%h/.hack/bin",
   ].join(":");
   return [
-    "# Managed by hack: written by `hack daemon install`, removed by `hack daemon uninstall`.",
+    SYSTEMD_MANAGED_HEADER,
     "# Local changes are replaced on the next install; use `systemctl --user edit hackd` for overrides.",
     "[Unit]",
     "Description=hack local daemon (hackd)",
@@ -1228,6 +1349,11 @@ export type SystemdInstallResult =
       readonly unavailable?: SystemdAvailability & {
         readonly available: false;
       };
+      /**
+       * A unit, drop-in or load directory, or the unit file, could have been
+       * written by another account; nothing was written (HACK-2216).
+       */
+      readonly untrusted?: true;
     };
 
 /**
@@ -1258,7 +1384,18 @@ export async function installSystemdUnit(opts: {
    * repair, which does not enable.
    */
   readonly hackHome?: string;
+  /**
+   * Explicit `hack daemon install` only (default false): secure Hack's own
+   * directories by removing group/other write from ones this user owns,
+   * and replace a unit file another account could have written. Without
+   * it (every automatic rewrite) any of those is refused with `untrusted`
+   * and nothing is changed, written, reloaded or restarted (HACK-2216): a
+   * directory that became writable after the earlier checks may already
+   * hold planted content.
+   */
+  readonly repair?: boolean;
 }): Promise<SystemdInstallResult> {
+  const repair = opts.repair === true;
   const access = resolveSystemdAccess({ env: opts.deps.env });
   if (!access.allowed) {
     return { ok: false, error: access.message };
@@ -1276,23 +1413,31 @@ export async function installSystemdUnit(opts: {
   const secured = await ensureOwnerWritableOnlyDirectories({
     // `$XDG_CONFIG_HOME`, `systemd/` and `systemd/user/`.
     dirs: [dirname(dirname(unitDir)), dirname(unitDir), unitDir],
+    repair,
   });
   if (!secured.ok) {
-    return { ok: false, error: secured.error };
+    return { ok: false, error: secured.error, untrusted: true };
   }
   // After Hack's own directories are secured: the config unit directory is
   // one of the load paths.
   const dropIns =
     (await checkSystemdUnitDirectoryChain({ unitPath: opts.unitPath })) ??
-    (await checkSystemdUnitDropIns({ unitPath: opts.unitPath })) ??
+    (await checkSystemdUnitDropIns({ unitPath: opts.unitPath, repair })) ??
     (await checkSystemdUnitLoadPaths({ deps: opts.deps }));
   if (dropIns !== null) {
-    return { ok: false, error: dropIns };
+    return { ok: false, error: dropIns, untrusted: true };
   }
   // Install writes the whole file: an existing one that another account
   // could have written (or a link) is removed and written fresh, never
-  // trusted for being unchanged.
+  // trusted for being unchanged. An automatic rewrite refuses it instead.
   if (await isUnitFileReplaceable({ unitPath: opts.unitPath })) {
+    if (!repair) {
+      return {
+        ok: false,
+        error: `Not rewriting ${SYSTEMD_UNIT_NAME}: ${opts.unitPath} could have been written by another account (a link, or writable by others) | Review it, then run: hack daemon install`,
+        untrusted: true,
+      };
+    }
     await rm(opts.unitPath, { force: true });
   }
   const { changed } = await writeTextFileAtomicIfChanged(
@@ -1301,9 +1446,12 @@ export async function installSystemdUnit(opts: {
     { createMode: 0o644 }
   );
   // An unchanged file is not rewritten: it must already be this user's.
-  const unitFile = await checkSystemdUnitFile({ unitPath: opts.unitPath });
+  const unitFile = await checkSystemdUnitFile({
+    unitPath: opts.unitPath,
+    repair,
+  });
   if (unitFile !== null) {
-    return { ok: false, error: unitFile };
+    return { ok: false, error: unitFile, untrusted: true };
   }
   if (changed || opts.forceReload === true) {
     const reload = await opts.deps.run("systemctl", [
@@ -1346,15 +1494,18 @@ export async function installSystemdUnit(opts: {
  * must be a directory owned by this user and not writable by its group or
  * others: otherwise another account could replace `hackd.service`, and the
  * enabled unit would run its `ExecStart` as this user at the next login
- * (HACK-2052). New directories are created `0755` whatever the umask; an
- * existing one this user owns has group/other write removed; anything else
- * is refused before the unit is written. A symlinked directory is judged by
- * its real target.
+ * (HACK-2052). New directories are created `0755` whatever the umask. With
+ * `repair` (explicit `hack daemon install` only), an existing one this user
+ * owns has group/other write removed; without it that is refused, unchanged
+ * (HACK-2216). Anything else is refused before the unit is written. A
+ * symlinked directory is judged by its real target.
  */
 export async function ensureOwnerWritableOnlyDirectories(opts: {
   readonly dirs: readonly string[];
   /** Defaults to this process's uid. */
   readonly uid?: number;
+  /** Explicit `hack daemon install` only; defaults to false. */
+  readonly repair?: boolean;
 }): Promise<
   { readonly ok: true } | { readonly ok: false; readonly error: string }
 > {
@@ -1372,8 +1523,14 @@ export async function ensureOwnerWritableOnlyDirectories(opts: {
   }
   for (const dir of opts.dirs) {
     const created = await createDirectoryExactly(dir);
+    // Only explicit install repairs group/other write (HACK-2216).
     const error =
-      created ?? (await checkOwnerWritableOnlyDirectory({ dir, uid }));
+      created ??
+      (await checkOwnerWritableOnlyDirectory({
+        dir,
+        uid,
+        repair: opts.repair === true,
+      }));
     if (error !== null) {
       return { ok: false, error };
     }
@@ -1424,22 +1581,31 @@ async function createDirectoryExactly(dir: string): Promise<string | null> {
   }
 }
 
-/** Null when `dir` is this user's and not group/other-writable (fixed if possible). */
+/**
+ * Null when `dir` is this user's and not group/other-writable. With
+ * `repair` (explicit `hack daemon install` only), group/other write is
+ * removed from a directory this user owns; otherwise it is refused
+ * (HACK-2216: an automatic path never repairs, because another account
+ * could already have planted units there).
+ */
 async function checkOwnerWritableOnlyDirectory(opts: {
   readonly dir: string;
   readonly uid: number;
+  readonly repair?: boolean;
 }): Promise<string | null> {
   return await checkOwnerControlledPath({
     path: opts.dir,
     uid: opts.uid,
     directory: true,
+    repair: opts.repair === true,
   });
 }
 
 /**
  * Null when `path` (resolved) is owned by `uid` and not writable by group or
- * others; group/other write is removed when this user owns it. `directory`
- * says which kind it must be.
+ * others. A directory this user owns that is group/other-writable is fixed
+ * only with `repair`, and refused otherwise; a file is always refused.
+ * `directory` says which kind it must be.
  */
 async function checkOwnerControlledPath(opts: {
   readonly path: string;
@@ -1447,6 +1613,8 @@ async function checkOwnerControlledPath(opts: {
   readonly directory: boolean;
   /** Also accept root-owned (system configuration such as /etc/systemd/user). */
   readonly allowRoot?: boolean;
+  /** Remove group/other write from an owned directory (install only). */
+  readonly repair?: boolean;
 }): Promise<string | null> {
   let real: string;
   let info: Awaited<ReturnType<typeof stat>>;
@@ -1470,6 +1638,11 @@ async function checkOwnerControlledPath(opts: {
   if (!opts.directory) {
     // Its contents may already be someone else's: a chmod would keep them.
     return `${shown} was writable by other users (mode ${(info.mode & 0o777).toString(8)}), so its contents cannot be trusted`;
+  }
+  if (opts.repair !== true) {
+    // Never repaired on an automatic path (HACK-2216): another account may
+    // already have added units or links while it was writable.
+    return `${shown} is writable by other users (mode ${(info.mode & 0o777).toString(8)}), so what is in it cannot be trusted | Review it, run: chmod go-w ${real}, then run: hack daemon install`;
   }
   try {
     await chmod(real, info.mode & 0o7755);
@@ -1495,6 +1668,8 @@ export async function checkSystemdUnitDropIns(opts: {
   readonly unitPath: string;
   /** Defaults to this process's uid. */
   readonly uid?: number;
+  /** Explicit `hack daemon install` only: see checkOwnerWritableOnlyDirectory. */
+  readonly repair?: boolean;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
   const unitDir = dirname(opts.unitPath);
@@ -1508,8 +1683,11 @@ export async function checkSystemdUnitDropIns(opts: {
       return `Not using ${SYSTEMD_UNIT_NAME}: its drop-in ${dangling}`;
     }
     const error =
-      (await checkOwnerWritableOnlyDirectory({ dir, uid })) ??
-      (await checkDropInEntries({ dir, uid }));
+      (await checkOwnerWritableOnlyDirectory({
+        dir,
+        uid,
+        repair: opts.repair,
+      })) ?? (await checkDropInEntries({ dir, uid }));
     if (error !== null) {
       return `Not using ${SYSTEMD_UNIT_NAME}: its drop-in ${error}. Review and remove it, then run: hack daemon install`;
     }
@@ -1637,11 +1815,17 @@ export async function checkSystemdUnitFile(opts: {
   readonly unitPath: string;
   /** Defaults to this process's uid. */
   readonly uid?: number;
+  /** Explicit `hack daemon install` only: see checkOwnerWritableOnlyDirectory. */
+  readonly repair?: boolean;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
   const unitDir = dirname(opts.unitPath);
   for (const dir of [dirname(dirname(unitDir)), dirname(unitDir), unitDir]) {
-    const error = await checkOwnerWritableOnlyDirectory({ dir, uid });
+    const error = await checkOwnerWritableOnlyDirectory({
+      dir,
+      uid,
+      repair: opts.repair,
+    });
     if (error !== null) {
       return `Not using ${SYSTEMD_UNIT_NAME}: ${error}`;
     }
@@ -1693,6 +1877,8 @@ export async function checkSystemdUnitDirectoryChain(opts: {
 export async function checkSystemdUnitTrusted(opts: {
   readonly unitPath: string;
   readonly uid?: number;
+  /** Explicit `hack daemon install` only; every automatic path refuses. */
+  readonly repair?: boolean;
 }): Promise<string | null> {
   return (
     (await checkSystemdUnitFile(opts)) ?? (await checkSystemdUnitDropIns(opts))
@@ -1739,6 +1925,41 @@ export async function checkSystemdLoadedUnitPaths(opts: {
     uid,
   });
   return files === null ? null : `Not starting ${SYSTEMD_UNIT_NAME}: ${files}`;
+}
+
+/**
+ * Trust before Hack changes an installed unit it found (HACK-2216): run
+ * before it reads the unit to keep its other directives, rewrites or
+ * retargets it, reloads systemd, or restarts the service. A rewrite
+ * replaces the file as this user, so a check after it would pass for text
+ * another account planted (a `Wants=` of its own unit survives a program
+ * retarget). Checked here: the unit file, the directories above it and its
+ * drop-in directories ({@link checkSystemdUnitTrusted}, as install and
+ * enable check them), every user-unit load directory, and the fragment and
+ * drop-ins systemd has loaded, which survive a rewrite of the main file.
+ * The loaded program is not judged here: a retarget replaces a missing
+ * one, and the check just before the restart judges what is loaded then.
+ * Null, or why Hack must not touch the unit; the message ends with the
+ * `hack daemon install` step.
+ */
+export async function checkSystemdUnitTrustedBeforeChange(opts: {
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const error =
+    (await checkSystemdUnitTrusted({ unitPath: opts.unitPath, uid })) ??
+    (await checkSystemdUnitLoadPaths({ deps: opts.deps, uid })) ??
+    (await checkLoadedUnitFiles({
+      unitPath: opts.unitPath,
+      deps: opts.deps,
+      uid,
+    }));
+  return error === null
+    ? null
+    : `${error} (${SYSTEMD_UNIT_NAME} was not rewritten, reloaded or restarted) | Run: hack daemon install`;
 }
 
 /**
@@ -1920,7 +2141,67 @@ async function checkUnitLoadDirectory(opts: {
       return error;
     }
   }
+  return await checkUnitRelationshipDirectories({
+    loadDir: existing,
+    uid: opts.uid,
+  });
+}
+
+/** Directories whose entries systemd pulls in with hackd.service. */
+const RELATIONSHIP_SUFFIXES = [".wants", ".requires", ".upholds"] as const;
+
+/**
+ * `hackd.service.wants/`, `.requires/` and `.upholds/` in a load directory
+ * (HACK-2216): systemd loads every unit listed there and starts it with
+ * hackd.service, so one another account planted would run as this user at
+ * the next reload and start. Hack's renderer and install create none of
+ * them (`systemctl enable` links into `default.target.wants/`). So each may
+ * only be absent, or an empty directory owned by this user or root that
+ * others cannot add to. A link, any entry, or anything else is refused.
+ * Null, or the refusal.
+ */
+async function checkUnitRelationshipDirectories(opts: {
+  readonly loadDir: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  for (const suffix of RELATIONSHIP_SUFFIXES) {
+    const dir = resolve(opts.loadDir, `${SYSTEMD_UNIT_NAME}${suffix}`);
+    const refused = await checkRelationshipDirectory({ dir, uid: opts.uid });
+    if (refused !== null) {
+      return refused;
+    }
+  }
   return null;
+}
+
+async function checkRelationshipDirectory(opts: {
+  readonly dir: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  const { dir } = opts;
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(dir);
+  } catch (error: unknown) {
+    return (error as { code?: unknown }).code === "ENOENT"
+      ? null
+      : `${dir} could not be inspected: ${errorMessage(error)}`;
+  }
+  const remedy = `Hack creates none; a unit listed there starts with ${SYSTEMD_UNIT_NAME} as this user. Review and remove it, then run: hack daemon install`;
+  if (!info.isDirectory()) {
+    return `${dir} is a link or other entry, not a directory. ${remedy}`;
+  }
+  const entries = await readdir(dir);
+  if (entries.length > 0) {
+    return `${dir} lists ${entries.sort().join(", ")}. ${remedy}`;
+  }
+  const owner = Number(info.uid);
+  if (opts.uid >= 0 && owner !== opts.uid && owner !== 0) {
+    return `${dir} is owned by another user (uid ${owner}). ${remedy}`;
+  }
+  return (Number(info.mode) & 0o022) === 0
+    ? null
+    : `${dir} lets other users add units (mode ${(Number(info.mode) & 0o777).toString(8)}). ${remedy}`;
 }
 
 /** True when an existing unit file is a link, another user's, or writable by others. */
@@ -2281,6 +2562,33 @@ export async function readSystemdServiceExecEntries(opts: {
 }
 
 /**
+ * The program systemd will actually run for hackd.service: the `path=` of
+ * its single loaded `ExecStart` entry, drop-ins included (a drop-in can
+ * override the main file's ExecStart). `unknown` when systemd cannot say,
+ * an entry cannot be read, or there is not exactly one ExecStart.
+ */
+export async function readSystemdLoadedProgram(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<
+  | { readonly kind: "path"; readonly path: string }
+  | { readonly kind: "unknown"; readonly reason: string }
+> {
+  const read = await readSystemdServiceExecEntries(opts);
+  if ("error" in read) {
+    return { kind: "unknown", reason: read.error };
+  }
+  const starts = read.entries.filter((entry) => entry.key === "ExecStart");
+  const only = starts.length === 1 ? starts[0] : undefined;
+  if (only === undefined || !isAbsolute(only.path)) {
+    return {
+      kind: "unknown",
+      reason: `systemd reports ${starts.length} ExecStart entries for ${SYSTEMD_UNIT_NAME}`,
+    };
+  }
+  return { kind: "path", path: only.path };
+}
+
+/**
  * What systemd will run for hackd.service is an allowlist (HACK-2052):
  * exactly one `ExecStart` running `<program> daemon start --foreground`,
  * with that program trusted ({@link checkServiceExecutableTrusted}), and
@@ -2489,16 +2797,19 @@ export async function checkSystemdStopHooks(opts: {
   readonly uid?: number;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
-  // The unit file itself (owner, mode, not a link), as start checks it: an
-  // account that could edit it could add OnSuccess= there too.
-  const loadPaths =
-    (await checkSystemdUnitTrusted({ unitPath: opts.unitPath, uid })) ??
-    (await checkSystemdUnitLoadPaths({ deps: opts.deps, uid }));
-  if (loadPaths !== null) {
-    return loadPaths.replace(
-      `Not using ${SYSTEMD_UNIT_NAME}:`,
-      `Not stopping ${SYSTEMD_UNIT_NAME}:`
-    );
+  // The unit file itself (a regular file this user owns that others cannot
+  // write): an account that could edit it could add OnSuccess= there too.
+  // A stop loads and runs no new unit code and Hack never reloads to stop
+  // (owner decision, HACK-2216). So the checks that guard what a later
+  // reload or start would load are not made here: load-directory and
+  // unit-directory modes, and hackd.service.wants/.requires/.upholds.
+  // Nothing is repaired either. What systemd has loaded is checked below.
+  const unitFile = await checkUnitFileItself({
+    unitPath: opts.unitPath,
+    uid,
+  });
+  if (unitFile !== null) {
+    return `Not stopping ${SYSTEMD_UNIT_NAME}: ${unitFile}`;
   }
   const files = await checkLoadedUnitFiles({
     unitPath: opts.unitPath,
@@ -2520,6 +2831,33 @@ export async function checkSystemdStopHooks(opts: {
     : null;
 }
 
+/**
+ * The unit file alone, for a stop: a regular file (not a link) owned by
+ * `uid` that group and others cannot write. Its directories are not judged
+ * and nothing is changed. Null, or why not.
+ */
+async function checkUnitFileItself(opts: {
+  readonly unitPath: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(opts.unitPath);
+  } catch (error: unknown) {
+    return `could not inspect ${opts.unitPath}: ${errorMessage(error)}`;
+  }
+  if (!info.isFile()) {
+    return `${opts.unitPath} is not a regular file (a symlink or other entry Hack did not write). Review and remove it, then run: hack daemon install`;
+  }
+  const owner = Number(info.uid);
+  if (opts.uid >= 0 && owner !== opts.uid) {
+    return `${opts.unitPath} is owned by another user (uid ${owner}). Review and remove it, then run: hack daemon install`;
+  }
+  return (Number(info.mode) & 0o022) === 0
+    ? null
+    : `${opts.unitPath} was writable by other users (mode ${(Number(info.mode) & 0o777).toString(8)}), so its contents cannot be trusted. Review and remove it, then run: hack daemon install`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -2530,6 +2868,89 @@ function errorMessage(error: unknown): string {
  * drop-in can set HACK_HOME), its PATH directories and the programs it
  * runs are safe (a drop-in can set PATH or add Exec* entries).
  */
+/**
+ * Whether systemd will not start hackd.service on its own any more
+ * (HACK-2216): `idle` only when `ActiveState` is `inactive` or `failed`,
+ * `SubState` is not `auto-restart` (no restart timer) and no `Job` is
+ * queued, or when systemd positively reports the unit not loaded
+ * (`LoadState=not-found`). `pending` when it is activating, active,
+ * deactivating, restarting or has a job; `unknown` when the query fails or
+ * leaves any of these out.
+ */
+export function classifySystemdManagerState(opts: {
+  readonly exitCode: number;
+  readonly stdout: string;
+}): "idle" | "pending" | "unknown" {
+  if (opts.exitCode !== 0) {
+    return "unknown";
+  }
+  const props = parseSystemdProperties(opts.stdout);
+  if (props.LoadState === "not-found") {
+    return "idle";
+  }
+  const active = props.ActiveState;
+  const sub = props.SubState;
+  const job = props.Job;
+  if (active === undefined || sub === undefined || job === undefined) {
+    return "unknown";
+  }
+  if (job.length > 0) {
+    return "pending";
+  }
+  if (sub === "auto-restart") {
+    return "pending";
+  }
+  return active === "inactive" || active === "failed" ? "idle" : "pending";
+}
+
+export async function readSystemdManagerState(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<"idle" | "pending" | "unknown"> {
+  if (!resolveSystemdAccess({ env: opts.deps.env }).allowed) {
+    // This process may not use the user service: it cannot have started
+    // one, and does not manage one.
+    return "idle";
+  }
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    // --all: print the requested properties even when empty, so "no job"
+    // is reported as `Job=` rather than left out (left out is unknown).
+    "--all",
+    "--property=LoadState,ActiveState,SubState,Job",
+  ]);
+  return classifySystemdManagerState(show);
+}
+
+/**
+ * The service as systemd has it loaded now, drop-ins included: its
+ * effective PATH directories and every program it runs must pass the
+ * install checks. What {@link checkBeforeEnable} applies after a write,
+ * available before one (HACK-2216). Null when they pass.
+ */
+export async function checkSystemdEffectiveService(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  return (
+    (await checkSystemdEffectivePath(opts)) ??
+    (await checkSystemdServicePrograms({ deps: opts.deps }))
+  );
+}
+
+/** The PATH half of {@link checkSystemdEffectiveService}. */
+export async function checkSystemdEffectivePath(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  const servicePath = await readSystemdServicePathDirectories({
+    deps: opts.deps,
+  });
+  return "error" in servicePath
+    ? servicePath.error
+    : await checkServicePathDirectories({ dirs: servicePath.dirs });
+}
+
 async function checkBeforeEnable(opts: {
   readonly deps: SystemdDeps;
   readonly hackHome: string | undefined;
@@ -2543,14 +2964,7 @@ async function checkBeforeEnable(opts: {
       return `Not enabling ${SYSTEMD_UNIT_NAME}: a drop-in makes it run hackd for ${unitHome.path}, not ${resolve(opts.hackHome)}; remove that override or install from that Hack home`;
     }
   }
-  const servicePath = await readSystemdServicePathDirectories({
-    deps: opts.deps,
-  });
-  const error =
-    ("error" in servicePath
-      ? servicePath.error
-      : await checkServicePathDirectories({ dirs: servicePath.dirs })) ??
-    (await checkSystemdServicePrograms({ deps: opts.deps }));
+  const error = await checkSystemdEffectiveService({ deps: opts.deps });
   return error === null ? null : `Not enabling ${SYSTEMD_UNIT_NAME}: ${error}`;
 }
 

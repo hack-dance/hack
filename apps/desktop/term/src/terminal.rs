@@ -436,11 +436,10 @@ mod tests {
 
     #[test]
     fn finished_retired_teardowns_still_report_what_they_left_running() {
-        let mut core = TerminalCore::stream(
-            &StreamSource::File(std::path::PathBuf::from("/dev/null")),
-            10,
-        )
-        .expect("core");
+        let home = crate::testutil::TempHome::new();
+        let empty = home.path().join("empty.log");
+        std::fs::write(&empty, b"").unwrap();
+        let mut core = TerminalCore::stream(&StreamSource::File(empty), 10).expect("core");
         let (_tx, rx) = std::sync::mpsc::channel();
         let running = PendingTeardown::new(rx, Hurry::new(Duration::ZERO));
         core.retired = vec![finished(vec![101, 102]), finished(Vec::new()), running];

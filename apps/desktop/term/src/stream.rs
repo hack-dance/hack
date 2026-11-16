@@ -112,7 +112,7 @@ impl ByteStream {
         };
         let (cancel, watch) = fdio::cancel_pair().map_err(early)?;
         let (reader, session): (File, Option<OwnedSession>) = match source {
-            StreamSource::File(path) => (File::open(path).map_err(early)?, None),
+            StreamSource::File(path) => (open_regular(path).map_err(early)?, None),
             StreamSource::Process(spec) => {
                 let (r, w) = io::pipe().map_err(early)?;
                 let mut cmd = Command::new(&spec.program);
@@ -284,6 +284,26 @@ impl ByteStream {
     }
 }
 
+/// Open a file stream's source: regular files only. The open itself never
+/// blocks (a FIFO with no writer would block the caller, the UI thread,
+/// indefinitely), and the check is made on the opened handle. Reads from a
+/// regular file are unaffected by `O_NONBLOCK`.
+fn open_regular(path: &std::path::Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)?;
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a file stream reads regular files only",
+        ))
+    }
+}
+
 impl Drop for ByteStream {
     fn drop(&mut self) {
         let threads = self.stop_io();
@@ -348,6 +368,30 @@ mod tests {
             ],
             env_clear: true,
         })
+    }
+
+    #[test]
+    fn opening_a_fifo_with_no_writer_fails_at_once_instead_of_blocking() {
+        let home = TempHome::new();
+        let fifo = home.path().join("logs.fifo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path and mode.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        // On a helper thread, so a regression fails the test instead of
+        // hanging it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let source = StreamSource::File(fifo);
+        std::thread::spawn(move || {
+            let _ = tx.send(ByteStream::open(&source).map(|_| ()).map_err(|e| e.kind()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("opening a FIFO returned at once");
+        assert_eq!(result, Err(io::ErrorKind::InvalidInput));
+        // A regular file still opens.
+        let file = home.path().join("logs.txt");
+        std::fs::write(&file, b"line\n").unwrap();
+        assert!(ByteStream::open(&StreamSource::File(file)).is_ok());
     }
 
     #[test]

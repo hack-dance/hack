@@ -282,6 +282,48 @@ fn selection_and_copy_return_plain_text() {
 }
 
 #[test]
+fn a_click_without_a_drag_selects_and_copies_nothing() {
+    let mut e = emu(20, 4, true);
+    e.feed(b"hello world\n");
+    e.select_start(2, 0);
+    assert!(e.selection_text().is_none(), "nothing copied");
+    let f = e.frame().unwrap();
+    assert!(f.selection.iter().all(Option::is_none), "nothing drawn");
+}
+
+#[test]
+fn the_selection_anchor_stays_on_its_text_when_scrollback_is_pruned() {
+    // A log stream with full scrollback: new output evicts old rows while
+    // the user drags. The anchor must stay on the line that was clicked.
+    let mut e = emu(40, 10, true);
+    e.feed(&lines(0..30_000));
+    // Click the first column of the top visible row and drag to its end.
+    e.select_start(0, 0);
+    e.select_to(39, 0);
+    let clicked = e.selection_text().expect("first drag selects");
+    assert!(
+        clicked.starts_with("line 2999") && clicked.len() == 10,
+        "{clicked:?}"
+    );
+    // More than a page of output: old scrollback is pruned meanwhile, and
+    // the clicked line is still kept. Prove the prune happened.
+    let before = e.scrollback_rows();
+    let mut pruned = false;
+    for i in 30_000..31_500 {
+        e.feed(format!("line {i}\n").as_bytes());
+        pruned |= e.scrollback_rows() < before;
+    }
+    assert!(pruned, "the scrollback was pruned during the drag");
+    e.select_to(5, 9);
+    let text = e.selection_text().expect("selection after pruning");
+    assert!(
+        text.starts_with(&clicked),
+        "the selection starts at the clicked text: {:?} does not start with {clicked:?}",
+        text.lines().next()
+    );
+}
+
+#[test]
 fn resize_reflows_soft_wrapped_lines() {
     let mut e = emu(10, 6, true);
     e.feed(b"0123456789abcdefghij\nnext\n");

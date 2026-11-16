@@ -290,8 +290,10 @@ pub struct Emulator {
     key_event: key::Event,
     theme: TermTheme,
     follow: bool,
-    /// Selection anchor in screen (scrollback-inclusive) coordinates.
-    anchor: Option<PointCoordinate>,
+    /// The terminal's selection is only the anchor of a drag that has not
+    /// moved yet: installed so libghostty keeps it on its line when old
+    /// scrollback is pruned, but not drawn and not copied.
+    anchor_only: bool,
 }
 
 impl std::fmt::Debug for Emulator {
@@ -327,7 +329,7 @@ impl Emulator {
             key_event: key::Event::new()?,
             theme: opts.theme,
             follow: true,
-            anchor: None,
+            anchor_only: false,
         };
         emu.set_theme(opts.theme)?;
         Ok(emu)
@@ -543,34 +545,61 @@ impl Emulator {
             .flatten()
     }
 
-    /// Start a selection at a viewport cell.
+    /// Start a selection at a viewport cell. The anchor is installed as the
+    /// terminal's own one-cell selection, which libghostty tracks: when new
+    /// output prunes old scrollback during the drag, the anchor stays on the
+    /// text that was clicked instead of shifting with a stored row number.
+    /// Until the drag moves it is neither drawn nor copied.
     pub fn select_start(&mut self, col: u16, row: u16) {
-        self.anchor = self.screen_point(col, row);
         let _ = self.term.set_selection(None);
-    }
-
-    /// Extend the selection from the anchor to a viewport cell.
-    pub fn select_to(&mut self, col: u16, row: u16) {
-        let (Some(a), Some(b)) = (self.anchor, self.screen_point(col, row)) else {
+        self.anchor_only = false;
+        let Some(point) = self.screen_point(col, row) else {
             return;
         };
         let (Ok(start), Ok(end)) = (
-            self.term.grid_ref(Point::Screen(a)),
-            self.term.grid_ref(Point::Screen(b)),
+            self.term.grid_ref(Point::Screen(point)),
+            self.term.grid_ref(Point::Screen(point)),
         ) else {
             return;
         };
         let sel = Selection::new(start, end, false);
-        let _ = self.term.set_selection(Some(&sel));
+        if self.term.set_selection(Some(&sel)).is_ok() {
+            self.anchor_only = true;
+        }
+    }
+
+    /// Extend the selection from the anchor to a viewport cell. Nothing
+    /// happens when there is no anchor, or when pruning removed its line.
+    pub fn select_to(&mut self, col: u16, row: u16) {
+        let Some(b) = self.screen_point(col, row) else {
+            return;
+        };
+        // A fresh snapshot of the terminal-owned (tracked) selection: valid
+        // now, with its start where the clicked text is now.
+        let Ok(Some(current)) = self.term.selection() else {
+            self.anchor_only = false;
+            return;
+        };
+        let start = current.start();
+        let Ok(end) = self.term.grid_ref(Point::Screen(b)) else {
+            return;
+        };
+        let sel = Selection::new(start, end, false);
+        if self.term.set_selection(Some(&sel)).is_ok() {
+            self.anchor_only = false;
+        }
     }
 
     pub fn clear_selection(&mut self) {
-        self.anchor = None;
+        self.anchor_only = false;
         let _ = self.term.set_selection(None);
     }
 
     /// The selected text as plain UTF-8, soft wraps joined, trailing blanks trimmed.
     pub fn selection_text(&self) -> Option<String> {
+        if self.anchor_only {
+            return None;
+        }
         let bytes = self
             .term
             .format_selection_alloc(FormatOptions::new().with_unwrap(true).with_trim(true))
@@ -582,6 +611,7 @@ impl Emulator {
 
     /// Select everything (screen and scrollback).
     pub fn select_all(&mut self) {
+        self.anchor_only = false;
         if let Ok(Some(sel)) = self.term.select_all() {
             let _ = self.term.set_selection(Some(&sel));
         }
@@ -736,9 +766,12 @@ impl Emulator {
         };
         let mut rows = self.rows_it.update(&snapshot)?;
         while let Some(row) = rows.next() {
-            frame
-                .selection
-                .push(row.selection()?.map(|s| (s.start_x, s.end_x)));
+            let selected = if self.anchor_only {
+                None
+            } else {
+                row.selection()?.map(|s| (s.start_x, s.end_x))
+            };
+            frame.selection.push(selected);
             let mut cells = self.cells_it.update(row)?;
             let mut out = Vec::with_capacity(usize::from(frame.cols));
             while let Some(cell) = cells.next() {

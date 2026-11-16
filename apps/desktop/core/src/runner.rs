@@ -320,9 +320,15 @@ impl CliRunner {
     ) -> Result<(String, String, Option<i32>), RunError> {
         // The timeout counts from before the spawn: starting the program can
         // itself take time (an ETXTBSY retry, or macOS checking a new
-        // executable on first launch), and a caller's budget must hold
-        // however long that takes.
+        // executable on first launch). A caller that budgets `timeout` plus
+        // the SIGTERM grace gets an end by `deadline + term_grace`: the grace
+        // is cut to what is left of that. Limit: a spawn that itself blocks
+        // past that point cannot be interrupted, and the call ends when the
+        // spawn returns and the group is killed.
         let deadline = timeout.map(|t| (Instant::now() + t, t));
+        let term_grace = self.term_grace;
+        let grace_left =
+            move |d: Instant| (d + term_grace).saturating_duration_since(Instant::now());
         let mut child = self.spawn(args, path)?;
         let out = read_all(child.stdout.take(), Keep::Head(MAX_STDOUT));
         let err = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
@@ -330,7 +336,8 @@ impl CliRunner {
             match child.try_wait() {
                 Ok(Some(s)) => break s,
                 Ok(None) if deadline.is_some_and(|(d, _)| Instant::now() >= d) => {
-                    terminate_group(&mut child, self.term_grace);
+                    let grace = deadline.map_or(self.term_grace, |(d, _)| grace_left(d));
+                    terminate_group(&mut child, grace);
                     let after = deadline.map_or(Duration::ZERO, |(_, t)| t);
                     return Err(RunError::Timeout { after });
                 }
@@ -341,12 +348,11 @@ impl CliRunner {
         // A deadline also covers draining: a descendant that keeps a pipe
         // open after `hack` exits must not hold the caller past the timeout.
         // Without a deadline, wait for the pipes to close.
-        let grace = self.term_grace;
         let drain = |rx: &mpsc::Receiver<Drained>, child: &mut Child| match deadline {
             Some((d, t)) => {
                 let left = d.saturating_duration_since(Instant::now());
                 rx.recv_timeout(left).map_err(|_| {
-                    terminate_group(child, grace);
+                    terminate_group(child, grace_left(d));
                     RunError::Timeout { after: t }
                 })
             }
@@ -1066,12 +1072,14 @@ mod tests {
     const T: Duration = Duration::from_secs(5);
 
     /// A slow start (here an ETXTBSY retry while another descriptor still
-    /// has the program open for writing) counts against the timeout.
+    /// has the program open for writing) counts against the timeout, and
+    /// the SIGTERM grace is cut so the call ends by `timeout + grace`.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_timeout_includes_the_time_spent_starting_the_program() {
         let fake = FakeHack::new("trap '' TERM\nwhile :; do sleep 0.05; done");
         let program = fake.dir.join("hack");
+        // Below the spawn's ETXTBSY retry window, past the deadline.
         let hold = Duration::from_millis(180);
         let writer = std::fs::OpenOptions::new()
             .append(true)
@@ -1081,23 +1089,32 @@ mod tests {
             std::thread::sleep(hold);
             drop(writer);
         });
-        let (timeout, grace) = (Duration::from_millis(150), Duration::from_millis(10));
+        let (timeout, grace) = (Duration::from_millis(60), Duration::from_millis(300));
+        // The program must ignore SIGTERM from its first instruction, or the
+        // signal sent right after the late spawn ends it before its trap is
+        // set. An ignored disposition is inherited through exec, so ignore it
+        // here for the call (nextest runs each test in its own process).
+        // SAFETY: setting a disposition to SIG_IGN and back is async-signal-safe.
+        let previous = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
         let started = Instant::now();
         let result =
             fake.runner()
                 .with_term_grace(grace)
                 .run_raw(&["doctor", "--json"], None, timeout);
         let took = started.elapsed();
+        // SAFETY: restores the disposition saved above.
+        unsafe { libc::signal(libc::SIGTERM, previous) };
         release.join().unwrap();
         assert!(
             matches!(result, Err(RunError::Timeout { .. })),
             "{result:?}"
         );
-        // Started after `hold`, already past the deadline: stopped at once.
-        // Counting the timeout from the spawn would take hold + timeout.
+        // Ends by timeout + grace (360 ms) plus scheduling. A full grace
+        // after the late spawn takes 480 ms; a timeout counted from the
+        // spawn, 540 ms.
         assert!(
-            took < hold + grace + Duration::from_millis(80),
-            "took {took:?}: the timeout started after the slow spawn"
+            took < timeout + grace + Duration::from_millis(80),
+            "took {took:?} for a {timeout:?} timeout and {grace:?} grace"
         );
     }
 

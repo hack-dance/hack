@@ -92,6 +92,11 @@ The sidebar Doctor row reads `hack doctor --json` once outside all projects and
 once per registered checkout. Machine checks are deduplicated by check id;
 project findings link from the project header. Unknown statuses, failed reads
 and projects not reached within the 90-second refresh budget remain unchecked.
+Each read's time limit counts from before the CLI is started and includes
+its stop: a check that ignores SIGTERM is killed when the budget's share for
+it runs out. One limit: if starting the CLI itself blocks past the budget
+(the operating system has not yet let the program start), the refresh ends
+when the start returns.
 Checks refresh on opening the pane and every ten minutes while it is visible.
 Stale results cannot show an all-clear message or green Doctor indicator.
 Missing registry rows remain unchecked and are never probed. Compose coverage

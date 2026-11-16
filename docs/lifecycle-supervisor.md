@@ -70,14 +70,15 @@ Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
 `unknown` and exits nonzero. Callers must inspect both the receipt and exit status.
 
 Every `stop` and `status` request whose frame is read ends with exactly one framed
-receipt, also when it fails. A failed request exits nonzero and carries a `reason`:
+receipt, also when it fails. Such a failed request exits nonzero and carries a `reason`
+(the fallback frame below, written before any frame is read, has none):
 
 | `reason` | `outcome` | Meaning |
 |---|---|---|
 | `invalid-request` | `refused` | The control frame or root was rejected; nothing was read or changed. |
 | `stop-lock-wait-expired` | `unknown` | Another stop or a launch held `.stop.lock` for the whole wait (sixteen seconds); this request acted on nothing. |
 | `foreign-live-process` | `unknown` | A receipt from another owner token still has live members. |
-| `foreign-unknown-process` | `unknown` | A receipt from another owner token has live members that no witness ties to it. |
+| `foreign-unknown-process` | `unknown` | A receipt from another owner token has live members that no witness ties to it. A census, inspection or boot-ID failure while checking that receipt is `io-error` instead. Nothing is signalled or retired in either case. |
 | `stop-incomplete` | `unknown` | Stop could not confirm that every member is gone. |
 | `retired-owner-live` | `unknown` | Status for a retired owner whose members are not proven absent. |
 | `stop-lock-failed` | `unknown` | Taking `.stop.lock` failed for a reason other than the wait expiring. |
@@ -95,13 +96,18 @@ read after the stop lock is released. Another stop or launch can run in between,
 they describe the root at reply time; `outcome`, `reason` and the exit status describe
 this request.
 
+A request that fails before it writes any reply gets one fallback frame: outcome
+`refused`, an empty `processes` list, no `reason`, and a nonzero exit. For `stop` and
+`status` this happens only before the request frame is read, so nothing was done: the
+startup descriptor cleanup failed (on macOS it needs one spare descriptor to list
+`/dev/fd`, so a caller at its descriptor limit is refused), the argument count was
+wrong, or the action was unknown.
+
 No frame (exit nonzero with no receipt, or a partial frame) means the request may or
-may not have acted. That happens only before the request frame is read or when the
-reply cannot be written: the startup descriptor cleanup fails (on macOS it needs one
-spare descriptor to list `/dev/fd`, so a caller at its descriptor limit is refused), a
-wrong argument count, a closed stdout, a reader that does not drain within ten
-seconds, a receipt over 1 MiB, or the process being killed. Re-run `status` to learn
-the state.
+may not have acted. That happens when the reply cannot be written: a closed stdout, a
+reader that does not drain within ten seconds, a receipt over 1 MiB, or the process
+being killed. An oversized receipt is never replaced by the fallback frame, because the
+request may already have signalled. Re-run `status` to learn the state.
 `run` must be spawned as a fresh child without making it a process-group leader:
 the supervisor calls `setsid` itself. A caller using `detached: true` or
 `setpgid(0, 0)` is refused before authored code starts.
@@ -163,10 +169,14 @@ the lock exists) `status` of the whole root failing, each within its bound, for 
 included. If the project supervisor is alive it rolls back and stops the published
 siblings itself; if it was killed, they keep running and cannot be stopped through
 `stop`. A guard frozen before its first receipt save has no receipt, so `status` does
-not show it. Recovery: find the frozen guard (a stopped `hack-lifecycle-supervisor
-guard` process whose session is its own PID, a child of the project supervisor or
-orphaned) and continue it (`SIGCONT`) or kill it; the lease is released when it exits
-or detaches.
+not show it. Recovery: find the frozen guard and continue it (`SIGCONT`) or kill it;
+the lease is released when it exits or detaches. The guard is a stopped process
+(state `T`) whose session ID is its own PID, a child of the project supervisor or
+orphaned. On macOS its command line is the supervisor's full path followed by
+`guard`. On Linux it is started as `/proc/self/exe guard`, so `ps` shows the
+command line `/proc/self/exe guard` and the short name `exe`, not
+`hack-lifecycle-supervisor`; confirm it with `readlink /proc/<pid>/exe`, which names
+the supervisor binary.
 
 `status` takes only the bounded stop-lock wait above. `stop` handles each target separately: a frozen live guard costs
 its own target the five-second grace plus the two-second confirmation bound (and the

@@ -419,7 +419,7 @@ fn recorded_members(state: &crate::storage::State) -> Result<Vec<Identity>> {
                         && p.uid == state.uid
                 })
             })
-            .ok_or_else(refused)?;
+            .ok_or_else(no_witness)?;
         // Recheck after enumeration: the witness held the SID throughout the census.
         if !inspect(witness.pid)?.as_ref().is_some_and(|p| {
             if witness.pid == state.guard_pid {
@@ -432,7 +432,30 @@ fn recorded_members(state: &crate::storage::State) -> Result<Vec<Identity>> {
         }
         return Ok(members);
     }
-    Err(refused())
+    Err(no_witness())
+}
+
+/// Live recorded-session members that no witness ties to the receipt (or the
+/// witness changed on every attempt). Distinct from census and I/O failures so
+/// the caller can name it; its text omits values like every other error.
+#[derive(Debug)]
+struct NoWitness;
+
+impl std::fmt::Display for NoWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Lifecycle operation refused; values omitted")
+    }
+}
+
+impl std::error::Error for NoWitness {}
+
+fn no_witness() -> std::io::Error {
+    std::io::Error::other(NoWitness)
+}
+
+/// Whether `error` came from a receipt whose live members have no witness.
+pub fn is_no_witness(error: &std::io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<NoWitness>())
 }
 
 pub fn recorded_live(state: &crate::storage::State, excluding_guard: bool) -> Result<bool> {
@@ -921,6 +944,20 @@ pub fn timestamp() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_missing_witness_is_classified_as_no_witness() {
+        assert!(super::is_no_witness(&super::no_witness()));
+        assert!(!super::is_no_witness(&crate::refused()));
+        assert!(!super::is_no_witness(&std::io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+        // Like every refusal, its text carries no values.
+        assert_eq!(
+            super::no_witness().to_string(),
+            "Lifecycle operation refused; values omitted"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     thread_local! {
         static PIDFD_OPEN_ERROR: std::cell::Cell<Option<(i32, i32)>> =

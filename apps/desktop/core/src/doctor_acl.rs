@@ -128,3 +128,36 @@ pub(crate) fn controlled(path: &Path) -> bool {
 pub(crate) fn controlled(_: &Path) -> bool {
     false
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    /// A directory whose entries keep changing (the temp directory on a
+    /// busy machine) is still recognised as having no ACL.
+    #[test]
+    fn a_busy_directory_without_an_acl_is_controlled() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir =
+            std::env::temp_dir().join(format!("hack-desktop-acl-busy-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let churn = {
+            let (dir, stop) = (dir.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let entry = dir.join("entry");
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::fs::write(&entry, b"x");
+                    let _ = std::fs::remove_file(&entry);
+                }
+            })
+        };
+        let refused = (0..2_000).filter(|_| !super::controlled(&dir)).count();
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            refused, 0,
+            "a busy directory was refused {refused} times in 2000"
+        );
+    }
+}

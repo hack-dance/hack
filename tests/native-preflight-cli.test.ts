@@ -13,6 +13,8 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { NativePreflightReport } from "../src/backends/native-preflight.ts";
+import { nativePreflightProbeFromReport } from "../src/lib/upgrade-check-probes.ts";
+import { nativeSetupInspection } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -67,6 +69,12 @@ async function fixture(compose: Record<string, unknown>) {
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${stub}/calls'
+if [ "$3" = runtime ] && [ "$4" = setup ]; then
+  if [ "$#" != 6 ] || [ "$5" != inspect ] || [ "$6" != --json ]; then
+    printf '%s' 'fixture refuses setup mutation' >&2
+    exit 1
+  fi
+fi
 reply="$3-$4"
 # The second review names the adapted document: keep a copy and, when the
 # test scripted one, answer it separately from the review of the original.
@@ -87,6 +95,7 @@ exit 1
   );
   const write = async (name: string, value: unknown) =>
     await writeFile(join(stub, name), JSON.stringify(value));
+  await write("runtime-setup.out", nativeSetupInspection());
   return {
     root,
     project,
@@ -141,7 +150,15 @@ exit 1
       (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
         .split("\n")
         .filter(Boolean)
-        .map((line) => line.split(" ").slice(2, 4).join(" ")),
+        .map((line) => {
+          const args = line.split(" ").slice(2);
+          const command = args.slice(0, 2).join(" ");
+          if (command === "runtime setup") {
+            // Assert full argv before shortening the observation for callers.
+            expect(args).toEqual(["runtime", "setup", "inspect", "--json"]);
+          }
+          return command;
+        }),
     native: {
       HACK_RUNTIME_BACKEND: "native",
       HACK_NATIVE_BINARY: binary,
@@ -215,6 +232,27 @@ function codes(report: NativePreflightReport, gate: "cli" | "runtime") {
 
 const GRANT = { HACK_NATIVE_SHARED_SOURCE: "1" };
 
+test(
+  "an unreportable service name retains the foreign-platform refusal",
+  async () => {
+    const f = await fixture({
+      services: {
+        ["s".repeat(129)]: { image: IMAGE, platform: "linux/amd64" },
+      },
+    });
+    await f.review([]);
+    const { report, code } = await preflight(f, { ...f.native, ...GRANT });
+    expect(code).toBe(1);
+    expect(report.ready).toBe(false);
+    expect(
+      report.blockers.some(
+        (item) => item.code === "foreign_platform" && item.service === undefined
+      )
+    ).toBe(true);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
 test("preflight and start share env-file admission and never publish file values", async () => {
   const f = await fixture({
     services: {
@@ -275,9 +313,63 @@ test("preflight and start share env-file admission and never publish file values
     expect(up.code).toBe(1);
     expect(up.output).not.toContain(PRIVATE);
     expect(report.output).not.toContain(PRIVATE);
-    expect((await f.calls()).slice(before.length)).toEqual([]);
+    // Detached up inspects setup in the parent and the foreground child.
+    expect((await f.calls()).slice(before.length)).toEqual([
+      "runtime setup",
+      "runtime setup",
+    ]);
   }
 }, 30_000);
+
+test("preflight and start refuse the project key as an env file before reading it", async () => {
+  const f = await fixture({
+    services: { web: { image: IMAGE, env_file: "../.hack.secret.key" } },
+  });
+  await chmod(f.project, 0o700);
+  const keyFile = join(f.project, ".hack.secret.key");
+  await writeFile(keyFile, `${PRIVATE}\n`, { mode: 0o600 });
+  await f.review([], { services: { web: { active: true } } });
+  const env = { ...f.native, ...GRANT };
+  const report = await preflight(f, env);
+  expect(codes(report.report, "cli")).toContain("environment_file_input:web");
+  expect(report.output).toContain(
+    "Hack key and secret-store files cannot be environment sources"
+  );
+  expect(report.output).not.toContain(PRIVATE);
+  const before = await f.argv();
+  // Foreground start: a detached owner discards the refusal text.
+  const up = await cli(f, ["up"], env);
+  expect(up.code).toBe(1);
+  expect(up.output).toContain(
+    "Hack key and secret-store files cannot be environment sources"
+  );
+  expect(up.output).not.toContain(PRIVATE);
+  const after = await f.argv();
+  expect(after.join("\n")).not.toContain(PRIVATE);
+  // Start may review the plan and, with first-use setup guidance, inspect the
+  // runtime setup read-only. Nothing else may run: no pool, file delivery or
+  // start call reaches the runtime.
+  const readOnly = (line: string) => {
+    const words = line.split(" ").slice(2);
+    if (words[0] === "project" && words[1] === "plan") {
+      return true;
+    }
+    const [runtime, setup, inspect, ...flags] = words;
+    return (
+      runtime === "runtime" &&
+      setup === "setup" &&
+      inspect === "inspect" &&
+      flags.includes("--json") &&
+      flags.every((flag) => flag === "--json" || flag === "--quiescence")
+    );
+  };
+  const started = after.slice(before.length);
+  expect(started.filter((line) => !readOnly(line))).toEqual([]);
+  expect(readOnly("--home h runtime setup --no-interactive --json")).toBe(
+    false
+  );
+  expect(readOnly("--home h project start --json")).toBe(false);
+});
 
 test("preflight and static start refuse oversized file delivery before pool effects", async () => {
   const f = await fixture({
@@ -299,11 +391,9 @@ test("preflight and static start refuse oversized file delivery before pool effe
   expect(up.code).toBe(1);
   expect(up.output).toContain("32 KiB");
   expect(up.output).not.toContain("private-quota-canary");
-  expect(
-    (await f.calls())
-      .slice(before.length)
-      .every((call) => call === "project plan")
-  ).toBe(true);
+  const [setup, ...reviews] = (await f.calls()).slice(before.length);
+  expect(setup).toBe("runtime setup");
+  expect(reviews.every((call) => call === "project plan")).toBe(true);
 });
 
 test(
@@ -332,18 +422,176 @@ test(
     const up = await cli(f, ["up"], env);
     expect(up.code).toBe(1);
     expect(up.output).toContain("overlap an environment source");
-    expect((await f.calls()).slice(before.length)).toEqual([]);
+    expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
     expect(report.output).not.toContain(PRIVATE);
     expect(up.output).not.toContain(PRIVATE);
     expect((await f.argv()).join("\n")).not.toContain(PRIVATE);
+    const beforeDetached = await f.calls();
     const detached = await cli(f, ["up", "--json"], env);
     expect(detached.code).toBe(1);
     expect(detached.output).not.toContain(PRIVATE);
-    expect((await f.calls()).slice(before.length)).toEqual([]);
+    expect((await f.calls()).slice(beforeDetached.length)).toEqual([
+      "runtime setup",
+      "runtime setup",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
 
+test(
+  "consent never hides per-service configuration findings in text or JSON",
+  async () => {
+    const f = await fixture({
+      services: {
+        api: { image: IMAGE, environment: { PRIVATE } },
+        worker: { image: IMAGE },
+      },
+    });
+    const detail = (service: string, field: string) => ({
+      text_fixed: true,
+      service,
+      field,
+      message: "This service configuration is not supported.",
+      fix: "Remove this field or use a supported declaration.",
+      value: PRIVATE,
+    });
+    await f.review(
+      [
+        {
+          severity: "error",
+          code: "privileged_service",
+          field: "services.api",
+          message: PRIVATE,
+        },
+      ],
+      {},
+      "both",
+      [
+        {
+          code: "graph_incompatible",
+          message_fixed: true,
+          message: "The reviewed graph contains blocking diagnostics.",
+        },
+        {
+          code: "graph_subset",
+          configuration_refusals: [
+            detail("api", "labels"),
+            detail("worker", "platform"),
+          ],
+        },
+        {
+          code: "graph_route_binding",
+          configuration_refusals: [detail("api", "healthcheck.x-hack-http")],
+        },
+      ]
+    );
+    const ungranted = await preflight(f, f.native);
+    const granted = await preflight(f, { ...f.native, ...GRANT });
+    expect(ungranted.code).toBe(1);
+    expect(ungranted.report.blockers).toEqual(granted.report.blockers);
+    expect(ungranted.report.consent_needed.map((item) => item.code)).toEqual([
+      "shared_source_grant_required",
+    ]);
+    expect(granted.report.consent_needed).toEqual([]);
+    expect(
+      ungranted.report.blockers.map((item) => [
+        item.code,
+        item.service,
+        item.field,
+      ])
+    ).toEqual([
+      ["privileged_service", "api", "services.api.privileged"],
+      ["graph_subset", "api", "labels"],
+      ["graph_subset", "worker", "platform"],
+      ["graph_route_binding", "api", "healthcheck.x-hack-http"],
+    ]);
+    const text = await cli(f, ["doctor", "--native-preflight"], f.native);
+    expect(text.output).toContain("Consent needed before native start:");
+    expect(text.output).toContain("4 blockers:");
+    expect(text.output).toContain("healthcheck.x-hack-http");
+    expect(text.output + ungranted.output + granted.output).not.toContain(
+      PRIVATE
+    );
+    expect(
+      (await f.calls()).every(
+        (line) => line === "runtime setup" || line.includes("project plan")
+      )
+    ).toBe(true);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "cache review errors carry every service and field across the error pipe",
+  async () => {
+    const services = Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [`s${index}`, { image: IMAGE }])
+    );
+    const f = await fixture({ services });
+    const configuration_refusals = Object.keys(services).flatMap((service) =>
+      [
+        "labels.hack.dependencies.lockfiles",
+        "labels.hack.dependencies.runtime-files",
+      ].map((field) => ({
+        text_fixed: true,
+        service,
+        field,
+        message:
+          "The dependency-cache file list is not a bounded list of relative paths.",
+        fix: "Use relative paths without interpolation or parent components.",
+      }))
+    );
+    await f.reply("project-plan.err", {
+      code: "invalid_dependency_cache",
+      message: PRIVATE,
+      configuration_refusals,
+    });
+    const { report, output } = await preflight(f, f.native);
+    expect(report.runtime_review).toEqual({
+      status: "stopped",
+      code: "invalid_dependency_cache",
+    });
+    expect(report.blockers).toHaveLength(128);
+    expect(new Set(report.blockers.map((item) => item.service)).size).toBe(64);
+    expect(report.consent_needed).toHaveLength(1);
+    expect(output).not.toContain(PRIVATE);
+    await f.reply("project-plan.err", {
+      code: "invalid_dependency_cache",
+      configuration_refusals: [
+        { ...configuration_refusals[0], text_fixed: false, message: PRIVATE },
+      ],
+    });
+    const malformed = await preflight(f, f.native);
+    expect(malformed.report.blockers).toHaveLength(1);
+    expect(malformed.output).not.toContain(PRIVATE);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "foreign platform findings name all offending services without platform values",
+  async () => {
+    const f = await fixture({
+      services: {
+        api: { image: IMAGE, platform: `linux/${PRIVATE}` },
+        worker: { image: IMAGE, platform: "linux/amd64" },
+        native: { image: IMAGE, platform: "linux/arm64" },
+      },
+    });
+    await f.review([]);
+    const { report, output } = await preflight(f, { ...f.native, ...GRANT });
+    expect(
+      report.blockers
+        .filter((item) => item.code === "foreign_platform")
+        .map((item) => [item.service, item.field])
+    ).toEqual([
+      ["api", "platform"],
+      ["worker", "platform"],
+    ]);
+    expect(output).not.toContain(PRIVATE);
+  },
+  SPAWN_TIMEOUT_MS
+);
 test("preflight and start refuse ignored root dotenv in a native build before effects", async () => {
   const f = await fixture({ services: { builder: { build: ".." } } });
   await writeFile(join(f.project, ".env"), `TOKEN=${PRIVATE}\n`, {
@@ -363,8 +611,8 @@ test("preflight and start refuse ignored root dotenv in a native build before ef
     )?.message
   ).toContain('source "../.env"');
   expect(report.output).not.toContain(PRIVATE);
-  const before = await f.calls();
   for (const args of [["up"], ["up", "--json"]]) {
+    const before = await f.calls();
     const started = await cli(f, args, env);
     expect(started.code).toBe(1);
     if (args.includes("--json")) {
@@ -376,7 +624,11 @@ test("preflight and start refuse ignored root dotenv in a native build before ef
       expect(started.output).toContain("overlap an environment source");
     }
     expect(started.output).not.toContain(PRIVATE);
-    expect((await f.calls()).slice(before.length)).toEqual([]);
+    expect((await f.calls()).slice(before.length)).toEqual(
+      args.includes("--json")
+        ? ["runtime setup", "runtime setup"]
+        : ["runtime setup"]
+    );
   }
 });
 
@@ -400,7 +652,7 @@ test("preflight requires the same decryption key as start and closes key errors"
   expect(up.code).toBe(1);
   expect(up.output).toContain("E_CONFIG_INVALID");
   expect(up.output).not.toContain(PRIVATE);
-  expect((await f.calls()).slice(before.length)).toEqual([]);
+  expect((await f.calls()).slice(before.length)).toEqual(["runtime setup"]);
 });
 
 test("old runtimes cannot silently ignore explicit environment unsets", async () => {
@@ -486,7 +738,7 @@ test(
     ]);
     const { report, code, output } = await preflight(f, f.native);
     expect(code).toBe(1);
-    expect(report.report_version).toBe(1);
+    expect(report.report_version).toBe(2);
     expect(report.backend).toBe("native");
     expect(report.compose_file).toBe(".hack/docker-compose.yml");
     expect(report.ready).toBe(false);
@@ -498,7 +750,6 @@ test(
       "extra_hosts_without_dependencies:web",
       "invalid_restart:jobs",
       "missing_image:jobs",
-      "shared_source_grant_required",
       "unsupported_label:api",
       "unsupported_logging:db",
     ]);
@@ -525,8 +776,12 @@ test(
     // Authored values and the runtime's own text never reach the output.
     expect(output).not.toContain(PRIVATE);
     expect(output).not.toContain("runtime text");
-    // The only runtime requests are the two reviews: nothing is started.
-    expect(await f.calls()).toEqual(["project plan", "project plan"]);
+    // Installation inspection and the two project reviews start nothing.
+    expect(await f.calls()).toEqual([
+      "runtime setup",
+      "project plan",
+      "project plan",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -570,6 +825,7 @@ test(
     expect(human.stdout).toBe(
       [
         "Native preflight for .hack/docker-compose.yml",
+        "Runtime setup: ready. Native runtime is set up.",
         "Runtime review: completed.",
         "",
         "No blockers. Native up should admit this project.",
@@ -668,7 +924,9 @@ test(
       gate: "runtime",
       code: "invalid_mount",
     });
-    expect(first.report.blockers[0]?.message).toContain("Anonymous volumes");
+    expect(first.report.blockers[0]?.message).toContain(
+      "not in a form native accepts"
+    );
     expect(first.report.blockers[0]?.fix).toContain(
       "run the preflight again after fixing it"
     );
@@ -761,7 +1019,10 @@ test(
     // Without the grant, both name the grant.
     const ungranted = await fixture({ services: { web: { image: IMAGE } } });
     const report = (await preflight(ungranted, ungranted.native)).report;
-    expect(codes(report, "cli")).toEqual(["shared_source_grant_required"]);
+    expect(codes(report, "cli")).toEqual([]);
+    expect(report.consent_needed.map((item) => item.code)).toEqual([
+      "shared_source_grant_required",
+    ]);
     const refused = await cli(ungranted, ["up"], ungranted.native);
     expect(refused.output).toContain("E_PERMISSION");
     // A clean project has no CLI blocker and native up goes on to the runtime.
@@ -790,7 +1051,7 @@ test(
     expect(up.output).toContain(
       "Run `hack doctor --native-preflight` to list every blocker with its fix."
     );
-    expect(await f.calls()).toEqual([]);
+    expect(await f.calls()).toEqual(["runtime setup"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -875,7 +1136,8 @@ test(
     expect((await f.normalized()).networks?.shared).toMatchObject({
       "x-hack-isolated": true,
     });
-    const [original, normalized] = await f.argv();
+    const [setup, original, normalized] = await f.argv();
+    expect(setup).toContain("runtime setup inspect --json");
     expect(original).toContain("project plan --project ");
     expect(original).toContain("--profile dev --profile ops --json");
     expect(original).not.toContain("--normalized-file");
@@ -920,7 +1182,7 @@ test(
       code: "native_adaptation_invalid",
     });
     expect(codes(invalidAdaptation.report, "runtime")).toEqual([]);
-    expect(await adaptation.calls()).toEqual([]);
+    expect(await adaptation.calls()).toEqual(["runtime setup"]);
 
     const config = await fixture({ services: { web: { image: IMAGE } } });
     await writeFile(join(config.projectDir, "hack.config.json"), "{ not json");
@@ -1444,7 +1706,8 @@ test("preflight reports the Compose budget before sending context for more than 
     result.report.blockers.some((entry) => entry.code === "service_budget")
   ).toBe(true);
   const args = await f.argv();
-  expect(args).toHaveLength(1);
+  expect(args).toHaveLength(2);
+  expect(args[0]).toContain("runtime setup inspect --json");
   expect(args.join("\n")).not.toContain("--start-managed-service");
   expect(args.join("\n")).not.toContain(PRIVATE);
 });
@@ -1584,6 +1847,29 @@ test(
         });
       }
     }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "file-only upgrade readiness retains outstanding native consent",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    await f.review([]);
+    const ungranted = await preflight(f, f.native);
+    expect(ungranted.code).toBe(1);
+    expect(nativePreflightProbeFromReport(ungranted.report)).toMatchObject({
+      ready: false,
+      blockers: 0,
+      consentNeeded: 1,
+    });
+    const granted = await preflight(f, { ...f.native, ...GRANT });
+    expect(granted.code).toBe(0);
+    expect(nativePreflightProbeFromReport(granted.report)).toMatchObject({
+      ready: true,
+      blockers: 0,
+      consentNeeded: 0,
+    });
   },
   SPAWN_TIMEOUT_MS
 );

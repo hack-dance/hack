@@ -1,13 +1,20 @@
-import { isAbsolute } from "node:path";
+import { accessSync, constants } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { normalizeHomeDir, readAbsolutePathOverride } from "../lib/home-dir.ts";
 import {
   type NativeProcessRefusal,
   readNativeProcessRefusals,
 } from "../lib/native-process-wrappers.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import { nativeBetaCandidatePointer } from "./native-beta.ts";
+import {
+  type NativeConfigurationRefusal,
+  readNativeConfigurationRefusals,
+} from "./native-configuration-refusals.ts";
 import {
   type NativePlanChange,
   nativePlanChangeGuidance,
@@ -30,6 +37,7 @@ const NATIVE_TAIL = /^[1-9][0-9]{0,3}$/;
 const NATIVE_RUN = /^[a-f0-9]{32}$/;
 const NATIVE_HASH = /^[a-f0-9]{64}$/;
 interface NativeFailure {
+  readonly configurationRefusals?: readonly NativeConfigurationRefusal[];
   readonly code: string;
   readonly logPhase?: NativeLogFailurePhase;
   readonly causeCode?: string;
@@ -179,6 +187,9 @@ export class NativeRuntimeRequestError extends ClosedCliError {
   readonly nativeMessage: string | undefined;
   readonly nativeService: string | undefined;
   readonly nativeStopFailures: readonly NativeStopFailure[] | undefined;
+  readonly nativeConfigurationRefusals:
+    | readonly NativeConfigurationRefusal[]
+    | undefined;
 
   constructor(opts: {
     readonly stopSignal?: "SIGINT" | "SIGTERM";
@@ -189,6 +200,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     readonly nativeMessage?: string;
     readonly nativeService?: string;
     readonly nativeStopFailures?: readonly NativeStopFailure[];
+    readonly nativeConfigurationRefusals?: readonly NativeConfigurationRefusal[];
     readonly nativeStartupPhase?: "static-preflight";
   }) {
     super(opts.message);
@@ -198,6 +210,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     this.nativeMessage = opts.nativeMessage;
     this.nativeService = opts.nativeService;
     this.nativeStopFailures = opts.nativeStopFailures;
+    this.nativeConfigurationRefusals = opts.nativeConfigurationRefusals;
     if (opts.nativeCode && ERROR_CODE.test(opts.nativeCode)) {
       retainedFailures.set(
         this,
@@ -286,6 +299,10 @@ export interface NativeRuntimeSelection {
 
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_PRIVATE_INPUT_BYTES = 256 * 1024;
+// Configuration refusals can originate during planning or startup, including
+// authored graph native plan/frontend-plan. Keep the same bounded envelope for
+// every structured error; startup output still requires its explicit decoder.
+const MAX_NATIVE_FAILURE_BYTES = 1024 * 1024;
 
 /**
  * Exit-relative bound on draining an owned native child's stdout and stderr.
@@ -315,14 +332,57 @@ export function resolveNativeRuntimeSelection(
   if (env.HACK_RUNTIME_BACKEND !== "native") {
     return null;
   }
-  const binary = env.HACK_NATIVE_BINARY;
-  const home = env.HACK_NATIVE_HOME;
-  if (!(binary && home && isAbsolute(binary) && isAbsolute(home))) {
+  return resolveNativeSetupSelection(env);
+}
+
+/** Native setup is explicit even when the project uses the Compose backend. */
+export function resolveNativeSetupSelection(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): NativeRuntimeSelection {
+  let binary = env.HACK_NATIVE_BINARY?.trim();
+  if (!binary) {
+    const adjacent = join(dirname(process.execPath), "hack-native");
+    try {
+      accessSync(adjacent, constants.X_OK);
+      binary = adjacent;
+    } catch {
+      binary = undefined;
+    }
+  }
+  if (!(binary && isAbsolute(binary))) {
     throw new ClosedCliError(
-      `Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths. ${nativeBetaCandidatePointer()}`
+      `Native runtime requires an adjacent bundled hack-native or an absolute HACK_NATIVE_BINARY path. ${nativeBetaCandidatePointer()}`
     );
   }
+  const home = resolveNativeHome(env);
   return { binary, home };
+}
+
+/** Selecting a home never creates it. Explicit isolation overrides fail closed. */
+export function resolveNativeHome(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): string {
+  const explicit = readAbsolutePathOverride({
+    name: "HACK_NATIVE_HOME",
+    value: env.HACK_NATIVE_HOME,
+  });
+  if (explicit) {
+    return explicit;
+  }
+  const hackHome = readAbsolutePathOverride({
+    name: "HACK_HOME",
+    value: env.HACK_HOME,
+  });
+  if (hackHome) {
+    return join(hackHome, "native-runtime");
+  }
+  const userHome = normalizeHomeDir(env.HOME) ?? normalizeHomeDir(homedir());
+  if (!userHome) {
+    throw new ClosedCliError(
+      "Native runtime needs an absolute HOME, HACK_HOME or HACK_NATIVE_HOME."
+    );
+  }
+  return join(userHome, ".hack", "native-runtime");
 }
 
 /**
@@ -714,6 +774,9 @@ function completionResponse(
       nativeMessage: timedOut ? undefined : failure?.message,
       nativeService: timedOut ? undefined : failure?.service,
       nativeStopFailures: timedOut ? undefined : failure?.stopFailures,
+      nativeConfigurationRefusals: timedOut
+        ? undefined
+        : failure?.configurationRefusals,
     });
   }
   try {
@@ -848,6 +911,9 @@ function nativeFailureFromReply(
     ...(logPhase ? { logPhase } : {}),
     ...(causeCode ? { causeCode } : {}),
     ...nativeFailureDetail(value),
+    configurationRefusals: readNativeConfigurationRefusals(
+      value.configuration_refusals
+    ),
     ...(planChange ? { planChange } : {}),
     ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
       value.code === "graph_owner_recovery" &&
@@ -875,7 +941,8 @@ function processRefusalsOf(value: unknown): {
 async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
-  limit = 8192
+  limit = MAX_NATIVE_FAILURE_BYTES,
+  startupLogs = false
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
   const cancel = () => {
@@ -904,7 +971,7 @@ async function readNativeFailure(
     }
     return nativeFailureFromReply(
       JSON.parse(text + decoder.decode()),
-      limit > 8192
+      startupLogs
     );
   } catch {
     return;
@@ -972,7 +1039,8 @@ export async function readNativeStartupFailure(
   const failure = await readNativeFailure(
     stream,
     signal,
-    NATIVE_STARTUP_FAILURE_REPLY_BYTES
+    Math.max(NATIVE_STARTUP_FAILURE_REPLY_BYTES, MAX_NATIVE_FAILURE_BYTES),
+    true
   );
   return failure === undefined
     ? undefined

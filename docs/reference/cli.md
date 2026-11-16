@@ -4,7 +4,7 @@
 
 hack — Local development without the port-collision tax
 
-Run `hack help <command>` for the same content in the terminal. Global options: `--no-interactive` (or `HACK_NO_INTERACTIVE=1`); commands with `--json` emit a `{ok, data, error}` envelope on stdout.
+Run `hack help <command>` for the same content in the terminal. Global options: `--no-interactive` (or `HACK_NO_INTERACTIVE=1`); new JSON contracts use schema-tagged envelopes; published legacy and streaming formats are listed in [Machine-readable output](./machine-readable-output.md).
 
 ## Project
 
@@ -187,6 +187,7 @@ hack up [services...] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -216,6 +217,7 @@ hack down [options]
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--recover` | Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -249,6 +251,7 @@ hack restart [services...] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--json` | Output JSON (machine-readable) |
+| `--progress` | With --json: stream ndjson progress lines before the result envelope (Compose backend) |
 | `--recover-frontend` | Recover an interrupted native frontend after proving its owner and effects are gone |
 | `--expect-finalization-attempt <32-hex>` | Require this exact interrupted native frontend attempt |
 | `--expect-frontend-pid <pid>` | Previously observed frontend PID (required only for legacy v1 state) |
@@ -529,7 +532,8 @@ hack logs [service] [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--compose` | Read logs directly from docker compose (bypass Loki) |
 | `--loki` | Force Loki backend (do not fall back to docker compose logs) |
-| `--services <csv>` | Filter Loki logs by service(s), comma-separated (e.g. api,www) |
+| `--services <csv>` | Only these services, comma-separated (e.g. api,www); merged with the service argument |
+| `--max-line-bytes <n>` | With --json, keep at most n UTF-8 bytes of each line and mark it truncated |
 | `--query <logql>` | Raw LogQL selector/query (overrides auto selector built from project + services) |
 | `--since <time>` | Start time for Loki or native followed logs (RFC3339 or duration like 15m) |
 | `--until <time>` | End time for Loki logs (RFC3339 or duration like 15m) |
@@ -1494,6 +1498,8 @@ hack usage [options]
 | Option | Description |
 | --- | --- |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--by-service` | With --json, report one project's usage per service (use --path or --project) |
 | `--details` | Show per-container usage and mount types |
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--watch` | Refresh usage continuously |
@@ -1558,6 +1564,56 @@ hack projects prune [options]
 | `--include-global` | Include global infra projects under ~/.hack (e.g. logging stack) |
 | `--dry-run` | Report prune candidates without changing registry entries or containers |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack native`
+
+Set up the opt-in native runtime
+
+### Usage
+
+```bash
+hack native <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack native setup` | Download and prepare the pinned native runtime for this home |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack native setup`
+
+Download and prepare the pinned native runtime for this home
+
+### Usage
+
+```bash
+hack native setup [options]
+```
+
+Verifies and resumes pinned downloads without starting a VM. Requires Apple Silicon macOS. Non-interactive downloads need --accept-downloads. --json passes the runtime result through unchanged.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--json` | Output JSON (machine-readable) |
+| `--accept-downloads` | Consent to the displayed pinned downloads |
+| `--archive <path>` | Offline pinned provider archive (requires the complete offline input set) |
+| `--engine-archive <path>` | Offline pinned engine archive |
+| `--network-tools-directory <path>` | Private directory containing all pinned networking packages |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1884,6 +1940,7 @@ Downloads and installs the latest stable hack release from GitHub.
 Notes:
 - Refuses to self-update when running from a Homebrew install, local dev wrapper, or symlink install.
 - Updates the current hack binary and refreshes assets.
+- `--check --json --observe` only reports: current, latest, availability, install kind and the upgrade command for this install.
 
 ### Options
 
@@ -1892,6 +1949,7 @@ Notes:
 | `--check` | Check for updates (do not install) |
 | `--yes` | Apply update without prompting |
 | `--tag <tag>` | Update to a specific release tag (e.g. v1.4.0) |
+| `--observe` | With --check --json, report updates for any install kind without installing or refusing (one release read) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2696,6 +2754,7 @@ hack env <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
+| `hack env migrate` | Preview, resume or undo project env migration; cleanup is a separate later step |
 | `hack env list` | List env names, scopes, layers and set state |
 | `hack env protect [keys...]` | List plaintext keys, or encrypt chosen keys in their existing layers |
 | `hack env get <key>` | Print one resolved env value without an added newline |
@@ -2714,6 +2773,31 @@ hack env <subcommand> [options]
 
 | Option | Description |
 | --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env migrate`
+
+Preview, resume or undo project env migration; cleanup is a separate later step
+
+### Usage
+
+```bash
+hack env migrate [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--json` | Output JSON (machine-readable) |
+| `--apply` | Apply the previewed migration with a snapshot and resumable journal |
+| `--cleanup` | Preview later legacy cleanup; combine with --apply only after migration has completed |
+| `--rollback-manifest <manifest>` | Restore the migration snapshot, refusing changes made afterward |
+| `--accept-tracked-env-changes` | Consent to the displayed edits or removals of Git-tracked legacy env files |
+| `--preserve-changes` | With rollback, restore originals and retain later edits privately in the snapshot |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

@@ -13,7 +13,7 @@ terminal).
 - `hack up --branch <name>` — a parallel branch instance with its own hostnames
 - `hack dev` — the repository's [side-by-side development build](dev.md)
 - `hack open` — open/print the project URL
-- `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
+- `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`; `--json` is the [logs JSON stream](reference/logs-json.md))
 - `hack ps` / `hack status` — project status
 - `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
 - `hack projects --json --observe` — read-only listing: no registration, `lastSeenAt` update, registry creation or write, daemon contact or engine contact. Works with `--summary`, `--project` and `--all`; rejects `--meta`. Add `--runtime` to query Docker explicitly; socket contact can start an on-demand engine. Ordinary listing retains discovery writes for compatibility.
@@ -132,7 +132,8 @@ ps/inspect reads, which can start a socket-activated engine (for example a
 systemd Docker socket or an on-demand macOS engine). Both modes bypass hackd,
 including when a daemon is available. `--all` discovers runtime-only projects
 only with `--runtime`.
-Observe returns the normal listing fields plus `observe: true` and
+Observe returns a success envelope with `data.schema: "hack.projects.observe.v1"`.
+The `data` payload contains the normal listing fields plus `observe: true` and
 `runtime_requested: false|true`. Without runtime queries, `runtime_error` and
 `runtime_checked_at` are null rather than claiming Docker failed. Each full or
 summary row adds `backend`, `state`, `state_reason`, `started_at` and `services`.
@@ -206,7 +207,8 @@ Historical remote guides are excluded from the supported documentation.
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
 - A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
   from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
-  `config get`/`set`, `env ...`, `host exec`/`shell` and `project owner`/`target`/`task`, for
+  `config get`/`set`, `env ...`, `host exec`/`shell`, `usage --by-service` and
+  `project owner`/`target`/`task`, for
   example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
   error envelope; without `--json` it is one closed error message, `E_PROJECT_NOT_FOUND: <message>`,
   and no stack trace. The logger decides how it looks: the console logger (`HACK_LOGGER=console`)

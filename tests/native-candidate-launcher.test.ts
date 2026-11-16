@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmod, copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveNativeHome } from "../src/backends/native-runtime-client.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -88,6 +89,29 @@ test.each([
   expect(result.exitCode).toBe(7);
 });
 
+test.each([
+  ["unset (a direct run)", undefined, "hack-v5"],
+  ["empty", "", "hack-v5"],
+  ["the channel manager's hack-next", "hack-next", "hack-next"],
+  ["hack-next with padding", " hack-next", "hack-v5"],
+  ["any other value", "custom-launcher", "hack-v5"],
+  ["hack-v5 itself", "hack-v5", "hack-v5"],
+])("entrypoint keeps exactly hack-next and marks every other run hack-v5: %s", async (_label, inherited, expected) => {
+  // HACK-2251: hack-next runs this script on native; printed commands must
+  // name ~/.hack-next/bin/hack-next, not the bundle-internal hack-v5.
+  for (const backend of ["native", "compose"]) {
+    const result = await launch(
+      { HACK_RUNTIME_BACKEND: backend, HACK_CANDIDATE_ENTRYPOINT: inherited },
+      ["ps"]
+    );
+    expect(result.exitCode).toBe(7);
+    const printed = result.stdout.split("\n");
+    expect(printed[4]).toBe(expected);
+    // Candidate runs never autostart hackd, whichever launcher is named.
+    expect(printed[5]).toBe("1");
+  }
+});
+
 test("explicit Compose selection is respected with the caller's Hack home and no native selectors", async () => {
   // An inherited opt-in cannot re-enable hackd autostart for a candidate run.
   const result = await launch({
@@ -138,12 +162,45 @@ test.each([
   );
 });
 
-test("native selection refuses without an absolute private home", async () => {
-  for (const home of [undefined, "", "relative"]) {
+test("native selection refuses a relative private home", async () => {
+  for (const home of ["relative"]) {
     const refused = await launch({ HACK_NATIVE_HOME: home }, ["up"]);
     expect(refused.exitCode).toBe(64);
     expect(refused.stdout).toBe("");
   }
+});
+
+test("shell and TypeScript select the same default private home without creating it", async () => {
+  for (const selected of [
+    { HACK_NATIVE_HOME: undefined, HACK_HOME: `${root}/isolated` },
+    { HACK_NATIVE_HOME: " ", HACK_HOME: " " },
+    { HACK_NATIVE_HOME: ` ${root}/explicit `, HACK_HOME: "relative" },
+  ]) {
+    const reply = await launch(selected, ["native", "setup"]);
+    expect(reply.exitCode).toBe(7);
+    expect(reply.stdout.split("\n")[2]).toBe(
+      resolveNativeHome(launcherEnv(selected))
+    );
+  }
+});
+
+test.each([
+  { prefix: [] },
+  { prefix: ["--no-interactive"] },
+])("explicit native setup keeps the native home in a Compose shell ($prefix)", async ({
+  prefix,
+}) => {
+  const result = await launch({ HACK_RUNTIME_BACKEND: "compose" }, [
+    ...prefix,
+    "native",
+    "setup",
+  ]);
+  expect(result.exitCode).toBe(7);
+  expect(result.stdout.split("\n").slice(0, 3)).toEqual([
+    "native",
+    `${root}/hack-native`,
+    `${root}/private home`,
+  ]);
 });
 
 test.each([

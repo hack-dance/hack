@@ -1,6 +1,6 @@
 # Hack desktop app (preview)
 
-Unsupported preview of a minimal native window for Hack (HACK-2214): every
+Unsupported preview of a minimal native window for Hack: every
 project, its state and services, and Start / Stop / Restart / Open. It is a view
 over the `hack` CLI and the `hackd` socket; it keeps no state beyond window
 layout, holds no credentials and runs `hack` as you for every action. Not part
@@ -25,11 +25,21 @@ libvulkan-dev`.
 
 ```sh
 cd apps/desktop
-cargo test -p hack-desktop-core          # no daemon, Docker or Hack home needed
+bash scripts/test.sh                    # pinned nextest, separate process per test
 cargo run -p hack-desktop                # live: matching hackd; otherwise needs R18
 cargo run -p hack-desktop -- --list-fixtures
 cargo run -p hack-desktop -- --fixtures failed-start --theme dark
 ```
+
+The core reads version identity through `hack version --json` and validates its
+`hack.version.v1` schema inside the success envelope. New schema-tagged commands
+use the strict parser; daemon and published legacy payloads keep their existing
+parsers. Shared boundary fixtures are checked against the CLI producers.
+
+Dropping a log stream retries killing its owned process group for up to two
+seconds before detaching a reader still waiting for EOF. A descendant that
+leaves that group cannot be retired by group signals; it no longer blocks the
+dropping thread, and its reader exits when the descendant closes stdout.
 
 ## Check the live data path without a window
 
@@ -39,10 +49,9 @@ cargo run -p hack-desktop-core --bin hack-desktop-state -- --project <name>
 ```
 
 `hack-desktop-state` reads exactly what the window reads: hackd when its version
-matches the CLI, plus native `hack ps` for native projects. Today's CLI listing
-auto-registers runtime projects and writes the registry, so it is never used as
-a fallback. Without a matching daemon the reader reports Unknown / needs R18
-(observe-only projects), rather than writing or claiming no projects exist.
+matches the CLI, plus native `hack ps` for native projects. This app does not
+use a CLI project-list fallback. Without a matching daemon the reader reports
+Unknown, rather than writing or claiming no projects exist.
 The window retains stale names with Unknown states and disables project actions.
 It offers **Start hackd** when unreachable or **Restart hackd** for a version
 mismatch. Only a fresh matching snapshot restores observed states.
@@ -51,7 +60,7 @@ each project's detail as JSON. It runs no action, opens no window and writes
 nothing.
 
 An accepted refresh that changes the selected project root or backend clears the
-previous log tail, including when Follow is off.
+previous log tail, including when Follow is off, and replaces any open Logs stream.
 
 Live reads refresh every two seconds with a matching daemon and retry every ten
 seconds when unavailable. Every request has an order token: a read started before
@@ -76,11 +85,99 @@ engine-down, error / cli-missing, many-projects, stopped / starting, running,
 degraded / stopping, failed-start, needs-attention):
 [light](screenshots/fixtures-light.png), [dark](screenshots/fixtures-dark.png).
 
-## What v0 does not do yet
+## Logs tab
 
-Logs, Env and Activity tabs, CPU and memory, Doctor view, onboarding, always-on,
-daemon actions and upgrades come in later units. The design and the CLI/daemon
-requests they need are in `DESIGN.md` (PR #800).
+`hack logs --json` for the selected project, following by default:
+- Pause (reading continues, with an "N new" count), search, and a filter for one service (`hack logs <service>`).
+- Click any line to show it in full below the list (long or width-clipped lines); lines over 4 KB show how much is hidden.
+- "Log stream ended" and failures are shown distinctly, with Reconnect.
+- CLI stderr is drained concurrently with an 8 KB retained tail. A separate 8 KB tail retains non-event stdout, including pretty JSON failure envelopes. Failed exits show the CLI error message or diagnostic tail and a human-readable exit status.
+- The buffer holds at most 10,000 lines and 8 MB (service and timestamp included). Messages in valid records are capped at 64 KB; raw records over 1 MiB are replaced by a visible dropped-record marker instead. Memory only: nothing is written to disk and there is no copy-all.
+- Scrolling up pauses following; Resume returns to the newest line. Each event's text fields are capped before queueing (log message 64 KB, notice 4 KB, other fields 256 bytes). The 1,024-event queue retains at most about 70 MiB of text. When full, the reader discards incoming events and keeps consuming stdout; the tab shows a cumulative skipped-event count. The CLI does not honor pipe backpressure, so blocking the reader would allow its own output buffer to grow. This bounds app retention, not the CLI's memory under an arbitrarily fast producer.
+- Stderr output uses a muted style; only explicit error-level entries use the danger color. Services-tab tail polling stops while Logs is open.
+- The app's limits do not bound allocations before the CLI emits a record: the current Compose reader accumulates a complete line before JSON formatting. A single oversized or unterminated service line can therefore grow CLI memory. Bounding that upstream chunk reader is a separate CLI fix; this preview does not claim end-to-end memory safety against arbitrary service output.
+- "Copy command" copies the equivalent `hack logs --path … [service]` for a terminal.
+- Native projects show the terminal command instead, because native logs are a one-service snapshot.
+
+Fixtures: `--logs-fixture <state>` (`--list-fixtures` lists them). Boards:
+[light](screenshots/logs-light.png), [dark](screenshots/logs-dark.png). Row by row:
+following / paused with search, long lines / service filter, follow ended /
+failed, native / stopped.
+The paused-search fixture shows its active query in the search field. Finite
+reads for observed stopped projects include that state alongside the stream status.
+The paused fixture also demonstrates the overflow count. Pause has no timeout;
+following resumes through Resume, not automatically when scrolling to the bottom.
+
+## Not yet
+
+The Activity tab, CPU and memory, onboarding, always-on, daemon actions and
+upgrades come in later units. The design and the CLI/daemon requests they
+need are in `DESIGN.md`.
+
+## Env tab (names only)
+
+Env reads `hack env list --json --path <root>` on tab open, project selection,
+and **Check again**, with a 10-second deadline. Native projects select
+`HACK_RUNTIME_BACKEND=native`. There is no polling or disk state for Env.
+A bare report on exit 1 is still a report. Missing required names appear first
+in red; both legacy scope arrays and canonical scope strings are supported.
+An explicit empty `vars` array shows “This project has no env layers” only
+when the report has no configured files/scopes or selected scope. Canonical
+reports label the selected scope (global by default); an empty scope is not
+project-wide absence. Other service scopes are not included in this listing.
+Malformed output shows “Could not read environment metadata”.
+
+The model retains only name, layer/source, scope, storage kind, set and required
+metadata. It discards unknown fields, including values/materialized data, and
+never includes raw output in errors. No editing, value reads, reveal, copy or
+export is offered. The locked state shows `hack doctor` with **Copy command**.
+Missing/unreadable `key_state` shows a lock. Absent key state means readability
+is unknown, never inferred healthy from `has_value`: Set indicates storage,
+not whether a value can be read.
+
+Fixtures: `env-loading`, `env-error`, `env-normal`, `env-missing`, `env-locked`,
+`env-empty`. Each renders offscreen in both themes through `--screenshots`.
+To bound rendering to one state, combine `--fixtures env-normal` with
+`--screenshots <output-dir>`.
+Screenshots for this slice: [normal light](screenshots/env-normal-light.png),
+[normal dark](screenshots/env-normal-dark.png),
+[missing](screenshots/env-missing-light.png), [locked](screenshots/env-locked-dark.png).
+
+This Env change is stacked on `feat/desktop-app-core` for focused review;
+the completed desktop stack ultimately targets `next`.
+
+Env reads refuse missing project markers and nested `.dev` targets shadowed by
+an ancestor `.hack` project, using the CLI's discovery precedence. The adapter
+canonicalizes the selected root and checks markers before and after the read;
+concurrent filesystem edits are not an atomic fence. Empty legacy scope arrays
+are shown as `global`. macOS keychain prompting remains unverified. Rapid tab
+changes may launch overlapping bounded reads; stale results are discarded, but
+in-flight reads are not deduplicated.
+
+## Process-cleanup tests
+
+The supported desktop test command uses the repository-pinned nextest release
+(installed by `scripts/install-cargo-nextest.sh` at the repository root), with
+zero retries and one process per test. Raw threaded `cargo test --workspace` is
+not the macOS qualification command: fresh executable writes, concurrent process
+creation, and short socket deadlines can interact across libtest threads.
+
+On macOS, the CLI runner uses `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`
+and explicit stdin/stdout/stderr actions. This prevents a CLI child from holding
+an unrelated descriptor during another thread's non-atomic close-on-exec setup.
+The process group, selected environment, cwd, timeout and retirement contracts
+are preserved. Linux retains the standard process implementation. This product
+boundary is needed independently of test isolation; a mutex around runner calls
+would not cover descriptors opened by other GUI/library threads.
+
+For the macOS qualification loop, run
+`HACK_DESKTOP_TEST_REPETITIONS=200 bash scripts/test.sh` from this directory.
+Each iteration runs all workspace tests in separate processes with zero retries;
+doctests run afterward. Both CI hosts use this same wrapper (one iteration per
+job). Three consecutive green hosted macOS jobs and the lead's 200-run native
+receipt are required for HACK-2243 acceptance; a Linux run or cross-check is not
+that evidence. The generous retirement deadlines from #843 are integrated in
+this tree for the combined qualification.
 
 Process-cleanup regression tests use a generous 60-second scheduling deadline,
 then check process retirement rather than enforcing a short wall-clock latency.

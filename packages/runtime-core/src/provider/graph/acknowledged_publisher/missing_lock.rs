@@ -815,6 +815,7 @@ pub fn retire(candidate: &Candidate, run: &str, expected: &str) -> Result<Value,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::owned_tmp_root::OwnedTmpRoot;
 
     /// Run one ignored dead-publisher fixture of this module alone in a child test process.
     ///
@@ -834,13 +835,13 @@ mod tests {
         super::super::super::tests::Fixture,
         Candidate,
         String,
-        PathBuf,
+        OwnedTmpRoot,
         Intent,
     ) {
         let fixture = super::super::super::tests::Fixture::new();
         let candidate = Candidate::discover(&fixture.0).unwrap();
         let run = "a".repeat(32);
-        let root = selected_root(&candidate, &run).unwrap();
+        let root = OwnedTmpRoot::new(selected_root(&candidate, &run).unwrap());
         foreground::transport::fixture_dead_publisher_without_lock(&candidate, &run);
         let publisher =
             foreground::transport::dead_publisher_without_lock(&candidate, &run).unwrap();
@@ -933,7 +934,7 @@ mod tests {
         )
         .unwrap();
         assert!(require_no_pending(&candidate, &run).is_err());
-        fs::remove_dir_all(root).unwrap();
+        drop(root);
     }
 
     #[test]
@@ -981,7 +982,7 @@ mod tests {
             assert!(absent(&temp).unwrap());
             assert_eq!(id(&target).unwrap(), lock.identity().unwrap());
             drop(lock);
-            fs::remove_dir_all(root).unwrap();
+            drop(root);
             drop((candidate, run));
         }
     }
@@ -1021,7 +1022,7 @@ mod tests {
         intent.marker_sha256 = digest(&marker(&intent.selection_sha256, &intent.nonce));
         state::write(&intent_path(&root), &intent).unwrap();
         assert!(require_no_pending(&candidate, &run).is_err());
-        fs::remove_dir_all(root).unwrap();
+        drop(root);
     }
 
     #[test]
@@ -1052,7 +1053,7 @@ mod tests {
         assert!(absent(&root.join("operation.lock")).unwrap());
         assert!(absent(&intent_path(&root)).unwrap());
         assert!(absent(&retirement_path(&root, &digest(&original_owner))).unwrap());
-        fs::remove_dir_all(root).unwrap();
+        drop(root);
     }
 
     #[test]
@@ -1077,6 +1078,6 @@ mod tests {
         );
         assert!(root.join("operation.lock").exists());
         drop((held, replacement));
-        fs::remove_dir_all(root).unwrap();
+        drop(root);
     }
 }

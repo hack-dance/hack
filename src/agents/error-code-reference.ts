@@ -16,6 +16,11 @@ type ErrorCodeGuide = {
 };
 
 const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
+  E_NATIVE_SETUP_REQUIRED: {
+    meaning:
+      "The selected native home needs runtime setup before project startup.",
+    readFirst: "`hack doctor --native-preflight --json`",
+  },
   E_DOCKER_UNAVAILABLE: {
     meaning: "The container runtime CLI or engine cannot be reached.",
     readFirst: "`hack doctor --json`",
@@ -64,6 +69,16 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning:
       "Compose exited successfully but printed output Hack cannot parse as JSON, usually an unsupported Compose version.",
     readFirst: "`docker compose version`",
+  },
+  E_PLAN_REFUSED: {
+    meaning:
+      "A read-only administrator plan established that the command would refuse to run.",
+    readFirst: "Read `error.detail.plan.refused`; no planned step ran.",
+  },
+  E_PLAN_INCOMPLETE: {
+    meaning: "An administrator plan cannot yet determine every required phase.",
+    readFirst:
+      "Read `error.detail.plan.blocked` and re-plan after its prerequisites are satisfied.",
   },
   E_STARTUP_INCOMPLETE: {
     meaning:

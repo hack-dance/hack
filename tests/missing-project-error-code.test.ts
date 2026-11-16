@@ -60,6 +60,10 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
   ps: { kind: "envelope", argv: ["ps", "-p", "DIR", "--json"] },
   logs: { kind: "envelope", argv: ["logs", "-p", "DIR", "--json"] },
   open: { kind: "envelope", argv: ["open", "-p", "DIR", "--json"] },
+  usage: {
+    kind: "envelope",
+    argv: ["usage", "--by-service", "-p", "DIR", "--json"],
+  },
   run: { kind: "line", argv: ["run", "-p", "DIR", "web", "true"] },
   exec: { kind: "line", argv: ["exec", "-p", "DIR", "web", "true"] },
   "commands read": {
@@ -133,6 +137,10 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
   "env protect": {
     kind: "envelope",
     argv: ["env", "protect", "-p", "DIR", "--json"],
+  },
+  "env migrate": {
+    kind: "envelope",
+    argv: ["env", "migrate", "-p", "DIR", "--json"],
   },
   "env apply": {
     kind: "line",

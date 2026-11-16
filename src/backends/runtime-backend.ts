@@ -6,6 +6,7 @@ import {
   resolveComposeStartupTimeoutMs,
 } from "../lib/compose-startup-budget.ts";
 import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
+import { reportLifecycleProgress } from "../lib/lifecycle-progress.ts";
 import { exec, run } from "../lib/shell.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import { createStructuredLogGrouper } from "../ui/log-group.ts";
@@ -214,6 +215,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
         env: opts.env,
         onPhase: (service, phase) => {
           process.stderr.write(`Dependency cache ${service}: ${phase}\n`);
+          reportLifecycleProgress({ service, phase });
         },
         onUnavailable: () => {
           process.stderr.write(

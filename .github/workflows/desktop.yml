@@ -1,6 +1,6 @@
 # Hack desktop app (HACK-2214): unsupported preview.
 # Separate from the default gates and the release workflow, and not a
-# required check. Linux and macOS builds of the app plus the `core` tests.
+# required check. Linux and macOS builds plus isolated workspace tests.
 # The toolchain comes from apps/desktop/rust-toolchain.toml (1.98.1; macOS
 # needs it), not from the repo root pin.
 name: Desktop app
@@ -10,11 +10,15 @@ on:
     paths:
       - "apps/desktop/**"
       - ".github/workflows/desktop.yml"
+      - "scripts/install-cargo-nextest.sh"
+      - ".config/nextest.toml"
   push:
     branches: [next]
     paths:
       - "apps/desktop/**"
       - ".github/workflows/desktop.yml"
+      - "scripts/install-cargo-nextest.sh"
+      - ".config/nextest.toml"
 
 permissions:
   contents: read
@@ -52,10 +56,14 @@ jobs:
           restore-keys: desktop-${{ runner.os }}-
       - name: Format
         run: cargo fmt --all --check
+      - name: Install pinned per-test process runner
+        run: |
+          bash ../../scripts/install-cargo-nextest.sh "$RUNNER_TEMP/desktop-nextest"
+          echo "$RUNNER_TEMP/desktop-nextest" >> "$GITHUB_PATH"
       - name: Core tests (no daemon, no Docker)
         env:
           HACK_DAEMON_AUTOSTART_DISABLE: "1"
-        run: cargo test --locked -p hack-desktop-core
+        run: bash scripts/test.sh
       # Both: the screenshots feature turns on gpui test-support, which can
       # hide test-only APIs from a build that only uses that feature.
       - name: Clippy (default features)
@@ -85,10 +93,14 @@ jobs:
             apps/desktop/target
           key: desktop-${{ runner.os }}-${{ hashFiles('apps/desktop/Cargo.lock') }}
           restore-keys: desktop-${{ runner.os }}-
+      - name: Install pinned per-test process runner
+        run: |
+          bash ../../scripts/install-cargo-nextest.sh "$RUNNER_TEMP/desktop-nextest"
+          echo "$RUNNER_TEMP/desktop-nextest" >> "$GITHUB_PATH"
       - name: Core tests (no daemon, no Docker)
         env:
           HACK_DAEMON_AUTOSTART_DISABLE: "1"
-        run: cargo test --locked -p hack-desktop-core
+        run: bash scripts/test.sh
       - name: Clippy (default features)
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build app

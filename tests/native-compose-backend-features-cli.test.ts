@@ -14,8 +14,10 @@ import { join, relative, resolve } from "node:path";
 import { nativeBuildsDisabledRefusal } from "../src/backends/native-project-builds.ts";
 import { NATIVE_CONFIGURATION_REFUSAL } from "../src/backends/native-project-start.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { quoteShellWord } from "../src/lib/logs.ts";
 import { foreignComposeNetworkNames } from "../src/lib/native-hack-compose-conventions.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -42,8 +44,12 @@ const ADMITTED_START_REQUESTS = [
   "runtime check-project-share",
   "runtime up",
 ];
-const SELECTION =
-  "this project runs on the Compose backend. Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too) and run the command again. Nothing was started or stopped.";
+/**
+ * The refusal's next step: the refused command through the launcher (`hack`
+ * here), selecting the same project so it works from any directory.
+ */
+const selection = (project: string, command = "hack up") =>
+  `this project runs on the Compose backend. To run it there: HACK_RUNTIME_BACKEND=compose ${command} --path ${quoteShellWord(project)}. Nothing was started or stopped.`;
 
 afterEach(async () => {
   for (const root of roots.splice(0)) {
@@ -78,6 +84,7 @@ async function fixture(compose: Record<string, unknown>) {
   await writeFile(
     binary,
     `#!/bin/sh
+${nativeSetupShellReply()}
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
 printf '%s' '{"code":"runtime_not_running"}' >&2
@@ -217,7 +224,7 @@ async function expectComposeBackendRefusal(opts: {
   const result = await cli(f, opts.args ?? ["up"], opts.env);
   expectOneClosedLine(
     result,
-    `E_NATIVE_PROJECT_UNSUPPORTED: Native \`${opts.command ?? "hack up"}\` does not support ${opts.phrase}; ${SELECTION}${networkDetail}`
+    `E_NATIVE_PROJECT_UNSUPPORTED: Native \`${opts.command ?? "hack up"}\` does not support ${opts.phrase}; ${selection(f.project, opts.command)}${networkDetail}`
   );
   for (const secret of opts.secrets ?? []) {
     expect(result.output).not.toContain(secret);
@@ -615,7 +622,7 @@ test(
     });
     expectOneClosedLine(
       result,
-      `E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION} Foreign external networks: foreign-dev.`
+      `E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${selection(f.project)} Foreign external networks: foreign-dev.`
     );
     expect(await f.calls()).toEqual([]);
     expect(await tree(f.root)).toEqual(before);

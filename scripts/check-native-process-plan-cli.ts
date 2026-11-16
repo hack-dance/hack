@@ -10,7 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
-import { assertNativePlanHome } from "./lib/native-plan-home.ts";
+import {
+  assertNativePlanRefusalActivity,
+  snapshotNativePlanHome,
+} from "./lib/native-plan-home-state.ts";
 
 /** Qualify pure process planning through a relocated bundle and real Git worktree. */
 const root = resolve(import.meta.dir, "..");
@@ -263,7 +266,11 @@ try {
     ],
     checkout
   );
-  await assertNativePlanHome({ home, failedUps: 0 });
+  assert(
+    (await readdir(home)).length === 0,
+    "metadata planning creates no HOME state"
+  );
+  const beforeStartup = await snapshotNativePlanHome(home);
   const runtime = await invoke(
     ["up", "web", "--detach"],
     checkout,
@@ -290,7 +297,13 @@ try {
       "planning creates no runtime state"
     );
   }
-  await assertNativePlanHome({ home, failedUps: 1 });
+  await assertNativePlanRefusalActivity({
+    home,
+    before: beforeStartup,
+    attempts: 1,
+    sentinel: canary,
+    fixtureRoot: directory,
+  });
   process.stdout.write(
     `Relocated native process planning: ${checks} checks passed; no hooks/DNS/trust/runtime effects\n`
   );

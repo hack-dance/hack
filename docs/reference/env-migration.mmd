@@ -1,0 +1,36 @@
+---
+title: Migration · journal and separate cleanup
+---
+stateDiagram-v2
+    direction TB
+    [*] --> preview
+    preview --> apply : Prepare [snapshot]
+    apply --> apply : Publish / Record
+    apply --> idle : Crash / Finish
+    idle --> apply : Resume [unfinished]
+    idle --> apply : RequestRepair [complete, deferred, snapshot, legacy]
+    idle --> idle : SuccessfulRun / DamageBackup
+    idle --> cleanup : RequestCleanup [proof]
+    cleanup --> idle : RemoveLegacy [safe]
+    cleanup --> idle : RefuseCleanup [before unlink]
+    idle --> rolled_back : Rollback [snapshot]
+    rolled_back --> apply : Prepare
+    note right of apply
+        INV legacy retained
+        Receipts follow publication
+    end note
+    note right of cleanup
+        INV intact snapshot
+        INV no live targets
+        Fresh delivery required
+    end note
+    note right of idle
+        RequestRepair clears run proof
+        Completed layers stay published
+    end note
+    classDef live stroke-width:1.6px
+    classDef wait stroke-width:1.6px
+    classDef idle stroke-dasharray:4 3
+    class apply live
+    class cleanup wait
+    class preview,rolled_back idle

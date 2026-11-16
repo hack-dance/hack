@@ -251,13 +251,24 @@ then re-reads status (R15 would add `--json`).
 |---|---|---|---|
 | Not installed, not running | `running: false`, `service.installed: false` | "hackd off" | Start (`hack daemon start`); setup offers `hack daemon install` |
 | Installed, stopped | `service.installed: true`, `running: false` | "hackd stopped (login service installed)" | Start |
-| Running, other version | `/v1/status.version` ≠ CLI version | "hackd vX, CLI vY" amber | Restart (`hack daemon restart`) |
+| Running, not usable | `/v1/status.version` ≠ CLI version and `hack daemon status --json` does not report `api_compatible: true` | "hackd X is older than this CLI (Y): restart hackd" or "hackd X is newer than this CLI (Y): update the CLI with hack update" amber | Restart (`hack daemon restart`) only when hackd is older; none when it is newer |
 | Stale process files | `stale: true` (`stale_reason`: `pid_not_running` / `socket_only`) | "hackd stopped unexpectedly" | Start (cleans the stale files) |
 | Stale unit | unit points at a missing or other binary (R8) | "Login service is out of date" + `service.next_step` | Repair (`hack daemon install`) |
 | Starting / incompatible | `status` | as given, with `issue` | Wait / Restart |
 | Running | ok | green dot only | none |
 
 The app never kills a daemon process or edits a unit itself.
+
+Compatibility rule (HACK-2263): equal version strings match without another
+call. When they differ (for example a prerelease CLI against a stable hackd),
+the app asks the CLI once per `(cli, daemon)` version pair with
+`hack daemon status --json` and uses hackd when `api_compatible` is `true`.
+A failed, unparsable or unreachable answer counts as not matching and is asked
+again on the next read. When they do not match, the versions are compared as
+semver (pre-releases order below their release): an older hackd is restarted
+from this CLI; a newer hackd means the CLI needs `hack update`, and the app
+does not offer Restart, which would downgrade hackd. Versions that do not
+parse fall back to Restart.
 
 ## 6. Always-on (HACK-2213, proposed contract)
 
@@ -396,3 +407,5 @@ Each is small enough for one PR.
 22. **R16** Trust status: a doctor check that reports whether the system trust store (and NSS on Linux) trusts the local CA, or `unknown`.
 23. **R17 — exists** `kind: safe | admin | manual` on upgrade report findings and plan steps (additive version-2 fields), independent of severity. Only explicitly allowed diagnostic/snapshot commands and fully eligible guarded apply groups are safe; host routing/login-service changes are admin; decisions and unknown actions are manual. The supplied per-checkout command can remain manual while its guarded grouped apply step is safe. Consumers must treat absent or unrecognized kinds as manual and still require an executable command before offering Run. App adoption is separate.
 24. **R18 — exists** `hack projects --json --observe` (also `--summary`, `--project`, `--all`): no auto-registration, `lastSeenAt` update, registry write, daemon contact or engine contact. Includes registered native rows. Compose state defaults to unknown; `--runtime` explicitly opts in to Docker reads that can start a socket-activated engine. Rows add the R2 field vocabulary with null/unknown for unavailable evidence; native state still comes from native `ps` until R2 integrates that observer. Always-on fields follow their persistence owner. Desktop fallback can use the default non-contact command when a matching hackd snapshot is unavailable; adopting it in the app is separate work. The daemon-off screen still offers Start hackd.
+25. **R19** Native branch instances: `/v1/projects` `branch_runtime` covers Compose projects only (for native projects, branch observations remain a separate interface), so the app cannot list or show a native project's branch instances. Request the same per-branch runtime for native projects in the project payload.
+26. **R20** Explicit branch identity: `branch_runtime[].branch` is the Compose project name suffix after `<project>--`, not necessarily the branch name the user passed to `--branch`, and the app derives each instance's routes from the containers' `caddy` labels and its URL by matching `<branch>.<dev_host>`. Request the original branch name and the instance's hosts (per service, plus its primary URL) as explicit fields, so the app relies on neither labels nor slug equality.

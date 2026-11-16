@@ -6,8 +6,9 @@
 use std::collections::BTreeMap;
 
 use crate::models::{
-    Autostart, AutostartFailures, Container, DaemonApiStatus, DoctorCheck, DoctorReport,
-    InputDiagnostic, LogEntry, ProjectRow, ProjectRuntime, ProjectsPayload, RuntimeService,
+    Autostart, AutostartFailures, BranchRuntime, Container, DaemonApiStatus, DoctorCheck,
+    DoctorReport, InputDiagnostic, LogEntry, ProjectRow, ProjectRuntime, ProjectsPayload,
+    RuntimeService,
 };
 use crate::source::{Snapshot, SourceError};
 use crate::state::{Action, LocalContext};
@@ -40,6 +41,9 @@ pub enum Fixture {
     Stopping,
     FailedStart,
     NeedsAttention,
+    /// The selected project's base instance is stopped while two branch
+    /// instances (`hack up --branch <name>`) run.
+    Branches,
     // Doctor pane.
     /// Findings across areas, machine and project scoped, one failed run.
     Doctor,
@@ -52,7 +56,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -74,6 +78,7 @@ impl Fixture {
         Self::Stopping,
         Self::FailedStart,
         Self::NeedsAttention,
+        Self::Branches,
         Self::Doctor,
         Self::DoctorClean,
         Self::DoctorLink,
@@ -104,6 +109,7 @@ impl Fixture {
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
+            Self::Branches => "branches",
             Self::Doctor => "doctor",
             Self::DoctorClean => "doctor-clean",
             Self::DoctorLink => "doctor-link",
@@ -125,6 +131,64 @@ fn container(state: &str, status: &str) -> Container {
         name: None,
         state: state.into(),
         status: status.into(),
+        labels: BTreeMap::new(),
+    }
+}
+
+/// A branch-instance container routed at `caddy` (comma-separated hosts).
+fn routed(state: &str, status: &str, caddy: &str) -> Container {
+    let mut c = container(state, status);
+    c.labels.insert("caddy".into(), caddy.into());
+    c
+}
+
+/// A running branch instance of storefront with web and api routes.
+fn running_branch(branch: &str) -> BranchRuntime {
+    BranchRuntime {
+        branch: branch.into(),
+        runtime: ProjectRuntime {
+            project: Some(format!("storefront--{branch}")),
+            services: vec![
+                svc(
+                    "api",
+                    routed(
+                        "running",
+                        "Up 20 minutes (healthy)",
+                        &format!("api.{branch}.storefront.hack"),
+                    ),
+                ),
+                svc("db", container("running", "Up 20 minutes")),
+                svc(
+                    "web",
+                    routed(
+                        "running",
+                        "Up 20 minutes",
+                        &format!("{branch}.storefront.hack"),
+                    ),
+                ),
+            ],
+        },
+    }
+}
+
+/// A branch instance whose api exited non-zero.
+fn failed_branch(branch: &str) -> BranchRuntime {
+    BranchRuntime {
+        branch: branch.into(),
+        runtime: ProjectRuntime {
+            project: Some(format!("storefront--{branch}")),
+            services: vec![
+                svc(
+                    "api",
+                    routed(
+                        "exited",
+                        "Exited (1) 5 minutes ago",
+                        &format!("api.{branch}.storefront.hack"),
+                    ),
+                ),
+                svc("db", container("exited", "Exited (0) 5 minutes ago")),
+            ],
+        },
     }
 }
 
@@ -265,6 +329,19 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         Fixture::EngineDown => {
             let mut r = storefront(vec![], "unknown");
             r.runtime = None;
+            r
+        }
+        Fixture::Running => {
+            let mut r = storefront(all_up(), "running");
+            r.branch_runtime = vec![running_branch("feature-search"), failed_branch("fix-login")];
+            r
+        }
+        Fixture::Branches => {
+            let mut r = storefront(vec![], "stopped");
+            r.branch_runtime = vec![
+                running_branch("feature-search"),
+                running_branch("fix-login"),
+            ];
             r
         }
         _ => storefront(all_up(), "running"),
@@ -408,6 +485,7 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
     };
     Ok(Snapshot {
         cli_version: CLI_VERSION.into(),
+        daemon_compatible: daemon.as_ref().map(|d| d.version == CLI_VERSION),
         projects,
         daemon,
         doctor: Some(doctor(f)),

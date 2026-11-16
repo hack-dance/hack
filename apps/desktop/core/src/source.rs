@@ -21,6 +21,12 @@ pub struct Snapshot {
     pub daemon: Option<DaemonApiStatus>,
     /// `None` when doctor was not run in this refresh.
     pub doctor: Option<DoctorReport>,
+    /// Whether the CLI can use this hackd: `Some(true)` when the versions
+    /// are equal or the CLI's `hack daemon status --json` reported
+    /// `api_compatible: true`; `Some(false)` otherwise; `None` when no
+    /// daemon was read (then [`Self::daemon_matches`] falls back to
+    /// comparing the version strings).
+    pub daemon_compatible: Option<bool>,
 }
 
 impl Snapshot {
@@ -28,24 +34,176 @@ impl Snapshot {
     /// daemon reads retry slowly, without spawning a registry writer.
     #[must_use]
     pub fn poll_interval(snapshot: Option<&Self>) -> Duration {
-        if snapshot.is_some_and(|s| {
-            s.daemon
-                .as_ref()
-                .is_some_and(|d| d.version == s.cli_version)
-        }) {
+        if snapshot.is_some_and(Self::daemon_matches) {
             Duration::from_secs(2)
         } else {
             Duration::from_secs(10)
         }
     }
-    /// hackd runs, but at another version than the CLI.
+
+    /// hackd is reachable and the CLI can use it.
+    #[must_use]
+    pub fn daemon_matches(&self) -> bool {
+        match (&self.daemon, self.daemon_compatible) {
+            (None, _) => false,
+            (Some(_), Some(compatible)) => compatible,
+            (Some(d), None) => d.version == self.cli_version,
+        }
+    }
+
+    /// hackd runs, but the CLI cannot use it: its version.
     #[must_use]
     pub fn daemon_mismatch(&self) -> Option<&str> {
         self.daemon
             .as_ref()
-            .filter(|d| d.version != self.cli_version)
+            .filter(|_| !self.daemon_matches())
             .map(|d| d.version.as_str())
     }
+}
+
+/// Which side to update when hackd and the CLI do not match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateSide {
+    /// hackd is older (or not comparable): restart it from this CLI.
+    Daemon,
+    /// hackd is newer than this CLI: update the CLI (`hack update`).
+    /// Restarting hackd from an older CLI would downgrade it.
+    Cli,
+}
+
+impl UpdateSide {
+    /// The side to update for a daemon at `daemon` and a CLI at `cli`.
+    /// Versions that do not parse as semver fall back to restarting hackd.
+    #[must_use]
+    pub fn for_versions(daemon: &str, cli: &str) -> Self {
+        if compare_versions(daemon, cli) == Some(std::cmp::Ordering::Greater) {
+            Self::Cli
+        } else {
+            Self::Daemon
+        }
+    }
+}
+
+/// One sentence naming the mismatch and its remedy.
+#[must_use]
+pub fn mismatch_text(daemon: &str, cli: &str) -> String {
+    match compare_versions(daemon, cli) {
+        Some(std::cmp::Ordering::Greater) => {
+            format!(
+                "hackd {daemon} is newer than this CLI ({cli}): update the CLI with hack update"
+            )
+        }
+        Some(std::cmp::Ordering::Less) => {
+            format!("hackd {daemon} is older than this CLI ({cli}): restart hackd")
+        }
+        _ => format!("hackd {daemon} does not match this CLI ({cli}): restart hackd"),
+    }
+}
+
+/// Compare two semantic versions, with pre-release ordering
+/// (`5.0.0-next.2 < 5.0.0-next.10 < 5.0.0`). A leading `v` and build
+/// metadata are ignored. `None` when either does not parse.
+#[must_use]
+pub fn compare_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    fn parse(v: &str) -> Option<([u64; 3], Vec<&str>)> {
+        let v = v.trim();
+        let v = v.strip_prefix('v').unwrap_or(v);
+        let v = v.split('+').next()?;
+        let (core, pre) = match v.split_once('-') {
+            Some((c, p)) => (c, Some(p)),
+            None => (v, None),
+        };
+        let mut nums = [0u64; 3];
+        let mut parts = core.split('.');
+        for n in &mut nums {
+            let p = parts.next()?;
+            if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            *n = p.parse().ok()?;
+        }
+        if parts.next().is_some() {
+            return None;
+        }
+        let pre: Vec<&str> = match pre {
+            Some(p) => {
+                let ids: Vec<&str> = p.split('.').collect();
+                if ids.iter().any(|i| i.is_empty()) {
+                    return None;
+                }
+                ids
+            }
+            None => vec![],
+        };
+        Some((nums, pre))
+    }
+    let (an, ap) = parse(a)?;
+    let (bn, bp) = parse(b)?;
+    let core = an.cmp(&bn);
+    if core != Ordering::Equal {
+        return Some(core);
+    }
+    Some(match (ap.is_empty(), bp.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            for (x, y) in ap.iter().zip(&bp) {
+                let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if ord != Ordering::Equal {
+                    return Some(ord);
+                }
+            }
+            ap.len().cmp(&bp.len())
+        }
+    })
+}
+
+/// Longest branch name the app passes to `--branch`.
+pub const MAX_BRANCH_LEN: usize = 128;
+
+/// Check a branch name before it becomes a CLI argument: non-empty, at most
+/// [`MAX_BRANCH_LEN`] bytes, no leading `-` (it would read as an option),
+/// no whitespace or control characters.
+///
+/// # Errors
+/// `E_APP_INVALID_BRANCH` naming the problem.
+pub fn validate_branch(branch: &str) -> Result<&str, SourceError> {
+    let refuse = |why: &str| SourceError::Cli {
+        code: "E_APP_INVALID_BRANCH".into(),
+        message: format!("Not running this command: the branch name {why}."),
+        failed: vec![],
+    };
+    if branch.is_empty() {
+        return Err(refuse("is empty"));
+    }
+    if branch.len() > MAX_BRANCH_LEN {
+        return Err(refuse("is too long"));
+    }
+    if branch.starts_with('-') {
+        return Err(refuse("starts with '-'"));
+    }
+    if branch.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(refuse("contains whitespace or control characters"));
+    }
+    Ok(branch)
+}
+
+/// `args` with `--branch <branch>` inserted after the subcommand.
+fn with_branch<'a>(args: &[&'a str], branch: Option<&'a str>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = args.to_vec();
+    if let Some(b) = branch {
+        let at = out.len().min(1);
+        out.splice(at..at, ["--branch", b]);
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +214,11 @@ pub enum SourceError {
     /// Project reads require a matching daemon until observe-only CLI listing exists.
     DaemonUnavailable {
         cli: String,
+        /// The daemon's version, `None` when hackd is off or unreachable.
         daemon: Option<String>,
+        /// The CLI can use this hackd (equal versions or `api_compatible`):
+        /// the failure was the project read itself, not a mismatch.
+        compatible: bool,
         message: String,
     },
     Cli {
@@ -163,36 +325,47 @@ pub trait Source: Send + Sync {
 
     /// Run one action for a project root. `native` selects the native
     /// backend (`HACK_RUNTIME_BACKEND=native`), which every native command needs.
+    /// `branch` targets that branch instance (`--branch <branch>`); it is
+    /// checked with [`validate_branch`] first.
     ///
     /// # Errors
-    /// A [`SourceError`] from the CLI.
+    /// A [`SourceError`] from the CLI, or an invalid branch name.
     fn act(
         &self,
         repo_root: &Path,
         native: bool,
+        branch: Option<&str>,
         action: Action,
     ) -> Result<ActionOutcome, SourceError>;
 
-    /// Last log lines for a project (no follow).
+    /// Last log lines for a project or one of its branch instances (no follow).
     ///
     /// # Errors
     /// Why no tail could be read; shown in place of the tail.
-    fn log_tail(&self, repo_root: &Path, native: bool, lines: u32)
-    -> Result<Vec<LogEntry>, String>;
+    fn log_tail(
+        &self,
+        repo_root: &Path,
+        native: bool,
+        branch: Option<&str>,
+        lines: u32,
+    ) -> Result<Vec<LogEntry>, String>;
 
     /// Doctor runs: one outside any project, then one per project
     /// (DESIGN.md section 3). Each run fails on its own.
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun>;
 
     /// Start a log stream for the Logs tab (`args` from `LogsModel::cli_args`).
-    /// Dropping the feed stops the stream.
+    /// `branch` streams that branch instance (`--branch <branch>` is added
+    /// after the subcommand). Dropping the feed stops the stream.
     ///
     /// # Errors
-    /// Why no stream can be opened (native projects in v0, spawn failure).
+    /// Why no stream can be opened (native projects in v0, invalid branch
+    /// name, spawn failure).
     fn open_logs(
         &self,
         repo_root: &Path,
         native: bool,
+        branch: Option<&str>,
         args: &[String],
     ) -> Result<Box<dyn LogFeed>, String>;
 }
@@ -577,6 +750,26 @@ fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
 pub struct LiveSource {
     pub runner: CliRunner,
     pub daemon: Option<DaemonClient>,
+    /// The CLI's compatibility answers for differing versions.
+    pub compat: CompatCache,
+}
+
+/// `api_compatible` answers from `hack daemon status --json`, cached per
+/// `(cli_version, daemon_version)` for the life of a [`LiveSource`], so
+/// polling does not spawn the CLI every refresh. Failed or unparsable
+/// answers are never cached.
+#[derive(Debug, Default)]
+pub struct CompatCache(std::sync::Mutex<std::collections::HashMap<(String, String), bool>>);
+
+impl CompatCache {
+    fn get(&self, key: &(String, String)) -> Option<bool> {
+        self.0.lock().ok()?.get(key).copied()
+    }
+    fn put(&self, key: (String, String), compatible: bool) {
+        if let Ok(mut m) = self.0.lock() {
+            m.insert(key, compatible);
+        }
+    }
 }
 
 /// SIGTERM grace for doctor reads: they only read, so they own no builds
@@ -769,9 +962,50 @@ impl LiveSource {
             std::env::var("HACK_HOME").ok().as_deref(),
             std::env::var("HOME").ok().as_deref(),
         );
+        Self::new(
+            CliRunner::on_path("hack"),
+            socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
+        )
+    }
+
+    #[must_use]
+    pub fn new(runner: CliRunner, daemon: Option<DaemonClient>) -> Self {
         Self {
-            runner: CliRunner::on_path("hack"),
-            daemon: socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
+            runner,
+            daemon,
+            compat: CompatCache::default(),
+        }
+    }
+
+    /// Can the CLI at `cli` use the daemon at `daemon`? Equal versions match
+    /// without a call. Otherwise the CLI decides (`hack daemon status
+    /// --json` → `api_compatible`), cached per version pair. A failed or
+    /// unparsable answer, or one where the API was not reachable, counts as
+    /// not matching and is not cached.
+    fn daemon_compatible(&self, cli: &str, daemon: &str) -> bool {
+        if cli == daemon {
+            return true;
+        }
+        let key = (cli.to_owned(), daemon.to_owned());
+        if let Some(c) = self.compat.get(&key) {
+            return c;
+        }
+        let answer = self
+            .runner
+            .clone()
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
+            .ok()
+            // Exit 1 still carries the report when hackd is not "running".
+            .and_then(|(out, _, _)| serde_json::from_str::<crate::models::DaemonStatus>(&out).ok())
+            .filter(|s| s.api_reachable != Some(false))
+            .and_then(|s| s.api_compatible);
+        match answer {
+            Some(c) => {
+                self.compat.put(key, c);
+                c
+            }
+            None => false,
         }
     }
 
@@ -788,6 +1022,8 @@ impl LiveSource {
     }
 
     const READ: Duration = Duration::from_secs(15);
+    /// `hack daemon status --json` when the versions differ.
+    const DAEMON_STATUS: Duration = Duration::from_secs(10);
     /// After this long a lifecycle command is only *reported* as slow
     /// (`LIFECYCLE_WARN_AFTER`); the app never terminates it. The CLI owns
     /// lifecycle timeouts and retires the detached builds it starts; killing
@@ -803,14 +1039,19 @@ impl Source for LiveSource {
         &self,
         repo_root: &Path,
         native: bool,
+        branch: Option<&str>,
         args: &[String],
     ) -> Result<Box<dyn LogFeed>, String> {
         if native {
             return Err(NATIVE_LOGS_NOTE.into());
         }
+        let branch = branch
+            .map(validate_branch)
+            .transpose()
+            .map_err(|e| describe_error(&e))?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.runner
-            .stream_logs(&args, Some(repo_root))
+            .stream_logs(&with_branch(&args, branch), Some(repo_root))
             .map(|s| Box::new(s) as Box<dyn LogFeed>)
             .map_err(|e| e.to_string())
     }
@@ -869,20 +1110,26 @@ impl Source for LiveSource {
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         let cli_version = self.runner.version(Duration::from_secs(5))?;
         let daemon = self.daemon.as_ref().and_then(|d| d.status().ok());
-        let from_daemon = daemon
+        let daemon_compatible = daemon
             .as_ref()
-            .filter(|d| d.version == cli_version)
-            .and(self.daemon.as_ref())
+            .map(|d| self.daemon_compatible(&cli_version, &d.version));
+        let from_daemon = self
+            .daemon
+            .as_ref()
+            .filter(|_| daemon_compatible == Some(true))
             .and_then(|d| d.projects().ok());
         let mut projects = from_daemon.ok_or_else(|| SourceError::DaemonUnavailable {
             cli: cli_version.clone(),
             daemon: daemon.as_ref().map(|d| d.version.clone()),
+            compatible: daemon_compatible == Some(true),
             message: match &daemon {
                 None => "hackd is off or unreachable. Start hackd to read project status.".into(),
-                Some(d) if d.version != cli_version => format!(
-                    "hackd v{}, CLI v{cli_version}. Restart hackd to read project status.",
-                    d.version
-                ),
+                Some(d) if daemon_compatible != Some(true) => {
+                    format!(
+                        "{} to read project status.",
+                        mismatch_text(&d.version, &cli_version)
+                    )
+                }
                 Some(_) => {
                     "hackd could not provide project status. Check again or restart hackd.".into()
                 }
@@ -902,6 +1149,7 @@ impl Source for LiveSource {
             projects,
             daemon,
             doctor: None,
+            daemon_compatible,
         })
     }
 
@@ -909,21 +1157,23 @@ impl Source for LiveSource {
         &self,
         repo_root: &Path,
         native: bool,
+        branch: Option<&str>,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
+        let branch = branch.map(validate_branch).transpose()?;
         // Actions run checkout-defined lifecycle commands as the user: run
         // only on a validated root, by its canonical path.
         let real = trusted_root(repo_root)?;
         let repo_root = real.as_path();
 
-        let args = action.cli_args();
+        let args = with_branch(action.cli_args(), branch);
         let runner = self.runner_for(native);
         Ok(match action {
             Action::Open => {
-                ActionOutcome::Opened(runner.run_json(args, Some(repo_root), Self::OPEN)?)
+                ActionOutcome::Opened(runner.run_json(&args, Some(repo_root), Self::OPEN)?)
             }
             // No app deadline: busy until the CLI exits (see LIFECYCLE_WARN_AFTER).
-            _ => ActionOutcome::Lifecycle(runner.run_json_to_completion(args, Some(repo_root))?),
+            _ => ActionOutcome::Lifecycle(runner.run_json_to_completion(&args, Some(repo_root))?),
         })
     }
 
@@ -935,22 +1185,38 @@ impl Source for LiveSource {
         &self,
         repo_root: &Path,
         native: bool,
+        branch: Option<&str>,
         lines: u32,
     ) -> Result<Vec<LogEntry>, String> {
         if native {
             return Err(NATIVE_LOGS_NOTE.into());
         }
+        let branch = branch
+            .map(validate_branch)
+            .transpose()
+            .map_err(|e| describe_error(&e))?;
         let tail = lines.to_string();
         // No --compose / --services: they are backend-specific (DESIGN.md, Logs).
         let (out, err, code) = self
             .runner
             .run_raw(
-                &["logs", "--json", "--no-follow", "--tail", &tail],
+                &with_branch(&["logs", "--json", "--no-follow", "--tail", &tail], branch),
                 Some(repo_root),
                 Self::READ,
             )
             .map_err(|e| e.to_string())?;
         parse_log_tail(&out, &err, code)
+    }
+}
+
+/// A [`SourceError`] as one line for string-error APIs (logs).
+fn describe_error(e: &SourceError) -> String {
+    match e {
+        SourceError::Cli { message, .. } | SourceError::DaemonUnavailable { message, .. } => {
+            message.clone()
+        }
+        SourceError::CliMissing => "hack was not found on PATH".into(),
+        SourceError::Pending => "still loading".into(),
     }
 }
 
@@ -1150,10 +1416,14 @@ impl Source for FixtureSource {
         &self,
         _repo_root: &Path,
         native: bool,
+        branch: Option<&str>,
         args: &[String],
     ) -> Result<Box<dyn LogFeed>, String> {
         if native {
             return Err(NATIVE_LOGS_NOTE.into());
+        }
+        if let Some(b) = branch {
+            validate_branch(b).map_err(|e| describe_error(&e))?;
         }
         // Replay the "following" fixture, filtered to the chosen service.
         // The service filter is the trailing positional, if any.
@@ -1188,11 +1458,16 @@ impl Source for FixtureSource {
         &self,
         _repo_root: &Path,
         _native: bool,
+        branch: Option<&str>,
         action: Action,
     ) -> Result<ActionOutcome, SourceError> {
+        let branch = branch.map(validate_branch).transpose()?;
         Ok(match action {
             Action::Open => ActionOutcome::Opened(OpenResult {
-                url: "https://storefront.hack".into(),
+                url: branch.map_or_else(
+                    || "https://storefront.hack".into(),
+                    |b| format!("https://{b}.storefront.hack"),
+                ),
                 hint: None,
             }),
             _ => ActionOutcome::Lifecycle(LifecycleResult::default()),
@@ -1203,6 +1478,7 @@ impl Source for FixtureSource {
         &self,
         _repo_root: &Path,
         native: bool,
+        _branch: Option<&str>,
         _lines: u32,
     ) -> Result<Vec<LogEntry>, String> {
         if native {
@@ -1270,6 +1546,14 @@ mod tests {
     }
 
     fn fake_daemon(projects: &str) -> (DaemonClient, std::thread::JoinHandle<()>) {
+        fake_daemon_bodies(vec![
+            r#"{"status":"ok","version":"5.0.0"}"#.to_owned(),
+            projects.to_owned(),
+        ])
+    }
+
+    /// A fake hackd answering one request per body, in order.
+    fn fake_daemon_bodies(bodies: Vec<String>) -> (DaemonClient, std::thread::JoinHandle<()>) {
         use std::io::Write;
         use std::os::unix::{fs::DirBuilderExt, net::UnixListener};
         let dir = PathBuf::from(format!(
@@ -1284,10 +1568,9 @@ mod tests {
         let socket = dir.join("s");
         let listener = UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let projects = projects.to_owned();
         let handle = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + crate::test_support::DAEMON_BUDGET;
-            for body in [r#"{"status":"ok","version":"5.0.0"}"#.to_owned(), projects] {
+            for body in bodies {
                 let (mut stream, _) = loop {
                     match listener.accept() {
                         Ok(pair) => break pair,
@@ -1416,6 +1699,7 @@ esac
             r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","backend":"native"}]}"#,
         );
         let src = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack)
                 .with_env("HACK_HOME", &dir.to_string_lossy())
                 .with_env("HOME", &dir.to_string_lossy())
@@ -1470,6 +1754,7 @@ esac
             .unwrap();
         let (daemon, server) = fake_daemon("{}");
         let src = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack)
                 .with_env("HOME", &dir.to_string_lossy())
                 .with_env("HACK_HOME", &dir.to_string_lossy())
@@ -1582,6 +1867,7 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
 "#,
         );
         let src = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack).with_env("HACK_RUNTIME_BACKEND", "native"),
             daemon: None,
         };
@@ -1607,6 +1893,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"native root trust","status":"ok","deta
 fi"#,
         );
         let source = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -1666,6 +1953,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         );
         std::fs::remove_file(dir.join("executed")).unwrap();
         let source = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: None,
         };
@@ -2480,6 +2768,7 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
             system_dirs: vec![system_plugins],
         };
         let source = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack)
                 .with_env("HOME", root.to_str().unwrap())
                 .with_env("HACK_HOME", root.to_str().unwrap())
@@ -2655,6 +2944,7 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
     fn doctor_payload_without_checks_is_not_a_report() {
         let hack = fake_hack("doctor-empty", r#"echo '{"ok":true,"data":{}}'"#);
         let src = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -2716,6 +3006,7 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
         )
         .unwrap();
         let source = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack)
                 .with_env("PATH", &bin.to_string_lossy())
                 .with_env("HACK_HOME", &root.to_string_lossy())
@@ -2833,6 +3124,7 @@ esac"#,
         let marker = child.join(".hack/hack.project.json");
         std::fs::write(&marker, "{}").unwrap();
         let source = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack).with_env("HACK_HOME", &root.to_string_lossy()),
             daemon: None,
         };
@@ -2846,6 +3138,7 @@ esac"#,
         assert!(exact[1].exact_native_root);
         assert_eq!(crate::doctor::aggregate(&exact).projects_checked, 1);
         let changed = LiveSource {
+            compat: Default::default(),
             runner: source.runner.clone().with_env("DROP_MARKER", "1"),
             daemon: None,
         }
@@ -2870,6 +3163,7 @@ esac"#,
 echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'"#,
         );
         let source = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -2895,6 +3189,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             "trap '' TERM\nwhile :; do sleep 0.05; done",
         );
         let src = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -2914,6 +3209,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
     fn doctor_budget_marks_late_projects_not_checked() {
         let hack = fake_hack("doctor-slow", "sleep 5");
         let src = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -2963,6 +3259,7 @@ esac
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         let src = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: None,
         };
@@ -3139,7 +3436,9 @@ esac
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
-        let mut feed = src.open_logs(Path::new("/work/x"), false, &args).unwrap();
+        let mut feed = src
+            .open_logs(Path::new("/work/x"), false, None, &args)
+            .unwrap();
         let events = feed.poll(1000).events;
         assert!(
             events
@@ -3148,7 +3447,10 @@ esac
                 .all(|e| e.service.as_deref() == Some("worker"))
         );
         assert!(feed.poll(1000).events.is_empty(), "delivered once");
-        assert!(src.open_logs(Path::new("/work/x"), true, &args).is_err());
+        assert!(
+            src.open_logs(Path::new("/work/x"), true, None, &args)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3164,11 +3466,12 @@ esac
             "#!/bin/sh\nsleep 1\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
         );
         let src = LiveSource {
+            compat: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
         if host_temp_is_trustworthy() {
-            let r = src.act(&p, false, Action::Start);
+            let r = src.act(&p, false, None, Action::Start);
             assert!(matches!(r, Ok(ActionOutcome::Lifecycle(_))), "{r:?}");
         } else {
             eprintln!("skipped: temp dir ancestors are not private on this host");
@@ -3180,8 +3483,327 @@ esac
     fn mismatch_detection() {
         let s = fixtures::snapshot(Fixture::DaemonMismatch).unwrap();
         assert_eq!(s.daemon_mismatch(), Some("4.3.0"));
-        let s = fixtures::snapshot(Fixture::Running).unwrap();
+        assert_eq!(Snapshot::poll_interval(Some(&s)), Duration::from_secs(10));
+        let mut s = fixtures::snapshot(Fixture::Running).unwrap();
         assert_eq!(s.daemon_mismatch(), None);
+        assert_eq!(Snapshot::poll_interval(Some(&s)), Duration::from_secs(2));
+        // The CLI's own answer decides when the strings differ.
+        s.daemon.as_mut().unwrap().version = "4.3.0".into();
+        s.daemon_compatible = Some(true);
+        assert_eq!(s.daemon_mismatch(), None);
+        assert_eq!(Snapshot::poll_interval(Some(&s)), Duration::from_secs(2));
+        s.daemon_compatible = None;
+        assert_eq!(s.daemon_mismatch(), Some("4.3.0"));
+    }
+
+    #[test]
+    fn versions_compare_as_semver_with_prerelease_ordering() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let cases = [
+            ("5.0.0-next.18", "4.3.0", Greater),
+            ("5.0.0-next.2", "5.0.0-next.10", Less),
+            ("5.0.0-next.18", "5.0.0", Less),
+            ("5.0.0", "5.0.0", Equal),
+            ("v5.1.0", "5.0.9", Greater),
+            ("5.0.0-alpha", "5.0.0-alpha.1", Less),
+            ("5.0.0-1", "5.0.0-alpha", Less),
+            ("5.0.0+build.7", "5.0.0", Equal),
+        ];
+        for (a, b, want) in cases {
+            assert_eq!(compare_versions(a, b), Some(want), "{a} vs {b}");
+            assert_eq!(compare_versions(b, a), Some(want.reverse()), "{b} vs {a}");
+        }
+        for bad in ["", "5", "5.0", "5.0.0.0", "five", "5.0.x", "5.0.0-"] {
+            assert_eq!(compare_versions(bad, "5.0.0"), None, "{bad:?}");
+        }
+        assert_eq!(
+            UpdateSide::for_versions("4.3.0", "5.0.0-next.18"),
+            UpdateSide::Daemon
+        );
+        assert_eq!(UpdateSide::for_versions("5.1.0", "5.0.0"), UpdateSide::Cli);
+        assert_eq!(UpdateSide::for_versions("dev", "5.0.0"), UpdateSide::Daemon);
+        assert!(mismatch_text("dev", "5.0.0").contains("restart hackd"));
+    }
+
+    /// A fake CLI at `cli_version` whose `daemon status --json` runs
+    /// `daemon_reply` (and counts calls), plus a fake hackd answering
+    /// `bodies`. The CLI is warmed up before the daemon's clock starts.
+    fn compat_source(
+        tag: &str,
+        cli_version: &str,
+        daemon_reply: &str,
+        bodies: Vec<String>,
+    ) -> (LiveSource, std::thread::JoinHandle<()>, PathBuf) {
+        let dir = private_temp_dir(tag);
+        let hack = dir.join("hack");
+        crate::test_support::script(
+            &hack,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  version) echo '{{\"ok\":true,\"data\":{{\"schema\":\"hack.version.v1\",\"version\":\"{cli_version}\"}}}}' ;;\n  daemon) echo \"$*\" >> \"$HACK_HOME/daemon-calls\"; {daemon_reply} ;;\n  *) echo \"$*\" >> \"$HACK_HOME/unexpected\"; exit 2 ;;\nesac\n"
+            ),
+        );
+        let runner = fixture_runner(&hack).with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1");
+        runner.version(Duration::from_secs(60)).unwrap();
+        let (daemon, server) = fake_daemon_bodies(bodies);
+        (LiveSource::new(runner, Some(daemon)), server, dir)
+    }
+
+    fn daemon_calls(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("daemon-calls"))
+            .map(|s| s.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    fn status_body(version: &str) -> String {
+        format!(r#"{{"status":"ok","version":"{version}"}}"#)
+    }
+
+    const PROJECTS_BODY: &str = r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"}]}"#;
+
+    #[test]
+    fn equal_versions_match_without_asking_the_cli() {
+        let (src, server, dir) = compat_source(
+            "compat-equal",
+            "5.0.0",
+            "exit 9",
+            vec![status_body("5.0.0"), PROJECTS_BODY.into()],
+        );
+        let snap = src.snapshot().unwrap();
+        server.join().unwrap();
+        assert_eq!(snap.daemon_compatible, Some(true));
+        assert_eq!(snap.daemon_mismatch(), None);
+        assert!(daemon_calls(&dir).is_empty());
+        assert!(!dir.join("unexpected").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn differing_versions_use_api_compatible_and_cache_it() {
+        let (src, server, dir) = compat_source(
+            "compat-true",
+            "5.0.0-next.18",
+            r#"echo '{"status":"running","api_reachable":true,"api_compatible":true}'"#,
+            vec![
+                status_body("4.3.0"),
+                PROJECTS_BODY.into(),
+                status_body("4.3.0"),
+                PROJECTS_BODY.into(),
+            ],
+        );
+        let first = src.snapshot().unwrap();
+        let second = src.snapshot().unwrap();
+        server.join().unwrap();
+        for snap in [&first, &second] {
+            assert_eq!(snap.daemon_compatible, Some(true));
+            assert_eq!(snap.daemon_mismatch(), None);
+            assert_eq!(Snapshot::poll_interval(Some(snap)), Duration::from_secs(2));
+        }
+        assert_eq!(daemon_calls(&dir), ["daemon status --json"], "asked once");
+        let mut m = crate::viewmodel::AppModel::new();
+        m.apply(crate::viewmodel::Event::Refreshed(Ok(second)));
+        assert!(m.list().banners.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn incompatible_daemon_names_the_side_to_update() {
+        use crate::viewmodel::{AppModel, Banner, Event};
+        for (cli, daemon, side, recovery) in [
+            (
+                "5.0.0",
+                "4.3.0",
+                UpdateSide::Daemon,
+                Some(DaemonRecovery::Restart),
+            ),
+            ("5.0.0", "5.1.0", UpdateSide::Cli, None),
+        ] {
+            let (src, server, dir) = compat_source(
+                "compat-false",
+                cli,
+                r#"echo '{"status":"incompatible","api_reachable":true,"api_compatible":false}'; exit 1"#,
+                vec![status_body(daemon)],
+            );
+            let r = src.snapshot();
+            server.join().unwrap();
+            assert!(
+                matches!(&r, Err(SourceError::DaemonUnavailable { compatible: false, daemon: Some(d), .. }) if d == daemon),
+                "{r:?}"
+            );
+            let mut m = AppModel::new();
+            m.apply(Event::Refreshed(r));
+            let banners = m.list().banners;
+            assert_eq!(banners, [Banner::mismatch(daemon, cli)]);
+            assert!(
+                matches!(&banners[0], Banner::DaemonMismatch { update, .. } if *update == side)
+            );
+            assert_eq!(m.daemon_recovery(), recovery);
+            let text = banners[0].text();
+            match side {
+                UpdateSide::Daemon => assert!(
+                    text.contains("older") && text.contains("restart hackd"),
+                    "{text}"
+                ),
+                UpdateSide::Cli => assert!(
+                    text.contains("newer") && text.contains("hack update"),
+                    "{text}"
+                ),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn failed_compatibility_answers_mismatch_and_are_not_cached() {
+        for reply in [
+            "exit 3",
+            "echo not-json",
+            r#"echo '{"api_reachable":false,"api_compatible":true}'"#,
+        ] {
+            let (src, server, dir) = compat_source(
+                "compat-fail",
+                "5.0.0-next.18",
+                reply,
+                vec![status_body("4.3.0"), status_body("4.3.0")],
+            );
+            for _ in 0..2 {
+                let r = src.snapshot();
+                assert!(
+                    matches!(
+                        &r,
+                        Err(SourceError::DaemonUnavailable {
+                            compatible: false,
+                            ..
+                        })
+                    ),
+                    "{reply}: {r:?}"
+                );
+            }
+            server.join().unwrap();
+            assert_eq!(daemon_calls(&dir).len(), 2, "{reply}: asked every time");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn branch_names_are_validated() {
+        for ok in [
+            "feature-search",
+            "fix/login",
+            "a",
+            &"b".repeat(MAX_BRANCH_LEN),
+        ] {
+            assert_eq!(validate_branch(ok).unwrap(), ok);
+        }
+        let long = "b".repeat(MAX_BRANCH_LEN + 1);
+        for bad in [
+            "",
+            "-x",
+            "--help",
+            "a b",
+            "a\tb",
+            "a\nb",
+            "a\u{7}b",
+            long.as_str(),
+        ] {
+            assert!(
+                matches!(validate_branch(bad), Err(SourceError::Cli { ref code, .. }) if code == "E_APP_INVALID_BRANCH"),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            with_branch(&["logs", "--json", "api"], Some("b")),
+            ["logs", "--branch", "b", "--json", "api"]
+        );
+        assert_eq!(with_branch(&["logs", "--json"], None), ["logs", "--json"]);
+    }
+
+    /// A fake CLI that records its argv and answers with a lifecycle/open
+    /// envelope (or a finite log stream for `logs`).
+    fn argv_hack(dir: &Path) -> PathBuf {
+        let hack = dir.join("hack");
+        crate::test_support::script(
+            &hack,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HACK_HOME/argv\"\nif [ \"$1\" = logs ]; then echo '{\"type\":\"start\"}'; echo '{\"type\":\"end\",\"reason\":\"eof\"}'; exit 0; fi\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"url\":\"https://fix-login.storefront.hack\",\"services\":{\"failed\":[]}}}'\n",
+        );
+        hack
+    }
+
+    fn argv(dir: &Path) -> Vec<String> {
+        let a = std::fs::read_to_string(dir.join("argv")).unwrap_or_default();
+        let lines: Vec<String> = a.lines().map(str::to_owned).collect();
+        let _ = std::fs::remove_file(dir.join("argv"));
+        lines
+    }
+
+    #[test]
+    fn branch_is_passed_to_logs_and_actions() {
+        let b = base("branch-argv");
+        let hack = argv_hack(&b);
+        let src = LiveSource::new(fixture_runner(&hack), None);
+        src.log_tail(&b, false, Some("feature-search"), 50).unwrap();
+        let got = argv(&b);
+        assert_eq!(
+            got[..7],
+            [
+                "logs",
+                "--branch",
+                "feature-search",
+                "--json",
+                "--no-follow",
+                "--tail",
+                "50"
+            ]
+        );
+        assert_eq!(got[7], "--path", "the runner appends the root");
+        src.log_tail(&b, false, None, 50).unwrap();
+        assert!(!argv(&b).iter().any(|a| a == "--branch"));
+        if host_temp_is_trustworthy() {
+            let p = b.join("p");
+            make_project(&p, ".hack", "docker-compose.yml");
+            for (action, cmd) in [
+                (Action::Start, "up"),
+                (Action::Stop, "down"),
+                (Action::Restart, "restart"),
+                (Action::Open, "open"),
+            ] {
+                let r = src.act(&p, false, Some("fix-login"), action);
+                assert!(r.is_ok(), "{action:?}: {r:?}");
+                let got = argv(&b);
+                assert_eq!(got[..3], [cmd, "--branch", "fix-login"], "{action:?}");
+                assert!(got.iter().any(|a| a == "--json"));
+            }
+            src.act(&p, false, None, Action::Start).unwrap();
+            assert!(!argv(&b).iter().any(|a| a == "--branch"));
+        } else {
+            eprintln!("skipped actions: temp dir ancestors are not private on this host");
+        }
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn invalid_branch_names_never_run_the_cli() {
+        let b = base("branch-invalid");
+        let hack = argv_hack(&b);
+        let src = LiveSource::new(fixture_runner(&hack), None);
+        for bad in ["", "-rf", "a b", "a\u{1b}b"] {
+            let r = src.act(&b, false, Some(bad), Action::Start);
+            assert!(
+                matches!(&r, Err(SourceError::Cli { code, .. }) if code == "E_APP_INVALID_BRANCH"),
+                "{bad:?}: {r:?}"
+            );
+            assert!(src.log_tail(&b, false, Some(bad), 10).is_err());
+            assert!(
+                src.open_logs(&b, false, Some(bad), &["logs".into(), "--json".into()])
+                    .is_err()
+            );
+            assert!(
+                FixtureSource(Fixture::Running)
+                    .act(&b, false, Some(bad), Action::Open)
+                    .is_err()
+            );
+        }
+        assert!(!b.join("argv").exists(), "the CLI was run");
+        let _ = std::fs::remove_dir_all(&b);
     }
 
     #[test]

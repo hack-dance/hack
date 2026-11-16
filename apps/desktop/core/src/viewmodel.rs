@@ -6,34 +6,96 @@
 //! - A failed refresh keeps the last good snapshot and marks it stale; with
 //!   no snapshot yet it shows the error state.
 //! - Banners stack: daemon off, daemon version mismatch, engine down, stale.
-//! - One action per project at a time; the row's state shows it.
+//! - One action per instance at a time; the row's state shows it.
+//!
+//! Instances: a project's base instance and each of its branch instances
+//! (`hack up --branch <name>`, reported in `branch_runtime`) are separate
+//! [`InstanceKey`]s with their own state, selection and in-flight action.
 
 use std::collections::HashMap;
 
 use crate::models::ProjectRow;
+pub use crate::source::UpdateSide;
 use crate::source::{ActionOutcome, DaemonRecovery, Snapshot, SourceError};
 use crate::state::{self, Action, LocalContext, ProjectState, ServiceView};
+
+/// One runnable instance: a project's base instance (`branch: None`) or one
+/// of its branch instances.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct InstanceKey {
+    pub project: String,
+    pub branch: Option<String>,
+}
+
+impl InstanceKey {
+    /// The base instance of a project.
+    #[must_use]
+    pub fn project(name: impl Into<String>) -> Self {
+        Self {
+            project: name.into(),
+            branch: None,
+        }
+    }
+
+    /// A branch instance of a project.
+    #[must_use]
+    pub fn branch(name: impl Into<String>, branch: impl Into<String>) -> Self {
+        Self {
+            project: name.into(),
+            branch: Some(branch.into()),
+        }
+    }
+}
+
+impl std::fmt::Display for InstanceKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.branch {
+            None => write!(f, "{}", self.project),
+            Some(b) => write!(f, "{} · {b}", self.project),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "banner", rename_all = "snake_case")]
 pub enum Banner {
     DaemonOff,
-    DaemonMismatch { daemon: String, cli: String },
-    DaemonReadFailed { error: String },
-    EngineDown { error: String },
-    Stale { error: String },
+    /// hackd runs but the CLI cannot use it; `update` names the side to
+    /// update (only [`UpdateSide::Daemon`] offers "Restart hackd").
+    DaemonMismatch {
+        daemon: String,
+        cli: String,
+        update: UpdateSide,
+    },
+    DaemonReadFailed {
+        error: String,
+    },
+    EngineDown {
+        error: String,
+    },
+    Stale {
+        error: String,
+    },
 }
 
 impl Banner {
+    /// A mismatch banner for these versions, with the side to update.
+    #[must_use]
+    pub fn mismatch(daemon: &str, cli: &str) -> Self {
+        Self::DaemonMismatch {
+            daemon: daemon.to_owned(),
+            cli: cli.to_owned(),
+            update: UpdateSide::for_versions(daemon, cli),
+        }
+    }
+
     #[must_use]
     pub fn text(&self) -> String {
         match self {
             Self::DaemonOff => {
                 "hackd is off or unreachable: run `hack daemon start` to read project status".into()
             }
-            Self::DaemonMismatch { daemon, cli } => {
-                format!("hackd v{daemon} is running, CLI is v{cli}: restart hackd")
-            }
+            Self::DaemonMismatch { daemon, cli, .. } => crate::source::mismatch_text(daemon, cli),
             Self::EngineDown { error } => format!("Docker not reachable: {error}"),
             Self::DaemonReadFailed { error } => error.clone(),
             Self::Stale { error } => format!("Showing last known state: {error}"),
@@ -51,11 +113,28 @@ pub enum Phase {
     Ready,
 }
 
+/// A project in the sidebar: its base instance plus its branch instances.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Row {
+    /// The base instance.
+    pub key: InstanceKey,
     pub name: String,
+    /// The base instance's state.
     pub state: ProjectState,
     pub always_on: bool,
+    /// The base instance is selected.
+    pub selected: bool,
+    /// Branch instances, sorted by branch.
+    pub branches: Vec<BranchRow>,
+}
+
+/// One branch instance under its project's row.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BranchRow {
+    pub key: InstanceKey,
+    pub branch: String,
+    pub state: ProjectState,
+    pub url: Option<String>,
     pub selected: bool,
 }
 
@@ -76,14 +155,21 @@ pub struct ListView {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Counts {
+    /// Active instances, base and branch.
     pub running: usize,
+    /// Projects in the stopped group whose base instance is not unknown.
     pub stopped: usize,
+    /// Projects in the stopped group whose base instance is unknown.
     pub unknown: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DetailView {
+    pub key: InstanceKey,
+    /// The project name (also for a branch instance).
     pub name: String,
+    /// The branch instance shown, `None` for the base instance.
+    pub branch: Option<String>,
     pub state: ProjectState,
     pub backend: String,
     pub url: Option<String>,
@@ -104,13 +190,16 @@ pub const NATIVE_ACTIONS_NOTE: &str = "Native projects are view-only in this pre
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Refreshed(Result<Snapshot, SourceError>),
+    /// Select a project's base instance.
     Select(String),
+    /// Select an instance (base or branch).
+    SelectInstance(InstanceKey),
     ActionStarted {
-        project: String,
+        key: InstanceKey,
         action: Action,
     },
     ActionFinished {
-        project: String,
+        key: InstanceKey,
         action: Action,
         result: Result<ActionOutcome, SourceError>,
     },
@@ -127,13 +216,33 @@ pub struct RefreshToken {
 pub struct AppModel {
     snapshot: Option<Snapshot>,
     last_error: Option<SourceError>,
-    selected: Option<String>,
-    local: HashMap<String, LocalContext>,
-    action_errors: HashMap<String, String>,
+    selected: Option<InstanceKey>,
+    local: HashMap<InstanceKey, LocalContext>,
+    action_errors: HashMap<InstanceKey, String>,
     loaded_once: bool,
     refresh_sequence: u64,
     applied_sequence: u64,
     action_epoch: u64,
+}
+
+/// The row for an instance in a snapshot: the project row itself, or the
+/// row derived for a branch instance.
+fn instance_row(s: &Snapshot, key: &InstanceKey) -> Option<ProjectRow> {
+    let p = s.projects.projects.iter().find(|p| p.name == key.project)?;
+    match &key.branch {
+        None => Some(p.clone()),
+        Some(b) => p.instance(b),
+    }
+}
+
+fn instance_exists(s: &Snapshot, key: &InstanceKey) -> bool {
+    s.projects.projects.iter().any(|p| {
+        p.name == key.project
+            && key
+                .branch
+                .as_ref()
+                .is_none_or(|b| p.branch_runtime.iter().any(|r| &r.branch == b))
+    })
 }
 
 impl AppModel {
@@ -161,12 +270,23 @@ impl AppModel {
         }
     }
 
+    /// The daemon action the app may offer. A daemon newer than the CLI is
+    /// fixed by updating the CLI, never by restarting hackd from it.
     #[must_use]
     pub fn daemon_recovery(&self) -> Option<DaemonRecovery> {
         match &self.last_error {
             Some(SourceError::DaemonUnavailable { daemon: None, .. }) => {
                 Some(DaemonRecovery::Start)
             }
+            Some(SourceError::DaemonUnavailable {
+                daemon: Some(d),
+                cli,
+                compatible: false,
+                ..
+            }) => match UpdateSide::for_versions(d, cli) {
+                UpdateSide::Daemon => Some(DaemonRecovery::Restart),
+                UpdateSide::Cli => None,
+            },
             Some(SourceError::DaemonUnavailable { .. }) => Some(DaemonRecovery::Restart),
             _ => None,
         }
@@ -179,6 +299,10 @@ impl AppModel {
                 .snapshot
                 .as_ref()
                 .is_some_and(|s| s.projects.runtime_ok.is_some())
+    }
+
+    fn local_for(&self, key: &InstanceKey) -> LocalContext {
+        self.local.get(key).cloned().unwrap_or_default()
     }
 
     fn observed_state(&self, row: &ProjectRow, local: &LocalContext) -> ProjectState {
@@ -211,15 +335,17 @@ impl AppModel {
                 self.loaded_once = true;
                 self.clear_recovered_failures(&s);
                 self.last_error = None;
-                if self.selected.is_none()
-                    || !s
-                        .projects
-                        .projects
-                        .iter()
-                        .any(|p| Some(&p.name) == self.selected.as_ref())
-                {
-                    self.selected = first_by_group(&s, &self.local);
-                }
+                self.selected = match self.selected.take() {
+                    Some(k) if instance_exists(&s, &k) => Some(k),
+                    // A branch instance that went away: its project's base.
+                    Some(k)
+                        if k.branch.is_some()
+                            && instance_exists(&s, &InstanceKey::project(k.project.clone())) =>
+                    {
+                        Some(InstanceKey::project(k.project))
+                    }
+                    _ => first_by_group(&s, &self.local),
+                };
                 self.snapshot = Some(s);
                 false
             }
@@ -230,26 +356,41 @@ impl AppModel {
                 false
             }
             Event::Select(name) => {
-                self.selected = Some(name);
+                self.selected = Some(InstanceKey::project(name));
                 false
             }
-            Event::ActionStarted { project, action } => {
-                let ctx = self.local.entry(project.clone()).or_default();
+            Event::SelectInstance(key) => {
+                // A branch instance the current snapshot does not have
+                // selects its project's base instead.
+                let missing = key.branch.is_some()
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|s| !instance_exists(s, &key));
+                self.selected = Some(if missing {
+                    InstanceKey::project(key.project)
+                } else {
+                    key
+                });
+                false
+            }
+            Event::ActionStarted { key, action } => {
+                let ctx = self.local.entry(key.clone()).or_default();
                 if ctx.in_flight.is_some() {
                     return false;
                 }
                 ctx.in_flight = Some(action);
                 self.action_epoch += 1;
-                self.action_errors.remove(&project);
+                self.action_errors.remove(&key);
                 false
             }
             Event::ActionFinished {
-                project,
+                key,
                 action,
                 result,
             } => {
                 self.action_epoch += 1;
-                let ctx = self.local.entry(project.clone()).or_default();
+                let ctx = self.local.entry(key.clone()).or_default();
                 if ctx.in_flight == Some(action) {
                     ctx.in_flight = None;
                 }
@@ -268,7 +409,7 @@ impl AppModel {
                         {
                             ctx.last_failed.clone_from(failed);
                         }
-                        self.action_errors.insert(project, describe(&e));
+                        self.action_errors.insert(key, describe(&e));
                     }
                 }
                 action != Action::Open
@@ -281,14 +422,14 @@ impl AppModel {
     /// this app clears it too, in `ActionFinished`.) "Nothing runs" is not
     /// evidence: a failed start can leave containers never created.
     fn clear_recovered_failures(&mut self, s: &Snapshot) {
-        for p in &s.projects.projects {
-            let Some(ctx) = self.local.get_mut(&p.name) else {
-                continue;
-            };
+        for (key, ctx) in &mut self.local {
             if ctx.last_failed.is_empty() || ctx.in_flight.is_some() {
                 continue;
             }
-            let svcs = state::services(p);
+            let Some(row) = instance_row(s, key) else {
+                continue;
+            };
+            let svcs = state::services(&row);
             let recovered = ctx
                 .last_failed
                 .iter()
@@ -299,14 +440,11 @@ impl AppModel {
         }
     }
 
-    /// Can `action` start for `project` now?
+    /// Can an action start for this instance now? Each instance has its
+    /// own single flight: a branch action does not block the base.
     #[must_use]
-    pub fn can_start(&self, project: &str) -> bool {
-        self.last_error.is_none()
-            && self
-                .local
-                .get(project)
-                .is_none_or(|c| c.in_flight.is_none())
+    pub fn can_start(&self, key: &InstanceKey) -> bool {
+        self.last_error.is_none() && self.local.get(key).is_none_or(|c| c.in_flight.is_none())
     }
 
     /// The last good snapshot, if any.
@@ -320,11 +458,17 @@ impl AppModel {
         self.snapshot.is_some() && self.last_error.is_none()
     }
 
+    /// The selected instance.
     #[must_use]
-    pub fn selected_row(&self) -> Option<&ProjectRow> {
-        let s = self.snapshot.as_ref()?;
-        let name = self.selected.as_ref()?;
-        s.projects.projects.iter().find(|p| &p.name == name)
+    pub fn selected_key(&self) -> Option<InstanceKey> {
+        self.selected.clone()
+    }
+
+    /// The selected instance's row: the project row, or the row derived
+    /// for a branch instance ([`ProjectRow::instance`]).
+    #[must_use]
+    pub fn selected_row(&self) -> Option<ProjectRow> {
+        instance_row(self.snapshot.as_ref()?, self.selected.as_ref()?)
     }
 
     #[must_use]
@@ -346,18 +490,17 @@ impl AppModel {
         };
         let mut running = Vec::new();
         let mut stopped = Vec::new();
+        let mut active_instances = 0;
         if let Some(SourceError::DaemonUnavailable {
             cli,
             daemon,
+            compatible,
             message,
         }) = &self.last_error
         {
             banners.push(match daemon {
                 None => Banner::DaemonOff,
-                Some(d) if d != cli => Banner::DaemonMismatch {
-                    daemon: d.clone(),
-                    cli: cli.clone(),
-                },
+                Some(d) if !compatible => Banner::mismatch(d, cli),
                 Some(_) => Banner::DaemonReadFailed {
                     error: message.clone(),
                 },
@@ -367,10 +510,7 @@ impl AppModel {
             if !matches!(self.last_error, Some(SourceError::DaemonUnavailable { .. })) {
                 match (&s.daemon, s.daemon_mismatch()) {
                     (None, _) => banners.push(Banner::DaemonOff),
-                    (Some(_), Some(v)) => banners.push(Banner::DaemonMismatch {
-                        daemon: v.to_owned(),
-                        cli: s.cli_version.clone(),
-                    }),
+                    (Some(_), Some(v)) => banners.push(Banner::mismatch(v, &s.cli_version)),
                     _ => {}
                 }
             }
@@ -383,16 +523,19 @@ impl AppModel {
                 banners.push(Banner::Stale { error: describe(e) });
             }
             for p in &s.projects.projects {
+                let key = InstanceKey::project(p.name.clone());
+                let branches = self.branch_rows(p);
                 let row = Row {
-                    state: self.observed_state(
-                        p,
-                        self.local.get(&p.name).unwrap_or(&LocalContext::default()),
-                    ),
+                    state: self.observed_state(p, &self.local_for(&key)),
                     always_on: p.autostart.as_ref().is_some_and(|a| a.enabled),
-                    selected: Some(&p.name) == self.selected.as_ref(),
+                    selected: self.selected.as_ref() == Some(&key),
                     name: p.name.clone(),
+                    key,
+                    branches,
                 };
-                if row.state.is_active() {
+                let active_branches = row.branches.iter().filter(|b| b.state.is_active()).count();
+                active_instances += active_branches + usize::from(row.state.is_active());
+                if row.state.is_active() || active_branches > 0 {
                     running.push(row);
                 } else {
                     stopped.push(row);
@@ -406,7 +549,7 @@ impl AppModel {
             .filter(|r| matches!(r.state, ProjectState::Unknown { .. }))
             .count();
         let counts = Counts {
-            running: running.len(),
+            running: active_instances,
             stopped: stopped.len() - unknown,
             unknown,
         };
@@ -426,13 +569,34 @@ impl AppModel {
         }
     }
 
+    fn branch_rows(&self, p: &ProjectRow) -> Vec<BranchRow> {
+        let mut rows: Vec<BranchRow> = p
+            .branch_runtime
+            .iter()
+            .filter_map(|br| {
+                let row = p.instance(&br.branch)?;
+                let key = InstanceKey::branch(p.name.clone(), br.branch.clone());
+                Some(BranchRow {
+                    state: self.observed_state(&row, &self.local_for(&key)),
+                    url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
+                    selected: self.selected.as_ref() == Some(&key),
+                    branch: br.branch.clone(),
+                    key,
+                })
+            })
+            .collect();
+        rows.sort_by(|a, b| a.branch.cmp(&b.branch));
+        rows.dedup_by(|a, b| a.branch == b.branch);
+        rows
+    }
+
     #[must_use]
     pub fn detail(&self) -> Option<DetailView> {
+        let key = self.selected.clone()?;
         let row = self.selected_row()?;
-        let default = LocalContext::default();
-        let local = self.local.get(&row.name).unwrap_or(&default);
-        let st = self.observed_state(row, local);
-        let mut services = state::services(row);
+        let local = self.local_for(&key);
+        let st = self.observed_state(&row, &local);
+        let mut services = state::services(&row);
         if self.last_error.is_some() {
             for service in &mut services {
                 service.running = false;
@@ -443,6 +607,7 @@ impl AppModel {
         }
         Some(DetailView {
             name: row.name.clone(),
+            branch: key.branch.clone(),
             backend: if row.is_native() {
                 "native".into()
             } else {
@@ -458,25 +623,38 @@ impl AppModel {
             note: row.is_native().then(|| NATIVE_ACTIONS_NOTE.to_owned()),
             busy: local.in_flight.is_some(),
             services,
-            last_error: self.action_errors.get(&row.name).cloned(),
+            last_error: self.action_errors.get(&key).cloned(),
             state: st,
+            key,
         })
     }
 }
 
-fn first_by_group(s: &Snapshot, local: &HashMap<String, LocalContext>) -> Option<String> {
+/// The first project by sidebar group (running group first), then name.
+fn first_by_group(s: &Snapshot, local: &HashMap<InstanceKey, LocalContext>) -> Option<InstanceKey> {
     let default = LocalContext::default();
+    let active = |row: &ProjectRow, key: &InstanceKey| {
+        state::derive(row, local.get(key).unwrap_or(&default)).is_active()
+    };
     let mut rows: Vec<(bool, &str)> = s
         .projects
         .projects
         .iter()
         .map(|p| {
-            let st = state::derive(p, local.get(&p.name).unwrap_or(&default));
-            (!st.is_active(), p.name.as_str())
+            let base = active(p, &InstanceKey::project(p.name.clone()));
+            let any_branch = p.branch_runtime.iter().any(|br| {
+                p.instance(&br.branch).is_some_and(|row| {
+                    active(
+                        &row,
+                        &InstanceKey::branch(p.name.clone(), br.branch.clone()),
+                    )
+                })
+            });
+            (!(base || any_branch), p.name.as_str())
         })
         .collect();
     rows.sort();
-    rows.first().map(|(_, n)| (*n).to_owned())
+    rows.first().map(|(_, n)| InstanceKey::project(*n))
 }
 
 fn describe(e: &SourceError) -> String {
@@ -513,6 +691,7 @@ mod tests {
                 token,
                 Err(SourceError::DaemonUnavailable {
                     cli: "5.0.0".into(),
+                    compatible: false,
                     daemon,
                     message: message.into(),
                 }),
@@ -530,7 +709,7 @@ mod tests {
             }));
             assert_eq!(m.daemon_recovery(), Some(expected));
             assert!(m.detail().unwrap().actions.is_empty());
-            assert!(!m.can_start("storefront"));
+            assert!(!m.can_start(&InstanceKey::project("storefront")));
             assert!(!m.engine_observed());
             assert!(
                 m.detail()
@@ -542,12 +721,13 @@ mod tests {
             let refreshed = m.begin_refresh();
             m.finish_refresh(refreshed, fixtures::snapshot(Fixture::Running));
             assert!(m.engine_observed());
-            assert!(m.can_start("storefront"));
+            assert!(m.can_start(&InstanceKey::project("storefront")));
             assert!(!m.detail().unwrap().actions.is_empty());
         }
         let mut first_launch = AppModel::new();
         first_launch.apply(Event::Refreshed(Err(SourceError::DaemonUnavailable {
             cli: "5.0.0".into(),
+            compatible: false,
             daemon: None,
             message: "hackd is off".into(),
         })));
@@ -561,12 +741,12 @@ mod tests {
         m.apply(Event::Select("storefront".into()));
         let before_start = m.begin_refresh();
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Restart,
         });
         let during_action = m.begin_refresh();
         m.apply(Event::ActionFinished {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Restart,
             result: Err(SourceError::Cli {
                 code: "E_STARTUP_INCOMPLETE".into(),
@@ -699,20 +879,20 @@ mod tests {
         m.apply(Event::Select("storefront".into()));
         assert_eq!(m.detail().unwrap().actions, vec![Action::Start]);
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Start,
         });
         let d = m.detail().unwrap();
         assert_eq!(d.state, ProjectState::Starting);
         assert!(d.busy);
-        assert!(!m.can_start("storefront"));
+        assert!(!m.can_start(&InstanceKey::project("storefront")));
         // A second action while one runs is ignored.
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Restart,
         });
         let refresh = m.apply(Event::ActionFinished {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Start,
             result: Ok(ActionOutcome::Lifecycle(LifecycleResult {
                 services: crate::models::LifecycleServices {
@@ -736,10 +916,10 @@ mod tests {
         let mut m = model(Fixture::Running);
         m.apply(Event::Select("storefront".into()));
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Open,
         });
-        assert!(!m.can_start("storefront"));
+        assert!(!m.can_start(&InstanceKey::project("storefront")));
         assert!(m.detail().unwrap().busy);
         assert!(matches!(
             m.detail().unwrap().state,
@@ -752,11 +932,11 @@ mod tests {
         let mut m = model(Fixture::Running);
         m.apply(Event::Select("storefront".into()));
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Restart,
         });
         m.apply(Event::ActionFinished {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Restart,
             result: Err(SourceError::Cli {
                 code: "E_STARTUP_INCOMPLETE".into(),
@@ -769,11 +949,11 @@ mod tests {
         let mut d = model(Fixture::Degraded);
         d.apply(Event::Select("storefront".into()));
         d.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Start,
         });
         d.apply(Event::ActionFinished {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Start,
             result: Err(SourceError::Cli {
                 code: "E_STARTUP_INCOMPLETE".into(),
@@ -794,11 +974,11 @@ mod tests {
         let mut m = model(Fixture::Degraded);
         m.apply(Event::Select("storefront".into()));
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Start,
         });
         m.apply(Event::ActionFinished {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Start,
             result: Err(SourceError::Cli {
                 code: "E_STARTUP_INCOMPLETE".into(),
@@ -826,11 +1006,11 @@ mod tests {
         let mut m = model(Fixture::Stopped);
         m.apply(Event::Select("storefront".into()));
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Start,
         });
         m.apply(Event::ActionFinished {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Start,
             result: Err(SourceError::Cli {
                 code: "E_STARTUP_INCOMPLETE".into(),
@@ -847,11 +1027,11 @@ mod tests {
         assert_eq!(m.detail().unwrap().state, failed);
         // An explicit successful Stop clears it.
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Stop,
         });
         m.apply(Event::ActionFinished {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Stop,
             result: Ok(ActionOutcome::Lifecycle(LifecycleResult::default())),
         });
@@ -873,11 +1053,11 @@ mod tests {
         let mut m = model(Fixture::Running);
         m.apply(Event::Select("storefront".into()));
         m.apply(Event::ActionStarted {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Stop,
         });
         m.apply(Event::ActionFinished {
-            project: "storefront".into(),
+            key: InstanceKey::project("storefront"),
             action: Action::Stop,
             result: Err(SourceError::Cli {
                 code: "E_DOCKER_UNAVAILABLE".into(),
@@ -888,6 +1068,192 @@ mod tests {
         let d = m.detail().unwrap();
         assert_eq!(d.last_error.as_deref(), Some("E_DOCKER_UNAVAILABLE: down"));
         assert!(!d.busy);
+    }
+
+    fn branch(b: &str) -> InstanceKey {
+        InstanceKey::branch("storefront", b)
+    }
+
+    #[test]
+    fn instance_keys_display_and_compare() {
+        assert_eq!(InstanceKey::project("storefront").to_string(), "storefront");
+        assert_eq!(branch("fix-login").to_string(), "storefront · fix-login");
+        assert_ne!(InstanceKey::project("storefront"), branch("fix-login"));
+    }
+
+    #[test]
+    fn branch_instances_group_and_count() {
+        // Base stopped, two branches running: the project is in the running group.
+        let v = model(Fixture::Branches).list();
+        let names = |rows: &[Row]| rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&v.running), ["docs-site", "storefront"]);
+        assert_eq!(names(&v.stopped), ["billing-api", "notes"]);
+        let sf = &v.running[1];
+        assert_eq!(sf.key, InstanceKey::project("storefront"));
+        assert_eq!(sf.state, ProjectState::Stopped);
+        let br: Vec<_> = sf.branches.iter().map(|b| b.branch.as_str()).collect();
+        assert_eq!(br, ["feature-search", "fix-login"]);
+        assert!(sf.branches.iter().all(|b| b.state.is_active()));
+        assert_eq!(sf.branches[0].key, branch("feature-search"));
+        assert_eq!(
+            sf.branches[0].url.as_deref(),
+            Some("https://feature-search.storefront.hack")
+        );
+        // docs-site + two branch instances; storefront's base is not counted.
+        assert_eq!(
+            v.counts,
+            Counts {
+                running: 3,
+                stopped: 2,
+                unknown: 0
+            }
+        );
+
+        // Running fixture: base running, one branch running, one failed.
+        let v = model(Fixture::Running).list();
+        let sf = v.running.iter().find(|r| r.name == "storefront").unwrap();
+        assert!(sf.state.is_active());
+        assert!(sf.branches[0].state.is_active());
+        assert_eq!(
+            sf.branches[1].state,
+            ProjectState::FailedStart {
+                services: vec!["api".into()]
+            }
+        );
+        assert_eq!(v.counts.running, 3, "storefront, feature-search, docs-site");
+        assert_eq!(v.counts.stopped, 2);
+
+        // An unreadable daemon makes every instance unknown.
+        let mut m = model(Fixture::Branches);
+        m.apply(Event::Refreshed(Err(SourceError::Cli {
+            code: "E_UNEXPECTED".into(),
+            message: "boom".into(),
+            failed: vec![],
+        })));
+        let v = m.list();
+        assert!(v.running.is_empty());
+        assert_eq!(v.counts.running, 0);
+        assert_eq!(v.counts.unknown, 4);
+    }
+
+    #[test]
+    fn selecting_a_branch_instance_and_falling_back() {
+        let mut m = model(Fixture::Branches);
+        m.apply(Event::SelectInstance(branch("feature-search")));
+        assert_eq!(m.selected_key(), Some(branch("feature-search")));
+        let row = m.selected_row().unwrap();
+        assert_eq!(row.branch.as_deref(), Some("feature-search"));
+        let d = m.detail().unwrap();
+        assert_eq!(d.key, branch("feature-search"));
+        assert_eq!(d.name, "storefront");
+        assert_eq!(d.branch.as_deref(), Some("feature-search"));
+        assert_eq!(
+            d.url.as_deref(),
+            Some("https://feature-search.storefront.hack")
+        );
+        assert!(matches!(d.state, ProjectState::Running { .. }));
+        assert_eq!(d.actions, [Action::Open, Action::Restart, Action::Stop]);
+        assert!(!d.always_on);
+        let v = m.list();
+        let sf = v.running.iter().find(|r| r.name == "storefront").unwrap();
+        assert!(!sf.selected, "only the branch is selected");
+        assert!(sf.branches[0].selected && !sf.branches[1].selected);
+
+        // The base instance is its own selection.
+        m.apply(Event::Select("storefront".into()));
+        let d = m.detail().unwrap();
+        assert_eq!(d.branch, None);
+        assert_eq!(d.state, ProjectState::Stopped);
+        assert_eq!(d.url.as_deref(), Some("https://storefront.hack"));
+
+        // The branch goes away: fall back to the project's base instance.
+        m.apply(Event::SelectInstance(branch("fix-login")));
+        m.apply(Event::Refreshed(fixtures::snapshot(Fixture::Stopped)));
+        assert_eq!(m.selected_key(), Some(InstanceKey::project("storefront")));
+        assert_eq!(m.detail().unwrap().branch, None);
+
+        // Selecting a branch the snapshot does not have selects the base.
+        m.apply(Event::SelectInstance(branch("nope")));
+        assert_eq!(m.selected_key(), Some(InstanceKey::project("storefront")));
+    }
+
+    #[test]
+    fn actions_are_single_flight_per_instance() {
+        let mut m = model(Fixture::Running);
+        let base = InstanceKey::project("storefront");
+        let fs = branch("feature-search");
+        m.apply(Event::ActionStarted {
+            key: fs.clone(),
+            action: Action::Restart,
+        });
+        assert!(!m.can_start(&fs));
+        assert!(
+            m.can_start(&base),
+            "a branch action does not block the base"
+        );
+        m.apply(Event::Select("storefront".into()));
+        assert!(!m.detail().unwrap().busy);
+        m.apply(Event::ActionStarted {
+            key: base.clone(),
+            action: Action::Stop,
+        });
+        assert!(!m.can_start(&base));
+        m.apply(Event::SelectInstance(fs.clone()));
+        let d = m.detail().unwrap();
+        assert!(d.busy);
+        assert_eq!(d.state, ProjectState::Starting);
+        // Finishing the branch's action leaves the base in flight.
+        m.apply(Event::ActionFinished {
+            key: fs.clone(),
+            action: Action::Restart,
+            result: Err(SourceError::Cli {
+                code: "E_STARTUP_INCOMPLETE".into(),
+                message: "m".into(),
+                failed: vec!["api".into()],
+            }),
+        });
+        assert!(m.can_start(&fs));
+        assert!(!m.can_start(&base));
+        let d = m.detail().unwrap();
+        assert_eq!(d.last_error.as_deref(), Some("E_STARTUP_INCOMPLETE: m"));
+        m.apply(Event::Select("storefront".into()));
+        let d = m.detail().unwrap();
+        assert_eq!(d.state, ProjectState::Stopping);
+        assert_eq!(d.last_error, None, "errors are per instance");
+    }
+
+    #[test]
+    fn mismatch_banner_names_the_side_to_update() {
+        let v = model(Fixture::DaemonMismatch).list();
+        assert_eq!(
+            v.banners,
+            [Banner::DaemonMismatch {
+                daemon: "4.3.0".into(),
+                cli: "5.0.0".into(),
+                update: UpdateSide::Daemon,
+            }]
+        );
+        assert_eq!(
+            v.banners[0].text(),
+            "hackd 4.3.0 is older than this CLI (5.0.0): restart hackd"
+        );
+        assert_eq!(
+            Banner::mismatch("5.1.0", "5.0.0").text(),
+            "hackd 5.1.0 is newer than this CLI (5.0.0): update the CLI with hack update"
+        );
+        // A compatible daemon whose project read failed is not a mismatch.
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Err(SourceError::DaemonUnavailable {
+            cli: "5.0.0-next.18".into(),
+            daemon: Some("4.3.0".into()),
+            compatible: true,
+            message: "hackd could not provide project status".into(),
+        })));
+        assert!(matches!(
+            m.list().banners[..],
+            [Banner::DaemonReadFailed { .. }]
+        ));
+        assert_eq!(m.daemon_recovery(), Some(DaemonRecovery::Restart));
     }
 
     #[test]
@@ -905,7 +1271,7 @@ mod tests {
             m.apply(Event::Select(fixtures::selected(f).into()));
             if let Some(a) = fixtures::local(f).in_flight {
                 m.apply(Event::ActionStarted {
-                    project: fixtures::selected(f).into(),
+                    key: InstanceKey::project(fixtures::selected(f)),
                     action: a,
                 });
             }

@@ -84,6 +84,26 @@ pub struct ProjectRow {
     /// Native observation from `hack ps --json` (filled by the source).
     #[serde(skip)]
     pub native: Option<NativePs>,
+    /// Running branch instances (`hack up --branch <name>`), Compose only.
+    /// Native branch instances are not reported here (design request R19).
+    #[serde(deserialize_with = "null_default")]
+    pub branch_runtime: Vec<BranchRuntime>,
+    /// Set on a row derived by [`ProjectRow::instance`]: the branch this
+    /// row describes. `None` for the project's base instance.
+    #[serde(skip)]
+    pub branch: Option<String>,
+}
+
+/// One branch instance in `/v1/projects` `branch_runtime`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct BranchRuntime {
+    /// The Compose project name suffix after `<project>--` (design request
+    /// R20: not necessarily the branch name the user typed).
+    #[serde(deserialize_with = "null_default")]
+    pub branch: String,
+    #[serde(deserialize_with = "null_default")]
+    pub runtime: ProjectRuntime,
 }
 
 /// Project views refuse canonical native projects with this code.
@@ -99,6 +119,65 @@ impl ProjectRow {
                 .input_diagnostic
                 .as_ref()
                 .is_some_and(|d| d.code == NATIVE_PROJECT_CODE)
+    }
+
+    /// A row for one branch instance of this project, derived from
+    /// `branch_runtime`; `None` when no such branch instance is reported.
+    ///
+    /// The derived row keeps the project's identity (name, checkout, kind,
+    /// backend, defined services) and takes everything observed from the
+    /// branch runtime: `status` is `running` when any container runs, else
+    /// `stopped`; `service_hosts` come from each container's `caddy` label
+    /// (already rewritten for the branch); `dev_host` is
+    /// `<branch>.<base dev_host>` when that host is routed, else the first
+    /// routed host. Summary counters and always-on do not apply.
+    #[must_use]
+    pub fn instance(&self, branch: &str) -> Option<ProjectRow> {
+        let br = self.branch_runtime.iter().find(|b| b.branch == branch)?;
+        let mut service_hosts: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut all_hosts: Vec<String> = Vec::new();
+        for svc in &br.runtime.services {
+            for c in &svc.containers {
+                let Some(label) = c.labels.get("caddy") else {
+                    continue;
+                };
+                for host in label.split(',').map(str::trim).filter(|h| !h.is_empty()) {
+                    let hosts = service_hosts.entry(svc.service.clone()).or_default();
+                    if !hosts.iter().any(|h| h == host) {
+                        hosts.push(host.to_owned());
+                    }
+                    if !all_hosts.iter().any(|h| h == host) {
+                        all_hosts.push(host.to_owned());
+                    }
+                }
+            }
+        }
+        let preferred = self.dev_host.as_ref().map(|d| format!("{branch}.{d}"));
+        let dev_host = preferred
+            .filter(|p| all_hosts.contains(p))
+            .or_else(|| all_hosts.first().cloned());
+        let running = br
+            .runtime
+            .services
+            .iter()
+            .any(|s| s.containers.iter().any(Container::is_running));
+        let status = if running { "running" } else { "stopped" };
+        Some(ProjectRow {
+            project_id: self.project_id.clone(),
+            name: self.name.clone(),
+            dev_host,
+            repo_root: self.repo_root.clone(),
+            status: status.into(),
+            runtime_status: Some(status.into()),
+            kind: self.kind.clone(),
+            defined_services: self.defined_services.clone(),
+            service_hosts,
+            runtime: Some(br.runtime.clone()),
+            backend: self.backend.clone(),
+            branch: Some(branch.to_owned()),
+            ..ProjectRow::default()
+        })
     }
 }
 
@@ -163,6 +242,9 @@ pub struct Container {
     /// Docker status text, for example `Up 5 minutes (healthy)`.
     #[serde(deserialize_with = "null_default")]
     pub status: String,
+    /// Container labels. Branch instances carry their routes in `caddy`.
+    #[serde(deserialize_with = "null_default")]
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 impl Container {
@@ -236,6 +318,7 @@ pub struct DaemonStatus {
     pub status: String,
     pub running: bool,
     pub api_ok: bool,
+    pub api_reachable: Option<bool>,
     pub api_compatible: Option<bool>,
     pub stale: bool,
     pub stale_reason: Option<String>,
@@ -429,6 +512,98 @@ mod tests {
         )
         .unwrap();
         assert_eq!(e.failed_services(), vec!["api", "worker"]);
+    }
+
+    /// Shape of a full `/v1/projects` row from `serializeProjectView`.
+    const BRANCH_ROW: &str = r#"{"projects":[{
+      "name":"storefront","status":"stopped","dev_host":"storefront.hack",
+      "repo_root":"/work/storefront","kind":"registered","backend":"compose",
+      "defined_services":["api","web"],"autostart":{"enabled":true,"state":"on"},
+      "runtime":null,
+      "branch_runtime":[
+        {"branch":"feature-search","runtime":{"project":"storefront--feature-search",
+          "working_dir":"/work/storefront","services":[
+          {"service":"api","containers":[{"id":"c1","state":"running","status":"Up 3 minutes",
+            "name":"storefront--feature-search-api-1","ports":[],"image":"img",
+            "labels":{"caddy":"api.feature-search.storefront.hack, feature-search.storefront.hack",
+              "com.docker.compose.project":"storefront--feature-search"},
+            "mounts":[],"networks":[]}]},
+          {"service":"web","containers":[{"id":"c2","state":"running","status":"Up 3 minutes",
+            "labels":{"caddy":"feature-search.storefront.hack,web.feature-search.storefront.hack,"}}]},
+          {"service":"db","containers":[{"id":"c3","state":"running","status":"Up 3 minutes",
+            "labels":null}]}]}},
+        {"branch":"fix-login","runtime":{"project":"storefront--fix-login","services":[
+          {"service":"api","containers":[{"state":"exited","status":"Exited (1) 1 minute ago",
+            "labels":{"caddy":"api.fix-login.storefront.hack"}}]}]}}
+      ]},
+      {"name":"notes","status":"stopped","branch_runtime":null}]}"#;
+
+    #[test]
+    fn branch_runtime_parses_with_null_labels_and_null_list() {
+        let p: ProjectsPayload = serde_json::from_str(BRANCH_ROW).unwrap();
+        let row = &p.projects[0];
+        assert_eq!(row.branch_runtime.len(), 2);
+        assert_eq!(row.branch_runtime[0].branch, "feature-search");
+        assert!(
+            row.branch_runtime[0].runtime.services[2].containers[0]
+                .labels
+                .is_empty()
+        );
+        assert!(p.projects[1].branch_runtime.is_empty());
+        assert!(row.branch.is_none());
+        assert!(row.instance("nope").is_none());
+    }
+
+    #[test]
+    fn instance_derives_state_hosts_and_dev_host() {
+        let p: ProjectsPayload = serde_json::from_str(BRANCH_ROW).unwrap();
+        let base = &p.projects[0];
+        let fs = base.instance("feature-search").unwrap();
+        assert_eq!(fs.name, "storefront");
+        assert_eq!(fs.branch.as_deref(), Some("feature-search"));
+        assert_eq!(fs.status, "running");
+        assert_eq!(fs.repo_root, base.repo_root);
+        assert_eq!(fs.backend.as_deref(), Some("compose"));
+        assert_eq!(fs.defined_services, base.defined_services);
+        assert!(fs.branch_runtime.is_empty());
+        assert!(fs.autostart.is_none());
+        assert_eq!(
+            fs.service_hosts["api"],
+            [
+                "api.feature-search.storefront.hack",
+                "feature-search.storefront.hack"
+            ]
+        );
+        assert_eq!(
+            fs.service_hosts["web"],
+            [
+                "feature-search.storefront.hack",
+                "web.feature-search.storefront.hack"
+            ]
+        );
+        assert!(!fs.service_hosts.contains_key("db"));
+        // `<branch>.<base dev_host>` wins over the first host found.
+        assert_eq!(
+            fs.dev_host.as_deref(),
+            Some("feature-search.storefront.hack")
+        );
+
+        let fl = base.instance("fix-login").unwrap();
+        assert_eq!(fl.status, "stopped");
+        // No `fix-login.storefront.hack` route: the first host found.
+        assert_eq!(
+            fl.dev_host.as_deref(),
+            Some("api.fix-login.storefront.hack")
+        );
+
+        let mut no_routes = base.clone();
+        for c in no_routes.branch_runtime[1].runtime.services[0]
+            .containers
+            .iter_mut()
+        {
+            c.labels.clear();
+        }
+        assert_eq!(no_routes.instance("fix-login").unwrap().dev_host, None);
     }
 
     #[test]

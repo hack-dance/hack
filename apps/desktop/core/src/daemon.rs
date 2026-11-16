@@ -2,9 +2,10 @@
 //!
 //! Only GET requests, one per connection (`Connection: close`), with a read
 //! and write timeout. The socket API has no authentication; it is owner-only
-//! on disk, and the app only reads from it. A daemon whose version differs
-//! from the CLI is treated as unusable for data (the CLI does the same) and
-//! project reads remain unavailable until a matching daemon can be read.
+//! on disk, and the app only reads from it. A daemon the CLI cannot use
+//! (versions differ and `hack daemon status --json` does not report
+//! `api_compatible: true`) is treated as unusable for data, and project
+//! reads remain unavailable until a usable daemon can be read.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;

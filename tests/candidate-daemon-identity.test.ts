@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import {
   chmod,
   copyFile,
+  mkdir,
   mkdtemp,
   realpath,
   rm,
@@ -76,6 +77,116 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
     expect(gate.stdout).toContain("hack-next: hackd pid");
     expect(gate.stdout).toContain("hack-v5: hackd pid");
     expect(gate.stdout).toContain(`CLI and hackd report ${VERSION}`);
+  },
+  120_000
+);
+
+/** Compiles this checkout's CLI to `outfile` with a build version. */
+async function compileHack(opts: {
+  readonly fixture: string;
+  readonly outfile: string;
+  readonly version: string;
+}): Promise<void> {
+  const build = await children.run({
+    cmd: [
+      process.execPath,
+      "build",
+      join(REPO, "index.ts"),
+      "--compile",
+      "--define",
+      `__HACK_BUILD_VERSION__="${opts.version}"`,
+      "--outfile",
+      opts.outfile,
+    ],
+    cwd: opts.fixture,
+    env: privateCliEnv({ root: opts.fixture }),
+  });
+  expect(build.exitCode).toBe(0);
+}
+
+test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
+  "a candidate never starts over, restarts or stops a stable hackd on a shared home",
+  async () => {
+    // A short root keeps hackd's socket path inside the platform limit.
+    root = await realpath(await mkdtemp("/tmp/hack-cdi-shared-"));
+    const bundle = join(root, "bundle");
+    const stable = join(root, "stable");
+    const home = join(root, "home");
+    await compileHack({
+      fixture: root,
+      outfile: join(bundle, "hack-cli"),
+      version: VERSION,
+    });
+    await compileHack({
+      fixture: root,
+      outfile: join(stable, "hack"),
+      version: "4.9.9",
+    });
+    await copyFile(
+      join(REPO, "scripts", "hack-v5.sh"),
+      join(bundle, "hack-v5")
+    );
+    await chmod(join(bundle, "hack-v5"), 0o755);
+    await writeFile(join(bundle, "hack-native"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    await mkdir(home, { mode: 0o700 });
+    await chmod(home, 0o700);
+    // Both lines share HOME and so ~/.hack, as a Compose candidate does.
+    const env: Record<string, string> = {
+      HOME: home,
+      PATH: `${stable}:/usr/bin:/bin`,
+      TMPDIR: root,
+      NO_COLOR: "1",
+      HACK_LOGGER: "console",
+      HACK_DAEMON_AUTOSTART_DISABLE: "1",
+      HACK_DAEMON_DISABLE_DOCKER_EVENTS: "1",
+    };
+    const json = async (argv: readonly string[], extra = {}) => {
+      const result = await children.run({
+        cmd: argv,
+        cwd: root,
+        env: { ...env, ...extra },
+      });
+      return {
+        exitCode: result.exitCode,
+        json: JSON.parse(result.stdout) as {
+          ok: boolean;
+          data?: { daemon?: { pid: number | null; version: string | null } };
+          error?: { message: string };
+        },
+      };
+    };
+    const stableHack = join(stable, "hack");
+    const started = await json([stableHack, "daemon", "start", "--json"]);
+    expect(started.exitCode).toBe(0);
+    const stablePid = started.json.data?.daemon?.pid;
+    expect(typeof stablePid).toBe("number");
+    try {
+      for (const command of ["start", "restart", "stop"]) {
+        const result = await json(
+          [join(bundle, "hack-v5"), "daemon", command, "--json"],
+          { HACK_RUNTIME_BACKEND: "compose" }
+        );
+        expect(result.exitCode).toBe(1);
+        expect(result.json.error?.message).toContain(
+          `hackd version 4.9.9 (pid ${stablePid}) runs for this Hack home`
+        );
+      }
+      const status = await children.run({
+        cmd: [stableHack, "daemon", "status", "--json"],
+        cwd: root,
+        env,
+      });
+      const report = JSON.parse(status.stdout) as {
+        pid: number;
+        version: string;
+      };
+      expect(report.pid).toBe(stablePid as number);
+      expect(report.version).toBe("4.9.9");
+    } finally {
+      await json([stableHack, "daemon", "stop", "--json"]);
+    }
   },
   120_000
 );

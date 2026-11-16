@@ -76,6 +76,7 @@ import {
 } from "../lib/runtime-guidance.ts";
 import { logger } from "../ui/logger.ts";
 import {
+  candidateOrphanRefusal,
   candidateRunningDaemonRefusal,
   candidateServiceCommandRefusal,
 } from "./daemon-candidate.ts";
@@ -343,6 +344,12 @@ async function startDaemon(opts: {
   readonly alreadyReplaced?: boolean;
 }): Promise<number> {
   const { paths, trace } = opts;
+  if (isCandidateRun() && !opts.foreground) {
+    const refused = await refuseCandidateDaemonChange({ paths, launch: true });
+    if (refused !== null) {
+      return refused;
+    }
+  }
   const status = await readDaemonStatus({ paths });
 
   // A pid that survived an unclean shutdown may now belong to another
@@ -444,9 +451,11 @@ async function startStoppedDaemon(opts: {
   readonly replacement?: boolean;
 }): Promise<ReplacementStartOutcome> {
   const { paths, trace } = opts;
+  const candidate = isCandidateRun();
   const sweep = await sweepOrphanDaemons({
     trackedPid: opts.trackedPid,
     paths,
+    refuseOrphans: candidate,
   });
   if (!sweep.allStopped) {
     // A proven orphan still holds the socket: any start would fail.
@@ -457,7 +466,6 @@ async function startStoppedDaemon(opts: {
   // before touching the pid/socket files: systemd (a pending restart) or
   // another starter may be writing them right now, and hackd replaces its
   // own socket when it starts.
-  const candidate = isCandidateRun();
   if (process.platform === "linux" && !opts.foreground && !candidate) {
     let requested = false;
     const viaSystemd = await startViaSystemdIfInstalled({
@@ -571,6 +579,11 @@ async function reportUnprovenStop(opts: {
 async function sweepOrphanDaemons(opts: {
   readonly trackedPid: number | null;
   readonly paths: DaemonPaths;
+  /**
+   * A candidate run (HACK-2263): an orphan's version is unknown, so it is
+   * reported and nothing is signalled or started.
+   */
+  readonly refuseOrphans?: boolean;
 }): Promise<{ readonly allStopped: boolean; readonly stopped: number }> {
   const scan = await findOrphanDaemonProcesses({
     trackedPid: opts.trackedPid,
@@ -590,6 +603,13 @@ async function sweepOrphanDaemons(opts: {
     logger.info({
       message: `Left pid ${refused.pid} running: it looks like a hack daemon start, but ${describeDaemonProcessRefusal(refused.reason)}`,
     });
+  }
+  const orphanRefusal = opts.refuseOrphans
+    ? candidateOrphanRefusal({ pids: scan.orphans.map((orphan) => orphan.pid) })
+    : null;
+  if (orphanRefusal !== null) {
+    logger.error({ message: orphanRefusal });
+    return { allStopped: false, stopped: 0 };
   }
   let allStopped = true;
   let stopped = 0;
@@ -754,7 +774,7 @@ async function reportCandidateRunningDaemon(opts: {
   const refusal = candidateRunningDaemonRefusal({
     pid: opts.pid,
     version: api.version,
-    compatible: !(api.reachable && !api.compatible),
+    compatible: api.reachable && api.compatible,
   });
   if (refusal === null) {
     logger.success({ message: `hackd already running (pid ${opts.pid})` });
@@ -860,12 +880,14 @@ async function startDaemonDetached(opts: {
     });
     return 1;
   }
-  // Never call a hackd "started" that this CLI then calls incompatible
-  // (HACK-2263): the program started may not be this CLI.
-  const api = await checkDaemonApi({ socketExists: true, paths });
-  if (api.reachable && !api.compatible) {
+  // "started" needs positive evidence (HACK-2263): the program started may
+  // not be this CLI, so its API must answer with this CLI's version.
+  const api = await waitForDaemonApi({ paths });
+  if (!(api.reachable && api.compatible)) {
     logger.error({
-      message: `Started hackd, but it reports version ${api.version ?? "unknown"}, not this CLI's ${DAEMON_CLI_VERSION}; it is not this Hack's hackd | Check: hack daemon status`,
+      message: api.reachable
+        ? `Started hackd, but it reports version ${api.version ?? "unknown"}, not this CLI's ${DAEMON_CLI_VERSION}; it is not this Hack's hackd | Check: hack daemon status`
+        : "Started hackd, but its API did not answer, so its version is unknown | Check: hack daemon status",
     });
     return 1;
   }
@@ -919,7 +941,16 @@ async function stopDaemon(opts: {
   readonly trace: DaemonCommandTrace;
 }): Promise<number> {
   const { paths, trace } = opts;
-  const code = await stopDaemonSteps({ paths, trace });
+  // A candidate stops only its own hackd, never through the login service
+  // (HACK-2263).
+  const candidate = isCandidateRun();
+  if (candidate) {
+    const refused = await refuseCandidateDaemonChange({ paths, launch: false });
+    if (refused !== null) {
+      return refused;
+    }
+  }
+  const code = await stopDaemonSteps({ paths, trace, useSystemd: !candidate });
   if (trace.manager === "none" && process.platform === "darwin") {
     const launchd = await resolveLaunchdStatus({ paths });
     trace.manager = launchd?.loaded ? "launchd" : "none";
@@ -930,6 +961,8 @@ async function stopDaemon(opts: {
 async function stopDaemonSteps(opts: {
   readonly paths: DaemonPaths;
   readonly trace: DaemonCommandTrace;
+  /** False in a candidate run: hackd.service runs the stable hack. */
+  readonly useSystemd?: boolean;
 }): Promise<number> {
   const { paths, trace } = opts;
   const initial = await readDaemonStatus({ paths });
@@ -938,7 +971,7 @@ async function stopDaemonSteps(opts: {
   // file is missing or names a dead pid: that is how a pending
   // Restart=on-failure restart gets cancelled.
   const viaSystemd =
-    process.platform === "linux"
+    process.platform === "linux" && opts.useSystemd !== false
       ? await stopViaSystemdIfInstalled({
           pid: initial.running ? initial.pid : null,
           hackHome: dirname(paths.root),
@@ -1452,25 +1485,18 @@ async function restartCandidateDaemon(opts: {
   readonly trace: DaemonCommandTrace;
 }): Promise<number> {
   const { paths, trace } = opts;
-  const status = await readDaemonStatus({ paths });
-  if (status.running && status.pid !== null) {
-    const api = await checkDaemonApi({
-      socketExists: status.socketExists,
-      paths,
-    });
-    const refusal = candidateRunningDaemonRefusal({
-      pid: status.pid,
-      version: api.version,
-      compatible: !(api.reachable && !api.compatible),
-    });
-    if (refusal !== null) {
-      trace.stale.add("version-mismatch");
-      logger.error({ message: refusal });
-      return 1;
-    }
+  // Everything the start would refuse is refused before the stop.
+  const refused = await refuseCandidateDaemonChange({ paths, launch: true });
+  if (refused !== null) {
+    return refused;
   }
+  const running = (await readDaemonStatus({ paths })).running;
   const stopTrace = createDaemonCommandTrace();
-  const stopped = await stopDaemon({ paths, trace: stopTrace });
+  const stopped = await stopDaemonSteps({
+    paths,
+    trace: stopTrace,
+    useSystemd: false,
+  });
   if (stopped !== 0) {
     trace.manager = stopTrace.manager;
     return stopped;
@@ -1479,12 +1505,78 @@ async function restartCandidateDaemon(opts: {
     paths,
     foreground: false,
     trace,
-    alreadyReplaced: status.running,
+    alreadyReplaced: running,
   });
   if (started === 0 && trace.action === "started") {
     trace.action = "restarted";
   }
   return started;
+}
+
+/**
+ * Before a candidate run (HACK-2263) starts, stops or restarts hackd: an
+ * exit code (reported) when it must change nothing, else null. It refuses
+ * when it cannot prove what it would start (`launch`), when the tracked
+ * hackd does not positively report this CLI's version (a stable hackd on a
+ * shared Hack home, or one whose API did not answer), and when untracked
+ * hackd processes hold this home or the process table cannot be read.
+ */
+async function refuseCandidateDaemonChange(opts: {
+  readonly paths: DaemonPaths;
+  readonly launch: boolean;
+}): Promise<number | null> {
+  const { paths } = opts;
+  const launch = opts.launch ? resolveDaemonLaunch() : null;
+  if (launch?.kind === "refused") {
+    logger.error({ message: launch.message });
+    return 1;
+  }
+  const status = await readDaemonStatus({ paths });
+  const livePid = status.running ? status.pid : null;
+  if (livePid !== null && (await isHackDaemonProcess({ pid: livePid }))) {
+    const api = await checkDaemonApi({
+      socketExists: status.socketExists,
+      paths,
+    });
+    const refusal = candidateRunningDaemonRefusal({
+      pid: livePid,
+      version: api.version,
+      compatible: api.reachable && api.compatible,
+    });
+    if (refusal !== null) {
+      logger.error({ message: refusal });
+      return 1;
+    }
+  }
+  const scan = await findOrphanDaemonProcesses({
+    trackedPid: status.pid,
+    daemonRoot: paths.root,
+  });
+  const orphanRefusal = scan.unknown
+    ? "Could not read the process table (no ps at a fixed, trusted path), so this candidate cannot tell which hackd processes hold this Hack home; nothing was stopped or started."
+    : candidateOrphanRefusal({
+        pids: scan.orphans.map((orphan) => orphan.pid),
+      });
+  if (orphanRefusal !== null) {
+    logger.error({ message: orphanRefusal });
+    return 1;
+  }
+  return null;
+}
+
+/** Polls hackd's API until it answers or `timeoutMs` passes. */
+async function waitForDaemonApi(opts: {
+  readonly paths: DaemonPaths;
+  readonly timeoutMs?: number;
+}): Promise<Awaited<ReturnType<typeof checkDaemonApi>>> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 5000);
+  for (;;) {
+    const api = await checkDaemonApi({ socketExists: true, paths: opts.paths });
+    if (api.reachable || Date.now() >= deadline) {
+      return api;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
 }
 
 async function waitForDaemonStart({

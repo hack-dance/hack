@@ -22,15 +22,34 @@ export function candidateRunningDaemonRefusal(opts: {
   readonly pid: number;
   /** What hackd's API reported; null when it did not answer. */
   readonly version: string | null;
+  /**
+   * Positive evidence only: hackd's API answered with this CLI's version.
+   * An API that did not answer is unknown, never compatible.
+   */
   readonly compatible: boolean;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): string | null {
   if (opts.compatible || !isCandidateRun(opts.env ?? process.env)) {
     return null;
   }
-  const running =
-    opts.version === null ? "another version" : `version ${opts.version}`;
-  return `hackd ${running} (pid ${opts.pid}) runs for this Hack home and this candidate (${DAEMON_CLI_VERSION}) does not replace it; stop it with the Hack that started it, then run this command again.`;
+  if (opts.version === null) {
+    return `hackd (pid ${opts.pid}) runs for this Hack home but did not report its version, so this candidate (${DAEMON_CLI_VERSION}) leaves it alone; check it with: hack daemon status`;
+  }
+  return `hackd version ${opts.version} (pid ${opts.pid}) runs for this Hack home and this candidate (${DAEMON_CLI_VERSION}) does not stop or replace it; stop it with the Hack that started it, then run this command again.`;
+}
+
+/**
+ * The one-sentence refusal when a candidate run finds hackd processes the
+ * pid file does not track for its Hack home (orphans): their version is
+ * unknown, so a candidate never signals them. Null when there are none.
+ */
+export function candidateOrphanRefusal(opts: {
+  readonly pids: readonly number[];
+}): string | null {
+  if (opts.pids.length === 0) {
+    return null;
+  }
+  return `hackd process ${opts.pids.join(", ")} holds this Hack home without its pid file, and this candidate does not stop a hackd it cannot identify; stop it with the Hack that started it, then run this command again.`;
 }
 
 /**

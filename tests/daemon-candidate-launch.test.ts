@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import pkg from "../package.json";
 import {
+  candidateOrphanRefusal,
   candidateRunningDaemonRefusal,
   candidateServiceCommandRefusal,
 } from "../src/commands/daemon-candidate.ts";
@@ -114,7 +115,7 @@ test("a candidate refuses a running hackd of another version only", () => {
     env,
   });
   expect(refusal).toContain("version 4.3.0 (pid 42)");
-  expect(refusal).toContain("does not replace it");
+  expect(refusal).toContain("does not stop or replace it");
   expect(
     candidateRunningDaemonRefusal({
       pid: 42,
@@ -123,6 +124,24 @@ test("a candidate refuses a running hackd of another version only", () => {
       env: {},
     })
   ).toBeNull();
+});
+
+test("a candidate treats an unanswered API as unknown, never compatible", () => {
+  const refusal = candidateRunningDaemonRefusal({
+    pid: 7,
+    version: null,
+    compatible: false,
+    env: { HACK_CANDIDATE_ENTRYPOINT: "hack-v5" },
+  });
+  expect(refusal).toContain("did not report its version");
+  expect(refusal).toContain("leaves it alone");
+});
+
+test("a candidate refuses untracked hackd processes", () => {
+  expect(candidateOrphanRefusal({ pids: [] })).toBeNull();
+  expect(candidateOrphanRefusal({ pids: [11, 12] })).toContain(
+    "hackd process 11, 12 holds this Hack home without its pid file"
+  );
 });
 
 test("a candidate run refuses daemon install and uninstall", () => {

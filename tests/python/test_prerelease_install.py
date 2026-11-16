@@ -479,6 +479,25 @@ class ChannelTests(unittest.TestCase):
                     self.channel.install("5.0.0-next.2", archive, checksum, True)
         self.assertEqual(self.selection(), before)
 
+    def test_supervisor_extension_installs_with_checksums_modes_and_signature_inventory(self):
+        def payload(entries):
+            files = {name: value for name, value, _ in with_current_payload(entries)
+                     if name != "SHA256SUMS"}
+            files["hack-lifecycle-supervisor"] = b"synthetic supervisor"
+            files["SHA256SUMS"] = "".join(sha(value) + "  " + name + "\n"
+                                           for name, value in sorted(files.items())).encode()
+            return [(name, value, tarfile.REGTYPE) for name, value in files.items()]
+        archive, checksum = self.archive(mutate=payload)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        bundle = self.channel.root / "versions/5.0.0-next.1/bundle"
+        supervisor = bundle / "hack-lifecycle-supervisor"
+        self.assertEqual(supervisor.read_bytes(), b"synthetic supervisor")
+        self.assertEqual(supervisor.stat().st_mode & 0o777, 0o755)
+        self.calls.clear()
+        installer.verify_signatures(bundle)
+        self.assertIn(str(supervisor), self.calls[0][0])
+
     def test_signature_batch_covers_all_executable_assets_in_one_strict_call(self):
         archive, checksum = self.archive(mutate=with_current_payload)
         with self.channel.lock():

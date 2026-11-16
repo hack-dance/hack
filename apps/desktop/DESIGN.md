@@ -198,8 +198,8 @@ is removed after use. The app never types into an existing terminal or pane.
 
 ## 3. Doctor
 
-Source: `hack doctor --json --path <root>` per registered project, plus one run
-outside any project for machine checks (until R7c), on open and every 10
+Source: `hack doctor --json --path <root>` per registered project, plus
+`hack doctor --machine --json` for machine findings, on open and every 10
 minutes while visible. The versioned audit gives `{ok:true,data:{schema:1,checks,summary,counts}}`; checks include `id`, `status`, `detail`, `area`, `scope` and `fix` (R7a).
 
 | Card part | Content |
@@ -382,7 +382,7 @@ Each is small enough for one PR.
 8. **R6** Action progress: `hack up|down|restart --json --progress` emitting ndjson `{type:"progress", service, phase}` before the final envelope. The Compose slice exists; see [Lifecycle progress stream](../../docs/reference/lifecycle-progress.md). Native backend support is open.
 9. **R7a — exists.** Doctor audit schema 1 adds per-check `area`, `scope: machine | project` and `fix: {kind: safe | admin | manual, args[], doc_url}` inside the existing `{ok,data}` envelope. Unknown checks default to Other/manual with no executable args. A category is guidance, not permission to run it.
 10. **R7b — exists.** `hack doctor --fix --only <id> --yes --json` executes one allowlisted safe fix and rechecks it. Initially only `hack gitignore` is safe; other IDs and mixed modes refuse before writes. Results use `{ok,data:{schema:1,checks,summary,counts,fix}}`; `fix` records `id`, `changed`, `confirmed`.
-11. **R7c** Machine-only doctor: `hack doctor --machine --json` (no project), so the app does not need to de-duplicate.
+11. **R7c — exists.** `hack doctor --machine --json` skips project discovery even inside an invalid project. It reports only machine scopes for the selected backend plus global secrets hygiene, in the `{ok,data}` envelope with `data.schema: "hack.doctor.machine.v1"` (a schema-tagged flag variant in the machine-output inventory; plain `doctor --json` keeps `schema: 1`). Read-only engine/service probes may run; nothing is started or repaired. `--path`, project/browser flags and mutation modes refuse. For R7b project fixes, the app supplies its selected project cwd or appends `--path <root>` to the advertised argv.
 12. **R8** Daemon unit staleness: `service.unit_stale` and reason in `hack daemon status --json`, and `version` there.
 13. **R9 — exists** Push updates: `GET /v1/projects?wait=<state_token>&wait_timeout_ms=<ms>` long-poll ([waiting for changes](../../docs/reference/project-state.md#waiting-for-changes)). `generated_at` changes on every response, so the marker is the response's `state_token`, a digest that ignores per-response and refresh-timestamp fields. Answers on change, or at the timeout (default 25 s, max 55 s).
 14. **R10 — exists** Env key state: `key_state: ok | missing | unreadable | not_checked` in `hack env list --json` (no values). `not_checked` is the legacy `hack.env.json` contract. The payload keeps its published bare-object shape; no envelope was added.

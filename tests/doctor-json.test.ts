@@ -61,6 +61,22 @@ test("buildDoctorJsonData handles an all-ok run", () => {
   expect(data.checks[0]?.id).toBe("bun");
 });
 
+test("buildDoctorJsonData tags only the machine audit with its stable schema id", () => {
+  const results = [
+    {
+      name: "bun",
+      status: "ok" as const,
+      message: "/usr/bin/bun",
+      durationMs: 2,
+    },
+  ];
+  expect(buildDoctorJsonData({ results }).schema).toBe(1);
+  expect(buildDoctorJsonData({ results, machine: false }).schema).toBe(1);
+  const machine = buildDoctorJsonData({ results, machine: true });
+  expect(machine.schema).toBe("hack.doctor.machine.v1");
+  expect(machine.checks).toEqual(buildDoctorJsonData({ results }).checks);
+});
+
 test("buildDoctorJsonData adds only superseded-root counts and fingerprints", () => {
   const supersededRoots = {
     count: 2,

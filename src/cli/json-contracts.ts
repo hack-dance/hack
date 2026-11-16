@@ -125,4 +125,9 @@ export const SCHEMA_JSON_VARIANTS = [
   { command: "daemon stop", flags: [], schema: "hack.daemon-stop.v1" },
   { command: "daemon restart", flags: [], schema: "hack.daemon-restart.v1" },
   { command: "daemon install", flags: [], schema: "hack.daemon-install.v1" },
+  {
+    command: "doctor",
+    flags: ["--machine"],
+    schema: "hack.doctor.machine.v1",
+  },
 ] as const;

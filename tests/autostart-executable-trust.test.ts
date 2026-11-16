@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { assertAutostartExecutablePathTrusted } from "../src/lib/autostart-executable-trust.ts";
 import {
   DARWIN_ADMIN_GID,
-  isDarwinAdminDirectory,
+  DARWIN_DAEMON_GID,
+  isDarwinSystemGroupDirectory,
 } from "../src/lib/path-trust.ts";
 
 let root = "";
@@ -207,32 +208,60 @@ test("Darwin ACL probe failures refuse with closed diagnostics", async () => {
   }
 });
 
-test("macOS admin directories such as /Applications are accepted only on darwin, never world-writable", () => {
+test("macOS system-group directories (/Applications, /var/run) are accepted only on darwin, never world-writable", () => {
   const dir = (fields: { uid: number; gid: number; mode: number }) => ({
     ...fields,
     isDirectory: () => true,
   });
   // /Applications: root:admin drwxrwxr-x.
   const applications = dir({ uid: 0, gid: DARWIN_ADMIN_GID, mode: 0o4_0775 });
-  expect(isDarwinAdminDirectory(applications, "darwin")).toBe(true);
-  expect(isDarwinAdminDirectory(applications, "linux")).toBe(false);
+  expect(isDarwinSystemGroupDirectory(applications, "darwin")).toBe(true);
+  expect(isDarwinSystemGroupDirectory(applications, "linux")).toBe(false);
+  // /var/run (/private/var/run): root:daemon drwxrwxr-x on a stock install.
+  const varRun = dir({ uid: 0, gid: DARWIN_DAEMON_GID, mode: 0o4_0775 });
+  expect(isDarwinSystemGroupDirectory(varRun, "darwin")).toBe(true);
+  expect(isDarwinSystemGroupDirectory(varRun, "linux")).toBe(false);
   expect(
-    isDarwinAdminDirectory(
+    isDarwinSystemGroupDirectory(
+      dir({ uid: 0, gid: DARWIN_DAEMON_GID, mode: 0o4_0777 }),
+      "darwin"
+    )
+  ).toBe(false);
+  // staff (20) and everyone (12) contain ordinary users.
+  for (const gid of [12, 20]) {
+    expect(
+      isDarwinSystemGroupDirectory(
+        dir({ uid: 0, gid, mode: 0o4_0775 }),
+        "darwin"
+      )
+    ).toBe(false);
+  }
+  expect(
+    isDarwinSystemGroupDirectory(
+      dir({ uid: 1, gid: DARWIN_DAEMON_GID, mode: 0o4_0775 }),
+      "darwin"
+    )
+  ).toBe(false);
+  expect(
+    isDarwinSystemGroupDirectory(
       dir({ uid: 0, gid: DARWIN_ADMIN_GID, mode: 0o4_0777 }),
       "darwin"
     )
   ).toBe(false);
   expect(
-    isDarwinAdminDirectory(dir({ uid: 0, gid: 20, mode: 0o4_0775 }), "darwin")
+    isDarwinSystemGroupDirectory(
+      dir({ uid: 0, gid: 20, mode: 0o4_0775 }),
+      "darwin"
+    )
   ).toBe(false);
   expect(
-    isDarwinAdminDirectory(
+    isDarwinSystemGroupDirectory(
       dir({ uid: 501, gid: DARWIN_ADMIN_GID, mode: 0o4_0775 }),
       "darwin"
     )
   ).toBe(false);
   expect(
-    isDarwinAdminDirectory(
+    isDarwinSystemGroupDirectory(
       {
         uid: 0,
         gid: DARWIN_ADMIN_GID,

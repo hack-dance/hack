@@ -22,7 +22,8 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 let root = "";
 const cli = resolve("index.ts");
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "autostart-intent-"));
+  // macOS links /var to /private/var; the product compares resolved paths.
+  root = await realpath(await mkdtemp(join(tmpdir(), "autostart-intent-")));
   await mkdir(join(root, "project", ".hack"), { recursive: true });
   await mkdir(join(root, "home", ".hack"), { recursive: true });
   await mkdir(join(root, "bin"));

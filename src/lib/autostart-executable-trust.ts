@@ -22,7 +22,7 @@ export async function assertAutostartExecutablePathTrusted(
         inspectedPaths,
         // Docker Desktop and OrbStack reach their tools through
         // /Applications (root:admin 0775); accept that, never o+w.
-        acceptDarwinAdminDirectories: true,
+        acceptDarwinSystemGroupDirectories: true,
       })) === null
     ) {
       await assertAutostartPathAclsTrusted(inspectedPaths, deps);

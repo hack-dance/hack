@@ -7,6 +7,7 @@ import {
   open,
   readdir,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -60,7 +61,8 @@ const defaultDomain = "example.test";
 const bindAddress = "127.0.0.1";
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hack-routing-assets-"));
+  // macOS links /var to /private/var; the product compares resolved paths.
+  root = await realpath(await mkdtemp(join(tmpdir(), "hack-routing-assets-")));
   const caddy = join(root, GLOBAL_CADDY_DIR_NAME);
   const logging = join(root, GLOBAL_LOGGING_DIR_NAME);
   const schemas = join(root, GLOBAL_SCHEMAS_DIR_NAME);

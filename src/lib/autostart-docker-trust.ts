@@ -10,15 +10,36 @@ import { join } from "node:path";
 import { assertAutostartPathAclsTrustedSync } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
-import { isDarwinAdminDirectory, walkReplaceableChain } from "./path-trust.ts";
+import {
+  isDarwinSystemGroupDirectory,
+  walkReplaceableChain,
+} from "./path-trust.ts";
 
 const LOGIN_DOCKER_TRANSPORT = /^unix:\/\//;
+
+/**
+ * Docker's engine when no context or `DOCKER_HOST` selects another. On macOS
+ * Docker Desktop and OrbStack install it as a root-owned link in `/var/run`
+ * (root:daemon 0775) to a socket in the user's home.
+ */
+export const DEFAULT_DOCKER_HOST = "unix:///var/run/docker.sock";
+
+/** Fixed system directories the Docker CLI searches for plugins such as Compose. */
+export const DOCKER_SYSTEM_PLUGIN_DIRECTORIES: readonly string[] = [
+  "/usr/local/lib/docker/cli-plugins",
+  "/usr/local/libexec/docker/cli-plugins",
+  "/usr/lib/docker/cli-plugins",
+  "/usr/libexec/docker/cli-plugins",
+];
 
 /** Authenticate Docker's engine-selection inputs without exposing credentials. */
 export function assertAutostartDockerConfigTrusted(opts: {
   readonly home: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Tests only: replaces {@link DOCKER_SYSTEM_PLUGIN_DIRECTORIES}. */
   readonly systemPluginDirectories?: readonly string[];
+  /** Tests only: replaces {@link DEFAULT_DOCKER_HOST}. */
+  readonly defaultHost?: string;
 }): void {
   try {
     const uid = process.getuid?.();
@@ -40,7 +61,7 @@ export function assertAutostartDockerConfigTrusted(opts: {
         hackHome: null,
         checked,
         allowMissing: true,
-        acceptDarwinAdminDirectories: true,
+        acceptDarwinSystemGroupDirectories: true,
       });
       if ("error" in trust) {
         throw new Error("Unsafe selection input");
@@ -50,7 +71,7 @@ export function assertAutostartDockerConfigTrusted(opts: {
       if (
         existing.isDirectory() &&
         (existing.mode & 0o022) !== 0 &&
-        !isDarwinAdminDirectory(existing)
+        !isDarwinSystemGroupDirectory(existing)
       ) {
         throw new Error("Selection directory permits new entries");
       }
@@ -78,12 +99,8 @@ export function assertAutostartDockerConfigTrusted(opts: {
     visit(join(root, "config.json"), 0);
     visit(join(root, "contexts"), 0);
     visit(join(root, "cli-plugins"), 0);
-    for (const directory of opts.systemPluginDirectories ?? [
-      "/usr/local/lib/docker/cli-plugins",
-      "/usr/local/libexec/docker/cli-plugins",
-      "/usr/lib/docker/cli-plugins",
-      "/usr/libexec/docker/cli-plugins",
-    ]) {
+    for (const directory of opts.systemPluginDirectories ??
+      DOCKER_SYSTEM_PLUGIN_DIRECTORIES) {
       visit(directory, 0);
     }
     const env = opts.env ?? process.env;
@@ -138,7 +155,10 @@ export function assertAutostartDockerConfigTrusted(opts: {
     }
     // Docker uses this socket when no named context or direct host is selected.
     if (context === "default") {
-      assertLoginDockerTransport(host || "unix:///var/run/docker.sock", uid);
+      assertLoginDockerTransport(
+        host || (opts.defaultHost ?? DEFAULT_DOCKER_HOST),
+        uid
+      );
     } else if (host) {
       assertLoginDockerTransport(host, uid);
     }
@@ -179,7 +199,7 @@ function assertLoginDockerTransport(host: unknown, uid: number): void {
     hackHome: null,
     checked,
     allowMissing: true,
-    acceptDarwinAdminDirectories: true,
+    acceptDarwinSystemGroupDirectories: true,
   });
   if ("error" in trust) {
     throw new Error("Unsafe socket path");
@@ -192,7 +212,7 @@ function assertLoginDockerTransport(host: unknown, uid: number): void {
     if (
       info.isDirectory() &&
       (info.mode & 0o022) !== 0 &&
-      !isDarwinAdminDirectory(info)
+      !isDarwinSystemGroupDirectory(info)
     ) {
       throw new Error("Replaceable socket parent");
     }

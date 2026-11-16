@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { realpathSync, statSync } from "node:fs";
 import {
   chmod,
   mkdir,
   mkdtemp,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -11,11 +13,36 @@ import {
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+
 import { assertAutostartDockerConfigTrusted } from "../src/lib/autostart-docker-trust.ts";
+import { isDarwinSystemGroupDirectory } from "../src/lib/path-trust.ts";
+
+/**
+ * Every check here is hermetic: no runner environment, no system plugin
+ * directory, and a default engine socket that does not exist directly below
+ * `/` (only `/` itself is inspected), so neither `/var/run/docker.sock` nor
+ * `/usr/local/lib/docker` on the test machine is read. A socket below the
+ * fixture home would not do: on Linux the home is under sticky `/tmp`, which
+ * the socket-parent rule refuses. A test passes a field to override these.
+ */
+const MISSING_DEFAULT_HOST = "unix:///hack-test-missing-engine/docker.sock";
+
+function trustDocker(
+  opts: Partial<Parameters<typeof assertAutostartDockerConfigTrusted>[0]> = {}
+): void {
+  assertAutostartDockerConfigTrusted({
+    home,
+    env: {},
+    systemPluginDirectories: [],
+    defaultHost: MISSING_DEFAULT_HOST,
+    ...opts,
+  });
+}
 
 let home = "";
 beforeEach(async () => {
-  home = await mkdtemp(join(tmpdir(), "hack-docker-trust-"));
+  // macOS links /var to /private/var; the product compares resolved paths.
+  home = await realpath(await mkdtemp(join(tmpdir(), "hack-docker-trust-")));
   await mkdir(join(home, ".docker"), { mode: 0o700 });
 });
 afterEach(async () => {
@@ -23,11 +50,11 @@ afterEach(async () => {
 });
 
 test("missing or owner-controlled Docker engine selection is accepted without exposing values", async () => {
-  expect(() => assertAutostartDockerConfigTrusted({ home })).not.toThrow();
+  expect(() => trustDocker({ home })).not.toThrow();
   await writeFile(join(home, ".docker/config.json"), "{}", {
     mode: 0o600,
   });
-  expect(() => assertAutostartDockerConfigTrusted({ home })).not.toThrow();
+  expect(() => trustDocker({ home })).not.toThrow();
 });
 
 test("writable Compose plugins and custom plugin search paths refuse automatic startup", async () => {
@@ -36,18 +63,14 @@ test("writable Compose plugins and custom plugin search paths refuse automatic s
   const plugin = join(plugins, "docker-compose");
   await writeFile(plugin, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   await chmod(plugin, 0o777);
-  expect(() =>
-    assertAutostartDockerConfigTrusted({ home, systemPluginDirectories: [] })
-  ).toThrow();
+  expect(() => trustDocker({ home, systemPluginDirectories: [] })).toThrow();
   await chmod(plugin, 0o700);
   await writeFile(
     join(home, ".docker/config.json"),
     JSON.stringify({ cliPluginsExtraDirs: [plugins] }),
     { mode: 0o600 }
   );
-  expect(() =>
-    assertAutostartDockerConfigTrusted({ home, systemPluginDirectories: [] })
-  ).toThrow();
+  expect(() => trustDocker({ home, systemPluginDirectories: [] })).toThrow();
 });
 
 test("writable Docker config or context inputs refuse before contacting an engine", async () => {
@@ -57,14 +80,14 @@ test("writable Docker config or context inputs refuse before contacting an engin
   await writeFile(meta, "{}", { mode: 0o600 });
   for (const path of [join(home, ".docker"), meta]) {
     await chmod(path, 0o777);
-    expect(() => assertAutostartDockerConfigTrusted({ home })).toThrow();
+    expect(() => trustDocker({ home })).toThrow();
     await chmod(path, path === meta ? 0o600 : 0o700);
   }
   const target = join(home, "untrusted-config");
   await writeFile(target, "{}", { mode: 0o600 });
   await chmod(target, 0o666);
   await symlink(target, join(home, ".docker/config.json"));
-  expect(() => assertAutostartDockerConfigTrusted({ home })).toThrow();
+  expect(() => trustDocker({ home })).toThrow();
 });
 
 test("network contexts and direct hosts refuse before contacting an engine", async () => {
@@ -82,7 +105,7 @@ test("network contexts and direct hosts refuse before contacting an engine", asy
     { mode: 0o600 }
   );
   expect(() =>
-    assertAutostartDockerConfigTrusted({
+    trustDocker({
       home,
       env: {},
       systemPluginDirectories: [],
@@ -90,7 +113,7 @@ test("network contexts and direct hosts refuse before contacting an engine", asy
   ).toThrow();
   await writeFile(metadata, "{}", { mode: 0o600 });
   expect(() =>
-    assertAutostartDockerConfigTrusted({
+    trustDocker({
       home,
       env: {},
       systemPluginDirectories: [],
@@ -109,7 +132,7 @@ test("network contexts and direct hosts refuse before contacting an engine", asy
       { mode: 0o600 }
     );
     const check = () =>
-      assertAutostartDockerConfigTrusted({
+      trustDocker({
         home,
         env: {},
         systemPluginDirectories: [],
@@ -127,7 +150,7 @@ test("network contexts and direct hosts refuse before contacting an engine", asy
   }
   for (const host of ["ssh://fixture", "tcp://127.0.0.1:2376"]) {
     expect(() =>
-      assertAutostartDockerConfigTrusted({
+      trustDocker({
         home,
         env: { DOCKER_CONTEXT: "default", DOCKER_HOST: host },
         systemPluginDirectories: [],
@@ -140,12 +163,37 @@ test("network contexts and direct hosts refuse before contacting an engine", asy
     { mode: 0o600 }
   );
   expect(() =>
-    assertAutostartDockerConfigTrusted({
+    trustDocker({
       home,
       env: { DOCKER_CONTEXT: name },
       systemPluginDirectories: [],
     })
   ).toThrow();
+});
+
+test("the default engine socket is checked when nothing selects another", async () => {
+  // Stands in for /var/run/docker.sock in a directory others can write.
+  const shared = join(home, "shared-run");
+  await mkdir(shared, { mode: 0o700 });
+  await chmod(shared, 0o777);
+  const unsafe = `unix://${join(shared, "docker.sock")}`;
+  expect(() => trustDocker({ defaultHost: unsafe })).toThrow(
+    "Automatic startup refused unsafe Docker engine-selection files"
+  );
+  // An explicit default context still uses the default socket.
+  expect(() =>
+    trustDocker({ defaultHost: unsafe, env: { DOCKER_CONTEXT: "default" } })
+  ).toThrow();
+  // DOCKER_HOST replaces it.
+  expect(() =>
+    trustDocker({
+      defaultHost: unsafe,
+      env: { DOCKER_HOST: MISSING_DEFAULT_HOST },
+    })
+  ).not.toThrow();
+  expect(() =>
+    trustDocker({ defaultHost: MISSING_DEFAULT_HOST })
+  ).not.toThrow();
 });
 
 test("socket endpoints refuse shared sticky parents and regular files", () => {
@@ -155,7 +203,7 @@ test("socket endpoints refuse shared sticky parents and regular files", () => {
     "npipe:////./pipe/docker_engine",
   ]) {
     expect(() =>
-      assertAutostartDockerConfigTrusted({
+      trustDocker({
         home,
         env: { DOCKER_HOST: host },
         systemPluginDirectories: [],
@@ -164,49 +212,85 @@ test("socket endpoints refuse shared sticky parents and regular files", () => {
   }
 });
 
-test("owned socket and symlink pass; writable or sticky parents refuse", async () => {
-  const socketRoot = await mkdtemp(join(homedir(), ".hack-socket-trust-test-"));
-  const socket = join(socketRoot, "docker.sock");
-  const alias = join(socketRoot, "engine.sock");
-  const server = createServer();
-  try {
-    await chmod(socketRoot, 0o700);
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(socket, resolve);
-    });
-    await chmod(socket, 0o660);
-    await symlink(socket, alias);
-    for (const path of [socket, alias]) {
-      expect(() =>
-        assertAutostartDockerConfigTrusted({
-          home,
-          env: { DOCKER_HOST: `unix://${path}` },
-          systemPluginDirectories: [],
-        })
-      ).not.toThrow();
+/**
+ * A real socket needs a parent chain nobody else can write: on Linux the temp
+ * directory is sticky `/tmp`, so fall back to HOME there. On macOS the
+ * per-user temp directory qualifies and the real home is never used.
+ */
+function socketFixtureBase(): string | null {
+  for (const candidate of [tmpdir(), homedir()]) {
+    let path: string;
+    try {
+      path = realpathSync(candidate);
+    } catch {
+      continue;
     }
-    for (const mode of [0o777, 0o1777]) {
-      await chmod(socketRoot, mode);
-      expect(() =>
-        assertAutostartDockerConfigTrusted({
-          home,
-          env: { DOCKER_HOST: `unix://${alias}` },
-          systemPluginDirectories: [],
-        })
-      ).toThrow();
+    const parts = path.split("/").filter(Boolean);
+    const ancestors = [
+      "/",
+      ...parts.map((_, i) => `/${parts.slice(0, i + 1).join("/")}`),
+    ];
+    if (
+      ancestors.every((entry) => {
+        const info = statSync(entry);
+        return (info.mode & 0o022) === 0 || isDarwinSystemGroupDirectory(info);
+      })
+    ) {
+      return path;
     }
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(socketRoot, { recursive: true, force: true });
   }
-});
+  return null;
+}
+const SOCKET_FIXTURE_BASE = socketFixtureBase();
+
+test.skipIf(SOCKET_FIXTURE_BASE === null)(
+  "owned socket and symlink pass; writable or sticky parents refuse",
+  async () => {
+    const socketRoot = await mkdtemp(
+      join(SOCKET_FIXTURE_BASE ?? "/nonexistent", ".hack-socket-trust-test-")
+    );
+    const socket = join(socketRoot, "docker.sock");
+    const alias = join(socketRoot, "engine.sock");
+    const server = createServer();
+    try {
+      await chmod(socketRoot, 0o700);
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socket, resolve);
+      });
+      await chmod(socket, 0o660);
+      await symlink(socket, alias);
+      for (const path of [socket, alias]) {
+        expect(() =>
+          trustDocker({
+            home,
+            env: { DOCKER_HOST: `unix://${path}` },
+            systemPluginDirectories: [],
+          })
+        ).not.toThrow();
+      }
+      for (const mode of [0o777, 0o1777]) {
+        await chmod(socketRoot, mode);
+        expect(() =>
+          trustDocker({
+            home,
+            env: { DOCKER_HOST: `unix://${alias}` },
+            systemPluginDirectories: [],
+          })
+        ).toThrow();
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(socketRoot, { recursive: true, force: true });
+    }
+  }
+);
 
 test("sticky user and system plugin directories cannot admit late plugin creation", async () => {
   const root = join(home, ".docker");
   const plugins = join(root, "cli-plugins");
   const check = (systemPluginDirectories: readonly string[] = []) =>
-    assertAutostartDockerConfigTrusted({
+    trustDocker({
       home,
       env: {},
       systemPluginDirectories,

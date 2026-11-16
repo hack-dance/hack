@@ -5,6 +5,7 @@ import {
   mkdtemp,
   open,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -43,7 +44,10 @@ let previousHome: string | undefined;
 let previousConfig: string | undefined;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hack-autostart-registry-"));
+  // macOS links /var to /private/var; the product compares resolved paths.
+  root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-autostart-registry-"))
+  );
   registryPath = join(root, ".hack", "projects.json");
   previousHome = process.env.HOME;
   previousConfig = process.env.HACK_GLOBAL_CONFIG_PATH;

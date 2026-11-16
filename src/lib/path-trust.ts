@@ -42,10 +42,10 @@ export function checkReplaceableChain(opts: {
    */
   readonly checked?: Set<string>;
   /**
-   * Autostart engine lookup only: also accept a macOS administrator directory
-   * ({@link isDarwinAdminDirectory}), such as `/Applications`.
+   * Autostart engine lookup only: also accept a macOS system-group directory
+   * ({@link isDarwinSystemGroupDirectory}), such as `/Applications` or `/var/run`.
    */
-  readonly acceptDarwinAdminDirectories?: boolean;
+  readonly acceptDarwinSystemGroupDirectories?: boolean;
 }): string | null {
   const walk = walkReplaceableChain(opts);
   return "error" in walk ? walk.error : null;
@@ -66,10 +66,10 @@ export function walkReplaceableChain(opts: {
   readonly allowMissing?: boolean;
   readonly checked?: Set<string>;
   /**
-   * Autostart engine lookup only: also accept a macOS administrator directory
-   * ({@link isDarwinAdminDirectory}), such as `/Applications`.
+   * Autostart engine lookup only: also accept a macOS system-group directory
+   * ({@link isDarwinSystemGroupDirectory}), such as `/Applications` or `/var/run`.
    */
-  readonly acceptDarwinAdminDirectories?: boolean;
+  readonly acceptDarwinSystemGroupDirectories?: boolean;
 }):
   | { readonly error: string }
   | { readonly existing: string; readonly complete: boolean } {
@@ -123,7 +123,7 @@ type ChainWalk = {
     readonly hackHome: string | null;
     readonly stopAtLink?: boolean;
     readonly allowMissing?: boolean;
-    readonly acceptDarwinAdminDirectories?: boolean;
+    readonly acceptDarwinSystemGroupDirectories?: boolean;
   };
   readonly checked: Set<string>;
   readonly queue: string[];
@@ -140,7 +140,8 @@ function checkChainEntry(state: ChainWalk, entry: string): string | null {
     path: entry,
     uid: state.opts.uid,
     hackHome: state.opts.hackHome,
-    acceptDarwinAdminDirectories: state.opts.acceptDarwinAdminDirectories,
+    acceptDarwinSystemGroupDirectories:
+      state.opts.acceptDarwinSystemGroupDirectories,
   });
 }
 
@@ -213,7 +214,7 @@ function checkServicePathEntry(opts: {
   readonly path: string;
   readonly uid: number;
   readonly hackHome: string | null;
-  readonly acceptDarwinAdminDirectories?: boolean;
+  readonly acceptDarwinSystemGroupDirectories?: boolean;
 }): string | null {
   let info: Stats;
   try {
@@ -248,7 +249,8 @@ function checkServicePathEntry(opts: {
   if (
     (info.mode & 0o022) === 0 ||
     sticky ||
-    (opts.acceptDarwinAdminDirectories === true && isDarwinAdminDirectory(info))
+    (opts.acceptDarwinSystemGroupDirectories === true &&
+      isDarwinSystemGroupDirectory(info))
   ) {
     return null;
   }
@@ -273,13 +275,14 @@ function checkServicePathEntry(opts: {
 /** "mode NNNN" when others may create entries in `dir` (sticky or not). */
 export function lettingOthersCreate(
   dir: string,
-  opts: { readonly acceptDarwinAdminDirectories?: boolean } = {}
+  opts: { readonly acceptDarwinSystemGroupDirectories?: boolean } = {}
 ): string | null {
   const info = statSync(dir);
   const mode = info.mode;
   if (
     (mode & 0o022) === 0 ||
-    (opts.acceptDarwinAdminDirectories === true && isDarwinAdminDirectory(info))
+    (opts.acceptDarwinSystemGroupDirectories === true &&
+      isDarwinSystemGroupDirectory(info))
   ) {
     return null;
   }
@@ -289,14 +292,35 @@ export function lettingOthersCreate(
 /** The fixed group id of macOS's `admin` group. */
 export const DARWIN_ADMIN_GID = 80;
 
+/** The fixed group id of macOS's `daemon` group. */
+export const DARWIN_DAEMON_GID = 1;
+
 /**
- * A macOS administrator directory such as `/Applications` (root:admin 0775):
- * a root-owned directory whose only extra writer is the `admin` group, never
- * other users. Administrators can already replace system software, so on the
- * autostart engine path this grants no authority the user lacks. Accepted
+ * Groups whose write access to a root-owned macOS directory grants nothing
+ * beyond what the user's system already trusts:
+ * - `admin` (80): `/Applications` is root:admin 0775. Administrators can
+ *   already replace system software.
+ * - `daemon` (1): `/var/run` (`/private/var/run`) is root:daemon 0775 on a
+ *   stock install. By default the group's only member is `root`; its primary
+ *   member is the `daemon` system account. Adding anyone else needs an
+ *   administrator, who could already change that root-owned directory.
+ * Docker Desktop and OrbStack install `/var/run/docker.sock` as a root-owned
+ * link in `/var/run`, so automatic startup's default engine socket lives in a
+ * `daemon` directory.
+ */
+const DARWIN_SYSTEM_WRITER_GIDS: ReadonlySet<number> = new Set([
+  DARWIN_ADMIN_GID,
+  DARWIN_DAEMON_GID,
+]);
+
+/**
+ * A macOS system-group directory such as `/Applications` (root:admin 0775) or
+ * `/var/run` (root:daemon 0775): a root-owned directory whose only extra
+ * writer is one of {@link DARWIN_SYSTEM_WRITER_GIDS}, never other users. Any
+ * other group, a non-root owner or a world-writable mode is refused. Accepted
  * only where a caller opts in, and only on macOS.
  */
-export function isDarwinAdminDirectory(
+export function isDarwinSystemGroupDirectory(
   info: Pick<Stats, "uid" | "gid" | "mode"> & {
     readonly isDirectory: () => boolean;
   },
@@ -306,7 +330,7 @@ export function isDarwinAdminDirectory(
     platform === "darwin" &&
     info.isDirectory() &&
     info.uid === 0 &&
-    info.gid === DARWIN_ADMIN_GID &&
+    DARWIN_SYSTEM_WRITER_GIDS.has(info.gid) &&
     (Number(info.mode) & 0o002) === 0
   );
 }

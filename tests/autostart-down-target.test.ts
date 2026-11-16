@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resolveFinalAutostartDownTarget } from "../src/commands/project-autostart-intent.ts";
@@ -36,7 +36,8 @@ async function git(args: string[]) {
   return stdout.trim();
 }
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hack-down-target-"));
+  // macOS links /var to /private/var; the product compares resolved paths.
+  root = await realpath(await mkdtemp(join(tmpdir(), "hack-down-target-")));
   primary = join(root, "primary");
   worktree = join(root, "worktree");
   await mkdir(join(primary, ".hack"), { recursive: true });

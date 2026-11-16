@@ -1,6 +1,10 @@
 #!/usr/bin/env bun
 
 import {
+  LIFECYCLE_SUPERVISOR_HANDSHAKE_ARGUMENT,
+  LIFECYCLE_SUPERVISOR_VERSION,
+} from "./src/lib/lifecycle-supervisor-handshake.ts";
+import {
   finishNativeCpuDiagnostics,
   initializeNativeCpuDiagnostics,
 } from "./src/lib/native-cpu-diagnostics.ts";
@@ -23,6 +27,11 @@ if (Bun.argv[2] === NATIVE_DETACHED_OWNER_ARGUMENT) {
       },
     })
   );
+}
+
+if (Bun.argv[2] === LIFECYCLE_SUPERVISOR_HANDSHAKE_ARGUMENT) {
+  process.stdout.write(`${LIFECYCLE_SUPERVISOR_VERSION}\n`);
+  process.exit(0);
 }
 
 if (Bun.argv[2] === TTY_SUPERVISOR_ARGUMENT && process.send) {

@@ -48,6 +48,7 @@ export const PAYLOAD_MODES: Readonly<Record<string, number>> = {
   [NATIVE_STORAGE_TOOL_FILE]: 0o500,
   [NATIVE_STORAGE_TOOL_MANIFEST]: 0o600,
   "hack-config-compiler": 0o755,
+  "hack-lifecycle-supervisor": 0o755,
   "hack.project.schema.json": 0o600,
   "hack.local.schema.json": 0o600,
 };
@@ -775,12 +776,17 @@ export async function packagePrerelease({
     throw new Error("Native bundle root must be a directory, not an alias");
   }
   const entries = await readdir(bundle);
-  const compilerPayload = configCompilerPayload(entries);
+  const helperPayload = [
+    ...(entries.includes("hack-lifecycle-supervisor")
+      ? ["hack-lifecycle-supervisor"]
+      : []),
+    ...configCompilerPayload(entries),
+  ];
   const mcpPayload = await nativeCandidateMcpPayload(bundle);
-  const payload = [...PRERELEASE_PAYLOAD, ...compilerPayload, ...mcpPayload];
+  const payload = [...PRERELEASE_PAYLOAD, ...helperPayload, ...mcpPayload];
   const expected = [
     ...PRERELEASE_PAYLOAD,
-    ...compilerPayload,
+    ...helperPayload,
     "SHA256SUMS",
     ...(mcpPayload.length ? ["mcp"] : []),
   ].sort();

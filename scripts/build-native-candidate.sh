@@ -118,6 +118,11 @@ if [ -n "$version" ]; then
 else
   bun build index.ts --compile --outfile "$out/hack-cli"
 fi
+bun scripts/build-lifecycle-supervisor.ts
+cp dist/hack-lifecycle-supervisor "$out/hack-lifecycle-supervisor"
+chmod 755 "$out/hack-lifecycle-supervisor"
+/usr/bin/codesign --force --sign - "$out/hack-lifecycle-supervisor"
+/usr/bin/codesign --verify --strict "$out/hack-lifecycle-supervisor"
 bun scripts/build-config-compiler.ts
 cp dist/hack-config-compiler "$out/hack-config-compiler"
 cp packages/config-compiler/generated/hack.project.schema.json "$out/hack.project.schema.json"
@@ -158,7 +163,7 @@ fi
   else
     shasum -a 256 hack-native hack-relay-guest hack-storage-root-witness native-storage-tool.json hack-cli hack-v5 provider-pins.json README.md > SHA256SUMS
   fi
-  shasum -a 256 hack-config-compiler hack.project.schema.json hack.local.schema.json >> SHA256SUMS
+  shasum -a 256 hack-lifecycle-supervisor hack-config-compiler hack.project.schema.json hack.local.schema.json >> SHA256SUMS
   shasum -a 256 mcp/*/manifest.json mcp/*/hack-mcp-adapter mcp/*/hack-mcp-owner mcp/*/hack-mcp-backend >> SHA256SUMS
 )
 echo "Candidate bundle: $out"

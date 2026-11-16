@@ -59,9 +59,14 @@ pub struct ProjectPanel {
     /// instance's checkout changes (a branch recreated from another
     /// worktree), its sessions are ended and the panel starts again.
     origin: Option<(PathBuf, bool)>,
-    /// Whether the instance was running when last drawn: a stopped
-    /// instance's Logs tab is a finite read, restarted once when it runs.
+    /// Whether the instance was running when last drawn.
     was_active: bool,
+    /// Whether the Logs session follows (`hack logs` without
+    /// `--no-follow`). A running instance whose Logs tab does not follow is
+    /// given a following one; a following stream that fails is not
+    /// restarted in a loop. Stopping the instance clears it, so the next
+    /// start follows again.
+    logs_follow: bool,
 }
 
 /// The new-tab menu.
@@ -265,6 +270,7 @@ impl HackApp {
                 menu: Menu::Closed,
                 origin: self.instance_root().map(|(root, native, _)| (root, native)),
                 was_active: d.state.is_active(),
+                logs_follow: false,
             },
         );
         self.open_tab(&d, NewTab::Logs, window, cx);
@@ -281,8 +287,12 @@ impl HackApp {
             return;
         };
         let moved = panel.origin != origin;
-        let started = active && !panel.was_active;
+        if panel.was_active && !active {
+            // Stopped: whatever stream it had is over; follow on next start.
+            panel.logs_follow = false;
+        }
         panel.was_active = active;
+        let follow_now = active && !panel.logs_follow;
         if moved {
             panel.origin = origin;
             let sessions = panel.sessions.clone();
@@ -292,8 +302,10 @@ impl HackApp {
                 }
             });
             self.open_tab(d, NewTab::Logs, window, cx);
-        } else if started {
-            self.refresh_logs_tab(window, cx);
+        } else if follow_now {
+            // A finite read (started while stopped), running or ended:
+            // replace it with a following stream.
+            self.open_tab(d, NewTab::Logs, window, cx);
         }
     }
 
@@ -423,6 +435,11 @@ impl HackApp {
             v.set_look(look, cx);
             v
         });
+        if tab == NewTab::Logs
+            && let Some(p) = self.panels.by_key.get_mut(&d.key)
+        {
+            p.logs_follow = d.state.is_active();
+        }
         if tab == NewTab::Logs && sessions.read(cx).tab_count() > 0 {
             sessions.update(cx, |p, cx| p.replace(0, view, window, cx));
         } else {
@@ -1253,11 +1270,12 @@ mod window_tests {
         // The fixture's Logs tab is a finite read and has ended.
         let ended = cx.update(|cx| sessions.read(cx).tab(0).cloned().unwrap());
         assert!(cx.update(|cx| matches!(ended.read(cx).status(), TermStatus::Ended(_))));
-        // It was stopped when last drawn; now it runs.
+        // Its Logs session is a finite read (started while stopped), and the
+        // instance runs now.
         cx.update(|cx| {
             app.update(cx, |a, _| {
                 let key = a.model.selected_key().unwrap();
-                a.panels.by_key.get_mut(&key).unwrap().was_active = false;
+                a.panels.by_key.get_mut(&key).unwrap().logs_follow = false;
             });
         });
         draw(&mut cx, window, &app);

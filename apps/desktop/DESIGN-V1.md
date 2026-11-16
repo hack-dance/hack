@@ -1,10 +1,10 @@
 # Hack desktop app: design v1 (visual spec)
 
 Status: direction accepted by the owner on Nov 15 2026 (HACK-2252), with
-the logs moved into a terminal panel (approved panel mockup). The current
-window (`app/src/view.rs`) is unchanged; this spec, the tokens and components
-in `ui/` and the gallery renders in `screenshots/v1/` are what it will be
-restyled to after the Logs (#808) and Doctor (#806) tab PRs land.
+the logs moved into a terminal panel (approved panel mockup). The real window
+(`app/src/view.rs`) now uses these tokens and components; until the terminal
+panel is wired, its logs stay a Logs tab (DESIGN-V1 renders in
+`screenshots/v1/`, the real window's in `screenshots/window/`).
 
 Reference: the approved mockups (main window: title bar with search, sidebar
 with Running / Stopped / Machine, detail header, pill tabs, services table,

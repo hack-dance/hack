@@ -13,9 +13,10 @@ path = "src/main.rs"
 
 [features]
 # Offscreen rendering of fixture states to PNG (used for design evidence).
-screenshots = ["gpui-kit/test-support", "dep:image"]
+screenshots = ["gpui-kit/test-support", "dep:image", "hack-desktop-ui/screenshots"]
 
 [dependencies]
 hack-desktop-core.workspace = true
+hack-desktop-ui.workspace = true
 gpui-kit.workspace = true
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }

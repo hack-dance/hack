@@ -929,3 +929,81 @@ fn killed_preparation_and_publication_rerun_without_network_or_partial_install()
         assert!(!target.join("incomplete").exists());
     }
 }
+
+#[test]
+fn retry_stalled_headers_then_verify_download() {
+    use std::time::{Duration, Instant};
+    let root = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let pin = FilePin {
+        url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
+        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        size_bytes: 5,
+        max_bytes: 16,
+        redirect_hosts: vec![],
+    };
+    let handle = thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        request(&mut first);
+        thread::sleep(Duration::from_millis(150));
+        drop(first);
+        let (mut second, _) = listener.accept().unwrap();
+        request(&mut second);
+        second
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+            .unwrap();
+    });
+    let client = download::test_client(Duration::from_millis(100), Duration::from_secs(3), None);
+    let start = Instant::now();
+    download::acquire(&client, &root.0, &pin).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(fs::read(root.0.join("archive.tgz")).unwrap(), b"hello");
+    handle.join().unwrap();
+}
+
+#[test]
+fn retry_permanent_connection_failure_is_bounded_and_names_host_and_attempts() {
+    use std::time::{Duration, Instant};
+    let root = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let pin = FilePin {
+        url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
+        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        size_bytes: 5,
+        max_bytes: 16,
+        redirect_hosts: vec![],
+    };
+    drop(listener);
+    let start = Instant::now();
+    let failure = download::acquire(&client(), &root.0, &pin).unwrap_err();
+    assert!(failure.message.contains("127.0.0.1"));
+    assert!(failure.message.contains("3 attempt(s)"));
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(!root.0.join("archive.tgz").exists());
+}
+
+#[test]
+fn retry_header_stall_never_renews_the_file_deadline() {
+    use std::time::{Duration, Instant};
+    let root = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let pin = FilePin {
+        url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
+        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        size_bytes: 5,
+        max_bytes: 16,
+        redirect_hosts: vec![],
+    };
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        request(&mut stream);
+        thread::sleep(Duration::from_millis(200));
+    });
+    let client = download::test_client(Duration::from_secs(2), Duration::from_millis(100), None);
+    let start = Instant::now();
+    let failure = download::acquire(&client, &root.0, &pin).unwrap_err();
+    assert_eq!(failure.code, "setup_download_deadline");
+    assert!(failure.message.contains("1 attempt(s)"));
+    assert!(start.elapsed() < Duration::from_secs(1));
+    handle.join().unwrap();
+}

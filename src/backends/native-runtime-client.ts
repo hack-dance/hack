@@ -84,6 +84,33 @@ function fixedNativeMessage(
     : undefined;
 }
 
+const NETWORK_HOST = /^[a-zA-Z0-9.:[\]-]{1,253}$/;
+
+/** Render only a parsed authority and bounded count, never a runtime message or URL. */
+function networkRequestFailureMessage(
+  value: Record<string, unknown>
+): string | undefined {
+  const request = value.network_request;
+  if (
+    !(
+      ["registry_image", "setup_download", "setup_download_deadline"].includes(
+        typeof value.code === "string" ? value.code : ""
+      ) && isRecord(request)
+    ) ||
+    Object.keys(request).length !== 3 ||
+    request.version !== 1 ||
+    typeof request.host !== "string" ||
+    !NETWORK_HOST.test(request.host) ||
+    typeof request.attempts !== "number" ||
+    !Number.isInteger(request.attempts) ||
+    request.attempts < 1 ||
+    request.attempts > 3
+  ) {
+    return;
+  }
+  return `Network request to ${request.host} failed after ${request.attempts} attempt(s).`;
+}
+
 /** Render only the closed inferred-route diagnostic; never runtime error text. */
 function routeProbeFailureMessage(
   value: Record<string, unknown>,
@@ -120,7 +147,9 @@ export function nativeFailureDetail(value: Record<string, unknown>): {
       ? value.service
       : undefined;
   const message =
-    routeProbeFailureMessage(value, service) ?? fixedNativeMessage(value);
+    networkRequestFailureMessage(value) ??
+    routeProbeFailureMessage(value, service) ??
+    fixedNativeMessage(value);
   return {
     ...(message ? { message } : {}),
     ...(service ? { service } : {}),

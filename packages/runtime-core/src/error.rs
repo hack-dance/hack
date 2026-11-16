@@ -139,11 +139,21 @@ pub struct RouteProbeDiagnostic {
     pub port: u16,
 }
 
+/// Network authority and bounded attempt count only; never a URL, token or response.
+#[derive(Debug, Serialize)]
+pub struct NetworkRequestDiagnostic {
+    pub version: u8,
+    pub host: String,
+    pub attempts: usize,
+}
+
 /// Value-free refusal locations, boxed together so every
 /// `Result<_, CandidateError>` stays small; serialized flat as
 /// `process_refusals`, `plan_change` and `route_probe`.
 #[derive(Debug, Default, Serialize)]
 pub struct RefusalDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_request: Option<NetworkRequestDiagnostic>,
     /// File-only explanations. Every sentence and field is a compile-time literal;
     /// only validated service names come from the project. Never contains values.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -236,6 +246,25 @@ pub struct CandidateError {
 }
 
 impl CandidateError {
+    /// Carry only a parsed network host, excluding userinfo, query and path.
+    pub fn with_network_request(mut self, host: &str, attempts: usize) -> Self {
+        if !host.is_empty()
+            && host.len() <= 253
+            && (1..=3).contains(&attempts)
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+        {
+            self.refusals.get_or_insert_default().network_request =
+                Some(NetworkRequestDiagnostic {
+                    version: 1,
+                    host: host.to_owned(),
+                    attempts,
+                });
+        }
+        self
+    }
+
     pub fn with_configuration_refusals(mut self, mut findings: Vec<ConfigurationRefusal>) -> Self {
         // Malformed lists can repeat the same field thousands of times. Keep
         // every distinct explanation, not one copy per authored value. This

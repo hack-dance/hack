@@ -30,6 +30,7 @@ use super::image_load;
 use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::image_policy::ImagePolicy;
 use super::image_reference::{ImageReference, NamedReference, normalize};
+use super::network_retry::{ATTEMPTS, HEADER_TIMEOUT, backoff, transient};
 use super::registry_credentials::{self, Credential};
 use crate::CandidateError;
 use reqwest::{
@@ -764,6 +765,7 @@ struct Fetch<'a> {
     authorization: Option<Zeroizing<String>>,
     stage: Stage,
     deadline: Instant,
+    request_timeout: Duration,
 }
 
 impl<'a> Fetch<'a> {
@@ -800,6 +802,7 @@ impl<'a> Fetch<'a> {
             authorization: None,
             stage: Stage::Anonymous,
             deadline: Instant::now() + ACQUISITION_DEADLINE,
+            request_timeout: HEADER_TIMEOUT,
         })
     }
 
@@ -836,9 +839,58 @@ impl<'a> Fetch<'a> {
         }
     }
 
+    /// Replay GET headers only; never replay a body read or OAuth refresh POST.
+    fn send_headers(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        url: &Url,
+        retry: bool,
+    ) -> Result<Response, CandidateError> {
+        for attempt in 1..=ATTEMPTS {
+            let request = request
+                .try_clone()
+                .ok_or_else(|| error("Cannot replay registry request."))?;
+            match request
+                .timeout(self.remaining()?.min(if retry {
+                    self.request_timeout
+                } else {
+                    REQUEST_TIMEOUT
+                }))
+                .send()
+            {
+                Ok(response) => return Ok(response),
+                Err(failure) => {
+                    let classified = transport_error(&failure, "Registry request failed.");
+                    let delay = backoff(attempt);
+                    if !retry
+                        || !transient(&failure)
+                        || classified.code != "registry_image"
+                        || attempt == ATTEMPTS
+                        || self.remaining().unwrap_or_default() <= delay
+                    {
+                        return Err(CandidateError::new(
+                            classified.code,
+                            format!(
+                                "{} Host {} after {attempt} attempt(s).",
+                                classified.message,
+                                url.host_str().unwrap_or("unknown")
+                            ),
+                        )
+                        .with_network_request(url.host_str().unwrap_or("unknown"), attempt));
+                    }
+                    std::thread::sleep(delay);
+                }
+            }
+        }
+        unreachable!("bounded attempts return")
+    }
+
     /// One request with redirects followed under [`redirect_allowed`]. Authorization is
     /// attached only while the request targets the registry origin.
     fn send(&self, mut url: Url, timeout: Duration) -> Result<Response, CandidateError> {
+        let retry = url
+            .path()
+            .starts_with(&format!("/v2/{}/manifests/", self.path));
         for hop in 0..=4 {
             if !self.destination_allowed(&url) {
                 return Err(local_address_refused());
@@ -858,9 +910,13 @@ impl<'a> Fetch<'a> {
                 header.set_sensitive(true);
                 request = request.header(AUTHORIZATION, header);
             }
-            let response = request
-                .send()
-                .map_err(|e| transport_error(&e, "Registry request failed or timed out."))?;
+            let response = if retry {
+                self.send_headers(request, &url, true)?
+            } else {
+                request
+                    .send()
+                    .map_err(|e| transport_error(&e, "Registry request failed or timed out."))?
+            };
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -1026,10 +1082,11 @@ impl<'a> Fetch<'a> {
                 request
             }
         };
-        let response = request
-            .timeout(self.remaining()?.min(REQUEST_TIMEOUT))
-            .send()
-            .map_err(|e| transport_error(&e, "Registry token request failed or timed out."))?;
+        let response = self.send_headers(
+            request,
+            realm,
+            !matches!(credential, Some(Credential::IdentityToken(_))),
+        )?;
         if matches!(
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN

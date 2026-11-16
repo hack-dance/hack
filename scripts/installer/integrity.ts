@@ -39,10 +39,12 @@ const COMPILER = [
   "hack.project.schema.json",
   "hack.local.schema.json",
 ];
+const SUPERVISOR = ["hack-lifecycle-supervisor"];
 const STORAGE = ["hack-storage-root-witness", "native-storage-tool.json"];
 export const MCP =
   /^mcp\/([0-9a-f]{64})\/(manifest\.json|hack-mcp-adapter|hack-mcp-owner|hack-mcp-backend)$(?![\s\S])/;
 const EXECUTABLES = new Set([
+  ...SUPERVISOR,
   "hack-native",
   "hack-relay-guest",
   "hack-cli",
@@ -384,7 +386,8 @@ export function inventory(names: string[]): string[] {
     "Incomplete storage tool payload."
   );
   const extras = names.filter(
-    (name) => ![...required, ...COMPILER, ...STORAGE].includes(name)
+    (name) =>
+      ![...required, ...COMPILER, ...STORAGE, ...SUPERVISOR].includes(name)
   );
   if (extras.length) {
     const identity = MCP.exec(extras[0] ?? "")?.[1];
@@ -482,7 +485,13 @@ export function archiveEntries(compressed: Uint8Array) {
     const name = `${prefix ? `${prefix}/` : ""}${field(header, 0, 100)}`;
     requireThat(
       !entries.has(name) &&
-        ([...CORE, ...COMPILER, ...STORAGE, "SHA256SUMS"].includes(name) ||
+        ([
+          ...CORE,
+          ...COMPILER,
+          ...STORAGE,
+          ...SUPERVISOR,
+          "SHA256SUMS",
+        ].includes(name) ||
           MCP.test(name)),
       "Foreign, duplicate or traversing archive entry."
     );

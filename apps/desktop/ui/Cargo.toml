@@ -1,0 +1,21 @@
+[package]
+name = "hack-desktop-ui"
+description = "Design v1 tokens and presentational components for the Hack desktop app, with a fixture gallery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hack-desktop-gallery"
+path = "src/bin/gallery.rs"
+
+[features]
+# Offscreen rendering of the gallery to PNG (design evidence).
+screenshots = ["gpui-kit/test-support", "dep:image"]
+
+[dependencies]
+hack-desktop-core.workspace = true
+gpui-kit.workspace = true
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }

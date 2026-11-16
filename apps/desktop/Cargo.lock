@@ -3281,6 +3281,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hack-desktop-ui"
+version = "0.0.0"
+dependencies = [
+ "gpui-kit",
+ "hack-desktop-core",
+ "image",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

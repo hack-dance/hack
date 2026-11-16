@@ -3,7 +3,7 @@
 # release of packages/runtime-core or packages/config-compiler.
 [workspace]
 resolver = "3"
-members = ["core", "app", "term"]
+members = ["core", "app", "ui", "term"]
 
 [workspace.package]
 version = "0.0.0"

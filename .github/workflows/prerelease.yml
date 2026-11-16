@@ -92,6 +92,11 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Build and verify complete native bundle
         run: mise exec zig -- scripts/build-native-candidate.sh "$HACK_PRERELEASE_BUNDLE" "--version=$HACK_PRERELEASE_VERSION"
+      # HACK-2263: with a fake stable `hack` first on PATH and a temp HOME,
+      # the bundle's launcher must start the bundle's own hackd, and the CLI
+      # and hackd must report this release version.
+      - name: Check the candidate starts its own hackd with the release version
+        run: bun scripts/check-candidate-daemon-identity.ts "$HACK_PRERELEASE_BUNDLE" "$HACK_PRERELEASE_VERSION"
       - name: Package verified payload and outer checksum
         run: bun scripts/prerelease-plan.ts package
       - name: Retain reviewable artifacts

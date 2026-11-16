@@ -183,9 +183,13 @@ entrypoint, so the candidate does not start the stable `hackd` on its own, not
 even from a candidate `global up`, `global install` or `doctor --fix`. A
 candidate `hack doctor --fix` skips its `hackd` repair without asking, in a
 terminal or not, and prints the reason and the command to run yourself, such as
-`hack daemon start`. That command runs the stable CLI, so do not run it during a
-Compose candidate run. Older candidate bundles can start `hackd`, so use this
-order with every bundle.
+`hack daemon start`. In a candidate run, `daemon start` starts the candidate's own
+`hackd` through the bundle's `hack-v5` launcher, never the stable `hack` on PATH,
+and it refuses rather than replace a running stable `hackd`; see
+[A candidate's own daemon](../versions/v5/upgrade.md#a-candidates-own-daemon).
+Bundles up to 5.0.0-next.18 start the `hack` first on PATH, which is the stable
+CLI, so do not run their `daemon start` during a Compose candidate run. Older
+candidate bundles can start `hackd`, so use this order with every bundle.
 
 Use this order:
 

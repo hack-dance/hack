@@ -128,3 +128,33 @@ chosen install's `hack daemon install`. Add `--json` for one machine-readable re
 outside the shared-home candidate trial;
 [daemon and service details](guides/upgrade-from-v4.md#daemon-old-lock-and-missing-checkouts)
 explain the difference.
+
+## A candidate's own daemon
+
+A candidate run (`hack-next` or the bundle's `hack-v5`) starts only its own
+hackd. `daemon start` and `daemon restart` start the running bundle through its
+own `hack-v5` launcher, never a `hack` found on PATH, and never through the login
+service, which runs stable `hack`. They leave a hackd of another version running
+and print one sentence saying so; they never stop or replace it. They also refuse
+when they cannot prove which hackd they would start, for example a source run with
+the candidate marker set by hand. `daemon install` and `daemon uninstall` refuse
+in a candidate run.
+
+```mermaid
+flowchart TD
+  Start[candidate daemon start] --> Running{hackd running here?}
+  Running -->|same version| Already[already running]
+  Running -->|other version| Refuse1[refuse, nothing stopped]
+  Running -->|no| Launcher{hack-v5 next to hack-cli?}
+  Launcher -->|no| Refuse2[refuse, nothing started]
+  Launcher -->|yes| Spawn[start bundle hack-v5]
+  Spawn --> Check{API version equals CLI?}
+  Check -->|yes| Started[hackd started]
+  Check -->|no| Fail[error, not started]
+```
+
+Any start, candidate or stable, reports "hackd started" only when the new
+hackd's API reports this CLI's version. The CLI and hackd read the version from
+one place, so a prerelease's hackd reports the release version (for example
+`5.0.0-next.18`), the same string as `hack version --json`. `daemon status --json`
+prints both as `version` (hackd's API) and `cli_version`.

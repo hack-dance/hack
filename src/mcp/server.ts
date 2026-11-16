@@ -31,6 +31,7 @@ import {
 import { ensureDir, pathExists } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { HACK_VERSION } from "../lib/hack-version.ts";
 import { findProjectContext } from "../lib/project.ts";
 import {
   AmbiguousProjectNameError,
@@ -370,7 +371,7 @@ export function createMcpServer(opts: {
   const server = new McpServer(
     {
       name: packageJson.name,
-      version: packageJson.version,
+      version: HACK_VERSION,
     },
     {
       capabilities: { tools: {}, prompts: {} },

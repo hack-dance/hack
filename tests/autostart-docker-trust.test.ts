@@ -495,6 +495,15 @@ test("socket paths resolve through parent directories and final links without op
     const linkedDir = join(home, "linked-dir");
     await symlink(dir, linkedDir);
     expect(resolveSocketPath(join(linkedDir, "engine.sock"))).toBe(socket);
+    // `..` in a link target applies after an intermediate directory link, as
+    // the kernel resolves it: alias -> hop/../engine.sock, where hop links into
+    // a subdirectory of `dir`, reaches dir/engine.sock, not home/engine.sock.
+    const sub = join(dir, "sub");
+    await mkdir(sub, { mode: 0o700 });
+    await symlink(sub, join(home, "hop"));
+    const viaDotDot = join(home, "dotdot.sock");
+    await symlink("hop/../engine.sock", viaDotDot);
+    expect(resolveSocketPath(viaDotDot)).toBe(socket);
     // A missing entry stays ENOENT, which the trust check treats as absent.
     expect(() => resolveSocketPath(join(dir, "missing.sock"))).toThrow(
       expect.objectContaining({ code: "ENOENT" })

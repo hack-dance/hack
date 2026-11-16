@@ -7,7 +7,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import {
   type AutostartAclDependencies,
   assertAutostartPathAclsTrustedSync,
@@ -207,20 +207,42 @@ export function assertAutostartDockerConfigTrusted(opts: {
 /**
  * The physical path of a unix socket. On macOS, Bun's `realpathSync` opens the
  * path and a socket refuses that (EOPNOTSUPP), which refused every real engine
- * socket. Resolve the parent directory instead, and follow a final link by
- * hand. A missing entry still throws ENOENT.
+ * socket. Resolve the way the kernel does instead: one component at a time with
+ * lstat and readlink, following each link where it is met and applying `..` to
+ * the physical directory reached so far (never collapsing it as text first). The
+ * socket itself is only lstat'd. A missing component throws ENOENT.
  */
 export function resolveSocketPath(path: string): string {
-  let current = path;
-  for (let hops = 0; hops <= 40; hops += 1) {
-    const resolved = join(realpathSync(dirname(current)), basename(current));
-    if (!lstatSync(resolved).isSymbolicLink()) {
-      return resolved;
+  const queue = (isAbsolute(path) ? path : `${process.cwd()}/${path}`).split(
+    "/"
+  );
+  let current = "/";
+  let hops = 0;
+  while (queue.length > 0) {
+    const component = queue.shift() as string;
+    if (component === "" || component === ".") {
+      continue;
     }
-    const target = readlinkSync(resolved);
-    current = isAbsolute(target) ? target : join(dirname(resolved), target);
+    if (component === "..") {
+      current = dirname(current);
+      continue;
+    }
+    const next = current === "/" ? `/${component}` : `${current}/${component}`;
+    if (!lstatSync(next).isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    hops += 1;
+    if (hops > 40) {
+      throw new Error("Too many socket links");
+    }
+    const target = readlinkSync(next);
+    if (isAbsolute(target)) {
+      current = "/";
+    }
+    queue.unshift(...target.split("/"));
   }
-  throw new Error("Too many socket links");
+  return current;
 }
 
 /** Network transports need peer authentication beyond filesystem/context ownership. */

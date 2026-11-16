@@ -1,4 +1,9 @@
+import { renderedLaunchdPathDirectories } from "../daemon/launchd.ts";
 import type { DaemonCommandTrace } from "../daemon/reconcile.ts";
+import {
+  checkServicePathDirectories,
+  renderedServicePathDirectories,
+} from "../daemon/systemd.ts";
 import { logger } from "../ui/logger.ts";
 
 /**
@@ -158,4 +163,44 @@ async function refuseUnverified(opts: {
     message: `hackd was replaced, but ${problem}, so it is not running this version | Run: hack daemon install, then check: hack daemon status`,
   });
   return true;
+}
+
+/**
+ * The PATH a replacement hackd gets when it is started directly because its
+ * service could not start it. hackd runs helpers such as `docker` by bare
+ * name, and the caller's PATH may hold a directory another account can add
+ * programs to, so the direct start gets the PATH its service would give it
+ * (the systemd unit's or the launchd plist's), with the same checks
+ * ({@link checkServicePathDirectories}). `refused` says why not; the caller
+ * then starts nothing.
+ */
+export async function directReplacementPath(opts: {
+  /** What the direct start runs; its directory is on the systemd PATH. */
+  readonly argv: readonly string[];
+  readonly home: string;
+  readonly platform: NodeJS.Platform;
+  /** Test seam: replaces the fixed system directories. */
+  readonly systemDirectories?: readonly string[];
+}): Promise<{ readonly path: string } | { readonly refused: string }> {
+  const program = opts.argv[0];
+  if (program === undefined) {
+    return { refused: "no program to start" };
+  }
+  const dirs =
+    opts.platform === "darwin"
+      ? renderedLaunchdPathDirectories({
+          home: opts.home,
+          systemDirectories: opts.systemDirectories,
+        })
+      : renderedServicePathDirectories({
+          hackBinPath: program,
+          home: opts.home,
+          systemDirectories: opts.systemDirectories,
+        });
+  const error = await checkServicePathDirectories({ dirs });
+  return error === null
+    ? { path: dirs.join(":") }
+    : {
+        refused: error.replace("the hackd.service PATH", "the service PATH"),
+      };
 }

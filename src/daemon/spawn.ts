@@ -14,13 +14,21 @@ const INVOCATION_ONLY_ENV_KEYS = [
   "HACK_DAEMON_RECONCILE_ONLY",
 ] as const;
 
-/** The environment for a detached hackd: the caller's, minus those flags. */
+/**
+ * The environment for a detached hackd: the caller's, minus those flags.
+ * `path`, when given, replaces the caller's PATH (a replacement started
+ * outside its service gets the service's checked PATH, HACK-2216).
+ */
 export function detachedDaemonEnvironment(
-  base: Readonly<Record<string, string | undefined>>
+  base: Readonly<Record<string, string | undefined>>,
+  opts: { readonly path?: string } = {}
 ): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...base };
   for (const key of INVOCATION_ONLY_ENV_KEYS) {
     Reflect.deleteProperty(env, key);
+  }
+  if (opts.path !== undefined) {
+    env.PATH = opts.path;
   }
   return env;
 }
@@ -42,9 +50,13 @@ export function detachedDaemonEnvironment(
  */
 export function spawnDetachedDaemon(opts: {
   readonly argv: readonly string[];
+  /** Replaces the caller's PATH; see {@link detachedDaemonEnvironment}. */
+  readonly path?: string;
 }): { readonly pid: number } {
   const proc = Bun.spawn([...opts.argv], {
-    env: hackReexecEnvironment(detachedDaemonEnvironment(process.env)),
+    env: hackReexecEnvironment(
+      detachedDaemonEnvironment(process.env, { path: opts.path })
+    ),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

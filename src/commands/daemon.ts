@@ -61,6 +61,7 @@ import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { resolveUserHomeDir } from "../lib/home-dir.ts";
 import {
   buildDockerStatusProbe,
   detectDockerBackend,
@@ -74,6 +75,7 @@ import {
 } from "./daemon-launchd.ts";
 import {
   describeUnverifiedReplacement,
+  directReplacementPath,
   type ReplacementStartOutcome,
   type ServiceManagerState,
   startReplacementDaemon,
@@ -374,8 +376,7 @@ async function startDaemon(opts: {
   return await startReplacementDaemon({
     trace,
     startViaService: startStopped,
-    startDirect: () =>
-      startDaemonDetached({ paths, argv: executingDaemonArgv() }),
+    startDirect: () => startReplacementDirectly({ paths }),
     isRunning: async () => {
       const now = await readDaemonStatus({ paths });
       return now.running && now.socketExists;
@@ -752,6 +753,34 @@ async function clearStaleDaemonFilesBeforeStart(opts: {
  * or process group that ran `hack daemon start` (HACK-2052). hackd writes
  * its own log file; its stdio is not connected to the caller.
  */
+/**
+ * The direct start after a replaced daemon's service could not start it:
+ * this CLI itself, with the PATH its service would give hackd, never the
+ * caller's ({@link directReplacementPath}). An unsafe service PATH starts
+ * nothing and leaves hackd stopped.
+ */
+async function startReplacementDirectly(opts: {
+  readonly paths: DaemonPaths;
+}): Promise<number> {
+  const argv = executingDaemonArgv();
+  const servicePath = await directReplacementPath({
+    argv,
+    home: resolveUserHomeDir(),
+    platform: process.platform,
+  });
+  if ("refused" in servicePath) {
+    logger.error({
+      message: `Not starting the replacement hackd directly: ${servicePath.refused}; hackd is stopped | Fix that directory, then run: hack daemon install`,
+    });
+    return 1;
+  }
+  return await startDaemonDetached({
+    paths: opts.paths,
+    argv,
+    path: servicePath.path,
+  });
+}
+
 async function startDaemonDetached(opts: {
   readonly paths: DaemonPaths;
   /**
@@ -760,6 +789,8 @@ async function startDaemonDetached(opts: {
    * itself (HACK-2216).
    */
   readonly argv?: readonly string[];
+  /** Replaces the caller's PATH (a replacement; see startReplacementDirectly). */
+  readonly path?: string;
 }): Promise<number> {
   const { paths } = opts;
   let argv = opts.argv;
@@ -773,7 +804,7 @@ async function startDaemonDetached(opts: {
       "--foreground",
     ];
   }
-  spawnDetachedDaemon({ argv: [...argv] });
+  spawnDetachedDaemon({ argv: [...argv], path: opts.path });
 
   const started = await waitForDaemonStart({ paths });
   if (!started) {

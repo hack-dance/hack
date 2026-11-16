@@ -17,9 +17,9 @@ def publish_text(path, text):
     pending.replace(path)
 
 
-def alive(pid):
+def process_state(pid):
     result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
-    return result.returncode == 0 and not result.stdout.strip().startswith('Z')
+    return result.stdout.strip() if result.returncode == 0 else ''
 
 
 def worker(root, mode):
@@ -94,7 +94,10 @@ def probe(bun, program, mode):
             result.update(completion)
             for name in ['child', 'grandchild', 'sibling']:
                 path = root / (name + '.pid')
-                result[name + 'Alive'] = alive(int(path.read_text())) if path.exists() else False
+                state = process_state(int(path.read_text())) if path.exists() else ''
+                result[name + 'State'] = state
+                # Empty output and zombie/dead states are not a live process.
+                result[name + 'Alive'] = bool(state) and state[0] not in ['Z', 'X']
             if (root / 'tty.json').exists():
                 result['tty'] = json.loads((root / 'tty.json').read_text())
             print(json.dumps(result))

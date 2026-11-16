@@ -30,7 +30,8 @@ use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 use hack_desktop_core::source::target_keys;
 use hack_desktop_core::state::{Action, ProjectState};
 use hack_desktop_core::viewmodel::{
-    AppModel, Banner, DetailView, Event, ListView, Phase, RefreshToken, Row,
+    AppModel, Banner, BranchRow, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken,
+    Row, UpdateSide,
 };
 use hack_desktop_ui::components::{
     BannerTone, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, banner, caption,
@@ -79,7 +80,7 @@ pub struct HackApp {
     recovery_error: Option<String>,
     /// When each project's running action started, for the slow-action
     /// warning. Display only: the app never terminates a lifecycle command.
-    action_started: std::collections::HashMap<String, std::time::Instant>,
+    action_started: std::collections::HashMap<InstanceKey, Instant>,
 }
 
 impl HackApp {
@@ -293,12 +294,12 @@ impl HackApp {
         snap: Result<Snapshot, SourceError>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let before = self.model.selected_row().map(|r| r.name.clone());
+        let before = self.model.selected_key();
         let previous_root = self.selected_root();
         if !self.model.finish_refresh(token, snap) {
             return false;
         }
-        let after = self.model.selected_row().map(|r| r.name.clone());
+        let after = self.model.selected_key();
         let selection_changed = before != after || previous_root != self.selected_root();
         if selection_changed {
             // Only accepted snapshots may invalidate a tail or replace a
@@ -330,6 +331,7 @@ impl HackApp {
     }
 
     /// Type into the title bar search (frame sequences).
+    #[cfg(feature = "screenshots")]
     pub(crate) fn type_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.search
             .update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
@@ -381,11 +383,8 @@ impl HackApp {
 
     /// Fixtures: mark an action as in flight without running it.
     pub fn simulate_in_flight(&mut self, action: Action) {
-        if let Some(name) = self.model.detail().map(|d| d.name) {
-            self.model.apply(Event::ActionStarted {
-                project: name,
-                action,
-            });
+        if let Some(key) = self.model.detail().map(|d| d.key) {
+            self.model.apply(Event::ActionStarted { key, action });
         }
     }
 
@@ -401,6 +400,7 @@ impl HackApp {
                     "hackd is off or unreachable: start hackd"
                 }
                 .into(),
+                compatible: false,
             },
         )));
     }
@@ -442,20 +442,21 @@ impl HackApp {
         let Some(row) = self.model.selected_row() else {
             return;
         };
-        let project = row.name.clone();
+        let Some(key) = self.model.selected_key() else {
+            return;
+        };
         let native = row.is_native();
         let Some(root) = row.repo_root.clone().map(PathBuf::from) else {
             return;
         };
-        if !self.model.can_start(&project) {
+        if !self.model.can_start(&key) {
             return;
         }
         self.model.apply(Event::ActionStarted {
-            project: project.clone(),
+            key: key.clone(),
             action,
         });
-        self.action_started
-            .insert(project.clone(), std::time::Instant::now());
+        self.action_started.insert(key.clone(), Instant::now());
         cx.notify();
         if !self.live {
             return;
@@ -464,15 +465,18 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { source.act(&root, native, action) })
+                .spawn({
+                    let branch = key.branch.clone();
+                    async move { source.act(&root, native, branch.as_deref(), action) }
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Ok(ActionOutcome::Opened(o)) = &result {
                     cx.open_url(&o.url);
                 }
-                this.action_started.remove(&project);
+                this.action_started.remove(&key);
                 if this.model.apply(Event::ActionFinished {
-                    project,
+                    key,
                     action,
                     result,
                 }) {
@@ -537,7 +541,16 @@ impl HackApp {
     /// Whether a project row (or one of its branch instances) matches the
     /// title bar's filter. An empty filter matches everything.
     fn matches(&self, r: &Row) -> bool {
-        self.filter.is_empty() || r.name.to_lowercase().contains(&self.filter)
+        self.filter.is_empty()
+            || r.name.to_lowercase().contains(&self.filter)
+            || r.branches
+                .iter()
+                .any(|b| b.branch.to_lowercase().contains(&self.filter))
+    }
+
+    pub(crate) fn select_instance(&mut self, key: InstanceKey, cx: &mut Context<Self>) {
+        self.model.apply(Event::SelectInstance(key));
+        self.after_select(cx);
     }
 
     pub(crate) fn select_project(&mut self, name: String, cx: &mut Context<Self>) {
@@ -700,6 +713,9 @@ impl HackApp {
                     projects = projects.child(caption(label, ui));
                     for r in rows {
                         projects = projects.child(self.project_row(r, ui, cx));
+                        for b in &r.branches {
+                            projects = projects.child(self.branch_row(b, ui, cx));
+                        }
                     }
                 }
                 if !self.filter.is_empty() && running.is_empty() && stopped.is_empty() {
@@ -793,6 +809,19 @@ impl HackApp {
         .into_any_element()
     }
 
+    fn branch_row(&self, b: &BranchRow, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let key = b.key.clone();
+        hack_desktop_ui::components::branch_row(
+            SharedString::from(format!("branch-{}-{}", b.key.project, b.branch)),
+            b.branch.clone(),
+            Status::of(&b.state),
+            b.selected && self.pane == Pane::Project,
+            ui,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.select_instance(key.clone(), cx)))
+        .into_any_element()
+    }
+
     fn banners(&self, list: &ListView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         let daemon_banner = list
             .banners
@@ -825,6 +854,20 @@ impl HackApp {
                 ),
             };
             let mut row = banner(tone, msg, None, ui);
+            // A daemon newer than the CLI: the remedy is updating the CLI,
+            // never restarting hackd.
+            if let Banner::DaemonMismatch {
+                update: UpdateSide::Cli,
+                ..
+            } = b
+            {
+                row = row.child(
+                    action_button("copy-update", Glyph::Copy, "Copy hack update", true, ui)
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string("hack update".into()));
+                        })),
+                );
+            }
             if offers_recovery
                 && !recovery_shown
                 && let Some(action) = recovery
@@ -947,6 +990,20 @@ impl HackApp {
                             .text_color(p.text_primary)
                             .child(d.name.clone()),
                     )
+                    .children(d.branch.clone().map(|b| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::S2)
+                            .type_step(text::BODY)
+                            .text_color(p.text_secondary)
+                            .child(hack_desktop_ui::components::icon(
+                                Glyph::Branch,
+                                size::ICON,
+                                p.text_muted,
+                            ))
+                            .child(b)
+                    }))
                     .child(state_pill(status, project_label(&d.state), ui))
                     .child(neutral_pill(d.backend.clone(), ui))
                     .child(div().flex_1())
@@ -962,7 +1019,7 @@ impl HackApp {
                 div().type_step(text::BODY).text_color(c).child(r)
             }))
             .children(self.doctor_link(&d.name, ui, cx))
-            .children(self.slow_action_warning(&d.name).map(|w| {
+            .children(self.slow_action_warning(&d.key).map(|w| {
                 div()
                     .type_step(text::BODY)
                     .text_color(p.states.degraded.fg)
@@ -1233,8 +1290,8 @@ impl HackApp {
 
     /// Shown, never acted on, once an action has run past
     /// `LiveSource::LIFECYCLE_WARN_AFTER`.
-    fn slow_action_warning(&self, project: &str) -> Option<String> {
-        let started = self.action_started.get(project)?;
+    fn slow_action_warning(&self, key: &InstanceKey) -> Option<String> {
+        let started = self.action_started.get(key)?;
         (started.elapsed() >= hack_desktop_core::source::LiveSource::LIFECYCLE_WARN_AFTER).then(|| {
             "Still running after 6 hours. Hack owns this command and its timeouts; the app has not stopped it.".to_owned()
         })

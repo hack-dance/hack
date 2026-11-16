@@ -61,16 +61,14 @@ impl WindowData {
                     "hackd is off or unreachable: start hackd"
                 }
                 .into(),
+                compatible: false,
             })));
             tail = Err("Project status could not be read".into());
         }
         if let Some(action) = fixtures::local(f).in_flight
-            && let Some(name) = model.detail().map(|d| d.name)
+            && let Some(key) = model.detail().map(|d| d.key)
         {
-            model.apply(Event::ActionStarted {
-                project: name,
-                action,
-            });
+            model.apply(Event::ActionStarted { key, action });
         }
         let routing = fixtures::snapshot(f)
             .ok()
@@ -336,11 +334,7 @@ impl MainWindow {
                     "hackd is not running. Project states are not observed.".to_owned(),
                     Some((Glyph::Power, "Start hackd")),
                 ),
-                Banner::DaemonMismatch { daemon, cli } => (
-                    BannerTone::Warn,
-                    format!("hackd {daemon} is running; this CLI is {cli}."),
-                    Some((Glyph::Restart, "Restart hackd")),
-                ),
+                Banner::DaemonMismatch { .. } => (BannerTone::Warn, b.text(), None),
                 Banner::EngineDown { error } => (
                     BannerTone::Error,
                     format!("Docker is not reachable: {error}"),

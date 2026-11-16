@@ -10,7 +10,7 @@ of the release or onboarding yet.
 |---|---|
 | `core` (`hack-desktop-core`) | Models, CLI runner with timeouts, read-only hackd client, project state, list/detail view models, fixtures. No GUI dependency. |
 | `app` (`hack-desktop`) | The window, built with [gpui-kit](https://gpui-kit.com/) `=0.9.1`. |
-| `ui` (`hack-desktop-ui`) | Design v1 tokens and components, and the `hack-desktop-gallery` fixture gallery. Spec and renders: [DESIGN-V1.md](DESIGN-V1.md). Not yet used by the window. |
+| `ui` (`hack-desktop-ui`) | Design v1 tokens and components, used by the window, and the `hack-desktop-gallery` fixture gallery. Spec and renders: [DESIGN-V1.md](DESIGN-V1.md). |
 
 This is its own Cargo workspace with its own lockfile and target directory; it
 does not touch `packages/runtime-core`.
@@ -81,10 +81,54 @@ cargo run -p hack-desktop --features screenshots -- --screenshots /tmp/shots
 
 This renders every fixture in light and dark to PNG with GPUI's offscreen
 renderer (WGPU on Linux, Metal on macOS). It opens no window. Current renders
-(all 15 fixtures, row by row: loading, empty, daemon-down / daemon-mismatch,
-engine-down, error / cli-missing, many-projects, stopped / starting, running,
-degraded / stopping, failed-start, needs-attention):
+of the window's fixtures, alphabetical, four per row:
 [light](screenshots/fixtures-light.png), [dark](screenshots/fixtures-dark.png).
+
+```sh
+cargo run -p hack-desktop --features screenshots -- --sequence /tmp/seq
+```
+
+renders the window after each step of a short click-through on fixtures
+(search, select, Start, branch instances, tabs, Doctor). Each step calls the
+method its click handler calls; it is not a synthetic mouse event.
+[Click-through](screenshots/window/click-through.png).
+
+## Window
+
+The window follows [DESIGN-V1.md](DESIGN-V1.md).
+
+- **One title bar.** The app's header row is the title bar. On macOS the
+  window has a transparent, full-size-content title bar and the system traffic
+  lights sit inside the header (gpui-kit `TitleBar` moves the window and
+  handles double clicks). On Linux it asks for client-side decorations and
+  gpui-kit draws the window controls; a compositor that keeps server-side
+  decorations draws its own title bar above the header instead.
+- **Search** in the header filters the project list by project or branch
+  name; Cmd-K (Ctrl-K on Linux) focuses it.
+- **Live data only.** Without `--fixtures` everything comes from hackd and the
+  CLI. What the CLI does not report is not invented: CPU and memory are a dash
+  with a tooltip; the always-on switch is disabled with its reason (HACK-2213).
+- **Branch instances** (`hack up --branch <name>`) are listed under their
+  project from `/v1/projects` `branch_runtime`, with their own state,
+  services, routes (from each container's `caddy` label) and URL. Selecting one
+  runs Start, Stop, Restart, Open and Logs with `--branch <name>`. A project
+  whose only running instances are branches is in the Running group. Native
+  branch instances are not in that read yet (DESIGN.md R19).
+- **Daemon match.** Equal version strings match. Otherwise the core asks the
+  CLI (`hack daemon status --json`, `api_compatible`) once per version pair.
+  When they do not match, the banner says which side to update: an older
+  hackd offers Restart hackd, a newer one offers to copy `hack update`.
+- **Clickable means it works.** Projects, branch instances, tabs (Services,
+  Logs, Env), Start / Stop / Restart / Open with progress and errors, the copy
+  buttons, the Doctor and Routing rows and the daemon recovery button. The
+  Activity tab is gone until it has content.
+
+Renders: [running, dark](screenshots/window/running-dark.png),
+[running, light](screenshots/window/running-light.png),
+[branch instances](screenshots/window/branches-dark.png),
+[daemon mismatch](screenshots/window/daemon-mismatch-light.png),
+[failed start](screenshots/window/failed-start-light.png),
+[Doctor](screenshots/window/doctor-light.png).
 
 ## Doctor
 

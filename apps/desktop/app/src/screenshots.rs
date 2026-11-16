@@ -146,6 +146,25 @@ pub fn sequence(dir: &Path) {
         ("select-storefront", |app, _, cx| {
             app.select_project("storefront".into(), cx);
         }),
+        ("select-branch-feature-search", |app, _, cx| {
+            app.select_instance(
+                hack_desktop_core::viewmodel::InstanceKey::branch("storefront", "feature-search"),
+                cx,
+            );
+        }),
+        ("select-branch-fix-login", |app, _, cx| {
+            app.select_instance(
+                hack_desktop_core::viewmodel::InstanceKey::branch("storefront", "fix-login"),
+                cx,
+            );
+        }),
+        ("search-branch-name", |app, window, cx| {
+            app.type_search("fix", window, cx)
+        }),
+        ("select-storefront-again", |app, window, cx| {
+            app.type_search("", window, cx);
+            app.select_project("storefront".into(), cx);
+        }),
         ("tab-env", |app, _, cx| app.set_tab(2, cx)),
         ("tab-logs", |app, _, cx| app.set_tab(1, cx)),
         ("tab-services", |app, _, cx| app.set_tab(0, cx)),

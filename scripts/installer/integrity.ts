@@ -41,6 +41,13 @@ const COMPILER = [
 ];
 const SUPERVISOR = ["hack-lifecycle-supervisor"];
 const STORAGE = ["hack-storage-root-witness", "native-storage-tool.json"];
+/** A flat, plain file name: what a newer release's added payload looks like. */
+const NEWER_RELEASE_MEMBER = /^[a-z0-9][a-z0-9._-]{0,63}$(?![\s\S])/;
+
+/** The refusal for an archive member a newer release added (HACK-2262). */
+export function newerReleaseMemberMessage(name: string): string {
+  return `This release contains ${name}, which this installation manager does not know, so it was not installed and nothing changed. Replace the manager with the target release's standalone manager first: download hack-next-manager-darwin-arm64 and INSTALLER-SHA256SUMS from that release, verify them, and run it with --root <channel root> upgrade-manager (see the candidate install guide). Then retry, or install into a fresh --root.`;
+}
 export const MCP =
   /^mcp\/([0-9a-f]{64})\/(manifest\.json|hack-mcp-adapter|hack-mcp-owner|hack-mcp-backend)$(?![\s\S])/;
 const EXECUTABLES = new Set([
@@ -483,18 +490,18 @@ export function archiveEntries(compressed: Uint8Array) {
     );
     const prefix = field(header, 345, 155);
     const name = `${prefix ? `${prefix}/` : ""}${field(header, 0, 100)}`;
+    const known =
+      [...CORE, ...COMPILER, ...STORAGE, ...SUPERVISOR, "SHA256SUMS"].includes(
+        name
+      ) || MCP.test(name);
     requireThat(
-      !entries.has(name) &&
-        ([
-          ...CORE,
-          ...COMPILER,
-          ...STORAGE,
-          ...SUPERVISOR,
-          "SHA256SUMS",
-        ].includes(name) ||
-          MCP.test(name)),
+      !entries.has(name) && (known || NEWER_RELEASE_MEMBER.test(name)),
       "Foreign, duplicate or traversing archive entry."
     );
+    // A plain top-level file this manager does not know is most likely a payload
+    // a newer release added. Never accept it; say how to get a manager that
+    // validates it (HACK-2262).
+    requireThat(known, newerReleaseMemberMessage(name));
     const size = octal(124, 12);
     total += size;
     requireThat(

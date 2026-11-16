@@ -775,7 +775,9 @@ async function outputDaemonProjects({
     daemon.json &&
     (!opts.summary || daemon.json.detail_level === "summary")
   ) {
-    const { profiling, ...payload } = daemon.json;
+    // `state_token` is the daemon's long-poll marker (`?wait=`), not part of
+    // the published `projects --json` shape.
+    const { profiling, state_token: _stateToken, ...payload } = daemon.json;
     writeProfiledProjects({
       payload,
       profiler,

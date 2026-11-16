@@ -1316,7 +1316,13 @@ async function handleDaemonClear({
     return 1;
   }
 
-  const sweep = await sweepOrphanDaemons({ trackedPid: status.pid, paths });
+  // A candidate never signals an untracked hackd: its version is unknown
+  // (HACK-2263).
+  const sweep = await sweepOrphanDaemons({
+    trackedPid: status.pid,
+    paths,
+    refuseOrphans: isCandidateRun(),
+  });
   if (!sweep.allStopped) {
     return 1;
   }

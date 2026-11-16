@@ -4,6 +4,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -173,6 +174,24 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
           `hackd version 4.9.9 (pid ${stablePid}) runs for this Hack home`
         );
       }
+      // The stable hackd loses its pid file but keeps the home's socket: the
+      // candidate cannot identify it, so it signals nothing.
+      const pidPath = join(home, ".hack", "daemon", "hackd.pid");
+      const pidText = await readFile(pidPath, "utf8");
+      await rm(pidPath);
+      for (const command of ["clear", "start"]) {
+        const result = await children.run({
+          cmd: [join(bundle, "hack-v5"), "daemon", command],
+          cwd: root,
+          env: { ...env, HACK_RUNTIME_BACKEND: "compose" },
+        });
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout + result.stderr).toContain(
+          `hackd process ${stablePid} holds this Hack home without its pid file`
+        );
+      }
+      expect(() => process.kill(stablePid as number, 0)).not.toThrow();
+      await writeFile(pidPath, pidText);
       const status = await children.run({
         cmd: [stableHack, "daemon", "status", "--json"],
         cwd: root,

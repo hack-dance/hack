@@ -2008,6 +2008,11 @@ test("a compatible running daemon is restarted after a repair only when the repa
 
 test("an incompatible launchd daemon with a missing plist program is only replaced by its retarget target", async () => {
   const dir = await mkdtemp(join(tmpdir(), "hack-replace-target-"));
+  // The PATH a retarget would give hackd includes $HOME/.bun/bin and
+  // $HOME/.hack/bin, checked with the real home. Use this test's own empty
+  // home, so a developer's own ~/.bun or ~/.hack cannot decide the result.
+  const savedHome = process.env.HOME;
+  process.env.HOME = dir;
   try {
     const target = join(dir, "hack");
     const other = join(dir, "hack-other");
@@ -2122,6 +2127,11 @@ test("an incompatible launchd daemon with a missing plist program is only replac
     ).toBe(1);
     expect(restartTrace.blocked).toBe("unproven-owner");
   } finally {
+    if (savedHome === undefined) {
+      Reflect.deleteProperty(process.env, "HOME");
+    } else {
+      process.env.HOME = savedHome;
+    }
     await rm(dir, { recursive: true, force: true });
   }
 });

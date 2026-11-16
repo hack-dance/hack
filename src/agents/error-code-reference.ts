@@ -178,6 +178,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "A background command journal was written by a newer Hack journal format.",
     readFirst: "`hack --version`",
   },
+  E_DAEMON_SERVICE: {
+    meaning:
+      "hackd or its login service could not be started, stopped, restarted, installed or repaired, or Hack refused because it could not prove the daemon or service belongs to this Hack home and executable.",
+    readFirst: "`hack daemon status --json`",
+  },
   E_USAGE: {
     meaning: "Arguments or flags were invalid for the command.",
     readFirst: "`hack <command> --help`",

@@ -9,6 +9,10 @@ export const MACHINE_SCHEMAS = {
   globalStatusObserve: "hack.global-status.observe.v1",
   usageByService: "hack.usage.by-service.v1",
   updateCheck: "hack.update-check.v1",
+  daemonStart: "hack.daemon-start.v1",
+  daemonStop: "hack.daemon-stop.v1",
+  daemonRestart: "hack.daemon-restart.v1",
+  daemonInstall: "hack.daemon-install.v1",
   doctorMachine: "hack.doctor.machine.v1",
 } as const;
 

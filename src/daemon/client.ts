@@ -1,6 +1,7 @@
 import pkg from "../../package.json";
 
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { canPrompt } from "../lib/interactivity.ts";
@@ -8,7 +9,9 @@ import {
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
+  launchdJobMayBeRunning,
   resolveLaunchdAccess,
+  verifyLaunchdJobBeforeKickstart,
 } from "./launchd.ts";
 import { resolveDaemonPaths } from "./paths.ts";
 import { spawnDetachedDaemon } from "./spawn.ts";
@@ -20,6 +23,8 @@ type PackageJsonType = {
 } & Record<string, unknown>;
 
 const packageJson = pkg as unknown as PackageJsonType;
+/** This CLI's version; a hackd reporting another one is incompatible. */
+export const DAEMON_CLI_VERSION: string = packageJson.version;
 const DAEMON_AUTOSTART_COOLDOWN_MS = 15_000;
 const DAEMON_AUTOSTART_WAIT_MS = 3500;
 const DAEMON_AUTOSTART_POLL_MS = 125;
@@ -299,6 +304,27 @@ async function ensureLaunchdDaemonReady(opts: {
     if (!install.ok) {
       return false;
     }
+  }
+
+  // Last, right before launchd is asked to start the job: its program and
+  // the PATH it gives hackd, in the plist and in the configuration launchd
+  // has loaded (HACK-2216). On a refusal the autostart falls back to
+  // `hack daemon start`, which refuses the same job with the reason.
+  const plistText = await readTextFile(opts.paths.launchdPlistPath);
+  if (plistText === null) {
+    return false;
+  }
+  const refused = await verifyLaunchdJobBeforeKickstart({
+    paths: opts.paths,
+    plistText,
+    // Read fresh, only when a reload is about to happen.
+    isRunning: async () =>
+      launchdJobMayBeRunning(
+        await getLaunchdServiceStatus({ paths: opts.paths })
+      ),
+  });
+  if (refused !== null) {
+    return false;
   }
 
   const kick = await kickstartLaunchdService();

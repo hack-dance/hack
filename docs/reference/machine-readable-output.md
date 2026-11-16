@@ -59,7 +59,11 @@ success behavior stays covered by command-specific suites.
 | `hack config import --json` | Legacy bare object (no `data` envelope) |
 | `hack config plan --json` | Native compiler protocol object (`transport_version`, `ok`, result / diagnostics) |
 | `hack config validate --json` | Native compiler protocol object (`transport_version`, `ok`, result / diagnostics) |
+| `hack daemon install --json` | Envelope; versioned `data.schema`: `hack.daemon-install.v1` |
+| `hack daemon restart --json` | Envelope; versioned `data.schema`: `hack.daemon-restart.v1` |
+| `hack daemon start --json` | Envelope; versioned `data.schema`: `hack.daemon-start.v1` |
 | `hack daemon status --json` | Legacy bare object (no `data` envelope) |
+| `hack daemon stop --json` | Envelope; versioned `data.schema`: `hack.daemon-stop.v1` |
 | `hack dispatch logs --json` | Legacy bare object (no `data` envelope) |
 | `hack dispatch run --json` | Legacy bare object (no `data` envelope) |
 | `hack dispatch status --json` | Legacy bare object (no `data` envelope) |

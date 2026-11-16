@@ -15,15 +15,15 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { assertAutostartDockerConfigTrusted } from "../src/lib/autostart-docker-trust.ts";
-import { isDarwinSystemGroupDirectory } from "../src/lib/path-trust.ts";
+import { isDarwinAdminDirectory } from "../src/lib/path-trust.ts";
 
 /**
- * Every check here is hermetic: no runner environment, no system plugin
- * directory, and a default engine socket that does not exist directly below
- * `/` (only `/` itself is inspected), so neither `/var/run/docker.sock` nor
- * `/usr/local/lib/docker` on the test machine is read. A socket below the
- * fixture home would not do: on Linux the home is under sticky `/tmp`, which
- * the socket-parent rule refuses. A test passes a field to override these.
+ * Checks here do not read the runner environment, the system plugin
+ * directories or `/var/run/docker.sock`. The default engine socket is a path
+ * directly below `/` that is assumed not to exist on the test host, so only
+ * `/` itself is inspected. A socket below the fixture home would not do: on
+ * Linux the home is under sticky `/tmp`, which the socket-parent rule refuses.
+ * A test passes a field to override these.
  */
 const MISSING_DEFAULT_HOST = "unix:///hack-test-missing-engine/docker.sock";
 
@@ -233,7 +233,7 @@ function socketFixtureBase(): string | null {
     if (
       ancestors.every((entry) => {
         const info = statSync(entry);
-        return (info.mode & 0o022) === 0 || isDarwinSystemGroupDirectory(info);
+        return (info.mode & 0o022) === 0 || isDarwinAdminDirectory(info);
       })
     ) {
       return path;

@@ -91,20 +91,24 @@ It also applies to group-writable Homebrew directories owned by a user, includin
 required helpers in a trusted lookup directory before retrying.
 One macOS exception applies to the engine path only (helper lookup, Docker
 plugins and the Docker socket path): a root-owned directory whose only extra
-writer is a macOS system group is accepted. The two groups are `admin`, as on
-`/Applications` (`root:admin`, mode `0775`), and `daemon`, as on `/var/run`
-(`/private/var/run`, `root:daemon`, mode `0775`). Administrators can already
-replace system software. On a stock install `daemon`'s only member is `root`,
-plus the `daemon` system account whose primary group it is, and adding anyone
-else takes an administrator. So this adds no new writer. A directory owned by
-anyone but root, writable by any other group (such as `staff`), or writable by
-everyone is still refused. Checkout, config, registry and TLS inputs never get
-this exception.
-With no context or `DOCKER_HOST`, the engine is `/var/run/docker.sock`. Docker
-Desktop and OrbStack install it as a root-owned link in `/var/run` to a socket
-in your home. That default layout is accepted: the link is root's, `/var/run`
-is a `daemon` directory, and the socket must be owned by you or root with a
-parent chain that only you or root can change. A refused search
+writer is group `admin`, such as `/Applications` (`root:admin`, mode `0775`),
+is accepted. Administrators can already replace system software, so this adds
+no new writer. A world-writable directory is still refused, and checkout,
+config, registry and TLS inputs never get this exception.
+The Docker socket path alone also accepts a root-owned directory whose only
+extra writer is group `daemon`, which is how a stock macOS sets up `/var/run`
+(`/private/var/run`, `root:daemon`, mode `0775`). With no context or
+`DOCKER_HOST`, the engine is `/var/run/docker.sock`. Docker Desktop and
+OrbStack install it as a root-owned link there to a socket in your home.
+This trusts the `daemon` system account (uid 1), which can replace entries in
+`/var/run`, to the same degree as the system services that run under it.
+Helper and plugin lookup never accept a `daemon` directory. A socket
+directory owned by anyone but root, writable by another group (such as
+`staff`) or writable by everyone is still refused. The socket itself must be
+owned by you or root. To avoid trusting `/var/run`, select your engine's own
+context (for example `docker context use orbstack` or `desktop-linux`), whose
+socket lives in your home.
+A refused search
 path does not consume a project's attempt for this boot.
 The daemon keeps its installed PATH and continues normal status observation;
 automatic-start refusal does not change ordinary daemon operation.

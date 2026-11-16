@@ -11,7 +11,8 @@ import { assertAutostartPathAclsTrustedSync } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import {
-  isDarwinSystemGroupDirectory,
+  isDarwinAdminDirectory,
+  isDarwinDaemonDirectory,
   walkReplaceableChain,
 } from "./path-trust.ts";
 
@@ -20,7 +21,8 @@ const LOGIN_DOCKER_TRANSPORT = /^unix:\/\//;
 /**
  * Docker's engine when no context or `DOCKER_HOST` selects another. On macOS
  * Docker Desktop and OrbStack install it as a root-owned link in `/var/run`
- * (root:daemon 0775) to a socket in the user's home.
+ * (root:daemon 0775) to a socket in the user's home; only this socket path
+ * accepts that `daemon` directory.
  */
 export const DEFAULT_DOCKER_HOST = "unix:///var/run/docker.sock";
 
@@ -61,7 +63,7 @@ export function assertAutostartDockerConfigTrusted(opts: {
         hackHome: null,
         checked,
         allowMissing: true,
-        acceptDarwinSystemGroupDirectories: true,
+        acceptDarwinAdminDirectories: true,
       });
       if ("error" in trust) {
         throw new Error("Unsafe selection input");
@@ -71,7 +73,7 @@ export function assertAutostartDockerConfigTrusted(opts: {
       if (
         existing.isDirectory() &&
         (existing.mode & 0o022) !== 0 &&
-        !isDarwinSystemGroupDirectory(existing)
+        !isDarwinAdminDirectory(existing)
       ) {
         throw new Error("Selection directory permits new entries");
       }
@@ -199,7 +201,9 @@ function assertLoginDockerTransport(host: unknown, uid: number): void {
     hackHome: null,
     checked,
     allowMissing: true,
-    acceptDarwinSystemGroupDirectories: true,
+    acceptDarwinAdminDirectories: true,
+    // The default engine link lives in /var/run (root:daemon) on macOS.
+    acceptDarwinDaemonDirectories: true,
   });
   if ("error" in trust) {
     throw new Error("Unsafe socket path");
@@ -212,7 +216,8 @@ function assertLoginDockerTransport(host: unknown, uid: number): void {
     if (
       info.isDirectory() &&
       (info.mode & 0o022) !== 0 &&
-      !isDarwinSystemGroupDirectory(info)
+      !isDarwinAdminDirectory(info) &&
+      !isDarwinDaemonDirectory(info)
     ) {
       throw new Error("Replaceable socket parent");
     }

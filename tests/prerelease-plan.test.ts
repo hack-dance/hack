@@ -1634,6 +1634,25 @@ test("registered Release routes explicit prerelease to the same-commit reusable 
   expect(prerelease.jobs.build?.permissions.contents).toBe("read");
   expect(prerelease.jobs.publish?.environment).toBe("v5-prerelease");
   expect(prerelease.jobs.publish?.if).toContain("inputs.publish");
+  // HACK-2263: the built bundle must start its own hackd at the release
+  // version before it is packaged.
+  const buildRuns = (prerelease.jobs.build?.steps ?? []).map(
+    (step) => step.run ?? ""
+  );
+  const built = buildRuns.findIndex((run) =>
+    run.includes("scripts/build-native-candidate.sh")
+  );
+  const identity = buildRuns.findIndex((run) =>
+    run.includes(
+      'scripts/check-candidate-daemon-identity.ts "$HACK_PRERELEASE_BUNDLE" "$HACK_PRERELEASE_VERSION"'
+    )
+  );
+  const packaged = buildRuns.findIndex((run) =>
+    run.includes("scripts/prerelease-plan.ts package")
+  );
+  expect(built).toBeGreaterThanOrEqual(0);
+  expect(identity).toBeGreaterThan(built);
+  expect(packaged).toBeGreaterThan(identity);
   for (const workflow of [release, prerelease]) {
     for (const job of Object.values(workflow.jobs)) {
       for (const step of job.steps ?? []) {

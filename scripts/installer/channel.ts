@@ -47,8 +47,26 @@ import {
 
 const JOURNAL = ".manager-upgrade.json";
 const STAGE = /^\.stage-[0-9a-f]{32}$(?![\s\S])/;
-/** No compiled predecessor has shipped yet. Add only independently reviewed release digests. */
-const REVIEWED_PREDECESSORS: readonly string[] = [];
+/**
+ * The compiled managers that have shipped, by the sha256 each release lists for
+ * `hack-next-manager-darwin-arm64` in its `INSTALLER-SHA256SUMS`. `upgrade-manager`
+ * replaces only these. A channel root holds a byte copy of the manager that
+ * installed it, so its digest is the release's. Add each new release's manager
+ * when it publishes; the prerelease upgrade gate fails until a successor accepts
+ * the previous release's manager (HACK-2262).
+ */
+export const REVIEWED_PREDECESSORS: readonly string[] = [
+  // 5.0.0-next.6 and next.7
+  "ed606f521e36685d33657d91eed171cd612e6e66e3d83bdfa773a3aaeaf4fd71",
+  // 5.0.0-next.8 to next.12
+  "e6c667aa32bc345b3a58bc487f0c9a4a6e4fb68d2ae9a35f2bbbbf745a5a4f05",
+  // 5.0.0-next.13 to next.16
+  "3feb7cef0d1eff57ae54d2ee031fca2e769c9610acab3a04079b7b75cee81e3d",
+  // 5.0.0-next.17
+  "85bbe4f064b3277efc88a9f79c197e81950ab8881320aef1b3443b70d95b530f",
+  // 5.0.0-next.18
+  "90d1bc60bfd2b7eaad48dcf56ad45264f395c0ac1a8c4530e986be7fa194d4d9",
+];
 export const launcherBytes = () =>
   Buffer.from(
     '#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -P "$(dirname "$0")/.." && pwd -P)\nif [ "${1-}" = --manager ]; then shift; exec "$root/manager" --root "$root" "$@"; fi\nexec "$root/manager" --root "$root" run -- "$@"\n'
@@ -740,7 +758,7 @@ export class Channel {
     );
     requireThat(
       digest(this.path("manager")) === digest(this.source),
-      "Retained manager differs from this installer; use the retained manager or a separate --root. Replacement requires a future reviewed compiled predecessor digest; none is currently approved."
+      "Retained manager differs from this installer; use the retained manager (hack-next --manager), or replace it first: run this installer with --root <channel root> upgrade-manager. A separate --root also works."
     );
     this.requireQuiescent(current);
     // The exclusive manager lock excludes another installer. A killed download's

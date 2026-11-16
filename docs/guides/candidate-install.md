@@ -183,9 +183,13 @@ entrypoint, so the candidate does not start the stable `hackd` on its own, not
 even from a candidate `global up`, `global install` or `doctor --fix`. A
 candidate `hack doctor --fix` skips its `hackd` repair without asking, in a
 terminal or not, and prints the reason and the command to run yourself, such as
-`hack daemon start`. That command runs the stable CLI, so do not run it during a
-Compose candidate run. Older candidate bundles can start `hackd`, so use this
-order with every bundle.
+`hack daemon start`. In a candidate run, `daemon start` starts the candidate's own
+`hackd` through the bundle's `hack-v5` launcher, never the stable `hack` on PATH,
+and it refuses rather than replace a running stable `hackd`; see
+[A candidate's own daemon](../versions/v5/upgrade.md#a-candidates-own-daemon).
+Bundles up to 5.0.0-next.18 start the `hack` first on PATH, which is the stable
+CLI, so do not run their `daemon start` during a Compose candidate run. Older
+candidate bundles can start `hackd`, so use this order with every bundle.
 
 Use this order:
 
@@ -279,10 +283,19 @@ candidate that refuses state written by a newer one is not a successful rollback
 selected, all bundles and homes are retained, and your stable `hack` is unchanged.
 
 A bundle whose layout the installed manager does not understand needs a newer
-manager first. The installed manager cannot fetch one: `upgrade-manager` installs
-the executable it is run from. Download the standalone manager from the target
-release, verify it against that release's `INSTALLER-SHA256SUMS`, then run that
-file against your channel root:
+manager first. Such an `upgrade` refuses and changes nothing. Managers from
+`5.0.0-next.19` onward name the unknown file and this step. A `5.0.0-next.17` or
+earlier manager says "Foreign, duplicate or traversing archive entry." for the
+lifecycle supervisor that `5.0.0-next.18` added. The installed manager cannot fetch
+a newer one: `upgrade-manager` installs the executable it is run from. Download the
+standalone manager from the release you are upgrading to, verify it against that
+release's `INSTALLER-SHA256SUMS`, then run that file against your channel root.
+The example names `v5.0.0-next.16`; use the release you are upgrading to in both
+URLs and replace `NEWER` with its number. For a channel that a compiled manager
+installed (`5.0.0-next.6` to `next.17`) that is `5.0.0-next.19` or later: the
+`5.0.0-next.18` manager does not recognize earlier managers. The takeover works only
+on a channel the newer manager can validate. A channel from the `5.0.0-next.1` to
+`next.5` Python installer, or one it refuses, needs a fresh `--root` instead.
 
 ```sh
 dir=$(mktemp -d) && cd "$dir" &&
@@ -296,7 +309,8 @@ grep '[ *]hack-next-manager-darwin-arm64$' INSTALLER-SHA256SUMS > manager.sha256
 shasum -a 256 --check manager.sha256 &&
 codesign --verify --strict hack-next-manager-darwin-arm64 &&
 chmod 0700 hack-next-manager-darwin-arm64 &&
-./hack-next-manager-darwin-arm64 --root "$HOME/.hack-next" upgrade-manager
+./hack-next-manager-darwin-arm64 --root "$HOME/.hack-next" upgrade-manager &&
+"$HOME/.hack-next/bin/hack-next" --manager upgrade --version 5.0.0-next.NEWER
 ```
 
 Run it as one command. Every step is joined with `&&`, so a failed download, a

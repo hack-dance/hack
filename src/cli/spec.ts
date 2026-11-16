@@ -1,4 +1,3 @@
-import pkg from "../../package.json";
 import { activityCommand } from "../commands/activity.ts";
 import { agentCommand } from "../commands/agent.ts";
 import { branchCommand } from "../commands/branch.ts";
@@ -44,24 +43,13 @@ import { upgradeCommand } from "../commands/upgrade.ts";
 import { usageCommand } from "../commands/usage.ts";
 import { versionCommand } from "../commands/version.ts";
 import { xCommand } from "../commands/x.ts";
+import { HACK_VERSION } from "../lib/hack-version.ts";
 import { defineCli } from "./command.ts";
 import { optNoInteractive } from "./options.ts";
 
-type PackageJsonType = {
-  name: string;
-  version: string;
-} & Record<string, unknown>;
-const packageJson = pkg as unknown as PackageJsonType;
-
-/** Set only by the native prerelease compiler; ordinary builds use package.json. */
-declare const __HACK_BUILD_VERSION__: string | undefined;
-
 export const CLI_SPEC = defineCli({
   name: "hack",
-  version:
-    typeof __HACK_BUILD_VERSION__ === "string"
-      ? __HACK_BUILD_VERSION__
-      : packageJson.version,
+  version: HACK_VERSION,
   summary: "Local development without the port-collision tax",
   highlights: [
     "Run many projects and branches side by side, each at a real HTTPS hostname like https://myapp.hack.local.",

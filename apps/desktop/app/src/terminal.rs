@@ -1209,25 +1209,18 @@ impl HackApp {
         })
     }
 
-    /// Type or paste into the active tab. Reports a notice the tab shows
-    /// (a refused paste, a full input queue).
-    pub(crate) fn drive_input(
+    /// Paste into the active tab as the Paste action does (into find while
+    /// it is open). Reports a notice the tab shows (a refused paste).
+    pub(crate) fn drive_paste(
         &mut self,
         text: &str,
-        paste: bool,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         let view = self.active_view(cx).ok_or("no active tab")?;
         if !view.read(cx).kind().is_interactive() {
             return Err("the active tab is read-only".into());
         }
-        view.update(cx, |v, cx| {
-            if paste {
-                v.paste_text(text, cx);
-            } else {
-                v.type_text(text, cx);
-            }
-        });
+        view.update(cx, |v, cx| v.paste(text, cx));
         Ok(view
             .read(cx)
             .notice()
@@ -1253,7 +1246,8 @@ impl HackApp {
         })
     }
 
-    /// Every running tab's session leader and label, in every panel.
+    /// Every session leader each open tab has started (fallbacks
+    /// included) and the tab's label, in every panel.
     pub(crate) fn drive_sessions(&self, cx: &App) -> Vec<(u32, String)> {
         let mut out = Vec::new();
         for panel in self.panels.by_key.values() {
@@ -1261,7 +1255,7 @@ impl HackApp {
             for i in 0..sessions.tab_count() {
                 if let Some(view) = sessions.tab(i) {
                     let v = view.read(cx);
-                    if let Some(leader) = v.leader() {
+                    for &leader in v.leaders() {
                         out.push((leader, v.kind().label()));
                     }
                 }

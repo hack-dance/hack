@@ -101,6 +101,9 @@ pub struct TerminalCore {
     /// Processes left running by retired teardowns that have finished, not
     /// yet handed out by [`Self::take_retired`].
     retired_survivors: usize,
+    /// Every session leader this core started, in order: the first
+    /// attempt and each fallback. See [`Self::leaders`].
+    leaders: Vec<u32>,
 }
 
 /// The notice for input refused whole: larger than the input queue can
@@ -181,6 +184,11 @@ impl TerminalCore {
     }
 
     fn with(emu: Emulator, backend: Backend, kind: SessionKind, remaining: Vec<Launch>) -> Self {
+        let leaders = match &backend {
+            Backend::Pty(pty) => vec![pty.pid()],
+            Backend::Stream(stream) => stream.pid().into_iter().collect(),
+            Backend::Closed => Vec::new(),
+        };
         Self {
             emu,
             backend,
@@ -195,6 +203,7 @@ impl TerminalCore {
             input_sent: false,
             retired: Vec::new(),
             retired_survivors: 0,
+            leaders,
         }
     }
 
@@ -248,6 +257,13 @@ impl TerminalCore {
     /// shell's kind changes if `bash` was missing and `sh` was started.
     pub fn kind(&self) -> &SessionKind {
         &self.kind
+    }
+
+    /// Every session leader this core has started, the first attempt and
+    /// each fallback, whether or not it is still running. Each is also its
+    /// session's id, so a caller can account for what those sessions left.
+    pub fn leaders(&self) -> &[u32] {
+        &self.leaders
     }
 
     /// The running session's leader pid, which is also its session id.
@@ -359,6 +375,7 @@ impl TerminalCore {
         options.size = PtySize::cells(self.emu.cols(), self.emu.rows());
         match Pty::spawn(&options) {
             Ok(pty) => {
+                self.leaders.push(pty.pid());
                 // A full reset: the failed attempt's error text is not part
                 // of the session the user asked for.
                 self.emu.feed(b"\x1bc");

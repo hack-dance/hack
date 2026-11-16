@@ -127,6 +127,7 @@ fn a_container_without_bash_falls_back_to_sh_and_the_tab_says_so() {
     let mut core =
         TerminalCore::session(container_plan(&home, &[("FAKE_HACK_NO_BASH", "1")])).expect("spawn");
     assert_eq!(core.kind().label(), "api · bash", "bash is tried first");
+    let first = core.leader().expect("the bash attempt's leader");
     let screen = pump_until(&mut core, "container:api:sh");
     assert!(screen.contains("container:api:sh"), "{screen:?}");
     assert_eq!(
@@ -135,6 +136,11 @@ fn a_container_without_bash_falls_back_to_sh_and_the_tab_says_so() {
         "the label follows the shell"
     );
     assert_eq!(*core.status(), Status::Running);
+    // Both attempts' leaders are kept, so a caller can account for what
+    // each session left running.
+    let now = core.leader().expect("the sh attempt's leader");
+    assert_ne!(now, first);
+    assert_eq!(core.leaders(), [first, now]);
     assert!(
         !screen.contains("not found"),
         "the failed attempt's message is cleared: {screen:?}"

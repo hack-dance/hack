@@ -162,7 +162,9 @@ paste larger than that is refused whole, never cut, and the tab says so.
 
 `--drive <steps>` runs a steps file in the real window, quits the app the way
 the user does, waits 5 s, and counts every process still alive in a session a
-tab started. It exits 0 only when every step passed and nothing is left.
+tab started, every leader a tab tried included (a container shell that fell
+back from bash to sh started two). It exits 0 only when the app reported every
+step done and nothing is left.
 `--hidden` opens the window without showing it. Each step calls what the
 matching click or key calls; tabs come from the panel's own new-tab menu.
 
@@ -172,8 +174,10 @@ logs | host                     show the Logs tab | open "Host shell"
 container <service>             open "Shell in <service>"
 env <overlay> [<scope>]         open "Host shell with env…" for it
 key <keystroke>                 e.g. key ctrl-c (through the keymap)
-type <text>                     type into the active tab (\r \n \t \\)
-paste <file>                    paste a file's text
+type <text>                     type it, one keystroke per character
+                                (\r or \n is Enter, \t is Tab, \\)
+paste <file>                    paste a file's text as the Paste action
+                                does (into find while it is open)
 expect <text> [<seconds>]       wait for text on the active tab's screen
 wait <milliseconds>
 check-container <service> <pattern>

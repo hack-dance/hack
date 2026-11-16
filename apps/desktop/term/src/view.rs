@@ -494,10 +494,16 @@ impl TerminalView {
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
             return;
         };
+        self.paste(&text, cx);
+    }
+
+    /// Paste `text` as the Paste action does with the clipboard's text:
+    /// into the find field while it is open, otherwise into the PTY.
+    pub fn paste(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.search_open {
-            self.paste_into_find(&text, cx);
+            self.paste_into_find(text, cx);
         } else {
-            self.paste_text(&text, cx);
+            self.paste_text(text, cx);
         }
     }
 
@@ -550,6 +556,12 @@ impl TerminalView {
     /// The running session's leader pid; see [`TerminalCore::leader`].
     pub fn leader(&self) -> Option<u32> {
         self.core.leader()
+    }
+
+    /// Every session leader this tab has started; see
+    /// [`TerminalCore::leaders`].
+    pub fn leaders(&self) -> &[u32] {
+        self.core.leaders()
     }
 
     pub fn status(&self) -> &Status {

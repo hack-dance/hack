@@ -25,8 +25,10 @@
 //! container <service>             open "Shell in <service>"
 //! env <overlay> [<scope>]         open "Host shell with env…" for it
 //! key <keystroke>                 dispatch a keystroke, e.g. key ctrl-c
-//! type <text>                     type into the active tab (\r \n \t \\)
-//! paste <file>                    paste a file's text (relative to the steps file)
+//! type <text>                     type it, one keystroke per character
+//!                                 (\r or \n is Enter, \t is Tab, \\)
+//! paste <file>                    paste a file's text as the Paste action
+//!                                 does (relative to the steps file)
 //! expect <text> [<seconds>]       wait for text on the active tab's screen
 //! wait <milliseconds>
 //! check-container <service> <pattern>
@@ -173,6 +175,26 @@ fn unescape(s: &str) -> String {
     out
 }
 
+/// The keystroke a user makes for `c`: Enter for a line break, Tab, Space,
+/// shift for an upper-case letter, otherwise the character itself. The
+/// window turns its text into input as the platform would.
+fn keystroke_for(c: char) -> Keystroke {
+    let (key, key_char): (String, Option<String>) = match c {
+        '\r' | '\n' => ("enter".into(), None),
+        '\t' => ("tab".into(), None),
+        ' ' => ("space".into(), Some(" ".into())),
+        c => (c.to_lowercase().collect(), Some(c.to_string())),
+    };
+    Keystroke {
+        modifiers: gpui_kit::Modifiers {
+            shift: c.is_uppercase(),
+            ..Default::default()
+        },
+        key,
+        key_char,
+    }
+}
+
 fn say(line: &str) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{TAG} {line}");
@@ -186,6 +208,8 @@ fn say(line: &str) {
 pub async fn run(win: Win, steps: Vec<Step>, cx: &mut AsyncApp) {
     let handle = &win;
     let mut seen = BTreeSet::new();
+    let mut ran = 0;
+    let mut all = true;
     for (i, step) in steps.iter().enumerate() {
         if *step == Step::Quit {
             break;
@@ -193,13 +217,25 @@ pub async fn run(win: Win, steps: Vec<Step>, cx: &mut AsyncApp) {
         let result = run_step(handle, step, cx).await;
         report_sessions(handle, &mut seen, cx);
         match result {
-            Ok(detail) => say(&format!("step {} ok {step:?}{detail}", i + 1)),
+            Ok(detail) => {
+                ran += 1;
+                say(&format!("step {} ok {step:?}{detail}", i + 1));
+            }
             Err(why) => {
+                all = false;
                 say(&format!("step {} failed {step:?}: {why}", i + 1));
                 break;
             }
         }
     }
+    // The supervisor accepts a run only with this receipt: an app that
+    // exits early, even cleanly, has not run every step.
+    if all {
+        say(&format!("done\t{ran}"));
+    }
+    // Once more just before quitting: a container shell that fell back
+    // from bash to sh after its step has a new leader.
+    report_sessions(handle, &mut seen, cx);
     say("quit");
     cx.update(|cx| cx.quit());
 }
@@ -314,14 +350,21 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
             .map_err(|e| e.to_string())?;
             Ok(String::new())
         }
-        Step::Type(text) => handle
-            .update(cx, |app, _, cx| app.drive_input(text, false, cx))
-            .map_err(|e| e.to_string())?,
+        Step::Type(text) => {
+            for c in text.chars() {
+                let stroke = keystroke_for(c);
+                cx.update_window(handle.window, |_, window, cx| {
+                    window.dispatch_keystroke(stroke, cx);
+                })
+                .map_err(|e| e.to_string())?;
+            }
+            Ok(String::new())
+        }
         Step::Paste(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("read {}: {e}", path.display()))?;
             let detail = handle
-                .update(cx, |app, _, cx| app.drive_input(&text, true, cx))
+                .update(cx, |app, _, cx| app.drive_paste(&text, cx))
                 .map_err(|e| e.to_string())??;
             Ok(format!(" {} bytes{detail}", text.len()))
         }
@@ -444,9 +487,13 @@ pub fn supervise(steps_file: &Path, child_args: &[String]) -> i32 {
             }
         }
     });
+    let expected = parse(&text, base)
+        .map(|steps| steps.iter().take_while(|s| **s != Step::Quit).count())
+        .unwrap_or_default();
     let mut leaders = Vec::new();
     let mut checks = Vec::new();
     let mut failed = false;
+    let mut done = false;
     let mut take = |line: String| {
         println!("{line}");
         let Some(rest) = line.strip_prefix(TAG).map(str::trim_start) else {
@@ -455,10 +502,13 @@ pub fn supervise(steps_file: &Path, child_args: &[String]) -> i32 {
         let fields: Vec<&str> = rest.split('\t').collect();
         match fields.as_slice() {
             ["session", pid, ..] => {
-                if let Ok(pid) = pid.parse::<u32>() {
+                if let Ok(pid) = pid.parse::<u32>()
+                    && !leaders.contains(&pid)
+                {
                     leaders.push(pid);
                 }
             }
+            ["done", n] => done = n.parse::<usize>().is_ok_and(|n| n == expected),
             ["check-container", svc, pat, native, branch, hack, root] => {
                 checks.push(ContainerCheck {
                     service: (*svc).into(),
@@ -532,7 +582,10 @@ pub fn supervise(steps_file: &Path, child_args: &[String]) -> i32 {
             }
         }
     }
-    let ok = quit_ok && !failed && left.is_empty() && container_left == 0;
+    if !done {
+        println!("{TAG} the app did not report every step done ({expected} expected)");
+    }
+    let ok = quit_ok && done && !failed && left.is_empty() && container_left == 0;
     println!("{TAG} result {}", if ok { "pass" } else { "fail" });
     i32::from(!ok)
 }
@@ -556,12 +609,54 @@ fn leftovers(leaders: &[u32]) -> Vec<(u32, u32)> {
     out.into_iter().collect()
 }
 
+/// How long a probe after the app has exited (`ps`, `hack exec`) may run.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run `cmd` with stdout captured, for at most `limit`. On timeout the
+/// command is killed and an error returned; a process it left holding the
+/// pipe cannot hang the caller, because the pipe is read on a thread.
+fn run_bounded(mut cmd: Command, limit: Duration) -> Result<(bool, String), String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut buf);
+        let _ = tx.send(buf);
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("did not finish within {limit:?}"));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let left = limit
+        .saturating_sub(start.elapsed())
+        .max(Duration::from_secs(1));
+    let out = rx
+        .recv_timeout(left)
+        .map_err(|_| "its output stayed open (a process it started holds the pipe)".to_owned())?;
+    Ok((status.success(), out))
+}
+
 fn command_name(pid: u32) -> String {
-    Command::new("ps")
-        .args(["-o", "comm=", "-p", &pid.to_string()])
-        .output()
+    let mut cmd = Command::new("ps");
+    cmd.args(["-o", "comm=", "-p", &pid.to_string()]);
+    run_bounded(cmd, Duration::from_secs(5))
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .map(|(_, out)| out.trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "?".into())
 }
@@ -589,13 +684,12 @@ impl ContainerCheck {
             .env(
                 "HACK_RUNTIME_BACKEND",
                 if self.native { "native" } else { "compose" },
-            )
-            .stdin(Stdio::null());
-        let out = cmd.output().map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(format!("hack exec exited {}", out.status));
+            );
+        let (ok, out) = run_bounded(cmd, PROBE_TIMEOUT).map_err(|e| format!("hack exec: {e}"))?;
+        if !ok {
+            return Err("hack exec failed".into());
         }
-        Ok(String::from_utf8_lossy(&out.stdout)
+        Ok(out
             .lines()
             .filter(|l| l.contains(&self.pattern) && !l.contains("ps -eo args"))
             .count())

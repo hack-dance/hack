@@ -10,6 +10,13 @@ import tempfile
 import time
 
 
+def publish_text(path, text):
+    """Make fixture readiness observable only after its content is complete."""
+    pending = path.with_name(path.name + '.pending')
+    pending.write_text(text)
+    pending.replace(path)
+
+
 def alive(pid):
     result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
     return result.returncode == 0 and not result.stdout.strip().startswith('Z')
@@ -19,11 +26,11 @@ def worker(root, mode):
     for sig in [signal.SIGHUP, signal.SIGINT, signal.SIGTERM]:
         signal.signal(sig, signal.SIG_IGN)
     with open('/dev/tty') as tty:
-        (root / 'tty.json').write_text(json.dumps({
+        publish_text(root / 'tty.json', json.dumps({
             'stdin': os.isatty(0), 'devTty': os.isatty(tty.fileno()),
             'foreground': os.tcgetpgrp(tty.fileno()) == os.getpgrp(),
         }))
-    (root / 'child.pid').write_text(str(os.getpid()))
+    publish_text(root / 'child.pid', str(os.getpid()))
     if mode == 'late-abort':
         sys.exit(7)
     subprocess.Popen([sys.executable, __file__, 'grandchild', str(root)])
@@ -36,16 +43,13 @@ def launcher(root, bun, program, mode):
         signal.signal(sig, signal.SIG_IGN)
     original = os.tcgetpgrp(0)
     sibling = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-    (root / 'sibling.pid').write_text(str(sibling.pid))
+    publish_text(root / 'sibling.pid', str(sibling.pid))
     child = subprocess.Popen([bun, program, mode, str(root), sys.executable, __file__])
-    (root / 'wrapper.pid').write_text(str(child.pid))
+    publish_text(root / 'wrapper.pid', str(child.pid))
     code = child.wait()
-    # Existence is readiness for the observer, so publish only complete JSON.
-    completion = root / 'completion.json.pending'
-    completion.write_text(json.dumps({
+    publish_text(root / 'completion.json', json.dumps({
         'wrapperCode': code, 'foregroundRestored': os.tcgetpgrp(0) == original,
     }))
-    completion.replace(root / 'completion.json')
     while True:
         time.sleep(1)
 
@@ -116,7 +120,7 @@ if sys.argv[1] == 'worker':
 elif sys.argv[1] == 'grandchild':
     for sig in [signal.SIGHUP, signal.SIGINT, signal.SIGTERM]:
         signal.signal(sig, signal.SIG_IGN)
-    (pathlib.Path(sys.argv[2]) / 'grandchild.pid').write_text(str(os.getpid()))
+    publish_text(pathlib.Path(sys.argv[2]) / 'grandchild.pid', str(os.getpid()))
     while True:
         time.sleep(1)
 else:

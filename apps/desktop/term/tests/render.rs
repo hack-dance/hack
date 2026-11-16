@@ -50,26 +50,37 @@ mod harness {
             }
             return;
         }
+        // No case is ignored: asked for ignored cases only, run none.
+        if has("--ignored") {
+            println!("test result: ok. 0 passed; 0 failed");
+            return;
+        }
         let exact = has("--exact");
         let mut filters: Vec<&str> = Vec::new();
-        let mut skip_value = false;
-        for a in &args {
-            if skip_value {
-                skip_value = false;
-                continue;
-            }
+        let mut skips: Vec<&str> = Vec::new();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
             match a.as_str() {
-                // Options that take a value.
-                "--test-threads" | "--format" | "--color" | "--skip" => skip_value = true,
-                s if s.starts_with('-') => {}
+                "--skip" => skips.extend(it.next().map(String::as_str)),
+                // Options that take a value this harness does not use.
+                "--test-threads" | "--format" | "--color" | "-Z" => {
+                    it.next();
+                }
+                // Accepted and meaningless here: every case runs on the
+                // main thread, one at a time, with output shown.
+                "--exact" | "--nocapture" | "--show-output" | "--quiet" | "-q"
+                | "--include-ignored" => {}
+                s if s.starts_with('-') => {
+                    eprintln!("render tests: unsupported option {s}");
+                    std::process::exit(2);
+                }
                 s => filters.push(s),
             }
         }
+        let matches = |name: &str, f: &str| if exact { name == f } else { name.contains(f) };
         let selected = cases.iter().filter(|(name, _)| {
-            filters.is_empty()
-                || filters
-                    .iter()
-                    .any(|f| if exact { name == f } else { name.contains(f) })
+            (filters.is_empty() || filters.iter().any(|f| matches(name, f)))
+                && !skips.iter().any(|f| matches(name, f))
         });
         let mut failed = 0;
         let mut ran = 0;

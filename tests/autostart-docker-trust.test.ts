@@ -14,7 +14,10 @@ import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { assertAutostartDockerConfigTrusted } from "../src/lib/autostart-docker-trust.ts";
+import {
+  assertAutostartDockerConfigTrusted,
+  resolveSocketPath,
+} from "../src/lib/autostart-docker-trust.ts";
 import {
   isDarwinAdminDirectory,
   walkReplaceableChain,
@@ -258,7 +261,7 @@ const SOCKET_FIXTURE_BASE = socketFixtureBase();
 function describeSocketCheck(path: string): string {
   const lines: string[] = [`socket check for ${path}`];
   try {
-    const physical = realpathSync(path);
+    const physical = resolveSocketPath(path);
     const info = lstatSync(physical);
     lines.push(
       `resolves to ${physical}: isSocket=${info.isSocket()} uid=${info.uid} (process ${process.getuid?.()}) mode=${(info.mode & 0o7777).toString(8)}`
@@ -465,3 +468,44 @@ test.skipIf(SOCKET_FIXTURE_BASE === null)(
     }
   }
 );
+
+// On macOS, Bun's realpathSync opens its path and a unix socket refuses that
+// (EOPNOTSUPP), which refused every real engine socket. resolveSocketPath
+// resolves the parent directory and follows a final link by hand instead.
+test("socket paths resolve through parent directories and final links without opening the socket", async () => {
+  const dir = join(home, "sockets");
+  await mkdir(dir, { mode: 0o700 });
+  const socket = join(dir, "engine.sock");
+  const server = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socket, resolve);
+    });
+    const relative = join(dir, "relative.sock");
+    const absolute = join(home, "absolute.sock");
+    const chained = join(home, "chained.sock");
+    await symlink("engine.sock", relative);
+    await symlink(socket, absolute);
+    await symlink(relative, chained);
+    for (const path of [socket, relative, absolute, chained]) {
+      expect(resolveSocketPath(path)).toBe(socket);
+    }
+    // Through a linked parent directory too.
+    const linkedDir = join(home, "linked-dir");
+    await symlink(dir, linkedDir);
+    expect(resolveSocketPath(join(linkedDir, "engine.sock"))).toBe(socket);
+    // A missing entry stays ENOENT, which the trust check treats as absent.
+    expect(() => resolveSocketPath(join(dir, "missing.sock"))).toThrow(
+      expect.objectContaining({ code: "ENOENT" })
+    );
+    // A link loop is bounded.
+    await symlink(join(home, "loop-b.sock"), join(home, "loop-a.sock"));
+    await symlink(join(home, "loop-a.sock"), join(home, "loop-b.sock"));
+    expect(() => resolveSocketPath(join(home, "loop-a.sock"))).toThrow(
+      "Too many socket links"
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

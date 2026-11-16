@@ -3,10 +3,11 @@ import {
   lstatSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import {
   type AutostartAclDependencies,
   assertAutostartPathAclsTrustedSync,
@@ -203,6 +204,25 @@ export function assertAutostartDockerConfigTrusted(opts: {
   }
 }
 
+/**
+ * The physical path of a unix socket. On macOS, Bun's `realpathSync` opens the
+ * path and a socket refuses that (EOPNOTSUPP), which refused every real engine
+ * socket. Resolve the parent directory instead, and follow a final link by
+ * hand. A missing entry still throws ENOENT.
+ */
+export function resolveSocketPath(path: string): string {
+  let current = path;
+  for (let hops = 0; hops <= 40; hops += 1) {
+    const resolved = join(realpathSync(dirname(current)), basename(current));
+    if (!lstatSync(resolved).isSymbolicLink()) {
+      return resolved;
+    }
+    const target = readlinkSync(resolved);
+    current = isAbsolute(target) ? target : join(dirname(resolved), target);
+  }
+  throw new Error("Too many socket links");
+}
+
 /** Network transports need peer authentication beyond filesystem/context ownership. */
 function assertLoginDockerTransport(
   host: unknown,
@@ -216,7 +236,7 @@ function assertLoginDockerTransport(
   const checked = new Set<string>();
   let physical: string | null = null;
   try {
-    physical = realpathSync(path);
+    physical = resolveSocketPath(path);
     const info = lstatSync(physical);
     if (!info.isSocket() || (info.uid !== uid && info.uid !== 0)) {
       throw new Error("Unsafe Docker socket");

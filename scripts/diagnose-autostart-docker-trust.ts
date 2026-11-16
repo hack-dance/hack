@@ -13,19 +13,14 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  lstatSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-} from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   assertAutostartDockerConfigTrusted,
   DEFAULT_DOCKER_HOST,
   DOCKER_SYSTEM_PLUGIN_DIRECTORIES,
+  resolveSocketPath,
 } from "../src/lib/autostart-docker-trust.ts";
 import { hasDevMutationAcl } from "../src/lib/dev-acl.ts";
 import {
@@ -198,7 +193,7 @@ if (refusals.length === 0) {
     const checked = new Set<string>();
     let physical: string | null = null;
     try {
-      physical = realpathSync(path);
+      physical = resolveSocketPath(path);
       console.log(`socket resolves to: ${describe(physical)}`);
       const info = lstatSync(physical);
       if (!info.isSocket() || (info.uid !== uid && info.uid !== 0)) {

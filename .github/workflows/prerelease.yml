@@ -94,6 +94,14 @@ jobs:
         run: mise exec zig -- scripts/build-native-candidate.sh "$HACK_PRERELEASE_BUNDLE" "--version=$HACK_PRERELEASE_VERSION"
       - name: Package verified payload and outer checksum
         run: bun scripts/prerelease-plan.ts package
+      # HACK-2262: an existing prerelease channel must be able to take this
+      # candidate with the documented upgrade command. Install the previous
+      # published prerelease with its own manager, then upgrade it with that
+      # retained manager; fail before anything is published.
+      - name: Upgrade the previous prerelease to this candidate with its retained manager
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/check-prerelease-upgrade.ts
       - name: Retain reviewable artifacts
         uses: actions/upload-artifact@v4
         with:

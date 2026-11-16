@@ -952,8 +952,9 @@ fixtureTest(
       new Error("unexpected download")
     );
     try {
+      // The refusal names the takeover step instead of a missing allowlist.
       await expect(external.install("5.0.0-next.2")).rejects.toThrow(
-        "none is currently approved"
+        "upgrade-manager"
       );
       expect(mock).not.toHaveBeenCalled();
     } finally {

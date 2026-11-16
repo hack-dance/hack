@@ -30,7 +30,6 @@ import {
 import { hasDevMutationAcl } from "../src/lib/dev-acl.ts";
 import {
   isDarwinAdminDirectory,
-  isDarwinDaemonDirectory,
   walkReplaceableChain,
 } from "../src/lib/path-trust.ts";
 
@@ -227,7 +226,6 @@ if (refusals.length === 0) {
       checked,
       allowMissing: true,
       acceptDarwinAdminDirectories: true,
-      acceptDarwinDaemonDirectories: true,
     });
     if (refusals.length > 0) {
       // Already refused above.
@@ -242,8 +240,7 @@ if (refusals.length === 0) {
         if (
           info.isDirectory() &&
           (info.mode & 0o022) !== 0 &&
-          !isDarwinAdminDirectory(info) &&
-          !isDarwinDaemonDirectory(info)
+          !isDarwinAdminDirectory(info)
         ) {
           refuse("socket parent", `${describe(entry)} is replaceable`);
           break;
@@ -275,3 +272,8 @@ console.log(
       : "first refused input: none"
 );
 console.log(`product decision (login child): ${decision}`);
+if (refusals[0]?.startsWith("socket") && context === "default") {
+  console.log(
+    "hint: no Docker context is selected, so the default /var/run/docker.sock is used; select your engine's own context (for example: docker context use orbstack, or desktop-linux), whose socket is in your home"
+  );
+}

@@ -95,19 +95,17 @@ writer is group `admin`, such as `/Applications` (`root:admin`, mode `0775`),
 is accepted. Administrators can already replace system software, so this adds
 no new writer. A world-writable directory is still refused, and checkout,
 config, registry and TLS inputs never get this exception.
-The Docker socket path alone also accepts a root-owned directory whose only
-extra writer is group `daemon`, which is how a stock macOS sets up `/var/run`
-(`/private/var/run`, `root:daemon`, mode `0775`). With no context or
-`DOCKER_HOST`, the engine is `/var/run/docker.sock`. Docker Desktop and
-OrbStack install it as a root-owned link there to a socket in your home.
-This trusts the `daemon` system account (uid 1), which can replace entries in
-`/var/run`, to the same degree as the system services that run under it.
-Helper and plugin lookup never accept a `daemon` directory. A socket
-directory owned by anyone but root, writable by another group (such as
-`staff`) or writable by everyone is still refused. The socket itself must be
-owned by you or root. To avoid trusting `/var/run`, select your engine's own
-context (for example `docker context use orbstack` or `desktop-linux`), whose
-socket lives in your home.
+On macOS, select your Docker engine's own context. With no context or
+`DOCKER_HOST`, the engine is `/var/run/docker.sock`, which Docker Desktop and
+OrbStack install as a root-owned link in `/var/run` (`/private/var/run`,
+`root:daemon`, mode `0775`). The `daemon` system account can replace that link
+between the check and Docker reopening it, so automatic startup refuses the
+default socket there. Both engines' own contexts (`desktop-linux` for Docker
+Desktop, `orbstack` for OrbStack; `docker context use <name>`) name a socket in
+your home, owned by you, which passes. To check what login would decide, run
+`bun scripts/diagnose-autostart-docker-trust.ts` from a Hack checkout: it prints
+the selected endpoint, the first refused input and the decision, and changes
+nothing.
 A refused search
 path does not consume a project's attempt for this boot.
 The login child runs Hack itself by its executable path, not through that

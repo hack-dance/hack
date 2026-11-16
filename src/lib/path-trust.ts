@@ -46,12 +46,6 @@ export function checkReplaceableChain(opts: {
    * ({@link isDarwinAdminDirectory}), such as `/Applications`.
    */
   readonly acceptDarwinAdminDirectories?: boolean;
-  /**
-   * Docker socket path only: also accept a macOS `daemon` directory
-   * ({@link isDarwinDaemonDirectory}), such as `/var/run`. Never set for
-   * executable or plugin lookup.
-   */
-  readonly acceptDarwinDaemonDirectories?: boolean;
 }): string | null {
   const walk = walkReplaceableChain(opts);
   return "error" in walk ? walk.error : null;
@@ -76,12 +70,6 @@ export function walkReplaceableChain(opts: {
    * ({@link isDarwinAdminDirectory}), such as `/Applications`.
    */
   readonly acceptDarwinAdminDirectories?: boolean;
-  /**
-   * Docker socket path only: also accept a macOS `daemon` directory
-   * ({@link isDarwinDaemonDirectory}), such as `/var/run`. Never set for
-   * executable or plugin lookup.
-   */
-  readonly acceptDarwinDaemonDirectories?: boolean;
 }):
   | { readonly error: string }
   | { readonly existing: string; readonly complete: boolean } {
@@ -136,7 +124,6 @@ type ChainWalk = {
     readonly stopAtLink?: boolean;
     readonly allowMissing?: boolean;
     readonly acceptDarwinAdminDirectories?: boolean;
-    readonly acceptDarwinDaemonDirectories?: boolean;
   };
   readonly checked: Set<string>;
   readonly queue: string[];
@@ -154,7 +141,6 @@ function checkChainEntry(state: ChainWalk, entry: string): string | null {
     uid: state.opts.uid,
     hackHome: state.opts.hackHome,
     acceptDarwinAdminDirectories: state.opts.acceptDarwinAdminDirectories,
-    acceptDarwinDaemonDirectories: state.opts.acceptDarwinDaemonDirectories,
   });
 }
 
@@ -228,7 +214,6 @@ function checkServicePathEntry(opts: {
   readonly uid: number;
   readonly hackHome: string | null;
   readonly acceptDarwinAdminDirectories?: boolean;
-  readonly acceptDarwinDaemonDirectories?: boolean;
 }): string | null {
   let info: Stats;
   try {
@@ -263,10 +248,7 @@ function checkServicePathEntry(opts: {
   if (
     (info.mode & 0o022) === 0 ||
     sticky ||
-    (opts.acceptDarwinAdminDirectories === true &&
-      isDarwinAdminDirectory(info)) ||
-    (opts.acceptDarwinDaemonDirectories === true &&
-      isDarwinDaemonDirectory(info))
+    (opts.acceptDarwinAdminDirectories === true && isDarwinAdminDirectory(info))
   ) {
     return null;
   }
@@ -325,33 +307,6 @@ export function isDarwinAdminDirectory(
     info.isDirectory() &&
     info.uid === 0 &&
     info.gid === DARWIN_ADMIN_GID &&
-    (Number(info.mode) & 0o002) === 0
-  );
-}
-
-/** The fixed group id of macOS's `daemon` group. */
-export const DARWIN_DAEMON_GID = 1;
-
-/**
- * A macOS `daemon` directory: `/var/run` (`/private/var/run`) is
- * root:daemon 0775 on a stock install, and Docker Desktop and OrbStack put
- * the default engine link `/var/run/docker.sock` there. Its extra writers are
- * the members of group `daemon`: by default `root` and the `daemon` system
- * account (uid 1), which can replace entries there. Accepting it therefore
- * trusts the `daemon` account, unlike {@link isDarwinAdminDirectory}. Only the
- * Docker socket path opts in; executable and plugin lookup never do.
- */
-export function isDarwinDaemonDirectory(
-  info: Pick<Stats, "uid" | "gid" | "mode"> & {
-    readonly isDirectory: () => boolean;
-  },
-  platform: NodeJS.Platform = process.platform
-): boolean {
-  return (
-    platform === "darwin" &&
-    info.isDirectory() &&
-    info.uid === 0 &&
-    info.gid === DARWIN_DAEMON_GID &&
     (Number(info.mode) & 0o002) === 0
   );
 }

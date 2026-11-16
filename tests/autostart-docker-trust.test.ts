@@ -15,10 +15,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { assertAutostartDockerConfigTrusted } from "../src/lib/autostart-docker-trust.ts";
-import {
-  isDarwinAdminDirectory,
-  isDarwinDaemonDirectory,
-} from "../src/lib/path-trust.ts";
+import { isDarwinAdminDirectory } from "../src/lib/path-trust.ts";
 
 /**
  * Checks here do not read the runner environment, the system plugin
@@ -329,47 +326,54 @@ test("sticky user and system plugin directories cannot admit late plugin creatio
 });
 
 /**
- * The stock macOS default-socket layout (Docker Desktop and OrbStack), element
- * by element, against the rules the socket walk applies. Root-owned entries
- * cannot be created by a test, so this checks each element's rule:
- * - `/var` -> `/private/var`: a root-owned link (followed, like any link);
- * - `/private/var`: root:wheel 0755 (nobody else can write);
- * - `/private/var/run`: root:daemon 0775, accepted only on the socket path;
- * - `/var/run/docker.sock`: a root-owned link into the user's home;
- * - the engine's directories in the home and the socket: owned by the user.
+ * The stock macOS default socket, `/var/run/docker.sock`, is a root-owned link
+ * in `/var/run`, which is root:daemon 0775. The `daemon` account could replace
+ * that link after the check and before Docker reopens it, so automatic startup
+ * refuses the default socket there (a root:daemon directory is never accepted).
+ * Docker Desktop and OrbStack select their own context, whose socket is in the
+ * user's home: that chain is owned by the user and passes.
  */
-test("the stock macOS default-socket layout passes each rule of the socket walk", () => {
-  const entry = (fields: {
-    uid: number;
-    gid: number;
-    mode: number;
-    dir?: boolean;
-  }) => ({ ...fields, isDirectory: () => fields.dir !== false });
-  const user = 501;
-  // /private/var/run: the only group-writable element.
-  const varRun = entry({ uid: 0, gid: 1, mode: 0o4_0775 });
-  expect(isDarwinDaemonDirectory(varRun, "darwin")).toBe(true);
-  // Lookup paths never accept it: only the socket walk opts in.
+test("the stock macOS /var/run is not trusted for the default socket; a selected engine context avoids it", async () => {
+  const varRun = {
+    uid: 0,
+    gid: 1,
+    mode: 0o4_0775,
+    isDirectory: () => true,
+  };
   expect(isDarwinAdminDirectory(varRun, "darwin")).toBe(false);
-  // root:wheel 0755 and the user's own 0700/0755 directories need no
-  // exception: nobody else can write them.
-  for (const own of [
-    entry({ uid: 0, gid: 0, mode: 0o4_0755 }),
-    entry({ uid: user, gid: 20, mode: 0o4_0700 }),
-    entry({ uid: user, gid: 20, mode: 0o4_0755 }),
-  ]) {
-    expect(own.mode & 0o022).toBe(0);
-  }
-  // The variants that must still refuse on the socket path.
-  for (const unsafe of [
-    entry({ uid: 0, gid: 1, mode: 0o4_0777 }), // world-writable
-    entry({ uid: user, gid: 1, mode: 0o4_0775 }), // not root's
-    entry({ uid: 0, gid: 20, mode: 0o4_0775 }), // group staff
-    entry({ uid: 0, gid: 12, mode: 0o4_0775 }), // group everyone
-  ]) {
-    expect(isDarwinDaemonDirectory(unsafe, "darwin")).toBe(false);
-    expect(isDarwinAdminDirectory(unsafe, "darwin")).toBe(false);
-  }
+  // A directory others can write, standing in for /var/run, refuses...
+  const shared = join(home, "var-run");
+  await mkdir(shared, { mode: 0o700 });
+  await chmod(shared, 0o775);
+  expect(() =>
+    trustDocker({ defaultHost: `unix://${join(shared, "docker.sock")}` })
+  ).toThrow("Automatic startup refused unsafe Docker engine-selection files");
+  // ...while a selected engine context means the default socket is never
+  // consulted. (Its endpoint here is the missing stand-in below `/`: on Linux
+  // a socket under the fixture home would sit below sticky /tmp.)
+  const name = "orbstack";
+  const context = join(
+    home,
+    ".docker/contexts/meta",
+    createHash("sha256").update(name).digest("hex")
+  );
+  await mkdir(context, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(context, "meta.json"),
+    JSON.stringify({
+      Name: name,
+      Endpoints: { docker: { Host: MISSING_DEFAULT_HOST } },
+    }),
+    { mode: 0o600 }
+  );
+  await writeFile(
+    join(home, ".docker/config.json"),
+    JSON.stringify({ currentContext: name }),
+    { mode: 0o600 }
+  );
+  expect(() =>
+    trustDocker({ defaultHost: `unix://${join(shared, "docker.sock")}` })
+  ).not.toThrow();
 });
 
 // The socket chain gets its own ACL inspection, separate from the selection

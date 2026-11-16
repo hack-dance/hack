@@ -13,19 +13,17 @@ import {
 } from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
-import {
-  isDarwinAdminDirectory,
-  isDarwinDaemonDirectory,
-  walkReplaceableChain,
-} from "./path-trust.ts";
+import { isDarwinAdminDirectory, walkReplaceableChain } from "./path-trust.ts";
 
 const LOGIN_DOCKER_TRANSPORT = /^unix:\/\//;
 
 /**
  * Docker's engine when no context or `DOCKER_HOST` selects another. On macOS
- * Docker Desktop and OrbStack install it as a root-owned link in `/var/run`
- * (root:daemon 0775) to a socket in the user's home; only this socket path
- * accepts that `daemon` directory.
+ * Docker Desktop and OrbStack install it as a root-owned link in `/var/run`,
+ * which is root:daemon 0775: the `daemon` account could replace that link
+ * after this check and before Docker reopens it, so automatic startup refuses
+ * it. Both engines' own contexts (`desktop-linux`, `orbstack`) name a socket
+ * in the user's home, which passes.
  */
 export const DEFAULT_DOCKER_HOST = "unix:///var/run/docker.sock";
 
@@ -237,8 +235,6 @@ function assertLoginDockerTransport(
     checked,
     allowMissing: true,
     acceptDarwinAdminDirectories: true,
-    // The default engine link lives in /var/run (root:daemon) on macOS.
-    acceptDarwinDaemonDirectories: true,
   });
   if ("error" in trust) {
     throw new Error("Unsafe socket path");
@@ -251,8 +247,7 @@ function assertLoginDockerTransport(
     if (
       info.isDirectory() &&
       (info.mode & 0o022) !== 0 &&
-      !isDarwinAdminDirectory(info) &&
-      !isDarwinDaemonDirectory(info)
+      !isDarwinAdminDirectory(info)
     ) {
       throw new Error("Replaceable socket parent");
     }

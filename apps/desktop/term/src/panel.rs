@@ -288,8 +288,9 @@ impl TerminalPanel {
         // The view may be dropped now, and its quit handler with it, so the
         // panel keeps every teardown it had: the one starting here and any
         // the session started by itself.
-        let any = shutdown.is_some() || !retired.is_empty();
-        self.closing.extend(retired);
+        let any = shutdown.is_some() || !retired.pending.is_empty();
+        self.left_running += retired.survivors;
+        self.closing.extend(retired.pending);
         if let Some(shutdown) = shutdown {
             self.closing.push(shutdown.terminate_in_background());
         }

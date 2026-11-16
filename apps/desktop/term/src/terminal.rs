@@ -91,6 +91,17 @@ pub struct TerminalCore {
     /// the session ended, a failed attempt replaced) that have not finished.
     /// Kept so app quit can hurry and await them; see [`Self::take_retired`].
     retired: Vec<PendingTeardown>,
+    /// Processes left running by retired teardowns that have finished, not
+    /// yet handed out by [`Self::take_retired`].
+    retired_survivors: usize,
+}
+
+/// What [`TerminalCore::take_retired`] hands out: teardowns still running,
+/// and how many processes the finished ones left running.
+#[derive(Debug, Default)]
+pub struct Retired {
+    pub pending: Vec<PendingTeardown>,
+    pub survivors: usize,
 }
 
 impl TerminalCore {
@@ -161,14 +172,28 @@ impl TerminalCore {
             started: Instant::now(),
             input_sent: false,
             retired: Vec::new(),
+            retired_survivors: 0,
         }
+    }
+
+    /// Drop finished retired teardowns, keeping the count of what each
+    /// left running so it can still be reported.
+    fn prune_retired(&mut self) {
+        let mut survivors = 0;
+        self.retired.retain(|pending| match pending.try_result() {
+            Some(done) => {
+                survivors += done.survivors.len();
+                false
+            }
+            None => true,
+        });
+        self.retired_survivors += survivors;
     }
 
     /// End a backend this core no longer uses on a reaper thread, and keep
     /// the handle until it finishes.
     fn retire(&mut self, backend: Backend) {
-        self.retired
-            .retain(|pending| pending.try_result().is_none());
+        self.prune_retired();
         let shutdown = match backend {
             Backend::Pty(pty) => Shutdown::Pty(pty),
             Backend::Stream(stream) => Shutdown::Stream(stream),
@@ -179,11 +204,14 @@ impl TerminalCore {
 
     /// Give up the teardowns of backends this core ended by itself that
     /// are still running, so the caller can hurry and await them (app
-    /// quit) or keep them after the view is gone (closing a tab).
-    pub fn take_retired(&mut self) -> Vec<PendingTeardown> {
-        self.retired
-            .retain(|pending| pending.try_result().is_none());
-        std::mem::take(&mut self.retired)
+    /// quit) or keep them after the view is gone (closing a tab), with the
+    /// number of processes the finished ones left running, to report.
+    pub fn take_retired(&mut self) -> Retired {
+        self.prune_retired();
+        Retired {
+            pending: std::mem::take(&mut self.retired),
+            survivors: std::mem::take(&mut self.retired_survivors),
+        }
     }
 
     pub fn emulator(&mut self) -> &mut Emulator {
@@ -370,5 +398,47 @@ impl TerminalCore {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Hurry;
+
+    fn finished(survivors: Vec<libc::pid_t>) -> PendingTeardown {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Teardown {
+            gone: survivors.is_empty(),
+            escalated: false,
+            survivors,
+        })
+        .expect("send");
+        PendingTeardown::new(rx, Hurry::new(Duration::ZERO))
+    }
+
+    #[test]
+    fn finished_retired_teardowns_still_report_what_they_left_running() {
+        let mut core = TerminalCore::stream(
+            &StreamSource::File(std::path::PathBuf::from("/dev/null")),
+            10,
+        )
+        .expect("core");
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let running = PendingTeardown::new(rx, Hurry::new(Duration::ZERO));
+        core.retired = vec![finished(vec![101, 102]), finished(Vec::new()), running];
+        // Pruning on the way (another backend retired) must not lose them.
+        core.prune_retired();
+        core.retired.push(finished(vec![103]));
+
+        let taken = core.take_retired();
+        assert_eq!(taken.survivors, 3, "every survivor of a finished teardown");
+        assert_eq!(taken.pending.len(), 1, "only the unfinished one is pending");
+        let again = core.take_retired();
+        assert_eq!(
+            (again.survivors, again.pending.len()),
+            (0, 0),
+            "handed out once"
+        );
     }
 }

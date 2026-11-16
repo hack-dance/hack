@@ -178,7 +178,7 @@ impl TerminalView {
         // out the close grace: cut that short and await them too.
         cx.on_app_quit(|this, cx| {
             let shutdown = this.core.take_shutdown();
-            let retired = this.core.take_retired();
+            let retired = this.core.take_retired().pending;
             for pending in &retired {
                 pending.hurry();
             }
@@ -254,7 +254,7 @@ impl TerminalView {
 
     /// Give up the teardowns of backends the session ended by itself that
     /// are still running (see [`TerminalCore::take_retired`]).
-    pub fn take_retired(&mut self) -> Vec<crate::session::PendingTeardown> {
+    pub fn take_retired(&mut self) -> crate::terminal::Retired {
         self.core.take_retired()
     }
 

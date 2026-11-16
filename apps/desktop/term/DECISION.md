@@ -702,8 +702,10 @@ cgroups or job objects.
   within the same window. The same holds for a backend the terminal ends
   by itself: a stream whose output ended while its process runs on, a
   session that ended, or a failed attempt replaced by the next. The core
-  keeps those teardowns until they finish; the view's quit handler cuts
-  their grace and awaits them, and closing a tab hands them to the panel.
+  keeps those teardowns until they finish, and the count of processes a
+  finished one left running, so the panel's "still running" note includes
+  them; the view's quit handler cuts their grace and awaits them, and
+  closing a tab hands both to the panel.
 - Any input, and any change to the notice about undelivered input,
   notifies the view, so it is drawn in the next frame even when the child
   prints nothing.

@@ -371,3 +371,49 @@ test("the stock macOS default-socket layout passes each rule of the socket walk"
     expect(isDarwinAdminDirectory(unsafe, "darwin")).toBe(false);
   }
 });
+
+// The socket chain gets its own ACL inspection, separate from the selection
+// inputs: a mutation ACL on a directory only the socket path crosses refuses,
+// while the same inspection passing everywhere else accepts.
+test.skipIf(SOCKET_FIXTURE_BASE === null)(
+  "a mutation ACL on the socket path refuses even when the selection inputs pass",
+  async () => {
+    const socketRoot = await mkdtemp(
+      join(SOCKET_FIXTURE_BASE ?? "/nonexistent", ".hack-socket-acl-test-")
+    );
+    try {
+      await chmod(socketRoot, 0o700);
+      const inspected: string[][] = [];
+      const acl = (flagged: string | null) => ({
+        platform: "darwin" as const,
+        inspect: () => Promise.resolve({ exitCode: 0, stdout: "" }),
+        inspectSync: (paths: readonly string[]) => {
+          inspected.push([...paths]);
+          return {
+            exitCode: 0,
+            stdout:
+              flagged !== null && paths.includes(flagged)
+                ? `drwx------  2 user  staff  64 Jan  1 00:00 ${flagged}\n 0: user:intruder allow add_file\n`
+                : "",
+          };
+        },
+      });
+      const check = (flagged: string | null) =>
+        trustDocker({
+          env: { DOCKER_HOST: `unix://${join(socketRoot, "docker.sock")}` },
+          acl: acl(flagged),
+        });
+      expect(() => check(null)).not.toThrow();
+      // Selection inputs were inspected before the socket chain, and neither
+      // inventory is empty.
+      expect(inspected.length).toBeGreaterThanOrEqual(2);
+      expect(inspected[0]?.includes(socketRoot)).toBe(false);
+      expect(inspected.at(-1)?.includes(socketRoot)).toBe(true);
+      expect(() => check(socketRoot)).toThrow(
+        "Automatic startup refused unsafe Docker engine-selection files"
+      );
+    } finally {
+      await rm(socketRoot, { recursive: true, force: true });
+    }
+  }
+);

@@ -75,8 +75,14 @@ function aclRefusal(paths: Iterable<string>): string | null {
   return null;
 }
 
+let visited = 0;
 function visit(step: string, path: string, checked: Set<string>, depth = 0) {
-  if (refusals.length > 0 || depth > 16) {
+  if (refusals.length > 0) {
+    return;
+  }
+  visited += 1;
+  if (visited > 4096 || depth > 16) {
+    refuse(step, "selection inputs exceed the 4096-entry or depth-16 bound");
     return;
   }
   const trust = walkReplaceableChain({
@@ -126,24 +132,35 @@ if (refusals.length === 0) {
 }
 
 let context = "default";
-let host = DEFAULT_DOCKER_HOST;
+let host: string | null = DEFAULT_DOCKER_HOST;
+const configPath = join(home, ".docker/config.json");
 try {
-  const config: unknown = JSON.parse(
-    readFileSync(join(home, ".docker/config.json"), "utf8")
-  );
-  if (
-    typeof config === "object" &&
-    config !== null &&
-    "currentContext" in config &&
-    typeof config.currentContext === "string" &&
-    config.currentContext
-  ) {
-    context = config.currentContext;
+  if (statSync(configPath).size > 1024 * 1024) {
+    refuse("docker config", "config.json exceeds 1 MiB");
   }
-} catch {
-  // No readable config: the default context.
+  const config: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+  if (typeof config !== "object" || config === null || Array.isArray(config)) {
+    refuse("docker config", "config.json is not a JSON object");
+  } else {
+    const record = config as Record<string, unknown>;
+    if (record.currentContext !== undefined) {
+      if (typeof record.currentContext === "string") {
+        context = record.currentContext || "default";
+      } else {
+        refuse("docker config", "currentContext is not a string");
+      }
+    }
+    if (record.cliPluginsExtraDirs !== undefined) {
+      refuse("docker config", "cliPluginsExtraDirs requires a manual start");
+    }
+  }
+} catch (error: unknown) {
+  if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+    refuse("docker config", "config.json could not be read or parsed");
+  }
 }
 if (context !== "default") {
+  host = null;
   try {
     const digest = createHash("sha256").update(context).digest("hex");
     const meta: unknown = JSON.parse(
@@ -154,25 +171,54 @@ if (context !== "default") {
     );
     const endpoint = (meta as { Endpoints?: { docker?: { Host?: unknown } } })
       .Endpoints?.docker?.Host;
-    host = typeof endpoint === "string" ? endpoint : "(not a string)";
+    if (typeof endpoint === "string") {
+      host = endpoint;
+    } else {
+      refuse("docker context", "the context has no string Docker endpoint");
+    }
   } catch {
-    host = "(context metadata unreadable)";
+    refuse("docker context", "context metadata is missing or unreadable");
   }
 }
-console.log(`selected context: ${context}`);
-console.log(`engine endpoint: ${host}`);
+// Endpoint values can carry credentials: print only the transport, and the
+// path for a unix socket (a filesystem name).
+const transport =
+  host === null
+    ? "unknown"
+    : (/^([a-z][a-z0-9+.-]*):\/\//i.exec(host)?.[1] ?? "unknown");
+console.log(
+  `selected context: ${context === "default" ? "default" : "(named)"}`
+);
+console.log(
+  `engine endpoint: ${transport}${transport === "unix" && host ? ` ${host.slice("unix://".length)}` : ""}`
+);
 
 if (refusals.length === 0) {
-  if (host.startsWith("unix://")) {
+  if (host?.startsWith("unix://")) {
     const path = host.slice("unix://".length);
     const checked = new Set<string>();
     let physical: string | null = null;
     try {
       physical = realpathSync(path);
       console.log(`socket resolves to: ${describe(physical)}`);
+      const info = lstatSync(physical);
+      if (!info.isSocket() || (info.uid !== uid && info.uid !== 0)) {
+        refuse(
+          "socket",
+          `${describe(physical)} is not a socket owned by you or root`
+        );
+      }
       checked.add(physical);
-    } catch {
-      console.log("socket: missing (accepted as absent)");
+    } catch (error: unknown) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        console.log("socket: missing (accepted as absent)");
+      } else {
+        refuse("socket", "the socket path could not be resolved");
+      }
     }
     const trust = walkReplaceableChain({
       path,
@@ -183,7 +229,9 @@ if (refusals.length === 0) {
       acceptDarwinAdminDirectories: true,
       acceptDarwinDaemonDirectories: true,
     });
-    if ("error" in trust) {
+    if (refusals.length > 0) {
+      // Already refused above.
+    } else if ("error" in trust) {
       refuse("socket path", trust.error);
     } else {
       for (const entry of checked) {
@@ -213,15 +261,17 @@ if (refusals.length === 0) {
   }
 }
 
-console.log(
-  refusals.length === 0
-    ? "first refused input: none"
-    : `first refused input: ${refusals[0]}`
-);
 let decision = "accepted";
 try {
   assertAutostartDockerConfigTrusted({ home, env: {} });
 } catch {
   decision = "refused";
 }
+console.log(
+  refusals.length > 0
+    ? `first refused input: ${refusals[0]}`
+    : decision === "refused"
+      ? "first refused input: not identified by this diagnostic (for example a symlink cycle); the product refused"
+      : "first refused input: none"
+);
 console.log(`product decision (login child): ${decision}`);

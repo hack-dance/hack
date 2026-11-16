@@ -1,4 +1,4 @@
-import { displayEnvName } from "./portable-env-name.ts";
+import { displayEnvName, isPortableEnvName } from "./portable-env-name.ts";
 
 const HOST_COMMAND = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const RULE =
@@ -67,6 +67,11 @@ export class NativeEnvironmentNameError extends Error {
       return;
     }
     const variable = key.replaceAll("~1", "/").replaceAll("~0", "~");
+    // A portable last token is not the refused key: for example a variable
+    // named `environment` whose `env_ref` is invalid ends in `/env_ref`.
+    if (isPortableEnvName(variable)) {
+      return;
+    }
     const location = tokens.slice(0, -1).join("/");
     return new NativeEnvironmentNameError(
       `Project configuration sets environment variable ${displayEnvName(variable)} at ${displayEnvName(location)}, ${RULE}`

@@ -84,6 +84,11 @@ test("the compiler's environment-key diagnostic becomes the named refusal; other
         pointer: "/services/web/environment/TOKEN/env_ref",
       },
       { code: "invalid_environment_key", pointer: "/environment" },
+      // A variable named `environment` whose env_ref is invalid.
+      {
+        code: "invalid_environment_key",
+        pointer: "/services/web/environment/environment/env_ref",
+      },
     ])
   ).toBeUndefined();
 });

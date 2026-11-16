@@ -158,8 +158,38 @@ function logWithGum(level: LogLevel, { message, fields }: LogInput): void {
   }
 }
 
+let problemSink: ((message: string) => void) | null = null;
+
+/**
+ * Records the warning and error messages logged until `stop` is called, so
+ * a `--json` handler whose steps report failures through the logger can put
+ * the last one in its error envelope. The lines are still logged as usual
+ * (to stderr under the `console` backend). One capture at a time.
+ */
+export function captureLoggedProblems(): {
+  readonly last: () => string | null;
+  readonly stop: () => void;
+} {
+  let last: string | null = null;
+  const sink = (message: string) => {
+    last = message;
+  };
+  problemSink = sink;
+  return {
+    last: () => last,
+    stop: () => {
+      if (problemSink === sink) {
+        problemSink = null;
+      }
+    },
+  };
+}
+
 export const logger: Logger = (() => {
   const emit = (level: LogLevel, input: LogInput) => {
+    if (problemSink && (level === "warn" || level === "error")) {
+      problemSink(input.message);
+    }
     const backend = resolveBackend();
     if (backend === "gum") {
       return logWithGum(level, input);

@@ -380,6 +380,16 @@ for (const phase of [
     expect(await readFile(binary, "utf8")).toBe(
       await readFile(join(f.release, "hack"), "utf8")
     );
+    // The identity the post-update step re-checks is the published file's
+    // (HACK-2216): same device and inode, and its sha256.
+    const published = await stat(binary);
+    expect(result.installedBinary).toEqual({
+      dev: Number(published.dev),
+      ino: Number(published.ino),
+      sha256: createHash("sha256")
+        .update(await readFile(binary))
+        .digest("hex"),
+    });
     expect(await readFile(compiler, "utf8")).toBe(
       await readFile(join(f.release, "hack-config-compiler"), "utf8")
     );

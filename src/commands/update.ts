@@ -33,6 +33,11 @@ import {
   selectCliTarballAsset,
 } from "../lib/self-update.ts";
 import { observeUpdate } from "../lib/update-observe.ts";
+import {
+  type InstalledBinary,
+  type PostUpdateDaemonResult,
+  reconcileDaemonAfterUpdate,
+} from "./daemon-upgrade.ts";
 
 const optCheck = defineOption({
   name: "check",
@@ -262,6 +267,7 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
   }
 
   let backupManifest: string | undefined;
+  let installedBinary: InstalledBinary | undefined;
   try {
     const install = await installExtractedRelease({
       version: latestVersion,
@@ -276,6 +282,7 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
       });
     }
     backupManifest = install.backupManifest;
+    installedBinary = install.installedBinary;
   } finally {
     // Best-effort cleanup; avoid failing the update after a successful install.
     await rm(extracted.tmpDir, { recursive: true, force: true }).catch(
@@ -284,6 +291,12 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
   }
 
   const mutagenProvision = await ensureMutagenAfterUpdate();
+  // An installed login service still runs the old hackd: bring it up to
+  // the new executable (best effort; never fails the update).
+  const daemon = await reconcileDaemonAfterUpdate({
+    binaryPath: bin.path,
+    installed: installedBinary,
+  });
 
   return writeResult({
     json: args.options.json === true,
@@ -298,10 +311,29 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
       assetsDir,
       mutagen: mutagenProvision,
       backupManifest,
+      daemon,
     },
-    human: `Updated to v${latestVersion}. Backup manifest: ${backupManifest}`,
+    human: [
+      `Updated to v${latestVersion}. Backup manifest: ${backupManifest}`,
+      ...describePostUpdateDaemon(daemon),
+    ].join("\n"),
   });
 };
+
+/** The human line for {@link reconcileDaemonAfterUpdate}, if any. */
+function describePostUpdateDaemon(result: PostUpdateDaemonResult): string[] {
+  if (result.status === "skipped") {
+    return [];
+  }
+  if (result.status === "failed") {
+    return [
+      `hackd was not updated: ${result.message} | Run: ${result.next_step}`,
+    ];
+  }
+  return result.action === "none"
+    ? []
+    : [`hackd ${result.action} (${result.manager}) on the new version.`];
+}
 
 /**
  * Read-only report for every install kind, including Homebrew and candidate
@@ -501,6 +533,7 @@ type UpdateOutput =
       readonly assetsDir: string;
       readonly mutagen?: MutagenProvisionResult;
       readonly backupManifest?: string;
+      readonly daemon?: PostUpdateDaemonResult;
     }
   | {
       readonly ok: false;

@@ -159,6 +159,9 @@ pub struct TerminalPanel {
     closing: Vec<PendingTeardown>,
     /// Processes that outlived tabs closed so far.
     left_running: usize,
+    /// Embedded in a host that draws its own chrome: render only the
+    /// active terminal, and leave panel actions to the host.
+    embedded: bool,
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
@@ -190,7 +193,18 @@ impl TerminalPanel {
             focus: cx.focus_handle(),
             closing: Vec::new(),
             left_running: 0,
+            embedded: false,
         }
+    }
+
+    /// For a host that draws its own tab strip and handles the panel
+    /// actions (`TogglePanel`, `NewTab`, `CloseTab`, tab switching,
+    /// `ToggleMaximize`): the panel then renders only the active terminal
+    /// and registers no action handlers, so those actions reach the host.
+    /// Session ownership and teardown are unchanged.
+    pub fn set_embedded(&mut self, embedded: bool, cx: &mut Context<Self>) {
+        self.embedded = embedded;
+        cx.notify();
     }
 
     pub fn is_visible(&self) -> bool {
@@ -279,7 +293,14 @@ impl TerminalPanel {
 
     /// Close the active tab and end its session.
     pub fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.state.close_active() else {
+        if let Some(index) = self.state.active_index() {
+            self.close(index, window, cx);
+        }
+    }
+
+    /// Close one tab and end its session.
+    pub fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.state.close(index) else {
             return;
         };
         // End the session now, on a reaper thread, and keep the handle so
@@ -362,6 +383,13 @@ impl Focusable for TerminalPanel {
 
 impl Render for TerminalPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.embedded {
+            return div()
+                .id("terminal-panel")
+                .track_focus(&self.focus)
+                .size_full()
+                .children(self.state.active().map(|view| view.clone()));
+        }
         let root = div()
             .id("terminal-panel")
             .key_context("TerminalPanel")

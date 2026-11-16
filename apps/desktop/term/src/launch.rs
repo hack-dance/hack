@@ -279,7 +279,7 @@ fn term_name(choice: TermChoice, dirs: &[PathBuf]) -> &'static str {
 
 /// The only variables the app sets for a session: what kind of terminal
 /// this is. Everything else is inherited or injected by the CLI.
-fn terminal_identity(term: &str) -> Vec<(OsString, OsString)> {
+pub fn terminal_identity(term: &str) -> Vec<(OsString, OsString)> {
     vec![
         ("TERM".into(), term.into()),
         ("COLORTERM".into(), "truecolor".into()),

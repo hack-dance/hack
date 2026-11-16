@@ -535,6 +535,10 @@ impl TerminalView {
     /// Paste text into the PTY as the user would (bracketed when the
     /// program asked for it). No-op for a stream view.
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // A read-only tab (logs) takes no input, pasted or typed.
+        if self.core.read_only() {
+            return;
+        }
         let bytes = self.core.emu().encode_paste(text);
         self.send(&bytes, cx);
     }

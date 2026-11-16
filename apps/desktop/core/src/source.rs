@@ -1252,8 +1252,10 @@ mod tests {
             budget: Duration,
             timeout: Duration,
         ) -> Vec<DoctorRun> {
-            let fake = fake_hack("plugin-inputs", "echo '{}'");
-            let root = fake.parent().unwrap();
+            // Only a private directory for the discovery inputs: no
+            // executable to write or launch, so nothing here is timed by a
+            // budget test except the Doctor run itself.
+            let root = &private_temp_dir("plugin-inputs");
             let discovery = crate::doctor_plugins::Discovery {
                 config_dir: Some(root.join("client")),
                 unsupported_extra_selector: false,
@@ -1507,6 +1509,20 @@ esac
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
+    }
+
+    /// A new owner-only directory under the temp dir, for fixture inputs.
+    fn private_temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        dir
     }
 
     fn fake_hack(tag: &str, body: &str) -> std::path::PathBuf {

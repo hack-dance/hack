@@ -318,10 +318,14 @@ impl CliRunner {
         path: Option<&Path>,
         timeout: Option<Duration>,
     ) -> Result<(String, String, Option<i32>), RunError> {
+        // The timeout counts from before the spawn: starting the program can
+        // itself take time (an ETXTBSY retry, or macOS checking a new
+        // executable on first launch), and a caller's budget must hold
+        // however long that takes.
+        let deadline = timeout.map(|t| (Instant::now() + t, t));
         let mut child = self.spawn(args, path)?;
         let out = read_all(child.stdout.take(), Keep::Head(MAX_STDOUT));
         let err = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
-        let deadline = timeout.map(|t| (Instant::now() + t, t));
         let status = loop {
             match child.try_wait() {
                 Ok(Some(s)) => break s,
@@ -1060,6 +1064,42 @@ mod tests {
     }
 
     const T: Duration = Duration::from_secs(5);
+
+    /// A slow start (here an ETXTBSY retry while another descriptor still
+    /// has the program open for writing) counts against the timeout.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_timeout_includes_the_time_spent_starting_the_program() {
+        let fake = FakeHack::new("trap '' TERM\nwhile :; do sleep 0.05; done");
+        let program = fake.dir.join("hack");
+        let hold = Duration::from_millis(180);
+        let writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&program)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(hold);
+            drop(writer);
+        });
+        let (timeout, grace) = (Duration::from_millis(150), Duration::from_millis(10));
+        let started = Instant::now();
+        let result =
+            fake.runner()
+                .with_term_grace(grace)
+                .run_raw(&["doctor", "--json"], None, timeout);
+        let took = started.elapsed();
+        release.join().unwrap();
+        assert!(
+            matches!(result, Err(RunError::Timeout { .. })),
+            "{result:?}"
+        );
+        // Started after `hold`, already past the deadline: stopped at once.
+        // Counting the timeout from the spawn would take hold + timeout.
+        assert!(
+            took < hold + grace + Duration::from_millis(80),
+            "took {took:?}: the timeout started after the slow spawn"
+        );
+    }
 
     #[test]
     fn unwraps_envelope() {

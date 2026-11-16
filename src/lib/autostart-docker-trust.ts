@@ -7,7 +7,10 @@ import {
   statSync,
 } from "node:fs";
 import { join } from "node:path";
-import { assertAutostartPathAclsTrustedSync } from "./autostart-path-acl.ts";
+import {
+  type AutostartAclDependencies,
+  assertAutostartPathAclsTrustedSync,
+} from "./autostart-path-acl.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -34,6 +37,26 @@ export const DOCKER_SYSTEM_PLUGIN_DIRECTORIES: readonly string[] = [
   "/usr/libexec/docker/cli-plugins",
 ];
 
+/** Machine inputs a test replaces so it never reads the host's (see below). */
+export type AutostartDockerTrustRoots = {
+  readonly defaultHost?: string;
+  readonly systemPluginDirectories?: readonly string[];
+  readonly acl?: AutostartAclDependencies;
+};
+
+let rootsForTests: AutostartDockerTrustRoots | null = null;
+
+/**
+ * Tests only. A CLI subprocess cannot receive the options below, so its test
+ * preload (`tests/helpers/autostart-docker-trust-preload.ts`) calls this.
+ * Production code never calls it and reads no environment variable for it.
+ */
+export function useAutostartDockerTrustRootsForTests(
+  roots: AutostartDockerTrustRoots | null
+): void {
+  rootsForTests = roots;
+}
+
 /** Authenticate Docker's engine-selection inputs without exposing credentials. */
 export function assertAutostartDockerConfigTrusted(opts: {
   readonly home: string;
@@ -42,7 +65,10 @@ export function assertAutostartDockerConfigTrusted(opts: {
   readonly systemPluginDirectories?: readonly string[];
   /** Tests only: replaces {@link DEFAULT_DOCKER_HOST}. */
   readonly defaultHost?: string;
+  /** Tests only: replaces the Darwin ACL inspection. */
+  readonly acl?: AutostartAclDependencies;
 }): void {
+  const acl = opts.acl ?? rootsForTests?.acl;
   try {
     const uid = process.getuid?.();
     if (uid === undefined) {
@@ -102,13 +128,14 @@ export function assertAutostartDockerConfigTrusted(opts: {
     visit(join(root, "contexts"), 0);
     visit(join(root, "cli-plugins"), 0);
     for (const directory of opts.systemPluginDirectories ??
+      rootsForTests?.systemPluginDirectories ??
       DOCKER_SYSTEM_PLUGIN_DIRECTORIES) {
       visit(directory, 0);
     }
     const env = opts.env ?? process.env;
     let currentContext = "default";
     const configPath = join(root, "config.json");
-    assertAutostartPathAclsTrustedSync(checked);
+    assertAutostartPathAclsTrustedSync(checked, acl);
     const configTrust = walkReplaceableChain({
       path: configPath,
       uid,
@@ -153,16 +180,20 @@ export function assertAutostartDockerConfigTrusted(opts: {
       ) {
         throw new Error("Invalid Docker endpoint");
       }
-      assertLoginDockerTransport(metadata.Endpoints.docker.Host, uid);
+      assertLoginDockerTransport(metadata.Endpoints.docker.Host, uid, acl);
     }
     // Docker uses this socket when no named context or direct host is selected.
     if (context === "default") {
       assertLoginDockerTransport(
-        host || (opts.defaultHost ?? DEFAULT_DOCKER_HOST),
-        uid
+        host ||
+          (opts.defaultHost ??
+            rootsForTests?.defaultHost ??
+            DEFAULT_DOCKER_HOST),
+        uid,
+        acl
       );
     } else if (host) {
-      assertLoginDockerTransport(host, uid);
+      assertLoginDockerTransport(host, uid, acl);
     }
   } catch {
     throw new HackCliError({
@@ -175,7 +206,11 @@ export function assertAutostartDockerConfigTrusted(opts: {
 }
 
 /** Network transports need peer authentication beyond filesystem/context ownership. */
-function assertLoginDockerTransport(host: unknown, uid: number): void {
+function assertLoginDockerTransport(
+  host: unknown,
+  uid: number,
+  acl?: AutostartAclDependencies
+): void {
   if (typeof host !== "string" || !LOGIN_DOCKER_TRANSPORT.test(host)) {
     throw new Error("Docker transport requires manual startup");
   }
@@ -222,5 +257,5 @@ function assertLoginDockerTransport(host: unknown, uid: number): void {
       throw new Error("Replaceable socket parent");
     }
   }
-  assertAutostartPathAclsTrustedSync(checked);
+  assertAutostartPathAclsTrustedSync(checked, acl);
 }

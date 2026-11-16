@@ -21,6 +21,11 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let root = "";
 const cli = resolve("index.ts");
+// Fixture Docker selection inputs: the host's socket, plugins and ACLs never decide.
+const DOCKER_TRUST_PRELOAD = resolve(
+  import.meta.dir,
+  "helpers/autostart-docker-trust-preload.ts"
+);
 beforeEach(async () => {
   // macOS links /var to /private/var; the product compares resolved paths.
   root = await realpath(await mkdtemp(join(tmpdir(), "autostart-intent-")));
@@ -78,7 +83,14 @@ async function run(
   overrides: Readonly<Record<string, string>> = {}
 ) {
   const child = Bun.spawn(
-    [process.execPath, cli, "--no-interactive", ...args],
+    [
+      process.execPath,
+      "--preload",
+      DOCKER_TRUST_PRELOAD,
+      cli,
+      "--no-interactive",
+      ...args,
+    ],
     {
       cwd,
       env: privateCliEnv({

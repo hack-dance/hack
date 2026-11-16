@@ -15,17 +15,25 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { assertAutostartDockerConfigTrusted } from "../src/lib/autostart-docker-trust.ts";
-import { isDarwinAdminDirectory } from "../src/lib/path-trust.ts";
+import {
+  isDarwinAdminDirectory,
+  isDarwinDaemonDirectory,
+} from "../src/lib/path-trust.ts";
 
 /**
  * Checks here do not read the runner environment, the system plugin
- * directories or `/var/run/docker.sock`. The default engine socket is a path
+ * directories, Darwin ACLs or `/var/run/docker.sock`. The default engine socket is a path
  * directly below `/` that is assumed not to exist on the test host, so only
  * `/` itself is inspected. A socket below the fixture home would not do: on
  * Linux the home is under sticky `/tmp`, which the socket-parent rule refuses.
  * A test passes a field to override these.
  */
 const MISSING_DEFAULT_HOST = "unix:///hack-test-missing-engine/docker.sock";
+const NO_ACL_INSPECTION = { exitCode: 0, stdout: "" };
+const NO_ACL = {
+  inspect: () => Promise.resolve(NO_ACL_INSPECTION),
+  inspectSync: () => NO_ACL_INSPECTION,
+};
 
 function trustDocker(
   opts: Partial<Parameters<typeof assertAutostartDockerConfigTrusted>[0]> = {}
@@ -35,6 +43,9 @@ function trustDocker(
     env: {},
     systemPluginDirectories: [],
     defaultHost: MISSING_DEFAULT_HOST,
+    // Darwin ACLs on the host's temp chain are not under test here; the ACL
+    // rules have their own tests (autostart-path-acl.test.ts).
+    acl: NO_ACL,
     ...opts,
   });
 }
@@ -315,4 +326,48 @@ test("sticky user and system plugin directories cannot admit late plugin creatio
   expect(() => check()).toThrow();
   await chmod(target, 0o700);
   expect(() => check()).not.toThrow();
+});
+
+/**
+ * The stock macOS default-socket layout (Docker Desktop and OrbStack), element
+ * by element, against the rules the socket walk applies. Root-owned entries
+ * cannot be created by a test, so this checks each element's rule:
+ * - `/var` -> `/private/var`: a root-owned link (followed, like any link);
+ * - `/private/var`: root:wheel 0755 (nobody else can write);
+ * - `/private/var/run`: root:daemon 0775, accepted only on the socket path;
+ * - `/var/run/docker.sock`: a root-owned link into the user's home;
+ * - the engine's directories in the home and the socket: owned by the user.
+ */
+test("the stock macOS default-socket layout passes each rule of the socket walk", () => {
+  const entry = (fields: {
+    uid: number;
+    gid: number;
+    mode: number;
+    dir?: boolean;
+  }) => ({ ...fields, isDirectory: () => fields.dir !== false });
+  const user = 501;
+  // /private/var/run: the only group-writable element.
+  const varRun = entry({ uid: 0, gid: 1, mode: 0o4_0775 });
+  expect(isDarwinDaemonDirectory(varRun, "darwin")).toBe(true);
+  // Lookup paths never accept it: only the socket walk opts in.
+  expect(isDarwinAdminDirectory(varRun, "darwin")).toBe(false);
+  // root:wheel 0755 and the user's own 0700/0755 directories need no
+  // exception: nobody else can write them.
+  for (const own of [
+    entry({ uid: 0, gid: 0, mode: 0o4_0755 }),
+    entry({ uid: user, gid: 20, mode: 0o4_0700 }),
+    entry({ uid: user, gid: 20, mode: 0o4_0755 }),
+  ]) {
+    expect(own.mode & 0o022).toBe(0);
+  }
+  // The variants that must still refuse on the socket path.
+  for (const unsafe of [
+    entry({ uid: 0, gid: 1, mode: 0o4_0777 }), // world-writable
+    entry({ uid: user, gid: 1, mode: 0o4_0775 }), // not root's
+    entry({ uid: 0, gid: 20, mode: 0o4_0775 }), // group staff
+    entry({ uid: 0, gid: 12, mode: 0o4_0775 }), // group everyone
+  ]) {
+    expect(isDarwinDaemonDirectory(unsafe, "darwin")).toBe(false);
+    expect(isDarwinAdminDirectory(unsafe, "darwin")).toBe(false);
+  }
 });

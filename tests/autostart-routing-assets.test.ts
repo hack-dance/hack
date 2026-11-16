@@ -180,6 +180,10 @@ test("source global up refuses poisoned login assets before any Docker effect", 
     [
       process.execPath,
       "--no-env-file",
+      // Fixture Docker selection inputs, so the routing-asset refusal under
+      // test is reached on any host (not the host's socket or plugins).
+      "--preload",
+      resolve(import.meta.dir, "helpers/autostart-docker-trust-preload.ts"),
       resolve("index.ts"),
       "global",
       "up",

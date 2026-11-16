@@ -52,6 +52,12 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                             let mut app =
                                 HackApp::new(crate::source_for(Some(f)), false, window, cx);
                             app.select(fixtures::selected(f));
+                            if fixtures::loads_doctor(f) {
+                                app.show_doctor_now();
+                                if !fixtures::opens_doctor(f) {
+                                    app.show_project();
+                                }
+                            }
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture();
                             }

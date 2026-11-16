@@ -200,6 +200,7 @@ import {
   inspectSupersededMacRoots,
   type SupersededRootInventory,
 } from "../lib/mac-ca-trust.ts";
+import { MACHINE_SCHEMAS } from "../lib/machine-output.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -433,6 +434,13 @@ const optBrowserResult = defineOption({
 const doctorOptions = [
   optPath,
   optFix,
+  defineOption({
+    name: "machine",
+    type: "boolean",
+    long: "--machine",
+    description:
+      "Observe machine checks only, without discovering a project or repairing state",
+  } as const),
   defineOption({
     name: "only",
     type: "string",
@@ -757,6 +765,9 @@ async function runNativePreflightMode(
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  if (args.options.machine) {
+    assertMachineDoctorOptions(args.options);
+  }
   if (selectedDoctorFixRequested(args.options)) {
     return await runSelectedDoctorFix(args);
   }
@@ -772,9 +783,11 @@ async function runDoctorAudit(
   if (args.options.profile !== undefined) {
     throw new CliUsageError("--profile applies only to --native-preflight.");
   }
-  const adopted = await preflightDoctorProject({
-    startDir: resolveDoctorStartDir(args.options.path),
-  });
+  const adopted = args.options.machine
+    ? null
+    : await preflightDoctorProject({
+        startDir: resolveDoctorStartDir(args.options.path),
+      });
   const mappingResult = await maybeRunNativeMappingRecovery(args);
   if (mappingResult !== null) {
     return mappingResult;
@@ -802,6 +815,7 @@ async function runDoctorAudit(
       startDir: resolveDoctorStartDir(args.options.path),
       browser,
       json,
+      machine: args.options.machine === true,
       fix: args.options.fix === true,
       migrateEnvConfig: args.options.migrateEnvConfig === true,
       acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
@@ -937,8 +951,12 @@ async function runDoctorAudit(
       results.push(await runCheck(s, DAEMON_SERVICE_CHECK, () => serviceCheck));
     }
   }
-  results.push(await runCheck(s, "gateway config", () => checkGatewayConfig()));
-  results.push(await runCheck(s, "gateway tokens", () => checkGatewayTokens()));
+  results.push(
+    ...(await collectGatewayDoctorChecks({
+      progress: s,
+      machine: args.options.machine === true,
+    }))
+  );
 
   if (isMac()) {
     results.push(
@@ -1104,31 +1122,7 @@ async function runDoctorAudit(
     );
   }
 
-  // Project (if in a repo or --path)
-  const startDir = args.options.path
-    ? resolve(process.cwd(), args.options.path)
-    : process.cwd();
-  const projectCtx = await runCheck(s, "project", () =>
-    checkProject({ startDir, adopted })
-  );
-  results.push(projectCtx);
-  results.push(
-    await runCheck(s, "sessions mux", () =>
-      checkSessionsMuxConfig({ startDir, adopted })
-    )
-  );
-
-  results.push(
-    ...(await runProjectChecks({
-      progress: s,
-      startDir,
-      adopted,
-      projectFound: projectCtx.status === "ok",
-      dockerOk: results.some(
-        (result) => result.name === "docker daemon" && result.status === "ok"
-      ),
-    }))
-  );
+  await appendDoctorScopeChecks({ args, progress: s, adopted, results });
 
   s.stop(`Doctor checks complete (${results.length} checks)`);
 
@@ -1138,6 +1132,7 @@ async function runDoctorAudit(
     results,
     hasError,
     json,
+    machine: args.options.machine === true,
     browserHintTargets: composeDoctorBrowserHintTargets({
       url: browser.url,
       defaultDomain,
@@ -1157,7 +1152,7 @@ async function runDoctorAudit(
 
   if (args.options.fix || args.options.migrateEnvConfig) {
     await runDoctorFix({
-      startDir,
+      startDir: resolveDoctorStartDir(args.options.path),
       migrateEnvConfig: args.options.migrateEnvConfig === true,
       acceptTrackedEnvChanges: args.options.acceptTrackedEnvChanges === true,
     });
@@ -1170,6 +1165,92 @@ async function runDoctorAudit(
   }
 
   return 0;
+}
+
+/**
+ * Machine mode adds only global secrets hygiene and marks every row machine
+ * scope; ordinary Doctor adds the project checks instead.
+ */
+async function appendDoctorScopeChecks(opts: {
+  readonly args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"];
+  readonly progress: DoctorProgress;
+  readonly adopted: DoctorAdoptedProject | null;
+  readonly results: TimedCheckResult[];
+}): Promise<void> {
+  if (opts.args.options.machine) {
+    opts.results.push(
+      await runCheck(
+        opts.progress,
+        SECRETS_HYGIENE_CHECK,
+        checkMachineSecretsHygiene,
+        { timeoutMs: 10_000 }
+      )
+    );
+    markMachineDoctorResults(opts.results);
+    return;
+  }
+  opts.results.push(...(await collectDoctorProjectChecks(opts)));
+}
+
+async function collectDoctorProjectChecks(opts: {
+  readonly args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"];
+  readonly progress: DoctorProgress;
+  readonly adopted: DoctorAdoptedProject | null;
+  readonly results: readonly TimedCheckResult[];
+}): Promise<TimedCheckResult[]> {
+  const { args, progress: s, adopted } = opts;
+  const results: TimedCheckResult[] = [];
+  const startDir = args.options.path
+    ? resolve(process.cwd(), args.options.path)
+    : process.cwd();
+  const projectCtx = await runCheck(s, "project", () =>
+    checkProject({ startDir, adopted })
+  );
+  results.push(projectCtx);
+  results.push(
+    await runCheck(s, "sessions mux", () =>
+      checkSessionsMuxConfig({ startDir, adopted })
+    )
+  );
+
+  results.push(
+    ...(await runProjectChecks({
+      progress: s,
+      startDir,
+      adopted,
+      projectFound: projectCtx.status === "ok",
+      dockerOk: opts.results.some(
+        (result) => result.name === "docker daemon" && result.status === "ok"
+      ),
+    }))
+  );
+
+  return results;
+}
+
+function assertMachineDoctorOptions(
+  options: Readonly<Record<string, unknown>>
+): void {
+  const allowed = new Set(["machine", "json"]);
+  if (
+    Object.entries(options).some(
+      ([name, value]) =>
+        !allowed.has(name) && value !== undefined && value !== false
+    )
+  ) {
+    throw new CliUsageError(
+      "--machine accepts only --json; project selection and repair flags are not allowed."
+    );
+  }
+}
+
+/** The machine audit never borrows the default scope for unknown future IDs. */
+function markMachineDoctorResults(results: TimedCheckResult[]): void {
+  const scoped = results.map((result) => ({
+    ...result,
+    scope: "machine" as const,
+  }));
+  results.splice(0, results.length, ...scoped);
 }
 
 function selectedDoctorFixRequested(opts: {
@@ -1252,6 +1333,8 @@ export async function reportDoctorResults(opts: {
   readonly results: readonly TimedCheckResult[];
   readonly hasError: boolean;
   readonly json: boolean;
+  /** Machine-only audit (`--machine`); selects the schema-tagged payload. */
+  readonly machine?: boolean;
   readonly browserHintTargets: readonly string[];
   readonly renderHuman: () => Promise<void>;
   readonly noteHint?: (targets: readonly string[]) => boolean;
@@ -1261,6 +1344,7 @@ export async function reportDoctorResults(opts: {
     const code = finishDoctorJson({
       results: opts.results,
       hasError: opts.hasError,
+      machine: opts.machine === true,
     });
     noteHint(opts.browserHintTargets);
     return code;
@@ -1280,6 +1364,7 @@ async function handleNativeDoctor(opts: {
   readonly startDir: string;
   readonly browser: ReturnType<typeof parseBrowserNetworkOptions>;
   readonly json: boolean;
+  readonly machine: boolean;
   readonly fix: boolean;
   /**
    * Runs the same project-file env migration as Compose doctor after the
@@ -1418,9 +1503,7 @@ async function handleNativeDoctor(opts: {
   }
   // The env key audit is runtime-independent; outside a project there is no
   // key to audit, so native Doctor adds no check there.
-  const nativeProject = await findProjectContext(opts.startDir).catch(
-    () => null
-  );
+  const nativeProject = await nativeDoctorProject(opts);
   if (nativeProject) {
     results.push(
       await runCheck(
@@ -1482,12 +1565,14 @@ async function handleNativeDoctor(opts: {
       )
     );
   }
+  await appendNativeMachineChecks({ ...opts, progress, results });
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
   const reported = await reportDoctorResults({
     results,
     hasError,
     json: opts.json,
+    machine: opts.machine,
     browserHintTargets: nativeDoctorBrowserHintTargets(opts.browser.url),
     renderHuman: () => renderDoctorSummary(results),
   });
@@ -1502,6 +1587,34 @@ async function handleNativeDoctor(opts: {
   }
   await maybeRunNativeDoctorEnvMigration(opts);
   return hasError ? 1 : 0;
+}
+
+async function nativeDoctorProject(opts: {
+  readonly machine: boolean;
+  readonly startDir: string;
+}) {
+  return opts.machine
+    ? null
+    : await findProjectContext(opts.startDir).catch(() => null);
+}
+
+async function appendNativeMachineChecks(opts: {
+  readonly machine: boolean;
+  readonly progress: DoctorProgress;
+  readonly results: TimedCheckResult[];
+}): Promise<void> {
+  if (!opts.machine) {
+    return;
+  }
+  opts.results.push(
+    await runCheck(
+      opts.progress,
+      SECRETS_HYGIENE_CHECK,
+      checkMachineSecretsHygiene,
+      { timeoutMs: 10_000 }
+    )
+  );
+  markMachineDoctorResults(opts.results);
 }
 
 /**
@@ -1683,7 +1796,11 @@ export type DoctorJsonCheck = DoctorMetadata & {
 };
 
 export type DoctorJsonData = {
-  readonly schema: 1;
+  /**
+   * Plain `doctor --json` keeps its R7a numeric schema. The HACK-2218
+   * machine-only audit is a schema-tagged flag variant with a stable id.
+   */
+  readonly schema: 1 | typeof MACHINE_SCHEMAS.doctorMachine;
   readonly checks: readonly DoctorJsonCheck[];
   readonly summary: readonly string[];
   readonly counts: {
@@ -1698,13 +1815,15 @@ export type DoctorJsonData = {
  */
 export function buildDoctorJsonData(opts: {
   readonly results: readonly TimedCheckResult[];
+  /** `--machine`: tag the payload with `hack.doctor.machine.v1`. */
+  readonly machine?: boolean;
 }): DoctorJsonData {
   const counts = { ok: 0, warn: 0, error: 0 };
   for (const result of opts.results) {
     counts[result.status] += 1;
   }
   return {
-    schema: 1,
+    schema: opts.machine === true ? MACHINE_SCHEMAS.doctorMachine : 1,
     checks: opts.results.map((result) => ({
       id: result.name,
       ...doctorMetadata({ id: result.name, scope: result.scope }),
@@ -1744,9 +1863,15 @@ export function buildDoctorJsonData(opts: {
 function finishDoctorJson(opts: {
   readonly results: readonly TimedCheckResult[];
   readonly hasError: boolean;
+  readonly machine: boolean;
 }): number {
   emitCliResult({
-    result: okResult({ data: buildDoctorJsonData({ results: opts.results }) }),
+    result: okResult({
+      data: buildDoctorJsonData({
+        results: opts.results,
+        machine: opts.machine,
+      }),
+    }),
   });
   return opts.hasError ? 1 : 0;
 }
@@ -2079,6 +2204,20 @@ async function checkDaemonStatus(): Promise<CheckResult> {
   });
 
   return buildDoctorDaemonCheck({ report, candidate: isCandidateRun() });
+}
+
+/** Retained gateway checks scan registered project configs, so a machine-only audit omits them. */
+async function collectGatewayDoctorChecks(opts: {
+  readonly progress: DoctorProgress;
+  readonly machine: boolean;
+}): Promise<TimedCheckResult[]> {
+  if (opts.machine) {
+    return [];
+  }
+  return [
+    await runCheck(opts.progress, "gateway config", checkGatewayConfig),
+    await runCheck(opts.progress, "gateway tokens", checkGatewayTokens),
+  ];
 }
 
 async function checkGatewayConfig(): Promise<CheckResult> {
@@ -3435,6 +3574,19 @@ export async function checkSecretsHygiene(opts: {
     name: SECRETS_HYGIENE_CHECK,
     scope: scope.project ? "project" : "machine",
     ...describeSecretsHygiene(findings),
+  };
+}
+
+/** Inspect global configuration and stores without project discovery, even from a project cwd. */
+async function checkMachineSecretsHygiene(): Promise<CheckResult> {
+  const scope = await resolveLiveInputScope({
+    startDir: process.cwd(),
+    findProject: () => Promise.resolve(null),
+  });
+  return {
+    name: SECRETS_HYGIENE_CHECK,
+    scope: "machine",
+    ...describeSecretsHygiene(await inspectSecretsHygiene(scope)),
   };
 }
 

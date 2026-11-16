@@ -3,7 +3,6 @@ import { Buffer } from "node:buffer";
 import { userInfo } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
-import pkg from "../../package.json";
 
 import {
   DAEMON_PROCESS_TITLE,
@@ -28,6 +27,7 @@ import {
   readControlPlaneConfig,
 } from "../control-plane/sdk/config.ts";
 import { ensureDir } from "../lib/fs.ts";
+import { HACK_VERSION } from "../lib/hack-version.ts";
 import { resolveRegisteredProjectById } from "../lib/projects-registry.ts";
 import { runAutostartAtLogin } from "./autostart.ts";
 import {
@@ -66,13 +66,6 @@ import {
   restrictSocketMode,
   secureDaemonDirectory,
 } from "./socket-permissions.ts";
-
-type PackageJsonType = {
-  readonly name: string;
-  readonly version: string;
-} & Record<string, unknown>;
-
-const packageJson = pkg as unknown as PackageJsonType;
 
 type DaemonMetrics = {
   readonly startedAtMs: number;
@@ -264,7 +257,7 @@ export async function runDaemon({
 
   const requestContext = {
     metrics,
-    version: packageJson.version,
+    version: HACK_VERSION,
     pid: process.pid,
     cache,
     supervisor,
@@ -434,7 +427,7 @@ export async function runDaemon({
   process.on("SIGINT", () => void shutdown({ reason: "SIGINT" }));
 
   logger.info({
-    message: `hackd started (pid ${process.pid}, version ${packageJson.version})`,
+    message: `hackd started (pid ${process.pid}, version ${HACK_VERSION})`,
   });
   loginAutostart.start();
 }

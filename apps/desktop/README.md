@@ -86,6 +86,145 @@ engine-down, error / cli-missing, many-projects, stopped / starting, running,
 degraded / stopping, failed-start, needs-attention):
 [light](screenshots/fixtures-light.png), [dark](screenshots/fixtures-dark.png).
 
+## Doctor
+
+The sidebar Doctor row reads `hack doctor --json` once outside all projects and
+once per registered checkout. Machine checks are deduplicated by check id;
+project findings link from the project header. Unknown statuses, failed reads
+and projects not reached within the 90-second refresh budget remain unchecked.
+Each read's time limit counts from before the CLI is started and includes
+its stop: a check that ignores SIGTERM is killed when the budget's share for
+it runs out. One limit: if starting the CLI itself blocks past the budget
+(the operating system has not yet let the program start), the refresh ends
+when the start returns.
+Checks refresh on opening the pane and every ten minutes while it is visible.
+Stale results cannot show an all-clear message or green Doctor indicator.
+Missing registry rows remain unchecked and are never probed. Compose coverage
+requires a report identifying that exact checkout's Hack directory; native
+coverage requires exact root selection and unchanged marker identity before and
+after the read, plus a known project-only check. A machine-only or ancestor-project
+report cannot establish Compose project coverage.
+Machine diagnostics remain visible even when a checkout cannot be verified.
+
+Cards group findings by area and offer one copied command or documentation link.
+Project commands include the checkout path. The app never runs a Doctor fix:
+one-click fixes remain blocked on the CLI's explicit safe-fix metadata (R7a/R7b).
+The probes do not use `hack global status`, which can start Docker.
+Offscreen Doctor evidence: [light](screenshots/doctor-light.png) and
+[dark](screenshots/doctor-dark.png).
+
+For integrations, `Card.authored_remedy` exposes an `AuthoredRemedy`: `argv()`
+returns authored arguments without an executable or environment, including each
+project root as one lossless argument. Bind these arguments to the integration's
+selected, checked CLI context and retain its action gates. Do not parse or execute
+the copy display string. Standalone Doctor's copy display names `hack` from the
+user's terminal PATH; it does not select a candidate CLI or home. A recipe grants
+no permission to run a fix, and Doctor has no dependency on Setup's context types.
+
+Doctor accepts owner-writable tool directories, including a normal user-owned
+`/opt/homebrew/bin` with mode `0755`. A PATH directory, each selected executable,
+every intermediate symlink target and canonical ancestor must be owned by this user
+or root, with no group/other-write bits. A root-owned sticky ancestor such as
+`/tmp` is allowed above a private entry; a shared writable PATH entry itself is
+not. An unsafe executable is excluded individually, so it does not hide safe
+siblings such as Git. Foreign-owned executable targets are excluded too. A
+script tool's `#!` interpreter must pass the same rules (recursively); a script
+whose interpreter lives in a shared writable directory is excluded and its
+checks become Unknown. Only two `#!` forms are accepted: a trusted interpreter
+with no arguments, or exactly `#!/usr/bin/env <name>` (env identified by its
+real path), whose name resolves only through the private wrapper PATH. Any
+other form, including shell flags such as `-e`, makes that tool Unknown. A tool
+this user cannot read is not used either: its `#!` line cannot be checked, yet
+the kernel would still follow it. macOS ACL mutation grants
+(write/append/delete, child deletion, attributes, security or owner changes) are
+refused for any principal; deny/read-only entries remain supported. Linux access
+ACLs are conservatively refused. Unreadable ACL metadata is untrusted. The same
+ACL policy covers Docker discovery/config paths and their link targets. This
+may refuse owner-only ACL grants; it never attempts to infer group membership
+or effective ACL ordering. Native ACL fixtures need hosted macOS qualification. Darwin ACL inspection does not require executable read access. NULL/ENOENT
+counts as absent ACL only when pre/post link and target metadata show the path
+still exists unchanged; missing, changed or unreadable metadata remains
+untrusted. These observations cannot lock out same-user/root ABA changes.
+Doctor checks each tool's executable and its `#!` interpreter chain, not the
+shared libraries a compiled tool loads. Library search paths embedded in a binary
+(ELF `RUNPATH`/`RPATH`, Mach-O `LC_RPATH` and `@rpath`/`@loader_path` load
+commands), the system loader configuration and the dyld shared cache are not
+validated; inherited loader variables are removed, but a library in another
+user's writable directory named by the binary itself would still load.
+
+Each refresh creates one private temporary PATH of wrappers that exec the checked
+absolute tool paths, preserving normal shim script locations and nested lookup.
+Wrappers contain checked tool paths only, not credentials or injected context
+values, and their temporary files are removed afterward.
+Scans deduplicate absolute directories (including canonical aliases) before the
+64-directory bound and inspect at most 8,192 entries. Reaching either bound
+keeps already checked tools and runs Doctor with explicit incomplete coverage;
+only checks dependent on filtered or unsearched Doctor tools become Unknown,
+so those tools cannot look missing or healthy. One coverage card names the
+unchecked tools; independently established checks keep their result. The fixed
+[Doctor tool/dependency audit](DOCTOR_TOOLS.md) excludes unrelated executables
+and documents actual read calls and file-only exclusions. For a scan cutoff
+or unreadable directory, tools already checked remain available and only
+unsearched Doctor tools receive incomplete coverage.
+A root:admin group-writable `/Applications` or app-bundle target is refused too;
+this preview does not widen trust for Docker Desktop or OrbStack. The lead's
+Mac pass must qualify these layouts; a skip is not proof Docker is missing. This is an ownership/permission boundary,
+not a sandbox or content/signature check: trusted tools, their plugins and
+same-user/root updates remain trusted. Real macOS/Homebrew behavior still needs
+the combined Mac pass; the layout and nested shims are tested with owned fixtures.
+Those fixtures use only a temporary Homebrew-style tree and an owned symlink
+alias; expected shim paths come from the fixture's canonical root, never from
+the runner's real Homebrew installation or filesystem modes.
+
+The fixed absolute Mutagen override (`HACK_MUTAGEN_PATH`) or managed
+`HACK_HOME/bin/mutagen` candidate, an absolute `HACK_NATIVE_BINARY` (or, when it
+is unset, the `hack-native` the CLI would take from beside its own executable)
+and every discovered Docker plugin are checked before Doctor too, including the same `#!`
+interpreter rule (the native runtime does not get the `env` form); Doctor's
+runs also remove inherited interpreter startup and preload variables
+(`BASH_ENV`, `ENV`, `SHELLOPTS`, `PS4`, exported Bash functions, Perl, Python,
+Ruby and Node options and paths, the Bun runtime's `BUN_OPTIONS`, `BUN_BE_BUN`,
+`BUN_CONFIG_*` and `BUN_INSPECT*` (the CLI is a Bun-compiled binary), and every
+`LD_*` and `DYLD_*` loader variable), so a checked tool script cannot be made to load code from the
+environment; missing candidates
+require protected ancestry, and relative/unprovable selections are refused.
+For a compiled CLI, the `hack-lifecycle-supervisor` companion beside it (which
+Doctor's project checks run by absolute path for projects using the supervisor
+runner, ignoring any selector) must pass the same rule; an unsafe one refuses
+Doctor. When the CLI is a `#!` launcher, the supervisor it would finally run cannot
+be located or checked by the app.
+Doctor's runs pin the checked native runtime through `HACK_NATIVE_BINARY`. When the
+CLI is a `#!` launcher, the executable it finally runs (and so its fallback
+directory) cannot be known, so Doctor pins an absent path inside its private
+wrapper directory and native checks report the runtime as unavailable; set
+`HACK_NATIVE_BINARY` to check a bundled runtime in that layout.
+Docker plugin preflight preserves HOME, DOCKER_CONFIG and DOCKER_CONTEXT. Doctor's
+automatic checks only use a local Docker socket: a non-`unix://` `DOCKER_HOST`,
+or a selected context whose endpoint is remote (for example `ssh://`) or cannot
+be found, refuses the probe, because Docker would start programs such as `ssh`
+and its configured helpers that Doctor does not inspect. It
+checks the selected config/plugin directories, configured `cliPluginsExtraDirs`,
+the four standard Unix system plugin directories and plugin executable/symlink
+targets with the same owner/mode/ancestor rule. It streams only the public extra
+directory list from config JSON; credentials and context contents are ignored,
+never retained, logged, copied or rewritten. Config parsing is bounded to 1 MiB;
+plugin inspection to 64 directories and 8,192 entries. Unsafe or unprovable
+discovery produces CouldNotCheck with a reason before the Doctor CLI/Docker probe.
+
+This supports the documented standard Unix Docker CLI discovery model, not
+opaque/custom discovery. A nonempty `DOCKER_CLI_PLUGIN_EXTRA_DIRS`, relative
+discovery path or unsupported/unreadable config is conservatively refused,
+without switching to another context or home. Custom/bundled discovery and real
+Mac behavior still require reviewer assessment and the combined Mac pass; this
+is not a general Docker sandbox. Native pre/post marker witnesses are read-only
+observations, not locks against concurrent same-user changes.
+
+## What v0 does not do yet
+
+The Activity tab, CPU and memory, onboarding, always-on, daemon actions and
+upgrades come in later units. The design and the CLI/daemon requests they need
+are in `DESIGN.md` (PR #800).
+
 ## Logs tab
 
 `hack logs --json` for the selected project, following by default:
@@ -108,12 +247,6 @@ The paused-search fixture shows its active query in the search field. Finite
 reads for observed stopped projects include that state alongside the stream status.
 The paused fixture also demonstrates the overflow count. Pause has no timeout;
 following resumes through Resume, not automatically when scrolling to the bottom.
-
-## Not yet
-
-The Activity tab, CPU and memory, onboarding, always-on, daemon actions and
-upgrades come in later units. The design and the CLI/daemon requests they
-need are in `DESIGN.md`.
 
 ## Env tab (names only)
 

@@ -10,10 +10,10 @@ import {
 } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import pkg from "../../../package.json";
 import { HackCliError } from "../cli-result.ts";
 import { resolveGlobalHackDir } from "../config-paths.ts";
 import { isRecord } from "../guards.ts";
+import { HACK_VERSION as BUILD_VERSION } from "../hack-version.ts";
 import { readReplaceablePrivateFile } from "../private-file.ts";
 
 /**
@@ -50,8 +50,7 @@ import { readReplaceablePrivateFile } from "../private-file.ts";
  */
 
 export const JOURNAL_FORMAT_VERSION = 1;
-export const HACK_VERSION: string = (pkg as { readonly version: string })
-  .version;
+export const HACK_VERSION: string = BUILD_VERSION;
 export const RESERVE_BYTES = 64 * 1024;
 /** Capture limit per command, stdout and stderr together. */
 export const CAPTURE_LIMIT_BYTES = 8 * 1024 * 1024;

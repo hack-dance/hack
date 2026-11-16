@@ -15,7 +15,11 @@
 //! | Host shell with env | `hack host shell --env <overlay> --scope <scope>` |
 //!
 //! It passes subcommands, validated names and a shell name only. It never
-//! builds an environment and never sees a value.
+//! builds an environment and never sees a value: it sets the terminal's
+//! identity (`TERM`, `COLORTERM`, `TERM_PROGRAM`) and, for a CLI tab, the
+//! instance's backend (`HACK_RUNTIME_BACKEND=native|compose`), the same
+//! selector the core passes on every CLI call, so a shell or log stream
+//! targets the instance's own backend.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -133,6 +137,18 @@ fn tab_kind(kind: &SessionKind) -> TabKind {
             is_default: *is_default,
         },
     }
+}
+
+/// Select the instance's backend for every attempt of a CLI plan.
+fn with_backend(mut plan: SessionPlan, native: bool) -> SessionPlan {
+    let backend = if native { "native" } else { "compose" };
+    for attempt in &mut plan.attempts {
+        attempt
+            .options
+            .env
+            .push(("HACK_RUNTIME_BACKEND".into(), backend.into()));
+    }
+    plan
 }
 
 /// `--branch <b>` for a branch instance, as validated names.
@@ -367,12 +383,10 @@ impl HackApp {
                     hack_desktop_core::source::NATIVE_LOGS_NOTE
                 ))
                 .map_err(io),
-                (Some(hack), Some((root, false, branch))) => TerminalCore::session(logs_plan(
-                    hack,
-                    root,
-                    branch.as_deref(),
-                    d.state.is_active(),
-                )?)
+                (Some(hack), Some((root, false, branch))) => TerminalCore::session(with_backend(
+                    logs_plan(hack, root, branch.as_deref(), d.state.is_active())?,
+                    false,
+                ))
                 .map_err(io),
                 // Fixtures: the fixture's log lines, as a service prints them.
                 _ if !self.live => note_core(&self.fixture_log_text()).map_err(io),
@@ -385,11 +399,14 @@ impl HackApp {
                 }
             },
             NewTab::Container(service) => {
-                let (Some(hack), Some((root, _, branch))) = (&hack, &root) else {
+                let (Some(hack), Some((root, native, branch))) = (&hack, &root) else {
                     return Err("A shell in a service needs the hack CLI.".into());
                 };
-                TerminalCore::session(container_plan(hack, root, branch.as_deref(), service)?)
-                    .map_err(io)
+                TerminalCore::session(with_backend(
+                    container_plan(hack, root, branch.as_deref(), service)?,
+                    *native,
+                ))
+                .map_err(io)
             }
             NewTab::Host => {
                 let root = root
@@ -409,11 +426,14 @@ impl HackApp {
                 scope,
                 is_default,
             } => {
-                let (Some(hack), Some((root, _, _))) = (&hack, &root) else {
+                let (Some(hack), Some((root, native, _))) = (&hack, &root) else {
                     return Err("A host shell with env needs the hack CLI.".into());
                 };
-                TerminalCore::session(host_env_plan(hack, root, overlay, scope, *is_default)?)
-                    .map_err(io)
+                TerminalCore::session(with_backend(
+                    host_env_plan(hack, root, overlay, scope, *is_default)?,
+                    *native,
+                ))
+                .map_err(io)
             }
         }
     }
@@ -1136,6 +1156,47 @@ mod tests {
                 "500"
             ]]
         );
+    }
+
+    fn env_of(plan: &SessionPlan) -> Vec<Vec<(String, String)>> {
+        plan.attempts
+            .iter()
+            .map(|a| {
+                a.options
+                    .env
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.to_string_lossy().into_owned(),
+                            v.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_cli_tab_selects_the_instance_backend_and_nothing_else() {
+        let hack = Path::new("/bin/hack");
+        let root = Path::new("/work/p");
+        for native in [false, true] {
+            let backend = if native { "native" } else { "compose" };
+            for plan in [
+                container_plan(hack, root, None, "api").unwrap(),
+                logs_plan(hack, root, None, true).unwrap(),
+                host_env_plan(hack, root, "staging", "api", false).unwrap(),
+            ] {
+                for env in env_of(&with_backend(plan, native)) {
+                    let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+                    assert_eq!(
+                        names,
+                        ["TERM", "COLORTERM", "TERM_PROGRAM", "HACK_RUNTIME_BACKEND"]
+                    );
+                    assert_eq!(env[3].1, backend, "every attempt, bash and sh alike");
+                }
+            }
+        }
     }
 
     #[test]

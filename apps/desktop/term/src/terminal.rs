@@ -31,6 +31,11 @@ pub const MAX_BYTES_PER_PUMP: usize = 1 << 20;
 pub const EXIT_DRAIN_QUIET: Duration = Duration::from_millis(500);
 /// After the child exits: the longest wait for end of output.
 pub const EXIT_DRAIN_CAP: Duration = Duration::from_secs(5);
+/// After end of output: the longest wait for the child's exit status to
+/// become visible. The terminal can report end of output a moment before
+/// the exit can be read; without this wait the session ended as "terminal
+/// closed" with no status. Pumping never blocks; this spans pumps.
+pub const EOF_EXIT_WAIT: Duration = Duration::from_millis(250);
 /// How soon a "command not found" exit must come to try the next attempt.
 pub const FALLBACK_WINDOW: Duration = Duration::from_secs(10);
 
@@ -81,6 +86,8 @@ pub struct TerminalCore {
     notice: Option<String>,
     /// When the child's exit was first seen, and the last output after it.
     exit_seen: Option<(ExitInfo, Instant)>,
+    /// When end of output was first seen.
+    eof_seen: Option<Instant>,
     last_output: Instant,
     /// Attempts not yet tried, the current start time, and whether the user
     /// has typed: what decides a fallback.
@@ -167,6 +174,7 @@ impl TerminalCore {
             status: Status::Running,
             notice: None,
             exit_seen: None,
+            eof_seen: None,
             last_output: Instant::now(),
             remaining,
             started: Instant::now(),
@@ -285,7 +293,15 @@ impl TerminalCore {
                         at.elapsed() >= EXIT_DRAIN_CAP,
                     )
                 });
-                if read.eof || quiet || capped {
+                if read.eof && self.eof_seen.is_none() {
+                    self.eof_seen = Some(Instant::now());
+                }
+                // End of output ends the session once the exit status is
+                // known, or after EOF_EXIT_WAIT without it.
+                let eof_done = self
+                    .eof_seen
+                    .is_some_and(|at| self.exit_seen.is_some() || at.elapsed() >= EOF_EXIT_WAIT);
+                if eof_done || quiet || capped {
                     let info = self.exit_seen.map(|(info, _)| info).or(exit);
                     busy = true;
                     if !self.try_next_attempt(info) {
@@ -325,6 +341,7 @@ impl TerminalCore {
                 self.retire(failed);
                 self.kind = next.kind;
                 self.exit_seen = None;
+                self.eof_seen = None;
                 self.last_output = Instant::now();
                 self.started = Instant::now();
                 true

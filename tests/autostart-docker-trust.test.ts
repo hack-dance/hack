@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { realpathSync, statSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -15,7 +15,10 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { assertAutostartDockerConfigTrusted } from "../src/lib/autostart-docker-trust.ts";
-import { isDarwinAdminDirectory } from "../src/lib/path-trust.ts";
+import {
+  isDarwinAdminDirectory,
+  walkReplaceableChain,
+} from "../src/lib/path-trust.ts";
 
 /**
  * Checks here do not read the runner environment, the system plugin
@@ -251,6 +254,41 @@ function socketFixtureBase(): string | null {
 }
 const SOCKET_FIXTURE_BASE = socketFixtureBase();
 
+/** What the socket walk sees for `path`: names, owners and modes only. */
+function describeSocketCheck(path: string): string {
+  const lines: string[] = [`socket check for ${path}`];
+  try {
+    const physical = realpathSync(path);
+    const info = lstatSync(physical);
+    lines.push(
+      `resolves to ${physical}: isSocket=${info.isSocket()} uid=${info.uid} (process ${process.getuid?.()}) mode=${(info.mode & 0o7777).toString(8)}`
+    );
+  } catch (error: unknown) {
+    lines.push(`realpath/lstat failed: ${String(error)}`);
+  }
+  const checked = new Set<string>();
+  const walk = walkReplaceableChain({
+    path,
+    uid: process.getuid?.() ?? -1,
+    hackHome: null,
+    checked,
+    allowMissing: true,
+    acceptDarwinAdminDirectories: true,
+  });
+  lines.push(`walk: ${JSON.stringify(walk)}`);
+  for (const entry of checked) {
+    try {
+      const info = lstatSync(entry);
+      lines.push(
+        `  ${entry} uid=${info.uid} gid=${info.gid} mode=${(info.mode & 0o7777).toString(8)} dir=${info.isDirectory()} link=${info.isSymbolicLink()}`
+      );
+    } catch (error: unknown) {
+      lines.push(`  ${entry} lstat failed: ${String(error)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 test.skipIf(SOCKET_FIXTURE_BASE === null)(
   "owned socket and symlink pass; writable or sticky parents refuse",
   async () => {
@@ -269,13 +307,19 @@ test.skipIf(SOCKET_FIXTURE_BASE === null)(
       await chmod(socket, 0o660);
       await symlink(socket, alias);
       for (const path of [socket, alias]) {
-        expect(() =>
+        let refused: unknown = null;
+        try {
           trustDocker({
             home,
             env: { DOCKER_HOST: `unix://${path}` },
             systemPluginDirectories: [],
-          })
-        ).not.toThrow();
+          });
+        } catch (error: unknown) {
+          refused = error;
+        }
+        // The product omits values; on a failure, name what the socket check
+        // saw so a host-specific refusal can be diagnosed from CI output.
+        expect(refused, describeSocketCheck(path)).toBeNull();
       }
       for (const mode of [0o777, 0o1777]) {
         await chmod(socketRoot, mode);

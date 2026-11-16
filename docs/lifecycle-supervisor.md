@@ -58,33 +58,50 @@ a failed capture does not prevent that healthy guard from handling shutdown. If 
 is lost during stop, recovery prefers a fresh capture and falls back to those
 admitted identities, rechecking each before TERM/KILL. Each recovered target gets
 its own five-second TERM grace and two-second confirmation bound. Recovery begins
-at most once per target; late guard loss can extend stop to roughly fourteen seconds. Unobserved descendants
-still report unknown. A failed or expired target does not abandon other admitted
-targets: stop drives them to their own outcomes before returning unknown.
+at most once per target; late guard loss can extend stop to roughly fourteen seconds. Descendants forked after the capture are never
+signalled: once no captured member is left, stop waits until the target's own deadline for them to
+exit and reports unknown only if they are still alive. A failed or expired target does not abandon other admitted
+targets: stop drives them to their own outcomes before returning unknown. A receipt that
+cannot be verified at admission is never signalled, but it no longer keeps the owner's
+other targets from being stopped; the reply is still `unknown` with `stop-incomplete`.
 
 Replies contain `version`, `supervisorPid`, `processes`, and `outcome` (`ready`,
 `observed`, `stopped`, `unknown` or `refused`). A stop whose confirmation times out emits
 `unknown` and exits nonzero. Callers must inspect both the receipt and exit status.
 
-Every `stop` and `status` request ends with exactly one framed receipt, also when it
-fails. A failed request exits nonzero and carries a `reason`:
+Every `stop` and `status` request whose frame is read ends with exactly one framed
+receipt, also when it fails. A failed request exits nonzero and carries a `reason`:
 
 | `reason` | `outcome` | Meaning |
 |---|---|---|
 | `invalid-request` | `refused` | The control frame or root was rejected; nothing was read or changed. |
 | `stop-lock-wait-expired` | `unknown` | Another stop or a launch held `.stop.lock` for the whole wait (sixteen seconds); this request acted on nothing. |
 | `foreign-live-process` | `unknown` | A receipt from another owner token still has live members. |
+| `foreign-unknown-process` | `unknown` | A receipt from another owner token has live members that no witness ties to it. |
 | `stop-incomplete` | `unknown` | Stop could not confirm that every member is gone. |
 | `retired-owner-live` | `unknown` | Status for a retired owner whose members are not proven absent. |
 | `stop-lock-failed` | `unknown` | Taking `.stop.lock` failed for a reason other than the wait expiring. |
 | `receipt-read-failed` | `unknown` | The process receipts could not be read. |
-| `retire-failed` | `unknown` | Stop could not durably retire the owner token; nothing was signalled. |
+| `retire-failed` | `unknown` | Stop could not durably retire the owner token; nothing was signalled. The retirement marker may already exist, so a later `run` with that token can be refused. |
 | `io-error` | `unknown` | Any other local failure. |
 
 A successful reply has no `reason`. The sixteen-second stop-lock wait exceeds the
 timers of a stop that recovers after late guard loss (about fourteen seconds), so a
 waiter normally gets its own outcome; admission and census work run outside those
 timers, which is why an expired wait still returns its own receipt.
+
+The reply's `processes`, `liveProcessNames` and `unknownProcessNames` are a snapshot
+read after the stop lock is released. Another stop or launch can run in between, so
+they describe the root at reply time; `outcome`, `reason` and the exit status describe
+this request.
+
+No frame (exit nonzero with no receipt, or a partial frame) means the request may or
+may not have acted. That happens only before the request frame is read or when the
+reply cannot be written: the startup descriptor cleanup fails (on macOS it needs one
+spare descriptor to list `/dev/fd`, so a caller at its descriptor limit is refused), a
+wrong argument count, a closed stdout, a reader that does not drain within ten
+seconds, a receipt over 1 MiB, or the process being killed. Re-run `status` to learn
+the state.
 `run` must be spawned as a fresh child without making it a process-group leader:
 the supervisor calls `setsid` itself. A caller using `detached: true` or
 `setpgid(0, 0)` is refused before authored code starts.
@@ -111,10 +128,22 @@ there is no total ordering guarantee between stdout and stderr.
 Each record is written with one `write` on an `O_APPEND` descriptor and no lock. On a
 local file system the kernel places each append atomically at the end of the file, so
 whole records from different guards never interleave; records from different guards
-appear in the order their appends happened. A short write (a full disk, a file-size
-limit, or a signal after partial progress) is completed by a second write and can split
-one record. No guard waits for another guard to log, so a stopped or hung
-guard cannot stall a sibling guard's output, exit detection or stop handling.
+appear in the order their appends happened. No guard waits for another guard to log,
+so a stopped or hung guard cannot stall a sibling guard's output, exit detection or
+stop handling.
+
+Readers: a final line without a line end is incomplete (a record can be read while it
+is still being appended) and must be held back until it ends.
+
+When a log write fails, a record can be split. If the first write is short and the
+second fails (a full disk), the head of the record stays in the file without a line
+end; the next record from any guard is appended directly after it, so that line has a
+damaged head followed by a whole record. A failed log write is an error for the guard:
+it sends TERM to its command, waits the five-second grace, sends KILL and exits, so on
+a full disk each guard ends its command at its next log record. With a file-size limit
+(`RLIMIT_FSIZE`) the second write raises SIGXFSZ, which the guard does not handle, so
+the default action ends the guard itself and its command continues without a guard;
+`stop` then recovers it as after any lost guard.
 
 ## Locks and waits
 
@@ -125,9 +154,19 @@ The bounds below limit each wait, not the total duration of a request:
 | Lock | Held by | Held across a blocking call? | Who waits, and the bound |
 |---|---|---|---|
 | `.instance.lock` | The project supervisor (`run` or `serve`), for its lifetime | Yes, its whole run | Another `run` or `serve` for the root: up to 10 s, then refused. Guards, `add`, `stop` and `status` never take it. |
-| `.stop.lock` | `run` or `serve` from admission until its ready receipt; `add` while it admits one command; each new guard (inherited on fd 2) until it publishes and detaches; `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. `status` waits up to 16 s only when the lock file exists (it never creates it), with the same framed answer on expiry. `add` waits up to 16 s; its forwarder reads the reply for up to 26 s. A launch (`run`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` waits up to 10 s for each guard's receipt, then rolls back. |
+| `.stop.lock` | `run` or `serve` from admission until its ready receipt; `add` while it admits one command; each new guard (inherited on fd 2) until it publishes and detaches, or through its cleanup if a step before detaching fails (five seconds plus the KILL confirmation); `stop` for its duration; the project supervisor while it stops on a signal | Yes. A guard frozen before it publishes keeps the lease until it is continued or killed | `stop` waits up to 16 s, then answers `unknown` with reason `stop-lock-wait-expired` and acts on nothing. `status` waits up to 16 s only when the lock file exists (it never creates it), with the same framed answer on expiry. `add` waits up to 16 s; its forwarder reads the reply for up to 26 s. A launch (`run` or `serve`) waits up to 16 s, then exits nonzero without a ready receipt and starts nothing. `run` writes each guard's plan and reads its receipt with a 10 s deadline each, then rolls back (up to seven seconds more). The project supervisor's signal-triggered stop also waits up to 16 s, then tries again on its next loop pass. |
 | `<name>.lock` | The guard of that command, for its lifetime | Yes | Only a new guard for the same command name: up to 10 s, then refused. Never a sibling, `stop` or `status`. |
-| Receipts, retirement marker, `lifecycle.log` | No lock | No | Receipts are replaced atomically; a reader that races a replacement reopens the name. Log records are single appends (above). |
+| Receipts, retirement marker, `lifecycle.log` | No lock | No | Receipts are replaced atomically; a reader that races a replacement reads the complete version it opened. Log records are single appends (above). |
+
+A guard frozen before it detaches keeps every `stop`, `run`, `serve`, `add` and (when
+the lock exists) `status` of the whole root failing, each within its bound, for as long as it stays frozen, healthy siblings
+included. If the project supervisor is alive it rolls back and stops the published
+siblings itself; if it was killed, they keep running and cannot be stopped through
+`stop`. A guard frozen before its first receipt save has no receipt, so `status` does
+not show it. Recovery: find the frozen guard (a stopped `hack-lifecycle-supervisor
+guard` process whose session is its own PID, a child of the project supervisor or
+orphaned) and continue it (`SIGCONT`) or kill it; the lease is released when it exits
+or detaches.
 
 `status` takes only the bounded stop-lock wait above. `stop` handles each target separately: a frozen live guard costs
 its own target the five-second grace plus the two-second confirmation bound (and the
@@ -180,13 +219,15 @@ leader identity and each remaining member's UID, birth and session. Recovery
 delivers TERM individually, grants a fresh five-second grace, then KILL to the captured incarnations and
 confirms absence. The capture remains authoritative if TERM ends the witness;
 every signal still rechecks that member's PID, birth, UID and session (pidfd on Linux).
-Readers that open a receipt while a guard atomically replaces it reopen the name, so a
+Readers that open a receipt while a guard atomically replaces it read the complete version
+they opened (the read takes effect just before the replacement), so a
 concurrent update never reads as a refusal.
 On Linux a thread-group leader whose main thread exited while other threads run shows
-`Z` in `/proc/<pid>/stat`; it counts as live until no thread in `/proc/<pid>/task` is. A pidfd open that
+`Z` in `/proc/<pid>/stat`; it counts as live while the kernel's thread count on that same
+stat line is above one. A pidfd open that
 reports the process missing (`ESRCH`, or `EINVAL` on Linux 6.8 when the PID survives only as a group or
 session ID) skips that member without a signal; liveness is still decided by identity afterwards.
-Unobserved descendants never inherit this authority and retain an unknown outcome. Unverified identity never authorizes signals or a successful
+Unobserved descendants never inherit this authority; stop waits for them until its deadline and reports unknown if they remain. Unverified identity never authorizes signals or a successful
 stop. Launch and stop share a bounded lock; a startup descriptor lease keeps
 admission locked through guard publication even if the project owner dies.
 The guard temporarily inherits this stop-lock lease on stderr (fd 2), then closes
@@ -407,8 +448,8 @@ the default suite and builds the release executable without this feature.
 ## Manual recovery after an unknown stop
 
 Stop retires the owner token before validating all receipts. One unknown receipt
-can therefore leave otherwise healthy guards running and block every new start
-in that private root. Repeating up with a new token does not bypass the uncertainty.
+is left running (it is never signalled) and blocks every new start in that private
+root, although the owner's other, verifiable targets are still stopped. Repeating up with a new token does not bypass the uncertainty.
 This also applies when a guard dies after spawn but before publishing running:
 the receipt has no command birth evidence, so an unanchored session is unknown.
 

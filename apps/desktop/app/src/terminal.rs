@@ -428,14 +428,33 @@ impl HackApp {
         }
         let sessions = panel.sessions.clone();
         let core = match core {
-            Ok(core) => core,
+            Ok(core) => {
+                self.panels.error = None;
+                core
+            }
+            // The Logs tab always exists: when its stream cannot start, it
+            // says why, and a click on it tries again (its note has ended).
+            Err(why) if tab == NewTab::Logs => {
+                let note =
+                    format!("Logs could not start: {why}\r\nClick the Logs tab to try again.\r\n");
+                match note_core(&note) {
+                    Ok(core) => {
+                        self.panels.error = Some(why);
+                        core
+                    }
+                    Err(e) => {
+                        self.panels.error = Some(format!("{why} ({e})"));
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
             Err(why) => {
                 self.panels.error = Some(why);
                 cx.notify();
                 return;
             }
         };
-        self.panels.error = None;
         let view = cx.new(|cx| {
             let mut v = TerminalView::from_core(core, cx);
             v.set_look(look, cx);

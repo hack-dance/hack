@@ -124,15 +124,15 @@ impl ProjectRow {
                 t.to_owned()
             }
         };
-        let mut dirs = runtime.working_dir.iter().chain(
-            runtime
-                .services
-                .iter()
-                .flat_map(|s| &s.containers)
-                .filter_map(|c| c.working_dir.as_ref()),
-        );
-        let first = trim(dirs.next()?);
-        if dirs.any(|d| trim(d) != first) {
+        // Every container must carry ownership evidence (as the CLI's
+        // `assertSingleRuntimeDirectory` requires): one without a working
+        // directory makes the owner unknown, not ignorable.
+        let mut dirs: Vec<&String> = runtime.working_dir.iter().collect();
+        for c in runtime.services.iter().flat_map(|s| &s.containers) {
+            dirs.push(c.working_dir.as_ref()?);
+        }
+        let first = trim(dirs.first()?);
+        if dirs.iter().any(|d| trim(d) != first) {
             return None;
         }
         let plain = |p: &str| {
@@ -598,14 +598,14 @@ mod tests {
       "branch_runtime":[
         {"branch":"feature-search","runtime":{"project":"storefront--feature-search",
           "working_dir":"/work/storefront","services":[
-          {"service":"api","containers":[{"id":"c1","state":"running","status":"Up 3 minutes",
+          {"service":"api","containers":[{"id":"c1","state":"running","status":"Up 3 minutes","working_dir":"/work/storefront",
             "name":"storefront--feature-search-api-1","ports":[],"image":"img",
             "labels":{"caddy":"api.feature-search.storefront.hack, feature-search.storefront.hack",
               "com.docker.compose.project":"storefront--feature-search"},
             "mounts":[],"networks":[]}]},
-          {"service":"web","containers":[{"id":"c2","state":"running","status":"Up 3 minutes",
+          {"service":"web","containers":[{"id":"c2","state":"running","status":"Up 3 minutes","working_dir":"/work/storefront/",
             "labels":{"caddy":"feature-search.storefront.hack,web.feature-search.storefront.hack,"}}]},
-          {"service":"db","containers":[{"id":"c3","state":"running","status":"Up 3 minutes",
+          {"service":"db","containers":[{"id":"c3","state":"running","status":"Up 3 minutes","working_dir":"/work/storefront",
             "labels":null}]}]}},
         {"branch":"fix-login","runtime":{"project":"storefront--fix-login","services":[
           {"service":"api","containers":[{"state":"exited","status":"Exited (1) 1 minute ago",
@@ -673,6 +673,12 @@ mod tests {
                 Some("/work/wt/feature/.hack"),
             ],
             vec![None],
+            // A valid aggregate, but a container without ownership evidence.
+            vec![
+                Some("/work/storefront/.hack"),
+                Some("/work/storefront/.hack"),
+                None,
+            ],
         ] {
             assert_eq!(p.owning_checkout(&runtime_in(&dirs)), None, "{dirs:?}");
         }

@@ -235,6 +235,23 @@ fn subdomain_branch(branch: &str) -> BranchRuntime {
     }
 }
 
+/// Every container of each runtime carries its runtime's working directory,
+/// as Compose reports it.
+fn owned(mut branches: Vec<BranchRuntime>) -> Vec<BranchRuntime> {
+    for b in &mut branches {
+        let dir = b.runtime.working_dir.clone();
+        for c in b
+            .runtime
+            .services
+            .iter_mut()
+            .flat_map(|s| &mut s.containers)
+        {
+            c.working_dir.clone_from(&dir);
+        }
+    }
+    branches
+}
+
 fn svc(name: &str, c: Container) -> RuntimeService {
     RuntimeService {
         service: name.into(),
@@ -378,7 +395,10 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         }
         Fixture::Running => {
             let mut r = storefront(all_up(), "running");
-            r.branch_runtime = vec![running_branch("feature-search"), failed_branch("fix-login")];
+            r.branch_runtime = owned(vec![
+                running_branch("feature-search"),
+                failed_branch("fix-login"),
+            ]);
             r.worktrees = vec![crate::models::Worktree {
                 path: Some(STOREFRONT_WORKTREE.into()),
                 branch: Some("fix-login".into()),
@@ -387,11 +407,11 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         }
         Fixture::Branches => {
             let mut r = storefront(vec![], "stopped");
-            r.branch_runtime = vec![
+            r.branch_runtime = owned(vec![
                 running_branch("feature-search"),
                 running_branch("fix-login"),
                 subdomain_branch("release-2"),
-            ];
+            ]);
             r.worktrees = vec![crate::models::Worktree {
                 path: Some(STOREFRONT_WORKTREE.into()),
                 branch: Some("fix-login".into()),

@@ -106,6 +106,10 @@ impl HackApp {
         }
         let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
         let mut cmd = format!("hack logs --path {}", quote(&root.to_string_lossy()));
+        if let Some(branch) = self.model.selected_key().and_then(|k| k.branch) {
+            cmd.push_str(" --branch ");
+            cmd.push_str(&quote(&branch));
+        }
         if let Some(svc) = &self.logs.model.service {
             cmd.push(' ');
             cmd.push_str(&quote(svc));
@@ -139,10 +143,11 @@ impl HackApp {
         self.logs.refresh_visible();
         let generation = self.logs.generation;
         let source = self.source.clone();
+        let branch = self.model.selected_key().and_then(|k| k.branch);
         cx.spawn(async move |this, cx| {
             let opened = cx
                 .background_executor()
-                .spawn(async move { source.open_logs(&root, false, &args) })
+                .spawn(async move { source.open_logs(&root, false, branch.as_deref(), &args) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.logs.generation != generation {

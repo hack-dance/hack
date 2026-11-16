@@ -13,6 +13,7 @@ export const MACHINE_SCHEMAS = {
   daemonStop: "hack.daemon-stop.v1",
   daemonRestart: "hack.daemon-restart.v1",
   daemonInstall: "hack.daemon-install.v1",
+  doctorMachine: "hack.doctor.machine.v1",
 } as const;
 
 export function machineSuccess<T extends object>(opts: {

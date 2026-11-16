@@ -3256,6 +3256,7 @@ version = "0.0.0"
 dependencies = [
  "gpui-kit",
  "hack-desktop-core",
+ "hack-desktop-ui",
  "image",
 ]
 

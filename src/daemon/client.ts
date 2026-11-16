@@ -1,9 +1,8 @@
-import pkg from "../../package.json";
-
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { HACK_VERSION } from "../lib/hack-version.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import {
   getLaunchdServiceStatus,
@@ -17,14 +16,11 @@ import { resolveDaemonPaths } from "./paths.ts";
 import { spawnDetachedDaemon } from "./spawn.ts";
 import { readDaemonStatus } from "./status.ts";
 
-type PackageJsonType = {
-  readonly name: string;
-  readonly version: string;
-} & Record<string, unknown>;
-
-const packageJson = pkg as unknown as PackageJsonType;
-/** This CLI's version; a hackd reporting another one is incompatible. */
-export const DAEMON_CLI_VERSION: string = packageJson.version;
+/**
+ * This CLI's version ({@link HACK_VERSION}, the release version a
+ * prerelease build stamps); a hackd reporting another one is incompatible.
+ */
+export const DAEMON_CLI_VERSION: string = HACK_VERSION;
 const DAEMON_AUTOSTART_COOLDOWN_MS = 15_000;
 const DAEMON_AUTOSTART_WAIT_MS = 3500;
 const DAEMON_AUTOSTART_POLL_MS = 125;
@@ -276,7 +272,7 @@ export async function probeDaemonApi(opts: {
   const version = json ? json.version : null;
   return {
     reachable: true,
-    compatible: typeof version === "string" && version === packageJson.version,
+    compatible: typeof version === "string" && version === DAEMON_CLI_VERSION,
     version: typeof version === "string" ? version : null,
   };
 }
@@ -394,7 +390,7 @@ async function isDaemonCompatible(opts: {
   }
   const json = safeJsonParse({ text: raw.body });
   const version = json ? json.version : null;
-  return typeof version === "string" && version === packageJson.version;
+  return typeof version === "string" && version === DAEMON_CLI_VERSION;
 }
 
 async function requestDaemonRaw(opts: {

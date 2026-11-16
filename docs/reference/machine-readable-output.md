@@ -141,4 +141,5 @@ success behavior stays covered by command-specific suites.
 | `hack global status --json --observe` | Envelope; `data.schema: hack.global-status.observe.v1` |
 | `hack usage --json --by-service` | Envelope; `data.schema: hack.usage.by-service.v1` |
 | `hack update --json --check --observe` | Envelope; `data.schema: hack.update-check.v1` |
+| `hack doctor --json --machine` | Envelope; `data.schema: hack.doctor.machine.v1` |
 <!-- json-inventory:end -->

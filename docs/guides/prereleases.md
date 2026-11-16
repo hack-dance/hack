@@ -169,6 +169,20 @@ mise exec -- scripts/build-native-candidate.sh /absolute/new/candidate-bundle \
 This builds software and provenance only; it does not reserve the version number,
 create a tag, or publish a release.
 
+Before anything is published, the build job also checks that an existing channel
+can take the candidate. It installs the previous published prerelease into a fresh
+root with that release's own standalone manager, then upgrades it to the candidate
+with the documented `hack-next --manager upgrade` command, which runs the retained
+older manager. If that fails, the job fails. Release assets can be replaced after
+publication, so the gate runs the previous release only when its manager digest is
+a reviewed predecessor in `scripts/installer/channel.ts` and both its manager and
+archive digests are pinned for that release in `scripts/check-prerelease-upgrade.ts`.
+Add them for each release when it publishes. The managers run without the workflow token, and the job fails if the
+packaged candidate changed while the gate ran. It also reports whether the documented
+`upgrade-manager` step would work. A release can pass on that step only with
+`HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1` and release notes that tell existing users to
+run it.
+
 Publication requires an explicit publish request for the exact protected `next`
 commit, successful checks for that commit, and approval through a configured
 `v5-prerelease` GitHub environment. An environment without required reviewers is
@@ -220,6 +234,20 @@ ceiling, but every member must still be a reviewed name in a complete group. A
 later bundle that adds a file therefore needs the same `upgrade-manager` step
 first. Upgrading with that newer installer against such a channel also refuses
 until you run it, and leaves the channel unchanged.
+
+Bundles from `5.0.0-next.18` onward add the lifecycle supervisor executable
+(`hack-lifecycle-supervisor`). A channel installed by `5.0.0-next.17` or earlier
+keeps that release's compiled manager, which refuses the new member: `upgrade`
+fails with "Foreign, duplicate or traversing archive entry." and leaves the channel
+unchanged. The `5.0.0-next.18` standalone manager cannot take such a channel over
+either, because no compiled predecessor was listed before it. Upgrade a channel
+a compiled manager installed (`next.6` to `next.17`) to `5.0.0-next.19` or later
+instead: run that release's standalone manager with `upgrade-manager` against the
+existing root, then `upgrade`. The takeover refuses a channel layout it cannot
+validate, such as one from the `next.1` to `next.5` Python installer; use a fresh
+`--root` for those. Managers
+from `5.0.0-next.19` onward name an unknown file and give that step when they
+refuse. A fresh `--root` does not need it.
 
 Compiled-manager downloads share one total deadline and an inactivity limit. Connection
 interruptions and HTTP 502/503/504 receive up to three fresh attempts with bounded

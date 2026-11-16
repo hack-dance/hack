@@ -52,6 +52,106 @@ const PLATFORM_MONO_FAMILIES: &[&str] = &[
     "Ubuntu Mono",
 ];
 
+/// The outcome of [`pick_family`].
+#[derive(Debug, PartialEq, Eq)]
+struct Picked {
+    /// The family to draw with; `None` when no installed family qualifies.
+    family: Option<String>,
+    /// The first candidate skipped, by index, and why.
+    first_skipped: Option<(usize, &'static str)>,
+}
+
+/// The first candidate that is installed (names compared without case) and
+/// monospaced. When every candidate fails, the first monospaced installed
+/// family, trying names that contain "mono" first: a grid is never drawn
+/// in a proportional font while a monospaced one exists.
+fn pick_family(
+    candidates: &[SharedString],
+    installed: &[String],
+    monospaced: impl Fn(&str) -> bool,
+) -> Picked {
+    let lower: std::collections::HashSet<String> =
+        installed.iter().map(|n| n.to_lowercase()).collect();
+    let mut first_skipped = None;
+    for (index, family) in candidates.iter().enumerate() {
+        let why = if !lower.contains(&family.to_lowercase()) {
+            "is not installed"
+        } else if !monospaced(family) {
+            "is not monospaced"
+        } else {
+            return Picked {
+                family: Some(family.to_string()),
+                first_skipped,
+            };
+        };
+        first_skipped.get_or_insert((index, why));
+    }
+    let (named_mono, others): (Vec<&String>, Vec<&String>) = installed
+        .iter()
+        .partition(|n| n.to_lowercase().contains("mono"));
+    let family = named_mono
+        .into_iter()
+        .chain(others)
+        .find(|n| monospaced(n))
+        .cloned();
+    Picked {
+        family,
+        first_skipped,
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn exhausted_candidates_fall_back_to_an_installed_monospaced_family() {
+        // The configured family is missing and the theme's is proportional:
+        // a monospaced family that is installed but not listed is used.
+        let candidates = [SharedString::from("Missing"), SharedString::from("UI Sans")];
+        let installed = names(&["UI Sans", "Serif Text", "Code Mono"]);
+        let picked = pick_family(&candidates, &installed, |f| f == "Code Mono");
+        assert_eq!(picked.family.as_deref(), Some("Code Mono"));
+        assert_eq!(picked.first_skipped, Some((0, "is not installed")));
+    }
+
+    #[test]
+    fn a_monospaced_family_without_mono_in_its_name_is_found_too() {
+        let candidates = [SharedString::from("Missing")];
+        let installed = names(&["Sans", "Fixed Grid"]);
+        let picked = pick_family(&candidates, &installed, |f| f == "Fixed Grid");
+        assert_eq!(picked.family.as_deref(), Some("Fixed Grid"));
+    }
+
+    #[test]
+    fn candidates_win_in_order_and_names_ignore_case() {
+        let candidates = [
+            SharedString::from("ui sans"),
+            SharedString::from("code mono"),
+        ];
+        let installed = names(&["UI Sans", "Code Mono", "Other Mono"]);
+        let picked = pick_family(&candidates, &installed, |f| {
+            f.contains("Mono") || f.contains("mono")
+        });
+        assert_eq!(picked.family.as_deref(), Some("code mono"));
+        assert_eq!(picked.first_skipped, Some((0, "is not monospaced")));
+    }
+
+    #[test]
+    fn no_monospaced_family_at_all_picks_none() {
+        let picked = pick_family(
+            &[SharedString::from("UI Sans")],
+            &names(&["UI Sans"]),
+            |_| false,
+        );
+        assert_eq!(picked.family, None);
+    }
+}
+
 /// Padding around the grid when the user's config sets none.
 const DEFAULT_PAD: f32 = 8.0;
 /// GPUI gives quit handlers 200 ms in total.
@@ -143,8 +243,8 @@ pub struct TerminalView {
     /// The user's terminal look, and whether it still has to be applied.
     look: GhosttyLook,
     look_pending: bool,
-    /// Installed family names (lower case), read once per view.
-    installed_fonts: Option<std::sync::Arc<std::collections::HashSet<String>>>,
+    /// Installed family names, read once per view.
+    installed_fonts: Option<std::sync::Arc<Vec<String>>>,
     /// The family chosen for a list of candidates, and the note to show.
     chosen_font: Option<(Vec<SharedString>, SharedString, Option<String>)>,
     rendered: Rendered,
@@ -314,52 +414,31 @@ impl TerminalView {
         }
         let installed = self
             .installed_fonts
-            .get_or_insert_with(|| {
-                std::sync::Arc::new(
-                    window
-                        .text_system()
-                        .all_font_names()
-                        .into_iter()
-                        .map(|name| name.to_lowercase())
-                        .collect(),
-                )
-            })
+            .get_or_insert_with(|| std::sync::Arc::new(window.text_system().all_font_names()))
             .clone();
         let ts = window.text_system();
-        let monospaced = |family: &SharedString| {
-            let id = ts.resolve_font(&gpui_kit::font(family.clone()));
+        let monospaced = |family: &str| {
+            let id = ts.resolve_font(&gpui_kit::font(family.to_owned()));
             let width = |c| ts.advance(id, size, c).map(|s| s.width).ok();
             let m = width('m');
             m.is_some_and(|m| m > px(0.)) && ['i', 'W', '.', '@'].iter().all(|c| width(*c) == m)
         };
-        let mut skipped: Option<(SharedString, &'static str)> = None;
-        let mut chosen = None;
-        for family in &candidates {
-            let reason = if !installed.contains(&family.to_lowercase()) {
-                Some("is not installed")
-            } else if !monospaced(family) {
-                Some("is not monospaced")
-            } else {
-                None
-            };
-            match reason {
-                None => {
-                    chosen = Some(family.clone());
-                    break;
-                }
-                Some(why) if skipped.is_none() && !self.look.font_families.is_empty() => {
-                    skipped = Some((family.clone(), why));
-                }
-                Some(_) => {}
-            }
-        }
-        // Nothing qualified (no monospaced font at all): keep the theme's.
-        let family = chosen.unwrap_or_else(|| cx.theme().mono_font_family.clone());
-        let note = skipped
-            .filter(|(first, _)| {
-                self.look.font_families.first().map(String::as_str) == Some(first.as_ref())
-            })
-            .map(|(first, why)| format!("font \"{first}\" {why}; using {family}"));
+        let picked = pick_family(&candidates, &installed, monospaced);
+        let family = picked
+            .family
+            .map(SharedString::from)
+            // No monospaced font is installed at all: the theme's family is
+            // the best that can be done.
+            .unwrap_or_else(|| cx.theme().mono_font_family.clone());
+        let note = picked
+            .first_skipped
+            .filter(|(index, _)| *index == 0 && !self.look.font_families.is_empty())
+            .map(|(_, why)| {
+                format!(
+                    "font \"{}\" {why}; using {family}",
+                    self.look.font_families[0]
+                )
+            });
         self.chosen_font = Some((candidates, family.clone(), note.clone()));
         (family, note)
     }

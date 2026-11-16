@@ -11,13 +11,14 @@
  * documented extra step works (the candidate's standalone manager running
  * `upgrade-manager` on the channel, then the same upgrade). A release may pass on
  * that step only with HACK_PRERELEASE_ACCEPT_MANAGER_STEP=1, which means its
- * release notes tell existing users to run it.
+ * release notes tell existing users to run it. The prerelease workflow does not
+ * set it: using it is a deliberate maintainer change to that workflow.
  *
  * Inputs: HACK_PRERELEASE_VERSION, HACK_PRERELEASE_OUTPUT (the packaged candidate
  * assets) and a GitHub token for `gh` (GH_TOKEN). Runs on Apple Silicon macOS
  * only; it starts no runtime and changes nothing outside its own temp directory.
  */
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -118,7 +119,9 @@ async function main(): Promise<number> {
     );
     return 0;
   }
-  const work = mkdtempSync(join(tmpdir(), "hack-upgrade-gate-"));
+  // Managers refuse a path that is not canonical; macOS tmpdir() is /var/...,
+  // a link to /private/var.
+  const work = realpathSync(mkdtempSync(join(tmpdir(), "hack-upgrade-gate-")));
   try {
     const assets = join(work, "previous");
     required(

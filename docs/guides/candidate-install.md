@@ -287,9 +287,11 @@ a newer one: `upgrade-manager` installs the executable it is run from. Download 
 standalone manager from the release you are upgrading to, verify it against that
 release's `INSTALLER-SHA256SUMS`, then run that file against your channel root.
 The example names `v5.0.0-next.16`; use the release you are upgrading to in both
-URLs and replace `NEWER` with its number. For a channel from `5.0.0-next.17` or
-earlier that is `5.0.0-next.19` or later: the `5.0.0-next.18` manager does not
-recognize earlier managers.
+URLs and replace `NEWER` with its number. For a channel that a compiled manager
+installed (`5.0.0-next.6` to `next.17`) that is `5.0.0-next.19` or later: the
+`5.0.0-next.18` manager does not recognize earlier managers. The takeover works only
+on a channel the newer manager can validate. A channel from the `5.0.0-next.1` to
+`next.5` Python installer, or one it refuses, needs a fresh `--root` instead.
 
 ```sh
 dir=$(mktemp -d) && cd "$dir" &&

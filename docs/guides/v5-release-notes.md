@@ -26,8 +26,9 @@ manager a next.17 (or earlier) channel keeps refuses that file, so
 `hack-next --manager upgrade --version 5.0.0-next.18` fails with "Foreign,
 duplicate or traversing archive entry." and changes nothing. The next.18
 standalone manager cannot replace it either. Install next.18 into a fresh `--root`,
-or upgrade the existing channel to next.19 or later: run that release's
-standalone manager with `upgrade-manager` against the channel, then `upgrade`
+or upgrade the existing channel to next.19 or later: for a channel a compiled
+manager installed (next.6 to next.17), run that release's standalone manager with
+`upgrade-manager` against the channel, then `upgrade`
 ([steps](candidate-install.md#upgrade-roll-back-and-return-to-stable)). From
 next.19, a release is published only after the previous release's channel upgrades
 to it with its retained manager.

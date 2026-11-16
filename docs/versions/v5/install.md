@@ -125,8 +125,10 @@ covered by the bundle checksums. Retained managers accept older bundles without
 this helper. Packaging does not change the lifecycle runner default.
 A prerelease channel installed by `5.0.0-next.17` or earlier refuses a bundle that
 contains it ("Foreign, duplicate or traversing archive entry."), and its `upgrade`
-changes nothing. Replace its manager first with the standalone manager of
-`5.0.0-next.19` or later (`upgrade-manager`), then upgrade; see
+changes nothing. For a channel a compiled manager installed (`next.6` to `next.17`),
+replace its manager first with the standalone manager of `5.0.0-next.19` or later
+(`upgrade-manager`), then upgrade. Older or unrecognized channels need a fresh
+`--root`. See
 [the full procedure](../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).
 
 Self-upgrades stage the helper before publishing the CLI, retain its previous

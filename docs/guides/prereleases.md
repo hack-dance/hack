@@ -235,9 +235,12 @@ Bundles from `5.0.0-next.18` onward add the lifecycle supervisor executable
 keeps that release's compiled manager, which refuses the new member: `upgrade`
 fails with "Foreign, duplicate or traversing archive entry." and leaves the channel
 unchanged. The `5.0.0-next.18` standalone manager cannot take such a channel over
-either, because no compiled predecessor was listed before it. Upgrade those
-channels to `5.0.0-next.19` or later instead: run that release's standalone
-manager with `upgrade-manager` against the existing root, then `upgrade`. Managers
+either, because no compiled predecessor was listed before it. Upgrade a channel
+a compiled manager installed (`next.6` to `next.17`) to `5.0.0-next.19` or later
+instead: run that release's standalone manager with `upgrade-manager` against the
+existing root, then `upgrade`. The takeover refuses a channel layout it cannot
+validate, such as one from the `next.1` to `next.5` Python installer; use a fresh
+`--root` for those. Managers
 from `5.0.0-next.19` onward name an unknown file and give that step when they
 refuse. A fresh `--root` does not need it.
 

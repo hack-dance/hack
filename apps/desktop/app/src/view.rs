@@ -139,6 +139,7 @@ pub struct HackApp {
     /// runs wait for it.
     window_visible: bool,
     _visibility: Option<gpui_kit::Subscription>,
+    _env_activation: Option<gpui_kit::Subscription>,
     recovery_busy: bool,
     recovery_error: Option<String>,
     /// When each project's running action started, for the slow-action
@@ -172,6 +173,7 @@ impl HackApp {
             doctor: DoctorPane::default(),
             window_visible: true,
             _visibility: None,
+            _env_activation: None,
             env: Default::default(),
             live,
             search,
@@ -318,8 +320,17 @@ impl HackApp {
             |this, visibility, _window, cx| {
                 this.window_visible = visibility.is_visible();
                 this.maybe_auto_refresh(cx);
+                if !this.window_visible {
+                    this.hide_env_values(cx);
+                }
             },
         ));
+        // A revealed env value hides when the window loses focus.
+        self._env_activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.hide_env_values(cx);
+            }
+        }));
     }
 
     /// While the Doctor pane is visible, refresh every 10 minutes.
@@ -412,39 +423,11 @@ impl HackApp {
     }
 
     /// Select the Env fixture without opening a window.
-    pub fn show_env_fixture(&mut self) {
+    pub fn show_env_fixture(&mut self, name: &str, cx: &mut Context<Self>) {
         self.tab = 2;
-        let generation = self.env.begin();
-        if let Some((root, native)) = self.selected_root() {
-            self.env.finish(generation, self.source.env(&root, native));
-        }
-    }
-
-    pub(crate) fn read_env(&mut self, cx: &mut Context<Self>) {
-        let generation = self.env.begin();
-        let Some((root, native)) = self.selected_root() else {
-            return;
-        };
-        if !self.live {
-            self.env.finish(generation, self.source.env(&root, native));
-            return;
-        }
-        let source = self.source.clone();
-        let requested = root.clone();
-        cx.spawn(async move |this, cx| {
-            let view = cx
-                .background_executor()
-                .spawn(async move { source.env(&root, native) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                // The generation drops a read the user has moved away from.
-                if this.selected_root() == Some((requested, native)) {
-                    this.env.finish(generation, view);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        // The CLI does not report a running overlay per instance yet (R22).
+        self.env.running = (name == "env-running").then(|| "staging".to_owned());
+        self.read_env(cx);
     }
 
     /// Fixtures: mark an action as in flight without running it.
@@ -629,6 +612,10 @@ impl HackApp {
     pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Project;
         self.copied = None;
+        // Another project: its own overlays and scopes, nothing revealed.
+        self.env.env = None;
+        self.env.scope = None;
+        self.env.running = None;
         self.env.begin();
         if self.tab == 2 {
             self.read_env(cx);
@@ -1233,164 +1220,6 @@ impl HackApp {
                     .child(body)
             })
             .children(panel)
-    }
-
-    fn env_tab(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
-        use hack_desktop_core::env::{EnvView, KeyState};
-        let p = ui.p;
-        let line = |s: String| {
-            div()
-                .type_step(text::BODY)
-                .text_color(p.text_secondary)
-                .child(s)
-        };
-        let mut body = div().flex().flex_col().gap(space::S4).pt(space::S3).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(space::S4)
-                .child(
-                    div()
-                        .type_step(text::BODY_STRONG)
-                        .text_color(p.text_primary)
-                        .child("Environment"),
-                )
-                .child(
-                    div()
-                        .type_step(text::SMALL)
-                        .text_color(p.text_muted)
-                        .child("names only; the app never reads a value"),
-                )
-                .child(div().flex_1())
-                .child(
-                    action_button("env-check", Glyph::Restart, "Check again", true, ui).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.read_env(cx);
-                            cx.notify();
-                        }),
-                    ),
-                ),
-        );
-        match &self.env.view {
-            EnvView::Loading => body = body.child(line("Reading environment metadata…".into())),
-            EnvView::Unreadable => {
-                body = body.child(line(
-                    "Could not read environment metadata. Check again or run hack doctor.".into(),
-                ));
-            }
-            EnvView::Report(report) => {
-                if let Some(scope) = &report.selected_scope {
-                    body = body.child(line(format!(
-                        "Scope: {scope} · other scopes are not included in this listing"
-                    )));
-                }
-                body = body.child(line(
-                    match report.key_state {
-                        KeyState::Missing | KeyState::Unreadable => {
-                            "Names are shown; stored values cannot be read."
-                        }
-                        KeyState::Unknown => "Key readability is unknown.",
-                        KeyState::Ok => "Key is readable.",
-                    }
-                    .into(),
-                ));
-                body = body.child(div().type_step(text::SMALL).text_color(p.text_muted).child(
-                    "Set means a value is stored. It does not confirm that the value can be read.",
-                ));
-                if matches!(report.key_state, KeyState::Missing | KeyState::Unreadable) {
-                    body = body.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(space::S4)
-                            .child(
-                                div()
-                                    .px(space::S4)
-                                    .py(space::S1)
-                                    .rounded(radius::CONTROL)
-                                    .bg(p.surface_1)
-                                    .font_family(ui.mono.clone())
-                                    .type_step(text::MONO)
-                                    .child("hack doctor"),
-                            )
-                            .child(
-                                action_button("env-doctor", Glyph::Copy, "Copy command", true, ui)
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            "hack doctor".into(),
-                                        ));
-                                    })),
-                            ),
-                    );
-                }
-                if report.vars.is_empty() {
-                    body = body.child(line(report.empty_label().to_owned())).child(
-                        action_button(
-                            "env-docs",
-                            Glyph::ExternalLink,
-                            "Environment docs",
-                            true,
-                            ui,
-                        )
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.open_url("https://github.com/hack-dance/hack/blob/next/docs/env.md");
-                        })),
-                    );
-                } else {
-                    let cell = |s: String| div().flex_1().min_w_0().truncate().child(s);
-                    let mut table = div().flex().flex_col().child(
-                        div()
-                            .h(px(26.))
-                            .flex()
-                            .items_center()
-                            .gap(space::S4)
-                            .type_step(text::SMALL)
-                            .text_color(p.text_muted)
-                            .children(
-                                ["Name", "Layer / source", "Scope", "Kind", "Set", "Required"]
-                                    .map(|s| cell(s.to_owned())),
-                            ),
-                    );
-                    for row in &report.vars {
-                        table = table.child(
-                            div()
-                                .h(size::TABLE_ROW)
-                                .flex()
-                                .items_center()
-                                .gap(space::S4)
-                                .hairline_t(p.border)
-                                .type_step(text::BODY)
-                                .text_color(if row.missing {
-                                    p.states.failed.fg
-                                } else {
-                                    p.text_primary
-                                })
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_family(ui.mono.clone())
-                                        .type_step(text::MONO)
-                                        .child(row.key.clone()),
-                                )
-                                .child(cell(
-                                    row.layer
-                                        .clone()
-                                        .or_else(|| row.resolved_from.clone())
-                                        .unwrap_or_else(|| "—".into()),
-                                ))
-                                .child(cell(row.scope.label()))
-                                .child(cell(row.storage.kind.clone()))
-                                .child(cell(if row.has_value { "yes" } else { "no" }.into()))
-                                .child(cell(if row.required { "yes" } else { "no" }.into())),
-                        );
-                    }
-                    body = body.child(table);
-                }
-            }
-        }
-        body
     }
 
     /// Shown, never acted on, once an action has run past

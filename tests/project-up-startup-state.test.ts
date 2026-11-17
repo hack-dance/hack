@@ -1491,3 +1491,24 @@ test("full restart cleans lifecycle state before propagating a Docker inspection
     })
   ).toBeNull();
 });
+
+test("a restart repair keeps the project's start ceiling", async () => {
+  upExitCode = 124;
+  const projectRoot = await createProject();
+  const configPath = resolve(projectRoot, ".hack", PROJECT_CONFIG_FILENAME);
+  const config = JSON.parse(await readFile(configPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ ...config, compose: { startupCeilingMs: 600_000 } })}\n`
+  );
+
+  expect(await runRestart({ projectRoot })).toBe(124);
+  // The first attempt and its repair both carry the resolved ceiling.
+  const ceilings = runtimeCalls.flatMap((call) =>
+    call.kind === "up" ? [call.opts.startupCeilingMs] : []
+  );
+  expect(ceilings).toEqual([600_000, 600_000]);
+});

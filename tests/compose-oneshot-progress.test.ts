@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   composeOneShotGraph,
   effectiveComposeProfiles,
+  interpolateComposeValue,
   mergeOneShotGraphs,
   readComposeOneShotGraph,
   runningOneShots,
@@ -340,4 +341,50 @@ test("a service-scoped start waits only on the one-shots in its scope", () => {
   ]).toEqual([]);
   // No selection: the whole graph.
   expect([...scopeOneShotGraph(graph, {}).oneShots]).toEqual(["migrate"]);
+});
+
+test("profile values are interpolated as Compose does", () => {
+  const env = { APP_PROFILE: "prod", EMPTY: "" };
+  expect(interpolateComposeValue("${APP_PROFILE}", env)).toBe("prod");
+  expect(interpolateComposeValue("$APP_PROFILE", env)).toBe("prod");
+  expect(interpolateComposeValue("${MISSING:-dev}", env)).toBe("dev");
+  expect(interpolateComposeValue("${EMPTY:-dev}", env)).toBe("dev");
+  expect(interpolateComposeValue("${EMPTY-dev}", env)).toBe("");
+  expect(interpolateComposeValue("$$literal", env)).toBe("$literal");
+  expect(interpolateComposeValue("${MISSING:?required}", env)).toBeNull();
+  expect(interpolateComposeValue("${X:-${Y}}", env)).toBeNull();
+});
+
+test("an interpolated profile decides whether its service counts", () => {
+  const document = {
+    services: {
+      migrate: { image: "app" },
+      api: {
+        image: "app",
+        profiles: ["${APP_PROFILE:-dev}"],
+        depends_on: {
+          migrate: { condition: "service_completed_successfully" },
+        },
+      },
+    },
+  };
+  const graph = (
+    doc: unknown,
+    activeProfiles: string[],
+    interpolationEnv: Record<string, string>
+  ) => [
+    ...composeOneShotGraph(doc, { activeProfiles, interpolationEnv }).oneShots,
+  ];
+  // The default applies: api is in profile dev.
+  expect(graph(document, ["dev"], {})).toEqual(["migrate"]);
+  // The variable selects another profile: api is off under dev.
+  expect(graph(document, ["dev"], { APP_PROFILE: "prod" })).toEqual([]);
+  // A form Hack cannot evaluate keeps the service: never cut a real wait short.
+  const unknown = {
+    services: {
+      ...document.services,
+      api: { ...document.services.api, profiles: ["${APP:?set it}"] },
+    },
+  };
+  expect(graph(unknown, ["dev"], {})).toEqual(["migrate"]);
 });

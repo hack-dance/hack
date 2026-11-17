@@ -254,6 +254,7 @@ async function runComposeStartPhase(input: {
         cliProfiles: options.profiles ?? [],
         env: options.env ?? {},
       }),
+      interpolationEnv: { ...process.env, ...options.env },
     }),
     { services: options.services, noDeps: options.noDeps }
   );

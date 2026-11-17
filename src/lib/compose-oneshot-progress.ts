@@ -95,6 +95,12 @@ export function effectiveComposeProfiles(opts: {
 /** Which services' `depends_on` count: all, or those active under these profiles. */
 export type OneShotGraphOptions = {
   readonly activeProfiles?: readonly string[];
+  /**
+   * The environment Compose interpolates the files with (the command's
+   * environment); `profiles` values are interpolated with it, as Compose
+   * does before applying them. Without it they are taken literally.
+   */
+  readonly interpolationEnv?: Readonly<Record<string, string | undefined>>;
 };
 
 /** The one-shot graph of one parsed Compose document. */
@@ -130,7 +136,7 @@ export function mergeOneShotGraphs(
         conditions.set(dependency, condition);
       }
       effective.set(name, conditions);
-      const profiles = declaredProfiles(service);
+      const profiles = declaredProfiles(service, options.interpolationEnv);
       if (profiles !== null) {
         serviceProfiles.set(name, profiles);
       }
@@ -177,14 +183,74 @@ function graphFromConditions(input: {
 
 const COMPLETED = "service_completed_successfully";
 
-/** A service's `profiles`, or null when it does not set them. */
-function declaredProfiles(service: unknown): readonly string[] | null {
+/**
+ * A service's `profiles`, interpolated, or null when it does not set them.
+ * A value that cannot be interpolated here makes the service count as active
+ * (`[ANY_PROFILE]`): a real one-shot must never lose its wait over a profile
+ * expression Hack does not evaluate.
+ */
+function declaredProfiles(
+  service: unknown,
+  env: Readonly<Record<string, string | undefined>> | undefined
+): readonly string[] | null {
   if (!(isRecord(service) && Array.isArray(service.profiles))) {
     return null;
   }
-  return service.profiles.filter(
-    (profile): profile is string => typeof profile === "string"
-  );
+  const profiles: string[] = [];
+  for (const raw of service.profiles) {
+    if (typeof raw !== "string") {
+      continue;
+    }
+    const value = env ? interpolateComposeValue(raw, env) : raw;
+    if (value === null) {
+      return [ANY_PROFILE];
+    }
+    if (value.length > 0) {
+      profiles.push(value);
+    }
+  }
+  return profiles;
+}
+
+/** Marks a service whose profiles could not be evaluated: always active. */
+const ANY_PROFILE = "*";
+
+const INTERPOLATION = /\$\$|\$\{([^}]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+const BRACED = /^([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)(.*))?$/s;
+
+/**
+ * Compose interpolation of one value: `$$`, `$VAR`, `${VAR}`,
+ * `${VAR:-default}` and `${VAR-default}`. Any other form (`:?`, `:+`,
+ * nesting) returns null: unknown here.
+ */
+export function interpolateComposeValue(
+  value: string,
+  env: Readonly<Record<string, string | undefined>>
+): string | null {
+  let unknown = false;
+  const out = value.replace(INTERPOLATION, (match, braced, bare) => {
+    if (match === "$$") {
+      return "$";
+    }
+    if (typeof bare === "string") {
+      return env[bare] ?? "";
+    }
+    const parts = BRACED.exec(braced as string);
+    if (!parts || (parts[3] ?? "").includes("$")) {
+      unknown = true;
+      return "";
+    }
+    const [, name, operator, fallback] = parts;
+    const current = env[name as string];
+    if (operator === ":-") {
+      return current ? current : (fallback ?? "");
+    }
+    if (operator === "-") {
+      return current ?? fallback ?? "";
+    }
+    return current ?? "";
+  });
+  return unknown ? null : out;
 }
 
 /**
@@ -197,6 +263,10 @@ function serviceActive(
   activeProfiles: readonly string[] | undefined
 ): boolean {
   if (!(profiles && profiles.length > 0 && activeProfiles)) {
+    return true;
+  }
+  // A profile Hack could not evaluate: assume Compose starts the service.
+  if (profiles.includes(ANY_PROFILE)) {
     return true;
   }
   // Compose's `*` (`--profile '*'`, `COMPOSE_PROFILES='*'`) enables every profile.

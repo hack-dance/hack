@@ -1099,6 +1099,7 @@ async function checkOneShotInterruption(opts: {
       cliProfiles: opts.profiles,
       env: opts.env ?? {},
     }),
+    interpolationEnv: { ...process.env, ...opts.env },
   });
   if (graph.oneShots.size === 0) {
     return { proceed: true };
@@ -8662,6 +8663,8 @@ async function runRestartUpPhase(opts: {
             }),
             startupTimeoutMs: opts.budgets.startupTimeoutMs,
             imageTimeoutMs: opts.budgets.imageTimeoutMs,
+            // The repair keeps the project's resolved ceiling (HACK-2310).
+            startupCeilingMs: opts.budgets.startupCeilingMs,
             composeFiles: composeFilesWithEnv,
             composeProject: opts.composeProjectName,
             profiles: opts.profiles,
@@ -9697,6 +9700,7 @@ async function handlePs({
         cliProfiles: profiles,
         env: {},
       }),
+      interpolationEnv: process.env,
     }),
     entries,
   });

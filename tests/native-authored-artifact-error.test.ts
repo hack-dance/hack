@@ -278,6 +278,19 @@ test("message lines never count as frames, and a site must be a line the file ha
   expect(failure.diagnostic.sites).toEqual([`${real}:5`]);
 });
 
+test("a message too long to skip yields no sites", () => {
+  const root = `${dirname(import.meta.dir)}/src`;
+  const real = "backends/native-authored-artifact-error.ts";
+  const message = `${"line\n".repeat(64)}    at m (${root}/${real}:5:1)`;
+  const failure = nativeAuthoredArtifactError(
+    Object.assign(new Error(message), {
+      stack: [`Error: ${message}`, `    at c (${root}/${real}:7:1)`].join("\n"),
+    }),
+    "action"
+  );
+  expect(failure.diagnostic.sites).toEqual([]);
+});
+
 test("an oversized stack is bounded before matching", () => {
   const huge = `    at x (${"a".repeat(200_000)}`;
   const started = performance.now();

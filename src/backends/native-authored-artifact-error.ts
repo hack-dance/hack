@@ -290,7 +290,12 @@ function sourceSites(error: object): string[] {
   }
   const message = ownData(error, "message");
   const headerLines =
-    typeof message === "string" ? message.split("\n", 64).length : 1;
+    typeof message === "string" ? message.split("\n", 65).length : 1;
+  // A message too long to skip within the budget could still hold
+  // frame-shaped lines: report no sites rather than misattribute one.
+  if (headerLines > 64) {
+    return [];
+  }
   const sites: string[] = [];
   for (const line of stack
     .slice(0, MAX_STACK_CHARS)

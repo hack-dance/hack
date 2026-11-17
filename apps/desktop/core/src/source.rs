@@ -361,6 +361,21 @@ pub trait Source: Send + Sync {
     /// (DESIGN.md section 3). Each run fails on its own.
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun>;
 
+    /// Fresh setup checks (DESIGN.md section 2). Fixtures stay offline.
+    fn setup(&self) -> crate::setup::Report {
+        crate::setup::fixture(self.snapshot(), &self.doctor_runs(&[]))
+    }
+
+    /// Run one fixed, non-admin setup action against the checked report,
+    /// never anything inferred from Doctor text. Fixtures refuse.
+    fn setup_action(
+        &self,
+        _action: crate::setup::SafeAction,
+        _checked: &crate::setup::Report,
+    ) -> String {
+        "Fixture: no action executed".into()
+    }
+
     /// Start a log stream for the Logs tab (`args` from `LogsModel::cli_args`).
     /// `branch` streams that branch instance (`--branch <branch>` is added
     /// after the subcommand). Dropping the feed stops the stream.
@@ -461,6 +476,20 @@ fn read_doctor(
 
 /// Owner-write is allowed; group/other-write and foreign ownership are not.
 /// A root-owned sticky ancestor (such as /tmp) may contain a private entry.
+/// `hack daemon status --json` as JSON, without starting the daemon. Exit
+/// status 1 still carries the report when hackd is not running.
+pub(crate) fn read_daemon_status(
+    runner: &CliRunner,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let (out, _, _) = runner
+        .clone()
+        .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .run_raw(&["daemon", "status", "--json"], None, timeout)
+        .map_err(|e| e.to_string())?;
+    serde_json::from_str(&out).map_err(|e| format!("hack daemon status: {e}"))
+}
+
 pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     if !crate::doctor_plugins::guarded_names(path, uid, &mut 64, false) {
@@ -1016,6 +1045,24 @@ impl LiveSource {
         }
     }
 
+    /// The daemon client to read: the configured one, else the socket
+    /// `hack daemon status --json` reports (an absolute path only).
+    pub(crate) fn effective_daemon(
+        &self,
+        status: Option<&serde_json::Value>,
+    ) -> Option<DaemonClient> {
+        self.daemon.clone().or_else(|| {
+            let path = Path::new(status?.get("socket_path")?.as_str()?);
+            if !path.is_absolute() {
+                return None;
+            }
+            Some(DaemonClient::new(
+                path.to_path_buf(),
+                Duration::from_secs(3),
+            ))
+        })
+    }
+
     fn runner_for(&self, native: bool) -> CliRunner {
         if native {
             self.runner
@@ -1114,6 +1161,18 @@ impl Source for LiveSource {
             ))
         }
     }
+    fn setup(&self) -> crate::setup::Report {
+        self.read_setup()
+    }
+
+    fn setup_action(
+        &self,
+        action: crate::setup::SafeAction,
+        checked: &crate::setup::Report,
+    ) -> String {
+        crate::setup_io::run_safe(action, checked)
+    }
+
     fn hack_program(&self) -> Option<std::path::PathBuf> {
         self.runner.program_path()
     }

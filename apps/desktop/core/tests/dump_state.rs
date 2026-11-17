@@ -147,7 +147,9 @@ fn missing_daemon_never_runs_the_registry_writing_cli_listing() {
     let hack = home.join("hack");
     test_support::script(
         &hack,
-        "#!/bin/sh\ncase \"$1\" in version) echo '{\"ok\":true,\"data\":{\"schema\":\"hack.version.v1\",\"version\":\"5.0.0\"}}';; *) echo called > \"$HACK_HOME/unexpected\"; exit 1;; esac\n",
+        // `daemon status` is a read the app makes to find hackd; anything
+        // else (the registry-writing `projects` above all) is unexpected.
+        "#!/bin/sh\ncase \"$1\" in version) echo '{\"ok\":true,\"data\":{\"schema\":\"hack.version.v1\",\"version\":\"5.0.0\"}}';; daemon) [ \"$2\" = status ] || echo called > \"$HACK_HOME/unexpected\"; exit 1;; *) echo called > \"$HACK_HOME/unexpected\"; exit 1;; esac\n",
     );
     let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
         .env("PATH", &home)
@@ -181,7 +183,7 @@ fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
         "#!/bin/sh\nprintf '%s' \"$*\" > \"$HACK_HOME/called\"\nif [ \"$2\" = restart ]; then echo 'daemon could not restart' >&2; exit 1; fi\n",
     );
     let source = LiveSource {
-        compat: Default::default(),
+        cache: Default::default(),
         runner: CliRunner::new(hack)
             .with_env("HOME", home.to_str().unwrap())
             .with_env("HACK_HOME", home.to_str().unwrap())

@@ -69,6 +69,12 @@ impl DaemonClient {
         }
     }
 
+    /// The socket this client reads.
+    #[must_use]
+    pub fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+
     /// GET a path and deserialize the JSON body.
     ///
     /// # Errors

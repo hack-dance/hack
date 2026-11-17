@@ -30,6 +30,9 @@
 //! paste <file>                    paste a file's text as the Paste action
 //!                                 does (relative to the steps file)
 //! expect <text> [<seconds>]       wait for text on the active tab's screen
+//! use-cli <name>                  switch to the other Hack CLI found
+//!                                 (hack or hack-next), as the status bar does
+//! expect-cli <text> [<seconds>]   wait for the status bar's CLI label
 //! expect-notice <text> [<seconds>]
 //!                                 wait for the active tab's notice (a
 //!                                 refused paste) to contain text
@@ -92,6 +95,11 @@ pub enum Step {
         text: String,
         within: Duration,
     },
+    UseCli(String),
+    ExpectCli {
+        text: String,
+        within: Duration,
+    },
     Wait(Duration),
     CheckContainer {
         service: String,
@@ -138,7 +146,8 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
             ("key", [k]) => Step::Key((*k).into()),
             ("type", _) if !rest.is_empty() => Step::Type(unescape(rest)),
             ("paste", _) if !rest.is_empty() => Step::Paste(base.join(rest)),
-            ("expect" | "expect-notice", _) if !rest.is_empty() => {
+            ("use-cli", [name]) => Step::UseCli((*name).into()),
+            ("expect" | "expect-notice" | "expect-cli", _) if !rest.is_empty() => {
                 let (text, within) = match rest.rsplit_once(char::is_whitespace) {
                     Some((t, secs)) if secs.parse::<u64>().is_ok() => (
                         t.trim(),
@@ -147,10 +156,10 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                     _ => (rest, Duration::from_secs(10)),
                 };
                 let text = unescape(text);
-                if word == "expect" {
-                    Step::Expect { text, within }
-                } else {
-                    Step::ExpectNotice { text, within }
+                match word {
+                    "expect" => Step::Expect { text, within },
+                    "expect-cli" => Step::ExpectCli { text, within },
+                    _ => Step::ExpectNotice { text, within },
                 }
             }
             ("wait", [ms]) => Step::Wait(Duration::from_millis(
@@ -387,6 +396,33 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
             })
             .await
             .ok_or_else(|| format!("{text:?} not on screen within {within:?}"))?;
+            Ok(String::new())
+        }
+        Step::UseCli(name) => {
+            let path = handle
+                .update(cx, |app, _, _| {
+                    app.source
+                        .cli_choice()
+                        .and_then(|c| c.others().find(|i| i.name == *name).map(|i| i.path.clone()))
+                })?
+                .ok_or_else(|| format!("no other Hack CLI named {name} was found"))?;
+            handle.update(cx, |app, _, cx| app.use_cli(&path, cx))?;
+            Ok(String::new())
+        }
+        Step::ExpectCli { text, within } => {
+            poll(handle, cx, *within, |app, _, _| {
+                app.cli_label()
+                    .filter(|l| l.contains(text.as_str()))
+                    .map(|_| ())
+            })
+            .await
+            .ok_or_else(|| {
+                let now = handle
+                    .update(cx, |app, _, _| app.cli_label())
+                    .ok()
+                    .flatten();
+                format!("CLI label {text:?} not shown within {within:?} (label: {now:?})")
+            })?;
             Ok(String::new())
         }
         Step::ExpectNotice { text, within } => {

@@ -59,6 +59,32 @@ mismatch. Only a fresh matching snapshot restores observed states.
 It applies that to the same view model and prints the list and
 each project's detail as JSON. It runs no action, opens no window and writes
 nothing.
+It also prints which Hack CLI it used and the others found (`cli`), the hackd
+socket it read, and how long each step of the read took (`read_steps`).
+
+### Which CLI and which hackd
+
+The app runs one Hack CLI and reads the hackd that CLI reports
+(`hack daemon status --json` → `socket_path`), not a socket under `HACK_HOME`. A
+prerelease channel keeps its hackd and registry in its own home
+(`~/.hack-next/versions/<version>/cli-home`), so reading the default home showed
+no projects while a healthy prerelease hackd was running. The socket is asked
+for once per CLI and again when it stops answering. A CLI that does not report
+one uses the home it inherits (`HACK_HOME`, else `~/.hack`).
+
+The app finds stable `hack` on PATH and a prerelease `hack-next` (on PATH or
+`~/.hack-next/bin/hack-next`), offering only installs no other user can change.
+It uses the one chosen before, else stable, else the prerelease. The status bar
+names it (`hack-next 5.0.0-next.19 · prerelease`) and offers the other with one
+click (**Use hack (stable)**); the choice is saved in the app's settings
+(`~/Library/Application Support/dance.hack.desktop/settings.json` on macOS,
+`$XDG_CONFIG_HOME/hack-desktop/settings.json` elsewhere), never an environment
+variable. `--drive` has `use-cli <name>` and `expect-cli <text>` for it.
+
+Each read starts the CLI for `hack version --json`, then one `hack ps --json`
+per native project (4 at a time). Through a launcher such as `hack-next`, every
+start costs the launcher's own checks, so the read grows with the number of
+native projects; Compose projects come from hackd alone.
 
 An accepted refresh that changes the selected project root or backend clears the
 previous log tail, including when Follow is off, and replaces any open Logs stream.

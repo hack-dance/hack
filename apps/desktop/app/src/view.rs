@@ -663,6 +663,57 @@ impl HackApp {
         cx.notify();
     }
 
+    /// The status bar, naming the Hack CLI the app runs (`hack-next
+    /// 5.0.0-next.19 · prerelease`) and offering another install when one
+    /// was found (HACK-2283).
+    fn status_bar_with_cli(
+        &self,
+        list: &ListView,
+        ui: &Ui,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let choice = self.source.cli_choice();
+        let version = self.cli_label_for(list);
+        let other = choice.as_ref().and_then(|c| c.others().next().cloned());
+        let p = ui.p;
+        status_bar(self.status_items(list), version, ui).children(other.map(|o| {
+            let label = format!("Use {} ({})", o.name, o.channel.label());
+            div()
+                .id("use-other-cli")
+                .ml(space::S5)
+                .cursor_pointer()
+                .text_color(p.accent)
+                .hover(|d| d.underline())
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.use_cli(&o.path, cx)))
+        }))
+    }
+
+    /// The status bar's CLI label: `hack-next 5.0.0-next.19 · prerelease`.
+    fn cli_label_for(&self, list: &ListView) -> Option<String> {
+        let selected = self.source.cli_choice().and_then(|c| c.selected);
+        list.cli_version.clone().map(|v| match &selected {
+            Some(i) => format!("{} {v} · {}", i.name, i.channel.label()),
+            None => format!("hack {v}"),
+        })
+    }
+
+    /// The CLI label the status bar shows now (`--drive`).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    pub(crate) fn cli_label(&self) -> Option<String> {
+        self.cli_label_for(&self.model.list())
+    }
+
+    /// Run another Hack CLI from now on (saved for next launch), and read
+    /// its hackd.
+    pub(crate) fn use_cli(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if let Err(why) = self.source.use_cli(path) {
+            self.recovery_error = Some(why);
+        }
+        self.refresh_now_async(cx);
+        cx.notify();
+    }
+
     pub(crate) fn copy_url(&mut self, url: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(url));
         self.copied = Some(Instant::now());
@@ -1571,11 +1622,7 @@ impl Render for HackApp {
                             .child(main),
                     ),
             )
-            .child(status_bar(
-                self.status_items(&list),
-                list.cli_version.clone().map(|v| format!("hack {v}")),
-                &ui,
-            ))
+            .child(self.status_bar_with_cli(&list, &ui, cx))
     }
 }
 

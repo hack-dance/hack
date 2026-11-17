@@ -330,6 +330,20 @@ pub trait Source: Send + Sync {
         None
     }
 
+    /// The Hack CLIs found and the one this source runs, when it chose
+    /// among them (`None` for fixtures and fixed test sources).
+    fn cli_choice(&self) -> Option<crate::cli_choice::Choice> {
+        None
+    }
+
+    /// Run the install at `path` from now on and save that choice.
+    ///
+    /// # Errors
+    /// Why it could not switch, or could not save the choice.
+    fn use_cli(&self, path: &Path) -> Result<(), String> {
+        Err(format!("cannot switch this source to {}", path.display()))
+    }
+
     /// Run one action for a project root. `native` selects the native
     /// backend (`HACK_RUNTIME_BACKEND=native`), which every native command needs.
     /// `branch` targets that branch instance (`--branch <branch>`); it is
@@ -756,25 +770,59 @@ fn apply_tool_coverage(runs: &mut Vec<DoctorRun>, tools: &ProbeTools) {
 /// today's `projects` command auto-registers projects and writes the registry.
 pub struct LiveSource {
     pub runner: CliRunner,
+    /// A fixed hackd to read (tests). `None`: ask the CLI where its hackd
+    /// is ([`LiveSource::hackd`]).
     pub daemon: Option<DaemonClient>,
-    /// The CLI's compatibility answers for differing versions.
-    pub compat: CompatCache,
+    /// What this source has learned from its CLI.
+    pub cache: CliCache,
 }
 
-/// `api_compatible` answers from `hack daemon status --json`, cached per
-/// `(cli_version, daemon_version)` for the life of a [`LiveSource`], so
-/// polling does not spawn the CLI every refresh. Failed or unparsable
-/// answers are never cached.
+/// What a [`LiveSource`] learns from its CLI, so polling does not spawn the
+/// CLI every refresh:
+/// - `api_compatible` answers from `hack daemon status --json`, per
+///   `(cli_version, daemon_version)`; failed or unparsable answers are never
+///   cached;
+/// - where the CLI's hackd is (`socket_path` from the same command), per
+///   CLI executable. A prerelease channel keeps its hackd in its own home.
 #[derive(Debug, Default)]
-pub struct CompatCache(std::sync::Mutex<std::collections::HashMap<(String, String), bool>>);
+pub struct CliCache {
+    compat: std::sync::Mutex<std::collections::HashMap<(String, String), bool>>,
+    hackd: std::sync::Mutex<Option<FoundHackd>>,
+    /// The Hack CLIs found and the one this source runs ([`LiveSource::from_env`]).
+    choice: std::sync::Mutex<Option<crate::cli_choice::Choice>>,
+}
 
-impl CompatCache {
-    fn get(&self, key: &(String, String)) -> Option<bool> {
-        self.0.lock().ok()?.get(key).copied()
+/// Where one CLI's hackd is, and when that was asked.
+#[derive(Debug, Clone)]
+struct FoundHackd {
+    program: PathBuf,
+    client: Option<DaemonClient>,
+    asked: std::time::Instant,
+}
+
+/// Native `ps` reads (each a CLI start) run this many at a time.
+const NATIVE_PS_PARALLEL: usize = 4;
+
+/// After a failed lookup (or a socket that stopped answering), how long
+/// before asking the CLI again.
+const HACKD_LOOKUP_RETRY: Duration = Duration::from_secs(10);
+
+impl CliCache {
+    fn compat_get(&self, key: &(String, String)) -> Option<bool> {
+        self.compat.lock().ok()?.get(key).copied()
     }
-    fn put(&self, key: (String, String), compatible: bool) {
-        if let Ok(mut m) = self.0.lock() {
+    fn compat_put(&self, key: (String, String), compatible: bool) {
+        if let Ok(mut m) = self.compat.lock() {
             m.insert(key, compatible);
+        }
+    }
+    /// Forget what was learned from the CLI: the source now runs another.
+    fn clear_learned(&self) {
+        if let Ok(mut m) = self.compat.lock() {
+            m.clear();
+        }
+        if let Ok(mut h) = self.hackd.lock() {
+            *h = None;
         }
     }
 }
@@ -960,19 +1008,180 @@ impl LiveSource {
         runs
     }
 
-    /// The live source exactly as the app builds it: `hack` resolved on
-    /// absolute PATH entries, and the hackd socket under `HACK_HOME`
-    /// (else `~/.hack`). Used by the window and by `hack-desktop-state`.
+    /// [`Source::snapshot`], with how long each step took (for
+    /// `hack-desktop-state`): the CLI version, finding hackd, its status and
+    /// projects, and each native project's `ps`.
+    pub fn snapshot_timed(&self) -> (Result<Snapshot, SourceError>, Vec<(String, Duration)>) {
+        let mut steps: Vec<(String, Duration)> = Vec::new();
+        let result = self.read_snapshot(&mut steps);
+        (result, steps)
+    }
+
+    fn read_snapshot(&self, steps: &mut Vec<(String, Duration)>) -> Result<Snapshot, SourceError> {
+        let mut timed = |label: &str, started: std::time::Instant| {
+            steps.push((label.to_owned(), started.elapsed()));
+        };
+        let t = std::time::Instant::now();
+        let cli_version = self.runner.version(Duration::from_secs(5));
+        timed("hack version --json", t);
+        let cli_version = cli_version?;
+        let t = std::time::Instant::now();
+        let client = self.hackd();
+        timed("find hackd (cached after the first read)", t);
+        let t = std::time::Instant::now();
+        let daemon = client.as_ref().and_then(|d| d.status().ok());
+        timed("hackd status", t);
+        if client.is_some() && daemon.is_none() {
+            self.forget_hackd();
+        }
+        let t = std::time::Instant::now();
+        let daemon_compatible = daemon
+            .as_ref()
+            .map(|d| self.daemon_compatible(&cli_version, &d.version));
+        timed("version compatibility (cached per pair)", t);
+        let t = std::time::Instant::now();
+        let from_daemon = client
+            .as_ref()
+            .filter(|_| daemon_compatible == Some(true))
+            .and_then(|d| d.projects().ok());
+        timed("hackd projects", t);
+        let mut projects = from_daemon.ok_or_else(|| SourceError::DaemonUnavailable {
+            cli: cli_version.clone(),
+            daemon: daemon.as_ref().map(|d| d.version.clone()),
+            compatible: daemon_compatible == Some(true),
+            message: match &daemon {
+                None => "hackd is off or unreachable. Start hackd to read project status.".into(),
+                Some(d) if daemon_compatible != Some(true) => {
+                    format!(
+                        "{} to read project status.",
+                        mismatch_text(&d.version, &cli_version)
+                    )
+                }
+                Some(_) => {
+                    "hackd could not provide project status. Check again or restart hackd.".into()
+                }
+            },
+        })?;
+        // Which checkout owns each branch instance, by canonical paths.
+        for row in &mut projects.projects {
+            row.resolve_branch_owners();
+        }
+        // Project views do not read native projects; ask native ps for each,
+        // a few at a time: each is a CLI start.
+        let native = self.runner_for(true);
+        let t = std::time::Instant::now();
+        let mut rows: Vec<&mut crate::models::ProjectRow> = projects
+            .projects
+            .iter_mut()
+            .filter(|r| r.is_native() && r.repo_root.is_some())
+            .collect();
+        let count = rows.len();
+        for chunk in rows.chunks_mut(NATIVE_PS_PARALLEL) {
+            std::thread::scope(|s| {
+                for row in chunk.iter_mut() {
+                    let native = native.clone();
+                    s.spawn(move || {
+                        let root = row.repo_root.clone().unwrap_or_default();
+                        row.native = native
+                            .run_json(&["ps", "--json"], Some(Path::new(&root)), Self::READ)
+                            .ok();
+                    });
+                }
+            });
+        }
+        timed(
+            &format!("native ps for {count} project(s), {NATIVE_PS_PARALLEL} at a time"),
+            t,
+        );
+        Ok(Snapshot {
+            cli_version,
+            projects,
+            daemon,
+            doctor: None,
+            daemon_compatible,
+        })
+    }
+
+    /// The live source exactly as the app builds it: the CLI the app
+    /// selected (`hack` on absolute PATH entries unless a saved choice or a
+    /// prerelease install says otherwise; see [`crate::cli_choice`]), and the
+    /// hackd that CLI reports. Used by the window and by `hack-desktop-state`.
     #[must_use]
     pub fn from_env() -> Self {
-        let socket = crate::daemon::default_socket_path(
-            std::env::var("HACK_HOME").ok().as_deref(),
-            std::env::var("HOME").ok().as_deref(),
-        );
-        Self::new(
-            CliRunner::on_path("hack"),
-            socket.map(|s| DaemonClient::new(s, Duration::from_secs(3))),
-        )
+        let choice = crate::cli_choice::Choice::load();
+        let runner = match &choice.selected {
+            Some(install) => CliRunner::selectable(install.path.clone()),
+            None => CliRunner::on_path("hack"),
+        };
+        let source = Self::new(runner, None);
+        if let Ok(mut c) = source.cache.choice.lock() {
+            *c = Some(choice);
+        }
+        source
+    }
+
+    /// The hackd this source reads: the fixed one, else the one its CLI
+    /// reports (`hack daemon status --json` → `socket_path`), asked once
+    /// per CLI and again after [`HACKD_LOOKUP_RETRY`] when it failed. A CLI
+    /// that reports no socket falls back to the home it inherits
+    /// (`HACK_HOME`, else `~/.hack`).
+    pub fn hackd(&self) -> Option<DaemonClient> {
+        if let Some(d) = &self.daemon {
+            return Some(d.clone());
+        }
+        let program = self.runner.program_path()?;
+        if let Ok(found) = self.cache.hackd.lock()
+            && let Some(f) = found.as_ref()
+            && f.program == program
+            && (f.client.is_some() || f.asked.elapsed() < HACKD_LOOKUP_RETRY)
+        {
+            return f.client.clone();
+        }
+        let client = self.ask_cli_for_hackd();
+        if let Ok(mut found) = self.cache.hackd.lock() {
+            *found = Some(FoundHackd {
+                program,
+                client: client.clone(),
+                asked: std::time::Instant::now(),
+            });
+        }
+        client
+    }
+
+    /// The cached hackd stopped answering: ask the CLI again, after the
+    /// retry interval, in case it moved (an upgrade, another home).
+    fn forget_hackd(&self) {
+        if let Ok(mut found) = self.cache.hackd.lock()
+            && let Some(f) = found.as_mut()
+        {
+            f.client = None;
+            f.asked = std::time::Instant::now();
+        }
+    }
+
+    fn ask_cli_for_hackd(&self) -> Option<DaemonClient> {
+        let reported = self
+            .runner
+            .clone()
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
+            .ok()
+            // Exit 1 still carries the report when hackd is not running.
+            .and_then(|(out, _, _)| serde_json::from_str::<serde_json::Value>(&out).ok())
+            .and_then(|v| v.get("socket_path")?.as_str().map(PathBuf::from))
+            .filter(|p| p.is_absolute());
+        // A CLI that does not report it (older ones) uses the home it
+        // inherits from the app: HACK_HOME when set, else ~/.hack.
+        let socket = reported.or_else(|| {
+            crate::daemon::default_socket_path(
+                self.runner
+                    .env_value("HACK_HOME")
+                    .and_then(|h| h.into_string().ok())
+                    .as_deref(),
+                std::env::var("HOME").ok().as_deref(),
+            )
+        })?;
+        Some(DaemonClient::new(socket, Duration::from_secs(3)))
     }
 
     #[must_use]
@@ -980,7 +1189,7 @@ impl LiveSource {
         Self {
             runner,
             daemon,
-            compat: CompatCache::default(),
+            cache: CliCache::default(),
         }
     }
 
@@ -994,7 +1203,7 @@ impl LiveSource {
             return true;
         }
         let key = (cli.to_owned(), daemon.to_owned());
-        if let Some(c) = self.compat.get(&key) {
+        if let Some(c) = self.cache.compat_get(&key) {
             return c;
         }
         let answer = self
@@ -1009,7 +1218,7 @@ impl LiveSource {
             .and_then(|s| s.api_compatible);
         match answer {
             Some(c) => {
-                self.compat.put(key, c);
+                self.cache.compat_put(key, c);
                 c
             }
             None => false,
@@ -1114,58 +1323,34 @@ impl Source for LiveSource {
             ))
         }
     }
+    fn cli_choice(&self) -> Option<crate::cli_choice::Choice> {
+        self.cache.choice.lock().ok()?.clone()
+    }
+
+    /// Switch every read and action to `path` (one of the installs found),
+    /// save the choice, and drop what was learned from the previous CLI.
+    fn use_cli(&self, path: &Path) -> Result<(), String> {
+        let saved = {
+            let mut guard = self.cache.choice.lock().map_err(|_| "choice unavailable")?;
+            let choice = guard.as_mut().ok_or("this source has no CLI choice")?;
+            choice.select(path)
+        };
+        let selected = self
+            .cli_choice()
+            .and_then(|c| c.selected)
+            .filter(|i| i.path == path)
+            .ok_or("not one of the installs found")?;
+        self.runner.select(&selected.path);
+        self.cache.clear_learned();
+        saved
+    }
+
     fn hack_program(&self) -> Option<std::path::PathBuf> {
         self.runner.program_path()
     }
 
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
-        let cli_version = self.runner.version(Duration::from_secs(5))?;
-        let daemon = self.daemon.as_ref().and_then(|d| d.status().ok());
-        let daemon_compatible = daemon
-            .as_ref()
-            .map(|d| self.daemon_compatible(&cli_version, &d.version));
-        let from_daemon = self
-            .daemon
-            .as_ref()
-            .filter(|_| daemon_compatible == Some(true))
-            .and_then(|d| d.projects().ok());
-        let mut projects = from_daemon.ok_or_else(|| SourceError::DaemonUnavailable {
-            cli: cli_version.clone(),
-            daemon: daemon.as_ref().map(|d| d.version.clone()),
-            compatible: daemon_compatible == Some(true),
-            message: match &daemon {
-                None => "hackd is off or unreachable. Start hackd to read project status.".into(),
-                Some(d) if daemon_compatible != Some(true) => {
-                    format!(
-                        "{} to read project status.",
-                        mismatch_text(&d.version, &cli_version)
-                    )
-                }
-                Some(_) => {
-                    "hackd could not provide project status. Check again or restart hackd.".into()
-                }
-            },
-        })?;
-        // Which checkout owns each branch instance, by canonical paths.
-        for row in &mut projects.projects {
-            row.resolve_branch_owners();
-        }
-        // Project views do not read native projects; ask native ps for each.
-        let native = self.runner_for(true);
-        for row in projects.projects.iter_mut().filter(|r| r.is_native()) {
-            if let Some(root) = row.repo_root.clone() {
-                row.native = native
-                    .run_json(&["ps", "--json"], Some(Path::new(&root)), Self::READ)
-                    .ok();
-            }
-        }
-        Ok(Snapshot {
-            cli_version,
-            projects,
-            daemon,
-            doctor: None,
-            daemon_compatible,
-        })
+        self.snapshot_timed().0
     }
 
     fn act(
@@ -1714,7 +1899,7 @@ esac
             r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","backend":"native"}]}"#,
         );
         let src = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack)
                 .with_env("HACK_HOME", &dir.to_string_lossy())
                 .with_env("HOME", &dir.to_string_lossy())
@@ -1769,7 +1954,7 @@ esac
             .unwrap();
         let (daemon, server) = fake_daemon("{}");
         let src = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack)
                 .with_env("HOME", &dir.to_string_lossy())
                 .with_env("HACK_HOME", &dir.to_string_lossy())
@@ -1882,7 +2067,7 @@ printf '{"ok":true,"data":{"checks":[{"id":"probe","status":"ok","detail":"%s"}]
 "#,
         );
         let src = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack).with_env("HACK_RUNTIME_BACKEND", "native"),
             daemon: None,
         };
@@ -1908,7 +2093,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"native root trust","status":"ok","deta
 fi"#,
         );
         let source = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -1968,7 +2153,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
         );
         std::fs::remove_file(dir.join("executed")).unwrap();
         let source = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: None,
         };
@@ -2783,7 +2968,7 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
             system_dirs: vec![system_plugins],
         };
         let source = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack)
                 .with_env("HOME", root.to_str().unwrap())
                 .with_env("HACK_HOME", root.to_str().unwrap())
@@ -2959,7 +3144,7 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
     fn doctor_payload_without_checks_is_not_a_report() {
         let hack = fake_hack("doctor-empty", r#"echo '{"ok":true,"data":{}}'"#);
         let src = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -3021,7 +3206,7 @@ echo '{"checks":[{"id":"docker","status":"ok","detail":"healthy"}]}'
         )
         .unwrap();
         let source = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack)
                 .with_env("PATH", &bin.to_string_lossy())
                 .with_env("HACK_HOME", &root.to_string_lossy())
@@ -3139,7 +3324,7 @@ esac"#,
         let marker = child.join(".hack/hack.project.json");
         std::fs::write(&marker, "{}").unwrap();
         let source = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack).with_env("HACK_HOME", &root.to_string_lossy()),
             daemon: None,
         };
@@ -3153,7 +3338,7 @@ esac"#,
         assert!(exact[1].exact_native_root);
         assert_eq!(crate::doctor::aggregate(&exact).projects_checked, 1);
         let changed = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: source.runner.clone().with_env("DROP_MARKER", "1"),
             daemon: None,
         }
@@ -3178,7 +3363,7 @@ esac"#,
 echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'"#,
         );
         let source = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -3204,7 +3389,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
             "trap '' TERM\nwhile :; do sleep 0.05; done",
         );
         let src = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -3224,7 +3409,7 @@ echo '{"ok":true,"data":{"checks":[{"id":"docker","status":"ok","detail":""}]}}'
     fn doctor_budget_marks_late_projects_not_checked() {
         let hack = fake_hack("doctor-slow", "sleep 5");
         let src = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -3274,7 +3459,7 @@ esac
         .unwrap();
         std::fs::set_permissions(&hack, std::fs::Permissions::from_mode(0o755)).unwrap();
         let src = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack).with_env("HACK_HOME", &dir.to_string_lossy()),
             daemon: None,
         };
@@ -3481,7 +3666,7 @@ esac
             "#!/bin/sh\nsleep 1\necho '{\"ok\":true,\"data\":{\"action\":\"up\",\"services\":{\"failed\":[]}}}'\n",
         );
         let src = LiveSource {
-            compat: Default::default(),
+            cache: Default::default(),
             runner: fixture_runner(&hack),
             daemon: None,
         };
@@ -3574,6 +3759,66 @@ esac
     }
 
     const PROJECTS_BODY: &str = r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"}]}"#;
+
+    /// A fixture CLI at version 5.0.0 whose `daemon status --json` reports
+    /// `socket` (a hackd outside the default home, as a prerelease channel
+    /// keeps it).
+    fn cli_reporting_socket(tag: &str, socket: &Path) -> (CliRunner, PathBuf) {
+        let dir = private_temp_dir(tag);
+        let hack = dir.join("hack-next");
+        crate::test_support::script(
+            &hack,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  version) echo '{{\"ok\":true,\"data\":{{\"schema\":\"hack.version.v1\",\"version\":\"5.0.0\"}}}}' ;;\n  daemon) echo '{{\"running\":true,\"socket_path\":\"{}\"}}' ;;\n  *) exit 2 ;;\nesac\n",
+                socket.display()
+            ),
+        );
+        let runner = fixture_runner(&hack).with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1");
+        runner.version(Duration::from_secs(60)).unwrap();
+        (runner, dir)
+    }
+
+    #[test]
+    fn the_hackd_read_is_the_one_the_cli_reports_not_the_default_home() {
+        let (daemon, server) = fake_daemon(PROJECTS_BODY);
+        let (runner, dir) = cli_reporting_socket("hackd-from-cli", daemon.socket());
+        // No fixed daemon: the source asks its CLI, whose HACK_HOME (the
+        // fixture's dir) has no socket at all.
+        let src = LiveSource::new(runner, None);
+        let snap = src
+            .snapshot()
+            .expect("projects from the hackd the CLI reported");
+        assert_eq!(snap.projects.projects[0].name, "svc");
+        assert_eq!(
+            src.hackd().map(|d| d.socket().to_path_buf()),
+            Some(daemon.socket().to_path_buf())
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn switching_cli_reads_the_new_clis_hackd() {
+        let (first, first_server) = fake_daemon(PROJECTS_BODY);
+        let (second, second_server) = fake_daemon(
+            r#"{"runtime_ok":true,"projects":[{"name":"other","status":"stopped","repo_root":"/work/other"}]}"#,
+        );
+        let (one, dir_one) = cli_reporting_socket("hackd-switch-one", first.socket());
+        let (two, dir_two) = cli_reporting_socket("hackd-switch-two", second.socket());
+        let program_two = two.program_path().unwrap();
+        let runner = CliRunner::selectable(one.program_path().unwrap())
+            .with_env("HACK_HOME", dir_one.to_str().unwrap())
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1");
+        let src = LiveSource::new(runner, None);
+        assert_eq!(src.snapshot().unwrap().projects.projects[0].name, "svc");
+        src.runner.select(&program_two);
+        src.cache.clear_learned();
+        assert_eq!(src.snapshot().unwrap().projects.projects[0].name, "other");
+        first_server.join().unwrap();
+        second_server.join().unwrap();
+        std::fs::remove_dir_all(dir_one).unwrap();
+        std::fs::remove_dir_all(dir_two).unwrap();
+    }
 
     #[test]
     fn equal_versions_match_without_asking_the_cli() {

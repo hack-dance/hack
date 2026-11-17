@@ -468,22 +468,25 @@ impl HackApp {
         let editor = edit.id;
         let value = Revealed::new(edit.value.read(cx).value().to_string());
         let project = root.clone();
+        // Bound to the CLI chosen now: a switch before the write runs does
+        // not move it to another CLI, and a completion after a switch does
+        // not land in the new CLI's listing.
+        let epoch = self.model.source_epoch();
+        let pinned = self.source.pinned().unwrap_or_else(|| self.source.clone());
         if let Some(edit) = self.env_edit.as_mut() {
             edit.busy = true;
             edit.error = None;
         }
         let label = name.clone();
         let done = move |this: &mut Self, result: Result<(), String>, cx: &mut Context<Self>| {
-            this.finish_env_save(&project, editor, &label, result, cx);
+            this.finish_env_save(&project, epoch, editor, &label, result, cx);
         };
         if !self.live {
-            let result = self
-                .source
-                .env_set(&root, native, &target, &name, secret, &value);
+            let result = pinned.env_set(&root, native, &target, &name, secret, &value);
             done(self, result, cx);
             return;
         }
-        let source = self.source.clone();
+        let source = pinned;
         let key = name.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -496,7 +499,8 @@ impl HackApp {
         cx.notify();
     }
 
-    /// A write finished. Another project meanwhile: show nothing over it.
+    /// A write finished. Another project or another CLI meanwhile: show
+    /// nothing over it.
     /// Only the editor that started it (`editor`) is closed or given the
     /// error: one opened since (after Cancel) keeps its input, and its own
     /// write still completes even if this one listed again first (listing
@@ -504,12 +508,15 @@ impl HackApp {
     pub(crate) fn finish_env_save(
         &mut self,
         project: &std::path::Path,
+        epoch: u64,
         editor: u64,
         label: &str,
         result: Result<(), String>,
         cx: &mut Context<Self>,
     ) {
-        if self.selected_root().map(|(root, _)| root).as_deref() != Some(project) {
+        if self.model.source_epoch() != epoch
+            || self.selected_root().map(|(root, _)| root).as_deref() != Some(project)
+        {
             return;
         }
         let own = self.env_edit.as_ref().is_some_and(|e| e.id == editor);
@@ -1318,20 +1325,21 @@ mod tests {
         };
         let first = open(&mut cx);
         let project = cx.update(|cx| app.read(cx).selected_root().unwrap().0);
+        let epoch = cx.update(|cx| app.read(cx).model.source_epoch());
         cx.update(|cx| app.update(cx, |a, cx| a.cancel_env_edit(cx)));
         let second = open(&mut cx);
         assert_ne!(first, second);
         // The first editor's write fails: the second gets no error.
         cx.update(|cx| {
             app.update(cx, |a, cx| {
-                a.finish_env_save(&project, first, "OLD", Err("no".into()), cx)
+                a.finish_env_save(&project, epoch, first, "OLD", Err("no".into()), cx)
             });
         });
         assert!(cx.update(|cx| app.read(cx).env_edit.as_ref().unwrap().error.is_none()));
         // The first editor's write succeeds: the second stays open.
         cx.update(|cx| {
             app.update(cx, |a, cx| {
-                a.finish_env_save(&project, first, "OLD", Ok(()), cx)
+                a.finish_env_save(&project, epoch, first, "OLD", Ok(()), cx)
             });
         });
         let (open_id, saved) = cx.update(|cx| {
@@ -1344,7 +1352,7 @@ mod tests {
         // listed again (which moved the listing generation).
         cx.update(|cx| {
             app.update(cx, |a, cx| {
-                a.finish_env_save(&project, second, "NEW", Ok(()), cx)
+                a.finish_env_save(&project, epoch, second, "NEW", Ok(()), cx)
             });
         });
         let (open_id, saved) = cx.update(|cx| {
@@ -1353,5 +1361,16 @@ mod tests {
         });
         assert_eq!(open_id, None, "B's editor closes on its own success");
         assert_eq!(saved.as_deref(), Some("Saved NEW"));
+        // A write started under the previous CLI shows nothing after a switch.
+        cx.update(|cx| app.update(cx, |a, _| a.model.source_changed()));
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.finish_env_save(&project, epoch, second, "STALE", Ok(()), cx)
+            });
+        });
+        assert_ne!(
+            cx.update(|cx| app.read(cx).env_saved.clone()).as_deref(),
+            Some("Saved STALE")
+        );
     }
 }

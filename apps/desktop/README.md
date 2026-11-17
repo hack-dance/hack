@@ -532,8 +532,11 @@ file** and **Use env var** (choose the key source for a run, R26). Each is
 inactive, and its tooltip names the request.
 
 Values never reach a log, a render, `--drive` output or an error message, and
-fixtures use fake values. A failed write shows the CLI's reason only when it
-does not contain the value.
+fixtures use fake values. A failed write shows the command and its exit code,
+never the CLI's output (an echoed value could be trimmed, escaped or cut, so
+no check on it is safe): run the command shown in a terminal to see why. A
+write started before a CLI switch runs through the CLI chosen when Save was
+pressed, and its result is not shown over the new CLI's listing.
 
 Dependencies (macOS only, for the concealed clipboard; all three were already
 in `Cargo.lock` through GPUI): `objc2 =0.6.5` (MIT), `objc2-app-kit =0.3.2`

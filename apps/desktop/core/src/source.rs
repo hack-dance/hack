@@ -1550,22 +1550,12 @@ impl Source for LiveSource {
             .run_raw_with_input(&args, Some(&root), Duration::from_secs(20), &input)
         {
             Ok((_, _, Some(0))) => Ok(()),
-            Ok((_, stderr, code)) => {
-                // The CLI's reason helps (an unknown scope, no key), but
-                // only when it does not echo the value.
-                let reason = stderr.trim();
-                let reason = if reason.is_empty()
-                    || (!value.expose().is_empty() && reason.contains(value.expose()))
-                {
-                    String::new()
-                } else {
-                    format!(": {}", reason.lines().last().unwrap_or_default())
-                };
-                Err(format!(
-                    "hack env add {key} {}{reason}",
-                    code.map_or_else(|| "was stopped".into(), |c| format!("exited with code {c}"))
-                ))
-            }
+            // No command output in the error: an echoed value can be
+            // trimmed, escaped or cut, so no check on it is safe.
+            Ok((_, _, code)) => Err(format!(
+                "hack env add {key} {}. Run the command shown in a terminal to see why.",
+                code.map_or_else(|| "was stopped".into(), |c| format!("exited with code {c}"))
+            )),
             Err(e @ (RunError::NotFound | RunError::Spawn(_) | RunError::Timeout { .. })) => {
                 Err(format!("hack env add {key}: {e}"))
             }

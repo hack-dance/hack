@@ -468,17 +468,16 @@ impl CliRunner {
         // block this one; closing the pipe ends the input. A child that
         // exits early makes the write fail (EPIPE), which is not an error.
         let writer = match (input, child.stdin.take()) {
-            (Some(bytes), Some(mut stdin)) => {
+            (Some(bytes), Some(stdin)) => {
                 let bytes = bytes.to_vec();
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stop = cancel.clone();
                 let (done, written) = mpsc::channel::<()>();
                 let handle = thread::spawn(move || {
-                    use std::io::Write as _;
-                    let _ = stdin.write_all(&bytes);
-                    // Closing stdin (dropped here) ends the input.
-                    drop(stdin);
+                    write_cancellable(stdin, &bytes, &stop);
                     let _ = done.send(());
                 });
-                Some((handle, written))
+                Some((handle, written, cancel))
             }
             _ => None,
         };
@@ -529,11 +528,15 @@ impl CliRunner {
         // without reading, which blocks the write. The deadline covers that
         // too: past it, the group ends, its end of the pipe closes, and the
         // write fails.
-        if let Some((handle, written)) = writer {
+        if let Some((handle, written, cancel)) = writer {
             let finished = match deadline {
                 Some((d, t)) => {
                     let left = d.saturating_duration_since(Instant::now());
                     written.recv_timeout(left).map_err(|_| {
+                        // A reader outside the group (its own session) can
+                        // keep the pipe open after the group ends: the
+                        // writer stops on its own when told.
+                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                         terminate_group(&mut child, grace_left(d));
                         RunError::Timeout { after: t }
                     })
@@ -1026,6 +1029,41 @@ pub fn resolve_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<Pat
 /// Ask the process group to stop (SIGTERM), give the CLI `grace` to retire
 /// the subprocesses it owns, then SIGKILL whatever is left of the group and
 /// reap. Returns only once the direct child has exited.
+/// Write `bytes` to a child's stdin, then close it. The descriptor is made
+/// non-blocking and the write waits in short polls, so `cancel` stops it even
+/// when a reader holds the pipe open without reading (a descendant in
+/// another process group). Errors (the reader went away) end the write.
+fn write_cancellable<W>(mut stdin: W, bytes: &[u8], cancel: &std::sync::atomic::AtomicBool)
+where
+    W: std::io::Write + std::os::fd::AsRawFd,
+{
+    let fd = stdin.as_raw_fd();
+    // SAFETY: fd is the live write end this function owns through `stdin`.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return;
+    }
+    let mut off = 0;
+    while off < bytes.len() && !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        match stdin.write(&bytes[off..]) {
+            Ok(0) => return,
+            Ok(n) => off += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: one valid pollfd for a live descriptor; 50 ms bound.
+                unsafe { libc::poll(&mut pfd, 1, 50) };
+            }
+            Err(_) => return,
+        }
+    }
+    // `stdin` drops here: closing it ends the input.
+}
+
 fn terminate_group(child: &mut Child, grace: Duration) {
     if let Ok(pid) = i32::try_from(child.id()) {
         // SAFETY: plain syscall on the group we created with process_group(0).
@@ -1368,6 +1406,32 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(30),
             "ended at the deadline, not when the descendant did"
+        );
+    }
+
+    #[test]
+    fn a_reader_outside_the_group_cannot_hold_the_write_past_the_deadline() {
+        // The descendant starts its own session (outside the group the
+        // runner ends) and holds stdin without reading.
+        let f = FakeHack::new(
+            "if command -v setsid >/dev/null; then setsid sleep 6 <&0 >/dev/null 2>&1 & else perl -e 'use POSIX; POSIX::setsid(); sleep 6' <&0 >/dev/null 2>&1 & fi\nexit 0",
+        );
+        let started = Instant::now();
+        let input = vec![b'x'; 1 << 20];
+        let r = f
+            .runner()
+            .with_term_grace(Duration::from_millis(100))
+            .run_raw_with_input(
+                &["env", "add", "K", "--value-stdin"],
+                None,
+                Duration::from_secs(1),
+                &input,
+            );
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "ended near the deadline, not when the reader did ({:?})",
+            started.elapsed()
         );
     }
 

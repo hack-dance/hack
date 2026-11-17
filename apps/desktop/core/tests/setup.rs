@@ -141,6 +141,30 @@ fn daemon_requires_running_and_socket_version_not_exit_zero() {
     }
 }
 #[test]
+fn an_answering_hackd_without_a_tracked_pid_is_running() {
+    // Started outside the CLI's PID file: `running` is false, the API answers.
+    for d in [
+        serde_json::json!({"status":"running","running":false,"api_ok":true,"service":{"installed":true}}),
+        serde_json::json!({"status":"running","running":false,"api_reachable":true,"service":{"installed":true}}),
+    ] {
+        let r = derive(&[], Platform::Linux, d.clone(), Some("5.0.0"));
+        let card = r.cards.iter().find(|c| c.id == "daemon").unwrap();
+        assert_eq!(card.status, Status::Passed, "{d}");
+        assert_ne!(
+            card.remedy,
+            Remedy::Run(SafeAction::StartDaemon),
+            "never offer Start for a running hackd"
+        );
+    }
+    // No answering API: still off.
+    let off = serde_json::json!({"status":"stopped","running":false,"api_ok":false});
+    let r = derive(&[], Platform::Linux, off, Some("5.0.0"));
+    assert_eq!(
+        r.cards.iter().find(|c| c.id == "daemon").unwrap().remedy,
+        Remedy::Run(SafeAction::StartDaemon)
+    );
+}
+#[test]
 fn native_only_keeps_unknown_and_never_global_fixes() {
     let r = hack_desktop_core::setup_fixtures::load("native-unknown").unwrap();
     assert!(

@@ -576,6 +576,32 @@ fn read_doctor(
 
 /// Owner-write is allowed; group/other-write and foreign ownership are not.
 /// A root-owned sticky ancestor (such as /tmp) may contain a private entry.
+/// `runner`'s CLI in the checked execution context, for every `hack daemon`
+/// command the app runs on its own (status reads and project-pane
+/// recovery), as Setup runs its actions:
+/// - the executable `runner` resolves to now, pinned and verified, so a
+///   later `PATH` lookup cannot pick another install;
+/// - a clean environment with only the context's allowlist, and a `PATH` of
+///   directories no other user can change;
+/// - `HACK_MCP_COMMAND` naming that executable: the CLI starts hackd by
+///   invoking itself and would otherwise use the first `hack` on `PATH`,
+///   which on a machine with several installs is another one.
+///
+/// # Errors
+/// No CLI selected, or a context that cannot be checked.
+pub(crate) fn checked_daemon_runner(runner: &CliRunner) -> Result<CliRunner, String> {
+    let program = runner
+        .program_path()
+        .ok_or("No Hack CLI is selected")?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "The CLI path is not UTF-8".to_owned())?;
+    let context = crate::execution::ExecutionContext::capture(runner)?.with_controlled_path()?;
+    Ok(context
+        .runner(&program)?
+        .with_env("HACK_MCP_COMMAND", &program))
+}
+
 /// `hack daemon status --json` as JSON, without starting the daemon. Exit
 /// status 1 still carries the report when hackd is not running.
 pub(crate) fn read_daemon_status(
@@ -1186,6 +1212,18 @@ impl LiveSource {
         let cli_version = self.cli_version(&runner);
         timed("hack version --json (cached 30 s per CLI)", t);
         let cli_version = cli_version?;
+        // hackd is found and checked with the CLI in its checked context; a
+        // context that cannot be checked is that error, never "hackd off"
+        // (which would offer Start).
+        if self.daemon.is_none() {
+            checked_daemon_runner(&runner).map_err(|e| SourceError::Cli {
+                code: "E_APP_CONTEXT".into(),
+                message: format!(
+                    "The app could not check the CLI's environment to read hackd: {e}"
+                ),
+                failed: vec![],
+            })?;
+        }
         let t = std::time::Instant::now();
         let client = self.hackd_for(&runner, Some(&cli_version), generation);
         timed("find hackd (cached after the first read)", t);
@@ -1420,8 +1458,8 @@ impl LiveSource {
     }
 
     fn ask_cli_for_hackd(&self, runner: &CliRunner) -> Option<DaemonClient> {
-        let report = runner
-            .clone()
+        let report = checked_daemon_runner(runner)
+            .ok()?
             .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
             .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
             .ok()
@@ -1473,11 +1511,13 @@ impl LiveSource {
         if let Some(c) = self.cache.compat_get(&key) {
             return c;
         }
-        let answer = runner
-            .clone()
-            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
+        let answer = checked_daemon_runner(runner)
             .ok()
+            .map(|r| r.with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"))
+            .and_then(|r| {
+                r.run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
+                    .ok()
+            })
             // Exit 1 still carries the report when hackd is not "running".
             .and_then(|(out, _, _)| serde_json::from_str::<crate::models::DaemonStatus>(&out).ok())
             .filter(|s| s.api_reachable != Some(false))
@@ -1655,10 +1695,13 @@ impl Source for LiveSource {
     }
 
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
-        let (_, stderr, code) = self
-            .runner
+        // The selected CLI in its checked context, so hackd is started or
+        // restarted by this install and no other.
+        let runner = checked_daemon_runner(&self.runner.fixed())
+            .map_err(|e| format!("Could not {} hackd: {e}", action.command()))?;
+        let (stdout, stderr, code) = runner
             .run_raw(
-                &["daemon", action.command()],
+                &["daemon", action.command(), "--no-interactive"],
                 None,
                 Duration::from_secs(120),
             )
@@ -1670,10 +1713,16 @@ impl Source for LiveSource {
                 || "was killed by a signal".into(),
                 |n| format!("exited with code {n}"),
             );
+            // The CLI writes some diagnostics to stdout: keep both, bounded.
+            let detail = [stderr.trim(), stdout.trim()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(2048).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
             Err(format!(
-                "Could not {} hackd: command {exit}. {}",
+                "Could not {} hackd: command {exit}. {detail}",
                 action.command(),
-                stderr.trim()
             ))
         }
     }
@@ -2368,6 +2417,107 @@ mod tests {
     }
 
     /// A trusted fake daemon provides rows; only native ps uses the fake CLI.
+    #[test]
+    fn automatic_daemon_status_reads_run_the_selected_cli_in_its_checked_context() {
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-status-ctx-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        let env_log = dir.join("status-env");
+        crate::test_support::script(
+            &hack,
+            format!(
+                r#"#!/bin/sh
+if [ "$1 $2" = "daemon status" ]; then
+  {{ echo "stray=${{STRAY_SETTING:-unset}}"; echo "autostart=$HACK_DAEMON_AUTOSTART_DISABLE"; echo "mcp=$HACK_MCP_COMMAND"; }} > '{log}'
+  echo '{{"status":"stopped","running":false,"socket_path":"{dir}/hackd.sock"}}'; exit 1
+fi
+"#,
+                log = env_log.display(),
+                dir = dir.display()
+            ),
+        );
+        let src = LiveSource::new(
+            fixture_runner(&hack)
+                .with_env("HOME", &dir.to_string_lossy())
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("STRAY_SETTING", "from the app's environment"),
+            None,
+        );
+        let found = src.hackd();
+        let env = std::fs::read_to_string(&env_log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            found.map(|d| d.socket().to_path_buf()),
+            Some(dir.join("hackd.sock"))
+        );
+        assert!(
+            env.contains("stray=unset\n"),
+            "only the checked allowlist: {env}"
+        );
+        assert!(env.contains("autostart=1\n"), "{env}");
+        assert!(
+            env.contains(&format!("mcp={}\n", hack.display())),
+            "pinned to the selected CLI: {env}"
+        );
+    }
+
+    #[test]
+    fn a_context_that_cannot_be_checked_is_an_error_never_hackd_off() {
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-ctx-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        let called = dir.join("status-called");
+        crate::test_support::script(
+            &hack,
+            format!(
+                r#"#!/bin/sh
+case "$1" in
+  version) echo '{{"ok":true,"data":{{"schema":"hack.version.v1","version":"5.0.0"}}}}' ;;
+  daemon) : > '{called}'; exit 1 ;;
+esac
+"#,
+                called = called.display()
+            ),
+        );
+        let src = LiveSource::new(
+            fixture_runner(&hack)
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("HOME", "relative/home"),
+            None,
+        );
+        let result = src.snapshot();
+        let status_ran = called.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        let Err(e @ SourceError::Cli { .. }) = result else {
+            panic!("expected the context error, got {result:?}");
+        };
+        let mut model = crate::viewmodel::AppModel::new();
+        model.apply(crate::viewmodel::Event::Refreshed(Err(e)));
+        assert_eq!(
+            model.daemon_recovery(),
+            None,
+            "no Start for an unchecked context"
+        );
+        assert!(
+            !status_ran,
+            "no daemon command ran outside the checked context"
+        );
+    }
+
     #[test]
     fn live_source_reads_native_rows_with_native_backend() {
         let dir = std::env::temp_dir().join(format!(

@@ -20,6 +20,7 @@ use gpui_kit::{
     Render, SharedString, Styled, Window, div, prelude::*, px,
 };
 use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
+use hack_desktop_core::machine_gate::{Holder, MachineGate};
 use hack_desktop_core::source::{
     ActionOutcome, DaemonRecovery, DoctorTarget, Snapshot, Source, SourceError,
 };
@@ -146,7 +147,9 @@ pub struct HackApp {
     window_visible: bool,
     _visibility: Option<gpui_kit::Subscription>,
     _activation: Option<gpui_kit::Subscription>,
-    recovery_busy: bool,
+    /// One machine action at a time: Setup's actions and Start / Restart
+    /// hackd here share it.
+    pub(crate) machine: MachineGate,
     recovery_error: Option<String>,
     /// Setup checks (DESIGN.md section 2; `setup_view`).
     pub(crate) setup: hack_desktop_core::setup::Pane,
@@ -195,7 +198,7 @@ impl HackApp {
             copied: None,
             #[cfg(feature = "terminal")]
             panels: Default::default(),
-            recovery_busy: false,
+            machine: MachineGate::default(),
             recovery_error: None,
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
@@ -537,7 +540,7 @@ impl HackApp {
     }
 
     pub(crate) fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
-        if self.recovery_busy {
+        if self.machine.busy() {
             return;
         }
         let Some(row) = self.model.selected_row() else {
@@ -613,10 +616,12 @@ impl HackApp {
     }
 
     fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
-        if self.recovery_busy || !self.live {
+        if !self.live {
             return;
         }
-        self.recovery_busy = true;
+        let Some(ticket) = self.machine.try_begin(Holder::Recovery) else {
+            return;
+        };
         self.recovery_error = None;
         // Starts or restarts the hackd of the CLI selected now, whatever is
         // selected by the time the task runs.
@@ -635,7 +640,7 @@ impl HackApp {
                     cx.notify();
                     return;
                 }
-                this.recovery_busy = false;
+                this.machine.finish(ticket);
                 this.recovery_error = result.err();
                 // A command exit is not evidence that a compatible daemon
                 // is ready. Only the next ordered snapshot can restore rows.
@@ -799,7 +804,7 @@ impl HackApp {
             self.model.source_changed();
             // A Start or Restart hackd still running belongs to the
             // previous installation: it must not block this one.
-            self.recovery_busy = false;
+            self.machine.reset();
             self.recovery_error = None;
             self.logs.close();
             self.env.begin();
@@ -1096,15 +1101,16 @@ impl HackApp {
                     DaemonRecovery::Start => Glyph::Power,
                     DaemonRecovery::Restart => Glyph::Restart,
                 };
-                let label = if self.recovery_busy {
+                let label = if self.machine.held_by(Holder::Recovery) {
                     "Working…"
                 } else {
                     action.label()
                 };
                 row = row.child(
-                    action_button("recover-hackd", glyph, label, !self.recovery_busy, ui).on_click(
-                        cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
-                    ),
+                    action_button("recover-hackd", glyph, label, !self.machine.busy(), ui)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
+                        ),
                 );
             }
             col = col.child(row);
@@ -1129,7 +1135,7 @@ impl HackApp {
             if !d.actions.contains(&a) {
                 continue;
             }
-            let enabled = !d.busy && !self.recovery_busy;
+            let enabled = !d.busy && !self.machine.busy();
             let (glyph, id) = match a {
                 Action::Open => (Glyph::ExternalLink, "open"),
                 Action::Restart => (Glyph::Restart, "restart"),
@@ -1497,7 +1503,9 @@ impl Render for HackApp {
         let main: AnyElement = match &list.phase {
             // Setup applies whatever the project list shows, a missing CLI
             // included.
-            _ if self.pane == Pane::Setup => crate::setup_view::render(&self.setup, &ui, cx),
+            _ if self.pane == Pane::Setup => {
+                crate::setup_view::render(&self.setup, self.machine.busy(), &ui, cx)
+            }
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.

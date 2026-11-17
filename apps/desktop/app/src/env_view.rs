@@ -42,7 +42,15 @@ pub(crate) struct EnvEdit {
     pub value: Entity<InputState>,
     pub busy: bool,
     pub error: Option<String>,
+    /// The field holds the value Save may store: false while an existing
+    /// plaintext value is still being read (Save is off, so an unchanged
+    /// Save never blanks it).
+    pub ready: bool,
 }
+
+/// Why Save stays off when an existing value could not be read.
+const UNREAD_ERROR: &str =
+    "Could not read the current value, so Save is off (it would replace it). Close and try again.";
 
 /// Most plaintext values read with one listing (one `hack env get` each).
 /// A listing in one read is DESIGN.md request R25.
@@ -350,14 +358,37 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) {
         let secret = row.is_some_and(EnvRow::is_secret);
-        let current = row.and_then(|r| match self.env.value(&self.value_key(r)) {
+        let mut current = row.and_then(|r| match self.env.value(&self.value_key(r)) {
             ValueState::Plain(v) if !secret => Some(v.expose().to_owned()),
             _ => None,
         });
+        // An existing plaintext value the listing has not read (still
+        // loading, failed, or past PLAIN_VALUES_MAX): read it before Save
+        // is allowed. A missing required name has no value to keep.
+        let unread = row.filter(|r| !secret && !r.missing && current.is_none());
+        let mut read_error = None;
+        if let Some(r) = unread.filter(|_| !self.live)
+            && let Some((root, native)) = self.selected_root()
+        {
+            match self
+                .source
+                .env_value(&root, native, &self.row_target(r), &r.key)
+            {
+                Ok(v) => current = Some(v.expose().to_owned()),
+                Err(_) => read_error = Some(UNREAD_ERROR.to_owned()),
+            }
+        }
+        let ready = current.is_some() || unread.is_none();
         let value = cx.new(|cx| {
             let mut state = InputState::new(window, cx)
                 .masked(secret)
-                .placeholder(if secret { "New secret value" } else { "Value" });
+                .placeholder(if secret {
+                    "New secret value"
+                } else if ready {
+                    "Value"
+                } else {
+                    "Reading the current value…"
+                });
             if let Some(current) = current {
                 state.set_value(current, window, cx);
             }
@@ -381,10 +412,51 @@ impl HackApp {
             name,
             value,
             busy: false,
-            error: None,
+            error: read_error,
+            ready,
         });
         self.env_saved = None;
+        if let Some(r) = unread.filter(|_| self.live && !ready) {
+            self.read_edit_value(r.clone(), window, cx);
+        }
         cx.notify();
+    }
+
+    /// Fill the open editor with the row's current value, read for this one
+    /// name. Only that editor: one opened since is left alone.
+    fn read_edit_value(&mut self, row: EnvRow, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((root, native)), Some(editor)) =
+            (self.selected_root(), self.env_edit.as_ref().map(|e| e.id))
+        else {
+            return;
+        };
+        let target = self.row_target(&row);
+        let source = self.source.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let key = row.key.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.env_value(&root, native, &target, &key) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let Some(edit) = this.env_edit.as_mut().filter(|e| e.id == editor) else {
+                    return;
+                };
+                match result {
+                    Ok(value) => {
+                        let text = value.expose().to_owned();
+                        edit.value.update(cx, |state, cx| {
+                            state.set_value(text, window, cx);
+                            state.set_placeholder("Value", window, cx);
+                        });
+                        edit.ready = true;
+                    }
+                    Err(_) => edit.error = Some(UNREAD_ERROR.to_owned()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// A new variable only: store it encrypted or as plaintext.
@@ -452,7 +524,7 @@ impl HackApp {
         let Some((root, native)) = self.selected_root() else {
             return;
         };
-        let Some(edit) = self.env_edit.as_ref().filter(|e| !e.busy) else {
+        let Some(edit) = self.env_edit.as_ref().filter(|e| !e.busy && e.ready) else {
             return;
         };
         let name = Self::edit_name(edit, cx);
@@ -600,7 +672,7 @@ impl HackApp {
                     "env-edit-save",
                     Glyph::Check,
                     if edit.busy { "Saving…" } else { "Save" },
-                    !edit.busy,
+                    !edit.busy && edit.ready,
                     ui,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.save_env_edit(cx))),
@@ -1372,5 +1444,43 @@ mod tests {
             cx.update(|cx| app.read(cx).env_saved.clone()).as_deref(),
             Some("Saved STALE")
         );
+    }
+
+    #[test]
+    fn an_unread_plaintext_value_is_read_before_save_is_allowed() {
+        let (mut cx, window, app) = app_window();
+        // The listing has not read APP_MODE's value (past the limit, say).
+        cx.update(|cx| app.update(cx, |a, _| a.env.hide_all()));
+        let plain = row(&mut cx, &app, "APP_MODE");
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| a.open_env_edit(Some(&plain), window, cx));
+        })
+        .unwrap();
+        let (ready, value) = cx.update(|cx| {
+            let edit = app.read(cx).env_edit.as_ref().unwrap();
+            (edit.ready, edit.value.read(cx).value().to_string())
+        });
+        assert!(ready);
+        assert_eq!(value, "fake-app-mode-value", "the current value, not empty");
+        // A value that cannot be read: Save stays off and does nothing.
+        let mut unknown = plain.clone();
+        unknown.key = "NOT_LISTED".into();
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| a.open_env_edit(Some(&unknown), window, cx));
+        })
+        .unwrap();
+        cx.update(|cx| app.update(cx, |a, cx| a.save_env_edit(cx)));
+        let (ready, busy, error, saved) = cx.update(|cx| {
+            let a = app.read(cx);
+            let edit = a.env_edit.as_ref().unwrap();
+            (
+                edit.ready,
+                edit.busy,
+                edit.error.clone(),
+                a.env_saved.clone(),
+            )
+        });
+        assert!(!ready && !busy && saved.is_none(), "nothing was written");
+        assert!(error.unwrap().contains("Save is off"));
     }
 }

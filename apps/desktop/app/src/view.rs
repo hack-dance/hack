@@ -675,6 +675,9 @@ impl HackApp {
         self.hackd_loading = true;
         let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let epoch = self.model.source_epoch();
+        // What the project reads said when this read started: an answer
+        // that lands after they changed may describe the hackd before.
+        let started = self.hackd_evidence_key();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let status = cx
@@ -686,9 +689,19 @@ impl HackApp {
                     return;
                 }
                 this.hackd_loading = false;
+                if this.hackd_evidence_key() != started {
+                    if this.pane == Pane::Hackd {
+                        this.load_hackd(cx);
+                    } else {
+                        this.hackd_read = false;
+                        this.hackd_status = None;
+                    }
+                    cx.notify();
+                    return;
+                }
                 this.hackd_status = status;
                 this.hackd_read = true;
-                this.hackd_evidence_seen = this.hackd_evidence_key();
+                this.hackd_evidence_seen = started;
                 cx.notify();
             });
         })

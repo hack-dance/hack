@@ -18,12 +18,59 @@ export type ComposeOneShotGraph = {
   readonly oneShots: ReadonlySet<string>;
   /** Service to the one-shots it waits on, in file order. */
   readonly waitsOn: ReadonlyMap<string, readonly string[]>;
+  /** Service to every service it depends on, whatever the condition. */
+  readonly dependsOn: ReadonlyMap<string, readonly string[]>;
 };
 
 export const EMPTY_ONE_SHOT_GRAPH: ComposeOneShotGraph = {
   oneShots: new Set(),
   waitsOn: new Map(),
+  dependsOn: new Map(),
 };
+
+/**
+ * The part of `graph` a service-scoped start waits on: Compose starts the
+ * selected services and, unless `noDeps`, everything they depend on, and
+ * waits only for the one-shots those services wait on. An unrelated
+ * one-shot running elsewhere in the project is not this start's progress.
+ * Without selected services the whole graph is in scope.
+ */
+export function scopeOneShotGraph(
+  graph: ComposeOneShotGraph,
+  scope: {
+    readonly services?: readonly string[];
+    readonly noDeps?: boolean;
+  }
+): ComposeOneShotGraph {
+  if (!scope.services || scope.services.length === 0) {
+    return graph;
+  }
+  if (scope.noDeps) {
+    // `--no-deps` starts only the selected services and waits for nothing.
+    return { ...graph, oneShots: new Set(), waitsOn: new Map() };
+  }
+  const started = new Set<string>();
+  const pending = [...scope.services];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    if (started.has(next)) {
+      continue;
+    }
+    started.add(next);
+    pending.push(...(graph.dependsOn.get(next) ?? []));
+  }
+  const oneShots = new Set<string>();
+  const waitsOn = new Map<string, readonly string[]>();
+  for (const [service, blockers] of graph.waitsOn) {
+    if (!started.has(service)) {
+      continue;
+    }
+    waitsOn.set(service, blockers);
+    for (const blocker of blockers) {
+      oneShots.add(blocker);
+    }
+  }
+  return { oneShots, waitsOn, dependsOn: graph.dependsOn };
+}
 
 /**
  * The Compose profiles a command runs with: its `--profile` values, else
@@ -89,14 +136,31 @@ export function mergeOneShotGraphs(
       }
     }
   }
+  return graphFromConditions({
+    effective,
+    serviceProfiles,
+    activeProfiles: options.activeProfiles,
+  });
+}
+
+/** The graph edges of the effective per-service conditions. */
+function graphFromConditions(input: {
+  readonly effective: ReadonlyMap<string, ReadonlyMap<string, string>>;
+  readonly serviceProfiles: ReadonlyMap<string, readonly string[]>;
+  readonly activeProfiles: readonly string[] | undefined;
+}): ComposeOneShotGraph {
   const oneShots = new Set<string>();
   const waitsOn = new Map<string, string[]>();
-  for (const [name, conditions] of effective) {
+  const dependsOn = new Map<string, string[]>();
+  for (const [name, conditions] of input.effective) {
     // A service its profiles leave out never starts, so it waits on nothing:
     // its completion edges would make a long-running service look like a
     // one-shot (HACK-2310).
-    if (!serviceActive(serviceProfiles.get(name), options.activeProfiles)) {
+    if (!serviceActive(input.serviceProfiles.get(name), input.activeProfiles)) {
       continue;
+    }
+    if (conditions.size > 0) {
+      dependsOn.set(name, [...conditions.keys()]);
     }
     const completions = [...conditions]
       .filter(([, condition]) => condition === COMPLETED)
@@ -108,7 +172,7 @@ export function mergeOneShotGraphs(
       waitsOn.set(name, completions);
     }
   }
-  return { oneShots, waitsOn };
+  return { oneShots, waitsOn, dependsOn };
 }
 
 const COMPLETED = "service_completed_successfully";

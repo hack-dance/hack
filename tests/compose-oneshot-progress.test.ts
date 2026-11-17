@@ -8,6 +8,7 @@ import {
   mergeOneShotGraphs,
   readComposeOneShotGraph,
   runningOneShots,
+  scopeOneShotGraph,
   startWatchDecision,
   waitingDependents,
 } from "../src/lib/compose-oneshot-progress.ts";
@@ -309,4 +310,34 @@ test("a completion dependency inherited from an extension anchor counts", async 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a service-scoped start waits only on the one-shots in its scope", () => {
+  const graph = composeOneShotGraph({
+    services: {
+      migrate: { image: "app" },
+      api: {
+        image: "app",
+        depends_on: {
+          migrate: { condition: "service_completed_successfully" },
+        },
+      },
+      edge: { image: "edge", depends_on: ["api"] },
+      web: { image: "web" },
+    },
+  });
+  // Unrelated to migrate: nothing to wait on.
+  expect([...scopeOneShotGraph(graph, { services: ["web"] }).oneShots]).toEqual(
+    []
+  );
+  // edge -> api -> migrate: Compose starts and waits through the chain.
+  expect([
+    ...scopeOneShotGraph(graph, { services: ["edge"] }).oneShots,
+  ]).toEqual(["migrate"]);
+  // --no-deps starts only the selection and waits for nothing.
+  expect([
+    ...scopeOneShotGraph(graph, { services: ["api"], noDeps: true }).oneShots,
+  ]).toEqual([]);
+  // No selection: the whole graph.
+  expect([...scopeOneShotGraph(graph, {}).oneShots]).toEqual(["migrate"]);
 });

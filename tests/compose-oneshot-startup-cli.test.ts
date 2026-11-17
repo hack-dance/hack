@@ -388,3 +388,20 @@ test("ps renders a Created service named like an Object member", async () => {
   expect(result.stdout).toContain("constructor");
   expect(result.stdout).not.toContain("waiting for");
 }, 60_000);
+
+test("a service-scoped up ignores a running one-shot outside its scope", async () => {
+  await writeFile(
+    join(project, ".hack", "docker-compose.yml"),
+    `${ONE_SHOT_COMPOSE}  web:\n    image: alpine:3.22\n`
+  );
+  // migrate keeps running, but web does not wait on it: the plain budget.
+  const result = await cli(["up", "--detach", "--json", "web"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "4",
+  });
+  expect(result.exitCode).toBe(124);
+  const envelope = JSON.parse(result.stdout) as {
+    error: { message: string };
+  };
+  expect(envelope.error.message).toContain("startup budget of 1000 ms");
+}, 60_000);

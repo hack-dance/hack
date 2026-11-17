@@ -4,6 +4,7 @@ import {
   effectiveComposeProfiles,
   readComposeOneShotGraph,
   runningOneShots,
+  scopeOneShotGraph,
   startWatchDecision,
 } from "../lib/compose-oneshot-progress.ts";
 import { parseComposePsJson } from "../lib/compose-ps-result.ts";
@@ -247,12 +248,15 @@ async function runComposeStartPhase(input: {
   ) => Promise<number>;
 }): Promise<number> {
   const { options } = input;
-  const graph = await readComposeOneShotGraph(options.composeFiles, {
-    activeProfiles: effectiveComposeProfiles({
-      cliProfiles: options.profiles ?? [],
-      env: options.env ?? {},
+  const graph = scopeOneShotGraph(
+    await readComposeOneShotGraph(options.composeFiles, {
+      activeProfiles: effectiveComposeProfiles({
+        cliProfiles: options.profiles ?? [],
+        env: options.env ?? {},
+      }),
     }),
-  });
+    { services: options.services, noDeps: options.noDeps }
+  );
   if (graph.oneShots.size === 0) {
     const code = await input.runPhase(input.cmd, input.startupTimeoutMs);
     if (code === 124) {

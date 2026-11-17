@@ -808,9 +808,15 @@ pub struct CliCache {
     /// `hack version --json` per executable, for [`CLI_VERSION_TTL`]: every
     /// start of a launcher such as `hack-next` re-verifies its bundle.
     versions: std::sync::Mutex<std::collections::HashMap<PathBuf, (String, std::time::Instant)>>,
-    /// The hackd socket each other install's CLI reports, per executable.
-    other_sockets: std::sync::Mutex<std::collections::HashMap<PathBuf, Option<PathBuf>>>,
+    /// The hackd socket each other install's CLI reported, per executable,
+    /// and when: a found socket is reused for [`OTHER_SOCKET_TTL`], a failed
+    /// lookup retried after [`HACKD_LOOKUP_RETRY`].
+    other_sockets:
+        std::sync::Mutex<std::collections::HashMap<PathBuf, (Option<PathBuf>, std::time::Instant)>>,
 }
+
+/// How long another install's reported hackd socket is reused.
+const OTHER_SOCKET_TTL: Duration = Duration::from_secs(60);
 
 /// How long a CLI's reported version is reused before asking again.
 const CLI_VERSION_TTL: Duration = Duration::from_secs(30);
@@ -859,6 +865,9 @@ impl CliCache {
         }
         if let Ok(mut h) = hackd {
             *h = None;
+        }
+        if let Ok(mut o) = self.other_sockets.lock() {
+            o.clear();
         }
     }
 }
@@ -1244,24 +1253,30 @@ impl LiveSource {
         let choice = self.cli_choice()?;
         for other in choice.installs.iter().filter(|i| i.path != ours) {
             let other_runner = runner.with_program(&other.path);
-            let reported = {
-                let known = self
-                    .cache
-                    .other_sockets
-                    .lock()
-                    .ok()
-                    .and_then(|m| m.get(&other.path).cloned());
-                match known {
-                    Some(s) => s,
-                    None => {
-                        let s = self
-                            .ask_cli_for_hackd(&other_runner)
-                            .map(|d| d.socket().to_path_buf());
-                        if let Ok(mut m) = self.cache.other_sockets.lock() {
-                            m.insert(other.path.clone(), s.clone());
-                        }
-                        s
+            let known = self
+                .cache
+                .other_sockets
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&other.path).cloned())
+                .filter(|(s, at)| {
+                    let ttl = if s.is_some() {
+                        OTHER_SOCKET_TTL
+                    } else {
+                        HACKD_LOOKUP_RETRY
+                    };
+                    at.elapsed() < ttl
+                });
+            let reported = match known {
+                Some((s, _)) => s,
+                None => {
+                    let s = self
+                        .ask_cli_for_hackd(&other_runner)
+                        .map(|d| d.socket().to_path_buf());
+                    if let Ok(mut m) = self.cache.other_sockets.lock() {
+                        m.insert(other.path.clone(), (s.clone(), std::time::Instant::now()));
                     }
+                    s
                 }
             };
             if reported.as_deref() == Some(socket) {

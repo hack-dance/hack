@@ -287,12 +287,17 @@ pub struct EnvModel {
     pub running: Option<String>,
     /// The value last copied, for its check mark until the clipboard clears.
     pub copied: Option<ValueKey>,
+    /// Bumped by every hide of all values (a new listing, focus or
+    /// visibility lost): a reveal or copy started before it must not
+    /// complete after it. Those hides also drop the "Reading" marks.
+    reveal_epoch: u64,
     values: std::collections::HashMap<ValueKey, ValueState>,
 }
 impl EnvModel {
     /// A new listing: every value shown so far is dropped.
     pub fn begin(&mut self) -> u64 {
         self.generation += 1;
+        self.reveal_epoch += 1;
         self.view = EnvView::Loading;
         self.values.clear();
         self.generation
@@ -305,6 +310,11 @@ impl EnvModel {
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    /// See `reveal_epoch`: a pending reveal or copy compares it on completion.
+    #[must_use]
+    pub fn reveal_epoch(&self) -> u64 {
+        self.reveal_epoch
     }
     /// What `key`'s cell shows now; a value older than [`REVEAL_FOR`] is
     /// hidden again.
@@ -326,11 +336,13 @@ impl EnvModel {
     }
     /// Drop every value (the window lost focus, a tab changed).
     pub fn hide_all(&mut self) {
+        self.reveal_epoch += 1;
         self.values.clear();
     }
     /// Hide every revealed secret, keeping plaintext values; whether any
     /// was shown or still being read.
     pub fn hide_revealed(&mut self) -> bool {
+        self.reveal_epoch += 1;
         let before = self.values.len();
         self.values
             .retain(|_, v| matches!(v, ValueState::Plain(_) | ValueState::Failed(_)));
@@ -554,6 +566,30 @@ mod tests {
         assert_eq!(model.value(&key), ValueState::Hidden, "past its time");
         assert!(model.expire());
         assert_eq!(model.value(&key), ValueState::Hidden);
+    }
+
+    #[test]
+    fn hiding_everything_invalidates_reads_still_in_flight() {
+        let mut model = EnvModel::default();
+        model.begin();
+        let key = |name: &str| ValueKey {
+            env: "staging".into(),
+            scope: "global".into(),
+            name: name.into(),
+        };
+        // An eye pressed, then focus lost before `hack env get` answered.
+        let epoch = model.reveal_epoch();
+        model.set_value(model.generation(), key("DATABASE_URL"), ValueState::Reading);
+        assert!(model.hide_revealed());
+        assert_ne!(model.reveal_epoch(), epoch, "the pending reveal is dropped");
+        assert_eq!(model.value(&key("DATABASE_URL")), ValueState::Hidden);
+        // Hiding one value with its own eye leaves another read alone.
+        let epoch = model.reveal_epoch();
+        model.hide(&key("API_TOKEN"));
+        assert_eq!(model.reveal_epoch(), epoch);
+        // A new listing invalidates too.
+        model.begin();
+        assert_ne!(model.reveal_epoch(), epoch);
     }
 
     #[test]

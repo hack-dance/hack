@@ -158,7 +158,8 @@ impl HackApp {
         cx.notify();
     }
 
-    /// Read one value (`hack env get` for this one name), then `then`.
+    /// Read one value (`hack env get` for this one name), then `then`, unless
+    /// a hide (focus lost, another overlay) happened while it was read.
     fn read_value(
         &mut self,
         row: &EnvRow,
@@ -169,6 +170,7 @@ impl HackApp {
             return;
         };
         let generation = self.env.generation();
+        let epoch = self.env.reveal_epoch();
         let target = self.env_target();
         let name = row.key.clone();
         if !self.live {
@@ -183,8 +185,9 @@ impl HackApp {
                 .spawn(async move { source.env_value(&root, native, &target, &name) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                // Moved to another listing meanwhile: drop the value.
-                if this.env.generation() == generation {
+                // Moved to another listing, or anything was hidden (the
+                // window lost focus) while reading: drop the value.
+                if this.env.generation() == generation && this.env.reveal_epoch() == epoch {
                     then(this, result, cx);
                 }
             });

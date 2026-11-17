@@ -13,7 +13,7 @@
 //! runs no `hack autostart` command; this is a summary only. A field the
 //! payload does not carry is unknown, never off.
 
-use crate::models::{Autostart, AutostartGlobal, DaemonApiStatus, DaemonStatus, ProjectsPayload};
+use crate::models::{Autostart, AutostartGlobal, DaemonStatus, ProjectsPayload};
 use crate::source::UpdateSide;
 
 /// How a card or line reads at a glance.
@@ -56,14 +56,25 @@ pub fn hackd_running(s: &DaemonStatus) -> bool {
     s.running || (s.status == "running" && (s.api_ok || s.api_reachable == Some(true)))
 }
 
+/// What the window already knows about hackd from its project reads, as
+/// current as the last read: the card never acts on less.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HackdEvidence<'a> {
+    /// The version hackd answers with (`/v1/status`), from the last read.
+    pub hackd_version: Option<&'a str>,
+    /// The selected CLI's version.
+    pub cli_version: Option<&'a str>,
+    /// Another install whose CLI reports this same hackd (a shared home):
+    /// the app then never starts or restarts it, which would only start a
+    /// fight over it.
+    pub shared_with: Option<&'a str>,
+}
+
 /// The hackd card. `status`: `hack daemon status --json`, `None` when it
-/// could not be read. `api`: `/v1/status`, `None` when hackd did not answer.
+/// could not be read.
 #[must_use]
-pub fn hackd_card(
-    status: Option<&DaemonStatus>,
-    api: Option<&DaemonApiStatus>,
-    cli_version: Option<&str>,
-) -> HackdCard {
+pub fn hackd_card(status: Option<&DaemonStatus>, evidence: &HackdEvidence<'_>) -> HackdCard {
+    let cli_version = evidence.cli_version;
     let Some(s) = status else {
         return HackdCard {
             tone: Tone::Unknown,
@@ -77,8 +88,8 @@ pub fn hackd_card(
     let mut details = Vec::new();
     // `/v1/status` may be from an earlier read: its version describes hackd
     // only while the CLI says hackd runs.
-    let version = api
-        .map(|a| a.version.as_str())
+    let version = evidence
+        .hackd_version
         .filter(|v| !v.is_empty() && hackd_running(s));
     if let Some(v) = version {
         details.push(match s.pid {
@@ -109,10 +120,13 @@ pub fn hackd_card(
                 }
             }
             _ if s.status == "starting" => (Tone::Unknown, "hackd is starting".into(), None),
+            // Without both versions the app cannot tell an older hackd (which
+            // a restart from this CLI fixes) from a newer one (which it would
+            // downgrade): say so and act on nothing.
             _ if s.status == "incompatible" => (
                 Tone::Attention,
                 "hackd is running but this CLI cannot use it".into(),
-                Some(CardAction::Restart),
+                None,
             ),
             _ => (Tone::Ok, "hackd running".into(), None),
         }
@@ -133,6 +147,15 @@ pub fn hackd_card(
         )
     } else {
         (Tone::Problem, "hackd off".into(), Some(CardAction::Start))
+    };
+    let action = match (action, evidence.shared_with) {
+        (Some(CardAction::Start | CardAction::Restart), Some(other)) => {
+            details.push(format!(
+                "This hackd belongs to {other}, which shares this home: the app does not start or restart it."
+            ));
+            None
+        }
+        (a, _) => a,
     };
     // A login service that needs repair is the one thing to do once hackd
     // itself is fine.
@@ -260,6 +283,9 @@ fn reason_text(status: &str, reason: Option<&str>) -> String {
 pub struct AlwaysOnSummary {
     /// Projects whose marker is enabled.
     pub marked: usize,
+    /// Projects the payload reports no `autostart` object for: unknown,
+    /// never counted as off.
+    pub unreported: usize,
     pub on: usize,
     pub paused: usize,
     pub starting: usize,
@@ -284,9 +310,13 @@ pub fn always_on_summary(payload: &ProjectsPayload) -> AlwaysOnSummary {
         ..AlwaysOnSummary::default()
     };
     for p in &payload.projects {
-        let Some(a) = p.autostart.as_ref().filter(|a| a.enabled) else {
+        let Some(a) = p.autostart.as_ref() else {
+            s.unreported += 1;
             continue;
         };
+        if !a.enabled {
+            continue;
+        }
         s.marked += 1;
         match a.state.as_str() {
             "on" => s.on += 1,
@@ -322,7 +352,24 @@ fn login_run_text(g: &AutostartGlobal) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AutostartFailures, AutostartLoginRun, AutostartResult, DaemonService};
+    use crate::models::{
+        AutostartFailures, AutostartLoginRun, AutostartResult, DaemonApiStatus, DaemonService,
+    };
+
+    fn hackd_card(
+        s: Option<&DaemonStatus>,
+        api: Option<&DaemonApiStatus>,
+        cli: Option<&str>,
+    ) -> HackdCard {
+        super::hackd_card(
+            s,
+            &HackdEvidence {
+                hackd_version: api.map(|a| a.version.as_str()),
+                cli_version: cli,
+                shared_with: None,
+            },
+        )
+    }
 
     fn status(json: &str) -> DaemonStatus {
         serde_json::from_str(json).unwrap()
@@ -442,6 +489,38 @@ mod tests {
     }
 
     #[test]
+    fn restart_needs_both_versions_and_never_touches_a_shared_hackd() {
+        let incompatible = status(r#"{"status":"incompatible","running":true}"#);
+        let card = hackd_card(Some(&incompatible), None, Some("5.0.0"));
+        assert_eq!(card.action, None, "no versions: not known to be older");
+        let older = status(r#"{"status":"running","running":true}"#);
+        let shared = super::hackd_card(
+            Some(&older),
+            &HackdEvidence {
+                hackd_version: Some("4.3.0"),
+                cli_version: Some("5.0.0"),
+                shared_with: Some("hack 4.3.0 (stable)"),
+            },
+        );
+        assert_eq!(shared.action, None);
+        assert!(
+            shared
+                .details
+                .iter()
+                .any(|d| d.contains("hack 4.3.0 (stable)"))
+        );
+        let off = status(r#"{"status":"stopped","running":false}"#);
+        let shared_off = super::hackd_card(
+            Some(&off),
+            &HackdEvidence {
+                shared_with: Some("hack 4.3.0 (stable)"),
+                ..HackdEvidence::default()
+            },
+        );
+        assert_eq!(shared_off.action, None);
+    }
+
+    #[test]
     fn an_unread_status_is_unknown_with_no_action() {
         let card = hackd_card(None, None, Some("5.0.0"));
         assert_eq!((card.tone, card.action), (Tone::Unknown, None));
@@ -555,6 +634,7 @@ mod tests {
             (s.marked, s.on, s.starting, s.needs_attention, s.paused),
             (3, 1, 1, 1, 0)
         );
+        assert_eq!(s.unreported, 1, "project e reports no autostart object");
         assert_eq!(s.global_paused, Some(false));
         assert_eq!(s.service_ready, Some(true));
         assert_eq!(

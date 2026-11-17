@@ -28,6 +28,19 @@ pub fn status_of(tone: Tone) -> Status {
 }
 
 impl HackApp {
+    /// A key for what the project reads say about hackd: when it changes,
+    /// a stored hackd read is out of date.
+    pub(crate) fn hackd_evidence_key(&self) -> String {
+        let e = self.model.hackd_evidence();
+        format!(
+            "{:?}|{:?}|{:?}|{:?}",
+            self.model.daemon_recovery(),
+            e.hackd_version,
+            e.cli_version,
+            e.shared_with
+        )
+    }
+
     /// Before the pane has read hackd's status: what the project reads
     /// already say (a matching hackd answered, or it is off or mismatched).
     pub(crate) fn hackd_tone_from_snapshot(&self) -> Option<Tone> {
@@ -75,11 +88,9 @@ impl HackApp {
         if !self.hackd_read {
             return None;
         }
-        let snapshot = self.model.snapshot();
         Some(machine::hackd_card(
             self.hackd_status.as_ref(),
-            snapshot.and_then(|s| s.daemon.as_ref()),
-            snapshot.map(|s| s.cli_version.as_str()),
+            &self.model.hackd_evidence(),
         ))
     }
 }
@@ -274,12 +285,23 @@ fn always_on(app: &HackApp, ui: &Ui) -> AnyElement {
     if let Some(run) = &s.login_run {
         col = col.child(line(Tone::Unknown, run.clone()));
     }
+    let unreported = (s.unreported > 0).then(|| {
+        format!(
+            "The CLI did not report always-on for {} project{}: unknown, not off.",
+            s.unreported,
+            if s.unreported == 1 { "" } else { "s" }
+        )
+    });
     if s.marked == 0 {
         col = col.child(
             div()
                 .type_step(text::BODY)
                 .text_color(p.text_secondary)
-                .child("No project is always on."),
+                .child(if unreported.is_some() {
+                    "No reported project is always on."
+                } else {
+                    "No project is always on."
+                }),
         );
     } else {
         let mut counts = vec![format!("{} always on", s.marked)];
@@ -310,6 +332,9 @@ fn always_on(app: &HackApp, ui: &Ui) -> AnyElement {
                     .child(div().text_color(p.text_secondary).child(text_.clone())),
             );
         }
+    }
+    if let Some(u) = unreported {
+        col = col.child(line(Tone::Unknown, u));
     }
     if s.service_ready == Some(false) && s.marked > 0 {
         col = col.child(line(
@@ -383,6 +408,36 @@ mod tests {
                 assert!(a.machine.finish(held));
             })
         });
+    }
+
+    #[test]
+    fn a_project_read_that_reports_hackd_off_retires_a_stored_green_card() {
+        use hack_desktop_core::source::SourceError;
+        let (mut cx, app) = window(Fixture::Hackd);
+        let tone = cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.refresh_now();
+                a.open_hackd(cx);
+                assert_eq!(a.hackd_card().unwrap().tone, Tone::Ok);
+                a.show_project();
+                let token = a.model.begin_refresh();
+                assert!(a.apply_refresh(
+                    token,
+                    Err(SourceError::DaemonUnavailable {
+                        cli: "5.0.0".into(),
+                        daemon: None,
+                        compatible: false,
+                        message: "hackd is off".into(),
+                        shared_with: None,
+                    }),
+                    cx,
+                ));
+                a.hackd_card()
+                    .map(|c| c.tone)
+                    .or_else(|| a.hackd_tone_from_snapshot())
+            })
+        });
+        assert_eq!(tone, Some(Tone::Problem), "the dot follows the newer read");
     }
 
     #[test]

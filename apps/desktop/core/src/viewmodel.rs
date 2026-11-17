@@ -399,6 +399,36 @@ impl AppModel {
         }
     }
 
+    /// What the project reads say about hackd, for the hackd card: from the
+    /// unavailable-daemon error when the last read failed that way, else from
+    /// a good snapshot; nothing otherwise. Never an older read's versions
+    /// after a newer read failed.
+    #[must_use]
+    pub fn hackd_evidence(&self) -> crate::machine::HackdEvidence<'_> {
+        match &self.last_error {
+            Some(SourceError::DaemonUnavailable {
+                cli,
+                daemon,
+                shared_with,
+                ..
+            }) => crate::machine::HackdEvidence {
+                hackd_version: daemon.as_deref(),
+                cli_version: Some(cli),
+                shared_with: shared_with.as_deref(),
+            },
+            Some(_) => crate::machine::HackdEvidence::default(),
+            None => self
+                .snapshot
+                .as_ref()
+                .map(|s| crate::machine::HackdEvidence {
+                    hackd_version: s.daemon.as_ref().map(|d| d.version.as_str()),
+                    cli_version: Some(&s.cli_version),
+                    shared_with: None,
+                })
+                .unwrap_or_default(),
+        }
+    }
+
     #[must_use]
     pub fn engine_observed(&self) -> bool {
         self.last_error.is_none()

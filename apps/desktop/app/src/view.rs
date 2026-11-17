@@ -157,6 +157,9 @@ pub struct HackApp {
     /// A read finished (its result may be `None`: not readable).
     pub(crate) hackd_read: bool,
     pub(crate) hackd_loading: bool,
+    /// [`Self::hackd_evidence_key`] when hackd was last read: a project read
+    /// that changes it makes the stored read stale.
+    hackd_evidence_seen: String,
     /// Setup checks (DESIGN.md section 2; `setup_view`).
     pub(crate) setup: hack_desktop_core::setup::Pane,
     /// The launch check has not reported yet: when it finds something to
@@ -209,6 +212,7 @@ impl HackApp {
             hackd_status: None,
             hackd_read: false,
             hackd_loading: false,
+            hackd_evidence_seen: String::new(),
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
             setup_on_launch: live,
@@ -431,6 +435,18 @@ impl HackApp {
         if !self.model.finish_refresh(token, snap) {
             return false;
         }
+        // hackd changed under the stored card (stopped, started, another
+        // version): read it again while the pane shows it, else forget it so
+        // the sidebar dot follows the project reads.
+        let evidence = self.hackd_evidence_key();
+        if self.hackd_read && evidence != self.hackd_evidence_seen {
+            if self.pane == Pane::Hackd {
+                self.load_hackd(cx);
+            } else {
+                self.hackd_read = false;
+                self.hackd_status = None;
+            }
+        }
         let after = self.model.selected_key();
         let selection_changed = before != after || previous_root != self.selected_root();
         if selection_changed {
@@ -642,6 +658,7 @@ impl HackApp {
         self.pane = Pane::Hackd;
         self.hackd_status = self.source.daemon_status();
         self.hackd_read = true;
+        self.hackd_evidence_seen = self.hackd_evidence_key();
     }
 
     /// Read `hack daemon status --json` off the UI thread with the CLI
@@ -671,6 +688,7 @@ impl HackApp {
                 this.hackd_loading = false;
                 this.hackd_status = status;
                 this.hackd_read = true;
+                this.hackd_evidence_seen = this.hackd_evidence_key();
                 cx.notify();
             });
         })
@@ -876,6 +894,9 @@ impl HackApp {
             self.hackd_status = None;
             self.hackd_read = false;
             self.hackd_loading = false;
+            if self.pane == Pane::Hackd {
+                self.load_hackd(cx);
+            }
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();

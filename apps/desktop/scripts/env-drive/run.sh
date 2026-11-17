@@ -44,7 +44,13 @@ STANDIN
     env -i PATH=/usr/bin:/bin HOME="$T/userhome" HACK_HOME="$T/userhome/.hack" \
       HACK_DAEMON_AUTOSTART_DISABLE=1 HACK_NO_INTERACTIVE=1 "$BUN" "$REPO/index.ts" "$@"
   }
-  printf 'fake-plain-one' | cli env add FIXTURE_MODE --value-stdin --env default --service global --path "$T/proj" >/dev/null 2>&1
+  if ! printf 'fake-plain-one' | cli env add FIXTURE_MODE --value-stdin --env default --service global --path "$T/proj" >/dev/null 2>&1; then
+    # Not the app: the checkout's CLI could not run (dependencies not
+    # installed, say). Stop here rather than report a confusing app failure.
+    echo "pass $n: seeding the temp project with this checkout's CLI failed; run bun install --frozen-lockfile in the repository" >&2
+    rm -rf "$T"
+    exit 2
+  fi
   python3 -I "$HERE/fakehackd.py" "$T/userhome/.hack/daemon/hackd.sock" "$T/proj" 5.0.0 &
   FD=$!
   i=0

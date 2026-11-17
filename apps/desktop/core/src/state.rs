@@ -272,6 +272,12 @@ pub fn derive(row: &ProjectRow, local: &LocalContext) -> ProjectState {
         };
     }
     if row.is_native() {
+        // Listed, its `hack ps` not back yet, and no earlier observation.
+        if row.native_pending && row.native.is_none() {
+            return ProjectState::Unknown {
+                reason: "Reading native status…".into(),
+            };
+        }
         return native_state(row.native.as_ref());
     }
     if let Some(d) = &row.input_diagnostic {

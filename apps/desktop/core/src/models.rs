@@ -84,6 +84,13 @@ pub struct ProjectRow {
     /// Native observation from `hack ps --json` (filled by the source).
     #[serde(skip)]
     pub native: Option<NativePs>,
+    /// This read has not asked `hack ps` for this native project yet
+    /// ([`crate::source::Source::listing`]); the app reads it next, on its
+    /// own. Meanwhile [`Self::native`] is the previous read's observation,
+    /// kept for display, or `None`. A pending row is never evidence: it does
+    /// not clear a failed start or report shells.
+    #[serde(skip)]
+    pub native_pending: bool,
     /// Running branch instances (`hack up --branch <name>`), Compose only.
     /// Native branch instances are not reported here (design request R19).
     #[serde(deserialize_with = "null_default")]

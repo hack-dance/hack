@@ -1,6 +1,7 @@
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
+  effectiveComposeProfiles,
   readComposeOneShotGraph,
   runningOneShots,
   startWatchDecision,
@@ -246,7 +247,12 @@ async function runComposeStartPhase(input: {
   ) => Promise<number>;
 }): Promise<number> {
   const { options } = input;
-  const graph = await readComposeOneShotGraph(options.composeFiles);
+  const graph = await readComposeOneShotGraph(options.composeFiles, {
+    activeProfiles: effectiveComposeProfiles({
+      cliProfiles: options.profiles ?? [],
+      env: options.env ?? {},
+    }),
+  });
   if (graph.oneShots.size === 0) {
     const code = await input.runPhase(input.cmd, input.startupTimeoutMs);
     if (code === 124) {

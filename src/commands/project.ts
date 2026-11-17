@@ -216,6 +216,7 @@ import {
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import {
+  effectiveComposeProfiles,
   readComposeOneShotGraph,
   runningOneShots,
   waitingDependents,
@@ -1084,11 +1085,21 @@ async function checkOneShotInterruption(opts: {
   readonly json: boolean;
   /** A targeted restart interrupts only these services. */
   readonly services?: readonly string[];
+  /**
+   * The Compose environment the command's other `ps` reads use (delivered
+   * values, `COMPOSE_PROFILES`), so a profile-gated one-shot is seen too.
+   */
+  readonly env?: Readonly<Record<string, string>>;
 }): Promise<{
   readonly proceed: boolean;
   readonly interruption?: OneShotInterruption;
 }> {
-  const graph = await readComposeOneShotGraph([opts.project.composeFile]);
+  const graph = await readComposeOneShotGraph([opts.project.composeFile], {
+    activeProfiles: effectiveComposeProfiles({
+      cliProfiles: opts.profiles,
+      env: opts.env ?? {},
+    }),
+  });
   if (graph.oneShots.size === 0) {
     return { proceed: true };
   }
@@ -1097,8 +1108,11 @@ async function checkOneShotInterruption(opts: {
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    ...(opts.env ? { env: { ...opts.env } } : {}),
     all: true,
   });
+  // A failed read finds nothing to interrupt: the command goes on unchanged,
+  // and its own reads report the engine error as before.
   const entries = ps.exitCode === 0 ? parseComposePsJson(ps.stdout) : null;
   const services = (entries ? runningOneShots({ graph, entries }) : []).filter(
     (service) => !opts.services || opts.services.includes(service)
@@ -8702,6 +8716,8 @@ type TargetedServiceRestartResult =
       readonly code: 0;
       readonly running: readonly string[];
       readonly completed: readonly string[];
+      /** One-shots among the restarted services it stopped mid-run. */
+      readonly interruption?: OneShotInterruption;
     }
   | {
       readonly ok: false;
@@ -8710,7 +8726,8 @@ type TargetedServiceRestartResult =
         | "E_COMPOSE_FAILED"
         | "E_STARTUP_INCOMPLETE"
         | "E_DEPENDENCY_BOOTSTRAP_FAILED"
-        | "E_STARTUP_TIMEOUT";
+        | "E_STARTUP_TIMEOUT"
+        | "E_CANCELLED";
       readonly message: string;
       readonly running: readonly string[];
       readonly completed: readonly string[];
@@ -8734,6 +8751,7 @@ async function runTargetedServiceRestart(opts: {
   readonly services: readonly string[];
   readonly allServiceNames: readonly string[];
   readonly routeStdoutToStderr: boolean;
+  readonly json: boolean;
 }): Promise<TargetedServiceRestartResult> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
   const devHost = await resolveRuntimeDevHost({
@@ -8784,6 +8802,26 @@ async function runTargetedServiceRestart(opts: {
     targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
   });
+  // Before anything is recreated, with the environment its own reads use.
+  const interruptionCheck = await checkOneShotInterruption({
+    project: opts.project,
+    composeProjectName: opts.composeProjectName,
+    profiles: opts.profiles,
+    action: "restart",
+    json: opts.json,
+    services: opts.services,
+    env: envOverrides.env,
+  });
+  if (!interruptionCheck.proceed) {
+    return {
+      ok: false,
+      code: 1,
+      errorCode: "E_CANCELLED",
+      message: "Restart cancelled; nothing was stopped.",
+      running: [],
+      completed: [],
+    };
+  }
   reportDependencyCacheFallback(dependencyCache);
   const composeFilesWithRuntimeOverrides = [
     ...composeFiles,
@@ -8929,6 +8967,9 @@ async function runTargetedServiceRestart(opts: {
     code: 0,
     running: startup.running,
     completed: startup.completed,
+    ...(interruptionCheck.interruption
+      ? { interruption: interruptionCheck.interruption }
+      : {}),
   };
 }
 
@@ -9126,17 +9167,6 @@ async function runRestartCommand({
     available: allServiceNames,
   });
   if (requestedServices.length > 0) {
-    const targetedInterruption = await checkOneShotInterruption({
-      project,
-      composeProjectName,
-      profiles,
-      action: "restart",
-      json,
-      services: requestedServices,
-    });
-    if (!targetedInterruption.proceed) {
-      return 1;
-    }
     const result = await runTargetedServiceRestart({
       budgets,
       project,
@@ -9150,6 +9180,7 @@ async function runRestartCommand({
       services: requestedServices,
       allServiceNames,
       routeStdoutToStderr: json,
+      json,
     });
     if (!json) {
       if (!result.ok) {
@@ -9176,7 +9207,7 @@ async function runRestartCommand({
           composeProject: composeProjectName ?? baseProjectName,
           started: result.running,
           completed: result.completed,
-          interruption: targetedInterruption.interruption,
+          interruption: result.interruption,
           durationMs: Date.now() - (startedAtMs ?? Date.now()),
         }),
       }),
@@ -9213,6 +9244,7 @@ async function runRestartCommand({
     profiles,
     action: "restart",
     json,
+    env: preflightEnv.env,
   });
   if (!interruptionCheck.proceed) {
     return 1;
@@ -9660,7 +9692,12 @@ async function handlePs({
   // A Created service whose one-shot dependency is still running starts only
   // when it completes and a Compose client waits for it (HACK-2310).
   const waiting = waitingDependents({
-    graph: await readComposeOneShotGraph([project.composeFile]),
+    graph: await readComposeOneShotGraph([project.composeFile], {
+      activeProfiles: effectiveComposeProfiles({
+        cliProfiles: profiles,
+        env: {},
+      }),
+    }),
     entries,
   });
   if (json) {
@@ -11076,13 +11113,10 @@ function resolveEffectiveComposeProfiles(opts: {
   readonly cliProfiles: readonly string[];
   readonly composeEnv: Readonly<Record<string, string>>;
 }): string[] {
-  if (opts.cliProfiles.length > 0) {
-    return [...opts.cliProfiles];
-  }
-  const composeProfiles = Object.hasOwn(opts.composeEnv, "COMPOSE_PROFILES")
-    ? opts.composeEnv.COMPOSE_PROFILES
-    : process.env.COMPOSE_PROFILES;
-  return parseCsvList(composeProfiles);
+  return effectiveComposeProfiles({
+    cliProfiles: opts.cliProfiles,
+    env: opts.composeEnv,
+  });
 }
 
 function parseLogTimeRange(opts: {

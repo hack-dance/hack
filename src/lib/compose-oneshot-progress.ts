@@ -25,9 +25,37 @@ export const EMPTY_ONE_SHOT_GRAPH: ComposeOneShotGraph = {
   waitsOn: new Map(),
 };
 
+/**
+ * The Compose profiles a command runs with: its `--profile` values, else
+ * `COMPOSE_PROFILES` from the delivered environment, else from this process.
+ */
+export function effectiveComposeProfiles(opts: {
+  readonly cliProfiles: readonly string[];
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): string[] {
+  if (opts.cliProfiles.length > 0) {
+    return [...opts.cliProfiles];
+  }
+  const raw = Object.hasOwn(opts.env, "COMPOSE_PROFILES")
+    ? opts.env.COMPOSE_PROFILES
+    : process.env.COMPOSE_PROFILES;
+  return (raw ?? "")
+    .split(",")
+    .map((profile) => profile.trim())
+    .filter((profile) => profile.length > 0);
+}
+
+/** Which services' `depends_on` count: all, or those active under these profiles. */
+export type OneShotGraphOptions = {
+  readonly activeProfiles?: readonly string[];
+};
+
 /** The one-shot graph of one parsed Compose document. */
-export function composeOneShotGraph(document: unknown): ComposeOneShotGraph {
-  return mergeOneShotGraphs([document]);
+export function composeOneShotGraph(
+  document: unknown,
+  options: OneShotGraphOptions = {}
+): ComposeOneShotGraph {
+  return mergeOneShotGraphs([document], options);
 }
 
 /**
@@ -38,10 +66,13 @@ export function composeOneShotGraph(document: unknown): ComposeOneShotGraph {
  * removes the one-shot edge. Edges come from the effective conditions only.
  */
 export function mergeOneShotGraphs(
-  documents: readonly unknown[]
+  documents: readonly unknown[],
+  options: OneShotGraphOptions = {}
 ): ComposeOneShotGraph {
   // Service -> dependency -> effective condition, in first-seen order.
   const effective = new Map<string, Map<string, string>>();
+  // Service -> its `profiles`, as the last document that sets them says.
+  const serviceProfiles = new Map<string, readonly string[]>();
   for (const document of documents) {
     if (!(isRecord(document) && isRecord(document.services))) {
       continue;
@@ -52,11 +83,21 @@ export function mergeOneShotGraphs(
         conditions.set(dependency, condition);
       }
       effective.set(name, conditions);
+      const profiles = declaredProfiles(service);
+      if (profiles !== null) {
+        serviceProfiles.set(name, profiles);
+      }
     }
   }
   const oneShots = new Set<string>();
   const waitsOn = new Map<string, string[]>();
   for (const [name, conditions] of effective) {
+    // A service its profiles leave out never starts, so it waits on nothing:
+    // its completion edges would make a long-running service look like a
+    // one-shot (HACK-2310).
+    if (!serviceActive(serviceProfiles.get(name), options.activeProfiles)) {
+      continue;
+    }
     const completions = [...conditions]
       .filter(([, condition]) => condition === COMPLETED)
       .map(([dependency]) => dependency);
@@ -71,6 +112,31 @@ export function mergeOneShotGraphs(
 }
 
 const COMPLETED = "service_completed_successfully";
+
+/** A service's `profiles`, or null when it does not set them. */
+function declaredProfiles(service: unknown): readonly string[] | null {
+  if (!(isRecord(service) && Array.isArray(service.profiles))) {
+    return null;
+  }
+  return service.profiles.filter(
+    (profile): profile is string => typeof profile === "string"
+  );
+}
+
+/**
+ * Compose runs a service with no profiles always, and one with profiles only
+ * when one of them is active. Without known active profiles every service
+ * counts.
+ */
+function serviceActive(
+  profiles: readonly string[] | undefined,
+  activeProfiles: readonly string[] | undefined
+): boolean {
+  if (!(profiles && profiles.length > 0 && activeProfiles)) {
+    return true;
+  }
+  return profiles.some((profile) => activeProfiles.includes(profile));
+}
 
 /**
  * One service's `depends_on` entries and their conditions. The short list
@@ -103,7 +169,8 @@ function dependencyConditions(service: unknown): [string, string][] {
  * plain start budget (no progress is ever observed), never a longer wait.
  */
 export async function readComposeOneShotGraph(
-  composeFiles: readonly string[]
+  composeFiles: readonly string[],
+  options: OneShotGraphOptions = {}
 ): Promise<ComposeOneShotGraph> {
   const documents: unknown[] = [];
   for (const file of composeFiles) {
@@ -117,7 +184,7 @@ export async function readComposeOneShotGraph(
       // Unreadable: no evidence of one-shots from this file.
     }
   }
-  return mergeOneShotGraphs(documents);
+  return mergeOneShotGraphs(documents, options);
 }
 
 function entryService(entry: Readonly<Record<string, unknown>>): string | null {

@@ -424,7 +424,10 @@ it. The start budget then counts only time in which no one-shot is running, so a
 first start that runs minutes of migrations on an empty database still succeeds.
 The ceiling bounds the whole start phase however long one-shots keep running, and
 is never lower than the start budget. A one-shot in a restart loop is not
-progress. A graph with no one-shot keeps the plain 90-second budget.
+progress. A graph with no one-shot keeps the plain 90-second budget. Only services
+active under the command's profiles count (`--profile`, else `COMPOSE_PROFILES` from
+the delivered environment): a dependency of a service whose profile is off is not a
+one-shot.
 
 The project can set both in `.hack/hack.config.json`; a host variable set on the
 invocation wins over the project setting:

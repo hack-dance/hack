@@ -519,10 +519,75 @@ test("targeted restart preserves delivered Compose environment", async () => {
   expect(exitCode).toBe(0);
   expect(errorMessages).toEqual([]);
   expect(upServiceSelections).toEqual([["migrate"]]);
+  // Three reads, all with the delivered environment: the one-shot
+  // interruption guard's (HACK-2310) before the recreate, then the two
+  // readiness reads after it.
   expect(psEnvs).toEqual([
     { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
     { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
+    { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
   ]);
+});
+
+async function captureStdout(run: () => Promise<number>): Promise<{
+  readonly code: number;
+  readonly stdout: string;
+}> {
+  let stdout = "";
+  const write = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout +=
+      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    return { code: await run(), stdout };
+  } finally {
+    process.stdout.write = write;
+  }
+}
+
+test("a one-shot gated by a delivered profile is seen by the restart guard", async () => {
+  // With `benchmark` delivered, profiled-worker waits for api to complete,
+  // so a running api is a one-shot that a targeted restart interrupts.
+  const projectRoot = await createProject({ composeProfiles: "benchmark" });
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  const { code, stdout } = await captureStdout(() =>
+    runRestart({ projectRoot, services: ["api"], json: true })
+  );
+  const envelope = JSON.parse(stdout) as {
+    data?: { interrupted?: string[]; warnings?: string[] };
+    error?: unknown;
+  };
+  expect(envelope.data?.interrupted).toEqual(["api"]);
+  expect(envelope.data?.warnings?.[0]).toContain(
+    "interrupted the one-shot service api"
+  );
+  // The guard's read carries the delivered environment, profiles included.
+  expect(psEnvs[0]).toEqual({
+    COMPOSE_PROFILES: "benchmark",
+    SHARED_MODE: "compose",
+  });
+  expect({ code, error: envelope.error }).toEqual({
+    code: 0,
+    error: undefined,
+  });
+});
+
+test("without the profile, a running api is not a one-shot and nothing is interrupted", async () => {
+  const projectRoot = await createProject();
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  const { stdout } = await captureStdout(() =>
+    runRestart({ projectRoot, services: ["api"], json: true })
+  );
+  const envelope = JSON.parse(stdout) as {
+    data?: { interrupted?: string[] };
+  };
+  expect(envelope.data?.interrupted).toBeUndefined();
 });
 
 test("up records value-free env digests and a targeted restart refreshes only its service", async () => {
@@ -1408,7 +1473,10 @@ test("full restart cleans lifecycle state before propagating a Docker inspection
   await expect(runRestart({ projectRoot })).rejects.toMatchObject({
     code: "E_DOCKER_UNAVAILABLE",
   });
-  expect(psEnvs).toHaveLength(1);
+  // Two reads: the one-shot interruption guard's (HACK-2310), whose failure
+  // finds nothing to interrupt and changes nothing, then the readiness read
+  // that reports E_DOCKER_UNAVAILABLE once, after the same cleanup.
+  expect(psEnvs).toHaveLength(2);
   expect(lifecycleStops.filter((entry) => entry.afterUp)).toEqual([
     {
       afterUp: true,

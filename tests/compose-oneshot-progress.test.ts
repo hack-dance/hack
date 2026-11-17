@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   composeOneShotGraph,
+  effectiveComposeProfiles,
   mergeOneShotGraphs,
   runningOneShots,
   startWatchDecision,
@@ -92,6 +93,48 @@ test("an override that changes the condition removes the one-shot edge", () => {
   ]);
   expect([...partial.oneShots]).toEqual(["migrate"]);
   expect(Object.fromEntries(partial.waitsOn)).toEqual({ worker: ["migrate"] });
+});
+
+test("a dependent its profiles leave out makes nothing a one-shot", () => {
+  const document = {
+    services: {
+      api: { image: "app" },
+      report: {
+        image: "app",
+        profiles: ["benchmark"],
+        depends_on: {
+          api: { condition: "service_completed_successfully" },
+        },
+      },
+    },
+  };
+  expect([
+    ...composeOneShotGraph(document, { activeProfiles: [] }).oneShots,
+  ]).toEqual([]);
+  expect([
+    ...composeOneShotGraph(document, { activeProfiles: ["benchmark"] })
+      .oneShots,
+  ]).toEqual(["api"]);
+  // Without known profiles every service counts, as before.
+  expect([...composeOneShotGraph(document).oneShots]).toEqual(["api"]);
+});
+
+test("profiles come from --profile, else the delivered COMPOSE_PROFILES", () => {
+  expect(
+    effectiveComposeProfiles({
+      cliProfiles: ["ops"],
+      env: { COMPOSE_PROFILES: "benchmark" },
+    })
+  ).toEqual(["ops"]);
+  expect(
+    effectiveComposeProfiles({
+      cliProfiles: [],
+      env: { COMPOSE_PROFILES: " benchmark, ops ,," },
+    })
+  ).toEqual(["benchmark", "ops"]);
+  expect(
+    effectiveComposeProfiles({ cliProfiles: [], env: { COMPOSE_PROFILES: "" } })
+  ).toEqual([]);
 });
 
 test("only a running one-shot is progress; a restarting one is not", () => {

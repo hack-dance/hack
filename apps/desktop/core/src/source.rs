@@ -1343,7 +1343,7 @@ impl LiveSource {
 
     /// Another discovered install whose CLI reports `socket` as its hackd,
     /// as "name version (channel)". Each other CLI is asked once.
-    fn install_sharing(&self, runner: &CliRunner, socket: &Path) -> Option<String> {
+    pub(crate) fn install_sharing(&self, runner: &CliRunner, socket: &Path) -> Option<String> {
         let ours = runner.program_path()?;
         let choice = self.cli_choice()?;
         for other in choice.installs.iter().filter(|i| i.path != ours) {

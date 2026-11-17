@@ -118,7 +118,10 @@ impl LiveSource {
             .unwrap_or_default();
         // These machine routing/trust cards describe Compose exclusively;
         // project observers below still choose each project's own backend.
-        let observer = LiveSource::new(runner.with_env("HACK_RUNTIME_BACKEND", "compose"), None);
+        let observer = LiveSource::new(
+            runner.clone().with_env("HACK_RUNTIME_BACKEND", "compose"),
+            None,
+        );
         let runs = observer.doctor_runs_within(
             &targets,
             Duration::from_secs(90).min(left()),
@@ -135,6 +138,15 @@ impl LiveSource {
         report.cli_program = selected.ok();
         report.context = context.ok();
         setup::qualify_login(&mut report, daemon.as_ref());
+        // A hackd at another version that another install's CLI also uses
+        // (they share this home): never offer to restart it, which would
+        // replace that install's daemon. Same rule as the project list.
+        if let (Ok(cli_version), Some(running), Some(client)) = (&cli, &socket, &client)
+            && running.version != *cli_version
+            && let Some(other) = self.install_sharing(&runner, client.socket())
+        {
+            setup::mark_shared_home(&mut report, &running.version, cli_version, &other);
+        }
         // Copy commands run the checked CLI with its checked context, never
         // whichever `hack` the user's terminal finds first.
         for (short, args, doc) in [

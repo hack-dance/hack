@@ -208,6 +208,24 @@ fn check(runs: &[DoctorRun], project: Option<&str>, id: &str) -> (Status, String
         (Status::Unknown, format!("{id}: missing or ambiguous check"))
     }
 }
+/// Where a shared-home hackd card points: how to give each install its own
+/// home.
+pub const SHARED_HOME_DOC: &str =
+    "https://github.com/hack-dance/hack/blob/next/docs/versions/v5/install.md";
+
+/// Another install's CLI (`other`) shares this home and its hackd, which
+/// runs another version than the app's CLI: the hackd card names it and
+/// offers no restart, which would replace that install's daemon.
+pub fn mark_shared_home(report: &mut Report, hackd: &str, cli: &str, other: &str) {
+    if let Some(card) = report.cards.iter_mut().find(|c| c.id == "daemon") {
+        card.status = Status::NeedsAttention;
+        card.detail = format!(
+            "hackd {hackd} here belongs to {other}, which shares this home with the app's CLI ({cli}). The app does not restart it: use {other} in the app, or give each install its own home."
+        );
+        card.remedy = Remedy::Doc(SHARED_HOME_DOC.into());
+    }
+}
+
 pub(crate) fn card(id: &str, title: &str, evidence: (Status, String), remedy: Remedy) -> Card {
     Card {
         id: id.into(),
@@ -640,5 +658,33 @@ mod pane_tests {
         // A new check does.
         let next = pane.begin();
         assert_ne!(next, generation);
+    }
+}
+
+#[cfg(test)]
+mod shared_home_tests {
+    use super::*;
+
+    #[test]
+    fn a_shared_hackd_is_named_and_never_offered_a_restart() {
+        let mut report = Report {
+            cards: vec![card(
+                "daemon",
+                "hackd",
+                (
+                    Status::NeedsAttention,
+                    "hackd 4.2.1 is older than CLI 5.0.0".into(),
+                ),
+                Remedy::Copy("hack daemon restart".into()),
+            )],
+            ..Report::default()
+        };
+        mark_shared_home(&mut report, "4.2.1", "5.0.0", "hack 4.2.1 (stable)");
+        let card = &report.cards[0];
+        assert!(card.detail.contains("hack 4.2.1 (stable)") && card.detail.contains("5.0.0"));
+        assert!(!matches!(
+            card.remedy,
+            Remedy::Copy(_) | Remedy::Run(_) | Remedy::Admin(_)
+        ));
     }
 }

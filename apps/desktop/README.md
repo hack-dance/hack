@@ -348,6 +348,9 @@ Doctor's **Run setup again** opens it any time. One
 card per step, in order: the Hack CLI (required), the Compose or native
 runtime, hackd, routing and DNS, certificate trust, and the login service.
 
+- When another installed CLI shares this home and runs hackd at another
+  version, the hackd card names that install and offers no restart, as the
+  project list does.
 - Checks only read; they never start a service. Unknown and skipped steps stay
   unresolved; a skip lasts for this session and never satisfies a check. The
   CLI cannot be skipped, and **Continue** needs it.

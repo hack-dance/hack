@@ -38,8 +38,21 @@ fn main() {
 
     let source = LiveSource::from_env();
     let started = Instant::now();
-    let snap = source.snapshot();
+    let (snap, steps) = source.snapshot_timed();
     let read_ms = started.elapsed().as_millis();
+    // Which CLI this read used, what else is installed, and where its
+    // hackd is, so a wrong CLI or home is visible (HACK-2283).
+    let choice = source.cli_choice();
+    let cli_info = json!({
+        "selected": choice.as_ref().and_then(|c| c.selected.clone()),
+        "others": choice.as_ref().map(|c| c.others().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+        "hackd_socket": source.hackd().map(|d| d.socket().display().to_string()),
+        "rejected": choice.as_ref().map(|c| c.rejected.clone()).unwrap_or_default(),
+    });
+    let timings: Vec<Value> = steps
+        .iter()
+        .map(|(step, d)| json!({ "step": step, "ms": d.as_millis() }))
+        .collect();
 
     let source_info = match &snap {
         Ok(s) => json!({
@@ -80,6 +93,8 @@ fn main() {
 
     let out = json!({
         "read_ms": read_ms,
+        "read_steps": timings,
+        "cli": cli_info,
         "source": source_info,
         "list": list,
         "details": details,

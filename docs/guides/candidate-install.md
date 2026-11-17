@@ -266,12 +266,17 @@ The standalone manager runs through the launcher:
 "$HOME/.hack-next/bin/hack-next" --manager status
 "$HOME/.hack-next/bin/hack-next" --manager upgrade --version 5.0.0-next.NEWER
 "$HOME/.hack-next/bin/hack-next" --manager rollback --version 5.0.0-next.OLDER
+"$HOME/.hack-next/bin/hack-next" --manager select --version 5.0.0-next.INSTALLED
 "$HOME/.hack-next/bin/hack-next" --manager stable
 "$HOME/.hack-next/bin/hack-next" --manager upgrade-manager
 ```
 
 `NEWER` and `OLDER` stand for prerelease numbers: `upgrade` takes a version newer than
 the selected one, and `rollback` takes an older version you already installed.
+`select` takes any installed version, older or newer, so after a rollback it moves
+forward again; `upgrade` to an installed version refuses and names this command.
+Managers before `5.0.0-next.20` have no `select`; there, `rollback --version`
+selects any installed version, newer ones included.
 
 Stop every retained version's graphs and runtime first. Version changes take the
 channel's exclusive lock, refuse active launchers and apply quiescence checks to

@@ -15,6 +15,7 @@ import {
   PUBLISHED_RELEASES,
   previousPrerelease,
 } from "../scripts/check-prerelease-upgrade.ts";
+import { selectionTarget } from "../scripts/install-prerelease.ts";
 import {
   Channel,
   REVIEWED_PREDECESSORS,
@@ -163,6 +164,7 @@ test("the released compiled managers are reviewed predecessors", () => {
     "3feb7cef0d1eff57ae54d2ee031fca2e769c9610acab3a04079b7b75cee81e3d", // next.13-16
     "85bbe4f064b3277efc88a9f79c197e81950ab8881320aef1b3443b70d95b530f", // next.17
     "90d1bc60bfd2b7eaad48dcf56ad45264f395c0ac1a8c4530e986be7fa194d4d9", // next.18
+    "ba47091559a80b2abbb246b8e86c5530b8ddb068973f5136e120d36e2003fae6", // next.19
   ]);
 });
 
@@ -236,8 +238,86 @@ test("the gate runs a previous release only from its own reviewed pins", () => {
       archive:
         "da7c3e74629c049a25c40fbe95c5aa35433f241499065df372a23b27ee95aaee",
     },
+    "5.0.0-next.19": {
+      manager:
+        "ba47091559a80b2abbb246b8e86c5530b8ddb068973f5136e120d36e2003fae6",
+      archive:
+        "57efde68a6424fc7cf0c710d058735b1e3a50cbac8e2f211b0208572aed33086",
+    },
   });
   for (const { manager } of Object.values(PUBLISHED_RELEASES)) {
     expect(REVIEWED_PREDECESSORS).toContain(manager);
   }
+});
+
+fixtureTest(
+  "after a rollback, select moves forward to an installed newer version; upgrade names it",
+  async () => {
+    const root = scratch();
+    const source = join(root, "manager");
+    writeFileSync(source, "manager bytes", { mode: 0o700 });
+    const channel = new Channel(join(root, "channel"), source, hooks);
+    channel.initialize();
+    const a17 = archive(root, "5.0.0-next.17");
+    const a18 = archive(root, "5.0.0-next.18");
+    await channel.install("5.0.0-next.17", a17.archive, a17.checksum);
+    await channel.install("5.0.0-next.18", a18.archive, a18.checksum, true);
+    channel.select(
+      selectionTarget({
+        command: "rollback",
+        version: undefined,
+        state: channel.state,
+      })
+    );
+    expect(channel.state.selected).toBe("5.0.0-next.17");
+    // Moving forward again is not an upgrade: the refusal names the command.
+    await expect(
+      channel.install("5.0.0-next.18", a18.archive, a18.checksum, true)
+    ).rejects.toThrow(
+      "5.0.0-next.18 is already installed; select it with: hack-next --manager select --version 5.0.0-next.18"
+    );
+    channel.select(
+      selectionTarget({
+        command: "select",
+        version: "5.0.0-next.18",
+        state: channel.state,
+      })
+    );
+    expect(channel.state.selected).toBe("5.0.0-next.18");
+    expect(channel.state.previous).toBe("5.0.0-next.17");
+    // An older version that is not installed is still no upgrade.
+    const a16 = archive(root, "5.0.0-next.16");
+    await expect(
+      channel.install("5.0.0-next.16", a16.archive, a16.checksum, true)
+    ).rejects.toThrow(
+      "Upgrade must increase the prerelease version. To use an installed older version, run: hack-next --manager select --version VERSION"
+    );
+    expect(channel.state.selected).toBe("5.0.0-next.18");
+  }
+);
+
+test("select needs an installed --version; rollback without one returns to the previous", () => {
+  const state = {
+    installed: { "5.0.0-next.17": {}, "5.0.0-next.18": {} },
+    previous: "5.0.0-next.17",
+  };
+  expect(
+    selectionTarget({ command: "select", version: "5.0.0-next.18", state })
+  ).toBe("5.0.0-next.18");
+  expect(() =>
+    selectionTarget({ command: "select", version: undefined, state })
+  ).toThrow("select requires --version");
+  expect(() =>
+    selectionTarget({ command: "select", version: "5.0.0-next.19", state })
+  ).toThrow("not installed");
+  expect(
+    selectionTarget({ command: "rollback", version: undefined, state })
+  ).toBe("5.0.0-next.17");
+  expect(() =>
+    selectionTarget({
+      command: "rollback",
+      version: undefined,
+      state: { ...state, previous: null },
+    })
+  ).toThrow("No retained rollback version.");
 });

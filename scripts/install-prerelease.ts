@@ -8,6 +8,37 @@ import {
   requireThat,
 } from "./installer/integrity.ts";
 
+/**
+ * The installed version `select` or `rollback` chooses. `select` moves to any
+ * installed version, older or newer, and requires `--version`; `rollback`
+ * without one returns to the previously selected version.
+ */
+export function selectionTarget(opts: {
+  readonly command: "select" | "rollback";
+  readonly version: string | undefined;
+  readonly state: {
+    readonly installed: Readonly<Record<string, unknown>>;
+    readonly previous: string | null;
+  };
+}): string {
+  if (opts.command === "select") {
+    requireThat(
+      opts.version !== undefined,
+      "select requires --version with an installed version."
+    );
+  }
+  const selected = opts.version ?? opts.state.previous;
+  requireThat(
+    selected !== null &&
+      selected !== undefined &&
+      Object.hasOwn(opts.state.installed, selected),
+    opts.command === "select"
+      ? "That version is not installed; status lists the installed versions."
+      : "No retained rollback version."
+  );
+  return selected as string;
+}
+
 /** Compiled entry point. There is no interpreter lookup or automatic dependency install. */
 export async function main(inputArgv: string[]) {
   let argv = inputArgv;
@@ -20,7 +51,7 @@ export async function main(inputArgv: string[]) {
   }
   if (argv.length === 1 && ["--help", "-h"].includes(argv[0] ?? "")) {
     console.log(
-      "hack-next --manager install|upgrade --version 5.MINOR.PATCH-next.N [--archive /path --sha256 digest]\nhack-next --manager status|stable|rollback [--version VERSION]|upgrade-manager\nhack-next --manager uninstall [--apply | --rollback-manifest /path]\nStandalone manager: [--root /canonical/path] <command>; hack-next runs the selected CLI."
+      "hack-next --manager install|upgrade --version 5.MINOR.PATCH-next.N [--archive /path --sha256 digest]\nhack-next --manager select --version VERSION (any installed version)\nhack-next --manager status|stable|rollback [--version VERSION]|upgrade-manager\nhack-next --manager uninstall [--apply | --rollback-manifest /path]\nStandalone manager: [--root /canonical/path] <command>; hack-next runs the selected CLI."
     );
     return 0;
   }
@@ -41,13 +72,14 @@ export async function main(inputArgv: string[]) {
         "install",
         "upgrade",
         "rollback",
+        "select",
         "stable",
         "status",
         "upgrade-manager",
         "run",
         "uninstall",
       ].includes(command),
-    "Expected install, upgrade, rollback, stable, status, upgrade-manager or run. Use --help."
+    "Expected install, upgrade, select, rollback, stable, status, upgrade-manager or run. Use --help."
   );
   const options: Record<string, string> = Object.create(null);
   const rest = argv.slice(1);
@@ -72,7 +104,7 @@ export async function main(inputArgv: string[]) {
     const allowed =
       command === "install" || command === "upgrade"
         ? ["--version", "--archive", "--sha256"]
-        : command === "rollback"
+        : command === "rollback" || command === "select"
           ? ["--version"]
           : [];
     for (let index = 0; index < rest.length; index += 2) {
@@ -121,13 +153,10 @@ export async function main(inputArgv: string[]) {
       channel.upgradeManager();
     } else if (command === "stable") {
       channel.select(null);
-    } else if (command === "rollback") {
-      const selected = version ?? channel.state.previous;
-      requireThat(
-        selected && Object.hasOwn(channel.state.installed, selected),
-        "No retained rollback version."
+    } else if (command === "rollback" || command === "select") {
+      channel.select(
+        selectionTarget({ command, version, state: channel.state })
       );
-      channel.select(selected);
     } else if (command === "run") {
       return await channel.run(rest[0] === "--" ? rest.slice(1) : rest);
     }

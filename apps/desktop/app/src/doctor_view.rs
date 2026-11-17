@@ -27,6 +27,8 @@ pub enum Pane {
     #[default]
     Project,
     Doctor,
+    /// Setup checks (`setup_view`).
+    Setup,
 }
 
 pub fn render(pane: &DoctorPane, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
@@ -61,6 +63,16 @@ pub fn render(pane: &DoctorPane, ui: &Ui, cx: &mut Context<HackApp>) -> AnyEleme
                 .child("Doctor"),
         )
         .child(div().flex_1())
+        .child(
+            action_button(
+                "doctor-setup",
+                Glyph::Stethoscope,
+                "Run setup again",
+                true,
+                ui,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.open_setup(cx))),
+        )
         .children(pane.age_label(Instant::now()).map(|a| {
             div()
                 .type_step(text::SMALL)

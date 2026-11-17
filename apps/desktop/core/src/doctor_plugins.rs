@@ -198,6 +198,15 @@ pub(crate) fn guarded_names(
     true
 }
 
+/// The `PATH` entries that are directories no other user can change.
+pub(crate) fn controlled_path_entries(path: &str) -> Vec<&str> {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    path.split(':')
+        .filter(|entry| guarded_dir(Path::new(entry), uid).is_some_and(|real| real.is_dir()))
+        .collect()
+}
+
 fn guarded_dir(path: &Path, uid: u32) -> Option<PathBuf> {
     if !guarded_names(path, uid, &mut 64, false) {
         return None;

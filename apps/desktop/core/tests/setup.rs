@@ -156,6 +156,14 @@ fn an_answering_hackd_without_a_tracked_pid_is_running() {
             "never offer Start for a running hackd"
         );
     }
+    // Incompatible, but its API answers: not off either, so no Start.
+    let incompatible =
+        serde_json::json!({"status":"incompatible","running":false,"api_reachable":true});
+    let r = derive(&[], Platform::Linux, incompatible, Some("5.1.0"));
+    assert_ne!(
+        r.cards.iter().find(|c| c.id == "daemon").unwrap().remedy,
+        Remedy::Run(SafeAction::StartDaemon)
+    );
     // No answering API: still off.
     let off = serde_json::json!({"status":"stopped","running":false,"api_ok":false});
     let r = derive(&[], Platform::Linux, off, Some("5.0.0"));

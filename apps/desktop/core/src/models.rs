@@ -483,10 +483,13 @@ pub struct DaemonStatus {
     /// `running | starting | incompatible | stale | stopped`.
     #[serde(deserialize_with = "null_default")]
     pub status: String,
+    #[serde(deserialize_with = "null_default")]
     pub running: bool,
+    #[serde(deserialize_with = "null_default")]
     pub api_ok: bool,
     pub api_reachable: Option<bool>,
     pub api_compatible: Option<bool>,
+    #[serde(deserialize_with = "null_default")]
     pub stale: bool,
     pub stale_reason: Option<String>,
     pub issue: Option<String>,
@@ -498,11 +501,17 @@ pub struct DaemonStatus {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DaemonService {
-    /// `launchd | systemd`.
+    /// `launchd | systemd`. launchd reports `enabled: null` (not a launchd
+    /// notion): every flag here reads `null` as false rather than failing
+    /// the whole report.
     pub manager: Option<String>,
+    #[serde(deserialize_with = "null_default")]
     pub available: bool,
+    #[serde(deserialize_with = "null_default")]
     pub installed: bool,
+    #[serde(deserialize_with = "null_default")]
     pub enabled: bool,
+    #[serde(deserialize_with = "null_default")]
     pub active: bool,
     pub summary: Option<String>,
     pub next_step: Option<String>,

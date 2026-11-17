@@ -53,7 +53,9 @@ pub struct HackdCard {
 /// `api_reachable`), as Setup reads it.
 #[must_use]
 pub fn hackd_running(s: &DaemonStatus) -> bool {
-    s.running || (s.status == "running" && (s.api_ok || s.api_reachable == Some(true)))
+    s.running
+        || (matches!(s.status.as_str(), "running" | "incompatible")
+            && (s.api_ok || s.api_reachable == Some(true)))
 }
 
 /// What the window already knows about hackd from its project reads, as
@@ -181,9 +183,15 @@ fn login_service_line(s: &DaemonStatus) -> (Tone, String) {
         match svc.next_step.as_deref().filter(|n| !n.is_empty()) {
             // The CLI names a next step when the unit is wrong (a stale or
             // missing binary, say).
+            // The CLI names a next step when the unit needs work (its
+            // program is gone, it drifted, it is disabled): its summary says
+            // which.
             Some(next) => (
                 Tone::Attention,
-                format!("Login service is out of date: {next}"),
+                match svc.summary.as_deref().filter(|s| !s.is_empty()) {
+                    Some(summary) => format!("Login service: {summary} · {next}"),
+                    None => format!("Login service needs attention: {next}"),
+                },
             ),
             None => (Tone::Ok, format!("Login service installed ({manager})")),
         }
@@ -437,6 +445,30 @@ mod tests {
     }
 
     #[test]
+    fn a_launchd_status_with_null_flags_is_read_not_dropped() {
+        // As the CLI prints it on macOS (`summarizeLaunchdService`).
+        let json = r#"{"status":"running","running":true,"pid":4242,"api_ok":true,
+            "stale":false,"service":{"manager":"launchd","available":true,"installed":true,
+            "enabled":null,"active":true,"pid":4242,"owns_daemon":true,"summary":"loaded",
+            "next_step":null}}"#;
+        let s: DaemonStatus = serde_json::from_str(json).expect("launchd shape parses");
+        let card = hackd_card(Some(&s), Some(&api("5.0.0")), Some("5.0.0"));
+        assert_eq!(card.title, "hackd running");
+        assert_eq!(
+            card.login_service,
+            (Tone::Ok, "Login service installed (launchd)".into())
+        );
+    }
+
+    #[test]
+    fn an_incompatible_hackd_whose_api_answers_without_a_pid_is_running() {
+        let s = status(r#"{"status":"incompatible","running":false,"api_reachable":true}"#);
+        let card = hackd_card(Some(&s), Some(&api("5.1.0")), Some("5.0.0"));
+        assert!(card.title.contains("newer than this CLI"), "{}", card.title);
+        assert_eq!(card.action, None, "never Start a hackd that answers");
+    }
+
+    #[test]
     fn an_answering_hackd_without_a_pid_is_running_not_off() {
         let s = status(r#"{"status":"running","running":false,"api_ok":true}"#);
         let card = hackd_card(Some(&s), Some(&api("5.0.0")), Some("5.0.0"));
@@ -476,7 +508,7 @@ mod tests {
         };
         let card = hackd_card(Some(&s), Some(&api("5.0.0")), Some("5.0.0"));
         assert_eq!(card.login_service.0, Tone::Attention);
-        assert!(card.login_service.1.contains("out of date"));
+        assert!(card.login_service.1.contains("needs attention"));
         assert_eq!(card.action, Some(CardAction::OpenSetup));
         // hackd off as well: Start first.
         let mut off = s.clone();

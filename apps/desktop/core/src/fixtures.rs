@@ -659,7 +659,8 @@ pub fn daemon_status(f: Fixture) -> Option<crate::models::DaemonStatus> {
         Fixture::HackdOff => serde_json::json!({
             "status": "stopped", "running": false,
             "service": {"manager": "launchd", "available": true, "installed": true,
-                "next_step": "hack daemon install (the unit runs a CLI that is gone)"}
+                "summary": "the unit's program no longer exists",
+                "next_step": "hack daemon install"}
         }),
         Fixture::DaemonDown => serde_json::json!({
             "status": "stopped", "running": false,

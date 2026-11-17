@@ -589,7 +589,9 @@ and the CLI report (DESIGN.md sections 5 and 6, HACK-2288 item 6):
   runs. Each state has at most one action: **Start hackd** (off, stopped,
   stopped unexpectedly), **Restart hackd** only for a hackd older than the CLI
   (a newer one says to `hack update`), or **Open Setup** for a login service
-  the CLI says is out of date (Setup checks before it installs). Start and
+  the CLI names a next step for (its program is gone, it drifted or is
+  disabled; Setup checks before it installs). The status flags launchd reports
+  as `null` (`enabled`) read as false rather than dropping the report. Start and
   Restart go through the same machine gate as Setup. A hackd whose API
   answers without a tracked PID is running. The daemon banner is not repeated
   on this pane.

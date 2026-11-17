@@ -135,6 +135,10 @@ function serviceActive(
   if (!(profiles && profiles.length > 0 && activeProfiles)) {
     return true;
   }
+  // Compose's `*` (`--profile '*'`, `COMPOSE_PROFILES='*'`) enables every profile.
+  if (activeProfiles.includes("*")) {
+    return true;
+  }
   return profiles.some((profile) => activeProfiles.includes(profile));
 }
 

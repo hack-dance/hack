@@ -115,6 +115,16 @@ test("a dependent its profiles leave out makes nothing a one-shot", () => {
     ...composeOneShotGraph(document, { activeProfiles: ["benchmark"] })
       .oneShots,
   ]).toEqual(["api"]);
+  // Compose's `*` enables every profile, from --profile or COMPOSE_PROFILES.
+  for (const env of [{}, { COMPOSE_PROFILES: "*" }]) {
+    const activeProfiles = effectiveComposeProfiles({
+      cliProfiles: Object.keys(env).length === 0 ? ["*"] : [],
+      env,
+    });
+    expect([
+      ...composeOneShotGraph(document, { activeProfiles }).oneShots,
+    ]).toEqual(["api"]);
+  }
   // Without known profiles every service counts, as before.
   expect([...composeOneShotGraph(document).oneShots]).toEqual(["api"]);
 });

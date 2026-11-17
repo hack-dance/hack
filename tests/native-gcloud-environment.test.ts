@@ -568,4 +568,21 @@ test("HACK-2324: every ADC spelling is a candidate for the pre-hook review, and 
       input({ web: { image: "x", volumes: ["./src:/app"] } })
     )
   ).toBe(false);
+  // Project-relative binds that end in the ADC path are project source.
+  for (const source of [
+    `./fixtures/${ADC}`,
+    `../shared/${ADC}`,
+    `fixtures/${ADC}`,
+  ]) {
+    for (const volume of [
+      `${source}:/config/adc.json:ro`,
+      { type: "bind", source, target: "/config/adc.json", read_only: true },
+    ]) {
+      expect(
+        hasNativeGcloudCredentialMount(
+          input({ web: { image: "x", volumes: [volume] } })
+        )
+      ).toBe(false);
+    }
+  }
 });

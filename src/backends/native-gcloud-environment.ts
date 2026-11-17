@@ -49,6 +49,10 @@ function missingCli(): Error {
   });
 }
 
+/** Source prefixes that place a bind on the host rather than in the project. */
+// biome-ignore lint/suspicious/noTemplateCurlyInString: the literal Compose spelling ${HOME}.
+const HOST_ANCHORS = ["~/", "$HOME/", "${HOME}/", "/"] as const;
+
 /**
  * A mount whose source names the gcloud ADC file in any spelling (`~`,
  * `$HOME`, `${HOME}` or an absolute home path), valid or not. The adapter
@@ -61,7 +65,13 @@ export function nativeGcloudCredentialCandidate(value: unknown): boolean {
   } else if (isRecord(value)) {
     source = value.source;
   }
-  return typeof source === "string" && source.endsWith(`/${ADC_RELATIVE}`);
+  // Only home-anchored or absolute sources are host credential candidates; a
+  // project-relative bind that happens to end in the same path is project source.
+  return (
+    typeof source === "string" &&
+    HOST_ANCHORS.some((anchor) => source.startsWith(anchor)) &&
+    source.endsWith(`/${ADC_RELATIVE}`)
+  );
 }
 
 /** Whether any service of the input has a gcloud ADC mount candidate. */

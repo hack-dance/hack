@@ -77,6 +77,11 @@ impl HackApp {
         report: hack_desktop_core::setup::Report,
         cx: &mut Context<Self>,
     ) {
+        // A check the app no longer waits for (a newer one, or a CLI
+        // switch) changes nothing: no report, no reopening, no auto-open.
+        if !self.setup.is_current(generation) {
+            return;
+        }
         let needed = report.needed();
         self.setup.finish(generation, report);
         let again = std::mem::take(&mut self.setup.refresh_again);
@@ -136,6 +141,7 @@ impl HackApp {
         }
         self.setup.result = None;
         self.setup.action_busy = true;
+        let epoch = self.setup.source_epoch();
         let source = self.source.clone();
         let checked = self.setup.report.clone();
         cx.spawn(async move |this, cx| {
@@ -144,6 +150,10 @@ impl HackApp {
                 .spawn(async move { source.setup_action(action, &checked) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // Started under a CLI the app has since switched away from.
+                if this.setup.source_epoch() != epoch {
+                    return;
+                }
                 this.setup.action_busy = false;
                 this.setup.result = Some(result);
                 this.setup.pending_fix = true;
@@ -179,6 +189,7 @@ impl HackApp {
         let command = self.setup.report.command(args);
         self.setup.result = None;
         self.setup.action_busy = true;
+        let epoch = self.setup.source_epoch();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -201,6 +212,9 @@ impl HackApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if this.setup.source_epoch() != epoch {
+                    return;
+                }
                 this.setup.action_busy = false;
                 this.setup.pending_fix = result.is_ok();
                 this.setup.result = Some(match result {

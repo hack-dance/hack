@@ -778,6 +778,11 @@ impl HackApp {
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();
+            // Setup's report and bound commands were the previous CLI's.
+            self.setup.source_changed();
+            if self.pane == Pane::Setup {
+                self.load_setup(cx);
+            }
             #[cfg(feature = "terminal")]
             self.close_all_terminals(window, cx);
         }

@@ -111,6 +111,9 @@ pub struct Pane {
     pub skipped: std::collections::BTreeSet<String>,
     generation: u64,
     pub checked_at: Option<std::time::Instant>,
+    /// Bumped when the app switches CLI: an action started under the
+    /// previous one compares it on completion and is dropped.
+    source_epoch: u64,
 }
 impl Pane {
     pub fn begin(&mut self) -> u64 {
@@ -128,6 +131,31 @@ impl Pane {
             self.checked_at = Some(std::time::Instant::now());
         }
     }
+    /// The app switched CLI: the report, its bound commands and anything
+    /// in flight belong to the previous install. A check still running is
+    /// dropped by the generation; an action by [`Self::source_epoch`].
+    pub fn source_changed(&mut self) {
+        let generation = self.generation + 1;
+        let source_epoch = self.source_epoch + 1;
+        *self = Self {
+            generation,
+            source_epoch,
+            ..Self::default()
+        };
+    }
+
+    /// Whether `generation` is the check now expected (not one a later
+    /// check or a CLI switch replaced).
+    #[must_use]
+    pub fn is_current(&self, generation: u64) -> bool {
+        generation == self.generation
+    }
+
+    #[must_use]
+    pub fn source_epoch(&self) -> u64 {
+        self.source_epoch
+    }
+
     pub fn skip(&mut self, id: &str) {
         if id != "cli" && self.report.cards.iter().any(|c| c.id == id) {
             self.skipped.insert(id.into());
@@ -576,5 +604,41 @@ mod routing_tests {
         assert!(detail.contains("shop.example.test"), "{detail}");
         // Without that project every check Doctor ran passes.
         assert_eq!(routing(&runs, None, Platform::Mac).0, Status::Passed);
+    }
+}
+
+#[cfg(test)]
+mod pane_tests {
+    use super::*;
+
+    #[test]
+    fn a_cli_switch_drops_the_report_and_anything_in_flight() {
+        let mut pane = Pane::default();
+        let generation = pane.begin();
+        pane.action_busy = true;
+        pane.pending_fix = true;
+        let epoch = pane.source_epoch();
+        pane.source_changed();
+        assert!(!pane.loading && !pane.action_busy && !pane.pending_fix);
+        assert_ne!(
+            pane.source_epoch(),
+            epoch,
+            "an action started before is dropped"
+        );
+        // A check started under the previous CLI does not land.
+        let old = Report {
+            cards: vec![card(
+                "cli",
+                "Hack CLI",
+                (Status::Passed, String::new()),
+                Remedy::Doc(String::new()),
+            )],
+            ..Report::default()
+        };
+        pane.finish(generation, old);
+        assert!(pane.report.cards.is_empty());
+        // A new check does.
+        let next = pane.begin();
+        assert_ne!(next, generation);
     }
 }

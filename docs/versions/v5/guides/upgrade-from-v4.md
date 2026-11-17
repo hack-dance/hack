@@ -850,6 +850,9 @@ including an application's 404; 5xx, incomplete responses and timeouts cannot.
 This does not establish application correctness.
 Inferred readiness also does not satisfy `depends_on: condition: service_healthy`;
 that dependency still requires an explicit enabled healthcheck.
+After next.20, a command healthcheck (`CMD` or `CMD-SHELL`) on a routed service no
+longer refuses: native uses the inferred probe in its place and reports
+`route_command_healthcheck_replaced`. A disabled check still refuses.
 
 The usual 300-second deadline belongs to the entire graph. Dependencies consume
 it too; a 240-second probe grace does not reset or extend it. For slow startup,

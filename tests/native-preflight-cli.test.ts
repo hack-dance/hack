@@ -1228,10 +1228,11 @@ test(
         fix: "Replace the disabled healthcheck",
       },
       {
+        // An older runtime that still returns the command check refuses.
         authored: { test: ["CMD", "true"] },
         reviewed: { healthcheck: { test: ["CMD", "true"] } },
-        message: "command-only healthcheck",
-        fix: "Replace the command healthcheck",
+        message: "does not replace it with the route probe",
+        fix: "Update the native runtime",
       },
       {
         authored: { "x-hack-http": probe },
@@ -1272,6 +1273,73 @@ test(
       expect(found?.service).toBe("web");
       expect(found?.message).toContain(entry.message);
       expect(found?.fix).toContain(entry.fix);
+    }
+  },
+  SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "HACK-2324: a routed command healthcheck replaced by the inferred route probe is admitted with a warning",
+  async () => {
+    for (const test of [
+      ["CMD", "curl", "-f", "http://localhost:3000/health"],
+      ["CMD-SHELL", "curl -f http://localhost:3000/health"],
+    ]) {
+      const project = await fixture({
+        services: {
+          web: {
+            image: IMAGE,
+            labels: {
+              caddy: "web.example.test",
+              "caddy.reverse_proxy": "{{upstreams 3000}}",
+              "caddy.tls": "internal",
+            },
+            healthcheck: { test, interval: "10s", start_period: "30s" },
+          },
+        },
+      });
+      await project.review(
+        [
+          {
+            severity: "warning",
+            code: "route_command_healthcheck_replaced",
+            field: "services.web.healthcheck",
+            message: "runtime text",
+          },
+        ],
+        {
+          services: {
+            web: {
+              active: true,
+              routing: { port: 3000 },
+              healthcheck: {
+                disabled: false,
+                native_http: {
+                  port: 3000,
+                  path: "/",
+                  interval_ms: 30_000,
+                  timeout_ms: 1000,
+                  retries: 3,
+                  start_period_ms: 240_000,
+                  policy: "route",
+                },
+              },
+            },
+          },
+        }
+      );
+      const result = await preflight(project, {
+        ...project.native,
+        ...GRANT,
+      });
+      expect(
+        result.report.blockers.filter((f) => f.code === "route_probe_required")
+      ).toEqual([]);
+      const warning = result.report.warnings.find(
+        (f) => f.code === "route_command_healthcheck_replaced"
+      );
+      expect(warning?.service).toBe("web");
+      expect(warning?.message).toContain("is not run on native");
     }
   },
   SPAWN_TIMEOUT_MS * 2

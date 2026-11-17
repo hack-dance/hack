@@ -1242,6 +1242,31 @@ fn compile_services(
             &format!("{field}.healthcheck"),
             diagnostics,
         )?;
+        // A routed service's command healthcheck cannot establish route
+        // readiness, and an engine check is never run beside a native probe.
+        // Use the inferred route probe in its place and say so (HACK-2324).
+        if let (Some(route), Some(health)) = (&routing, &healthcheck)
+            && !health.disabled
+            && health.native_http.is_none()
+            && health.test.is_some()
+        {
+            healthcheck = Some(HealthPlan {
+                native_http: Some(crate::provider::http_probe::HttpProbe::inferred_route(
+                    route.port,
+                )),
+                disabled: false,
+                test: None,
+                interval_nanos: None,
+                timeout_nanos: None,
+                start_period_nanos: None,
+                start_interval_nanos: None,
+                retries: None,
+            });
+            diagnostics.push(Diagnostic::warning(
+                "route_command_healthcheck_replaced", &format!("{field}.healthcheck"),
+                "Native routes are ready only through an HTTP probe, so the command healthcheck is not run on native. Readiness uses the inferred route-port probe: TCP and complete HTTP 200-499 response headers. Set healthcheck.x-hack-http to probe a specific path instead.",
+            ));
+        }
         if !m.contains_key("healthcheck") {
             if let Some(route) = &routing {
                 healthcheck = Some(HealthPlan {

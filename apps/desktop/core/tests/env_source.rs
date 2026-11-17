@@ -124,7 +124,7 @@ fn value_fixture(script: &str) -> (std::path::PathBuf, std::path::PathBuf, LiveS
     std::fs::write(&exe, script).unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
     let source = LiveSource {
-        compat: Default::default(),
+        cache: Default::default(),
         runner: CliRunner::new(exe)
             .with_env("EXPECTED_ROOT", project.to_str().unwrap())
             .with_env("HOME", dir.to_str().unwrap())

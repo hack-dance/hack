@@ -244,7 +244,11 @@ env > "$HOME/env"
             project.display()
         )
     );
-    assert_eq!(read("stdin"), "fake-secret-SENTINEL");
+    assert_eq!(
+        read("stdin"),
+        "fake-secret-SENTINEL\r\n",
+        "ends with the one CRLF the CLI strips"
+    );
     assert!(
         !read("env").contains("SENTINEL"),
         "never in the environment"
@@ -294,5 +298,36 @@ exit 1
     }
     let calls = std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
     assert_eq!(calls.lines().count(), 1, "odd names never reached the CLI");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_value_ending_in_a_newline_survives_the_clis_strip() {
+    use hack_desktop_core::env::Revealed;
+    use hack_desktop_core::source::EnvTarget;
+    // Stand-in for the CLI's stripOneTrailingNewline: one CRLF, else one LF.
+    let (dir, project, source) = value_fixture(
+        r#"#!/bin/sh
+cat > "$HOME/raw"
+"#,
+    );
+    for value in ["line\n", "line\r", "line\r\n", "plain"] {
+        source
+            .env_set(
+                &project,
+                false,
+                &EnvTarget::default(),
+                "K",
+                false,
+                &Revealed::new(value.into()),
+            )
+            .unwrap();
+        let raw = std::fs::read_to_string(dir.join("raw")).unwrap();
+        let stored = raw
+            .strip_suffix("\r\n")
+            .or_else(|| raw.strip_suffix('\n'))
+            .unwrap_or(&raw);
+        assert_eq!(stored, value, "{value:?}");
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }

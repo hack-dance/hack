@@ -1539,15 +1539,16 @@ impl Source for LiveSource {
         let root = env_root(root).ok_or("This checkout's env cannot be changed")?;
         let args = env_set_args(target, key, secret)?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        // `--value-stdin` strips one trailing `\r\n`, else one `\n`.
+        // Ending the input with `\r\n` makes the CLI strip exactly that,
+        // so a value ending in a newline or `\r` is stored as typed.
+        let mut input = value.expose().as_bytes().to_vec();
+        input.extend_from_slice(b"\r\n");
         match self
             .runner_for(native)
             .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .run_raw_with_input(
-                &args,
-                Some(&root),
-                Duration::from_secs(20),
-                value.expose().as_bytes(),
-            ) {
+            .run_raw_with_input(&args, Some(&root), Duration::from_secs(20), &input)
+        {
             Ok((_, _, Some(0))) => Ok(()),
             Ok((_, stderr, code)) => {
                 // The CLI's reason helps (an unknown scope, no key), but

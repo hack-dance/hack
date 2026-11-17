@@ -369,17 +369,26 @@ impl TerminalPanel {
     /// tab's session: the active tab, focus and visibility are unchanged.
     /// For work the user did not ask for (a log stream restarted in the
     /// background), so it never interrupts the tab being typed in.
+    ///
+    /// If the old view had focus, the new one takes it, so its keys (find,
+    /// follow, scrolling) keep working; focus anywhere else is left alone.
     pub fn replace_in_place(
         &mut self,
         index: usize,
         view: Entity<TerminalView>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        let incoming = view.read(cx).focus_handle(cx);
         let Some(old) = self.state.swap(index, view) else {
             return;
         };
+        let had_focus = old.read(cx).focus_handle(cx).contains_focused(window, cx);
         self.retire_view(&old, cx);
+        if had_focus {
+            window.focus(&incoming, cx);
+        }
         self.changed(cx);
     }
 

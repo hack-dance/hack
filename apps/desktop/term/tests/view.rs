@@ -568,3 +568,58 @@ fn a_closed_tabs_session_leader_is_still_reported_by_the_panel() {
     );
     rec.done();
 }
+
+#[test]
+fn replacing_a_tab_in_place_moves_focus_only_when_the_old_tab_had_it() {
+    let home = TempHome::new();
+    let mut cx = app();
+    let options = WindowOptions {
+        focus: false,
+        show: false,
+        ..WindowOptions::default()
+    };
+    let (window, panel) = cx
+        .update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(TerminalPanel::new)))
+        .expect("open a headless window");
+    let new_view = |cx: &mut HeadlessAppContext| {
+        let opts = sh("echo ok", &home);
+        cx.update(|cx| cx.new(|cx| TerminalView::new_pty(&opts, cx).expect("spawn")))
+    };
+    let focused = |cx: &mut HeadlessAppContext, view: &Entity<TerminalView>| {
+        cx.update_window(window, |_, window, cx| {
+            view.read(cx).focus_handle(cx).is_focused(window)
+        })
+        .expect("window")
+    };
+    let first = new_view(&mut cx);
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.add_tab(first.clone(), window, cx));
+    })
+    .expect("add the tab");
+    assert!(focused(&mut cx, &first), "adding a tab focuses it");
+
+    // The focused tab is replaced: its replacement takes focus.
+    let second = new_view(&mut cx);
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| {
+            p.replace_in_place(0, second.clone(), window, cx)
+        });
+    })
+    .expect("replace");
+    assert!(focused(&mut cx, &second), "the replacement took focus");
+
+    // Another tab has focus: replacing tab 0 leaves it there.
+    let other = new_view(&mut cx);
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.add_tab(other.clone(), window, cx));
+    })
+    .expect("add another tab");
+    assert!(focused(&mut cx, &other));
+    let third = new_view(&mut cx);
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |p, cx| p.replace_in_place(0, third.clone(), window, cx));
+    })
+    .expect("replace in the background");
+    assert!(focused(&mut cx, &other), "a background replace kept focus");
+    assert!(!focused(&mut cx, &third));
+}

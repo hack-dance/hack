@@ -563,7 +563,7 @@ impl HackApp {
             v
         });
         if tab == NewTab::Logs && quiet && sessions.read(cx).tab_count() > 0 {
-            sessions.update(cx, |p, cx| p.replace_in_place(0, view, cx));
+            sessions.update(cx, |p, cx| p.replace_in_place(0, view, window, cx));
         } else if tab == NewTab::Logs && sessions.read(cx).tab_count() > 0 {
             sessions.update(cx, |p, cx| p.replace(0, view, window, cx));
         } else {

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::{DEADLINE, TempHome, fake_hack, hermetic, sh, sh_source};
 use hack_desktop_term::launch::{HackCli, Name, SessionKind, container_shell};
 use hack_desktop_term::stream::StreamSource;
-use hack_desktop_term::terminal::{Status, TerminalCore};
+use hack_desktop_term::terminal::{SETTLE_MAX, Status, TerminalCore};
 
 fn pump_to_end(core: &mut TerminalCore) {
     let start = Instant::now();
@@ -168,6 +168,131 @@ fn typing_while_a_container_tab_opens_does_not_cancel_the_fallback_to_sh() {
         "the held input reached sh: {screen:?}"
     );
     assert_eq!(*core.status(), Status::Running);
+}
+
+/// When, relative to a failing `bash` attempt, the user types.
+#[derive(Clone, Copy, Debug)]
+enum TypedAt {
+    /// Straight after the tab opens, before the first pump.
+    Opening,
+    /// While the attempt has printed nothing and [`SETTLE_MAX`] has passed:
+    /// a slow `docker exec`.
+    SilentPastSettleMax,
+    /// As the error appears, while the attempt is still alive.
+    WithTheError,
+    /// After the attempt exited, before any pump saw the exit.
+    ExitedUnseen,
+    /// After a pump saw the exit, while the session drains its output.
+    ExitSeen,
+}
+
+fn pump_for(core: &mut TerminalCore, span: Duration) -> String {
+    let start = Instant::now();
+    while start.elapsed() < span {
+        if !core.pump() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    screen_text(core)
+}
+
+fn screen_text(core: &mut TerminalCore) -> String {
+    let frame = core.emulator().frame().unwrap();
+    (0..frame.rows.len())
+        .map(|r| frame.row_text(r))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A `bash` attempt that fails with 127 after `fail_after` seconds (and
+/// exits `exit_after` seconds after its message), with the user typing at
+/// `at`. The fallback to `sh` must happen and the typed command run there.
+fn fallback_with_input(at: TypedAt, fail_after: &str, exit_after: &str) {
+    let home = TempHome::new();
+    let mark = home.path().join("bash-attempt-exiting");
+    let mark_str = mark.to_str().unwrap().to_owned();
+    let mut extra = vec![
+        ("FAKE_HACK_NO_BASH", "1"),
+        ("FAKE_HACK_EXIT_MARK", mark_str.as_str()),
+    ];
+    if !fail_after.is_empty() {
+        extra.push(("FAKE_HACK_FAIL_AFTER", fail_after));
+    }
+    if !exit_after.is_empty() {
+        extra.push(("FAKE_HACK_EXIT_AFTER", exit_after));
+    }
+    let mut core = TerminalCore::session(container_plan(&home, &extra)).expect("spawn");
+    let typed: &[u8] = b"echo \"typed=[$((4 + 5))]\"\n";
+    match at {
+        TypedAt::Opening => core.send(typed),
+        TypedAt::SilentPastSettleMax => {
+            pump_for(&mut core, SETTLE_MAX + Duration::from_millis(300));
+            assert_eq!(
+                core.kind().label(),
+                "api · bash",
+                "{at:?}: still the first attempt"
+            );
+            core.send(typed);
+        }
+        TypedAt::WithTheError => {
+            pump_until(&mut core, "executable file not found");
+            core.send(typed);
+        }
+        TypedAt::ExitedUnseen | TypedAt::ExitSeen => {
+            pump_until(&mut core, "executable file not found");
+            // Let the attempt exit without pumping, so nothing has seen it.
+            // A sent-too-early input would count as typed and fail the test,
+            // so the slack can only cause a false failure, never a pass.
+            let start = Instant::now();
+            while !mark.exists() && start.elapsed() < DEADLINE {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            if matches!(at, TypedAt::ExitSeen) {
+                core.pump();
+                assert_eq!(*core.status(), Status::Running, "{at:?}: still draining");
+            }
+            core.send(typed);
+        }
+    }
+    let screen = pump_until(&mut core, "typed=[9]");
+    assert_eq!(
+        core.kind().label(),
+        "api · sh",
+        "{at:?}: fell back: {screen:?}"
+    );
+    assert!(
+        screen.contains("typed=[9]"),
+        "{at:?}: the input reached sh: {screen:?}"
+    );
+    assert_eq!(*core.status(), Status::Running, "{at:?}");
+}
+
+#[test]
+fn typing_at_the_opening_of_a_slow_failing_bash_still_falls_back() {
+    fallback_with_input(TypedAt::Opening, "3", "");
+}
+
+#[test]
+fn typing_while_a_slow_bash_attempt_is_silent_past_settle_max_still_falls_back() {
+    fallback_with_input(TypedAt::SilentPastSettleMax, "3", "");
+}
+
+#[test]
+fn typing_as_the_bash_error_appears_still_falls_back_when_the_exit_lags() {
+    // The exit is observed a little after the message, within the
+    // settle time: input typed meanwhile is held, not sent to bash.
+    fallback_with_input(TypedAt::WithTheError, "", "0.3");
+}
+
+#[test]
+fn typing_after_bash_exited_but_before_a_pump_saw_it_still_falls_back() {
+    fallback_with_input(TypedAt::ExitedUnseen, "", "0.7");
+}
+
+#[test]
+fn typing_while_the_failed_bash_attempt_drains_still_falls_back() {
+    fallback_with_input(TypedAt::ExitSeen, "", "0.7");
 }
 
 #[test]

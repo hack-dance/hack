@@ -1,7 +1,0 @@
-[2m[[0m[36mINFO[0m[2m][0m [2m[[0m[1m[38;5;81mapi-1[0m[2m][0m listening [2mport[0m=3000
-[2m[[0m[2mDEBUG[0m[2m][0m [2m[[0m[1m[38;5;105mworker-1[0m[2m][0m queue connected [2mqueue[0m=jobs
-[2m[[0m[33mWARN[0m[2m][0m [2m[[0m[1m[38;5;81mapi-1[0m[2m][0m slow request [2mms[0m=812 [2mpath[0m=/v1/orders
-[2m[[0m[1m[38;5;165mweb-1[0m[2m][0m GET /checkout 200 14ms
-[2m[[0m[31mERROR[0m[2m][0m [2m[[0m[1m[38;5;81mapi-1[0m[2m][0m payment provider timeout [2mattempt[0m=2
-[2m[[0m[36mINFO[0m[2m][0m [2m[[0m[1m[38;5;105mworker-1[0m[2m][0m job done [2mid[0m=j_1042 [2mms[0m=95
-[2m[[0m[1m[38;5;153mdb-1[0m[2m][0m 2026-11-17 03:20:04.512 UTC [1] LOG:  checkpoint complete

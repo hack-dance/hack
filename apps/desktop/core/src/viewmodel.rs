@@ -180,6 +180,9 @@ pub struct DetailView {
     pub backend: String,
     pub url: Option<String>,
     pub always_on: bool,
+    /// The always-on line under the header (read-only), when this instance
+    /// is the one its marker names.
+    pub always_on_note: Option<(crate::machine::Tone, String)>,
     pub actions: Vec<Action>,
     pub busy: bool,
     pub services: Vec<ServiceView>,
@@ -749,6 +752,20 @@ impl AppModel {
             },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
+            always_on_note: row
+                .autostart
+                .as_ref()
+                .filter(|a| a.branch == key.branch)
+                // The state line already says it (`state::derive`).
+                .filter(|a| a.state != "needs_attention")
+                .and_then(|a| {
+                    crate::machine::always_on_note(
+                        a,
+                        self.snapshot
+                            .as_ref()
+                            .and_then(|s| s.projects.autostart_global.as_ref()),
+                    )
+                }),
             actions: if row.is_native()
                 || self.last_error.is_some()
                 || (row.branch.is_some() && row.repo_root.is_none())
@@ -1099,6 +1116,52 @@ mod tests {
         m.apply(Event::Refreshed(Ok(snap)));
         m.apply(Event::Select("storefront".into()));
         assert_eq!(shells(&m), (vec!["api".to_owned()], false));
+    }
+
+    #[test]
+    fn the_always_on_line_belongs_to_the_instance_its_marker_names() {
+        let mut snap = fixtures::snapshot(Fixture::Hackd).unwrap();
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap.clone())));
+        let note = |m: &mut AppModel, key: InstanceKey| {
+            m.apply(Event::SelectInstance(key));
+            m.detail().unwrap().always_on_note.map(|(_, t)| t)
+        };
+        assert_eq!(
+            note(&mut m, InstanceKey::project("notes")).as_deref(),
+            Some("Always on · paused until you start it")
+        );
+        assert!(
+            note(&mut m, InstanceKey::project("storefront"))
+                .unwrap()
+                .contains("skipped (engine_timeout)")
+        );
+        // A marker for a branch instance is not the base instance's.
+        let mut branch_marker = snap.clone();
+        branch_marker
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart
+            .as_mut()
+            .unwrap()
+            .branch = Some("preview".into());
+        m.apply(Event::Refreshed(Ok(branch_marker)));
+        assert_eq!(note(&mut m, InstanceKey::project("storefront")), None);
+        // Needs attention: the state line already says it, once.
+        snap.projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "notes")
+            .unwrap()
+            .autostart
+            .as_mut()
+            .unwrap()
+            .state = "needs_attention".into();
+        m.apply(Event::Refreshed(Ok(snap)));
+        assert_eq!(note(&mut m, InstanceKey::project("notes")), None);
     }
 
     #[test]

@@ -23,6 +23,7 @@ mod doctor_view;
 mod drive;
 mod env_view;
 mod logs_view;
+mod machine_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod setup_view;

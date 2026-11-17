@@ -59,7 +59,7 @@ const SEARCH_CONTEXT: Option<&str> = None;
 const SEARCH_CONTEXT: Option<&str> = Some("!Terminal");
 
 /// Why the always-on switch is disabled.
-const ALWAYS_ON_REASON: &str = "Always on needs the CLI's autostart commands (HACK-2213)";
+const ALWAYS_ON_REASON: &str = "Read-only here: change always-on with hack autostart add or remove";
 
 /// The window's key bindings.
 pub fn bind_keys(cx: &mut App) {
@@ -151,6 +151,12 @@ pub struct HackApp {
     /// hackd here share it.
     pub(crate) machine: MachineGate,
     recovery_error: Option<String>,
+    /// `hack daemon status --json` for the hackd pane, read when the pane
+    /// opens, on Check again and after Start / Restart hackd.
+    pub(crate) hackd_status: Option<hack_desktop_core::models::DaemonStatus>,
+    /// A read finished (its result may be `None`: not readable).
+    pub(crate) hackd_read: bool,
+    pub(crate) hackd_loading: bool,
     /// Setup checks (DESIGN.md section 2; `setup_view`).
     pub(crate) setup: hack_desktop_core::setup::Pane,
     /// The launch check has not reported yet: when it finds something to
@@ -200,6 +206,9 @@ impl HackApp {
             panels: Default::default(),
             machine: MachineGate::default(),
             recovery_error: None,
+            hackd_status: None,
+            hackd_read: false,
+            hackd_loading: false,
             action_started: std::collections::HashMap::new(),
             setup: Default::default(),
             setup_on_launch: live,
@@ -615,7 +624,60 @@ impl HackApp {
         .detach();
     }
 
-    fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
+    /// The last Start / Restart hackd failure, if any.
+    pub(crate) fn recovery_error(&self) -> Option<&str> {
+        self.recovery_error.as_deref()
+    }
+
+    /// Open the hackd pane and read hackd's status.
+    pub(crate) fn open_hackd(&mut self, cx: &mut Context<Self>) {
+        self.pane = Pane::Hackd;
+        self.user_navigated();
+        self.load_hackd(cx);
+        cx.notify();
+    }
+
+    /// Fixtures and screenshots: the hackd pane with its status read.
+    pub fn show_hackd_now(&mut self) {
+        self.pane = Pane::Hackd;
+        self.hackd_status = self.source.daemon_status();
+        self.hackd_read = true;
+    }
+
+    /// Read `hack daemon status --json` off the UI thread with the CLI
+    /// selected now. A read started under another CLI is dropped.
+    pub(crate) fn load_hackd(&mut self, cx: &mut Context<Self>) {
+        if !self.live {
+            self.show_hackd_now();
+            cx.notify();
+            return;
+        }
+        if self.hackd_loading {
+            return;
+        }
+        self.hackd_loading = true;
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        let epoch = self.model.source_epoch();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { source.daemon_status() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.model.source_epoch() != epoch {
+                    return;
+                }
+                this.hackd_loading = false;
+                this.hackd_status = status;
+                this.hackd_read = true;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn recover_daemon(&mut self, action: DaemonRecovery, cx: &mut Context<Self>) {
         if !self.live {
             return;
         }
@@ -642,6 +704,10 @@ impl HackApp {
                 }
                 this.machine.finish(ticket);
                 this.recovery_error = result.err();
+                // The card shows what hackd says now, not the button's exit.
+                if this.pane == Pane::Hackd {
+                    this.load_hackd(cx);
+                }
                 // A command exit is not evidence that a compatible daemon
                 // is ready. Only the next ordered snapshot can restore rows.
                 this.refresh_now_async(cx);
@@ -806,6 +872,10 @@ impl HackApp {
             // previous installation: it must not block this one.
             self.machine.reset();
             self.recovery_error = None;
+            // hackd's status was the previous CLI's.
+            self.hackd_status = None;
+            self.hackd_read = false;
+            self.hackd_loading = false;
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();
@@ -973,6 +1043,24 @@ impl HackApp {
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
             )
+            .child({
+                let tone = self
+                    .hackd_card()
+                    .map(|c| c.tone)
+                    .or_else(|| self.hackd_tone_from_snapshot());
+                machine_row(
+                    "hackd",
+                    Glyph::Power,
+                    "hackd",
+                    dot(
+                        tone.map_or(Status::Unknown, crate::machine_view::status_of),
+                        ui,
+                    ),
+                    ui,
+                )
+                .when(self.pane == Pane::Hackd, |d| d.bg(p.surface_1))
+                .on_click(cx.listener(|this, _, _, cx| this.open_hackd(cx)))
+            })
             .child(
                 machine_row(
                     "doctor",
@@ -1053,6 +1141,12 @@ impl HackApp {
         let recovery = self.model.daemon_recovery();
         let mut recovery_shown = false;
         for b in &list.banners {
+            // The hackd pane's card says the same and offers the same action.
+            if self.pane == Pane::Hackd
+                && matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. })
+            {
+                continue;
+            }
             let (tone, msg, offers_recovery) = match b {
                 Banner::DaemonOff => (
                     BannerTone::Warn,
@@ -1245,6 +1339,21 @@ impl HackApp {
                     .child(actions),
             )
             .when(!compact, |col| col.child(url_row))
+            .children(
+                d.always_on_note
+                    .clone()
+                    .filter(|_| !compact)
+                    .map(|(tone, note)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::S3)
+                            .type_step(text::BODY)
+                            .text_color(p.text_secondary)
+                            .child(dot(crate::machine_view::status_of(tone), ui))
+                            .child(note)
+                    }),
+            )
             .children((!compact).then_some(()).and(reason).map(|r| {
                 let c = if status == Status::Failed {
                     p.states.failed.fg
@@ -1503,6 +1612,7 @@ impl Render for HackApp {
         let main: AnyElement = match &list.phase {
             // Setup applies whatever the project list shows, a missing CLI
             // included.
+            _ if self.pane == Pane::Hackd => crate::machine_view::render(self, &ui, cx),
             _ if self.pane == Pane::Setup => {
                 crate::setup_view::render(&self.setup, self.machine.busy(), &ui, cx)
             }

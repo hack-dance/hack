@@ -58,10 +58,16 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                                     app.show_project();
                                 }
                             }
+                            if fixtures::opens_hackd(f) {
+                                app.show_hackd_now();
+                            }
                             if f.name().starts_with("env-") {
                                 app.show_env_fixture(f.name(), window, cx);
                             }
-                            if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
+                            if matches!(
+                                f,
+                                Fixture::DaemonDown | Fixture::DaemonMismatch | Fixture::HackdOff
+                            ) {
                                 app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);
                             }
                             if let Some(a) = fixtures::local(f).in_flight {

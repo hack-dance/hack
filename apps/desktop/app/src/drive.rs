@@ -40,6 +40,9 @@
 //!                                 wait for the active tab's notice (a
 //!                                 refused paste) to contain text
 //! tab <services|logs|env>        show that detail tab
+//! hackd                           open the hackd pane (reads hackd's status)
+//! expect-hackd <text> [<seconds>] wait for the hackd card's title, or a line
+//!                                 of its always-on summary, to contain text
 //! expect-env <NAME> [<seconds>]   wait for NAME in the Env listing
 //! env-set <NAME> <value>          edit an existing row, as the pencil and
 //!                                 Save do (rest of the line is the value)
@@ -132,6 +135,11 @@ pub enum Step {
     },
     Wait(Duration),
     Tab(usize),
+    Hackd,
+    ExpectHackd {
+        text: String,
+        within: Duration,
+    },
     ExpectEnv {
         name: String,
         within: Duration,
@@ -250,7 +258,8 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                         .unwrap_or(10),
                 ),
             },
-            ("expect" | "expect-notice" | "expect-cli", _) if !rest.is_empty() => {
+            ("hackd", []) => Step::Hackd,
+            ("expect" | "expect-notice" | "expect-cli" | "expect-hackd", _) if !rest.is_empty() => {
                 let (text, within) = match rest.rsplit_once(char::is_whitespace) {
                     Some((t, secs)) if secs.parse::<u64>().is_ok() => (
                         t.trim(),
@@ -262,6 +271,7 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
                 match word {
                     "expect" => Step::Expect { text, within },
                     "expect-cli" => Step::ExpectCli { text, within },
+                    "expect-hackd" => Step::ExpectHackd { text, within },
                     _ => Step::ExpectNotice { text, within },
                 }
             }
@@ -618,6 +628,28 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
             handle
                 .update(cx, |app, _, cx| app.set_tab(*i, cx))
                 .map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        Step::Hackd => {
+            handle
+                .update(cx, |app, _, cx| app.open_hackd(cx))
+                .map_err(|e| e.to_string())?;
+            Ok(String::new())
+        }
+        Step::ExpectHackd { text, within } => {
+            poll(handle, cx, *within, |app, _, _| {
+                app.hackd_lines()
+                    .iter()
+                    .any(|l| l.contains(text.as_str()))
+                    .then_some(())
+            })
+            .await
+            .ok_or_else(|| {
+                let now = handle
+                    .update(cx, |app, _, _| app.hackd_lines())
+                    .unwrap_or_default();
+                format!("hackd pane did not show {text:?} within {within:?} (shows: {now:?})")
+            })?;
             Ok(String::new())
         }
         Step::ExpectEnv { name, within } => {

@@ -17,7 +17,8 @@ use crate::models::{Autostart, AutostartGlobal, DaemonApiStatus, DaemonStatus, P
 use crate::source::UpdateSide;
 
 /// How a card or line reads at a glance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Tone {
     Ok,
     Attention,
@@ -74,7 +75,11 @@ pub fn hackd_card(
     };
     let login_service = login_service_line(s);
     let mut details = Vec::new();
-    let version = api.map(|a| a.version.as_str()).filter(|v| !v.is_empty());
+    // `/v1/status` may be from an earlier read: its version describes hackd
+    // only while the CLI says hackd runs.
+    let version = api
+        .map(|a| a.version.as_str())
+        .filter(|v| !v.is_empty() && hackd_running(s));
     if let Some(v) = version {
         details.push(match s.pid {
             Some(pid) => format!("hackd {v} · pid {pid}"),
@@ -352,6 +357,9 @@ mod tests {
         );
         assert_eq!(stopped.title, "hackd stopped (login service installed)");
         assert_eq!(stopped.action, Some(CardAction::Start));
+        // A version from an earlier /v1/status is not shown for a stopped hackd.
+        let old_api = card(r#"{"status":"stopped","running":false}"#, Some("5.0.0"));
+        assert!(old_api.details.is_empty(), "{:?}", old_api.details);
         let stale = card(
             r#"{"status":"stale","running":false,"stale":true,"stale_reason":"pid_not_running"}"#,
             None,

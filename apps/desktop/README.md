@@ -578,10 +578,43 @@ Mac behavior still require reviewer assessment and the combined Mac pass; this
 is not a general Docker sandbox. Native pre/post marker witnesses are read-only
 observations, not locks against concurrent same-user changes.
 
+## hackd and always-on
+
+The **hackd** row in the sidebar's Machine group opens a pane with what hackd
+and the CLI report (DESIGN.md sections 5 and 6, HACK-2288 item 6):
+
+- **The hackd card** reads `hack daemon status --json` from the selected CLI
+  in its checked context (when the pane opens, on Check again and after
+  Start / Restart hackd), with the version from `/v1/status` while hackd
+  runs. Each state has at most one action: **Start hackd** (off, stopped,
+  stopped unexpectedly), **Restart hackd** only for a hackd older than the CLI
+  (a newer one says to `hack update`), or **Open Setup** for a login service
+  the CLI says is out of date (Setup checks before it installs). Start and
+  Restart go through the same machine gate as Setup. A hackd whose API
+  answers without a tracked PID is running. The daemon banner is not repeated
+  on this pane.
+- **Always on** summarises the documented `autostart` / `autostart_global`
+  contract (docs/always-on-projects.md): how many projects are always on,
+  paused, starting or need attention, the login run's progress, a global
+  pause, a missing login-service file, and one line per always-on project
+  (paused until you start it, starting at login, the last automatic start
+  skipped or failed with its reason code, stopped trying after N failures,
+  an invalid marker). An always-on project's header shows its line too.
+  Read-only: the app runs no `hack autostart` command, and the switch in the
+  header stays off-limits; change always-on with `hack autostart`.
+
+Fixtures `hackd` and `hackd-off`; renders:
+[running, light](screenshots/window/hackd-light.png),
+[off with a stale login service, dark](screenshots/window/hackd-off-dark.png).
+`scripts/hackd-drive/hackd.steps` drives the pane on the fixture
+(`hack-desktop --fixtures hackd --drive scripts/hackd-drive/hackd.steps
+--hidden`), and the env drive ends by reading it live through the stand-in
+CLI and fake hackd.
+
 ## What v0 does not do yet
 
-The Activity tab, CPU and memory, onboarding, always-on, daemon actions and
-upgrades come in later units. The design and the CLI/daemon requests they need
+The Activity tab, CPU and memory, onboarding, changing always-on and upgrades
+come in later units. The design and the CLI/daemon requests they need
 are in `DESIGN.md` (PR #800).
 
 ## Logs tab

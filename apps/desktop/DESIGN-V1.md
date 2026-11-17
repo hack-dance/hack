@@ -128,6 +128,7 @@ Stroke icons at 14 pt, coloured with the text colour of their context.
 | `pin` | Sidebar row of an always-on project (muted) |
 | `globe` | Machine: Routing and DNS |
 | `stethoscope` | Machine: Doctor |
+| `power` | Machine: hackd |
 | `external-link` | Header: Open |
 | `rotate-cw` | Header: Restart; banner: Restart hackd |
 | `square` | Header: Stop |
@@ -163,7 +164,10 @@ Machine section at the bottom.
 - Project row (28, radius 6): state dot, name (`BODY`; `BODY_STRONG` when
   selected; secondary when stopped or unknown), muted pin icon if always on.
   Selected and hover: `surface_1`.
-- Machine rows: icon (15, secondary), label, trailing state. Routing and DNS
+- Machine rows: icon (15, secondary), label, trailing state. hackd has a
+  dot from its card's tone; before the pane has read hackd's status, from the
+  project reads (a matching hackd answered: green; off: red; mismatched:
+  amber; otherwise a ring). Routing and DNS
   has a dot (a ring while routing status is not read). Doctor has an amber
   count pill when it reports findings, a green dot when clean, a ring when
   unknown. Routing and DNS shows a solid state dot whenever its state is

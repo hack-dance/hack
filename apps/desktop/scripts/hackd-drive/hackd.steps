@@ -1,0 +1,8 @@
+# The hackd pane on the `hackd` fixture (no CLI, no daemon):
+#   hack-desktop --fixtures hackd --drive scripts/hackd-drive/hackd.steps --hidden
+hackd
+expect-hackd hackd running 10
+expect-hackd Login service installed (launchd) 10
+expect-hackd At login: started 2 of 3 · 1 failed 10
+expect-hackd notes Always on · paused until you start it 10
+expect-hackd billing-api Always-on stopped trying after 3 failures · failed: api 10

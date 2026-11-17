@@ -57,10 +57,16 @@ pub enum Fixture {
     DoctorLink,
     /// No projects registered: the Doctor pane still shows machine checks.
     DoctorEmpty,
+    // hackd pane (HACK-2288 item 6).
+    /// hackd running, a login run under way, always-on projects in every
+    /// state the summary shows.
+    Hackd,
+    /// hackd stopped with a login service that is out of date.
+    HackdOff,
 }
 
 impl Fixture {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 32] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -91,6 +97,8 @@ impl Fixture {
         Self::DoctorClean,
         Self::DoctorLink,
         Self::DoctorEmpty,
+        Self::Hackd,
+        Self::HackdOff,
     ];
 
     #[must_use]
@@ -126,6 +134,8 @@ impl Fixture {
             Self::DoctorClean => "doctor-clean",
             Self::DoctorLink => "doctor-link",
             Self::DoctorEmpty => "doctor-empty",
+            Self::Hackd => "hackd",
+            Self::HackdOff => "hackd-off",
         }
     }
 
@@ -540,6 +550,9 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
         _ => {}
     }
     let mut projects = project(f);
+    if matches!(f, Fixture::Hackd | Fixture::HackdOff) {
+        always_on_fixture(&mut projects);
+    }
     if matches!(f, Fixture::Empty | Fixture::DoctorEmpty) {
         projects.projects.clear();
     }
@@ -631,6 +644,91 @@ pub fn opens_doctor(f: Fixture) -> bool {
         f,
         Fixture::Doctor | Fixture::DoctorClean | Fixture::DoctorEmpty
     )
+}
+
+/// Fixtures that open the hackd pane.
+#[must_use]
+pub fn opens_hackd(f: Fixture) -> bool {
+    matches!(f, Fixture::Hackd | Fixture::HackdOff)
+}
+
+/// `hack daemon status --json` as a fixture reports it.
+#[must_use]
+pub fn daemon_status(f: Fixture) -> Option<crate::models::DaemonStatus> {
+    let json = match f {
+        Fixture::HackdOff => serde_json::json!({
+            "status": "stopped", "running": false,
+            "service": {"manager": "launchd", "available": true, "installed": true,
+                "next_step": "hack daemon install (the unit runs a CLI that is gone)"}
+        }),
+        Fixture::DaemonDown => serde_json::json!({
+            "status": "stopped", "running": false,
+            "service": {"manager": "launchd", "available": true, "installed": false}
+        }),
+        Fixture::Loading | Fixture::CliMissing => return None,
+        _ => serde_json::json!({
+            "status": "running", "running": true, "api_ok": true, "pid": 4242,
+            "service": {"manager": "launchd", "available": true, "installed": true, "enabled": true}
+        }),
+    };
+    serde_json::from_value(json).ok()
+}
+
+/// Always-on in every state the hackd pane summarises, and a login run
+/// under way.
+fn always_on_fixture(payload: &mut ProjectsPayload) {
+    use crate::models::{AutostartGlobal, AutostartLoginRun, AutostartResult};
+    for p in &mut payload.projects {
+        p.autostart = match p.name.as_str() {
+            "docs-site" => Some(Autostart {
+                enabled: true,
+                state: "on".into(),
+                ..Autostart::default()
+            }),
+            "storefront" => Some(Autostart {
+                enabled: true,
+                state: "on".into(),
+                last_result: Some(AutostartResult {
+                    status: "skipped".into(),
+                    reason: Some("engine_timeout".into()),
+                    at: Some("2026-01-01T08:58:00Z".into()),
+                }),
+                ..Autostart::default()
+            }),
+            "notes" => Some(Autostart {
+                enabled: true,
+                state: "paused".into(),
+                paused_reason: Some("manual_stop".into()),
+                paused: true,
+                ..Autostart::default()
+            }),
+            "billing-api" => Some(Autostart {
+                enabled: true,
+                state: "needs_attention".into(),
+                failures: AutostartFailures {
+                    count: 3,
+                    last_at: Some("2026-01-01T08:59:00Z".into()),
+                    failed_services: vec!["api".into()],
+                    last_error_code: Some("start_failed".into()),
+                },
+                max_failures: Some(3),
+                ..Autostart::default()
+            }),
+            _ => None,
+        };
+    }
+    payload.autostart_global = Some(AutostartGlobal {
+        paused: false,
+        login_run: AutostartLoginRun {
+            in_progress: true,
+            started_at: Some("2026-01-01T08:57:00Z".into()),
+            pending: vec!["storefront-id".into()],
+            started: vec!["docs-site-id".into()],
+            failed: vec!["billing-api-id".into()],
+            waiting_for_engine: false,
+        },
+        service_ready: true,
+    });
 }
 
 /// Fixtures that load doctor results (and may still show a project).

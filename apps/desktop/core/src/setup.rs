@@ -408,6 +408,10 @@ fn routing(
     projects: Option<&ProjectsPayload>,
     platform: Platform,
 ) -> (Status, String) {
+    // Project host suffixes Doctor reported nothing for: it checks only the
+    // default domain's resolver today (DESIGN.md R23), so their routing
+    // cannot be confirmed and global install would not change that.
+    let mut unobserved: std::collections::BTreeMap<String, String> = Default::default();
     let mut ids: Vec<String> = match platform {
         Platform::Linux => vec!["linux dns route".into()],
         Platform::Other => return (Status::Unknown, "Unsupported platform".into()),
@@ -441,6 +445,9 @@ fn routing(
                     && let Some((_, suffix)) = h.split_once('.')
                 {
                     domains.insert(suffix.into());
+                    unobserved
+                        .entry(suffix.to_owned())
+                        .or_insert_with(|| h.clone());
                 }
             }
             let mut v = vec!["dnsmasq:53".into(), "coredns forwarding".into()];
@@ -452,7 +459,23 @@ fn routing(
         }
     };
     ids.sort();
-    let results: Vec<_> = ids.iter().map(|id| (id, check(runs, None, id))).collect();
+    let results: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            let mut result = check(runs, None, id);
+            let domain = id
+                .strip_prefix("resolver:")
+                .or_else(|| id.strip_prefix("dnsmasq.conf:"));
+            if result.0 == Status::Unknown
+                && let Some(host) = domain.and_then(|d| unobserved.get(d))
+            {
+                result.1 = format!(
+                    "Doctor does not check this project domain yet (DESIGN.md R23), so routing for {host} is unconfirmed"
+                );
+            }
+            (id, result)
+        })
+        .collect();
     if results.iter().all(|(_, (s, _))| *s == Status::Passed) {
         return (Status::Passed, "All required DNS checks passed".into());
     }
@@ -517,3 +540,41 @@ pub fn should_recheck_on_focus(
 }
 
 pub use crate::setup_login::{installation_refusal, qualify_login};
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use crate::models::{DoctorCheck, DoctorReport, ProjectRow, ProjectsPayload};
+
+    #[test]
+    fn a_project_suffix_doctor_does_not_check_is_unknown_and_says_why() {
+        let ok = |id: &str| DoctorCheck {
+            id: id.into(),
+            status: "ok".into(),
+            detail: String::new(),
+        };
+        let mut checks = vec![ok("dnsmasq:53"), ok("coredns forwarding")];
+        for d in ["hack", "hack.local", "hack.gy"] {
+            checks.push(ok(&format!("resolver:{d}")));
+            checks.push(ok(&format!("dnsmasq.conf:{d}")));
+        }
+        let runs = [DoctorRun::machine(Ok(DoctorReport {
+            checks,
+            summary: vec![],
+        }))];
+        let projects = ProjectsPayload {
+            projects: vec![ProjectRow {
+                name: "shop".into(),
+                dev_host: Some("shop.example.test".into()),
+                ..ProjectRow::default()
+            }],
+            ..ProjectsPayload::default()
+        };
+        let (status, detail) = routing(&runs, Some(&projects), Platform::Mac);
+        assert_eq!(status, Status::Unknown, "never green without evidence");
+        assert!(detail.contains("R23"), "{detail}");
+        assert!(detail.contains("shop.example.test"), "{detail}");
+        // Without that project every check Doctor ran passes.
+        assert_eq!(routing(&runs, None, Platform::Mac).0, Status::Passed);
+    }
+}

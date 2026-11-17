@@ -467,14 +467,14 @@ impl HackApp {
         let secret = edit.secret;
         let editor = edit.id;
         let value = Revealed::new(edit.value.read(cx).value().to_string());
-        let generation = self.env.generation();
+        let project = root.clone();
         if let Some(edit) = self.env_edit.as_mut() {
             edit.busy = true;
             edit.error = None;
         }
         let label = name.clone();
         let done = move |this: &mut Self, result: Result<(), String>, cx: &mut Context<Self>| {
-            this.finish_env_save(generation, editor, &label, result, cx);
+            this.finish_env_save(&project, editor, &label, result, cx);
         };
         if !self.live {
             let result = self
@@ -496,19 +496,20 @@ impl HackApp {
         cx.notify();
     }
 
-    /// A write finished. Another project or listing meanwhile: show nothing
-    /// over the new one. Only the editor that started it (`editor`) is
-    /// closed or given the error: one opened since (after Cancel) keeps its
-    /// input.
+    /// A write finished. Another project meanwhile: show nothing over it.
+    /// Only the editor that started it (`editor`) is closed or given the
+    /// error: one opened since (after Cancel) keeps its input, and its own
+    /// write still completes even if this one listed again first (listing
+    /// generations do not gate writes).
     pub(crate) fn finish_env_save(
         &mut self,
-        generation: u64,
+        project: &std::path::Path,
         editor: u64,
         label: &str,
         result: Result<(), String>,
         cx: &mut Context<Self>,
     ) {
-        if self.env.generation() != generation {
+        if self.selected_root().map(|(root, _)| root).as_deref() != Some(project) {
             return;
         }
         let own = self.env_edit.as_ref().is_some_and(|e| e.id == editor);
@@ -1316,21 +1317,21 @@ mod tests {
             cx.update(|cx| app.read(cx).env_edit.as_ref().unwrap().id)
         };
         let first = open(&mut cx);
-        let generation = cx.update(|cx| app.read(cx).env.generation());
+        let project = cx.update(|cx| app.read(cx).selected_root().unwrap().0);
         cx.update(|cx| app.update(cx, |a, cx| a.cancel_env_edit(cx)));
         let second = open(&mut cx);
         assert_ne!(first, second);
         // The first editor's write fails: the second gets no error.
         cx.update(|cx| {
             app.update(cx, |a, cx| {
-                a.finish_env_save(generation, first, "OLD", Err("no".into()), cx)
+                a.finish_env_save(&project, first, "OLD", Err("no".into()), cx)
             });
         });
         assert!(cx.update(|cx| app.read(cx).env_edit.as_ref().unwrap().error.is_none()));
         // The first editor's write succeeds: the second stays open.
         cx.update(|cx| {
             app.update(cx, |a, cx| {
-                a.finish_env_save(generation, first, "OLD", Ok(()), cx)
+                a.finish_env_save(&project, first, "OLD", Ok(()), cx)
             });
         });
         let (open_id, saved) = cx.update(|cx| {
@@ -1339,5 +1340,18 @@ mod tests {
         });
         assert_eq!(open_id, Some(second));
         assert_eq!(saved.as_deref(), Some("Saved OLD"));
+        // The second editor's own write still completes after the first one
+        // listed again (which moved the listing generation).
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.finish_env_save(&project, second, "NEW", Ok(()), cx)
+            });
+        });
+        let (open_id, saved) = cx.update(|cx| {
+            let a = app.read(cx);
+            (a.env_edit.as_ref().map(|e| e.id), a.env_saved.clone())
+        });
+        assert_eq!(open_id, None, "B's editor closes on its own success");
+        assert_eq!(saved.as_deref(), Some("Saved NEW"));
     }
 }

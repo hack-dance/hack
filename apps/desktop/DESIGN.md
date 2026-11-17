@@ -197,6 +197,11 @@ Terminal hand-off (recommended for both platforms; comparison in [Appendix A](#a
 
 The script holds only the CLI's own command with each argument shell-quoted; it
 is removed after use. The app never types into an existing terminal or pane.
+The command carries the checked, non-secret context the setup checks used:
+home and PATH, the backend, and the Docker selectors (`DOCKER_CONTEXT`,
+`DOCKER_CONFIG`, `DOCKER_HOST`, and for a TLS engine `DOCKER_TLS_VERIFY` and an
+absolute `DOCKER_CERT_PATH`). A selector the app cannot carry exactly refuses
+the hand-off instead of fixing a different engine.
 
 ## 3. Doctor
 

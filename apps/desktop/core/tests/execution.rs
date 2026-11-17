@@ -107,7 +107,26 @@ fn docker_selectors_are_kept_when_supported_and_refused_otherwise() {
         runner.effective_env("DOCKER_CONTEXT").as_deref(),
         Some(std::ffi::OsStr::new("fixture-context"))
     );
+    // A TLS engine keeps its transport, in the context and the runner.
+    let tls = with(&[
+        ("DOCKER_HOST", "tcp://engine.example.invalid:2376"),
+        ("DOCKER_TLS_VERIFY", "1"),
+        ("DOCKER_CERT_PATH", "/work/user/docker-certs"),
+    ])
+    .unwrap();
+    assert_eq!(tls.value("DOCKER_TLS_VERIFY"), Some("1"));
+    assert_eq!(
+        tls.value("DOCKER_CERT_PATH"),
+        Some("/work/user/docker-certs")
+    );
+    let runner = tls.runner("/checked/hack").unwrap();
+    assert_eq!(
+        runner.effective_env("DOCKER_CERT_PATH").as_deref(),
+        Some(std::ffi::OsStr::new("/work/user/docker-certs"))
+    );
     for bad in [
+        ("DOCKER_TLS_VERIFY", "1; x"),
+        ("DOCKER_CERT_PATH", "relative/certs"),
         ("DOCKER_CONTEXT", "bad context"),
         ("DOCKER_CONFIG", "relative/docker"),
         ("DOCKER_HOST", "unix://relative.sock"),

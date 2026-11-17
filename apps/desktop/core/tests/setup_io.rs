@@ -66,6 +66,8 @@ esac
         .with_env("PATH", "/usr/bin:/bin")
         .with_env("DOCKER_HOST", "")
         .with_env("DOCKER_CONTEXT", "")
+        .with_env("DOCKER_TLS_VERIFY", "")
+        .with_env("DOCKER_CERT_PATH", "")
         .with_env("DOCKER_CONFIG", t.0.join("docker").to_str().unwrap())
         .with_env("DOCKER_CLI_PLUGIN_EXTRA_DIRS", "")
         .with_env("HACK_MUTAGEN_PATH", "")

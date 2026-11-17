@@ -16,6 +16,8 @@ const KEYS: &[&str] = &[
     "DOCKER_CONTEXT",
     "DOCKER_HOST",
     "DOCKER_CONFIG",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
     "HACK_NATIVE_HOME",
     "HACK_NATIVE_BINARY",
     "HACK_GLOBAL_CONFIG_PATH",
@@ -156,6 +158,23 @@ impl ExecutionContext {
                 return Err("Unsupported DOCKER_HOST; hand-off refused".into());
             }
             entries.push(("DOCKER_HOST".into(), host.into()));
+        }
+        // A `tcp://` engine's TLS transport goes with it: dropping it would
+        // check and repair through a different connection than the user's.
+        if let Some(verify) = get("DOCKER_TLS_VERIFY") {
+            if !verify.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                return Err("Unsupported DOCKER_TLS_VERIFY; hand-off refused".into());
+            }
+            entries.push(("DOCKER_TLS_VERIFY".into(), verify.into()));
+        }
+        if let Some(certs) = get("DOCKER_CERT_PATH") {
+            if !Path::new(certs).is_absolute() {
+                return Err("DOCKER_CERT_PATH must be absolute; hand-off refused".into());
+            }
+            entries.push((
+                "DOCKER_CERT_PATH".into(),
+                normalized(Path::new(certs)).to_string_lossy().into_owned(),
+            ));
         }
         Ok(Self { entries })
     }

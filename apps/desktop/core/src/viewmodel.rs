@@ -865,8 +865,10 @@ impl AppModel {
                 .and_then(|s| s.projects.projects.iter().find(|p| p.name == key.project))
                 .and_then(|p| p.autostart.as_ref())
                 .filter(|a| a.branch == key.branch)
-                // The state line already says it (`state::derive`).
-                .filter(|a| a.state != "needs_attention")
+                // The state line already says it (`state::derive`) when this
+                // instance's row carries the marker (the base instance); a
+                // branch instance's derived row does not, so keep it there.
+                .filter(|a| a.state != "needs_attention" || row.autostart.is_none())
                 .and_then(|a| {
                     crate::machine::always_on_note(
                         a,
@@ -1474,6 +1476,38 @@ mod tests {
         );
         m.apply(Event::SelectInstance(InstanceKey::project("storefront")));
         assert_eq!(m.detail().unwrap().always_on_note, None);
+        // Needs attention on a branch marker: the branch's state line cannot
+        // say it, so the always-on line does.
+        let mut attention = fixtures::snapshot(Fixture::Running).unwrap();
+        attention
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart = Some(crate::models::Autostart {
+            enabled: true,
+            state: "needs_attention".into(),
+            branch: Some("feature-search".into()),
+            failures: crate::models::AutostartFailures {
+                count: 3,
+                ..crate::models::AutostartFailures::default()
+            },
+            ..crate::models::Autostart::default()
+        });
+        m.apply(Event::Refreshed(Ok(attention)));
+        m.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "feature-search",
+        )));
+        assert_eq!(
+            m.detail()
+                .unwrap()
+                .always_on_note
+                .map(|(_, t)| t)
+                .as_deref(),
+            Some("Always-on stopped trying after 3 failures")
+        );
     }
 
     #[test]

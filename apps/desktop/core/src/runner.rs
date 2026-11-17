@@ -1390,7 +1390,9 @@ mod tests {
     fn a_descendant_holding_stdin_cannot_hold_the_write_past_the_deadline() {
         // The command exits at once; a descendant keeps stdin open and never
         // reads, and the input is larger than any pipe buffer.
-        let f = FakeHack::new("sleep 120 <&0 >/dev/null 2>&1 &\nexit 0");
+        // POSIX gives a background job /dev/null as stdin before explicit
+        // redirections (dash does), so stdin is saved on fd 3 first.
+        let f = FakeHack::new("exec 3<&0\nsleep 120 <&3 >/dev/null 2>&1 &\nexit 0");
         let started = Instant::now();
         let input = vec![b'x'; 1 << 20];
         let r = f
@@ -1414,7 +1416,7 @@ mod tests {
         // The descendant starts its own session (outside the group the
         // runner ends) and holds stdin without reading.
         let f = FakeHack::new(
-            "if command -v setsid >/dev/null; then setsid sleep 6 <&0 >/dev/null 2>&1 & else perl -e 'use POSIX; POSIX::setsid(); sleep 6' <&0 >/dev/null 2>&1 & fi\nexit 0",
+            "exec 3<&0\nif command -v setsid >/dev/null; then setsid sleep 6 <&3 >/dev/null 2>&1 & else perl -e 'use POSIX; POSIX::setsid(); sleep 6' <&3 >/dev/null 2>&1 & fi\nexit 0",
         );
         let started = Instant::now();
         let input = vec![b'x'; 1 << 20];

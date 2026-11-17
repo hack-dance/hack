@@ -1264,7 +1264,7 @@ fn compile_services(
             });
             diagnostics.push(Diagnostic::warning(
                 "route_command_healthcheck_replaced", &format!("{field}.healthcheck"),
-                "Native routes are ready only through an HTTP probe, so the command healthcheck is not run on native. Readiness uses the inferred route-port probe: TCP and complete HTTP 200-499 response headers. Set healthcheck.x-hack-http to probe a specific path instead.",
+                "The command healthcheck is not run on native: route readiness is an HTTP probe. Native sends GET / to the route port; a complete HTTP 200-499 response counts as ready, 5xx and timeouts do not. To probe a real health path, replace the healthcheck with healthcheck.x-hack-http, for example {port: <route port>, path: /health}.",
             ));
         }
         if !m.contains_key("healthcheck") {

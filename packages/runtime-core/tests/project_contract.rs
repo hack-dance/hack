@@ -211,13 +211,14 @@ fn replaced_route_probe_still_does_not_satisfy_compose_healthy_dependencies() {
         "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n    healthcheck:\n      test: [CMD, 'true']\n  app:\n    image: alpine:3.21\n    depends_on:\n      web: {{condition: service_healthy}}\n"
     );
     let report = Fixture::new(&document).plan();
-    assert!(
-        report
-            .plan
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "missing_healthcheck")
-    );
+    let refusal = report
+        .plan
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "missing_healthcheck")
+        .unwrap();
+    assert!(refusal.message.contains("service_started"));
+    assert!(refusal.message.contains("x-hack-http"));
 }
 
 #[test]

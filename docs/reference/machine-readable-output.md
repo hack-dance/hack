@@ -41,7 +41,10 @@ Hack runs for the command writes to stderr instead, on both backends:
 lifecycle hooks (`before`, `after` and down phases, both their stdout and their
 stderr), host commands, the Compose client's own output, and a remote lifecycle
 dispatch (`--target remote`). This holds for every command in the inventory
-below, including `up`, `restart`, `down` and `run --detach`. Read stderr for that output; never parse it from stdout.
+below, including `up`, `restart`, `down` and `run --detach`. Read stderr for
+that output; never parse it from stdout. One exception: `run --detach` captures
+the Compose client's output for its own result, so that output appears on
+neither stream.
 
 A `--json` that belongs to a child command, as in `hack run web tool --json`,
 is the child's: Hack passes its output through unchanged.

@@ -825,6 +825,9 @@ pub fn supervise(steps_file: &Path, child_args: &[String]) -> i32 {
                     root: PathBuf::from(root),
                 });
             }
+            // A step's own line says whether it failed; its echoed text (an
+            // expected "1 failed", say) must not.
+            _ if rest.starts_with("step ") => failed |= step_failed(rest),
             _ if rest.contains(" failed ") => failed = true,
             _ => {}
         }
@@ -907,6 +910,14 @@ pub fn supervise(steps_file: &Path, child_args: &[String]) -> i32 {
     };
     println!("{TAG} result {}{known}", if ok { "pass" } else { "fail" });
     i32::from(!ok)
+}
+
+/// `step <n> failed …` (as opposed to `step <n> ok …`).
+fn step_failed(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    words.next() == Some("step")
+        && words.next().is_some_and(|n| n.parse::<usize>().is_ok())
+        && words.next() == Some("failed")
 }
 
 /// Every live process in one of `leaders`' sessions, and the leaders
@@ -1018,6 +1029,17 @@ impl ContainerCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_fails_by_its_status_word_not_its_echoed_text() {
+        assert!(!step_failed(
+            r#"step 4 ok ExpectHackd { text: "At login: started 1 of 3 · 1 failed · 1 pending", within: 10s }"#
+        ));
+        assert!(step_failed(
+            r#"step 2 failed ExpectHackd { text: "hackd running", within: 10s }: not shown"#
+        ));
+        assert!(!step_failed("step x failed"), "not a step number");
+    }
 
     #[test]
     fn env_steps_never_print_their_values() {

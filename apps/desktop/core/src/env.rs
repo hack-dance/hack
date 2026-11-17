@@ -331,6 +331,17 @@ impl EnvModel {
             self.values.insert(key, state);
         }
     }
+    /// Install a reveal's result only if that name is still being read:
+    /// hiding it meanwhile (its eye pressed again) drops a late result.
+    /// Returns whether it was installed.
+    pub fn finish_reveal(&mut self, generation: u64, key: ValueKey, state: ValueState) -> bool {
+        let pending = generation == self.generation
+            && matches!(self.values.get(&key), Some(ValueState::Reading));
+        if pending {
+            self.values.insert(key, state);
+        }
+        pending
+    }
     pub fn hide(&mut self, key: &ValueKey) {
         self.values.remove(key);
     }
@@ -590,6 +601,29 @@ mod tests {
         // A new listing invalidates too.
         model.begin();
         assert_ne!(model.reveal_epoch(), epoch);
+    }
+
+    #[test]
+    fn a_reveal_hidden_while_reading_never_lands() {
+        let mut model = EnvModel::default();
+        let generation = model.begin();
+        let key = ValueKey {
+            env: "staging".into(),
+            scope: "global".into(),
+            name: "DATABASE_URL".into(),
+        };
+        let shown = || ValueState::Shown {
+            value: Revealed::new("fake-value".into()),
+            at: std::time::Instant::now(),
+        };
+        model.set_value(generation, key.clone(), ValueState::Reading);
+        model.hide(&key);
+        assert!(!model.finish_reveal(generation, key.clone(), shown()));
+        assert_eq!(model.value(&key), ValueState::Hidden);
+        // Still reading: it lands.
+        model.set_value(generation, key.clone(), ValueState::Reading);
+        assert!(model.finish_reveal(generation, key.clone(), shown()));
+        assert!(matches!(model.value(&key), ValueState::Shown { .. }));
     }
 
     #[test]

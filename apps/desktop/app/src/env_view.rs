@@ -198,7 +198,12 @@ impl HackApp {
     /// The eye: show a secret's value for [`REVEAL_FOR`], or hide it.
     pub(crate) fn toggle_reveal(&mut self, row: &EnvRow, cx: &mut Context<Self>) {
         let key = self.value_key(row);
-        if matches!(self.env.value(&key), ValueState::Shown { .. }) {
+        // A second press hides it, or cancels a read still in flight: the
+        // completion below lands only while the name is still "Reading".
+        if matches!(
+            self.env.value(&key),
+            ValueState::Shown { .. } | ValueState::Reading
+        ) {
             self.env.hide(&key);
             cx.notify();
             return;
@@ -216,9 +221,10 @@ impl HackApp {
                     },
                     Err(e) => ValueState::Failed(e),
                 };
-                this.env.set_value(generation, key, state);
-                this.expire_values_later(cx);
-                cx.notify();
+                if this.env.finish_reveal(generation, key, state) {
+                    this.expire_values_later(cx);
+                    cx.notify();
+                }
             },
             cx,
         );

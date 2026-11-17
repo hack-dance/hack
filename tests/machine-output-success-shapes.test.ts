@@ -37,6 +37,8 @@ const CASES: readonly Case[] = [
   {
     command: "projects",
     keys: [
+      // Machine-wide always-on policy and login progress (always-on projects).
+      "autostart_global",
       "filter",
       "generated_at",
       "include_global",

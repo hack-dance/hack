@@ -7,6 +7,7 @@ terminal).
 
 ## Core commands
 
+- `hack autostart add|remove|list|pause|resume` — choose [always-on projects](always-on-projects.md) for this machine; `hack up -d --always` marks and starts one. `down` pauses its next login start; `up` resumes it.
 - `hack init` — generate `.hack/` (compose + config); `--with claude|codex` also hands off to
   agent-assisted onboarding
 - `hack up` / `hack down` / `hack restart` — start, stop and restart the project

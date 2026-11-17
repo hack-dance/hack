@@ -25,6 +25,12 @@ export const JSON_COMMAND_SHAPES = {
   logs: "logs",
   open: "legacy-object",
   activity: "schema-envelope",
+  "autostart add": "schema-envelope",
+  "autostart list": "schema-envelope",
+  "autostart pause": "schema-envelope",
+  "autostart remove": "schema-envelope",
+  "autostart resume": "schema-envelope",
+  "autostart run": "schema-envelope",
   doctor: "envelope",
   "daemon status": "legacy-object",
   "daemon start": "schema-envelope",
@@ -90,6 +96,12 @@ export const JSON_COMMAND_SHAPES = {
 
 export const SCHEMA_JSON_VARIANTS = [
   { command: "activity", flags: [], schema: "hack.activity.v1" },
+  { command: "autostart add", flags: [], schema: "hack.autostart.v1" },
+  { command: "autostart list", flags: [], schema: "hack.autostart.v1" },
+  { command: "autostart pause", flags: [], schema: "hack.autostart.v1" },
+  { command: "autostart remove", flags: [], schema: "hack.autostart.v1" },
+  { command: "autostart resume", flags: [], schema: "hack.autostart.v1" },
+  { command: "autostart run", flags: [], schema: "hack.autostart.v1" },
   { command: "version", flags: [], schema: "hack.version.v1" },
   {
     command: "projects",

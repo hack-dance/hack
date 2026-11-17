@@ -1,0 +1,44 @@
+---
+title: Autostart at login
+---
+sequenceDiagram
+  autonumber
+  participant Login
+  participant Daemon
+  participant Engine
+  participant Registry
+  participant CLI
+  participant User
+  Login->>Daemon: Start user service
+  Daemon->>Registry: Read machine markers
+  alt Globally paused
+    Daemon->>Daemon: Skip automatic starts
+  else Automatic starts enabled
+    Daemon->>Registry: Begin login progress
+    Daemon->>Engine: Backoff wait, ten-minute bound
+    alt Engine unavailable
+      Daemon->>Registry: Waiting, no boot claims
+      Engine-->>Daemon: Later healthy observation
+    end
+    opt Routing already installed
+      Daemon->>CLI: global up, no interaction
+    end
+    loop Unpaused projects in stable order
+      Daemon->>Registry: Claim once per boot
+      Daemon->>Engine: Inspect required services
+      alt Confirmed stopped
+        Daemon->>CLI: up -d in independent Linux scope
+        CLI->>Registry: Lock instance, recheck intent
+        CLI->>Registry: Recheck before containers start
+        CLI-->>Daemon: Result without prompts
+      else Running or unknown
+        Daemon->>Daemon: Adopt or skip
+      end
+      Daemon->>Registry: Save result and progress
+    end
+    Daemon->>Registry: Finish login progress
+  end
+  User->>Registry: down publishes pause
+  User->>CLI: Wait for instance lock
+  CLI-->>User: Earlier startup settles
+  User->>Engine: Stop project under lock

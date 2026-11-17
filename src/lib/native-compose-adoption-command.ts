@@ -1,6 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import { parseProjectSelectorOption } from "../cli/project-selector.ts";
+import { assertAutostartAdoptionAllowed } from "./autostart-refusal.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
@@ -273,7 +274,7 @@ async function observe(opts: {
     }));
     process.stdout.write(
       options.json
-        ? `${JSON.stringify({ owner: "legacy-compose", services: report })}\n`
+        ? `${JSON.stringify({ owner: "legacy-compose", services: report, ...(await options.statusMetadata?.()) })}\n`
         : report.map((entry) => `${entry.service}\t${entry.status}\n`).join("")
     );
     return 0;
@@ -325,6 +326,7 @@ export async function tryLegacyComposeAdoptedCommand(
   if (!projectRoot) {
     return null;
   }
+  assertAutostartAdoptionAllowed();
   requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });
   validate(options);
   const controller = new AbortController(),

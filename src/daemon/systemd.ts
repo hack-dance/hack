@@ -54,9 +54,10 @@ import {
  *   another existing `hack` is reported and switched by `hack daemon install`.
  * - `Restart=on-failure`: a crash restarts hackd; `hack daemon stop` (a clean
  *   stop through systemctl) does not. Start limits stop a crash loop.
- * - The default `KillMode=control-group` is kept on purpose: stopping or
- *   restarting the service also stops processes hackd started (supervisor
- *   jobs, shells), so none outlive the service that owns them.
+ * - Keep `KillMode=control-group`: stopping or restarting the service
+ *   settles its transient supervisor jobs and shells. Linux login autostart
+ *   starts each project in a distinct user scope, so project-owned detached
+ *   lifecycle helpers survive replacement of the daemon service.
  * - Every `systemctl`/`loginctl` call goes through a {@link ServiceCommandRunner}
  *   so tests use a fake. The default runner re-checks
  *   {@link resolveSystemdAccess} before it spawns anything.
@@ -641,12 +642,14 @@ export function renderSystemdUnit(opts: {
     "",
     "[Service]",
     "Type=simple",
+    "KillMode=control-group",
     `ExecStart="${escapeSpecifiers(bin)}" daemon start --foreground`,
     "Restart=on-failure",
     "RestartSec=2",
     "WorkingDirectory=%h",
     `Environment="PATH=${path}"`,
     "Environment=HACK_NO_INTERACTIVE=1",
+    "Environment=HACK_DAEMON_LOGIN_SERVICE=1",
     // Applied last by systemd, so it also strips what the user manager's
     // environment carries at each login start (HACK-2052).
     `UnsetEnvironment=${CODE_LOADING_ENV_KEYS.join(" ")}`,
@@ -2288,25 +2291,36 @@ export async function checkServicePathDirectories(opts: {
   readonly dirs: readonly string[];
   /** Defaults to this process's uid. */
   readonly uid?: number;
+  /** Optional inventory for additional read-only platform checks; never a trust cache. */
+  readonly inspectedPaths?: Set<string>;
+  /** Autostart's engine lookup only; the hackd.service PATH check never sets it. */
+  readonly acceptDarwinAdminDirectories?: boolean;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const admin = opts.acceptDarwinAdminDirectories === true;
   const checked = new Set<string>();
   const scanned = new Set<string>();
   for (const dir of opts.dirs) {
     if (!isAbsolute(dir)) {
       return `the hackd.service PATH has a directory that is not absolute (${dir || "empty"})`;
     }
+    const directoryPaths = opts.inspectedPaths ? new Set<string>() : undefined;
     const walk = await walkReplaceableChain({
       path: dir,
       uid,
       // Not repaired: programs may already have been planted.
       hackHome: null,
       allowMissing: true,
+      checked: directoryPaths,
+      acceptDarwinAdminDirectories: admin,
     });
     if ("error" in walk) {
       return `the hackd.service PATH directory ${dir} is not safe: ${walk.error}`;
     }
-    const writable = lettingOthersCreate(walk.existing);
+    recordInspectedPaths(directoryPaths, opts.inspectedPaths);
+    const writable = lettingOthersCreate(walk.existing, {
+      acceptDarwinAdminDirectories: admin,
+    });
     if (writable !== null) {
       return `other users can ${walk.complete ? "add programs to" : "create"} the hackd.service PATH directory ${dir} (${walk.existing}, ${writable}); run: chmod go-w ${walk.existing}`;
     }
@@ -2317,13 +2331,27 @@ export async function checkServicePathDirectories(opts: {
         dir: walk.existing,
         uid,
         checked,
+        inspectedPaths: opts.inspectedPaths,
+        acceptDarwinAdminDirectories: admin,
       });
       if (program !== null) {
         return `the hackd.service PATH directory ${dir} holds ${program}`;
       }
     }
   }
+  recordInspectedPaths(checked, opts.inspectedPaths);
   return null;
+}
+
+function recordInspectedPaths(
+  paths?: ReadonlySet<string>,
+  target?: Set<string>
+): void {
+  if (paths && target) {
+    for (const path of paths) {
+      target.add(path);
+    }
+  }
 }
 
 /**
@@ -2340,6 +2368,8 @@ async function checkPathDirectoryPrograms(opts: {
   readonly dir: string;
   readonly uid: number;
   readonly checked: Set<string>;
+  readonly inspectedPaths?: Set<string>;
+  readonly acceptDarwinAdminDirectories?: boolean;
 }): Promise<string | null> {
   let entries: string[];
   let systemDir: boolean;
@@ -2364,11 +2394,17 @@ async function checkPathDirectoryPrograms(opts: {
       continue;
     }
     const error = info.isSymbolicLink()
-      ? await checkPathLink({ path, uid: opts.uid, checked: opts.checked })
+      ? await checkPathLink({
+          path,
+          uid: opts.uid,
+          checked: opts.checked,
+          acceptDarwinAdminDirectories: opts.acceptDarwinAdminDirectories,
+        })
       : programFileProblem({ path, info, uid: opts.uid, systemDir });
     if (error !== null) {
       return error;
     }
+    opts.inspectedPaths?.add(path);
   }
   return null;
 }
@@ -2384,6 +2420,7 @@ async function checkPathLink(opts: {
   readonly path: string;
   readonly uid: number;
   readonly checked: Set<string>;
+  readonly acceptDarwinAdminDirectories?: boolean;
 }): Promise<string | null> {
   const walk = await walkReplaceableChain({
     path: opts.path,
@@ -2391,6 +2428,7 @@ async function checkPathLink(opts: {
     hackHome: null,
     allowMissing: true,
     checked: opts.checked,
+    acceptDarwinAdminDirectories: opts.acceptDarwinAdminDirectories,
   });
   if ("error" in walk) {
     return walk.error;
@@ -2398,7 +2436,9 @@ async function checkPathLink(opts: {
   if (walk.complete) {
     return null;
   }
-  const creatable = lettingOthersCreate(walk.existing);
+  const creatable = lettingOthersCreate(walk.existing, {
+    acceptDarwinAdminDirectories: opts.acceptDarwinAdminDirectories,
+  });
   return creatable === null
     ? null
     : `${opts.path}, a link to a missing target that other users could create in ${walk.existing} (${creatable})`;

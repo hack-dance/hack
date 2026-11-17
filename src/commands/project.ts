@@ -1,3 +1,5 @@
+import { assertAutostartHostCommandsAllowed } from "../lib/autostart-refusal.ts";
+import { resolveAutostartTrustedTlsBinds } from "../lib/autostart-trust-mounts.ts";
 import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
@@ -28,6 +30,7 @@ export function wrapLifecyclePersistentCommand(
   return wrapSharedLifecyclePersistentCommand(opts);
 }
 
+import { realpath } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import {
   autocompleteMultiselect,
@@ -125,7 +128,10 @@ import {
   optTail,
   optUntil,
 } from "../cli/options.ts";
-import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
+import {
+  parseProjectSelectorOption,
+  resolveRegisteredProjectOption,
+} from "../cli/project-selector.ts";
 import { globalUp } from "../commands/global.ts";
 import {
   DEFAULT_GRAFANA_HOST,
@@ -340,6 +346,7 @@ import {
   finishImplicitLegacyEnvMigration,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hasUnmigratedLegacyDotenv,
+  ProjectEnvKeyMissingError,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
@@ -379,6 +386,7 @@ import {
 } from "../lib/project-shared-helpers.ts";
 import {
   readProjectsRegistry,
+  setProjectAutostartPaused,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
 import {
@@ -400,6 +408,7 @@ import {
 import {
   formatSecretStoreDescriptor,
   resolveSecretStore,
+  SecretStoreKeyUnavailableError,
 } from "../lib/secret-store.ts";
 import { exec, findExecutableInPath, run as runShell } from "../lib/shell.ts";
 import { assertComposeSpawnEnvFits } from "../lib/spawn-env-limit.ts";
@@ -434,6 +443,15 @@ import { withActivity } from "./lifecycle-activity.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
+import {
+  assertAutostartEnvironment,
+  assertLoginAutostartCurrent,
+  findAutostartRegistration,
+  resolveFinalAutostartDownTarget,
+  updateNativeAutostartIntent,
+  withAutostartCommandLock,
+} from "./project-autostart-intent.ts";
+import { enableAutostartForUp } from "./project-autostart-opt-in.ts";
 import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
@@ -594,6 +612,12 @@ const upOptions = [
   optTarget,
   optJson,
   optProgress,
+  defineOption({
+    name: "always",
+    type: "boolean",
+    long: "--always",
+    description: "Mark this project for machine-local autostart and start it",
+  } as const),
 ] as const;
 const downOptions = [
   optPath,
@@ -746,7 +770,10 @@ const serviceLifecyclePositionals = [
 
 type InitArgs = CommandArgs<typeof initOptions, readonly []>;
 type UpArgs = CommandArgs<typeof upOptions, typeof serviceLifecyclePositionals>;
-type DownArgs = CommandArgs<typeof downOptions, readonly []>;
+type DownArgs = CommandArgs<typeof downOptions, readonly []> & {
+  /** Pin the reconciled instance through pause, admission and teardown. */
+  readonly resolvedAutostartBranch?: { readonly branch: string | null };
+};
 type RestartArgs = CommandArgs<
   typeof restartOptions,
   typeof serviceLifecyclePositionals
@@ -951,6 +978,10 @@ export async function resolveEffectiveBranchForCommand(opts: {
   const explicit = resolveBranchSlug(opts.branchOption);
   if (explicit) {
     return explicit;
+  }
+  // A saved null instance means base, even when its checkout is a worktree.
+  if (process.env.HACK_AUTOSTART_LOGIN === "1") {
+    return null;
   }
 
   const cfg = await readProjectConfig(opts.project);
@@ -1211,7 +1242,20 @@ function emitLifecycleResult(opts: {
   return opts.exitCode;
 }
 
-function buildLifecycleJsonErrorResult(opts: { readonly error: unknown }) {
+export function buildLifecycleJsonErrorResult(opts: {
+  readonly error: unknown;
+}) {
+  if (
+    process.env.HACK_AUTOSTART_LOGIN === "1" &&
+    (opts.error instanceof SecretStoreKeyUnavailableError ||
+      opts.error instanceof ProjectEnvKeyMissingError)
+  ) {
+    return errorResult({
+      code: "E_ENV_KEY_MISSING",
+      message:
+        "Autostart skipped: a required secret key is unavailable. Run hack up manually.",
+    });
+  }
   if (opts.error instanceof CliUsageError) {
     return errorResult({ code: "E_USAGE", message: opts.error.message });
   }
@@ -1993,6 +2037,7 @@ export async function runLifecycleCommands(opts: {
   readonly signal?: AbortSignal;
 }): Promise<number> {
   const commands = opts.commands ?? [];
+  assertAutostartHostCommandsAllowed({ hasCommands: commands.length > 0 });
   for (const [index, cmd] of commands.entries()) {
     const label = cmd.name ? `${cmd.name}: ${cmd.command}` : cmd.command;
     logger.step({ message: `${opts.title}: ${label}` });
@@ -2168,6 +2213,13 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   // Captured before any preparation hook runs: a down that completes while
   // the hooks run supersedes this operation (see startProjectSharedHelpers).
   const sharedHelperConfigs = opts.cfg.lifecycle?.sharedHelpers ?? [];
+  assertAutostartHostCommandsAllowed({
+    hasCommands:
+      sharedHelperConfigs.length > 0 ||
+      (opts.cfg.lifecycle?.up?.before?.length ?? 0) > 0 ||
+      (opts.cfg.lifecycle?.up?.after?.length ?? 0) > 0 ||
+      (opts.cfg.lifecycle?.processes?.length ?? 0) > 0,
+  });
   await assertSharedHelperSessionMuxSupported({
     runner: resolveLifecycleRunner({ runner: opts.cfg.lifecycle?.runner }),
     sharedHelpersConfigured: sharedHelperConfigs.length > 0,
@@ -2988,7 +3040,7 @@ export async function mergeLifecycleCommandEnv(
 ): Promise<Record<string, string>> {
   const base: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") {
+    if (typeof value === "string" && key !== "HACK_AUTOSTART_LOGIN") {
       base[key] = value;
     }
   }
@@ -5951,6 +6003,10 @@ async function runRemoteLifecycleCommand(opts: {
   readonly detach?: boolean;
   readonly services?: readonly string[];
 }): Promise<number | null> {
+  if (process.env.HACK_AUTOSTART_LOGIN === "1") {
+    // Machine-local unattended intent never dispatches a host command remotely.
+    return null;
+  }
   const target = await resolveProjectLifecycleTarget({
     project: opts.project,
     requestedTarget: opts.requestedTarget,
@@ -6471,7 +6527,135 @@ async function restartNativeImageProject({
   });
 }
 
-async function handleUp({
+/** Publish explicit user intent before runtime effects so a subsequent login respects down. */
+async function updateAutostartIntent(opts: {
+  readonly ctx: CliContext;
+  readonly action: "up" | "down";
+  readonly resolvedDownTarget?: { readonly branch: string | null };
+  readonly args: {
+    readonly options: {
+      readonly path?: string;
+      readonly project?: string;
+      readonly branch?: string;
+      readonly always?: boolean;
+    };
+  };
+}): Promise<void> {
+  const login = process.env.HACK_AUTOSTART_LOGIN === "1";
+  const registry = await readProjectsRegistry();
+  const selector =
+    opts.args.options.project === undefined
+      ? null
+      : parseProjectSelectorOption({ projectOpt: opts.args.options.project });
+  const requestedStartDir = resolveStartDir(opts.ctx, opts.args.options.path);
+  const startDir = await realpath(requestedStartDir).catch(
+    () => requestedStartDir
+  );
+  const marked = findAutostartRegistration({
+    projects: registry.projects,
+    selectorName: selector?.name,
+    startDir,
+  });
+  if (!(login || opts.args.options.always || marked)) {
+    return;
+  }
+  if (
+    marked &&
+    (await updateNativeAutostartIntent({
+      project: marked,
+      selectedRoot: selector ? marked.repoRoot : startDir,
+      action: opts.action,
+      branch: opts.args.options.branch,
+      always: opts.args.options.always,
+      login,
+    }))
+  ) {
+    return;
+  }
+  const project = await resolveProjectForArgs({
+    ctx: opts.ctx,
+    pathOpt: opts.args.options.path,
+    projectOpt: opts.args.options.project,
+    touchRegistration: false,
+  });
+  if (login) {
+    await assertAutostartEnvironment({ project });
+    return;
+  }
+  // Inspect selection without printing the normal up/down worktree notice twice.
+  const cfg = await readProjectConfig(project);
+  const resolvedBranch = await resolveEffectiveBranch({
+    explicitBranch: resolveBranchSlug(opts.args.options.branch),
+    projectRoot: project.projectRoot,
+    autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
+  });
+  if (resolvedBranch.source === "detached-worktree") {
+    throw new CliUsageError(
+      "Detached linked worktree requires an explicit --branch <name>."
+    );
+  }
+  const branch = opts.resolvedDownTarget
+    ? opts.resolvedDownTarget.branch
+    : resolvedBranch.branch;
+  if (opts.action === "up" && opts.args.options.always) {
+    await enableAutostartForUp({
+      project,
+      startDir: resolveStartDir(opts.ctx, opts.args.options.path),
+      selectorName: selector?.name,
+      branch,
+      registry,
+    });
+    return;
+  }
+  const projectDir = await realpath(project.projectDir).catch(
+    () => project.projectDir
+  );
+  const projectRoot = await realpath(project.projectRoot).catch(
+    () => project.projectRoot
+  );
+  const registered = registry.projects.find(
+    (entry) =>
+      entry.projectDir === projectDir ||
+      entry.worktrees?.some((worktree) => worktree.path === projectRoot)
+  );
+  if (registered?.autostart && registered.autostart.branch === branch) {
+    await setProjectAutostartPaused({
+      id: registered.id,
+      paused: opts.action === "down",
+    });
+  }
+}
+
+async function handleUp(
+  input: Parameters<typeof handleUpUnlocked>[0]
+): Promise<number> {
+  parseRequestedTarget({ raw: input.args.options.target });
+  const login = process.env.HACK_AUTOSTART_LOGIN === "1";
+  if (!login) {
+    await updateAutostartIntent({ ...input, action: "up" });
+  }
+  const run = async () => {
+    if (login) {
+      await updateAutostartIntent({ ...input, action: "up" });
+    }
+    return await handleUpUnlocked(input);
+  };
+  // Foreground up owns the terminal until shutdown; its existing supervisor
+  // handles stopping. Never hold this startup lock for that whole lifetime.
+  if (!(login || input.args.options.detach || input.args.options.json)) {
+    return await run();
+  }
+  return await withAutostartCommandLock({
+    action: "up",
+    cwd: input.ctx.cwd,
+    path: input.args.options.path,
+    project: input.args.options.project,
+    branch: input.args.options.branch,
+    run,
+  });
+}
+
+async function handleUpUnlocked({
   ctx,
   args,
 }: {
@@ -6941,7 +7125,14 @@ async function runUpCommand({
       assertCurrent: assertHelpersCurrent,
       up: (beforeStart) =>
         composeRuntimeBackend.up({
+          unattended:
+            process.env.HACK_AUTOSTART_LOGIN === "1" ? true : undefined,
+          unattendedTrustedBinds:
+            process.env.HACK_AUTOSTART_LOGIN === "1"
+              ? resolveAutostartTrustedTlsBinds
+              : undefined,
           beforeStart: async () => {
+            await assertLoginAutostartCurrent(branch, project.projectRoot);
             await beforeStart?.();
             if (!detach) {
               // Compose owns foreground shutdown. Lifecycle cleanup runs after
@@ -7258,7 +7449,57 @@ function refuseNativeDownOptions(options: DownArgs["options"]): void {
   }
 }
 
-async function handleDown({
+async function handleDown(
+  input: Parameters<typeof handleDownUnlocked>[0]
+): Promise<number> {
+  parseRequestedTarget({ raw: input.args.options.target });
+  // Publish stop intent before waiting for an earlier start to release its lock.
+  const resolvedDownTarget =
+    process.env.HACK_RUNTIME_BACKEND === "native"
+      ? undefined
+      : await resolveFinalAutostartDownTarget(
+          {
+            cwd: input.ctx.cwd,
+            path: input.args.options.path,
+            project: input.args.options.project,
+            branch: input.args.options.branch,
+            writeNotice: (notice) =>
+              writeDownNotice({
+                json: input.args.options.json === true,
+                ...notice,
+              }),
+          },
+          {
+            isLocalTarget: async (project) =>
+              (
+                await resolveProjectLifecycleTarget({
+                  project,
+                  requestedTarget: input.args.options.target,
+                })
+              ).resolvedTarget === "local",
+          }
+        );
+  const pinned = {
+    ...input,
+    args: { ...input.args, resolvedAutostartBranch: resolvedDownTarget },
+  };
+  await updateAutostartIntent({
+    ...pinned,
+    action: "down",
+    resolvedDownTarget,
+  });
+  return await withAutostartCommandLock({
+    action: "down",
+    cwd: input.ctx.cwd,
+    path: input.args.options.path,
+    project: input.args.options.project,
+    branch: input.args.options.branch,
+    resolvedDownTarget,
+    run: () => handleDownUnlocked(pinned),
+  });
+}
+
+async function handleDownUnlocked({
   ctx,
   args,
   deferFinalization,
@@ -7463,11 +7704,13 @@ async function runDownCommand({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
-  let branch = await resolveEffectiveBranchForCommand({
-    project,
-    branchOption: args.options.branch,
-    noticeToStderr: json,
-  });
+  let branch = args.resolvedAutostartBranch
+    ? args.resolvedAutostartBranch.branch
+    : await resolveEffectiveBranchForCommand({
+        project,
+        branchOption: args.options.branch,
+        noticeToStderr: json,
+      });
   const profiles = parseCsvList(args.options.profile);
   if (args.options.removeData) {
     throw new CliUsageError(
@@ -7531,7 +7774,9 @@ async function runDownCommand({
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   let runtime: readonly RuntimeProject[] | null = null;
   const implicitLinkedWorktreeTarget =
-    resolveBranchSlug(args.options.branch) === null && branch !== null;
+    !args.resolvedAutostartBranch &&
+    resolveBranchSlug(args.options.branch) === null &&
+    branch !== null;
   if (implicitLinkedWorktreeTarget || pruneCaches) {
     const runtimeResult = await readRuntimeProjects({ includeGlobal: false });
     if (!runtimeResult.ok) {
@@ -7552,9 +7797,9 @@ async function runDownCommand({
         writeDownNotice({ json, level, message });
       },
     });
-    // The activity record names the instance this down actually targets.
-    noteActivityBranch(branch);
   }
+  // Include an already-pinned autostart target as well as implicit reconciliation.
+  noteActivityBranch(branch);
   await recordBranchUsageIfNeeded({ project, branch });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
   const cachePruneCandidates =
@@ -8570,7 +8815,10 @@ async function handleRestart({
   if (native) {
     return await handleNativeUp({
       ctx,
-      args: { ...args, options: { ...args.options, detach: false } },
+      args: {
+        ...args,
+        options: { ...args.options, detach: false, always: false },
+      },
       native,
       restart: true,
       recovery:

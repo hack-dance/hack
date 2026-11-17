@@ -13,6 +13,7 @@ test("doctor metadata distinguishes machine and project findings", () => {
     "network:hack-dev subnet",
     "resolver:hack",
     "daemon service",
+    "autostart login service",
   ]) {
     expect(doctorMetadata({ id }).scope).toBe("machine");
   }

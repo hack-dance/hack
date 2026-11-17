@@ -305,6 +305,9 @@ pub struct EnvModel {
     pub running: Option<String>,
     /// The value last copied, for its check mark until the clipboard clears.
     pub copied: Option<ValueKey>,
+    /// The value the app last put on the clipboard, until it clears it
+    /// (after `REVEAL_FOR`, or on quit) or something else replaces it.
+    pub clipboard: Option<Revealed>,
     /// Bumped by every hide of all values (a new listing, focus or
     /// visibility lost): a reveal or copy started before it must not
     /// complete after it. Those hides also drop the "Reading" marks.

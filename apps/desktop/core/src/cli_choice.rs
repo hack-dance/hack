@@ -47,6 +47,8 @@ pub struct Install {
 pub struct Choice {
     pub installs: Vec<Install>,
     pub selected: Option<Install>,
+    /// CLIs found but refused: another user can change them.
+    pub rejected: Vec<PathBuf>,
 }
 
 impl Choice {
@@ -55,13 +57,16 @@ impl Choice {
     #[must_use]
     pub fn load() -> Self {
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let installs = discover(
+        let (installs, rejected) = discover(
             std::env::var_os("PATH").as_deref(),
             home.as_deref(),
             trusted,
         );
         let saved = settings_path().and_then(|p| read_saved(&p));
-        Self::pick(installs, saved.as_deref())
+        Self {
+            rejected,
+            ..Self::pick(installs, saved.as_deref())
+        }
     }
 
     /// Choose among `installs`: the saved path when it is still one of them,
@@ -73,7 +78,11 @@ impl Choice {
             .or_else(|| installs.iter().find(|i| i.channel == Channel::Stable))
             .or_else(|| installs.first())
             .cloned();
-        Self { installs, selected }
+        Self {
+            installs,
+            selected,
+            rejected: Vec::new(),
+        }
     }
 
     /// The installs the app could switch to.
@@ -101,13 +110,13 @@ impl Choice {
     }
 }
 
-/// Every install found, stable first, each once (by canonical path).
-/// `is_trusted` decides whether a found file may be offered.
+/// Every install found, stable first, each once (by canonical path), and
+/// the files `is_trusted` refused.
 pub fn discover(
     path_env: Option<&std::ffi::OsStr>,
     home: Option<&Path>,
     is_trusted: impl Fn(&Path) -> bool,
-) -> Vec<Install> {
+) -> (Vec<Install>, Vec<PathBuf>) {
     let mut candidates: Vec<(String, Channel, PathBuf)> = Vec::new();
     if let Some(p) = crate::runner::resolve_on_path("hack", path_env) {
         candidates.push(("hack".into(), Channel::Stable, p));
@@ -123,19 +132,24 @@ pub fn discover(
     }
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut out = Vec::new();
+    let mut rejected = Vec::new();
     for (name, channel, path) in candidates {
         let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        if seen.contains(&real) || !is_trusted(&path) {
+        if seen.contains(&real) {
             continue;
         }
         seen.push(real);
+        if !is_trusted(&path) {
+            rejected.push(path);
+            continue;
+        }
         out.push(Install {
             name,
             channel,
             path,
         });
     }
-    out
+    (out, rejected)
 }
 
 /// No other user can change the file or the directories above it.
@@ -235,7 +249,7 @@ mod tests {
         exe(&bin.join("hack"));
         let home = t.join("home");
         exe(&home.join(".hack-next/bin/hack-next"));
-        let found = discover(Some(bin.as_os_str()), Some(&home), |_| true);
+        let (found, _) = discover(Some(bin.as_os_str()), Some(&home), |_| true);
         assert_eq!(
             found
                 .iter()
@@ -263,9 +277,11 @@ mod tests {
         let t = tree("alone");
         let home = t.join("home");
         exe(&home.join(".hack-next/bin/hack-next"));
-        let only = Choice::pick(discover(None, Some(&home), |_| true), None);
+        let only = Choice::pick(discover(None, Some(&home), |_| true).0, None);
         assert_eq!(only.selected.unwrap().channel, Channel::Prerelease);
-        assert!(discover(None, Some(&home), |_| false).is_empty());
+        let (none, rejected) = discover(None, Some(&home), |_| false);
+        assert!(none.is_empty());
+        assert_eq!(rejected, [home.join(".hack-next/bin/hack-next")]);
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -275,7 +291,7 @@ mod tests {
         let home = t.join("home");
         let next = home.join(".hack-next/bin/hack-next");
         exe(&next);
-        let found = discover(
+        let (found, _) = discover(
             Some(next.parent().unwrap().as_os_str()),
             Some(&home),
             |_| true,

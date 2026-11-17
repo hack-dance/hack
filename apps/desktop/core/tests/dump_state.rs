@@ -74,6 +74,7 @@ fn dump_state_reads_the_cli_like_the_app_and_prints_view_models() {
 case "$1" in
   version) echo '{"ok":true,"data":{"schema":"hack.version.v1","version":"5.0.0"}}'  ;;
   projects) echo called > "$HACK_HOME/unsafe-listing"; exit 2 ;;
+  daemon) printf '{"running":true,"socket_path":"%s/daemon/hackd.sock"}\n' "$HACK_HOME" ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
 "#,

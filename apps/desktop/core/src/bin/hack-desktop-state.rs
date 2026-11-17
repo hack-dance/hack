@@ -47,6 +47,7 @@ fn main() {
         "selected": choice.as_ref().and_then(|c| c.selected.clone()),
         "others": choice.as_ref().map(|c| c.others().cloned().collect::<Vec<_>>()).unwrap_or_default(),
         "hackd_socket": source.hackd().map(|d| d.socket().display().to_string()),
+        "rejected": choice.as_ref().map(|c| c.rejected.clone()).unwrap_or_default(),
     });
     let timings: Vec<Value> = steps
         .iter()

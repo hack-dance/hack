@@ -171,6 +171,29 @@ impl CliRunner {
         runner
     }
 
+    /// No usable CLI: every command reports `NotFound` and nothing is
+    /// started, until [`Self::select`] gives it one.
+    #[must_use]
+    pub fn unavailable(name: &str) -> Self {
+        let mut runner = Self::new(name);
+        runner.missing = true;
+        runner.pinned = Some(std::sync::Arc::default());
+        runner
+    }
+
+    /// This runner with its current program fixed: later [`Self::select`]
+    /// calls do not change it. One read uses one of these throughout.
+    #[must_use]
+    pub fn fixed(&self) -> Self {
+        let program = self.current_program();
+        Self {
+            program: program.clone().unwrap_or_else(|| self.program.clone()),
+            missing: program.is_none(),
+            pinned: None,
+            ..self.clone()
+        }
+    }
+
     /// Run `program` from now on, in this runner and every clone of it. A
     /// runner that is not [`Self::selectable`] (or [`Self::on_path`]) is
     /// unchanged.

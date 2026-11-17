@@ -96,11 +96,9 @@ pub fn hackd_card(status: Option<&DaemonStatus>, evidence: &HackdEvidence<'_>) -
         .as_deref()
         .filter(nonempty)
         .filter(|_| hackd_running(s));
-    let cli_version = s
-        .cli_version
-        .as_deref()
-        .filter(nonempty)
-        .or(evidence.cli_version);
+    let reported_cli = s.cli_version.as_deref().filter(nonempty);
+    // For words only (never an action), the project read's CLI version.
+    let cli_version = reported_cli.or(evidence.cli_version);
     // For showing a version only, an earlier read's is better than none, and
     // only while the CLI says hackd runs.
     let version = reported.or(evidence
@@ -116,7 +114,7 @@ pub fn hackd_card(status: Option<&DaemonStatus>, evidence: &HackdEvidence<'_>) -
         details.push(issue.to_owned());
     }
     let (tone, title, action) = if hackd_running(s) {
-        match (reported, cli_version) {
+        match (reported, reported_cli) {
             (Some(v), Some(c)) if v != c && s.api_compatible != Some(true) => {
                 match UpdateSide::for_versions(v, c) {
                     UpdateSide::Daemon => (
@@ -145,9 +143,11 @@ pub fn hackd_card(status: Option<&DaemonStatus>, evidence: &HackdEvidence<'_>) -
             ),
             // Only an earlier read says the versions differ: worth a look,
             // not an action.
-            (None, Some(c))
-                if version.is_some_and(|v| v != c) && s.api_compatible != Some(true) =>
+            (_, _)
+                if version.zip(cli_version).is_some_and(|(v, c)| v != c)
+                    && s.api_compatible != Some(true) =>
             {
+                let c = cli_version.unwrap_or_default();
                 (
                     Tone::Attention,
                     format!(
@@ -578,6 +578,18 @@ mod tests {
             "never restart (downgrade) the newer hackd"
         );
         assert!(card.title.contains("5.1.0 is newer"), "{}", card.title);
+        // A response with hackd's version but not the CLI's: the CLI version
+        // from the project read never decides Restart.
+        let no_cli = status(r#"{"status":"incompatible","running":true,"version":"4.3.0"}"#);
+        let card = super::hackd_card(
+            Some(&no_cli),
+            &HackdEvidence {
+                hackd_version: Some("4.3.0"),
+                cli_version: Some("5.0.0"),
+                shared_with: None,
+            },
+        );
+        assert_eq!(card.action, None);
         // A response without its version: the older read alone never restarts.
         let unversioned = status(r#"{"status":"running","running":true}"#);
         let card = super::hackd_card(

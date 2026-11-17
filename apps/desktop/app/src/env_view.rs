@@ -268,6 +268,7 @@ impl HackApp {
                     Ok(value) => {
                         cx.write_to_clipboard(ClipboardItem::new_string(value.expose().to_owned()));
                         this.env.copied = Some(key.clone());
+                        this.env.clipboard = Some(value.clone());
                         this.clear_clipboard_later(value, cx);
                     }
                     Err(e) => this
@@ -286,18 +287,31 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REVEAL_FOR).await;
             let _ = this.update(cx, |this, cx| {
-                let still = cx
-                    .read_from_clipboard()
-                    .and_then(|item| item.text())
-                    .is_some_and(|text| text == value.expose());
-                if still {
-                    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                // Only the value this timer was started for: a later copy
+                // has its own timer.
+                if this.env.clipboard.as_ref() == Some(&value) {
+                    this.clear_owned_clipboard(cx);
                 }
                 this.env.copied = None;
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Clear the clipboard if it still holds the value the app put there,
+    /// never what the user copied since. Runs after `REVEAL_FOR` and on quit.
+    pub(crate) fn clear_owned_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(value) = self.env.clipboard.take() else {
+            return;
+        };
+        let still = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .is_some_and(|text| text == value.expose());
+        if still {
+            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+        }
     }
 
     /// Hide every revealed value: the window was hidden or lost focus.
@@ -687,6 +701,27 @@ mod tests {
             ValueState::Hidden,
             "copy does not reveal"
         );
+    }
+
+    #[test]
+    fn quitting_clears_a_copied_secret_but_never_what_was_copied_since() {
+        let (mut cx, app) = app();
+        let secret = row(&mut cx, &app, "DATABASE_URL");
+        cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
+        cx.update(|cx| app.update(cx, |a, cx| a.clear_owned_clipboard(cx)));
+        let text = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert!(
+            text.as_deref().unwrap_or_default().is_empty(),
+            "the secret is gone"
+        );
+        // The user copies something else after the secret.
+        cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
+        cx.update(|cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("user text".into()));
+        });
+        cx.update(|cx| app.update(cx, |a, cx| a.clear_owned_clipboard(cx)));
+        let text = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(text.as_deref(), Some("user text"));
     }
 
     #[test]

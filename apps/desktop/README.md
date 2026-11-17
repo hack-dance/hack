@@ -510,7 +510,8 @@ else. Plaintext values load with the listing. A secret shows dots until its
 eye is pressed, for that one name; it hides again after 60 s and when the
 overlay, scope, detail tab or project changes, or the window is hidden or
 loses focus. Copy reads that one name, puts it on the clipboard and clears the
-clipboard after 60 s if it still holds the value. A missing required name is
+clipboard after 60 s, or when the app quits sooner, if it still holds the
+value. A missing required name is
 listed first with a `required · missing` chip. With the key missing, the line
 says where the CLI looks and secrets cannot be revealed or copied.
 

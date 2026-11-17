@@ -528,6 +528,7 @@ impl HackApp {
             return;
         }
         let source = self.source.clone();
+        let epoch = self.model.source_epoch();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -537,6 +538,13 @@ impl HackApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // Started under a CLI the app no longer runs: its result
+                // belongs to that installation, not to what is shown now.
+                if this.model.source_epoch() != epoch {
+                    this.action_started.remove(&key);
+                    cx.notify();
+                    return;
+                }
                 if let Ok(ActionOutcome::Opened(o)) = &result {
                     cx.open_url(&o.url);
                 }
@@ -729,7 +737,7 @@ impl HackApp {
             self.model.source_changed();
             self.logs.close();
             self.env.begin();
-            self.doctor = DoctorPane::default();
+            self.doctor.source_changed();
             #[cfg(feature = "terminal")]
             self.close_all_terminals(window, cx);
         }

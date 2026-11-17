@@ -106,6 +106,9 @@ pub struct Panels {
     /// Why the last tab could not start, shown in the strip until the next
     /// tab starts.
     pub error: Option<String>,
+    /// Panels of a previous Hack CLI: their tabs are closed, and they are
+    /// kept so app quit still hurries and awaits those teardowns.
+    retired: Vec<Entity<TerminalPanel>>,
 }
 
 impl Panels {
@@ -322,7 +325,15 @@ impl HackApp {
                 }
             });
         }
-        self.panels.by_key.clear();
+        // Keep the panels: each owns its closed tabs' pending teardowns and
+        // the quit handler that awaits them.
+        let retired: Vec<_> = self
+            .panels
+            .by_key
+            .drain()
+            .map(|(_, p)| p.sessions)
+            .collect();
+        self.panels.retired.extend(retired);
         self.panels.error = None;
     }
 

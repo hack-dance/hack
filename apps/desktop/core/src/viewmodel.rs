@@ -228,6 +228,9 @@ pub struct AppModel {
     refresh_sequence: u64,
     applied_sequence: u64,
     action_epoch: u64,
+    /// Bumped by [`AppModel::source_changed`]: work started under an earlier
+    /// CLI carries an older value and is not applied.
+    source_epoch: u64,
 }
 
 /// The row for an instance in a snapshot: the project row itself, or the
@@ -326,12 +329,20 @@ impl AppModel {
     /// selection is kept by name, so the same project is shown again if the
     /// new CLI has it.
     pub fn source_changed(&mut self) {
+        self.source_epoch += 1;
         self.action_epoch += 1;
         self.snapshot = None;
         self.last_error = None;
         self.local.clear();
         self.action_errors.clear();
         self.loaded_once = false;
+    }
+
+    /// Which CLI the model is showing: capture it when work starts, and
+    /// apply the work's result only if it is unchanged.
+    #[must_use]
+    pub fn source_epoch(&self) -> u64 {
+        self.source_epoch
     }
 
     /// Apply an ordered live read; returns whether it was accepted.
@@ -777,7 +788,13 @@ mod tests {
         m.apply(Event::Select("storefront".into()));
         assert!(m.detail().is_some_and(|d| !d.actions.is_empty()));
         let in_flight = m.begin_refresh();
+        let epoch = m.source_epoch();
         m.source_changed();
+        assert_ne!(
+            m.source_epoch(),
+            epoch,
+            "work started before the switch can tell"
+        );
         assert!(
             m.detail().is_none(),
             "nothing from the previous CLI is shown or actionable"

@@ -24,8 +24,8 @@ while [ "$n" -lt "$PASSES" ]; do
   n=$((n + 1))
   T=$(mktemp -d /tmp/envd.XXXXXX)
   chmod 700 "$T"
-  mkdir -p "$T/bin" "$T/home/.hack/daemon" "$T/proj/.hack"
-  chmod 700 "$T/home/.hack/daemon"
+  mkdir -p "$T/bin" "$T/userhome/.hack/daemon" "$T/proj/.hack"
+  chmod 700 "$T/userhome/.hack/daemon"
   printf 'services:\n  api:\n    image: example.invalid/fixture:1\n' > "$T/proj/.hack/docker-compose.yml"
   # The stand-in `hack` the app runs: canned version/daemon/logs answers,
   # the real CLI for every `env` command.
@@ -41,15 +41,15 @@ esac
 STANDIN
   chmod 755 "$T/bin/hack"
   cli() {
-    env -i PATH=/usr/bin:/bin HOME="$T/home" HACK_HOME="$T/home/.hack" \
+    env -i PATH=/usr/bin:/bin HOME="$T/userhome" HACK_HOME="$T/userhome/.hack" \
       HACK_DAEMON_AUTOSTART_DISABLE=1 HACK_NO_INTERACTIVE=1 "$BUN" "$REPO/index.ts" "$@"
   }
   printf 'fake-plain-one' | cli env add FIXTURE_MODE --value-stdin --env default --service global --path "$T/proj" >/dev/null 2>&1
-  python3 -I "$HERE/fakehackd.py" "$T/home/.hack/daemon/hackd.sock" "$T/proj" 5.0.0 &
+  python3 -I "$HERE/fakehackd.py" "$T/userhome/.hack/daemon/hackd.sock" "$T/proj" 5.0.0 &
   FD=$!
   i=0
-  while [ ! -S "$T/home/.hack/daemon/hackd.sock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-  out=$(env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" HACK_HOME="$T/home/.hack" \
+  while [ ! -S "$T/userhome/.hack/daemon/hackd.sock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  out=$(env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/userhome" HACK_HOME="$T/userhome/.hack" \
     HACK_DAEMON_AUTOSTART_DISABLE=1 SHELL=/bin/sh TERM=xterm-256color \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
     "$APP" --drive "$HERE/edit.steps" --hidden 2>&1 | grep '@drive')

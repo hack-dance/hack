@@ -9699,7 +9699,11 @@ function psStateLabel(opts: {
   readonly waiting: Readonly<Record<string, readonly string[]>>;
 }): string {
   const state = getString(opts.entry, "State") ?? "";
-  const blockers = opts.waiting[getString(opts.entry, "Service") ?? ""];
+  const service = getString(opts.entry, "Service") ?? "";
+  // Own entries only: a service named like an Object member is not waiting.
+  const blockers = Object.hasOwn(opts.waiting, service)
+    ? opts.waiting[service]
+    : undefined;
   return blockers && state.toLowerCase() === "created"
     ? `${state} (waiting for ${blockers.join(", ")})`
     : state;

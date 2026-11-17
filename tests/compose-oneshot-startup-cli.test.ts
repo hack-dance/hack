@@ -37,6 +37,13 @@ case " $* " in
       printf '%s\\n' "$$" > "$state/ps.pid"
       exec sleep 60
     fi
+    if [ -n "\${STUB_PS_FAIL_AFTER_FIRST:-}" ] && [ -f "$state/up-started" ]; then
+      if [ -f "$state/ps-seen" ]; then exit 1; fi
+      : > "$state/ps-seen"
+    fi
+    if [ -n "\${STUB_PS_EXTRA:-}" ]; then
+      printf '%s\\n' "$STUB_PS_EXTRA"
+    fi
     if [ -n "\${STUB_PS_SLEEP:-}" ] && [ ! -f "$state/up-done" ]; then
       sleep "$STUB_PS_SLEEP"
     fi
@@ -351,4 +358,33 @@ test("Ctrl-C during a watched start ends promptly and stops the hung poll", asyn
   expect(code).not.toBe(0);
   expect(code).not.toBe(124);
   expect(alive(await hungPollPid())).toBe(false);
+}, 60_000);
+
+test("one-shot reads that stop answering end at the idle budget, not as a ceiling stop", async () => {
+  // The first poll sees migrate running; every later read fails.
+  const result = await cli(["up", "--detach", "--json"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "20",
+    STUB_PS_FAIL_AFTER_FIRST: "1",
+  });
+  expect(result.exitCode).toBe(124);
+  const envelope = JSON.parse(result.stdout) as {
+    error: { message: string; detail: Record<string, unknown> };
+  };
+  expect(envelope.error.message).toContain("startup budget of 1000 ms");
+  expect(envelope.error.message).not.toContain("start ceiling");
+  expect(envelope.error.detail).not.toHaveProperty("inProgress");
+}, 60_000);
+
+test("ps renders a Created service named like an Object member", async () => {
+  await writeFile(join(project, ".hack", "docker-compose.yml"), PLAIN_COMPOSE);
+  const result = await cli(["ps"], {
+    STUB_PS_EXTRA:
+      '{"ID":"c9","Service":"constructor","Name":"shop-constructor-1","State":"created","Status":"Created","ExitCode":0}',
+  });
+  expect({ exitCode: result.exitCode, stderr: result.stderr }).toMatchObject({
+    exitCode: 0,
+  });
+  expect(result.stdout).toContain("constructor");
+  expect(result.stdout).not.toContain("waiting for");
 }, 60_000);

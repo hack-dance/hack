@@ -370,13 +370,12 @@ async function watchStartProgress(input: {
     if (input.isDone()) {
       return { stopped: false, lastSeen };
     }
-    if (entries) {
-      // A failed read is no evidence of progress, never extra time.
-      lastSeen = runningOneShots({ graph: input.graph, entries });
-      if (lastSeen.length > 0) {
-        lastProgressAt = performance.now();
-        input.options.onStartupProgress?.();
-      }
+    // A failed read is no evidence of progress, never extra time, and no
+    // longer confirms what was running.
+    lastSeen = entries ? runningOneShots({ graph: input.graph, entries }) : [];
+    if (entries && lastSeen.length > 0) {
+      lastProgressAt = performance.now();
+      input.options.onStartupProgress?.();
     }
     const decision = startWatchDecision({
       now: performance.now(),
@@ -386,7 +385,12 @@ async function watchStartProgress(input: {
       ceilingMs: input.ceilingMs,
     });
     if (decision !== "wait") {
-      return { stopped: true, lastSeen };
+      // Only a ceiling stop leaves one-shots confirmed running by the last
+      // read; an idle stop means none was seen running for the whole budget.
+      return {
+        stopped: true,
+        lastSeen: decision === "ceiling" ? lastSeen : [],
+      };
     }
   }
 }

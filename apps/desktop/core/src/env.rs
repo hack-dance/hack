@@ -74,15 +74,21 @@ impl EnvRow {
     /// `hack.env*.yaml`. Only a layer known to be one of those is written; any
     /// other (a backend such as `portable_backend`, or a name the app does not
     /// know) is refused, so a value never moves from a place kept out of the
-    /// repository into the shared file. A row without a layer (a missing
-    /// required name) has no stored value to move and writes to the shared
-    /// file.
+    /// repository into the shared file. A row without a layer writes to the
+    /// shared file only when it has no stored value to move (a missing
+    /// required name); a stored value whose layer is not listed is refused.
     ///
     /// # Errors
     /// The reason, for a layer the app does not write.
     pub fn write_layer(&self) -> Result<bool, String> {
         let Some(layer) = self.layer.as_deref() else {
-            return Ok(false);
+            if self.missing || !self.has_value {
+                return Ok(false);
+            }
+            return Err(format!(
+                "{} has a value but the listing does not say where it is stored: edit it with the CLI so it stays there.",
+                self.key
+            ));
         };
         let name = layer.rsplit('/').next().unwrap_or(layer);
         if name == "local"
@@ -833,7 +839,14 @@ mod tests {
         }
         assert_eq!(row(Some(".hack/hack.env.yaml")).write_layer(), Ok(false));
         assert_eq!(row(Some(".hack/.env")).write_layer(), Ok(true));
-        assert_eq!(row(None).write_blocked(), None);
+        // No layer: a missing name writes to the shared file; a stored
+        // value of unknown origin is refused.
+        let mut absent = row(None);
+        absent.has_value = false;
+        absent.missing = true;
+        assert_eq!(absent.write_blocked(), None);
+        let why = row(None).write_blocked().expect("stored, no layer");
+        assert!(why.contains("CLI"), "{why}");
     }
 
     #[test]

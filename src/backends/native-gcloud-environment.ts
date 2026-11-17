@@ -49,7 +49,22 @@ function missingCli(): Error {
   });
 }
 
-/** Whether any service of the input binds the recognized gcloud ADC file. */
+/**
+ * A mount whose source names the gcloud ADC file in any spelling (`~`,
+ * `$HOME`, `${HOME}` or an absolute home path), valid or not. The adapter
+ * decides whether its form is accepted; a candidate is never read here.
+ */
+export function nativeGcloudCredentialCandidate(value: unknown): boolean {
+  let source: unknown;
+  if (typeof value === "string") {
+    source = value.split(":")[0];
+  } else if (isRecord(value)) {
+    source = value.source;
+  }
+  return typeof source === "string" && source.endsWith(`/${ADC_RELATIVE}`);
+}
+
+/** Whether any service of the input has a gcloud ADC mount candidate. */
 export function hasNativeGcloudCredentialMount(
   input: Pick<NativeProjectInput, "normalizedComposeJson">
 ): boolean {
@@ -61,7 +76,9 @@ export function hasNativeGcloudCredentialMount(
       (service) =>
         isRecord(service) &&
         Array.isArray(service.volumes) &&
-        service.volumes.some((volume) => nativeGcloudCredentialMount(volume))
+        service.volumes.some((volume) =>
+          nativeGcloudCredentialCandidate(volume)
+        )
     )
   );
 }

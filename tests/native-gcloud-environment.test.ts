@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   adaptNativeGcloudEnvironment,
+  hasNativeGcloudCredentialMount,
   nativeGcloudCredentialType,
   parseNativeGcloudSelection,
 } from "../src/backends/native-gcloud-environment.ts";
@@ -521,4 +522,49 @@ test("only the explicit file selector is accepted", () => {
       "HACK_NATIVE_GCLOUD_ADC accepts only `file`."
     );
   }
+});
+
+test("HACK-2324: every ADC spelling is a candidate for the pre-hook review, and the pure removal reads nothing", async () => {
+  const root = "/home/fixture-user";
+  for (const source of [
+    `~/${ADC}`,
+    `$HOME/${ADC}`,
+    `\${HOME}/${ADC}`,
+    `${root}/${ADC}`,
+  ]) {
+    for (const volume of [
+      `${source}:/config/adc.json:ro`,
+      { type: "bind", source, target: "/config/adc.json", read_only: true },
+    ]) {
+      const candidate = input({ web: { image: "x", volumes: [volume] } });
+      expect(hasNativeGcloudCredentialMount(candidate)).toBe(true);
+      // No ADC file exists under this home: deliver: false must not read it.
+      const { input: stripped } = await adaptNativeGcloudEnvironment({
+        input: candidate,
+        mode: "file",
+        deliver: false,
+        homeDirectory: root,
+      });
+      expect(stripped.normalizedComposeJson).not.toContain(ADC);
+    }
+  }
+  // A writable form is still a candidate, so the adapter (not a generic
+  // review finding) refuses it.
+  const writable = input({
+    web: { image: "x", volumes: [`~/${ADC}:/config/adc.json:rw`] },
+  });
+  expect(hasNativeGcloudCredentialMount(writable)).toBe(true);
+  await expect(
+    adaptNativeGcloudEnvironment({
+      input: writable,
+      mode: "file",
+      deliver: false,
+      homeDirectory: root,
+    })
+  ).rejects.toThrow("Native gcloud adaptation refused");
+  expect(
+    hasNativeGcloudCredentialMount(
+      input({ web: { image: "x", volumes: ["./src:/app"] } })
+    )
+  ).toBe(false);
 });

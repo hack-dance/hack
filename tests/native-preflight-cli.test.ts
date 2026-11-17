@@ -1935,3 +1935,31 @@ test(
   },
   SPAWN_TIMEOUT_MS * 2
 );
+
+test(
+  "HACK-2324: an ADC mount the adapter refuses is named as such, not as a generic mount finding",
+  async () => {
+    const f = await fixture({
+      services: {
+        app: {
+          image: IMAGE,
+          volumes: [
+            "~/.config/gcloud/application_default_credentials.json:/config/adc.json:rw",
+          ],
+        },
+      },
+    });
+    await f.review([], { services: { app: { active: true } } });
+    const result = await preflight(f, {
+      ...f.native,
+      ...GRANT,
+      HACK_NATIVE_GCLOUD_ADC: "file",
+    });
+    expect(
+      result.report.blockers
+        .filter((found) => found.code.startsWith("gcloud_"))
+        .map((found) => found.code)
+    ).toEqual(["gcloud_adc_mount_refused"]);
+  },
+  SPAWN_TIMEOUT_MS
+);

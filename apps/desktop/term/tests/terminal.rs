@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::{DEADLINE, TempHome, fake_hack, hermetic, sh, sh_source};
 use hack_desktop_term::launch::{HackCli, Name, SessionKind, container_shell};
 use hack_desktop_term::stream::StreamSource;
-use hack_desktop_term::terminal::{SETTLE_MAX, Status, TerminalCore};
+use hack_desktop_term::terminal::{Status, TerminalCore};
 
 fn pump_to_end(core: &mut TerminalCore) {
     let start = Instant::now();
@@ -175,9 +175,9 @@ fn typing_while_a_container_tab_opens_does_not_cancel_the_fallback_to_sh() {
 enum TypedAt {
     /// Straight after the tab opens, before the first pump.
     Opening,
-    /// While the attempt has printed nothing and [`SETTLE_MAX`] has passed:
-    /// a slow `docker exec`.
-    SilentPastSettleMax,
+    /// While the attempt has printed nothing for seconds: a slow
+    /// `docker exec`.
+    SilentForSeconds,
     /// As the error appears, while the attempt is still alive.
     WithTheError,
     /// After the attempt exited, before any pump saw the exit.
@@ -225,8 +225,8 @@ fn fallback_with_input(at: TypedAt, fail_after: &str, exit_after: &str) {
     let typed: &[u8] = b"echo \"typed=[$((4 + 5))]\"\n";
     match at {
         TypedAt::Opening => core.send(typed),
-        TypedAt::SilentPastSettleMax => {
-            pump_for(&mut core, SETTLE_MAX + Duration::from_millis(300));
+        TypedAt::SilentForSeconds => {
+            pump_for(&mut core, Duration::from_millis(2300));
             assert_eq!(
                 core.kind().label(),
                 "api · bash",
@@ -274,8 +274,8 @@ fn typing_at_the_opening_of_a_slow_failing_bash_still_falls_back() {
 }
 
 #[test]
-fn typing_while_a_slow_bash_attempt_is_silent_past_settle_max_still_falls_back() {
-    fallback_with_input(TypedAt::SilentPastSettleMax, "3", "");
+fn typing_while_a_slow_bash_attempt_is_silent_still_falls_back() {
+    fallback_with_input(TypedAt::SilentForSeconds, "3", "");
 }
 
 #[test]
@@ -293,6 +293,33 @@ fn typing_after_bash_exited_but_before_a_pump_saw_it_still_falls_back() {
 #[test]
 fn typing_while_the_failed_bash_attempt_drains_still_falls_back() {
     fallback_with_input(TypedAt::ExitSeen, "", "0.7");
+}
+
+/// A shell that did start but prints nothing must never run what is typed
+/// twice: held input reaches it only once the fallback window has passed,
+/// so its own `exit 127` ends the session instead of a fallback to `sh`.
+#[test]
+fn input_to_a_silent_shell_that_then_exits_127_runs_once() {
+    let home = TempHome::new();
+    let mut core =
+        TerminalCore::session(container_plan(&home, &[("FAKE_HACK_SILENT", "1")])).expect("spawn");
+    let ran = home.path().join("ran");
+    core.send(format!("printf x >> '{}'; exit 127\n", ran.display()).as_bytes());
+    pump_to_end(&mut core);
+    assert_eq!(
+        std::fs::read_to_string(&ran).unwrap_or_default(),
+        "x",
+        "the command ran exactly once"
+    );
+    assert_eq!(
+        core.kind().label(),
+        "api · bash",
+        "no fallback after typing"
+    );
+    assert_eq!(
+        *core.status(),
+        Status::Ended("process ended (exit status 127)".into())
+    );
 }
 
 #[test]

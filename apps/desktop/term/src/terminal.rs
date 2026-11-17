@@ -19,16 +19,14 @@
 //!
 //! While another attempt is still possible, input is held until the
 //! current attempt has settled: it produced output and stayed running for
-//! [`SETTLE_AFTER_OUTPUT`], or ran for [`SETTLE_MAX`]. Input is also held
-//! once the attempt has exited, until the session falls back or ends.
+//! [`SETTLE_AFTER_OUTPUT`], or ran for the whole [`FALLBACK_WINDOW`] (a
+//! shell that prints no prompt). Input is also held once the attempt has
+//! exited, until the session falls back or ends. Input therefore only ever
+//! reaches one attempt: held input goes to the attempt that settles, `sh`
+//! after a missing `bash` included, and counts as typed from then on.
+//! However slow `docker exec` is to fail, typing while the tab opens never
+//! cancels the fallback, and nothing typed runs twice.
 //!
-//! Only input delivered after the attempt produced output and stayed
-//! running for [`SETTLE_AFTER_OUTPUT`] counts as typed. Input delivered to
-//! an attempt that has printed nothing (held input released at
-//! [`SETTLE_MAX`], or typed after that) is kept, and if the attempt then
-//! fails with 126 or 127 it is replayed to the next attempt. So typing while
-//! the tab opens never cancels the fallback, however slow the failing
-//! attempt is to print its error, and never reaches only the dying attempt.
 //! An attempt that prints and then stays running for longer than
 //! [`SETTLE_AFTER_OUTPUT`] counts as started: input from then on is the
 //! user's, and a later 126 or 127 ends the session (a started shell running
@@ -58,8 +56,6 @@ pub const FALLBACK_WINDOW: Duration = Duration::from_secs(10);
 /// With another attempt possible, how long an attempt must keep running
 /// after its first output before held input is delivered to it.
 pub const SETTLE_AFTER_OUTPUT: Duration = Duration::from_millis(500);
-/// With another attempt possible, the longest input is held.
-pub const SETTLE_MAX: Duration = Duration::from_secs(2);
 
 enum Backend {
     Stream(ByteStream),
@@ -119,9 +115,6 @@ pub struct TerminalCore {
     /// Input typed before the current attempt settled, while another
     /// attempt is still possible. See the module docs.
     held: Vec<u8>,
-    /// Input delivered to the current attempt that does not count as typed
-    /// yet: replayed to the next attempt if this one could not start.
-    replay: Vec<u8>,
     /// When the current attempt first produced output.
     first_output: Option<Instant>,
     /// Teardowns of backends this core ended by itself (end of stream,
@@ -248,7 +241,6 @@ impl TerminalCore {
             started: Instant::now(),
             input_sent: false,
             held: Vec::new(),
-            replay: Vec::new(),
             first_output: None,
             retired: Vec::new(),
             retired_survivors: 0,
@@ -421,7 +413,8 @@ impl TerminalCore {
     /// attempt is left, or this one has settled (module docs).
     fn settled(&self) -> bool {
         self.remaining.is_empty()
-            || (!self.exited() && (self.showed_itself() || self.started.elapsed() >= SETTLE_MAX))
+            || (!self.exited()
+                && (self.showed_itself() || self.started.elapsed() >= FALLBACK_WINDOW))
     }
 
     /// The current attempt printed something and stayed running for
@@ -456,11 +449,6 @@ impl TerminalCore {
         match Pty::spawn(&options) {
             Ok(pty) => {
                 self.leaders.push(pty.pid());
-                // Input the failed attempt took before it showed itself
-                // goes to this one, ahead of anything held since.
-                let mut replay = std::mem::take(&mut self.replay);
-                replay.append(&mut self.held);
-                self.held = replay;
                 // A full reset: the failed attempt's error text is not part
                 // of the session the user asked for.
                 self.emu.feed(b"\x1bc");
@@ -486,9 +474,7 @@ impl TerminalCore {
         }
         if !self.settled() || !self.held.is_empty() {
             // Keep order: anything typed after held input waits with it.
-            // Replayable input counts too: a fallback delivers both.
-            let kept = self.held.len() + self.replay.len();
-            if kept + bytes.len() > crate::pty::INPUT_QUEUE_BYTES {
+            if self.held.len() + bytes.len() > crate::pty::INPUT_QUEUE_BYTES {
                 self.notice = Some(dropped_notice(bytes.len()));
             } else {
                 self.held.extend_from_slice(bytes);
@@ -499,10 +485,9 @@ impl TerminalCore {
         self.deliver(bytes, true);
     }
 
-    /// Write input to the current attempt. It counts as typed once the
-    /// attempt has shown itself; before that it is kept for a replay (module
-    /// docs). `fresh`: input the user just gave, which replaces any notice;
-    /// held input delivered later leaves the notice as it is.
+    /// Write input to the current attempt; it now counts as typed. `fresh`:
+    /// input the user just gave, which replaces any notice; held input
+    /// delivered later leaves the notice as it is.
     fn deliver(&mut self, bytes: &[u8], fresh: bool) {
         let Backend::Pty(pty) = &self.backend else {
             return;
@@ -512,16 +497,7 @@ impl TerminalCore {
                 if fresh {
                     self.notice = None;
                 }
-                if self.input_sent || self.remaining.is_empty() || self.showed_itself() {
-                    self.input_sent = true;
-                    self.replay.clear();
-                } else if self.replay.len() + bytes.len() > crate::pty::INPUT_QUEUE_BYTES {
-                    // Too much to replay: treat it as typed, no fallback.
-                    self.input_sent = true;
-                    self.replay.clear();
-                } else {
-                    self.replay.extend_from_slice(bytes);
-                }
+                self.input_sent = true;
             }
             WriteOutcome::Dropped { bytes } => {
                 self.notice = Some(dropped_notice(bytes));

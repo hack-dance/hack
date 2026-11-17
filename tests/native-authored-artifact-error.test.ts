@@ -260,6 +260,24 @@ test("sites come only from frame lines that name a real Hack source file", () =>
   expect(JSON.stringify(failure)).not.toContain(CANARY);
 });
 
+test("message lines never count as frames, and a site must be a line the file has", () => {
+  const root = `${dirname(import.meta.dir)}/src`;
+  const real = "backends/native-authored-artifact-error.ts";
+  const message = `fixture\n    at m (${root}/${real}:3:1)`;
+  const failure = nativeAuthoredArtifactError(
+    Object.assign(new Error(message), {
+      stack: [
+        `Error: ${message}`,
+        `    at a (${root}/${real}:999999:1)`,
+        `    at b (${root}/${real}:0:1)`,
+        `    at c (${root}/${real}:5:1)`,
+      ].join("\n"),
+    }),
+    "action"
+  );
+  expect(failure.diagnostic.sites).toEqual([`${real}:5`]);
+});
+
 test("an oversized stack is bounded before matching", () => {
   const huge = `    at x (${"a".repeat(200_000)}`;
   const started = performance.now();

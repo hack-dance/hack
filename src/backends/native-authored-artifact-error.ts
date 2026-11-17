@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { types } from "node:util";
 import {
@@ -258,17 +258,44 @@ function sources(): ReadonlySet<string> {
   return found;
 }
 
+const sourceLines = new Map<string, number>();
+/** The number of lines in an inventory file, read once; 0 when unreadable. */
+function lineCount(relative: string): number {
+  let count = sourceLines.get(relative);
+  if (count === undefined) {
+    try {
+      count = readFileSync(join(SOURCE_ROOT, relative), "utf8").split(
+        "\n"
+      ).length;
+    } catch {
+      count = 0;
+    }
+    sourceLines.set(relative, count);
+  }
+  return count;
+}
+
 /**
  * Hack source locations relative to `src/`, from frame lines only, naming files in
- * the source inventory. The checkout prefix, message and any other text never leave.
+ * the source inventory at a line that file has. The checkout prefix, message and
+ * any other text never leave. These are hints, not proof: a stack is writable, so
+ * code that rewrites it can still name the wrong line of a real file. The lines
+ * of the error's own message are skipped, so message text never counts as a
+ * frame.
  */
 function sourceSites(error: object): string[] {
   const stack = ownData(error, "stack");
   if (typeof stack !== "string") {
     return [];
   }
+  const message = ownData(error, "message");
+  const headerLines =
+    typeof message === "string" ? message.split("\n", 64).length : 1;
   const sites: string[] = [];
-  for (const line of stack.slice(0, MAX_STACK_CHARS).split("\n", 64)) {
+  for (const line of stack
+    .slice(0, MAX_STACK_CHARS)
+    .split("\n", 64 + headerLines)
+    .slice(headerLines)) {
     if (line.length > MAX_FRAME_CHARS) {
       continue;
     }
@@ -278,7 +305,12 @@ function sourceSites(error: object): string[] {
       continue;
     }
     const relative = path.slice(SOURCE_ROOT.length);
-    if (!sources().has(relative)) {
+    const lineNumber = Number(match[2]);
+    if (
+      !sources().has(relative) ||
+      lineNumber < 1 ||
+      lineNumber > lineCount(relative)
+    ) {
       continue;
     }
     sites.push(`${relative}:${match[2]}`);

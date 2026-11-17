@@ -16,6 +16,13 @@
 //! container shell: `bash`, then `sh`) moves to the next attempt when the
 //! current one could not start its program: it ended with exit status 126
 //! or 127 within [`FALLBACK_WINDOW`], before the user typed anything.
+//!
+//! While another attempt is still possible, input is held until the
+//! current attempt has settled: it produced output and stayed running for
+//! [`SETTLE_AFTER_OUTPUT`], or ran for [`SETTLE_MAX`]. Held input goes to
+//! the attempt that settles, `sh` after a missing `bash` included, and does
+//! not count as typing before then, so typing while the tab opens never
+//! cancels the fallback. A single-attempt session never holds input.
 
 use std::time::{Duration, Instant};
 
@@ -38,6 +45,11 @@ pub const EXIT_DRAIN_CAP: Duration = Duration::from_secs(5);
 pub const EOF_EXIT_WAIT: Duration = Duration::from_millis(250);
 /// How soon a "command not found" exit must come to try the next attempt.
 pub const FALLBACK_WINDOW: Duration = Duration::from_secs(10);
+/// With another attempt possible, how long an attempt must keep running
+/// after its first output before held input is delivered to it.
+pub const SETTLE_AFTER_OUTPUT: Duration = Duration::from_millis(500);
+/// With another attempt possible, the longest input is held.
+pub const SETTLE_MAX: Duration = Duration::from_secs(2);
 
 enum Backend {
     Stream(ByteStream),
@@ -94,6 +106,11 @@ pub struct TerminalCore {
     remaining: Vec<Launch>,
     started: Instant,
     input_sent: bool,
+    /// Input typed before the current attempt settled, while another
+    /// attempt is still possible. See the module docs.
+    held: Vec<u8>,
+    /// When the current attempt first produced output.
+    first_output: Option<Instant>,
     /// Teardowns of backends this core ended by itself (end of stream,
     /// the session ended, a failed attempt replaced) that have not finished.
     /// Kept so app quit can hurry and await them; see [`Self::take_retired`].
@@ -217,6 +234,8 @@ impl TerminalCore {
             remaining,
             started: Instant::now(),
             input_sent: false,
+            held: Vec::new(),
+            first_output: None,
             retired: Vec::new(),
             retired_survivors: 0,
             leaders,
@@ -333,6 +352,7 @@ impl TerminalCore {
                 if !read.bytes.is_empty() {
                     busy = true;
                     self.last_output = Instant::now();
+                    self.first_output.get_or_insert(self.last_output);
                     let reply = self.emu.feed(&read.bytes);
                     // Query replies are a few bytes; if the child is not
                     // reading there is nobody waiting for them.
@@ -370,11 +390,25 @@ impl TerminalCore {
                         let ended = std::mem::replace(&mut self.backend, Backend::Closed);
                         self.retire(ended);
                     }
+                } else if !self.held.is_empty() && self.exit_seen.is_none() && self.settled() {
+                    let held = std::mem::take(&mut self.held);
+                    self.deliver(&held);
+                    busy = true;
                 }
             }
             Backend::Closed => {}
         }
         busy
+    }
+
+    /// Whether input goes straight to the current attempt: no other
+    /// attempt is left, or this one has settled (module docs).
+    fn settled(&self) -> bool {
+        self.remaining.is_empty()
+            || self
+                .first_output
+                .is_some_and(|t| t.elapsed() >= SETTLE_AFTER_OUTPUT)
+            || self.started.elapsed() >= SETTLE_MAX
     }
 
     /// Start the next attempt of the plan if the current one could not
@@ -402,6 +436,7 @@ impl TerminalCore {
                 self.eof_seen = None;
                 self.last_output = Instant::now();
                 self.started = Instant::now();
+                self.first_output = None;
                 true
             }
             Err(_) => false,
@@ -411,12 +446,27 @@ impl TerminalCore {
     /// Queue input for the PTY (no-op for a stream). Input that cannot be
     /// queued is dropped whole and reported through [`Self::notice`].
     pub fn send(&mut self, bytes: &[u8]) {
+        if !matches!(self.backend, Backend::Pty(_)) || bytes.is_empty() {
+            return;
+        }
+        if !self.settled() || !self.held.is_empty() {
+            // Keep order: anything typed after held input waits with it.
+            if self.held.len() + bytes.len() > crate::pty::INPUT_QUEUE_BYTES {
+                self.notice = Some(dropped_notice(bytes.len()));
+            } else {
+                self.held.extend_from_slice(bytes);
+                self.notice = None;
+            }
+            return;
+        }
+        self.deliver(bytes);
+    }
+
+    /// Write input to the current attempt; it now counts as typed.
+    fn deliver(&mut self, bytes: &[u8]) {
         let Backend::Pty(pty) = &self.backend else {
             return;
         };
-        if bytes.is_empty() {
-            return;
-        }
         match pty.write(bytes) {
             WriteOutcome::Queued => {
                 self.notice = None;

@@ -151,6 +151,26 @@ fn a_container_without_bash_falls_back_to_sh_and_the_tab_says_so() {
 }
 
 #[test]
+fn typing_while_a_container_tab_opens_does_not_cancel_the_fallback_to_sh() {
+    let home = TempHome::new();
+    let mut core =
+        TerminalCore::session(container_plan(&home, &[("FAKE_HACK_NO_BASH", "1")])).expect("spawn");
+    // A fast typist: input before the bash attempt has printed or failed.
+    core.send(b"echo \"typed=[$((1 + 2))]\"\n");
+    let screen = pump_until(&mut core, "typed=[3]");
+    assert_eq!(
+        core.kind().label(),
+        "api · sh",
+        "bash was missing, so sh started"
+    );
+    assert!(
+        screen.contains("typed=[3]"),
+        "the held input reached sh: {screen:?}"
+    );
+    assert_eq!(*core.status(), Status::Running);
+}
+
+#[test]
 fn a_container_with_bash_keeps_it_and_a_later_exit_127_is_not_a_fallback() {
     let home = TempHome::new();
     let mut core = TerminalCore::session(container_plan(&home, &[])).expect("spawn");

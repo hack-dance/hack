@@ -100,6 +100,26 @@ impl EnvRow {
         }
     }
 
+    /// The one scope a write to this row goes to (`--service`). A legacy
+    /// row limited to several services has none: one write cannot cover
+    /// them, so editing it in the app is refused and the reason says how.
+    ///
+    /// # Errors
+    /// The reason, for a row the app cannot write in one scope.
+    pub fn write_scope(&self) -> Result<String, String> {
+        match &self.scope {
+            Scope::Legacy(services) if services.len() > 1 => Err(format!(
+                "{} applies to {}; one write cannot cover several services. Edit it with the CLI per service, or migrate the project's env (hack env migrate).",
+                self.key,
+                services.join(", ")
+            )),
+            Scope::Legacy(services) => {
+                Ok(services.first().cloned().unwrap_or_else(|| "global".into()))
+            }
+            Scope::Canonical(_) => Ok(self.scope_name()),
+        }
+    }
+
     /// The scope name, `global` when the listing does not name one.
     #[must_use]
     pub fn scope_name(&self) -> String {
@@ -749,6 +769,37 @@ mod tests {
         assert!(row(Some("local")).is_local_layer());
         assert!(!row(Some(".hack/hack.env.json")).is_local_layer());
         assert!(!row(None).is_local_layer());
+    }
+
+    #[test]
+    fn a_legacy_row_for_several_services_has_no_single_write_scope() {
+        let row = |scope: Scope| EnvRow {
+            key: "K".into(),
+            required: false,
+            storage: Storage {
+                kind: "plaintext".into(),
+            },
+            resolved_from: None,
+            has_value: true,
+            scope,
+            layer: None,
+            missing: false,
+        };
+        assert_eq!(row(Scope::Legacy(vec![])).write_scope().unwrap(), "global");
+        assert_eq!(
+            row(Scope::Legacy(vec!["api".into()]))
+                .write_scope()
+                .unwrap(),
+            "api"
+        );
+        assert_eq!(
+            row(Scope::Canonical("web".into())).write_scope().unwrap(),
+            "web"
+        );
+        let refused = row(Scope::Legacy(vec!["api".into(), "web".into()]))
+            .write_scope()
+            .unwrap_err();
+        assert!(refused.contains("api, web") && refused.contains("hack env migrate"));
     }
 
     #[test]

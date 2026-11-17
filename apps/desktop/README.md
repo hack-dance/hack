@@ -599,7 +599,9 @@ that one name first when the listing has not shown it; until then Save
 stores only text you type, never an empty field, so an unchanged Save never
 blanks it; a late read never overwrites what you typed); a
 secret starts empty, and its field is masked. A secret cannot be edited while
-the key is missing. The editor closes on another overlay, scope, tab or
+the key is missing, and a legacy variable limited to several services cannot
+be edited in the app (one write cannot cover them): the editor says to use the
+CLI per service or `hack env migrate`. The editor closes on another overlay, scope, tab or
 project. After Save the tab says "Saved NAME" and lists again.
 
 What needs the CLI is shown, not hidden: **+ Overlay** (create an overlay,

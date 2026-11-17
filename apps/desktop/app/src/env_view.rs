@@ -42,6 +42,9 @@ pub(crate) struct EnvEdit {
     pub value: Entity<InputState>,
     pub busy: bool,
     pub error: Option<String>,
+    /// Why this row cannot be written from the app at all (a legacy row for
+    /// several services); Save stays off.
+    pub blocked: Option<String>,
     /// The field holds the value Save may store: false while an existing
     /// plaintext value is still being read, or could not be. Until then
     /// Save stores only text the user typed, never an empty field, so an
@@ -406,7 +409,10 @@ impl HackApp {
             // An existing row is written where it lives (a global row
             // shown in a service listing stays global); a missing required
             // name has no scope yet and takes the listing's.
-            scope: row.map(EnvRow::scope_name).filter(|s| s != "unknown"),
+            scope: row
+                .and_then(|r| r.write_scope().ok())
+                .filter(|s| s != "unknown"),
+            blocked: row.and_then(|r| r.write_scope().err()),
             local: row.is_some_and(EnvRow::is_local_layer),
             id: {
                 self.env_edit_seq += 1;
@@ -415,7 +421,7 @@ impl HackApp {
             name,
             value,
             busy: false,
-            error: read_error,
+            error: row.and_then(|r| r.write_scope().err()).or(read_error),
             ready,
         });
         self.env_saved = None;
@@ -511,7 +517,7 @@ impl HackApp {
     /// Save is allowed once the field holds the current value, or text the
     /// user typed. An empty field over an unread value is never saved.
     fn edit_can_save(edit: &EnvEdit, cx: &gpui_kit::App) -> bool {
-        edit.ready || !edit.value.read(cx).value().is_empty()
+        edit.blocked.is_none() && (edit.ready || !edit.value.read(cx).value().is_empty())
     }
 
     fn edit_name(edit: &EnvEdit, cx: &gpui_kit::App) -> String {
@@ -1514,5 +1520,32 @@ mod tests {
             cx.update(|cx| app.read(cx).env_saved.clone()).as_deref(),
             Some("Saved NOT_LISTED")
         );
+    }
+
+    #[test]
+    fn a_legacy_row_for_several_services_cannot_be_saved_and_says_why() {
+        use hack_desktop_core::env::Scope;
+        let (mut cx, window, app) = app_window();
+        let mut legacy = row(&mut cx, &app, "APP_MODE");
+        legacy.scope = Scope::Legacy(vec!["api".into(), "web".into()]);
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| a.open_env_edit(Some(&legacy), window, cx));
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| {
+                let v = a.env_edit.as_ref().unwrap().value.clone();
+                v.update(cx, |s, cx| s.set_value("fake-typed", window, cx));
+                a.save_env_edit(cx);
+            });
+        })
+        .unwrap();
+        let (busy, error, saved) = cx.update(|cx| {
+            let a = app.read(cx);
+            let e = a.env_edit.as_ref().unwrap();
+            (e.busy, e.error.clone(), a.env_saved.clone())
+        });
+        assert!(!busy && saved.is_none(), "nothing was written");
+        assert!(error.unwrap().contains("api, web"));
     }
 }

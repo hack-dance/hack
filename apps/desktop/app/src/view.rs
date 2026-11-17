@@ -527,7 +527,9 @@ impl HackApp {
         if !self.live {
             return;
         }
-        let source = self.source.clone();
+        // Bound to the CLI selected now: a switch before the background
+        // task runs cannot make this action run another CLI.
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
         let epoch = self.model.source_epoch();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -581,7 +583,10 @@ impl HackApp {
         }
         self.recovery_busy = true;
         self.recovery_error = None;
-        let source = self.source.clone();
+        // Starts or restarts the hackd of the CLI selected now, whatever is
+        // selected by the time the task runs.
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        let epoch = self.model.source_epoch();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -590,7 +595,8 @@ impl HackApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.recovery_busy = false;
-                this.recovery_error = result.err();
+                // A failure of the previous CLI's hackd is not this one's.
+                this.recovery_error = result.err().filter(|_| this.model.source_epoch() == epoch);
                 // A command exit is not evidence that a compatible daemon
                 // is ready. Only the next ordered snapshot can restore rows.
                 this.refresh_now_async(cx);

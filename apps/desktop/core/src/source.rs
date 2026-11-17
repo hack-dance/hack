@@ -336,6 +336,13 @@ pub trait Source: Send + Sync {
         None
     }
 
+    /// This source bound to the CLI it runs now, for an action accepted
+    /// now: a switch afterwards cannot make the action run another CLI.
+    /// `None` when the source has no CLI to switch (fixtures).
+    fn pinned(&self) -> Option<std::sync::Arc<dyn Source>> {
+        None
+    }
+
     /// Run the install at `path` from now on and save that choice.
     ///
     /// # Errors
@@ -1372,6 +1379,13 @@ impl Source for LiveSource {
     }
     fn cli_choice(&self) -> Option<crate::cli_choice::Choice> {
         self.cache.choice.lock().ok()?.clone()
+    }
+
+    fn pinned(&self) -> Option<std::sync::Arc<dyn Source>> {
+        Some(std::sync::Arc::new(LiveSource::new(
+            self.runner.fixed(),
+            self.daemon.clone(),
+        )))
     }
 
     /// Switch every read and action to `path` (one of the installs found),
@@ -3889,6 +3903,21 @@ esac
         assert_eq!(
             cache.compat_get(&("5.0.0".into(), "5.1.0".into())),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn a_pinned_source_keeps_its_cli_after_a_switch() {
+        let src = LiveSource::new(CliRunner::selectable("/opt/one/hack"), None);
+        let pinned = src.pinned().expect("a live source pins");
+        src.runner.select(Path::new("/opt/two/hack-next"));
+        assert_eq!(
+            pinned.hack_program().as_deref(),
+            Some(Path::new("/opt/one/hack"))
+        );
+        assert_eq!(
+            src.hack_program().as_deref(),
+            Some(Path::new("/opt/two/hack-next"))
         );
     }
 

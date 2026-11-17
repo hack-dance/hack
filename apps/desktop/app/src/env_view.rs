@@ -674,4 +674,38 @@ mod tests {
             "copy does not reveal"
         );
     }
+
+    #[test]
+    fn a_refresh_that_changes_the_project_resets_overlay_and_scope() {
+        let (mut cx, app) = app();
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.select_overlay("staging".into(), cx);
+                a.select_scope("api".into(), cx);
+            })
+        });
+        // The selected project goes away in a live refresh.
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                let token = a.model.begin_refresh();
+                let mut snap = hack_desktop_core::fixtures::snapshot(Fixture::Running).unwrap();
+                snap.projects.projects.retain(|p| p.name != "storefront");
+                a.apply_refresh(token, Ok(snap), cx);
+            })
+        });
+        let (env, scope, selected) = cx.update(|cx| {
+            let a = app.read(cx);
+            (
+                a.env.env.clone(),
+                a.env.scope.clone(),
+                a.model.selected_key().map(|k| k.project),
+            )
+        });
+        assert_ne!(selected.as_deref(), Some("storefront"), "another project");
+        assert_eq!(
+            (env, scope),
+            (None, None),
+            "not the last project's overlay or scope"
+        );
+    }
 }

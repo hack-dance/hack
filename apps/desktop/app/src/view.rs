@@ -364,7 +364,7 @@ impl HackApp {
 
     /// Apply a fresh snapshot. If it changed the selected project (the old
     /// one disappeared), the Logs tab's stream follows the new selection.
-    fn apply_refresh(
+    pub(crate) fn apply_refresh(
         &mut self,
         token: RefreshToken,
         snap: Result<Snapshot, SourceError>,
@@ -381,7 +381,7 @@ impl HackApp {
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
             self.logs.model.set_service(None);
-            self.env.begin();
+            self.reset_env_selection();
             if self.tab == 2 {
                 self.read_env(cx);
             }
@@ -609,14 +609,21 @@ impl HackApp {
 
     /// Everything a selection change resets: the pane, the env read, the
     /// Logs tab's stream and its service filter.
-    pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
-        self.pane = Pane::Project;
-        self.copied = None;
-        // Another project: its own overlays and scopes, nothing revealed.
+    /// Another instance: its own overlays and scopes, nothing revealed.
+    /// Explicit selections and refreshes that change the selection both
+    /// come through here, so a new project is never listed with the last
+    /// one's overlay or scope.
+    fn reset_env_selection(&mut self) {
         self.env.env = None;
         self.env.scope = None;
         self.env.running = None;
         self.env.begin();
+    }
+
+    pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
+        self.pane = Pane::Project;
+        self.copied = None;
+        self.reset_env_selection();
         if self.tab == 2 {
             self.read_env(cx);
         }

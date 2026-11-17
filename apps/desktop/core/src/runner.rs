@@ -190,8 +190,66 @@ impl CliRunner {
         }
     }
 
-    /// The executable to start now: what [`Self::rediscover`] last found,
-    /// else `program` (`None` when [`Self::on_path`] found nothing).
+    /// Run `program` (absolute), switchable later with [`Self::select`]:
+    /// every clone follows. The app's own runner is one of these.
+    #[must_use]
+    pub fn selectable(program: impl Into<PathBuf>) -> Self {
+        let program = program.into();
+        let mut runner = Self::new(program.clone());
+        runner.pinned = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(program))));
+        runner
+    }
+
+    /// No usable CLI: every command reports `NotFound` and nothing is
+    /// started, until [`Self::select`] or setup's [`Self::rediscover`]
+    /// gives it one.
+    #[must_use]
+    pub fn unavailable(name: &str) -> Self {
+        let mut runner = Self::new(name);
+        runner.missing = true;
+        // Setup's recheck searches PATH for it again (`rediscover`).
+        runner.path_name = Some(name.into());
+        runner.pinned = Some(std::sync::Arc::default());
+        runner
+    }
+
+    /// This runner's settings with another (absolute) program, not switchable.
+    #[must_use]
+    pub fn with_program(&self, program: &Path) -> Self {
+        Self {
+            program: program.to_path_buf(),
+            missing: false,
+            pinned: None,
+            ..self.clone()
+        }
+    }
+
+    /// This runner with its current program fixed: later [`Self::select`]
+    /// calls do not change it. One read uses one of these throughout.
+    #[must_use]
+    pub fn fixed(&self) -> Self {
+        let program = self.current_program();
+        Self {
+            program: program.clone().unwrap_or_else(|| self.program.clone()),
+            missing: program.is_none(),
+            pinned: None,
+            ..self.clone()
+        }
+    }
+
+    /// Run `program` from now on, in this runner and every clone of it. A
+    /// runner that is not [`Self::selectable`] (or [`Self::on_path`]) is
+    /// unchanged.
+    pub fn select(&self, program: &Path) {
+        if let Some(slot) = &self.pinned
+            && let Ok(mut slot) = slot.lock()
+        {
+            *slot = Some(program.to_path_buf());
+        }
+    }
+
+    /// The executable to start now: the selected one, else `program`
+    /// (`None` when [`Self::on_path`] found nothing).
     fn current_program(&self) -> Option<PathBuf> {
         if let Some(slot) = &self.pinned
             && let Some(found) = slot.lock().ok().and_then(|g| g.clone())

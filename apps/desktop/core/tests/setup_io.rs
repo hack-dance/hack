@@ -76,7 +76,7 @@ esac
     let source = LiveSource {
         runner,
         daemon: None,
-        compat: Default::default(),
+        cache: Default::default(),
     };
     let r = source.setup();
     assert_eq!(
@@ -147,7 +147,7 @@ fn exhausted_budget_never_spawns_fake_cli() {
             .with_env("HOME", t.0.to_str().unwrap())
             .with_env("HACK_HOME", t.0.join("hack").to_str().unwrap()),
         daemon: None,
-        compat: Default::default(),
+        cache: Default::default(),
     };
     let r = source.read_setup_within(Duration::ZERO);
     assert!(!r.cli_ready());
@@ -168,7 +168,7 @@ fn shared_source_recovers_after_cli_install_and_actions_use_same_executable() {
     let source = LiveSource {
         runner,
         daemon: None,
-        compat: Default::default(),
+        cache: Default::default(),
     };
     assert!(!source.setup().cli_ready());
     std::fs::write(
@@ -237,7 +237,7 @@ esac
             )
             .with_env("HACK_SYSTEMD_DISABLE", "0"),
         daemon: None,
-        compat: Default::default(),
+        cache: Default::default(),
     }
 }
 #[test]
@@ -346,7 +346,7 @@ fn terminal_binds_checked_path_and_context_despite_different_login_environment()
             .with_env("HACK_LAUNCHD_DISABLE", "1")
             .with_env("HACK_RUNTIME_BACKEND", "compose"),
         daemon: None,
-        compat: Default::default(),
+        cache: Default::default(),
     };
     let report = source.setup();
     source.runner = source.runner.clone().with_env("PATH", "/wrong/login/bin");
@@ -410,7 +410,7 @@ fn version_timeout_is_unknown_without_forcing_a_missing_cli_gate() {
             .with_env("HACK_HOME", t.0.join(".hack").to_str().unwrap())
             .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
         daemon: None,
-        compat: Default::default(),
+        cache: Default::default(),
     };
     source
         .runner

@@ -10,6 +10,7 @@
 //! The app keeps no state of its own beyond window layout and holds no
 //! credentials; every action is one CLI command.
 
+pub mod cli_choice;
 pub mod daemon;
 pub mod doctor;
 mod doctor_acl;

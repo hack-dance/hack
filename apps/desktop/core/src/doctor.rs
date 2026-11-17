@@ -876,6 +876,18 @@ pub struct DoctorPane {
 }
 
 impl DoctorPane {
+    /// The app now runs another Hack CLI: forget the result and any run in
+    /// flight. The generation keeps counting, so a run started under the
+    /// previous CLI can never be taken for a later one.
+    pub fn source_changed(&mut self) {
+        self.result = DoctorState::NeverRun;
+        self.in_flight = None;
+        self.checked_at = None;
+        self.checked_targets = None;
+        self.stale = false;
+        self.filter = None;
+    }
+
     /// Start a run for these targets (`None`: the project list could not
     /// be read, so only machine checks run); returns its generation.
     pub fn begin(&mut self, targets: Option<&[TargetKey]>) -> u64 {
@@ -1913,6 +1925,20 @@ mod tests {
             assert!(p.stale, "{changed:?}");
             assert!(p.needs_refresh(t0));
         }
+    }
+
+    #[test]
+    fn a_run_started_under_the_previous_cli_never_lands() {
+        let t0 = Instant::now();
+        let runs = [machine(vec![check("docker", "ok", "")])];
+        let mut pane = DoctorPane::default();
+        let old = pane.begin(Some(&[]));
+        pane.source_changed();
+        assert_eq!(pane.finish(old, &runs, Some(&[]), t0), Finish::Discarded);
+        let new = pane.begin(Some(&[]));
+        assert_ne!(new, old, "generations keep counting across a switch");
+        assert_eq!(pane.finish(old, &runs, Some(&[]), t0), Finish::Discarded);
+        assert_ne!(pane.finish(new, &runs, Some(&[]), t0), Finish::Discarded);
     }
 
     #[test]

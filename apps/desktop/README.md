@@ -87,6 +87,32 @@ no projects while a healthy prerelease hackd was running. The socket is asked
 for once per CLI and again when it stops answering. A CLI that does not report
 one uses the home it inherits (`HACK_HOME`, else `~/.hack`).
 
+Every `hack daemon` command the app runs on its own (the status reads that
+find hackd and decide compatibility, and **Start / Restart hackd** in the
+project pane) runs the selected CLI the way Setup runs its actions: pinned to
+that executable, in the checked execution context (a clean environment with
+only its allowlist, and a `PATH` of directories no other user can change),
+with `HACK_MCP_COMMAND` naming the same executable. The CLI starts hackd by
+invoking itself; without that it would use the first `hack` on `PATH`, which
+on a machine with several installs can be another one. A failed Start or
+Restart shows the CLI's stderr and stdout (both bounded).
+
+hackd counts as running when the CLI says so (`running`), and also when its
+API answers (`status: "running"` with `api_ok` or `api_reachable`) without a
+tracked PID, so a hackd started outside the CLI's PID file is never offered
+Start. The socket client connects without blocking and keeps one deadline
+for the whole request, so a full listen backlog or a reply that trickles in
+cannot hold a read past it. A `/v1/status` reply without a status or a
+version is not a status.
+
+One machine action runs at a time: Setup's Start / Install hackd and Start /
+Restart hackd in the project pane share one gate; while one runs the others
+are disabled. A Setup step handed to your terminal waits for that action but
+does not hold the gate: the app cannot see the command finish there, and
+checks again when you come back. Switching to another CLI
+releases it, and a late completion from the previous CLI cannot release an
+action started since.
+
 The app finds stable `hack` on PATH and a prerelease `hack-next` (on PATH or
 `~/.hack-next/bin/hack-next`), offering only installs no other user can change.
 It uses the one chosen before, else stable, else the prerelease. The status bar

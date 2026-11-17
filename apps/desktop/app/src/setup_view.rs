@@ -13,6 +13,7 @@ use gpui_kit::{
     AnyElement, ClipboardItem, Context, IntoElement, ParentElement, SharedString, Styled, div,
     prelude::*, px,
 };
+use hack_desktop_core::machine_gate::Holder;
 use hack_desktop_core::setup::{Card, Pane as SetupPane, Remedy, SafeAction, Status};
 use hack_desktop_ui::components::{
     StyledExt as _, Ui, action_button, empty_pane, pill, primary_button,
@@ -128,6 +129,7 @@ impl HackApp {
             .iter()
             .any(|c| c.remedy == Remedy::Run(action) && c.status != Status::Passed);
         if self.setup.action_busy
+            || self.machine.busy()
             || self.setup.loading
             || !self.setup.report.cli_ready()
             || !offered
@@ -139,6 +141,9 @@ impl HackApp {
             cx.notify();
             return;
         }
+        let Some(ticket) = self.machine.try_begin(Holder::Setup) else {
+            return;
+        };
         self.setup.result = None;
         self.setup.action_busy = true;
         let epoch = self.setup.source_epoch();
@@ -154,6 +159,7 @@ impl HackApp {
                 if this.setup.source_epoch() != epoch {
                     return;
                 }
+                this.machine.finish(ticket);
                 this.setup.action_busy = false;
                 this.setup.result = Some(result);
                 this.setup.pending_fix = true;
@@ -175,6 +181,7 @@ impl HackApp {
             .iter()
             .any(|c| c.remedy == Remedy::Admin(args.clone()));
         if self.setup.action_busy
+            || self.machine.busy()
             || self.setup.loading
             || !self.setup.report.cli_ready()
             || !offered
@@ -187,6 +194,11 @@ impl HackApp {
             return;
         }
         let command = self.setup.report.command(args);
+        // Not admitted through the machine gate: the app only opens the
+        // terminal; the command runs there, under the user's control, for as
+        // long as they take, and the app cannot see it finish. It does wait
+        // for a machine action the app runs itself (checked above), and
+        // checks again when the user comes back.
         self.setup.result = None;
         self.setup.action_busy = true;
         let epoch = self.setup.source_epoch();
@@ -229,9 +241,16 @@ impl HackApp {
     }
 }
 
-pub fn render(pane: &SetupPane, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElement {
+/// `machine_busy`: another machine action (Start / Restart hackd from the
+/// project pane) holds the shared gate, so this pane's actions wait too.
+pub fn render(
+    pane: &SetupPane,
+    machine_busy: bool,
+    ui: &Ui,
+    cx: &mut Context<HackApp>,
+) -> AnyElement {
     let p = ui.p;
-    let busy = pane.loading || pane.action_busy;
+    let busy = pane.loading || pane.action_busy || machine_busy;
     let mut recheck = action_button(
         "setup-recheck",
         Glyph::Restart,
@@ -743,5 +762,80 @@ mod tests {
                 Some("Fixture: no terminal opened")
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "screenshots"))]
+mod gate_tests {
+    use super::*;
+    use gpui_kit::{HeadlessAppContext, WindowOptions};
+    use hack_desktop_core::fixtures::Fixture;
+    use hack_desktop_core::source::FixtureSource;
+    use std::sync::Arc;
+
+    #[test]
+    fn a_setup_action_waits_while_hackd_is_being_recovered_from_the_project_pane() {
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_kit::NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let options = WindowOptions {
+            focus: false,
+            show: false,
+            ..WindowOptions::default()
+        };
+        let (_, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, |window, cx| {
+                    cx.new(|cx| {
+                        HackApp::new(Arc::new(FixtureSource(Fixture::Running)), false, window, cx)
+                    })
+                })
+            })
+            .unwrap();
+        let report = hack_desktop_core::setup_fixtures::NAMES
+            .iter()
+            .filter_map(|n| hack_desktop_core::setup_fixtures::load(n))
+            .find(|r| {
+                r.cli_ready()
+                    && r.cards
+                        .iter()
+                        .any(|c| matches!(c.remedy, Remedy::Run(_)) && c.status != Status::Passed)
+            })
+            .expect("a setup fixture that offers a Run action");
+        let action = report
+            .cards
+            .iter()
+            .find_map(|c| match c.remedy {
+                Remedy::Run(a) if c.status != Status::Passed => Some(a),
+                _ => None,
+            })
+            .unwrap();
+        let result = cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.setup.report = report;
+                let recovery = a.machine.try_begin(Holder::Recovery).unwrap();
+                a.run_setup_action(action, cx);
+                let refused = (a.setup.result.clone(), a.setup.action_busy);
+                assert!(
+                    a.machine.finish(recovery),
+                    "Setup did not take or release the gate"
+                );
+                a.run_setup_action(action, cx);
+                (refused, a.setup.result.clone())
+            })
+        });
+        assert_eq!(
+            result.0,
+            (None, false),
+            "refused while recovery holds the gate"
+        );
+        assert_eq!(
+            result.1.as_deref(),
+            Some("Fixture: no action executed"),
+            "runs once the gate is free"
+        );
     }
 }

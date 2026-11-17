@@ -195,13 +195,54 @@ fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
     source.recover_daemon(DaemonRecovery::Start).unwrap();
     assert_eq!(
         std::fs::read_to_string(home.join("called")).unwrap(),
-        "daemon start"
+        "daemon start --no-interactive"
     );
     let error = source.recover_daemon(DaemonRecovery::Restart).unwrap_err();
     assert!(error.contains("daemon could not restart"));
     assert_eq!(
         std::fs::read_to_string(home.join("called")).unwrap(),
-        "daemon restart"
+        "daemon restart --no-interactive"
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The owner has several installs: a recovery must start hackd from the
+/// selected CLI, in its checked context, never from whatever `hack` the CLI
+/// finds first when it invokes itself.
+#[test]
+fn daemon_recovery_runs_the_selected_cli_in_its_checked_context() {
+    use hack_desktop_core::runner::CliRunner;
+    use hack_desktop_core::source::{DaemonRecovery, LiveSource, Source};
+    let home = temp_dir("recover-checked");
+    let hack = home.join("hack");
+    test_support::script(
+        &hack,
+        "#!/bin/sh\n{ echo \"mcp=$HACK_MCP_COMMAND\"; echo \"stray=${STRAY_SETTING:-unset}\"; echo \"home=$HACK_HOME\"; } > \"$HACK_HOME/env\"\necho 'stdout diagnostic: socket in use'\necho 'stderr detail' >&2\nexit 1\n",
+    );
+    let source = LiveSource {
+        cache: Default::default(),
+        runner: CliRunner::new(&hack)
+            .with_env("HOME", home.to_str().unwrap())
+            .with_env("HACK_HOME", home.to_str().unwrap())
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .with_env("STRAY_SETTING", "from the app's environment"),
+        daemon: None,
+    };
+    let error = source.recover_daemon(DaemonRecovery::Restart).unwrap_err();
+    let env = std::fs::read_to_string(home.join("env")).unwrap();
+    assert!(
+        env.contains(&format!("mcp={}\n", hack.display())),
+        "HACK_MCP_COMMAND names the selected CLI: {env}"
+    );
+    assert!(
+        env.contains("stray=unset\n"),
+        "only the checked allowlist: {env}"
+    );
+    assert!(env.contains(&format!("home={}\n", home.display())), "{env}");
+    assert!(error.contains("stderr detail"), "{error}");
+    assert!(
+        error.contains("stdout diagnostic: socket in use"),
+        "{error}"
     );
     std::fs::remove_dir_all(home).unwrap();
 }

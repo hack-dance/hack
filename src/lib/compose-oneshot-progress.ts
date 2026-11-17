@@ -44,16 +44,7 @@ export function mergeOneShotGraphs(
       continue;
     }
     for (const [name, service] of Object.entries(document.services)) {
-      if (!(isRecord(service) && isRecord(service.depends_on))) {
-        continue;
-      }
-      for (const [dependency, spec] of Object.entries(service.depends_on)) {
-        if (
-          !isRecord(spec) ||
-          spec.condition !== "service_completed_successfully"
-        ) {
-          continue;
-        }
+      for (const dependency of completionDependencies(service)) {
         oneShots.add(dependency);
         const list = waitsOn.get(name) ?? [];
         if (!list.includes(dependency)) {
@@ -64,6 +55,19 @@ export function mergeOneShotGraphs(
     }
   }
   return { oneShots, waitsOn };
+}
+
+/** The services one Compose service waits on to complete successfully. */
+function completionDependencies(service: unknown): string[] {
+  if (!(isRecord(service) && isRecord(service.depends_on))) {
+    return [];
+  }
+  return Object.entries(service.depends_on)
+    .filter(
+      ([, spec]) =>
+        isRecord(spec) && spec.condition === "service_completed_successfully"
+    )
+    .map(([dependency]) => dependency);
 }
 
 /**

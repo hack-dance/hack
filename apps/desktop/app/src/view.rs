@@ -595,9 +595,14 @@ impl HackApp {
                 .spawn(async move { source.recover_daemon(action) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // After a switch the recovery state belongs to the new CLI:
+                // leave its guard and error alone.
+                if this.model.source_epoch() != epoch {
+                    cx.notify();
+                    return;
+                }
                 this.recovery_busy = false;
-                // A failure of the previous CLI's hackd is not this one's.
-                this.recovery_error = result.err().filter(|_| this.model.source_epoch() == epoch);
+                this.recovery_error = result.err();
                 // A command exit is not evidence that a compatible daemon
                 // is ready. Only the next ordered snapshot can restore rows.
                 this.refresh_now_async(cx);
@@ -742,6 +747,10 @@ impl HackApp {
         }
         if before != after {
             self.model.source_changed();
+            // A Start or Restart hackd still running belongs to the
+            // previous installation: it must not block this one.
+            self.recovery_busy = false;
+            self.recovery_error = None;
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();

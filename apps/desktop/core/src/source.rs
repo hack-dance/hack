@@ -410,7 +410,15 @@ pub struct DoctorTarget {
 pub fn target_keys(targets: &[DoctorTarget]) -> Vec<crate::doctor::TargetKey> {
     targets
         .iter()
-        .map(|t| (t.name.clone(), t.repo_root.clone(), t.native, t.missing))
+        .map(|t| {
+            (
+                t.name.clone(),
+                t.repo_root.clone(),
+                t.native,
+                t.missing,
+                t.browser_url.clone(),
+            )
+        })
         .collect()
 }
 

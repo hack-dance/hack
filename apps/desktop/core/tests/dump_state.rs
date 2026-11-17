@@ -205,3 +205,40 @@ fn daemon_recovery_runs_only_the_requested_command_and_checks_its_exit() {
     );
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[test]
+fn several_reads_in_one_process_report_each_reads_steps() {
+    let home = temp_dir("reads");
+    let hack = home.join("hack");
+    test_support::script(
+        &hack,
+        "#!/bin/sh\ncase \"$1\" in version) echo '{\"ok\":true,\"data\":{\"schema\":\"hack.version.v1\",\"version\":\"5.0.0\"}}';; *) exit 1;; esac\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
+        .args(["--reads", "3", "--compact"])
+        .env("PATH", &home)
+        .env("HOME", &home)
+        .env("HACK_HOME", &home)
+        .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&home).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let reads = body["reads"].as_array().expect("reads");
+    assert_eq!(reads.len(), 3);
+    for read in reads {
+        assert!(read["read_ms"].is_u64());
+        assert!(!read["steps"].as_array().unwrap().is_empty());
+    }
+    // Out of range is refused.
+    let bad = Command::new(env!("CARGO_BIN_EXE_hack-desktop-state"))
+        .args(["--reads", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+}

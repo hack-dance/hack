@@ -1,5 +1,11 @@
-//! Names-only environment metadata. Unknown fields are discarded at deserialization;
-//! neither raw CLI output nor parse diagnostics escape this boundary.
+//! Environment metadata and, on request, one value at a time.
+//!
+//! Listings are names and kinds only (`hack env list --json`); unknown
+//! fields, values included, are discarded at deserialization, and neither
+//! raw CLI output nor parse diagnostics escape this boundary. A value is
+//! read only when the user asks for that one name (`hack env get`), held as
+//! [`Revealed`], which never prints, and dropped after [`REVEAL_FOR`] or
+//! when the tab, overlay, project or window changes.
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -45,6 +51,47 @@ pub struct EnvRow {
     #[serde(skip)]
     pub missing: bool,
 }
+impl EnvRow {
+    /// A secret (stored encrypted): masked until its eye is pressed.
+    #[must_use]
+    pub fn is_secret(&self) -> bool {
+        matches!(self.storage.kind.as_str(), "secret" | "encrypted")
+    }
+
+    /// A plaintext value: shown with the listing, no eye needed.
+    #[must_use]
+    pub fn is_plaintext(&self) -> bool {
+        matches!(self.storage.kind.as_str(), "plaintext" | "plain")
+    }
+
+    /// The service scope to read this row's value in (`--service`), when
+    /// the listing did not choose one: a legacy row limited to services
+    /// names its first service, a canonical row its scope. `None` for
+    /// global rows. Without it the CLI resolves in the global scope and a
+    /// service-only variable cannot be read.
+    #[must_use]
+    pub fn value_scope(&self) -> Option<String> {
+        match &self.scope {
+            Scope::Legacy(services) => services.first().cloned(),
+            Scope::Canonical(s)
+                if !s.is_empty() && !matches!(s.as_str(), "global" | "project" | "unknown") =>
+            {
+                Some(s.clone())
+            }
+            Scope::Canonical(_) => None,
+        }
+    }
+
+    /// The scope name, `global` when the listing does not name one.
+    #[must_use]
+    pub fn scope_name(&self) -> String {
+        match &self.scope {
+            Scope::Canonical(s) if s.is_empty() || s == "project" => "global".into(),
+            other => other.label(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct EnvReport {
     pub vars: Vec<EnvRow>,
@@ -57,7 +104,7 @@ pub struct EnvReport {
     #[serde(default)]
     pub key_state: KeyState,
     /// Overlay names the CLI selected: requested, default and effective.
-    /// Names only. The list of every overlay is CLI request 1 (term crate).
+    /// Names only. The list of every overlay is DESIGN.md request R24.
     #[serde(default)]
     pub env_selection: Option<EnvSelection>,
 }
@@ -71,7 +118,43 @@ pub struct EnvSelection {
     pub effective: Option<String>,
 }
 
+/// One overlay tab: its label and the `--env` value that lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayTab {
+    pub label: String,
+    /// `--env` argument: `default` lists the base layers.
+    pub env: String,
+    /// The project's configured default overlay.
+    pub is_default: bool,
+}
+
 impl EnvSelection {
+    /// Overlay tabs: base first, then each overlay the CLI named (the
+    /// configured default, the requested and the effective one), once.
+    /// Every overlay of a project is DESIGN.md request R24.
+    #[must_use]
+    pub fn tabs(&self) -> Vec<OverlayTab> {
+        let mut out = vec![OverlayTab {
+            label: "base".into(),
+            env: "default".into(),
+            is_default: false,
+        }];
+        for name in [&self.default, &self.requested, &self.effective]
+            .into_iter()
+            .flatten()
+        {
+            if name.is_empty() || name == "default" || out.iter().any(|t| &t.env == name) {
+                continue;
+            }
+            out.push(OverlayTab {
+                label: name.clone(),
+                env: name.clone(),
+                is_default: self.default.as_ref() == Some(name),
+            });
+        }
+        out
+    }
+
     /// The overlays a host shell can be opened with: the project's default
     /// and the effective one, without repeats.
     #[must_use]
@@ -140,16 +223,106 @@ impl EnvView {
     }
 }
 
+/// How long a revealed value stays on screen.
+pub const REVEAL_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One value the user asked to see. It never prints: `Debug` shows only
+/// its length, and nothing formats it but the cell that draws it and the
+/// clipboard write.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Revealed(String);
+
+impl Revealed {
+    #[must_use]
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+    /// The value, for the one cell that shows it or the clipboard.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Revealed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Revealed({} bytes)", self.0.len())
+    }
+}
+
+/// A variable's identity in a listing: overlay, scope and name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ValueKey {
+    pub env: String,
+    pub scope: String,
+    pub name: String,
+}
+
+/// What a value cell shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueState {
+    /// Not asked for (secrets), or not read yet.
+    Hidden,
+    Reading,
+    Shown {
+        value: Revealed,
+        at: std::time::Instant,
+    },
+    /// A plaintext value read with the listing; it stays while the listing
+    /// is shown and goes with it.
+    Plain(Revealed),
+    /// Could not be read; the message names no value.
+    Failed(String),
+}
+
+/// The quiet line under the overlay tabs: whether the CLI could read the
+/// project's secret key. The CLI does not say which source it used
+/// (DESIGN.md request R26), so the line names the two it looks in.
+#[must_use]
+pub fn key_line(state: KeyState) -> Option<(bool, &'static str)> {
+    match state {
+        KeyState::Ok => Some((true, "Secret key found")),
+        KeyState::Missing => Some((
+            false,
+            "No secret key: add .hack.secret.key to the checkout or set HACK_ENV_SECRET_KEY",
+        )),
+        KeyState::Unreadable => Some((false, "Secret key found but unreadable")),
+        KeyState::Unknown => None,
+    }
+}
+
 /// Monotonic request identity also rejects A → B → A stale completions.
 #[derive(Default)]
 pub struct EnvModel {
     pub view: EnvView,
     generation: u64,
+    /// The overlay tab shown (`--env` value); `None` until chosen.
+    pub env: Option<String>,
+    /// The scope listed (`--service` value); `None` is the CLI's default.
+    pub scope: Option<String>,
+    /// The overlay the selected instance is running, when known. The CLI
+    /// does not report it per instance yet (DESIGN.md R22); fixtures set it.
+    pub running: Option<String>,
+    /// The value last copied, for its check mark until the clipboard clears.
+    pub copied: Option<ValueKey>,
+    /// Bumped by every hide of all values (a new listing, focus or
+    /// visibility lost): a reveal or copy started before it must not
+    /// complete after it. Those hides also drop the "Reading" marks.
+    reveal_epoch: u64,
+    /// The reveal request each name is waiting for: a cancelled request's
+    /// late result never fills a newer one's place.
+    reveal_tokens: std::collections::HashMap<ValueKey, u64>,
+    next_token: u64,
+    values: std::collections::HashMap<ValueKey, ValueState>,
 }
 impl EnvModel {
+    /// A new listing: every value shown so far is dropped.
     pub fn begin(&mut self) -> u64 {
         self.generation += 1;
+        self.reveal_epoch += 1;
+        self.reveal_tokens.clear();
         self.view = EnvView::Loading;
+        self.values.clear();
         self.generation
     }
     pub fn finish(&mut self, generation: u64, view: EnvView) {
@@ -157,32 +330,153 @@ impl EnvModel {
             self.view = view;
         }
     }
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    /// See `reveal_epoch`: a pending reveal or copy compares it on completion.
+    #[must_use]
+    pub fn reveal_epoch(&self) -> u64 {
+        self.reveal_epoch
+    }
+    /// What `key`'s cell shows now; a value older than [`REVEAL_FOR`] is
+    /// hidden again.
+    #[must_use]
+    pub fn value(&self, key: &ValueKey) -> ValueState {
+        match self.values.get(key) {
+            Some(ValueState::Shown { at, .. }) if at.elapsed() >= REVEAL_FOR => ValueState::Hidden,
+            Some(v) => v.clone(),
+            None => ValueState::Hidden,
+        }
+    }
+    pub fn set_value(&mut self, generation: u64, key: ValueKey, state: ValueState) {
+        if generation == self.generation {
+            self.values.insert(key, state);
+        }
+    }
+    /// Start reading one name for a reveal: marks it "Reading" and returns
+    /// the token its result must present.
+    pub fn start_reveal(&mut self, key: ValueKey) -> u64 {
+        self.next_token += 1;
+        self.reveal_tokens.insert(key.clone(), self.next_token);
+        self.values.insert(key, ValueState::Reading);
+        self.next_token
+    }
+
+    /// Install a reveal's result only if it answers the latest request for
+    /// that name and the name is still being read. Hiding it meanwhile, or
+    /// a newer request, drops a late result. Returns whether it was
+    /// installed.
+    pub fn finish_reveal(
+        &mut self,
+        generation: u64,
+        key: ValueKey,
+        token: u64,
+        state: ValueState,
+    ) -> bool {
+        let pending = generation == self.generation
+            && self.reveal_tokens.get(&key) == Some(&token)
+            && matches!(self.values.get(&key), Some(ValueState::Reading));
+        if pending {
+            self.reveal_tokens.remove(&key);
+            self.values.insert(key, state);
+        }
+        pending
+    }
+    pub fn hide(&mut self, key: &ValueKey) {
+        self.reveal_tokens.remove(key);
+        self.values.remove(key);
+    }
+    /// Drop every value (the window lost focus, a tab changed).
+    pub fn hide_all(&mut self) {
+        self.reveal_epoch += 1;
+        self.reveal_tokens.clear();
+        self.values.clear();
+    }
+    /// Hide every revealed secret, keeping plaintext values; whether any
+    /// was shown or still being read.
+    pub fn hide_revealed(&mut self) -> bool {
+        self.reveal_epoch += 1;
+        self.reveal_tokens.clear();
+        let before = self.values.len();
+        self.values
+            .retain(|_, v| matches!(v, ValueState::Plain(_) | ValueState::Failed(_)));
+        before != self.values.len()
+    }
+    /// Drop values shown longer than [`REVEAL_FOR`]; whether any was.
+    pub fn expire(&mut self) -> bool {
+        let before = self.values.len();
+        self.values.retain(
+            |_, v| !matches!(v, ValueState::Shown { at, .. } if at.elapsed() >= REVEAL_FOR),
+        );
+        before != self.values.len()
+    }
 }
 
 #[must_use]
 pub fn fixture(name: &str) -> EnvView {
+    let row = |key: &str, kind: &str, scope: &str| {
+        format!(
+            r#"{{"key":"{key}","required":false,"storage":{{"kind":"{kind}"}},"resolved_from":"project_env_config","has_value":true,"scope":"{scope}","layer":".hack/hack.env.default.yaml"}}"#
+        )
+    };
     match name {
         "env-loading" => EnvView::Loading,
         "env-error" => EnvView::Unreadable,
         "env-empty" => EnvView::parse(r#"{"vars":[],"missing_required":[]}"#, Some(0)),
-        _ => {
+        // Several overlays, long names and values, a scoped secret, and a
+        // required name that is missing.
+        "env-overlays" | "env-running" | "env-locked" | "env-missing" | "env-long" => {
             let key_state = if name == "env-locked" {
                 "missing"
             } else {
-                "unknown"
+                "ok"
             };
             let missing = if name == "env-missing" {
-                r#""API_TOKEN""#
+                r#""PAYMENTS_WEBHOOK_SECRET""#
             } else {
                 ""
             };
+            let mut vars = vec![
+                row("APP_MODE", "plaintext", "global"),
+                row("DATABASE_URL", "secret", "global"),
+                row("LOG_LEVEL", "plaintext", "global"),
+                row("API_TOKEN", "secret", "api"),
+            ];
+            if name == "env-long" {
+                vars.push(row(
+                    "AN_UNUSUALLY_LONG_VARIABLE_NAME_THAT_KEEPS_GOING_FOR_THE_LAYOUT",
+                    "plaintext",
+                    "global",
+                ));
+            }
             EnvView::parse(
                 &format!(
-                    r#"{{"files":["hack.env.default.yaml"],"scopes":["global","api"],"selected_scope":"global","key_state":"{key_state}","missing_required":[{missing}],"vars":[{{"key":"APP_MODE","required":false,"storage":{{"kind":"plain"}},"resolved_from":"project","has_value":true,"scope":"project","layer":null}},{{"key":"API_TOKEN","required":true,"storage":{{"kind":"encrypted"}},"resolved_from":null,"has_value":false,"scope":["runtime"],"layer":"local"}}]}}"#
+                    r#"{{"files":["hack.env.default.yaml","hack.env.staging.yaml"],"scopes":["global","api","web"],"selected_scope":"global","key_state":"{key_state}","missing_required":[{missing}],"env_selection":{{"requested":"staging","default":"dev","effective":"staging"}},"vars":[{}]}}"#,
+                    vars.join(",")
+                ),
+                Some(0),
+            )
+        }
+        _ => {
+            let key_state = "unknown";
+            EnvView::parse(
+                &format!(
+                    r#"{{"files":["hack.env.default.yaml"],"scopes":["global","api"],"selected_scope":"global","key_state":"{key_state}","missing_required":[],"vars":[{{"key":"APP_MODE","required":false,"storage":{{"kind":"plain"}},"resolved_from":"project","has_value":true,"scope":"project","layer":null}},{{"key":"API_TOKEN","required":true,"storage":{{"kind":"encrypted"}},"resolved_from":null,"has_value":false,"scope":["runtime"],"layer":"local"}}]}}"#
                 ),
                 Some(1),
             )
         }
+    }
+}
+
+/// An obviously fake value for a fixture name; long for the long fixture.
+#[must_use]
+pub fn fixture_value(key: &str) -> String {
+    if key.starts_with("AN_UNUSUALLY_LONG") || key == "DATABASE_URL" {
+        "postgres://fixture-user:fake-password-not-real@db.example.invalid:5432/fixture_database_with_a_long_name".into()
+    } else {
+        format!("fake-{}-value", key.to_ascii_lowercase().replace('_', "-"))
     }
 }
 
@@ -219,7 +513,9 @@ mod tests {
         assert!(
             matches!(fixture("env-locked"), EnvView::Report(r) if r.key_state == KeyState::Missing)
         );
-        assert!(matches!(fixture("env-missing"), EnvView::Report(r) if r.vars[0].missing));
+        assert!(
+            matches!(fixture("env-missing"), EnvView::Report(r) if r.vars[0].missing && r.vars[0].key == "PAYMENTS_WEBHOOK_SECRET")
+        );
         for state in ["ok", "missing", "unreadable", "future"] {
             let report = EnvView::parse(
                 &format!(r#"{{"vars":[],"missing_required":[],"key_state":"{state}"}}"#),
@@ -270,6 +566,139 @@ mod tests {
             panic!("report");
         };
         assert_eq!(empty.empty_label(), "This project has no env layers");
+    }
+
+    #[test]
+    fn the_key_line_names_both_sources_when_none_is_found() {
+        assert_eq!(key_line(KeyState::Ok), Some((true, "Secret key found")));
+        let (ok, text) = key_line(KeyState::Missing).unwrap();
+        assert!(!ok);
+        assert!(text.contains(".hack.secret.key") && text.contains("HACK_ENV_SECRET_KEY"));
+        assert_eq!(key_line(KeyState::Unknown), None);
+    }
+
+    #[test]
+    fn overlay_tabs_are_base_then_each_named_overlay_once() {
+        let EnvView::Report(r) = fixture("env-overlays") else {
+            panic!("report");
+        };
+        let tabs = r.env_selection.unwrap().tabs();
+        let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["base", "dev", "staging"]);
+        assert_eq!(tabs[0].env, "default", "base is --env default");
+        assert!(tabs[1].is_default);
+    }
+
+    #[test]
+    fn fixture_values_are_obviously_fake() {
+        for key in ["APP_MODE", "DATABASE_URL", "API_TOKEN"] {
+            let v = fixture_value(key);
+            assert!(v.contains("fake") || v.contains("fixture"), "{v}");
+        }
+    }
+
+    #[test]
+    fn a_revealed_value_expires_and_never_prints() {
+        let mut model = EnvModel::default();
+        let generation = model.begin();
+        let key = ValueKey {
+            env: "staging".into(),
+            scope: "global".into(),
+            name: "DATABASE_URL".into(),
+        };
+        let at = std::time::Instant::now()
+            .checked_sub(REVEAL_FOR + std::time::Duration::from_secs(1))
+            .expect("clock");
+        model.set_value(
+            generation,
+            key.clone(),
+            ValueState::Shown {
+                value: Revealed::new("SECRET_SENTINEL".into()),
+                at,
+            },
+        );
+        assert!(!format!("{:?}", model.values).contains("SECRET_SENTINEL"));
+        assert_eq!(model.value(&key), ValueState::Hidden, "past its time");
+        assert!(model.expire());
+        assert_eq!(model.value(&key), ValueState::Hidden);
+    }
+
+    #[test]
+    fn hiding_everything_invalidates_reads_still_in_flight() {
+        let mut model = EnvModel::default();
+        model.begin();
+        let key = |name: &str| ValueKey {
+            env: "staging".into(),
+            scope: "global".into(),
+            name: name.into(),
+        };
+        // An eye pressed, then focus lost before `hack env get` answered.
+        let epoch = model.reveal_epoch();
+        model.set_value(model.generation(), key("DATABASE_URL"), ValueState::Reading);
+        assert!(model.hide_revealed());
+        assert_ne!(model.reveal_epoch(), epoch, "the pending reveal is dropped");
+        assert_eq!(model.value(&key("DATABASE_URL")), ValueState::Hidden);
+        // Hiding one value with its own eye leaves another read alone.
+        let epoch = model.reveal_epoch();
+        model.hide(&key("API_TOKEN"));
+        assert_eq!(model.reveal_epoch(), epoch);
+        // A new listing invalidates too.
+        model.begin();
+        assert_ne!(model.reveal_epoch(), epoch);
+    }
+
+    #[test]
+    fn a_reveal_hidden_while_reading_never_lands() {
+        let mut model = EnvModel::default();
+        let generation = model.begin();
+        let key = ValueKey {
+            env: "staging".into(),
+            scope: "global".into(),
+            name: "DATABASE_URL".into(),
+        };
+        let shown = || ValueState::Shown {
+            value: Revealed::new("fake-value".into()),
+            at: std::time::Instant::now(),
+        };
+        let a = model.start_reveal(key.clone());
+        model.hide(&key);
+        assert!(!model.finish_reveal(generation, key.clone(), a, shown()));
+        assert_eq!(model.value(&key), ValueState::Hidden);
+        // Cancelled A, then B started: A's late result does not fill B's place.
+        let a = model.start_reveal(key.clone());
+        model.hide(&key);
+        let b = model.start_reveal(key.clone());
+        assert!(!model.finish_reveal(generation, key.clone(), a, shown()));
+        assert_eq!(model.value(&key), ValueState::Reading);
+        assert!(model.finish_reveal(generation, key.clone(), b, shown()));
+        assert!(matches!(model.value(&key), ValueState::Shown { .. }));
+    }
+
+    #[test]
+    fn a_service_only_row_reads_its_value_in_that_service() {
+        let row = |scope: Scope| EnvRow {
+            key: "K".into(),
+            required: false,
+            storage: Storage {
+                kind: "plaintext".into(),
+            },
+            resolved_from: None,
+            has_value: true,
+            scope,
+            layer: None,
+            missing: false,
+        };
+        assert_eq!(
+            row(Scope::Legacy(vec!["api".into(), "web".into()])).value_scope(),
+            Some("api".into())
+        );
+        assert_eq!(row(Scope::Legacy(vec![])).value_scope(), None);
+        assert_eq!(
+            row(Scope::Canonical("api".into())).value_scope(),
+            Some("api".into())
+        );
+        assert_eq!(row(Scope::Canonical("global".into())).value_scope(), None);
+        assert_eq!(row(Scope::Canonical("project".into())).value_scope(), None);
     }
 
     #[test]

@@ -19,10 +19,18 @@
 //!
 //! While another attempt is still possible, input is held until the
 //! current attempt has settled: it produced output and stayed running for
-//! [`SETTLE_AFTER_OUTPUT`], or ran for [`SETTLE_MAX`]. Held input goes to
-//! the attempt that settles, `sh` after a missing `bash` included, and does
-//! not count as typing before then, so typing while the tab opens never
-//! cancels the fallback. A single-attempt session never holds input.
+//! [`SETTLE_AFTER_OUTPUT`], or ran for the whole [`FALLBACK_WINDOW`] (a
+//! shell that prints no prompt). Input is also held once the attempt has
+//! exited, until the session falls back or ends. Input therefore only ever
+//! reaches one attempt: held input goes to the attempt that settles, `sh`
+//! after a missing `bash` included, and counts as typed from then on.
+//! However slow `docker exec` is to fail, typing while the tab opens never
+//! cancels the fallback, and nothing typed runs twice.
+//!
+//! An attempt that prints and then stays running for longer than
+//! [`SETTLE_AFTER_OUTPUT`] counts as started: input from then on is the
+//! user's, and a later 126 or 127 ends the session (a started shell running
+//! `exit 127` looks the same). A single-attempt session never holds input.
 
 use std::time::{Duration, Instant};
 
@@ -48,8 +56,6 @@ pub const FALLBACK_WINDOW: Duration = Duration::from_secs(10);
 /// With another attempt possible, how long an attempt must keep running
 /// after its first output before held input is delivered to it.
 pub const SETTLE_AFTER_OUTPUT: Duration = Duration::from_millis(500);
-/// With another attempt possible, the longest input is held.
-pub const SETTLE_MAX: Duration = Duration::from_secs(2);
 
 enum Backend {
     Stream(ByteStream),
@@ -390,7 +396,7 @@ impl TerminalCore {
                         let ended = std::mem::replace(&mut self.backend, Backend::Closed);
                         self.retire(ended);
                     }
-                } else if !self.held.is_empty() && self.exit_seen.is_none() && self.settled() {
+                } else if !self.held.is_empty() && self.settled() {
                     let held = std::mem::take(&mut self.held);
                     // Input accepted earlier: a notice set since then (a
                     // refused paste) stays up.
@@ -407,10 +413,25 @@ impl TerminalCore {
     /// attempt is left, or this one has settled (module docs).
     fn settled(&self) -> bool {
         self.remaining.is_empty()
-            || self
-                .first_output
-                .is_some_and(|t| t.elapsed() >= SETTLE_AFTER_OUTPUT)
-            || self.started.elapsed() >= SETTLE_MAX
+            || (!self.exited()
+                && (self.showed_itself() || self.started.elapsed() >= FALLBACK_WINDOW))
+    }
+
+    /// The current attempt printed something and stayed running for
+    /// [`SETTLE_AFTER_OUTPUT`]: input delivered now counts as typed.
+    fn showed_itself(&self) -> bool {
+        self.first_output
+            .is_some_and(|t| t.elapsed() >= SETTLE_AFTER_OUTPUT)
+    }
+
+    /// The current attempt's child has exited, whether or not a pump has
+    /// seen it yet. Input must not go to it then: a fallback may follow.
+    fn exited(&self) -> bool {
+        self.exit_seen.is_some()
+            || match &self.backend {
+                Backend::Pty(pty) => pty.exit().is_some(),
+                _ => false,
+            }
     }
 
     /// Start the next attempt of the plan if the current one could not

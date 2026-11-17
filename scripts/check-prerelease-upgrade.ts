@@ -68,6 +68,10 @@ export const PUBLISHED_RELEASES: Readonly<
     manager: "90d1bc60bfd2b7eaad48dcf56ad45264f395c0ac1a8c4530e986be7fa194d4d9",
     archive: "da7c3e74629c049a25c40fbe95c5aa35433f241499065df372a23b27ee95aaee",
   },
+  "5.0.0-next.19": {
+    manager: "ba47091559a80b2abbb246b8e86c5530b8ddb068973f5136e120d36e2003fae6",
+    archive: "57efde68a6424fc7cf0c710d058735b1e3a50cbac8e2f211b0208572aed33086",
+  },
 };
 
 /** A fixed environment for the managers: no token, output path or caller state. */

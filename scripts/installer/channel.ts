@@ -66,6 +66,8 @@ export const REVIEWED_PREDECESSORS: readonly string[] = [
   "85bbe4f064b3277efc88a9f79c197e81950ab8881320aef1b3443b70d95b530f",
   // 5.0.0-next.18
   "90d1bc60bfd2b7eaad48dcf56ad45264f395c0ac1a8c4530e986be7fa194d4d9",
+  // 5.0.0-next.19
+  "ba47091559a80b2abbb246b8e86c5530b8ddb068973f5136e120d36e2003fae6",
 ];
 export const launcherBytes = () =>
   Buffer.from(
@@ -733,7 +735,7 @@ export class Channel {
     if (Object.hasOwn(this.state.installed, version)) {
       requireThat(
         version === current,
-        "Version is already installed; use rollback to select it."
+        `${version} is already installed; select it with: hack-next --manager select --version ${version}`
       );
       if (archive) {
         canonical(archive);
@@ -754,7 +756,7 @@ export class Channel {
     );
     requireThat(
       current === null || compareCandidateVersions(version, current) > 0,
-      "Upgrade must increase the prerelease version; use rollback."
+      "Upgrade must increase the prerelease version. To use an installed older version, run: hack-next --manager select --version VERSION"
     );
     requireThat(
       digest(this.path("manager")) === digest(this.source),

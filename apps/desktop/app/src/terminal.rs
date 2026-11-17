@@ -761,19 +761,22 @@ impl HackApp {
         }
     }
 
-    /// The new-tab menu's entries: a shell in each running service, a host
-    /// shell, and a host shell with env.
+    /// The new-tab menu's entries: a shell in each running service (the
+    /// last known list while a refresh is slow or failing), a host shell,
+    /// and a host shell with env.
     pub(crate) fn menu_entries(&self, d: &DetailView) -> Vec<(String, Glyph, Option<NewTab>)> {
         let cli = self.source.hack_program().is_some();
+        // The last good list while a refresh is slow or failing, never an
+        // empty one (DetailView::shells); marked when it may be out of date.
+        let mark = if d.shells_stale { " (last known)" } else { "" };
         let mut out: Vec<(String, Glyph, Option<NewTab>)> = d
-            .services
+            .shells
             .iter()
-            .filter(|s| s.running)
-            .map(|s| {
+            .map(|name| {
                 (
-                    format!("Shell in {}", s.name),
+                    format!("Shell in {name}{mark}"),
                     Glyph::Container,
-                    cli.then(|| NewTab::Container(s.name.clone())),
+                    cli.then(|| NewTab::Container(name.clone())),
                 )
             })
             .collect();
@@ -1503,6 +1506,91 @@ mod tests {
             searches(&[window, terminal]),
             cfg!(target_os = "macos"),
             "off macOS, Ctrl-K in a terminal goes to the shell"
+        );
+    }
+
+    /// The new-tab menu during a slow and a failed refresh: the last good
+    /// service shells, never an empty list.
+    #[cfg(feature = "screenshots")]
+    #[test]
+    fn the_new_tab_menu_keeps_its_shells_while_a_refresh_is_slow_or_fails() {
+        use hack_desktop_core::fixtures::Fixture;
+        use hack_desktop_core::source::{FixtureSource, SourceError};
+        use hack_desktop_core::viewmodel::Event;
+        let mut cx = gpui_kit::HeadlessAppContext::with_platform(
+            std::sync::Arc::new(gpui_kit::NoopTextSystem::new()),
+            std::sync::Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let options = gpui_kit::WindowOptions {
+            focus: false,
+            show: false,
+            ..gpui_kit::WindowOptions::default()
+        };
+        let (_, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, |window, cx| {
+                    cx.new(|cx| {
+                        let mut a = crate::view::HackApp::new(
+                            std::sync::Arc::new(FixtureSource(Fixture::Running)),
+                            false,
+                            window,
+                            cx,
+                        );
+                        a.select("storefront");
+                        a
+                    })
+                })
+            })
+            .expect("open a headless window");
+        let labels = |cx: &mut gpui_kit::HeadlessAppContext| {
+            cx.update(|cx| {
+                let a = app.read(cx);
+                let d = a.model.detail().expect("storefront is selected");
+                a.menu_entries(&d)
+                    .into_iter()
+                    .map(|(label, _, _)| label)
+                    .filter(|l| l.starts_with("Shell in"))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let good = labels(&mut cx);
+        assert_eq!(
+            good,
+            [
+                "Shell in api",
+                "Shell in db",
+                "Shell in web",
+                "Shell in worker"
+            ]
+        );
+        // A refresh in flight: nothing has answered yet.
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                let _token = a.model.begin_refresh();
+                a.model.apply(Event::Refreshed(Err(SourceError::Pending)));
+            });
+        });
+        assert_eq!(labels(&mut cx), good, "a slow refresh changes nothing");
+        // The refresh failed: the last good list, marked.
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                a.model.apply(Event::Refreshed(Err(SourceError::Cli {
+                    code: "E_TIMEOUT".into(),
+                    message: "the read timed out".into(),
+                    failed: vec![],
+                })));
+            });
+        });
+        assert_eq!(
+            labels(&mut cx),
+            [
+                "Shell in api (last known)",
+                "Shell in db (last known)",
+                "Shell in web (last known)",
+                "Shell in worker (last known)"
+            ]
         );
     }
 

@@ -317,6 +317,28 @@ pub trait Source: Send + Sync {
         crate::env::EnvView::Unreadable
     }
 
+    /// `hack env list --json` for one overlay (`--env`) and scope
+    /// (`--service`); `None` leaves each to the CLI's default. Names, scopes
+    /// and set state only: never values.
+    fn env_for(&self, root: &Path, native: bool, _selection: &EnvTarget) -> crate::env::EnvView {
+        self.env(root, native)
+    }
+
+    /// One value, read when the user asks for it (`hack env get KEY` on a
+    /// pipe, never a terminal). The error never contains the value.
+    ///
+    /// # Errors
+    /// Why the value could not be read, with no value in it.
+    fn env_value(
+        &self,
+        _root: &Path,
+        _native: bool,
+        _selection: &EnvTarget,
+        _key: &str,
+    ) -> Result<crate::env::Revealed, String> {
+        Err("Values are unavailable for this source".into())
+    }
+
     /// Explicit user recovery only; never called by a poll.
     /// # Errors
     /// Failed or unavailable daemon command.
@@ -1517,30 +1539,64 @@ impl Source for LiveSource {
     }
 
     fn env(&self, root: &Path, native: bool) -> crate::env::EnvView {
-        // env list walks ancestors. Refuse missing or shadowed project markers
-        // instead of attributing an ancestor's names to the selected project.
-        if !root.is_absolute() {
-            return crate::env::EnvView::Unreadable;
-        }
-        let Ok(root) = std::fs::canonicalize(root) else {
+        self.env_for(root, native, &EnvTarget::default())
+    }
+
+    fn env_for(&self, root: &Path, native: bool, selection: &EnvTarget) -> crate::env::EnvView {
+        let Some(root) = env_root(root) else {
             return crate::env::EnvView::Unreadable;
         };
-        if !root.is_dir() || !cli_selects_exactly(&root) {
+        let Ok(extra) = selection.args() else {
             return crate::env::EnvView::Unreadable;
-        }
+        };
+        let mut args = vec!["env", "list", "--json"];
+        args.extend(extra.iter().map(String::as_str));
         match self
             .runner_for(native)
             .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
-            .run_raw(
-                &["env", "list", "--json"],
-                Some(&root),
-                Duration::from_secs(10),
-            ) {
+            .run_raw(&args, Some(&root), Duration::from_secs(10))
+        {
             Ok((out, _, code)) if cli_selects_exactly(&root) => {
                 crate::env::EnvView::parse(&out, code)
             }
             Ok(_) => crate::env::EnvView::Unreadable,
             Err(_) => crate::env::EnvView::Unreadable,
+        }
+    }
+
+    fn env_value(
+        &self,
+        root: &Path,
+        native: bool,
+        selection: &EnvTarget,
+        key: &str,
+    ) -> Result<crate::env::Revealed, String> {
+        let root = env_root(root).ok_or("This checkout's env cannot be read")?;
+        if !valid_env_name(key) {
+            return Err("Not a variable name the app reads".into());
+        }
+        let extra = selection.args()?;
+        let mut args = vec!["env", "get", key];
+        args.extend(extra.iter().map(String::as_str));
+        // stdout is the value; nothing from it reaches an error message.
+        match self
+            .runner_for(native)
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_raw(&args, Some(&root), Duration::from_secs(10))
+        {
+            Ok((out, _, Some(0))) if cli_selects_exactly(&root) => {
+                Ok(crate::env::Revealed::new(out))
+            }
+            Ok((_, _, Some(0))) => Err("The checkout changed while reading; try again".into()),
+            Ok((_, _, code)) => Err(format!(
+                "hack env get {key} {}",
+                code.map_or_else(|| "was stopped".into(), |c| format!("exited with code {c}"))
+            )),
+            // Only these carry no command output; anything else is named, not quoted.
+            Err(e @ (RunError::NotFound | RunError::Spawn(_) | RunError::Timeout { .. })) => {
+                Err(format!("hack env get {key}: {e}"))
+            }
+            Err(_) => Err(format!("hack env get {key} failed")),
         }
     }
 
@@ -1909,6 +1965,22 @@ impl Source for FixtureSource {
         crate::env::fixture(self.0.name())
     }
 
+    fn env_value(
+        &self,
+        _root: &Path,
+        _native: bool,
+        _target: &EnvTarget,
+        key: &str,
+    ) -> Result<crate::env::Revealed, String> {
+        // Obviously fake values only; a name the listing does not have fails.
+        match crate::env::fixture(self.0.name()) {
+            crate::env::EnvView::Report(r) if r.vars.iter().any(|v| v.key == key && !v.missing) => {
+                Ok(crate::env::Revealed::new(crate::env::fixture_value(key)))
+            }
+            _ => Err(format!("hack env get {key} exited with code 1")),
+        }
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
     }
@@ -1949,6 +2021,69 @@ impl Source for FixtureSource {
         }
         Ok(fixtures::log_tail(self.0))
     }
+}
+
+/// Which overlay and scope an env read is for. `None` leaves it to the CLI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvTarget {
+    /// `--env` (`default` is the CLI's name for the base layers).
+    pub env: Option<String>,
+    /// `--service` (`global` or a service name).
+    pub scope: Option<String>,
+}
+
+impl EnvTarget {
+    /// The CLI arguments, refusing anything that is not a plain name.
+    ///
+    /// # Errors
+    /// An overlay or scope name the app does not pass to the CLI.
+    pub fn args(&self) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        if let Some(env) = &self.env {
+            if !valid_selector(env) {
+                return Err("Not an overlay name the app passes to the CLI".into());
+            }
+            out.extend(["--env".into(), env.clone()]);
+        }
+        if let Some(scope) = &self.scope {
+            if !valid_selector(scope) {
+                return Err("Not a scope name the app passes to the CLI".into());
+            }
+            out.extend(["--service".into(), scope.clone()]);
+        }
+        Ok(out)
+    }
+}
+
+/// Overlay and scope names: letters, digits, `.`, `_` and `-`, not starting
+/// with `-` (never read as an option), at most 128 bytes.
+fn valid_selector(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.starts_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Variable names as the CLI lists them: a letter or `_`, then letters,
+/// digits and `_`, at most 256 bytes.
+fn valid_env_name(s: &str) -> bool {
+    s.len() <= 256
+        && s.bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// The checkout an env command runs in. `hack env` walks ancestors, so a
+/// missing or shadowed project marker is refused instead of reading an
+/// ancestor's env as this project's.
+fn env_root(root: &Path) -> Option<std::path::PathBuf> {
+    if !root.is_absolute() {
+        return None;
+    }
+    let root = std::fs::canonicalize(root).ok()?;
+    (root.is_dir() && cli_selects_exactly(&root)).then_some(root)
 }
 
 #[cfg(test)]

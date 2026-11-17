@@ -57,6 +57,11 @@ pub enum Glyph {
     /// Sidebar and header: a branch instance.
     Branch,
     /// Header: copy the URL.
+    /// Env tab: reveal and hide a secret value.
+    Eye,
+    EyeOff,
+    /// Env tab: the secret key line.
+    Key,
     Copy,
     /// Header: copied.
     Check,
@@ -92,6 +97,9 @@ impl Glyph {
             Self::Branch => "icons/git-branch.svg",
             Self::Copy => "icons/copy.svg",
             Self::Check => "icons/check.svg",
+            Self::Eye => "icons/eye.svg",
+            Self::EyeOff => "icons/eye-off.svg",
+            Self::Key => "icons/key-round.svg",
         }
     }
 }
@@ -125,6 +133,9 @@ icon_assets!(
         GitBranch,
         Copy,
         Check,
+        Eye,
+        EyeOff,
+        KeyRound,
     ]
 );
 
@@ -180,6 +191,9 @@ mod tests {
             Glyph::Branch,
             Glyph::Copy,
             Glyph::Check,
+            Glyph::Eye,
+            Glyph::EyeOff,
+            Glyph::Key,
         ] {
             assert!(
                 Assets.load(g.path()).unwrap().is_some(),

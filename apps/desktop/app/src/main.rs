@@ -20,6 +20,7 @@
 mod doctor_view;
 #[cfg(feature = "terminal")]
 mod drive;
+mod env_view;
 mod logs_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
@@ -248,7 +249,7 @@ fn main() {
                             }
                         }
                         if f.name().starts_with("env-") {
-                            app.show_env_fixture();
+                            app.show_env_fixture(f.name(), cx);
                         }
                         if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
                             app.simulate_daemon_unavailable(f == Fixture::DaemonMismatch);

@@ -94,8 +94,8 @@ impl HackApp {
         cx.notify();
     }
 
-    /// The user chose where to look (an instance, a detail tab, Doctor, the
-    /// new-tab menu):
+    /// The user chose where to look (an instance, a detail tab, an env
+    /// overlay or scope, Doctor, the new-tab menu):
     /// the launch check no longer opens setup by itself. Losing the CLI
     /// still does.
     pub(crate) fn user_navigated(&mut self) {

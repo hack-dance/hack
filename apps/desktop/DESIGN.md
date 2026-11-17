@@ -17,7 +17,7 @@ second implementation of them.
 | Reads observe only | A poll never starts Docker, hackd, a VM or anything else. A command that can start something (today: `hack global status`) is not polled until it has an observe-only mode (R13). |
 | No app state beyond window layout | Selected project, window size, sidebar width, theme override. Nothing else is stored. |
 | No credentials, no passwords | No password field, no `sudo` from the app. Admin steps go to the user's terminal ([Onboarding](#2-first-run-onboarding)). |
-| No env-value reads or reveals | Env shows names and layers only, never a reveal. Exception: logs are unredacted service output (which can include values Hack injected), shown as the CLI emits them, with a warning, never written to disk and with no copy-all (owner decision: the Logs tab is in scope). |
+| Env values only through the CLI, one at a time | Owner decision (Nov 17): Env shows plaintext values and reveals a secret's value on request. Every read goes through the CLI on a pipe (`hack env get KEY` per name); the app never parses env files, decrypts or holds the key. A revealed value hides after 60 s and on any move; nothing bulk-reveals ([Env tab](#env-tab)). Logs are unredacted service output (which can include values Hack injected), shown as the CLI emits them, with a warning, never written to disk and with no copy-all (owner decision: the Logs tab is in scope). |
 | Unknown is not absent | A failed or timed-out read shows "could not read" with the error, never "stopped" or "0 projects". |
 | Small | Target under 4,000 lines of Rust for v0.1. The old `apps/macos` grew to 13,800 lines through an embedded terminal, command palette, editor and agent integrations, tickets and remote features. None of those come back. |
 
@@ -130,18 +130,28 @@ Source: `hack logs --json --path <root> --tail 500` (ndjson, follows by default)
 | Busy stream | The reader continuously consumes stdout. A full bounded event queue discards incoming events and reports a visible skipped-event count; it never waits for UI drain. This bounds app retention, not arbitrary producer-side CLI buffering. |
 | Stopped project | Last 200 lines (`--no-follow`), marked "project stopped". |
 
-### Env tab (names only, never values)
+### Env tab
 
-Source: `hack env list --json --path <root>`.
+Source: `hack env list --json --path <root> [--env <overlay>] [--service <scope>]`
+for names, and `hack env get <KEY> [--env <overlay>] [--service <scope>]` on a
+pipe for each value shown. Owner direction, Nov 17; mockup in the lead's brief.
 
-| State | Shown |
+| Part | Shown |
 |---|---|
-| Normal | Table: name, layer (`layer` / `resolved_from`), scope, kind (`storage.kind`), set (`has_value` ✓/✗), required. |
-| Missing required | Red rows from `missing_required`, first. |
-| Locked | `key_state` is `missing` or `unreadable`: lock icon, "Names are shown; values cannot be resolved", Copy `hack doctor`. `ok` does not prove the key decrypts the values. |
-| No env config | "This project has no env layers" + docs link. |
+| Overlay tabs | `base` (`--env default`), then each overlay the CLI names in `env_selection` (default, requested, effective), once. A `running` chip on the overlay the instance runs, when known (R22). Every overlay of a project is R24. |
+| Scope | Small pills on the right, from `scopes`; one listing per scope. |
+| Key line | `key_state` only: "Secret key found", or, when missing, the two places the CLI looks (`.hack.secret.key`, `HACK_ENV_SECRET_KEY`). Which source the CLI used is R26. |
+| Table | Name, Value, actions. A scope chip when not global; `required · missing` only for that exception, first. Plaintext values load with the listing (one `hack env get` each, at most 48; one read for all is R25). Secrets are dots with an eye and copy. With the key missing, secrets offer neither. |
+| Reveal | The eye reads that one name. It hides again after 60 s, and when the overlay, scope, detail tab or project changes, or the window is hidden or loses focus. |
+| Copy | Reads that one name if it is not shown, puts it on the clipboard, and clears the clipboard after 60 s if it still holds the value. GPUI cannot yet mark a clipboard item concealed (macOS `org.nspasteboard.ConcealedType`); that is an open gap in the toolkit, not the CLI. |
 
-Editing is "later". Never a reveal button.
+A value never reaches a log, a render, `--drive` output, a test snapshot or an
+error message: `Revealed` prints only its length, failures name the variable
+and exit code, and fixtures use obviously fake values. Editing, adding a
+variable or an overlay, and choosing the key source are slice 2. The key
+source will be stored per project in the app's machine-local settings file
+(the same file as the CLI choice), as a path or a variable name, never key
+bytes.
 
 ### Activity tab
 
@@ -325,6 +335,7 @@ because the unhealthy states live there.
 | Services CPU/memory | `hack usage --json --details` (until R3) | 5 s while visible | 10 s |
 | Logs | `hack logs --json --path <root> [<service>] --tail 500` (one long-running child) | stream | killed on tab change |
 | Env | `hack env list --json --path <root>` | on tab open, after env actions | 10 s |
+| Env value | `hack env get <KEY> --path <root>` (pipe) | per plaintext row with the listing; per eye or copy press for a secret | 10 s |
 | Activity | `hack activity --json --project <name> --limit 100` (R5b) | on open, 10 s while open | 10 s |
 | Doctor, onboarding | `hack doctor --json` (per project and once outside), `hack daemon status --json` | on open; every 10 min | 60 s |
 | Daemon | `GET /v1/status` | 10 s | 1 s |
@@ -341,7 +352,7 @@ The 24 numbered requests (R1–R18) this design needs from the CLI and daemon ar
 | v0 | Window, sidebar, detail header, Services table, log tail, status bar, light/dark; Start, Stop, Restart, Open, follow logs; `--fixtures <state>`. Compose detail; native row state only. |
 | v0.1 | Logs tab, Doctor view, onboarding, Env tab (names), always-on and daemon states, upgrade flow; Homebrew cask; Linux tarball. |
 | Later | Menu bar popover (open/start/stop, "Pause always-on"); activity charts; env editing through `hack env set`; branch instances; resource graphs. |
-| Never | Edit Compose files or Hack config; show, copy or export Hack's secret values; install, start or manage Docker itself; ask for or store a password; an embedded terminal, editor or agent; remote/gateway/tickets; its own database. |
+| Never | Edit Compose files or Hack config; export or bulk-reveal Hack's secret values, or read one except by name through the CLI when the user asks; install, start or manage Docker itself; ask for or store a password; an embedded terminal, editor or agent; remote/gateway/tickets; its own database. |
 
 Menu bar: gpui-kit 0.9.1 and GPUI have no tray or status item API (only the app
 menu, dock menu and in-window menus). The popover needs a separate crate such as
@@ -419,3 +430,7 @@ Each is small enough for one PR.
 27. **R21** End an exec session's processes inside the container. The terminal panel's service-shell tab runs `hack exec [--branch <b>] <service> -- bash`. Closing the tab or quitting ends that process group on the host, but a job the shell started in the background inside the container keeps running (as with `docker exec -it`), and the app can neither see nor signal processes in a container. Request: an exec mode that ties the in-container session to the client, for example `hack exec --session-scoped` running the command under a small in-container supervisor that ends its whole session when the client's terminal hangs up or the client exits. An alternative is `hack exec --print-session` (reporting the in-container session id) plus `hack exec --end-session <id>` for the app to call on close and on quit. The first form also covers a crashed app. Until then the app documents the limit and its `--drive` check reports such processes as known open.
 28. **R22** `hack exec` without `--env` on a Compose instance that is running a non-default overlay: today it resolves to the configured default overlay, and `resolveExecTargetReady` refuses the mismatch. `down` and `restart` already reuse the stored running overlay when `--env` is omitted (`resolveStoredRuntimeEnvName`). Request the same for `exec`, or expose the running overlay per instance in `/v1/projects` so the app can pass it explicitly. Until then a service-shell tab on such an instance shows the CLI's refusal, which names the overlay to use.
 29. **R23** Routing evidence for every registered project domain. On macOS, `hack doctor` emits `resolver:<suffix>` and `dnsmasq.conf:<suffix>` checks only for the default domain (`appendCustomDomainDnsChecks` uses `resolveDefaultDomain()`). A registered Compose project whose `dev_host` uses another suffix has no evidence, so Setup's routing card stays unknown and says so, naming the host. Re-checking or running `hack global install` cannot change that. Request: Doctor checks the resolver and dnsmasq entries for each registered project's domain suffix (or reports them as unchecked by name).
+30. **R24** Every overlay of a project. `hack env list --json` names only the default, requested and effective overlay (`env_selection`). The Env tab's overlay tabs need the whole set, for example `env_overlays: [{name, path}]` in that output or `hack env overlays --json`. The app does not list `.hack/hack.env.*.yaml` itself.
+31. **R25** Plaintext values in one read. Values come only with `--show-values` on a terminal, and that reveals everything. Request a pipe-safe listing that includes values for plaintext entries only (never secrets), for example `hack env list --json --plaintext-values`. Until then the app runs `hack env get` once per plaintext name (at most 48 per listing).
+32. **R26** Key source: report which source the CLI used for the project secret key (`file` with its path relative to the checkout, or `env` with the variable name), never the key; and accept an override for one run (a key file path or a variable name, for example `--key-file <path>` / `--key-env <NAME>`) so the app can offer "Choose key file" and "Use env var" without reading the key itself.
+33. **R27** Overlay creation: `hack env overlay add <name>` (creates `.hack/hack.env.<name>.yaml` the CLI's way, refusing an existing name), for the Env tab's `+ Overlay`. Slice 2.

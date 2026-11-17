@@ -30,6 +30,7 @@ use super::image_load;
 use super::image_platform::{ImagePlatform, PlatformPolicy};
 use super::image_policy::ImagePolicy;
 use super::image_reference::{ImageReference, NamedReference, normalize};
+use super::network_retry::{ATTEMPTS, backoff, transient};
 use super::registry_credentials::{self, Credential};
 use crate::CandidateError;
 use reqwest::{
@@ -764,6 +765,7 @@ struct Fetch<'a> {
     authorization: Option<Zeroizing<String>>,
     stage: Stage,
     deadline: Instant,
+    request_timeout: Duration,
 }
 
 impl<'a> Fetch<'a> {
@@ -800,6 +802,7 @@ impl<'a> Fetch<'a> {
             authorization: None,
             stage: Stage::Anonymous,
             deadline: Instant::now() + ACQUISITION_DEADLINE,
+            request_timeout: REQUEST_TIMEOUT,
         })
     }
 
@@ -836,18 +839,78 @@ impl<'a> Fetch<'a> {
         }
     }
 
+    /// Replay GET headers only; never replay a body read or OAuth refresh POST.
+    fn send_headers(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        url: &Url,
+        retry: bool,
+    ) -> Result<Response, CandidateError> {
+        for attempt in 1..=ATTEMPTS {
+            let remaining =
+                match self.remaining() {
+                    Ok(remaining) => remaining,
+                    Err(failure) => return Err(CandidateError::new(
+                        failure.code,
+                        format!(
+                            "Registry acquisition deadline exceeded. Host {} after {} attempt(s).",
+                            url.host_str().unwrap_or("unknown"),
+                            attempt - 1
+                        ),
+                    )
+                    .with_network_request(url.host_str().unwrap_or("unknown"), attempt - 1)),
+                };
+            let request = request
+                .try_clone()
+                .ok_or_else(|| error("Cannot replay registry request."))?;
+            match request
+                .timeout(remaining.min(if retry {
+                    self.request_timeout
+                } else {
+                    REQUEST_TIMEOUT
+                }))
+                .send()
+            {
+                Ok(response) => return Ok(response),
+                Err(failure) => {
+                    let classified = transport_error(&failure, "Registry request failed.");
+                    let delay = backoff(attempt);
+                    if !retry
+                        || !transient(&failure)
+                        || classified.code != "registry_image"
+                        || attempt == ATTEMPTS
+                        || self.remaining().unwrap_or_default() <= delay
+                    {
+                        return Err(CandidateError::new(
+                            classified.code,
+                            format!(
+                                "{} Host {} after {attempt} attempt(s).",
+                                classified.message,
+                                url.host_str().unwrap_or("unknown")
+                            ),
+                        )
+                        .with_network_request(url.host_str().unwrap_or("unknown"), attempt));
+                    }
+                    std::thread::sleep(delay);
+                }
+            }
+        }
+        unreachable!("bounded attempts return")
+    }
+
     /// One request with redirects followed under [`redirect_allowed`]. Authorization is
     /// attached only while the request targets the registry origin.
-    fn send(&self, mut url: Url, timeout: Duration) -> Result<Response, CandidateError> {
+    fn send(
+        &self,
+        mut url: Url,
+        timeout: Duration,
+        retry: bool,
+    ) -> Result<Response, CandidateError> {
         for hop in 0..=4 {
             if !self.destination_allowed(&url) {
                 return Err(local_address_refused());
             }
-            let mut request = self
-                .client
-                .get(url.clone())
-                .timeout(self.remaining()?.min(timeout))
-                .header(ACCEPT, ACCEPT_MANIFEST);
+            let mut request = self.client.get(url.clone()).header(ACCEPT, ACCEPT_MANIFEST);
             if let Some(value) = self
                 .authorization
                 .as_ref()
@@ -858,9 +921,14 @@ impl<'a> Fetch<'a> {
                 header.set_sensitive(true);
                 request = request.header(AUTHORIZATION, header);
             }
-            let response = request
-                .send()
-                .map_err(|e| transport_error(&e, "Registry request failed or timed out."))?;
+            let response = if retry {
+                self.send_headers(request, &url, true)?
+            } else {
+                request
+                    .timeout(self.remaining()?.min(timeout))
+                    .send()
+                    .map_err(|e| transport_error(&e, "Registry request failed or timed out."))?
+            };
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -887,9 +955,14 @@ impl<'a> Fetch<'a> {
     /// anonymously first, then with the host user's Docker credentials. Only a challenge
     /// from the registry origin itself is answered; a redirected host that refuses access
     /// fails without any token or credential request.
-    fn get(&mut self, url: Url, timeout: Duration) -> Result<Response, CandidateError> {
+    fn get(
+        &mut self,
+        url: Url,
+        timeout: Duration,
+        retry: bool,
+    ) -> Result<Response, CandidateError> {
         loop {
-            let response = self.send(url.clone(), timeout)?;
+            let response = self.send(url.clone(), timeout, retry)?;
             let status = response.status();
             if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
                 && !same_origin(&self.registry.origin, response.url())
@@ -1026,10 +1099,11 @@ impl<'a> Fetch<'a> {
                 request
             }
         };
-        let response = request
-            .timeout(self.remaining()?.min(REQUEST_TIMEOUT))
-            .send()
-            .map_err(|e| transport_error(&e, "Registry token request failed or timed out."))?;
+        let response = self.send_headers(
+            request,
+            realm,
+            !matches!(credential, Some(Credential::IdentityToken(_))),
+        )?;
         if matches!(
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
@@ -1076,7 +1150,7 @@ impl<'a> Fetch<'a> {
 
     fn manifest(&mut self, reference: &str) -> Result<Vec<u8>, CandidateError> {
         let url = self.url("manifests", reference)?;
-        let response = self.get(url, REQUEST_TIMEOUT)?;
+        let response = self.get(url, REQUEST_TIMEOUT, true)?;
         if response
             .content_length()
             .is_some_and(|n| n > MAX_METADATA as u64)
@@ -1098,7 +1172,11 @@ impl<'a> Fetch<'a> {
     /// One small object (manifest or config) verified against its descriptor.
     fn object(&mut self, kind: &str, d: &Descriptor) -> Result<Vec<u8>, CandidateError> {
         Self::checked(d, MAX_METADATA as u64)?;
-        let response = self.get(self.url(kind, &d.digest)?, REQUEST_TIMEOUT)?;
+        let response = self.get(
+            self.url(kind, &d.digest)?,
+            REQUEST_TIMEOUT,
+            kind == "manifests",
+        )?;
         let bytes = bounded(response, d.size as usize)?;
         verify_object(d, &bytes)?;
         Ok(bytes)
@@ -1107,7 +1185,7 @@ impl<'a> Fetch<'a> {
     /// A layer blob as a reader that enforces its descriptor's exact size and digest.
     fn blob(&mut self, d: &Descriptor) -> Result<Verified<Response>, CandidateError> {
         let timeout = REQUEST_TIMEOUT + Duration::from_secs(d.size / MIN_BLOB_BYTES_PER_SECOND);
-        let response = self.get(self.url("blobs", &d.digest)?, timeout)?;
+        let response = self.get(self.url("blobs", &d.digest)?, timeout, false)?;
         if response.content_length().is_some_and(|n| n != d.size) {
             return Err(error("Registry object digest or size mismatch."));
         }

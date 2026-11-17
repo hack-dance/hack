@@ -1482,3 +1482,59 @@ test("a different provider pin names the original release's recovery, without ex
   expect(error.message).not.toContain("PID file changed");
   expect(error.message).not.toContain("synthetic-secret-diagnostic");
 });
+
+bunTest(
+  "network failures expose only a bounded host and attempt diagnostic",
+  () => {
+    expect(
+      nativeFailureDetail({
+        code: "registry_image",
+        message: "synthetic-private-transport-error",
+        network_request: {
+          version: 1,
+          host: "registry.example.test",
+          attempts: 3,
+        },
+      }).message
+    ).toBe(
+      "Network request to registry.example.test failed after 3 attempt(s)."
+    );
+    for (const request of [
+      {
+        version: 1,
+        host: "https://user:secret@example.test/token?secret",
+        attempts: 3,
+      },
+      { version: 1, host: "example.test\nsecret", attempts: 3 },
+      { version: 1, host: "example.test", attempts: 4 },
+      { version: 1, host: "example.test", attempts: -1 },
+      { version: 1, host: "example.test", attempts: 1.5 },
+      { version: 1, host: "example.test", attempts: 3, extra: "secret" },
+    ]) {
+      expect(
+        nativeFailureDetail({
+          code: "registry_image",
+          network_request: request,
+        }).message
+      ).toBeUndefined();
+    }
+  }
+);
+
+bunTest(
+  "network diagnostics retain admitted underscore hosts and zero-attempt deadlines",
+  () => {
+    expect(
+      nativeFailureDetail({
+        code: "registry_image",
+        network_request: {
+          version: 1,
+          host: "registry_fixture.test",
+          attempts: 0,
+        },
+      }).message
+    ).toBe(
+      "Network request to registry_fixture.test failed after 0 attempt(s)."
+    );
+  }
+);

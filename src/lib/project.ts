@@ -486,7 +486,10 @@ export function resolveProjectRouteBaseHosts(opts: {
   readonly devHost: string;
   readonly aliasHost: string | null;
 }): string[] {
-  const hosts = [opts.devHost, ...(opts.aliasHost ? [opts.aliasHost] : [])];
+  // Host names are case-insensitive; label sites are compared in lowercase.
+  const hosts = [opts.devHost, ...(opts.aliasHost ? [opts.aliasHost] : [])].map(
+    (host) => host.toLowerCase()
+  );
   const project = managedRouteProject(opts.devHost);
   if (project) {
     hosts.push(

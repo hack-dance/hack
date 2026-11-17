@@ -15,7 +15,9 @@ export type RunningCaddySites = {
 
 const SITE_SEPARATOR = /[\s,]+/;
 const SITE = /^(?:https?:\/\/)?(?<host>[^\s/:]+)(?::\d{1,5})?$/i;
-// Only the compose project and the root site labels; nothing else is read.
+// Only the compose project and labels named `caddy` or `caddy_*` without a
+// dot; the parser then keeps just `caddy` and `caddy_<n>`. No other label,
+// environment or config is read.
 const FORMAT =
   '{"project":{{json (index .Config.Labels "com.docker.compose.project")}},"labels":{ {{- range $key,$value := .Config.Labels}}{{if or (eq $key "caddy") (and (ge (len $key) 7) (eq (slice $key 0 6) "caddy_") (eq (len (split $key ".")) 1))}}{{json $key}}:{{json $value}},{{end}}{{end}}"":""}}';
 

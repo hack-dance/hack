@@ -171,3 +171,29 @@ test("label sites keep scheme and port, and sites outside the family are dropped
   expect(isCaddySiteLabel("caddy.reverse_proxy")).toBe(false);
   expect(isCaddySiteLabel("caddy_ingress_network")).toBe(false);
 });
+
+test("a mixed-case custom dev_host still matches its own label hosts", () => {
+  const baseHosts = resolveProjectRouteBaseHosts({
+    devHost: "App.Example",
+    aliasHost: null,
+  });
+  expect(
+    rewriteCaddyLabelForBranch({
+      value: "App.Example, API.App.Example",
+      branch: "feature-x",
+      baseHosts,
+    })
+  ).toEqual({
+    value: "feature-x.app.example, api.feature-x.app.example",
+    changed: true,
+    dropped: [],
+  });
+  // Callers that pass their own mixed-case bases match the same way.
+  expect(
+    rewriteCaddyLabelForBranch({
+      value: "web.demo.hack",
+      branch: "feature-x",
+      baseHosts: ["Demo.Hack"],
+    }).value
+  ).toBe("web.feature-x.demo.hack");
+});

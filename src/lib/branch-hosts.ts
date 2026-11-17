@@ -147,9 +147,9 @@ function branchQualifiedHost(opts: {
 }): string | undefined {
   for (const baseHost of opts.baseHosts) {
     const rewritten = rewriteHostForBranch({
-      host: opts.host,
+      host: opts.host.toLowerCase(),
       branch: opts.branch,
-      baseHost,
+      baseHost: baseHost.toLowerCase(),
     });
     if (rewritten.matched) {
       return rewritten.host;

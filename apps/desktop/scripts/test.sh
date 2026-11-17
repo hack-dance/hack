@@ -18,8 +18,11 @@ export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
 # On macOS the app always builds the terminal panel, which needs the pinned
 # libghostty-vt inputs: fill the default directory (fetches only what is
 # missing, each file checked against its sha256) unless one is exported.
+# Export what it prints, so the build reads the directory it filled (it may
+# be HACK_DESKTOP_GHOSTTY_CACHE rather than the default).
 if [[ "$(uname -s)" == Darwin && -z "${GHOSTTY_RELEASE_DIR:-}" ]]; then
-  bash "$root/apps/desktop/term/scripts/provision-ghostty.sh" >/dev/null
+  provisioned=$(bash "$root/apps/desktop/term/scripts/provision-ghostty.sh")
+  eval "$provisioned"
 fi
 owned=$(mktemp -d "${TMPDIR:-/tmp}/hack-desktop-tests.XXXXXXXX")
 trap 'rm -rf -- "$owned"' EXIT

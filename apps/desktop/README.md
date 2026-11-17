@@ -47,6 +47,7 @@ dropping thread, and its reader exits when the descendant closes stdout.
 ```sh
 cargo run -p hack-desktop-core --bin hack-desktop-state            # all projects
 cargo run -p hack-desktop-core --bin hack-desktop-state -- --project <name>
+cargo run -p hack-desktop-core --bin hack-desktop-state -- --reads 3 --compact  # cold read, then warm reads
 ```
 
 `hack-desktop-state` reads exactly what the window reads: hackd when its version
@@ -60,7 +61,12 @@ It applies that to the same view model and prints the list and
 each project's detail as JSON. It runs no action, opens no window and writes
 nothing.
 It also prints which Hack CLI it used and the others found (`cli`), the hackd
-socket it read, and how long each step of the read took (`read_steps`).
+socket it read, and how long each step of the read took (`read_steps`). Each run is a
+new process, so its first read is cold: the CLI version, the hackd location
+and the version-compatibility answer are not cached yet, and every step that
+starts the CLI pays its start-up (about a second for a launcher that checks
+its bundle on each start). `--reads <n>` reads `n` times in one process and
+lists each read under `reads`, as the window's later reads are warm.
 
 ### Which CLI and which hackd
 

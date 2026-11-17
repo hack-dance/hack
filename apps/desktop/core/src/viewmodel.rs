@@ -253,7 +253,8 @@ pub struct AppModel {
 }
 
 /// The running services a read reports for a row, `None` when it does not
-/// report them. Native rows come from native `ps`, whatever Docker's state.
+/// report them. Native rows come from native `ps`, whatever Docker's state,
+/// when it observed the services (or confirmed the project not started).
 /// A Compose row needs a reachable engine and either its runtime, or a
 /// runtime the read confirmed absent (`runtime: null` with
 /// `runtime_status: "stopped"`: no shells). An unknown or unavailable
@@ -267,7 +268,15 @@ fn reported_shells(s: &Snapshot, row: &ProjectRow) -> Option<Vec<String>> {
             .collect()
     };
     if row.is_native() {
-        return row.native.is_some().then(|| running(row));
+        // As `state::native_state` reads it: only an observation that
+        // establishes service state replaces the list. `runtime_busy` and
+        // the other non-observations return no items without meaning the
+        // services stopped.
+        return match row.native.as_ref().map(|n| n.status.as_str()) {
+            Some("observed" | "runtime_degraded") => Some(running(row)),
+            Some("not_started") => Some(Vec::new()),
+            _ => None,
+        };
     }
     if s.projects.engine_down() {
         return None;
@@ -1098,6 +1107,48 @@ mod tests {
         m.source_changed();
         m.apply(Event::Refreshed(Err(read_error())));
         assert!(m.detail().is_none_or(|d| d.shells.is_empty()));
+    }
+
+    #[test]
+    fn a_busy_native_runtime_keeps_the_last_native_shells() {
+        let native = |status: &str, running: bool| {
+            let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+            let row = snap
+                .projects
+                .projects
+                .iter_mut()
+                .find(|p| p.name == "storefront")
+                .unwrap();
+            row.backend = Some("native".into());
+            row.native = Some(crate::models::NativePs {
+                status: status.into(),
+                items: if running {
+                    vec![crate::models::NativePsItem {
+                        service: "api".into(),
+                        state: "running".into(),
+                        ..Default::default()
+                    }]
+                } else {
+                    vec![]
+                },
+            });
+            snap
+        };
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(native("observed", true))));
+        m.apply(Event::Select("storefront".into()));
+        assert_eq!(shells(&m), (vec!["api".to_owned()], false));
+        for status in [
+            "runtime_busy",
+            "pending",
+            "runtime_not_running",
+            "owner_unconfirmed",
+        ] {
+            m.apply(Event::Refreshed(Ok(native(status, false))));
+            assert_eq!(shells(&m), (vec!["api".to_owned()], true), "{status}");
+        }
+        m.apply(Event::Refreshed(Ok(native("not_started", false))));
+        assert_eq!(shells(&m), (Vec::<String>::new(), false));
     }
 
     #[test]

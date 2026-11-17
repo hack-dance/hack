@@ -308,6 +308,9 @@ pub struct EnvModel {
     /// The value the app last put on the clipboard, until it clears it
     /// (after `REVEAL_FOR`, or on quit) or something else replaces it.
     pub clipboard: Option<Revealed>,
+    /// Counts copies: each copy's timer clears only if no later copy (of
+    /// the same value or another) has happened since.
+    pub clipboard_copy: u64,
     /// Bumped by every hide of all values (a new listing, focus or
     /// visibility lost): a reveal or copy started before it must not
     /// complete after it. Those hides also drop the "Reading" marks.

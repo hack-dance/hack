@@ -559,6 +559,46 @@ mod tests {
     }
 
     #[test]
+    fn setup_is_checked_again_when_the_window_regains_focus() {
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_kit::NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let options = WindowOptions {
+            focus: false,
+            show: false,
+            ..WindowOptions::default()
+        };
+        let (window, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, |window, cx| {
+                    cx.new(|cx| {
+                        let mut a = HackApp::new(
+                            Arc::new(FixtureSource(Fixture::Running)),
+                            false,
+                            window,
+                            cx,
+                        );
+                        a.watch_window(window, cx);
+                        a.show_setup_now(
+                            hack_desktop_core::setup_fixtures::load("partial").expect("fixture"),
+                        );
+                        a
+                    })
+                })
+            })
+            .expect("open a headless window");
+        let before = cx.update(|cx| app.read(cx).setup.checked_at);
+        cx.update_window(window, |_, w, _| w.activate_window())
+            .expect("activate");
+        cx.run_until_parked();
+        let after = cx.update(|cx| app.read(cx).setup.checked_at);
+        assert_ne!(before, after, "focus coming back checks setup again");
+    }
+
+    #[test]
     fn a_skip_lasts_for_the_session_and_the_cli_cannot_be_skipped() {
         let (mut cx, app) = app();
         cx.update(|cx| app.update(cx, |a, cx| a.open_setup(cx)));

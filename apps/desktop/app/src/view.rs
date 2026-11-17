@@ -139,6 +139,7 @@ pub struct HackApp {
     /// runs wait for it.
     window_visible: bool,
     _visibility: Option<gpui_kit::Subscription>,
+    _activation: Option<gpui_kit::Subscription>,
     recovery_busy: bool,
     recovery_error: Option<String>,
     /// Setup checks (DESIGN.md section 2; `setup_view`).
@@ -177,6 +178,7 @@ impl HackApp {
             doctor: DoctorPane::default(),
             window_visible: true,
             _visibility: None,
+            _activation: None,
             env: Default::default(),
             live,
             search,
@@ -326,20 +328,31 @@ impl HackApp {
             |this, visibility, _window, cx| {
                 this.window_visible = visibility.is_visible();
                 this.maybe_auto_refresh(cx);
-                // Back from the terminal after an admin step: check setup
-                // again while it is shown or a fix is outstanding.
-                if this.window_visible
-                    && hack_desktop_core::setup::should_recheck_on_focus(
-                        this.pane == Pane::Setup,
-                        this.setup.pending_fix,
-                        this.setup.loading,
-                        this.setup.action_busy,
-                    )
-                {
-                    this.load_setup(cx);
+                if this.window_visible {
+                    this.recheck_setup_on_return(cx);
                 }
             },
         ));
+        // Switching back from the terminal usually leaves the window
+        // visible throughout: focus coming back is the signal.
+        self._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.recheck_setup_on_return(cx);
+            }
+        }));
+    }
+
+    /// Back from the terminal after an admin step: check setup again while
+    /// it is shown or a fix is outstanding.
+    fn recheck_setup_on_return(&mut self, cx: &mut Context<Self>) {
+        if hack_desktop_core::setup::should_recheck_on_focus(
+            self.pane == Pane::Setup,
+            self.setup.pending_fix,
+            self.setup.loading,
+            self.setup.action_busy,
+        ) {
+            self.load_setup(cx);
+        }
     }
 
     /// While the Doctor pane is visible, refresh every 10 minutes.

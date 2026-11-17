@@ -1935,6 +1935,13 @@ image-declared `VOLUME` path; that cover must be writable. `hack doctor` gives t
 same retained-data advisories for a service with an anonymous volume as for one
 with a named data volume.
 
+A mount whose source the review cannot resolve (`unresolved_mount_source`, for
+example a home-relative file) is also refused by the start review, as
+`graph_subset` on `volumes` with the message "A mount source is interpolated or
+home-relative and was not resolved (unresolved_mount_source)". That refusal is the
+same mount, not an anonymous volume on the service; fix the
+`unresolved_mount_source` finding.
+
 Service CPU and memory limits are optional. Services without an explicit Compose
 limit share the admitted VM pool (Docker `NanoCpus: 0` and `Memory: 0`); the VM's
 CPU and memory admission bounds remain unchanged. Explicit limits retain per-service

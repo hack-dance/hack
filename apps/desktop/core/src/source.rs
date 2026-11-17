@@ -357,6 +357,13 @@ pub trait Source: Send + Sync {
         Err("Editing is unavailable for this source".into())
     }
 
+    /// `hack daemon status --json`, for the hackd card: the selected CLI in
+    /// its checked context, without starting hackd. `None` when it could not
+    /// be read.
+    fn daemon_status(&self) -> Option<crate::models::DaemonStatus> {
+        None
+    }
+
     /// Explicit user recovery only; never called by a poll.
     /// # Errors
     /// Failed or unavailable daemon command.
@@ -1743,6 +1750,16 @@ impl Source for LiveSource {
         }
     }
 
+    fn daemon_status(&self) -> Option<crate::models::DaemonStatus> {
+        // Exit 1 still carries the report when hackd is not running.
+        let (out, _, _) = checked_daemon_runner(&self.runner.fixed())
+            .ok()?
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_raw(&["daemon", "status", "--json"], None, Self::DAEMON_STATUS)
+            .ok()?;
+        serde_json::from_str(&out).ok()
+    }
+
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
         // The selected CLI in its checked context, so hackd is started or
         // restarted by this install and no other.
@@ -2156,6 +2173,10 @@ impl Source for FixtureSource {
 
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
+    }
+
+    fn daemon_status(&self) -> Option<crate::models::DaemonStatus> {
+        fixtures::daemon_status(self.0)
     }
 
     fn doctor_runs(&self, _projects: &[DoctorTarget]) -> Vec<DoctorRun> {

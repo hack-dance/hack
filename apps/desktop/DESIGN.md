@@ -291,6 +291,10 @@ parse fall back to Restart.
 
 ## 6. Always-on (HACK-2213, proposed contract)
 
+The CLI now emits this contract (docs/always-on-projects.md). The app shows it
+read-only in the hackd pane and under each always-on project's header
+(HACK-2288 item 6); the switch and the commands below stay HACK-2213.
+
 ![Always-on](diagrams/always-on.svg) ([source](diagrams/always-on.mmd))
 
 | State | Shown on the project | Action |

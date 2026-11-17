@@ -699,7 +699,8 @@ export async function resolveNativeHostSettings(opts: {
     machine: values.aws,
   });
   const gcloud = pick<NativeHostSettings["gcloud"]>({
-    envSet: nonEmpty(env, "HACK_NATIVE_GCLOUD_ADC"),
+    // An empty variable is present: it withholds a machine consent for this command.
+    envSet: set(env, "HACK_NATIVE_GCLOUD_ADC"),
     fromEnv: () => parseNativeGcloudSelection(env.HACK_NATIVE_GCLOUD_ADC),
     machineSet: values.gcloud !== undefined,
     machine: values.gcloud,

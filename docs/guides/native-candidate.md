@@ -2340,7 +2340,8 @@ For a project whose services bind the gcloud ADC file read-only, for example
 explicit `HACK_NATIVE_GCLOUD_ADC=file`, or `"gcloud": {"mode": "file"}` in the
 [machine settings](#native-settings-files), applies the gcloud adapter after the normal
 login hook, beside the AWS adapter. That one consent is the only step: the Compose file
-keeps its mount line. Native preflight lists a missing consent as
+keeps its mount line. The variable wins over the machine value; an empty
+`HACK_NATIVE_GCLOUD_ADC=` withholds a machine consent for that command. Native preflight lists a missing consent as
 `gcloud_adc_grant_required` for each service with the mount. It reviews the
 project as the adapter will deliver it, without the host mount, and so does the
 static review that `up` runs before lifecycle hooks. Accepted sources are that path written with

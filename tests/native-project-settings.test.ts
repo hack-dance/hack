@@ -764,6 +764,9 @@ test("HACK-2324: the gcloud ADC consent is a machine setting or the variable, an
   const machine = await f.host();
   expect(machine.gcloud).toEqual({ mode: "file" });
   expect(machine.origins.gcloud).toBe("machine");
+  const withheld = await f.host({ HACK_NATIVE_GCLOUD_ADC: "" });
+  expect(withheld.gcloud).toBeUndefined();
+  expect(withheld.origins.gcloud).toBe("env");
   for (const gcloud of [
     { mode: "token" },
     { mode: "file", extra: 1 },

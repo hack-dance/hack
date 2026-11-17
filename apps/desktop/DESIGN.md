@@ -143,7 +143,7 @@ pipe for each value shown. Owner direction, Nov 17; mockup in the lead's brief.
 | Key line | `key_state` only: "Secret key found", or, when missing, the two places the CLI looks (`.hack.secret.key`, `HACK_ENV_SECRET_KEY`). Which source the CLI used is R26. |
 | Table | Name, Value, actions. A scope chip when not global; `required · missing` only for that exception, first. Plaintext values load with the listing (one `hack env get` each, at most 48; one read for all is R25). Secrets are dots with an eye and copy. With the key missing, secrets offer neither. |
 | Reveal | The eye reads that one name. It hides again after 60 s, and when the overlay, scope, detail tab or project changes, or the window is hidden or loses focus. |
-| Copy | Reads that one name if it is not shown, puts it on the clipboard, and clears the clipboard after 60 s if it still holds the value. GPUI cannot yet mark a clipboard item concealed (macOS `org.nspasteboard.ConcealedType`); that is an open gap in the toolkit, not the CLI. |
+| Copy | Reads that one name if it is not shown, puts it on the clipboard, and clears the clipboard after 60 s, or when the app quits sooner, if it still holds the value. GPUI cannot yet mark a clipboard item concealed (macOS `org.nspasteboard.ConcealedType`); that is an open gap in the toolkit, not the CLI. |
 
 A value never reaches a log, a render, `--drive` output, a test snapshot or an
 error message: `Revealed` prints only its length, failures name the variable

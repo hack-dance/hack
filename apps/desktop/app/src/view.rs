@@ -200,6 +200,13 @@ impl HackApp {
             this.refresh_now();
         }
         this.start_log_drain(cx);
+        // A secret copied less than REVEAL_FOR ago: clear it on quit too, if
+        // the clipboard still holds it.
+        cx.on_app_quit(|this, cx| {
+            this.clear_owned_clipboard(cx);
+            async {}
+        })
+        .detach();
         this
     }
 

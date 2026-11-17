@@ -295,6 +295,54 @@ async function runComposeStartPhase(input: {
   return code;
 }
 
+/**
+ * One `compose ps --all --format json` read for the start-phase watchdog,
+ * owned by it: the poll runs in its own process group, bounded like other
+ * inspections, and is killed (with the Compose plugin process it starts) as
+ * soon as the start ends, so a hung read never keeps the CLI alive after
+ * Compose finished or was interrupted. Null when the read failed.
+ */
+async function pollComposePs(input: {
+  readonly options: RuntimeUpOptions;
+  readonly finished: Promise<number>;
+}): Promise<Record<string, unknown>[] | null> {
+  const proc = Bun.spawn(
+    [...buildComposeArgs(input.options), "ps", "--all", "--format", "json"],
+    {
+      cwd: input.options.cwd,
+      env: mergeSpawnEnv(input.options.env),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      detached: true,
+    }
+  );
+  let settled = false;
+  const stop = () => {
+    if (settled) {
+      return;
+    }
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      // The group already exited.
+    }
+  };
+  const timer = setTimeout(stop, DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS);
+  // Stop the poll the moment the start ends.
+  void input.finished.then(stop, stop);
+  try {
+    const [stdout, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    return code === 0 ? parseComposePsJson(stdout) : null;
+  } finally {
+    settled = true;
+    clearTimeout(timer);
+  }
+}
+
 /** Poll one-shot progress until the start ends or the watchdog decides to stop. */
 async function watchStartProgress(input: {
   readonly options: RuntimeUpOptions;
@@ -315,15 +363,13 @@ async function watchStartProgress(input: {
     if (input.isDone()) {
       return { stopped: false, lastSeen };
     }
-    // A poll never outlives the start: Compose ending wins the race.
-    const ps = await Promise.race([
-      composeRuntimeBackend.psJson({ ...input.options, all: true }),
-      input.finished.then(() => null),
-    ]);
-    if (ps === null || input.isDone()) {
+    const entries = await pollComposePs({
+      options: input.options,
+      finished: input.finished,
+    });
+    if (input.isDone()) {
       return { stopped: false, lastSeen };
     }
-    const entries = ps.exitCode === 0 ? parseComposePsJson(ps.stdout) : null;
     if (entries) {
       // A failed read is no evidence of progress, never extra time.
       lastSeen = runningOneShots({ graph: input.graph, entries });

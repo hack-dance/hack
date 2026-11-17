@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -26,6 +33,10 @@ case " $* " in
     : > "$state/up-done"
     exit 0 ;;
   *" ps "*)
+    if [ -n "\${STUB_PS_HANG:-}" ] && [ ! -f "$state/up-done" ]; then
+      printf '%s\\n' "$$" > "$state/ps.pid"
+      exec sleep 60
+    fi
     if [ -n "\${STUB_PS_SLEEP:-}" ] && [ ! -f "$state/up-done" ]; then
       sleep "$STUB_PS_SLEEP"
     fi
@@ -271,4 +282,73 @@ test("a targeted restart of a running one-shot reports the interruption; of anot
     data: { interrupted?: string[] };
   };
   expect(untouched.data.interrupted).toBeUndefined();
+}, 60_000);
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hungPollPid(): Promise<number> {
+  const text = await readFile(join(state, "ps.pid"), "utf8");
+  const pid = Number(text.trim());
+  expect(pid).toBeGreaterThan(0);
+  return pid;
+}
+
+test("a hung poll neither delays a finished start nor outlives it", async () => {
+  const started = Date.now();
+  const result = await cli(["up", "--detach", "--json"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "2",
+    STUB_PS_HANG: "1",
+  });
+  expect(result.exitCode).toBe(0);
+  // Without cancellation the CLI waits out the 15 s inspection bound.
+  expect(Date.now() - started).toBeLessThan(10_000);
+  expect(alive(await hungPollPid())).toBe(false);
+}, 60_000);
+
+test("Ctrl-C during a watched start ends promptly and stops the hung poll", async () => {
+  const child = Bun.spawn([process.execPath, CLI, "up", "--detach", "--json"], {
+    cwd: project,
+    env: privateCliEnv({
+      root,
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`,
+        HACK_RUNTIME_BACKEND: "compose",
+        HACK_NO_INTERACTIVE: "1",
+        NO_COLOR: "1",
+        STUB_STATE: state,
+        HACK_COMPOSE_STARTUP_TIMEOUT_MS: "60000",
+        STUB_UP_SECONDS: "30",
+        STUB_PS_HANG: "1",
+      },
+    }),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  // Wait until the watchdog's poll is hanging.
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const exists = await readFile(join(state, "ps.pid"), "utf8").catch(
+      () => ""
+    );
+    if (exists.trim() !== "") {
+      break;
+    }
+    await Bun.sleep(100);
+  }
+  const interruptedAt = Date.now();
+  child.kill("SIGINT");
+  const code = await child.exited;
+  expect(Date.now() - interruptedAt).toBeLessThan(10_000);
+  expect(code).not.toBe(0);
+  expect(code).not.toBe(124);
+  expect(alive(await hungPollPid())).toBe(false);
 }, 60_000);

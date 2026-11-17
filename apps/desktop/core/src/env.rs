@@ -64,6 +64,24 @@ impl EnvRow {
         matches!(self.storage.kind.as_str(), "plaintext" | "plain")
     }
 
+    /// The service scope to read this row's value in (`--service`), when
+    /// the listing did not choose one: a legacy row limited to services
+    /// names its first service, a canonical row its scope. `None` for
+    /// global rows. Without it the CLI resolves in the global scope and a
+    /// service-only variable cannot be read.
+    #[must_use]
+    pub fn value_scope(&self) -> Option<String> {
+        match &self.scope {
+            Scope::Legacy(services) => services.first().cloned(),
+            Scope::Canonical(s)
+                if !s.is_empty() && !matches!(s.as_str(), "global" | "project" | "unknown") =>
+            {
+                Some(s.clone())
+            }
+            Scope::Canonical(_) => None,
+        }
+    }
+
     /// The scope name, `global` when the listing does not name one.
     #[must_use]
     pub fn scope_name(&self) -> String {
@@ -654,6 +672,33 @@ mod tests {
         assert_eq!(model.value(&key), ValueState::Reading);
         assert!(model.finish_reveal(generation, key.clone(), b, shown()));
         assert!(matches!(model.value(&key), ValueState::Shown { .. }));
+    }
+
+    #[test]
+    fn a_service_only_row_reads_its_value_in_that_service() {
+        let row = |scope: Scope| EnvRow {
+            key: "K".into(),
+            required: false,
+            storage: Storage {
+                kind: "plaintext".into(),
+            },
+            resolved_from: None,
+            has_value: true,
+            scope,
+            layer: None,
+            missing: false,
+        };
+        assert_eq!(
+            row(Scope::Legacy(vec!["api".into(), "web".into()])).value_scope(),
+            Some("api".into())
+        );
+        assert_eq!(row(Scope::Legacy(vec![])).value_scope(), None);
+        assert_eq!(
+            row(Scope::Canonical("api".into())).value_scope(),
+            Some("api".into())
+        );
+        assert_eq!(row(Scope::Canonical("global".into())).value_scope(), None);
+        assert_eq!(row(Scope::Canonical("project".into())).value_scope(), None);
     }
 
     #[test]

@@ -35,6 +35,16 @@ impl HackApp {
         }
     }
 
+    /// The target for one row's value: the listing's, with the row's own
+    /// service when the listing named none (see [`EnvRow::value_scope`]).
+    fn row_target(&self, row: &EnvRow) -> EnvTarget {
+        let mut target = self.env_target();
+        if target.scope.is_none() {
+            target.scope = row.value_scope();
+        }
+        target
+    }
+
     /// The `--env` value of the tab shown: the one chosen, else the
     /// overlay the CLI selected.
     pub(crate) fn env_tab_shown(&self) -> Option<String> {
@@ -96,20 +106,19 @@ impl HackApp {
             return;
         };
         let generation = self.env.generation();
-        let target = self.env_target();
-        let rows: Vec<(ValueKey, String)> = report
+        let rows: Vec<(ValueKey, String, EnvTarget)> = report
             .vars
             .iter()
             .filter(|r| r.is_plaintext() && !r.missing)
             .take(PLAIN_VALUES_MAX)
-            .map(|r| (self.value_key(r), r.key.clone()))
+            .map(|r| (self.value_key(r), r.key.clone(), self.row_target(r)))
             .collect();
-        for (key, _) in &rows {
+        for (key, _, _) in &rows {
             self.env
                 .set_value(generation, key.clone(), ValueState::Reading);
         }
         if !self.live {
-            for (key, name) in rows {
+            for (key, name, target) in rows {
                 let state = match self.source.env_value(&root, native, &target, &name) {
                     Ok(v) => ValueState::Plain(v),
                     Err(e) => ValueState::Failed(e),
@@ -120,8 +129,8 @@ impl HackApp {
         }
         let source = self.source.clone();
         cx.spawn(async move |this, cx| {
-            for (key, name) in rows {
-                let (source, root, target) = (source.clone(), root.clone(), target.clone());
+            for (key, name, target) in rows {
+                let (source, root) = (source.clone(), root.clone());
                 let state = cx
                     .background_executor()
                     .spawn(async move {
@@ -171,7 +180,7 @@ impl HackApp {
         };
         let generation = self.env.generation();
         let epoch = self.env.reveal_epoch();
-        let target = self.env_target();
+        let target = self.row_target(row);
         let name = row.key.clone();
         if !self.live {
             let result = self.source.env_value(&root, native, &target, &name);

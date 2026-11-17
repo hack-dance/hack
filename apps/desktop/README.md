@@ -196,10 +196,11 @@ for the result of arithmetic the shell does, never for text that is on the
 typed command line, so the echoed command cannot satisfy it:
 
 ```sh
-mkdir -p /tmp/panel && cd /tmp/panel
-yes '# paste check' | head -c 2097152 > big.txt   # 2 MiB: refused whole, limit named
-yes '# paste check' | head -c 921600 > mid.txt    # 900 KiB: delivered
-cat > panel.steps <<'STEPS'
+# From apps/desktop. Paste paths in the steps file are relative to it.
+mkdir -p /tmp/panel
+yes '# paste check' | head -c 2097152 > /tmp/panel/big.txt   # 2 MiB: refused whole, limit named
+yes '# paste check' | head -c 921600 > /tmp/panel/mid.txt    # 900 KiB: delivered
+cat > /tmp/panel/panel.steps <<'STEPS'
 # Logs and a host shell
 select <project>
 logs

@@ -9,7 +9,7 @@
 //!
 //! | Tab | What runs, in the instance's checkout |
 //! |---|---|
-//! | Logs (first, not closable) | `hack logs [--branch b] [--no-follow] --tail 500`, read-only |
+//! | Logs (first, not closable) | `hack logs [--branch b] [--no-follow] --tail 500 --pretty`, read-only |
 //! | Shell in a service | `hack exec [--branch b] <service> -- bash`, then `sh` |
 //! | Host shell | the user's login shell |
 //! | Host shell with env | `hack host shell --env <overlay> --scope <scope>` |
@@ -198,6 +198,9 @@ pub fn logs_plan(
         args.push("--no-follow".into());
     }
     args.extend(["--tail".into(), LOG_TAIL.into()]);
+    // The CLI's own styling: coloured service names, dim timestamps, levels.
+    // Without it only what each service prints itself is coloured.
+    args.push("--pretty".into());
     options.args = args;
     Ok(SessionPlan {
         attempts: vec![Launch {
@@ -1257,6 +1260,35 @@ impl HackApp {
         view.read(cx).notice().map(str::to_owned)
     }
 
+    /// How many cells on the active tab's screen carry a colour or style
+    /// (a foreground other than the default, a background, bold, faint,
+    /// italic or underline). For `--drive`: styled output reached the grid.
+    pub(crate) fn drive_styled_cells(&self, cx: &mut Context<Self>) -> usize {
+        let Some(view) = self.active_view(cx) else {
+            return 0;
+        };
+        view.update(cx, |v, _| {
+            v.emulator()
+                .frame()
+                .map(|f| {
+                    f.rows
+                        .iter()
+                        .flatten()
+                        .filter(|c| !c.text.trim().is_empty())
+                        .filter(|c| {
+                            c.fg != f.foreground
+                                || c.bg.is_some()
+                                || c.bold
+                                || c.faint
+                                || c.italic
+                                || c.underline
+                        })
+                        .count()
+                })
+                .unwrap_or_default()
+        })
+    }
+
     /// The active tab's screen, row by row.
     pub(crate) fn drive_screen(&self, cx: &mut Context<Self>) -> String {
         let Some(view) = self.active_view(cx) else {
@@ -1321,7 +1353,7 @@ mod tests {
     #[test]
     fn the_logs_tab_runs_hack_logs_read_only_in_the_instance_checkout() {
         let plan = logs_plan(Path::new("/bin/hack"), Path::new("/work/p"), None, true).unwrap();
-        assert_eq!(argv(&plan), [["logs", "--tail", "500"]]);
+        assert_eq!(argv(&plan), [["logs", "--tail", "500", "--pretty"]]);
         assert_eq!(plan.kind(), &SessionKind::Logs, "read-only");
         assert_eq!(
             plan.attempts[0].options.cwd.as_deref(),
@@ -1353,7 +1385,8 @@ mod tests {
                 "fix-login",
                 "--no-follow",
                 "--tail",
-                "500"
+                "500",
+                "--pretty"
             ]]
         );
     }

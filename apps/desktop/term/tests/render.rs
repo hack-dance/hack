@@ -30,6 +30,10 @@ fn main() {
             "a_missing_or_proportional_configured_font_falls_back_to_a_monospaced_one",
             a_missing_or_proportional_configured_font_falls_back_to_a_monospaced_one,
         ),
+        (
+            "pretty_logs_keep_the_clis_colours_and_styles",
+            pretty_logs_keep_the_clis_colours_and_styles,
+        ),
     ]);
 }
 
@@ -193,6 +197,8 @@ struct Capture {
     metrics: GridMetrics,
     /// The symbols the view drew from the bundled font.
     fallback: Vec<char>,
+    /// The grid as drawn.
+    frame: hack_desktop_term::emulator::Frame,
 }
 
 impl Capture {
@@ -269,6 +275,15 @@ impl Capture {
 /// Render `text` as a log in an offscreen window. `None` when this machine
 /// has no offscreen renderer and one is not required.
 fn capture(text: &str, font: Option<TermFont>, dump: &str) -> Option<Capture> {
+    capture_sized(text, font, dump, (560., 120.))
+}
+
+fn capture_sized(
+    text: &str,
+    font: Option<TermFont>,
+    dump: &str,
+    (width, height): (f32, f32),
+) -> Option<Capture> {
     let required = std::env::var_os("HACK_TERM_REQUIRE_RENDERER").is_some_and(|v| v == "1");
     let home = TempHome::new();
     let log = home.path().join("glyphs.log");
@@ -285,7 +300,7 @@ fn capture(text: &str, font: Option<TermFont>, dump: &str) -> Option<Capture> {
         show: false,
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: Default::default(),
-            size: size(px(560.), px(120.)),
+            size: size(px(width), px(height)),
         })),
         ..WindowOptions::default()
     };
@@ -334,11 +349,13 @@ fn capture(text: &str, font: Option<TermFont>, dump: &str) -> Option<Capture> {
         let v = view.read(cx);
         (v.grid_metrics(), v.fallback_symbols().to_vec())
     });
+    let frame = cx.update(|cx| view.update(cx, |v, _| v.emulator().frame().expect("frame")));
     Some(Capture {
         image,
         scale,
         metrics,
         fallback,
+        frame,
     })
 }
 
@@ -707,4 +724,38 @@ fn a_missing_or_proportional_configured_font_falls_back_to_a_monospaced_one() {
             drawn.font_note
         );
     }
+}
+
+/// `hack logs --pretty` output (captured on a PTY from the CLI's shared
+/// formatter, `formatPrettyLogLine`, over synthetic service lines) keeps its
+/// styling in the grid: coloured levels, bold 256-colour service names and
+/// dim keys. Without `--pretty` only what services print themselves is
+/// coloured.
+fn pretty_logs_keep_the_clis_colours_and_styles() {
+    let sample = include_str!("fixtures/logs-pretty.ansi");
+    let Some(shot) = capture_sized(sample, None, "logs-pretty.png", (720., 200.)) else {
+        return;
+    };
+    let f = &shot.frame;
+    let cells = || {
+        f.rows
+            .iter()
+            .flatten()
+            .filter(|c| !c.text.trim().is_empty())
+    };
+    let styled = cells()
+        .filter(|c| c.fg != f.foreground || c.bold || c.faint)
+        .count();
+    let bold = cells().filter(|c| c.bold).count();
+    let faint = cells().filter(|c| c.faint).count();
+    let mut colours: Vec<_> = cells().map(|c| c.fg).collect();
+    colours.sort_by_key(|c| (c.r, c.g, c.b));
+    colours.dedup();
+    assert!(styled >= 50, "styled cells: {styled}");
+    assert!(bold > 0 && faint > 0, "bold {bold}, faint {faint}");
+    assert!(
+        colours.len() >= 5,
+        "distinct foreground colours: {}",
+        colours.len()
+    );
 }

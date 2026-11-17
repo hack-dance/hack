@@ -182,11 +182,16 @@ type <text>                     type it, one keystroke per character
 paste <file>                    paste a file's text as the Paste action
                                 does (into find while it is open)
 expect <text> [<seconds>]       wait for text on the active tab's screen
+expect-notice <text> [<seconds>]
+                                wait for the active tab's notice (a refused
+                                paste) to contain text
 wait <milliseconds>
 check-container <service> <pattern>
                                 after the app has quit, count processes in
                                 the service whose command line contains
-                                <pattern> (read through `hack exec`)
+                                <pattern> (read through `hack exec`); a count
+                                above 0 is reported as known open (below)
+                                and does not fail the run
 quit                            implied at the end
 ```
 
@@ -216,6 +221,7 @@ type echo after-ctrl-c-$((1+1))\r
 expect after-ctrl-c-2 10
 # Pastes: 2 MiB is refused with the limit named, 900 KiB is delivered
 paste big.txt
+expect-notice more than the 1 MiB input limit 5
 paste mid.txt
 # The shell's line editor takes a moment to read 900 KiB
 wait 2000
@@ -223,7 +229,9 @@ key ctrl-c
 type echo after-paste-$((2+2))\r
 expect after-paste-4 60
 type sleep 86399 &\r
-# A shell in a service, and what it leaves inside the container
+# A shell in a service, typed into at once (input waits for the shell
+# that starts, sh on an image without bash), and what it leaves inside
+# the container
 container <service>
 type echo in-$((1+1))-container\r
 expect in-2-container 30
@@ -255,6 +263,15 @@ The host-side count covers every process in a tab's session (the shell, its
 jobs, `hack`, the `docker exec` client). A process that starts its own session
 (`setsid`) leaves both the panel's teardown and this count. Processes inside a
 container are not host processes; `check-container` counts them through the CLI.
+
+**Known limit:** closing a service-shell tab, or quitting, ends the `hack exec`
+session on the host but not a job that shell started in the background inside
+the container (`sleep 600 &`), as with `docker exec -it`. The app has no way
+to find or signal processes in a container; that needs the CLI (DESIGN.md,
+R21). Until then `check-container` reports such a process as known open.
+
+A shell in a service that falls back from `bash` to `sh` keeps what is typed
+while it opens: input waits until the shell that starts has settled.
 
 Renders: [running, dark](screenshots/window/running-dark.png),
 [running, light](screenshots/window/running-light.png),

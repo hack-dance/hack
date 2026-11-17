@@ -1251,6 +1251,12 @@ impl HackApp {
             .unwrap_or_default())
     }
 
+    /// The notice the active tab shows (a refused paste), if any.
+    pub(crate) fn drive_notice(&self, cx: &App) -> Option<String> {
+        let view = self.active_view(cx)?;
+        view.read(cx).notice().map(str::to_owned)
+    }
+
     /// The active tab's screen, row by row.
     pub(crate) fn drive_screen(&self, cx: &mut Context<Self>) -> String {
         let Some(view) = self.active_view(cx) else {

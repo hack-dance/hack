@@ -477,7 +477,13 @@ impl CliRunner {
                     write_cancellable(stdin, &bytes, &stop);
                     let _ = done.send(());
                 });
-                Some((handle, written, cancel))
+                Some((
+                    WriterGuard {
+                        handle: Some(handle),
+                        cancel,
+                    },
+                    written,
+                ))
             }
             _ => None,
         };
@@ -528,7 +534,7 @@ impl CliRunner {
         // without reading, which blocks the write. The deadline covers that
         // too: past it, the group ends, its end of the pipe closes, and the
         // write fails.
-        if let Some((handle, written, cancel)) = writer {
+        if let Some((guard, written)) = writer {
             let finished = match deadline {
                 Some((d, t)) => {
                     let left = d.saturating_duration_since(Instant::now());
@@ -536,7 +542,7 @@ impl CliRunner {
                         // A reader outside the group (its own session) can
                         // keep the pipe open after the group ends: the
                         // writer stops on its own when told.
-                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                        guard.cancel();
                         terminate_group(&mut child, grace_left(d));
                         RunError::Timeout { after: t }
                     })
@@ -545,7 +551,7 @@ impl CliRunner {
                     .recv()
                     .map_err(|_| RunError::Spawn("input writer stopped".into())),
             };
-            let _ = handle.join();
+            drop(guard);
             finished?;
         }
         Ok((stdout.text, stderr.text, status.code()))
@@ -1029,6 +1035,30 @@ pub fn resolve_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<Pat
 /// Ask the process group to stop (SIGTERM), give the CLI `grace` to retire
 /// the subprocesses it owns, then SIGKILL whatever is left of the group and
 /// reap. Returns only once the direct child has exited.
+/// The stdin writer of one run. Dropping it, on every exit path including
+/// early returns (a leader timeout, a failed drain), stops the writer and
+/// waits for it, so no thread keeps the input or the pipe after the call.
+struct WriterGuard {
+    handle: Option<thread::JoinHandle<()>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WriterGuard {
+    fn cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        // A finished writer ignores this; a blocked one stops within a poll.
+        self.cancel();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Write `bytes` to a child's stdin, then close it. The descriptor is made
 /// non-blocking and the write waits in short polls, so `cancel` stops it even
 /// when a reader holds the pipe open without reading (a descendant in
@@ -1435,6 +1465,48 @@ mod tests {
             "ended near the deadline, not when the reader did ({:?})",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn a_leader_timeout_also_stops_the_stdin_writer() {
+        // The leader outlives the deadline, and a reader in its own session
+        // holds stdin without reading: the early timeout return must still
+        // stop the writer rather than leave it polling.
+        let f = FakeHack::new(
+            "exec 3<&0\nif command -v setsid >/dev/null; then setsid sleep 6 <&3 >/dev/null 2>&1 & else perl -e 'use POSIX; POSIX::setsid(); sleep 6' <&3 >/dev/null 2>&1 & fi\nexec 3<&-\nsleep 30 </dev/null",
+        );
+        // Threads of this process (nextest runs each test in its own).
+        #[cfg(target_os = "linux")]
+        let threads = || std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count);
+        #[cfg(target_os = "linux")]
+        let before = threads();
+        let started = Instant::now();
+        let input = vec![b'x'; 1 << 20];
+        let r = f
+            .runner()
+            .with_term_grace(Duration::from_millis(100))
+            .run_raw_with_input(
+                &["env", "add", "K", "--value-stdin"],
+                None,
+                Duration::from_secs(1),
+                &input,
+            );
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "returned at the deadline ({:?})",
+            started.elapsed()
+        );
+        // The writer is gone, not left polling while the reader in its own
+        // session still holds the pipe.
+        #[cfg(target_os = "linux")]
+        {
+            let until = Instant::now() + Duration::from_secs(2);
+            while threads() > before && Instant::now() < until {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(threads() <= before, "a thread outlived the call");
+        }
     }
 
     #[test]

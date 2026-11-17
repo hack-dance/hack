@@ -19,14 +19,14 @@
 
 mod clipboard;
 mod doctor_view;
-#[cfg(feature = "terminal")]
+#[cfg(hack_terminal)]
 mod drive;
 mod env_view;
 mod logs_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod setup_view;
-#[cfg(feature = "terminal")]
+#[cfg(hack_terminal)]
 mod terminal;
 mod view;
 
@@ -172,11 +172,11 @@ pub(crate) fn window_options() -> WindowOptions {
 
 fn main() {
     let args = parse_args();
-    #[cfg(feature = "terminal")]
+    #[cfg(hack_terminal)]
     if let Some(steps) = &args.drive {
         std::process::exit(drive::supervise(steps, &args.rest));
     }
-    #[cfg(feature = "terminal")]
+    #[cfg(hack_terminal)]
     let drive_steps = args.drive_child.as_ref().map(|path| {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("read {}: {e}", path.display());
@@ -189,7 +189,7 @@ fn main() {
             },
         )
     });
-    #[cfg(not(feature = "terminal"))]
+    #[cfg(not(hack_terminal))]
     if args.drive.is_some() || args.drive_child.is_some() {
         eprintln!("--drive needs a build with --features terminal");
         std::process::exit(2);
@@ -266,13 +266,13 @@ fn main() {
                 })
             })
             .expect("failed to open the window");
-            #[cfg(feature = "terminal")]
+            #[cfg(hack_terminal)]
             if let Some(steps) = drive_steps {
                 let win = drive::Win { window, app };
                 cx.spawn(async move |cx| drive::run(win, steps, cx).await)
                     .detach();
             }
-            #[cfg(not(feature = "terminal"))]
+            #[cfg(not(hack_terminal))]
             let _ = (window, app);
         });
 }

@@ -63,7 +63,7 @@ const ALWAYS_ON_REASON: &str = "Always on needs the CLI's autostart commands (HA
 /// The window's key bindings.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(SEARCH_KEY, FocusSearch, SEARCH_CONTEXT)]);
-    #[cfg(feature = "terminal")]
+    #[cfg(hack_terminal)]
     bind_terminal_keys(cx);
 }
 
@@ -71,7 +71,7 @@ pub fn bind_keys(cx: &mut App) {
 /// work wherever focus is; the rest apply in a terminal. Shortcuts that
 /// would reach the shell are never taken: on Linux they are Ctrl-Shift
 /// chords, as in terminals.
-#[cfg(feature = "terminal")]
+#[cfg(hack_terminal)]
 fn bind_terminal_keys(cx: &mut App) {
     use hack_desktop_term::actions::{
         CloseFind, CloseTab, Copy, Find, FindNewer, FindOlder, NewTab, NextTab, Paste, PrevTab,
@@ -131,7 +131,7 @@ pub struct HackApp {
     /// Numbers each editor opened (`EnvEdit::id`).
     pub(crate) env_edit_seq: u64,
     /// Terminal panels, one per project or branch instance.
-    #[cfg(feature = "terminal")]
+    #[cfg(hack_terminal)]
     pub(crate) panels: crate::terminal::Panels,
     pub(crate) live: bool,
     /// The title bar's project filter.
@@ -193,7 +193,7 @@ impl HackApp {
             search,
             filter: String::new(),
             copied: None,
-            #[cfg(feature = "terminal")]
+            #[cfg(hack_terminal)]
             panels: Default::default(),
             recovery_busy: false,
             recovery_error: None,
@@ -769,7 +769,7 @@ impl HackApp {
     }
 
     /// The CLI label the status bar shows now (`--drive`).
-    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    #[cfg_attr(not(hack_terminal), allow(dead_code))]
     pub(crate) fn cli_label(&self) -> Option<String> {
         self.cli_label_for(&self.model.list())
     }
@@ -809,7 +809,7 @@ impl HackApp {
             if self.pane == Pane::Setup {
                 self.load_setup(cx);
             }
-            #[cfg(feature = "terminal")]
+            #[cfg(hack_terminal)]
             self.close_all_terminals(window, cx);
         }
         let _ = window;
@@ -1319,9 +1319,9 @@ impl HackApp {
             })
             .collect();
         // With the terminal panel, logs live in the panel's Logs tab.
-        #[cfg(feature = "terminal")]
+        #[cfg(hack_terminal)]
         let pills: &[(usize, &'static str)] = &[(0, "Services"), (2, "Env")];
-        #[cfg(not(feature = "terminal"))]
+        #[cfg(not(hack_terminal))]
         let pills: &[(usize, &'static str)] = &[(0, "Services"), (1, "Logs"), (2, "Env")];
         let mut tabs = div().flex().items_center().gap(space::S2);
         for &(i, label) in pills {
@@ -1331,7 +1331,7 @@ impl HackApp {
             );
         }
         let body: AnyElement = match self.tab {
-            1 if cfg!(not(feature = "terminal")) => {
+            1 if cfg!(not(hack_terminal)) => {
                 // The Logs tab scrolls inside its own virtualized list.
                 let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
                 self.render_logs(&names, cx).into_any_element()
@@ -1363,12 +1363,12 @@ impl HackApp {
                 })
                 .into_any_element(),
         };
-        #[cfg(feature = "terminal")]
+        #[cfg(hack_terminal)]
         let (maximized, panel) = (
             self.panels.maximized(&d.key),
             Some(self.terminal_area(d, ui, window, cx)),
         );
-        #[cfg(not(feature = "terminal"))]
+        #[cfg(not(hack_terminal))]
         let (maximized, panel): (bool, Option<AnyElement>) = (false, None);
         div()
             .flex_1()
@@ -1445,7 +1445,7 @@ impl HackApp {
 impl HackApp {
     /// The panel's window-level handlers: drag the handle, and the panel
     /// actions wherever focus is.
-    #[cfg(feature = "terminal")]
+    #[cfg(hack_terminal)]
     fn terminal_handlers(
         &self,
         root: gpui_kit::Stateful<gpui_kit::Div>,
@@ -1479,7 +1479,7 @@ impl HackApp {
         .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.step_tab(false, window, cx)))
     }
 
-    #[cfg(not(feature = "terminal"))]
+    #[cfg(not(hack_terminal))]
     fn terminal_handlers(
         &self,
         root: gpui_kit::Stateful<gpui_kit::Div>,

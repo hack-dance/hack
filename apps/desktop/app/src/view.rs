@@ -133,15 +133,20 @@ pub struct HackApp {
     filter: String,
     /// When the URL was last copied, for the check mark.
     copied: Option<Instant>,
-    pane: Pane,
+    pub(crate) pane: Pane,
     doctor: DoctorPane,
     /// Is the window visible (not minimised or hidden)? Automatic doctor
     /// runs wait for it.
     window_visible: bool,
     _visibility: Option<gpui_kit::Subscription>,
-    _env_activation: Option<gpui_kit::Subscription>,
+    _activation: Option<gpui_kit::Subscription>,
     recovery_busy: bool,
     recovery_error: Option<String>,
+    /// Setup checks (DESIGN.md section 2; `setup_view`).
+    pub(crate) setup: hack_desktop_core::setup::Pane,
+    /// The launch check has not reported yet: when it finds something to
+    /// do, setup opens.
+    pub(crate) setup_on_launch: bool,
     /// When each project's running action started, for the slow-action
     /// warning. Display only: the app never terminates a lifecycle command.
     action_started: std::collections::HashMap<InstanceKey, Instant>,
@@ -173,7 +178,7 @@ impl HackApp {
             doctor: DoctorPane::default(),
             window_visible: true,
             _visibility: None,
-            _env_activation: None,
+            _activation: None,
             env: Default::default(),
             live,
             search,
@@ -184,10 +189,13 @@ impl HackApp {
             recovery_busy: false,
             recovery_error: None,
             action_started: std::collections::HashMap::new(),
+            setup: Default::default(),
+            setup_on_launch: live,
         };
         if live {
             this.start_polling(cx);
             this.start_doctor_refresh(cx);
+            this.load_setup(cx);
         } else {
             this.refresh_now();
         }
@@ -296,6 +304,7 @@ impl HackApp {
     /// doctor when it never ran or the result is older than 10 minutes.
     pub fn open_doctor(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
         self.pane = Pane::Doctor;
+        self.user_navigated();
         self.doctor.filter = filter;
         if self.doctor.needs_refresh(std::time::Instant::now()) {
             self.load_doctor(cx);
@@ -327,17 +336,36 @@ impl HackApp {
             |this, visibility, _window, cx| {
                 this.window_visible = visibility.is_visible();
                 this.maybe_auto_refresh(cx);
-                if !this.window_visible {
+                if this.window_visible {
+                    this.recheck_setup_on_return(cx);
+                } else {
                     this.hide_env_values(cx);
                 }
             },
         ));
-        // A revealed env value hides when the window loses focus.
-        self._env_activation = Some(cx.observe_window_activation(window, |this, window, cx| {
-            if !window.is_window_active() {
+        // Focus coming back checks setup again (switching back from the
+        // terminal usually leaves the window visible throughout); focus
+        // going away hides any revealed env value.
+        self._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.recheck_setup_on_return(cx);
+            } else {
                 this.hide_env_values(cx);
             }
         }));
+    }
+
+    /// Back from the terminal after an admin step: check setup again while
+    /// it is shown or a fix is outstanding.
+    fn recheck_setup_on_return(&mut self, cx: &mut Context<Self>) {
+        if hack_desktop_core::setup::should_recheck_on_focus(
+            self.pane == Pane::Setup,
+            self.setup.pending_fix,
+            self.setup.loading,
+            self.setup.action_busy,
+        ) {
+            self.load_setup(cx);
+        }
     }
 
     /// While the Doctor pane is visible, refresh every 10 minutes.
@@ -649,6 +677,7 @@ impl HackApp {
 
     pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Project;
+        self.user_navigated();
         self.copied = None;
         self.reset_env_selection();
         if self.tab == 2 {
@@ -667,6 +696,7 @@ impl HackApp {
     }
 
     pub(crate) fn set_tab(&mut self, to: usize, cx: &mut Context<Self>) {
+        self.user_navigated();
         let from = self.tab;
         if from == to {
             return;
@@ -755,6 +785,11 @@ impl HackApp {
             self.logs.close();
             self.env.begin();
             self.doctor.source_changed();
+            // Setup's report and bound commands were the previous CLI's.
+            self.setup.source_changed();
+            if self.pane == Pane::Setup {
+                self.load_setup(cx);
+            }
             #[cfg(feature = "terminal")]
             self.close_all_terminals(window, cx);
         }
@@ -1441,6 +1476,9 @@ impl Render for HackApp {
         let ui = self.ui(cx);
         let p = ui.p;
         let main: AnyElement = match &list.phase {
+            // Setup applies whatever the project list shows, a missing CLI
+            // included.
+            _ if self.pane == Pane::Setup => crate::setup_view::render(&self.setup, &ui, cx),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.

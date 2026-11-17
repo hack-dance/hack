@@ -21,11 +21,17 @@ pub mod logs;
 pub mod models;
 mod process;
 pub mod runner;
+pub mod setup;
+pub mod setup_fixtures;
+pub mod setup_io;
+mod setup_login;
 pub mod source;
 pub mod state;
 pub mod viewmodel;
 
 pub mod env;
+pub mod execution;
+pub mod terminal;
 
 #[cfg(test)]
 mod test_support;

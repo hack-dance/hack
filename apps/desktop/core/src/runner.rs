@@ -78,9 +78,35 @@ pub struct CliRunner {
     term_grace: Duration,
     /// Remove inherited variables that make interpreters load code.
     strip_startup: bool,
-    /// The program, shared by every clone of a [`Self::selectable`] runner,
-    /// so [`Self::select`] switches all of them at once.
+    /// Start every child from an empty environment plus `env` only.
+    clear_env: bool,
+    /// Refuse to run `program` unless no other user can change it or the
+    /// directories above it ([`Self::verified`]).
+    verify: bool,
+    /// The name [`Self::on_path`] searched for; [`Self::rediscover`] searches
+    /// for it again.
+    path_name: Option<String>,
+    /// What the last [`Self::rediscover`] found, shared by every clone of an
+    /// [`Self::on_path`] runner, so a CLI setup finds (installed since
+    /// launch, or another one) is the one every read and action runs.
     pinned: Option<std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>>,
+}
+
+/// The selected CLI, refused when another user could change it.
+fn trusted_cli(program: &Path) -> Result<(), RunError> {
+    if std::fs::symlink_metadata(program).is_err() {
+        return Err(RunError::NotFound);
+    }
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    crate::source::trusted_tool_path(program, uid, false)
+        .filter(|real| crate::source::trusted_interpreter(real, uid, 4, false))
+        .map(|_| ())
+        .ok_or_else(|| {
+            RunError::Spawn(
+                "the selected hack is in a location other users can change; it was not run".into(),
+            )
+        })
 }
 
 /// Inherited variables that make a shell or language runtime load and run
@@ -157,6 +183,9 @@ impl CliRunner {
             missing: false,
             term_grace: TERM_GRACE,
             strip_startup: false,
+            clear_env: false,
+            verify: false,
+            path_name: None,
             pinned: None,
         }
     }
@@ -172,11 +201,14 @@ impl CliRunner {
     }
 
     /// No usable CLI: every command reports `NotFound` and nothing is
-    /// started, until [`Self::select`] gives it one.
+    /// started, until [`Self::select`] or setup's [`Self::rediscover`]
+    /// gives it one.
     #[must_use]
     pub fn unavailable(name: &str) -> Self {
         let mut runner = Self::new(name);
         runner.missing = true;
+        // Setup's recheck searches PATH for it again (`rediscover`).
+        runner.path_name = Some(name.into());
         runner.pinned = Some(std::sync::Arc::default());
         runner
     }
@@ -227,6 +259,62 @@ impl CliRunner {
         (!self.missing).then(|| self.program.clone())
     }
 
+    /// Run the absolute `program` only after checking that no other user
+    /// can change it or the directories above it (setup and its fixes).
+    #[must_use]
+    pub fn verified(program: impl Into<PathBuf>) -> Self {
+        let mut runner = Self::new(program);
+        runner.verify = true;
+        runner
+    }
+
+    /// Start every child from an empty environment plus the variables
+    /// given with [`Self::with_env`] (a checked execution context).
+    #[must_use]
+    pub fn with_clean_env(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
+
+    /// The executable this runner starts: checked when it is
+    /// [`Self::verified`], found on `PATH` when created by name.
+    ///
+    /// # Errors
+    /// `NotFound`, or `Spawn` for a verified CLI others can change.
+    pub fn resolve_program(&self) -> Result<PathBuf, RunError> {
+        let program = self.program_path().ok_or(RunError::NotFound)?;
+        if self.verify {
+            trusted_cli(&program)?;
+        }
+        Ok(program)
+    }
+
+    /// Search `PATH` again (the runner's own `PATH` when it sets one) for
+    /// the program this runner was created for by name ([`Self::on_path`]),
+    /// or check its explicit program, and return it only when no other user
+    /// can change it. Setup's explicit recheck uses this,
+    /// so a CLI installed since the app started is found.
+    ///
+    /// # Errors
+    /// `NotFound`, or `Spawn` for a CLI in a location others can change.
+    pub fn rediscover(&self) -> Result<PathBuf, RunError> {
+        let Some(name) = &self.path_name else {
+            // Created with an explicit program: that is the one to use.
+            return self
+                .resolve_program()
+                .and_then(|p| trusted_cli(&p).map(|()| p));
+        };
+        let found = resolve_on_path(name, self.effective_env("PATH").as_deref())
+            .ok_or(RunError::NotFound)
+            .and_then(|p| trusted_cli(&p).map(|()| p));
+        if let Some(slot) = &self.pinned
+            && let Ok(mut slot) = slot.lock()
+        {
+            *slot = found.as_ref().ok().cloned();
+        }
+        found
+    }
+
     /// Change the SIGTERM-to-SIGKILL grace for timed-out commands.
     #[must_use]
     pub fn with_term_grace(mut self, grace: Duration) -> Self {
@@ -252,6 +340,7 @@ impl CliRunner {
                 r
             }
         };
+        r.path_name = Some(name.into());
         r.pinned = Some(std::sync::Arc::default());
         r
     }
@@ -294,12 +383,24 @@ impl CliRunner {
     }
 
     pub(crate) fn env_value(&self, key: &str) -> Option<std::ffi::OsString> {
+        self.effective_env(key)
+    }
+
+    /// The value `key` has for this runner's children: set with
+    /// [`Self::with_env`], else inherited (never with a clean environment).
+    pub fn effective_env(&self, key: &str) -> Option<std::ffi::OsString> {
         self.env
             .iter()
             .rev()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.into())
-            .or_else(|| std::env::var_os(key))
+            .or_else(|| {
+                if self.clear_env {
+                    None
+                } else {
+                    std::env::var_os(key)
+                }
+            })
     }
 
     fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
@@ -309,13 +410,19 @@ impl CliRunner {
         if let Some(p) = path {
             cmd.arg("--path").arg(p);
         }
+        if self.clear_env {
+            cmd.env_clear();
+        }
         // Children (and their own children, such as `docker` run by
         // `hack doctor`) get a PATH with only absolute entries: an empty or
         // relative entry would resolve against the working directory.
-        if let Some(path) = std::env::var_os("PATH") {
+        if let Some(path) = self.effective_env("PATH") {
             cmd.env("PATH", sanitize_path(&path));
         }
         for (k, v) in &self.env {
+            if k == "PATH" {
+                continue; // set above, sanitized
+            }
             cmd.env(k, v);
         }
         if self.strip_startup {
@@ -347,12 +454,15 @@ impl CliRunner {
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
         let program = self.current_program().ok_or(RunError::NotFound)?;
+        if self.verify {
+            trusted_cli(&program)?;
+        }
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match crate::process::spawn(&mut self.command(args, path, &program)) {
+            match crate::process::spawn(&mut self.command(args, path, &program), !self.clear_env) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;

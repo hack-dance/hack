@@ -408,6 +408,21 @@ pub trait Source: Send + Sync {
     /// (DESIGN.md section 3). Each run fails on its own.
     fn doctor_runs(&self, projects: &[DoctorTarget]) -> Vec<DoctorRun>;
 
+    /// Fresh setup checks (DESIGN.md section 2). Fixtures stay offline.
+    fn setup(&self) -> crate::setup::Report {
+        crate::setup::fixture(self.snapshot(), &self.doctor_runs(&[]))
+    }
+
+    /// Run one fixed, non-admin setup action against the checked report,
+    /// never anything inferred from Doctor text. Fixtures refuse.
+    fn setup_action(
+        &self,
+        _action: crate::setup::SafeAction,
+        _checked: &crate::setup::Report,
+    ) -> String {
+        "Fixture: no action executed".into()
+    }
+
     /// Start a log stream for the Logs tab (`args` from `LogsModel::cli_args`).
     /// `branch` streams that branch instance (`--branch <branch>` is added
     /// after the subcommand). Dropping the feed stops the stream.
@@ -431,6 +446,10 @@ pub struct DoctorTarget {
     pub name: String,
     pub repo_root: std::path::PathBuf,
     pub native: bool,
+    /// A native project's URL (`https://<dev_host>`), passed as
+    /// `--browser-url`: the CLI derives the native hostname, and so its
+    /// `native host dns` check, from it alone.
+    pub browser_url: Option<String>,
 }
 
 /// Identity of each target (name, checkout, backend) for the stale guard.
@@ -438,7 +457,15 @@ pub struct DoctorTarget {
 pub fn target_keys(targets: &[DoctorTarget]) -> Vec<crate::doctor::TargetKey> {
     targets
         .iter()
-        .map(|t| (t.name.clone(), t.repo_root.clone(), t.native, t.missing))
+        .map(|t| {
+            (
+                t.name.clone(),
+                t.repo_root.clone(),
+                t.native,
+                t.missing,
+                t.browser_url.clone(),
+            )
+        })
         .collect()
 }
 
@@ -464,6 +491,12 @@ impl DoctorTarget {
                 name: r.name.clone(),
                 repo_root: r.repo_root.clone().unwrap_or_default().into(),
                 native: r.is_native(),
+                browser_url: r
+                    .dev_host
+                    .as_deref()
+                    .filter(|_| r.is_native())
+                    .filter(|h| is_plain_host(h))
+                    .map(|h| format!("https://{h}")),
             })
             .collect()
     }
@@ -480,9 +513,19 @@ pub const NOT_CHECKED_BUDGET: &str = "not checked (time budget)";
 
 /// Read one doctor report. Exit 1 still carries a report; a payload
 /// without a `checks` array is not a report.
+/// A host name made of letters, digits, dots and hyphens that does not
+/// start with a hyphen: safe to put in a URL argument.
+fn is_plain_host(h: &str) -> bool {
+    !h.is_empty()
+        && !h.starts_with(['-', '.'])
+        && h.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
 fn read_doctor(
     runner: &CliRunner,
     root: Option<&Path>,
+    browser_url: Option<&str>,
     timeout: Duration,
 ) -> Result<crate::models::DoctorReport, String> {
     // Doctor invokes Git read commands. Repository config must never turn
@@ -495,7 +538,14 @@ fn read_doctor(
         .with_env("GIT_CONFIG_VALUE_0", "false")
         .with_env("GIT_CONFIG_KEY_1", "core.hooksPath")
         .with_env("GIT_CONFIG_VALUE_1", "/dev/null")
-        .run_json(&["doctor", "--json"], root, timeout)
+        .run_json(
+            &match browser_url {
+                Some(url) => vec!["doctor", "--json", "--browser-url", url],
+                None => vec!["doctor", "--json"],
+            },
+            root,
+            timeout,
+        )
         .map_err(|e| e.to_string())?;
     if !v
         .get("checks")
@@ -508,6 +558,20 @@ fn read_doctor(
 
 /// Owner-write is allowed; group/other-write and foreign ownership are not.
 /// A root-owned sticky ancestor (such as /tmp) may contain a private entry.
+/// `hack daemon status --json` as JSON, without starting the daemon. Exit
+/// status 1 still carries the report when hackd is not running.
+pub(crate) fn read_daemon_status(
+    runner: &CliRunner,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let (out, _, _) = runner
+        .clone()
+        .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        .run_raw(&["daemon", "status", "--json"], None, timeout)
+        .map_err(|e| e.to_string())?;
+    serde_json::from_str(&out).map_err(|e| format!("hack daemon status: {e}"))
+}
+
 pub(crate) fn trusted_tool_path(path: &Path, uid: u32, directory: bool) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     if !crate::doctor_plugins::guarded_names(path, uid, &mut 64, false) {
@@ -973,9 +1037,11 @@ impl LiveSource {
                 .saturating_duration_since(std::time::Instant::now())
                 .saturating_sub(DOCTOR_TERM_GRACE)
         };
-        let read = |runner: &CliRunner, root: Option<&Path>, timeout: Duration| {
-            read_doctor(runner, root, timeout)
-        };
+        let read =
+            |runner: &CliRunner,
+             root: Option<&Path>,
+             browser_url: Option<&str>,
+             timeout: Duration| { read_doctor(runner, root, browser_url, timeout) };
         // The machine run must happen outside every checkout, or doctor
         // would report that checkout's project checks as machine checks.
         // Prefer a user-private directory, then root. A shared temp cwd
@@ -995,6 +1061,7 @@ impl LiveSource {
                     .without_interpreter_startup()
                     .with_cwd(dir)
                     .with_term_grace(DOCTOR_TERM_GRACE),
+                None,
                 None,
                 per_call.min(left()),
             ),
@@ -1022,7 +1089,12 @@ impl LiveSource {
                             } else if timeout.is_zero() {
                                 Err(NOT_CHECKED_BUDGET.to_owned())
                             } else {
-                                read(&runner, Some(&t.repo_root), timeout)
+                                read(
+                                    &runner,
+                                    Some(&t.repo_root),
+                                    t.browser_url.as_deref(),
+                                    timeout,
+                                )
                             };
                             let mut run = t.run(result);
                             run.exact_native_root =
@@ -1044,7 +1116,8 @@ impl LiveSource {
                                         .with_env("PATH", tool_path)
                                         .without_interpreter_startup()
                                         .with_term_grace(DOCTOR_TERM_GRACE);
-                                    if let Ok(report) = read(&compose, Some(&t.repo_root), timeout)
+                                    if let Ok(report) =
+                                        read(&compose, Some(&t.repo_root), None, timeout)
                                         && crate::doctor::adopted_project_evidence(
                                             &t.repo_root,
                                             &report,
@@ -1270,7 +1343,7 @@ impl LiveSource {
 
     /// Another discovered install whose CLI reports `socket` as its hackd,
     /// as "name version (channel)". Each other CLI is asked once.
-    fn install_sharing(&self, runner: &CliRunner, socket: &Path) -> Option<String> {
+    pub(crate) fn install_sharing(&self, runner: &CliRunner, socket: &Path) -> Option<String> {
         let ours = runner.program_path()?;
         let choice = self.cli_choice()?;
         for other in choice.installs.iter().filter(|i| i.path != ours) {
@@ -1398,6 +1471,24 @@ impl LiveSource {
             }
             None => false,
         }
+    }
+
+    /// The daemon client to read: the configured one, else the socket
+    /// `hack daemon status --json` reports (an absolute path only).
+    pub(crate) fn effective_daemon(
+        &self,
+        status: Option<&serde_json::Value>,
+    ) -> Option<DaemonClient> {
+        self.daemon.clone().or_else(|| {
+            let path = Path::new(status?.get("socket_path")?.as_str()?);
+            if !path.is_absolute() {
+                return None;
+            }
+            Some(DaemonClient::new(
+                path.to_path_buf(),
+                Duration::from_secs(3),
+            ))
+        })
     }
 
     fn runner_for(&self, native: bool) -> CliRunner {
@@ -1532,6 +1623,18 @@ impl Source for LiveSource {
             ))
         }
     }
+    fn setup(&self) -> crate::setup::Report {
+        self.read_setup()
+    }
+
+    fn setup_action(
+        &self,
+        action: crate::setup::SafeAction,
+        checked: &crate::setup::Report,
+    ) -> String {
+        crate::setup_io::run_safe(action, checked)
+    }
+
     fn cli_choice(&self) -> Option<crate::cli_choice::Choice> {
         self.cache.choice.lock().ok()?.clone()
     }
@@ -2338,6 +2441,7 @@ esac
                 name: format!("p{i}"),
                 repo_root: format!("/work/p{i}").into(),
                 native: false,
+                browser_url: None,
             })
             .collect()
     }
@@ -3627,6 +3731,7 @@ esac"#,
             name: "child".into(),
             repo_root: child,
             native: true,
+            browser_url: None,
             missing: false,
         };
         let exact = source.fixture_doctor_runs(std::slice::from_ref(&target));
@@ -3763,6 +3868,7 @@ esac
             name: "alpha".into(),
             repo_root: "/work/alpha".into(),
             native: false,
+            browser_url: None,
         }]);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(runs.len(), 2);
@@ -4266,6 +4372,54 @@ esac
         second_server.join().unwrap();
         std::fs::remove_dir_all(dir_one).unwrap();
         std::fs::remove_dir_all(dir_two).unwrap();
+    }
+
+    #[test]
+    fn a_native_projects_doctor_read_names_its_url() {
+        let payload: ProjectsPayload = serde_json::from_str(
+            r#"{"projects":[
+                {"name":"nat","status":"stopped","repo_root":"/work/nat","backend":"native","dev_host":"nat.hack"},
+                {"name":"svc","status":"stopped","repo_root":"/work/svc","dev_host":"svc.hack"},
+                {"name":"odd","status":"stopped","repo_root":"/work/odd","backend":"native","dev_host":"-x.hack"}
+            ]}"#,
+        )
+        .unwrap();
+        let targets = DoctorTarget::from_projects(&payload);
+        let url = |n: &str| {
+            targets
+                .iter()
+                .find(|t| t.name == n)
+                .unwrap()
+                .browser_url
+                .clone()
+        };
+        assert_eq!(url("nat").as_deref(), Some("https://nat.hack"));
+        assert_eq!(url("svc"), None, "Compose projects need no URL");
+        assert_eq!(
+            url("odd"),
+            None,
+            "a host that looks like an option is never passed"
+        );
+
+        let dir = private_temp_dir("doctor-browser-url");
+        let hack = dir.join("hack");
+        crate::test_support::script(
+            &hack,
+            "#!/bin/sh\necho \"$*\" > \"$HACK_HOME/args\"\necho '{\"checks\":[{\"id\":\"x\",\"status\":\"ok\"}]}'\n",
+        );
+        let runner = fixture_runner(&hack);
+        read_doctor(
+            &runner,
+            None,
+            Some("https://nat.hack"),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("args")).unwrap().trim(),
+            "doctor --json --browser-url https://nat.hack"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

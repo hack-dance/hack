@@ -130,16 +130,20 @@ impl Child {
 
 /// The runner always supplies null stdin, piped outputs, and its own process
 /// group. Environment overrides/removals and cwd come from the authored Command.
-/// This boundary inherits the parent environment like CliRunner. It does not
-/// accept env_clear: the caller must use only Command options built by the
-/// current runner. Future clear-environment support must be carried explicitly
-/// here; Command offers no accessor for its environment-clear flag.
-pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
+/// With `inherit_env` the child starts from the parent environment, like
+/// CliRunner's default; without it (the runner's clean-environment mode, which
+/// also calls env_clear) it starts empty. Command offers no accessor for its
+/// environment-clear flag, so the caller must pass it explicitly.
+pub(crate) fn spawn(command: &mut Command, inherit_env: bool) -> io::Result<Child> {
     let args: Vec<CString> = std::iter::once(command.get_program())
         .chain(command.get_args())
         .map(cstring)
         .collect::<io::Result<_>>()?;
-    let mut environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    let mut environment: BTreeMap<OsString, OsString> = if inherit_env {
+        std::env::vars_os().collect()
+    } else {
+        BTreeMap::new()
+    };
     for (key, value) in command.get_envs() {
         if let Some(value) = value {
             environment.insert(key.into(), value.into());
@@ -297,7 +301,7 @@ mod tests {
             control.stdout, b"inherited",
             "probe detects the old boundary"
         );
-        let mut child = spawn(&mut command).unwrap();
+        let mut child = spawn(&mut command, true).unwrap();
         let mut output = String::new();
         child
             .stdout
@@ -337,7 +341,7 @@ mod contract_tests {
             "-c", "printf '%s\\n' \"$1\" \"$HACK_DESKTOP_PROCESS_TEST\" \"$PWD\"; if read -r unused; then printf unexpected; else printf 'eof\\n'; fi; /bin/ps -o pgid= -p $$; printf diagnostic >&2",
             "fixture", "space and ' quote",
         ]);
-        let mut child = spawn(&mut command).unwrap();
+        let mut child = spawn(&mut command, true).unwrap();
         let mut stdout = String::new();
         let mut stderr = String::new();
         child
@@ -411,7 +415,7 @@ mod signal_tests {
                 );
                 let mut command = Command::new("/bin/sh");
                 command.args(["-c", "kill -TERM $$; sleep 5; echo survived"]);
-                let mut child = spawn(&mut command).unwrap();
+                let mut child = spawn(&mut command, true).unwrap();
                 assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
             }
         })

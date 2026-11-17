@@ -155,6 +155,7 @@ impl HackApp {
 
     /// Show the overlay `env` (`default` is base).
     pub(crate) fn select_overlay(&mut self, env: String, cx: &mut Context<Self>) {
+        self.user_navigated();
         self.env.env = Some(env);
         self.read_env(cx);
         cx.notify();
@@ -162,6 +163,7 @@ impl HackApp {
 
     /// List one scope (`--service`).
     pub(crate) fn select_scope(&mut self, scope: String, cx: &mut Context<Self>) {
+        self.user_navigated();
         self.env.scope = Some(scope);
         self.read_env(cx);
         cx.notify();

@@ -172,7 +172,9 @@ snapshot, only counts and nothing else.
 
 ## 2. First-run onboarding
 
-Shown on first launch and from the Doctor row ("Run setup again"). One card per
+Shown on first launch when a check needs attention and the user has not yet
+selected an instance, opened Doctor or opened a terminal tab (a lost CLI shows
+it regardless), and from the Doctor row ("Run setup again"). One card per
 check, in order. Every check is read-only; every card offers **Check again**.
 
 ![Onboarding](diagrams/onboarding.svg) ([source](diagrams/onboarding.mmd))
@@ -205,6 +207,11 @@ Terminal hand-off (recommended for both platforms; comparison in [Appendix A](#a
 
 The script holds only the CLI's own command with each argument shell-quoted; it
 is removed after use. The app never types into an existing terminal or pane.
+The command carries the checked, non-secret context the setup checks used:
+home and PATH, the backend, and the Docker selectors (`DOCKER_CONTEXT`,
+`DOCKER_CONFIG`, `DOCKER_HOST`, and for a TLS engine `DOCKER_TLS_VERIFY` and an
+absolute `DOCKER_CERT_PATH`). A selector the app cannot carry exactly refuses
+the hand-off instead of fixing a different engine.
 
 ## 3. Doctor
 
@@ -422,6 +429,7 @@ Each is small enough for one PR.
 26. **R20** Explicit branch identity: `branch_runtime[].branch` is the Compose project name suffix after `<project>--`, not necessarily the branch name the user passed to `--branch`. The app derives each instance's routes from the containers' `caddy` labels, its URL as `<branch>.<dev_host>` (the host `hack open --branch` opens with no target; never a service route), and its checkout from Compose's `working_dir` against the registered checkout and `worktrees` (the CLI's runtime ownership rule; with no match the app offers no actions for that instance). Request as explicit fields: the original branch name, the owning checkout, the instance's hosts per service, and its primary URL as `hack open` resolves it, including the OAuth alias when the project prefers it (`open.prefer`, `oauth.enabled`: the app cannot read that config, so today its base and branch URLs use the dev host). The app's Open action already runs `hack open --branch <b>` and opens the CLI's answer.
 27. **R21** End an exec session's processes inside the container. The terminal panel's service-shell tab runs `hack exec [--branch <b>] <service> -- bash`. Closing the tab or quitting ends that process group on the host, but a job the shell started in the background inside the container keeps running (as with `docker exec -it`), and the app can neither see nor signal processes in a container. Request: an exec mode that ties the in-container session to the client, for example `hack exec --session-scoped` running the command under a small in-container supervisor that ends its whole session when the client's terminal hangs up or the client exits. An alternative is `hack exec --print-session` (reporting the in-container session id) plus `hack exec --end-session <id>` for the app to call on close and on quit. The first form also covers a crashed app. Until then the app documents the limit and its `--drive` check reports such processes as known open.
 28. **R22** `hack exec` without `--env` on a Compose instance that is running a non-default overlay: today it resolves to the configured default overlay, and `resolveExecTargetReady` refuses the mismatch. `down` and `restart` already reuse the stored running overlay when `--env` is omitted (`resolveStoredRuntimeEnvName`). Request the same for `exec`, or expose the running overlay per instance in `/v1/projects` so the app can pass it explicitly. Until then a service-shell tab on such an instance shows the CLI's refusal, which names the overlay to use.
+29. **R23** Routing evidence for every registered project domain. On macOS, `hack doctor` emits `resolver:<suffix>` and `dnsmasq.conf:<suffix>` checks only for the default domain (`appendCustomDomainDnsChecks` uses `resolveDefaultDomain()`). A registered Compose project whose `dev_host` uses another suffix has no evidence, so Setup's routing card stays unknown and says so, naming the host. Re-checking or running `hack global install` cannot change that. Request: Doctor checks the resolver and dnsmasq entries for each registered project's domain suffix (or reports them as unchecked by name).
 30. **R24** Every overlay of a project. `hack env list --json` names only the default, requested and effective overlay (`env_selection`). The Env tab's overlay tabs need the whole set, for example `env_overlays: [{name, path}]` in that output or `hack env overlays --json`. The app does not list `.hack/hack.env.*.yaml` itself.
 31. **R25** Plaintext values in one read. Values come only with `--show-values` on a terminal, and that reveals everything. Request a pipe-safe listing that includes values for plaintext entries only (never secrets), for example `hack env list --json --plaintext-values`. Until then the app runs `hack env get` once per plaintext name (at most 48 per listing).
 32. **R26** Key source: report which source the CLI used for the project secret key (`file` with its path relative to the checkout, or `env` with the variable name), never the key; and accept an override for one run (a key file path or a variable name, for example `--key-file <path>` / `--key-env <NAME>`) so the app can offer "Choose key file" and "Use env var" without reading the key itself.

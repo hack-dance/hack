@@ -819,8 +819,10 @@ impl DoctorState {
     }
 }
 
-/// What identifies a doctor target: name, checkout, backend and missing state.
-pub type TargetKey = (String, PathBuf, bool, bool);
+/// What identifies a doctor target: name, checkout, backend, missing state
+/// and the URL its read names (native projects: a changed host makes the
+/// DNS evidence stale).
+pub type TargetKey = (String, PathBuf, bool, bool, Option<String>);
 
 fn sorted(targets: Option<&[TargetKey]>) -> Option<Vec<TargetKey>> {
     targets.map(|t| {
@@ -1082,7 +1084,7 @@ mod tests {
     }
 
     fn key(name: &str, root: &str, native: bool) -> TargetKey {
-        (name.into(), root.into(), native, false)
+        (name.into(), root.into(), native, false, None)
     }
 
     fn machine(checks: Vec<DoctorCheck>) -> DoctorRun {
@@ -1940,13 +1942,17 @@ mod tests {
     }
 
     #[test]
-    fn same_name_with_new_root_or_backend_is_stale() {
+    fn same_name_with_new_root_backend_or_url_is_stale() {
         let t0 = Instant::now();
         let runs = [machine(vec![check("docker", "ok", "")])];
         let before = vec![key("alpha", "/work/alpha", false)];
+        let mut new_host = key("alpha", "/work/alpha", false);
+        new_host.4 = Some("https://alpha-renamed.hack".into());
         for after in [
             vec![key("alpha", "/work/alpha-moved", false)],
             vec![key("alpha", "/work/alpha", true)],
+            // A native project's host changed: its DNS evidence is stale.
+            vec![new_host],
         ] {
             let mut pane = DoctorPane::default();
             let g = pane.begin(Some(&before));

@@ -128,6 +128,8 @@ pub struct HackApp {
     pub(crate) env_edit: Option<crate::env_view::EnvEdit>,
     /// "Saved NAME" after the last write, until the next edit or listing.
     pub(crate) env_saved: Option<String>,
+    /// Numbers each editor opened (`EnvEdit::id`).
+    pub(crate) env_edit_seq: u64,
     /// Terminal panels, one per project or branch instance.
     #[cfg(feature = "terminal")]
     pub(crate) panels: crate::terminal::Panels,
@@ -181,6 +183,7 @@ impl HackApp {
             env: Default::default(),
             env_edit: None,
             env_saved: None,
+            env_edit_seq: 0,
             live,
             search,
             filter: String::new(),

@@ -147,6 +147,7 @@ printf 'fake-value-not-a-secret'
     let selection = EnvTarget {
         env: Some("staging".into()),
         scope: Some("api".into()),
+        local: false,
     };
     let value = source
         .env_value(&project, false, &selection, "API_TOKEN")
@@ -193,6 +194,7 @@ exit 1
         let selection = EnvTarget {
             env: env.map(Into::into),
             scope: scope.map(Into::into),
+            local: false,
         };
         assert!(source.env_value(&project, false, &selection, key).is_err());
         assert!(
@@ -222,6 +224,7 @@ env > "$HOME/env"
     let target = EnvTarget {
         env: Some("staging".into()),
         scope: Some("api".into()),
+        local: false,
     };
     source
         .env_set(

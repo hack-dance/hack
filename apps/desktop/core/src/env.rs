@@ -58,6 +58,17 @@ impl EnvRow {
         matches!(self.storage.kind.as_str(), "secret" | "encrypted")
     }
 
+    /// The value comes from a worktree-local layer
+    /// (`hack.env.local.yaml`, `hack.env.<overlay>.local.yaml`): a write
+    /// must go there too (`--local`), or the local value keeps winning.
+    #[must_use]
+    pub fn is_local_layer(&self) -> bool {
+        self.layer
+            .as_deref()
+            .and_then(|l| l.rsplit('/').next())
+            .is_some_and(|name| name.starts_with("hack.env") && name.ends_with(".local.yaml"))
+    }
+
     /// A plaintext value: shown with the listing, no eye needed.
     #[must_use]
     pub fn is_plaintext(&self) -> bool {
@@ -705,6 +716,27 @@ mod tests {
         );
         assert_eq!(row(Scope::Canonical("global".into())).value_scope(), None);
         assert_eq!(row(Scope::Canonical("project".into())).value_scope(), None);
+    }
+
+    #[test]
+    fn a_local_layer_is_told_from_the_shared_one() {
+        let row = |layer: Option<&str>| EnvRow {
+            key: "K".into(),
+            required: false,
+            storage: Storage {
+                kind: "plaintext".into(),
+            },
+            resolved_from: None,
+            has_value: true,
+            scope: Scope::Canonical("global".into()),
+            layer: layer.map(Into::into),
+            missing: false,
+        };
+        assert!(row(Some("/work/p/.hack/hack.env.local.yaml")).is_local_layer());
+        assert!(row(Some(".hack/hack.env.staging.local.yaml")).is_local_layer());
+        assert!(!row(Some(".hack/hack.env.default.yaml")).is_local_layer());
+        assert!(!row(Some(".hack/hack.env.staging.yaml")).is_local_layer());
+        assert!(!row(None).is_local_layer());
     }
 
     #[test]

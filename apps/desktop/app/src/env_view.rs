@@ -33,6 +33,11 @@ pub(crate) struct EnvEdit {
     pub secret: bool,
     /// The row's own scope (`None` for a new variable).
     pub scope: Option<String>,
+    /// The row lives in a worktree-local layer: written there (`--local`).
+    pub local: bool,
+    /// Which editor this is: a write's completion only touches the editor
+    /// that started it, not one opened since.
+    pub id: u64,
     pub name: Option<Entity<InputState>>,
     pub value: Entity<InputState>,
     pub busy: bool,
@@ -49,6 +54,7 @@ impl HackApp {
         EnvTarget {
             env: self.env.env.clone(),
             scope: self.env.scope.clone(),
+            local: false,
         }
     }
 
@@ -367,6 +373,11 @@ impl HackApp {
             // shown in a service listing stays global); a missing required
             // name has no scope yet and takes the listing's.
             scope: row.map(EnvRow::scope_name).filter(|s| s != "unknown"),
+            local: row.is_some_and(EnvRow::is_local_layer),
+            id: {
+                self.env_edit_seq += 1;
+                self.env_edit_seq
+            },
             name,
             value,
             busy: false,
@@ -413,6 +424,7 @@ impl HackApp {
                 .or_else(|| self.env.scope.clone())
                 .or(listed_scope)
                 .or_else(|| Some("global".into())),
+            local: edit.local,
         }
     }
 
@@ -453,6 +465,7 @@ impl HackApp {
         }
         let target = self.edit_target(edit);
         let secret = edit.secret;
+        let editor = edit.id;
         let value = Revealed::new(edit.value.read(cx).value().to_string());
         let generation = self.env.generation();
         if let Some(edit) = self.env_edit.as_mut() {
@@ -461,25 +474,7 @@ impl HackApp {
         }
         let label = name.clone();
         let done = move |this: &mut Self, result: Result<(), String>, cx: &mut Context<Self>| {
-            // Another project or listing meanwhile: the write went to the
-            // place the editor named; show nothing over the new one.
-            if this.env.generation() != generation {
-                return;
-            }
-            match result {
-                Ok(()) => {
-                    this.env_edit = None;
-                    this.env_saved = Some(format!("Saved {label}"));
-                    this.read_env(cx);
-                }
-                Err(e) => {
-                    if let Some(edit) = this.env_edit.as_mut() {
-                        edit.busy = false;
-                        edit.error = Some(e);
-                    }
-                }
-            }
-            cx.notify();
+            this.finish_env_save(generation, editor, &label, result, cx);
         };
         if !self.live {
             let result = self
@@ -498,6 +493,41 @@ impl HackApp {
             let _ = this.update(cx, |this, cx| done(this, result, cx));
         })
         .detach();
+        cx.notify();
+    }
+
+    /// A write finished. Another project or listing meanwhile: show nothing
+    /// over the new one. Only the editor that started it (`editor`) is
+    /// closed or given the error: one opened since (after Cancel) keeps its
+    /// input.
+    pub(crate) fn finish_env_save(
+        &mut self,
+        generation: u64,
+        editor: u64,
+        label: &str,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.env.generation() != generation {
+            return;
+        }
+        let own = self.env_edit.as_ref().is_some_and(|e| e.id == editor);
+        match result {
+            Ok(()) => {
+                if own {
+                    self.env_edit = None;
+                }
+                self.env_saved = Some(format!("Saved {label}"));
+                self.read_env(cx);
+            }
+            Err(e) if own => {
+                if let Some(edit) = self.env_edit.as_mut() {
+                    edit.busy = false;
+                    edit.error = Some(e);
+                }
+            }
+            Err(_) => {}
+        }
         cx.notify();
     }
 
@@ -1257,5 +1287,57 @@ mod tests {
         });
         assert!(!open);
         assert_eq!(saved.as_deref(), Some("Saved NEW_FLAG"));
+    }
+
+    #[test]
+    fn a_row_from_a_local_layer_is_written_there() {
+        let (mut cx, window, app) = app_window();
+        let mut local = row(&mut cx, &app, "APP_MODE");
+        local.layer = Some(".hack/hack.env.staging.local.yaml".into());
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| a.open_env_edit(Some(&local), window, cx));
+        })
+        .unwrap();
+        let command = cx.update(|cx| app.read(cx).env_edit_command(cx).unwrap());
+        assert_eq!(
+            command,
+            "hack env add APP_MODE --value-stdin --local --env staging --service global"
+        );
+    }
+
+    #[test]
+    fn an_old_write_never_touches_an_editor_opened_since() {
+        let (mut cx, window, app) = app_window();
+        let open = |cx: &mut HeadlessAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                app.update(cx, |a, cx| a.open_env_edit(None, window, cx));
+            })
+            .unwrap();
+            cx.update(|cx| app.read(cx).env_edit.as_ref().unwrap().id)
+        };
+        let first = open(&mut cx);
+        let generation = cx.update(|cx| app.read(cx).env.generation());
+        cx.update(|cx| app.update(cx, |a, cx| a.cancel_env_edit(cx)));
+        let second = open(&mut cx);
+        assert_ne!(first, second);
+        // The first editor's write fails: the second gets no error.
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.finish_env_save(generation, first, "OLD", Err("no".into()), cx)
+            });
+        });
+        assert!(cx.update(|cx| app.read(cx).env_edit.as_ref().unwrap().error.is_none()));
+        // The first editor's write succeeds: the second stays open.
+        cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.finish_env_save(generation, first, "OLD", Ok(()), cx)
+            });
+        });
+        let (open_id, saved) = cx.update(|cx| {
+            let a = app.read(cx);
+            (a.env_edit.as_ref().map(|e| e.id), a.env_saved.clone())
+        });
+        assert_eq!(open_id, Some(second));
+        assert_eq!(saved.as_deref(), Some("Saved OLD"));
     }
 }

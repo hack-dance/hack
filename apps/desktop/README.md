@@ -519,8 +519,9 @@ command Save runs, for example
 `hack env add API_TOKEN --secret --value-stdin --env staging --service api`.
 The value goes to the CLI on stdin, never in argv or the environment, and the
 command names the overlay and scope explicitly. An existing row is written in
-its own scope (a global variable shown in a service listing stays global); a
-new one goes to the scope listed. A plaintext value starts filled in; a
+its own scope (a global variable shown in a service listing stays global) and
+its own layer (a row from `hack.env[.<overlay>].local.yaml` with `--local`); a
+new one goes to the scope listed, in the shared file. A plaintext value starts filled in; a
 secret starts empty, and its field is masked. A secret cannot be edited while
 the key is missing. The editor closes on another overlay, scope, tab or
 project. After Save the tab says "Saved NAME" and lists again.

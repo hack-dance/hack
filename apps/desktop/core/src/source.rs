@@ -2003,6 +2003,9 @@ pub struct EnvTarget {
     pub env: Option<String>,
     /// `--service` (`global` or a service name).
     pub scope: Option<String>,
+    /// Writes only: `--local`, the worktree-local layer
+    /// (`hack.env[.<overlay>].local.yaml`) instead of the shared file.
+    pub local: bool,
 }
 
 impl EnvTarget {
@@ -2043,6 +2046,9 @@ pub fn env_set_args(target: &EnvTarget, key: &str, secret: bool) -> Result<Vec<S
         args.push("--secret".into());
     }
     args.push("--value-stdin".into());
+    if target.local {
+        args.push("--local".into());
+    }
     args.extend(target.args()?);
     Ok(args)
 }

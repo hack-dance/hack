@@ -182,6 +182,14 @@ export function nativeBridgeCapacity(
   }
   return count;
 }
+/** An authored healthcheck with a command test and no native HTTP probe. */
+function isCommandOnlyHealthcheck(authored: unknown): boolean {
+  return (
+    isRecord(authored) &&
+    !Object.hasOwn(authored, "x-hack-http") &&
+    Object.hasOwn(authored, "test")
+  );
+}
 function requireRouteProbe(
   service: Readonly<Record<string, unknown>>,
   spec: Readonly<Record<string, unknown>> | undefined
@@ -203,10 +211,7 @@ function requireRouteProbe(
   }
   // A command healthcheck on a routed service is replaced by the inferred
   // route probe in the review (HACK-2324), which reports it as a warning.
-  const commandOnly =
-    isRecord(authored) &&
-    !Object.hasOwn(authored, "x-hack-http") &&
-    Object.hasOwn(authored, "test");
+  const commandOnly = isCommandOnlyHealthcheck(authored);
   const probe =
     spec && isRecord(spec.healthcheck)
       ? spec.healthcheck["x-hack-http"]

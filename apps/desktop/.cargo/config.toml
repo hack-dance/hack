@@ -1,0 +1,9 @@
+# hack-desktop-term's `ghostty` feature builds libghostty-vt through the
+# ghostty-vt-sys build script. That script downloads its release archives
+# when GHOSTTY_RELEASE_DIR is unset. This workspace builds only from
+# provisioned, checksummed inputs (term/scripts/provision-ghostty.sh), so the
+# script's download base is set to a URL that cannot be fetched: without
+# GHOSTTY_RELEASE_DIR the build fails instead of using the network.
+# GHOSTTY_RELEASE_DIR, when set, takes precedence and this value is unused.
+[env]
+GHOSTTY_RELEASE_URL = "downloads-disabled://run-term/scripts/provision-ghostty.sh-and-export-GHOSTTY_RELEASE_DIR"

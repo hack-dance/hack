@@ -105,3 +105,71 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build app
         run: cargo build --locked -p hack-desktop
+      # The terminal surface on a real Mac: libghostty-vt from the prebuilt,
+      # checksummed XCFramework (no Zig on macOS), and every hack-desktop-term
+      # test, including the render target whose `main` creates GPUI's macOS
+      # platform on the main thread (real fonts, Metal offscreen rendering).
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ghostty-inputs
+          key: desktop-ghostty-inputs-${{ runner.os }}-${{ hashFiles('apps/desktop/term/scripts/provision-ghostty.sh') }}
+      - name: Provision pinned libghostty-vt inputs (checksummed)
+        run: bash term/scripts/provision-ghostty.sh --dir "$RUNNER_TEMP/ghostty-inputs" --emit github >> "$GITHUB_ENV"
+      - name: Terminal surface tests (ghostty, real platform)
+        env:
+          HACK_DAEMON_AUTOSTART_DISABLE: "1"
+          HACK_TERM_REQUIRE_RENDERER: "1"
+        run: |
+          cargo nextest run --locked -p hack-desktop-term --features screenshots \
+            --build-jobs 2 --config-file ../../.config/nextest.toml --profile ci --no-fail-fast
+
+  # The terminal surface's libghostty-vt feature (HACK-2252). The provision
+  # step is the only one that fetches libghostty-vt, Zig or the symbols font, and it verifies
+  # each file against a sha256 committed in the script. The build, lint and
+  # tests then run in a network namespace with no interfaces but a down
+  # loopback, so they cannot download anything.
+  term-ghostty:
+    name: Desktop terminal surface (Linux, libghostty-vt, offline build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GPUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libssl-dev libzstd-dev libvulkan-dev pkg-config xz-utils \
+            mesa-vulkan-drivers
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/target
+          key: desktop-term-ghostty-${{ runner.os }}-${{ hashFiles('apps/desktop/Cargo.lock') }}
+          restore-keys: desktop-term-ghostty-${{ runner.os }}-
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ghostty-inputs
+          key: desktop-ghostty-inputs-${{ runner.os }}-${{ hashFiles('apps/desktop/term/scripts/provision-ghostty.sh') }}
+      - name: Provision pinned Zig and libghostty-vt inputs (checksummed)
+        run: bash term/scripts/provision-ghostty.sh --dir "$RUNNER_TEMP/ghostty-inputs" --emit github >> "$GITHUB_ENV"
+      - name: Install pinned per-test process runner
+        run: |
+          bash ../../scripts/install-cargo-nextest.sh "$RUNNER_TEMP/desktop-nextest"
+          echo "$RUNNER_TEMP/desktop-nextest" >> "$GITHUB_PATH"
+      - name: Fetch locked crates
+        run: cargo fetch --locked
+      # The render test draws glyphs offscreen and inspects the pixels. Mesa's
+      # software Vulkan driver (installed above) is its renderer here.
+      - name: Build, lint and test the ghostty feature with networking disabled
+        env:
+          HACK_TERM_REQUIRE_RENDERER: "1"
+        run: bash term/scripts/no-network.sh bash term/scripts/check-ghostty.sh

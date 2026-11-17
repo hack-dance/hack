@@ -3,7 +3,7 @@
 # release of packages/runtime-core or packages/config-compiler.
 [workspace]
 resolver = "3"
-members = ["core", "app", "ui"]
+members = ["core", "app", "ui", "term"]
 
 [workspace.package]
 version = "0.0.0"
@@ -18,6 +18,12 @@ serde_json = "1"
 gpui-kit = { version = "=0.9.1" }
 hack-desktop-core = { path = "core" }
 hack-desktop-ui = { path = "ui" }
+hack-desktop-term = { path = "term" }
+# libghostty-vt 1.0.1 (tag vt-1.0.1). Cargo ignores build metadata in a
+# requirement, so the exact pin is `=0.9.0`; the lockfile records
+# `0.9.0+ghostty-vt.1.0.1`. See term/DECISION.md.
+ghostty-vt = { version = "=0.9.0", default-features = false }
+libc = "=0.2.191"
 
 [profile.release]
 strip = true

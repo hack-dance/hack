@@ -178,7 +178,8 @@ fn hackd_card(
             CardAction::OpenSetup => (Glyph::Stethoscope, "Open Setup"),
         };
         let working = app.machine.held_by(Holder::Recovery) && a != CardAction::OpenSetup;
-        let enabled = a == CardAction::OpenSetup || !busy;
+        // A read in flight may change what the card offers: wait for it.
+        let enabled = a == CardAction::OpenSetup || (!busy && !app.hackd_loading);
         let mut button = action_button(
             "hackd-action",
             glyph,
@@ -438,6 +439,36 @@ mod tests {
             })
         });
         assert_eq!(tone, Some(Tone::Problem), "the dot follows the newer read");
+    }
+
+    #[test]
+    fn with_the_pane_open_changed_evidence_replaces_the_card_with_a_fresh_read() {
+        use hack_desktop_core::source::SourceError;
+        let (mut cx, app) = window(Fixture::Hackd);
+        let (seen, now) = cx.update(|cx| {
+            app.update(cx, |a, cx| {
+                a.refresh_now();
+                a.open_hackd(cx);
+                let before = a.hackd_evidence_seen.clone();
+                let token = a.model.begin_refresh();
+                assert!(a.apply_refresh(
+                    token,
+                    Err(SourceError::DaemonUnavailable {
+                        cli: "5.0.0".into(),
+                        daemon: Some("5.1.0".into()),
+                        compatible: false,
+                        message: "newer hackd".into(),
+                        shared_with: None,
+                    }),
+                    cx,
+                ));
+                assert_ne!(before, a.hackd_evidence_key());
+                (a.hackd_evidence_seen.clone(), a.hackd_evidence_key())
+            })
+        });
+        // The card shown is one read against the new evidence (fixtures read
+        // at once), never the old one.
+        assert_eq!(seen, now);
     }
 
     #[test]

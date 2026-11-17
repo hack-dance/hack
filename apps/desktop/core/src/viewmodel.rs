@@ -857,9 +857,13 @@ impl AppModel {
             },
             url: row.dev_host.as_ref().map(|h| format!("https://{h}")),
             always_on: row.autostart.as_ref().is_some_and(|a| a.enabled),
-            always_on_note: row
-                .autostart
+            // The marker lives on the project's own row (a branch instance's
+            // derived row has none); it names the instance it is for.
+            always_on_note: self
+                .snapshot
                 .as_ref()
+                .and_then(|s| s.projects.projects.iter().find(|p| p.name == key.project))
+                .and_then(|p| p.autostart.as_ref())
                 .filter(|a| a.branch == key.branch)
                 // The state line already says it (`state::derive`).
                 .filter(|a| a.state != "needs_attention")
@@ -1433,6 +1437,43 @@ mod tests {
             .state = "needs_attention".into();
         m.apply(Event::Refreshed(Ok(snap)));
         assert_eq!(note(&mut m, InstanceKey::project("notes")), None);
+    }
+
+    #[test]
+    fn a_branch_marker_shows_on_that_branch_instance_only() {
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        snap.projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap()
+            .autostart = Some(crate::models::Autostart {
+            enabled: true,
+            state: "paused".into(),
+            paused_reason: Some("manual_stop".into()),
+            branch: Some("feature-search".into()),
+            ..crate::models::Autostart::default()
+        });
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap)));
+        m.apply(Event::SelectInstance(InstanceKey::branch(
+            "storefront",
+            "feature-search",
+        )));
+        assert_eq!(
+            m.detail().unwrap().branch.as_deref(),
+            Some("feature-search")
+        );
+        assert_eq!(
+            m.detail()
+                .unwrap()
+                .always_on_note
+                .map(|(_, t)| t)
+                .as_deref(),
+            Some("Always on · paused until you start it")
+        );
+        m.apply(Event::SelectInstance(InstanceKey::project("storefront")));
+        assert_eq!(m.detail().unwrap().always_on_note, None);
     }
 
     #[test]

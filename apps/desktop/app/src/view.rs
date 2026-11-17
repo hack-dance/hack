@@ -159,7 +159,7 @@ pub struct HackApp {
     pub(crate) hackd_loading: bool,
     /// [`Self::hackd_evidence_key`] when hackd was last read: a project read
     /// that changes it makes the stored read stale.
-    hackd_evidence_seen: String,
+    pub(crate) hackd_evidence_seen: String,
     /// Setup checks (DESIGN.md section 2; `setup_view`).
     pub(crate) setup: hack_desktop_core::setup::Pane,
     /// The launch check has not reported yet: when it finds something to
@@ -440,11 +440,12 @@ impl HackApp {
         // the sidebar dot follows the project reads.
         let evidence = self.hackd_evidence_key();
         if self.hackd_read && evidence != self.hackd_evidence_seen {
+            // Never leave the old card (and its action) up against the new
+            // evidence: drop it, and read again while the pane shows it.
+            self.hackd_read = false;
+            self.hackd_status = None;
             if self.pane == Pane::Hackd {
                 self.load_hackd(cx);
-            } else {
-                self.hackd_read = false;
-                self.hackd_status = None;
             }
         }
         let after = self.model.selected_key();

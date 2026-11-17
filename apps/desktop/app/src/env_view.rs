@@ -209,8 +209,7 @@ impl HackApp {
             return;
         }
         let generation = self.env.generation();
-        self.env
-            .set_value(generation, key.clone(), ValueState::Reading);
+        let token = self.env.start_reveal(key.clone());
         self.read_value(
             row,
             move |this, result, cx| {
@@ -221,7 +220,7 @@ impl HackApp {
                     },
                     Err(e) => ValueState::Failed(e),
                 };
-                if this.env.finish_reveal(generation, key, state) {
+                if this.env.finish_reveal(generation, key, token, state) {
                     this.expire_values_later(cx);
                     cx.notify();
                 }

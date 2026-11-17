@@ -291,6 +291,10 @@ pub struct EnvModel {
     /// visibility lost): a reveal or copy started before it must not
     /// complete after it. Those hides also drop the "Reading" marks.
     reveal_epoch: u64,
+    /// The reveal request each name is waiting for: a cancelled request's
+    /// late result never fills a newer one's place.
+    reveal_tokens: std::collections::HashMap<ValueKey, u64>,
+    next_token: u64,
     values: std::collections::HashMap<ValueKey, ValueState>,
 }
 impl EnvModel {
@@ -298,6 +302,7 @@ impl EnvModel {
     pub fn begin(&mut self) -> u64 {
         self.generation += 1;
         self.reveal_epoch += 1;
+        self.reveal_tokens.clear();
         self.view = EnvView::Loading;
         self.values.clear();
         self.generation
@@ -331,29 +336,50 @@ impl EnvModel {
             self.values.insert(key, state);
         }
     }
-    /// Install a reveal's result only if that name is still being read:
-    /// hiding it meanwhile (its eye pressed again) drops a late result.
-    /// Returns whether it was installed.
-    pub fn finish_reveal(&mut self, generation: u64, key: ValueKey, state: ValueState) -> bool {
+    /// Start reading one name for a reveal: marks it "Reading" and returns
+    /// the token its result must present.
+    pub fn start_reveal(&mut self, key: ValueKey) -> u64 {
+        self.next_token += 1;
+        self.reveal_tokens.insert(key.clone(), self.next_token);
+        self.values.insert(key, ValueState::Reading);
+        self.next_token
+    }
+
+    /// Install a reveal's result only if it answers the latest request for
+    /// that name and the name is still being read. Hiding it meanwhile, or
+    /// a newer request, drops a late result. Returns whether it was
+    /// installed.
+    pub fn finish_reveal(
+        &mut self,
+        generation: u64,
+        key: ValueKey,
+        token: u64,
+        state: ValueState,
+    ) -> bool {
         let pending = generation == self.generation
+            && self.reveal_tokens.get(&key) == Some(&token)
             && matches!(self.values.get(&key), Some(ValueState::Reading));
         if pending {
+            self.reveal_tokens.remove(&key);
             self.values.insert(key, state);
         }
         pending
     }
     pub fn hide(&mut self, key: &ValueKey) {
+        self.reveal_tokens.remove(key);
         self.values.remove(key);
     }
     /// Drop every value (the window lost focus, a tab changed).
     pub fn hide_all(&mut self) {
         self.reveal_epoch += 1;
+        self.reveal_tokens.clear();
         self.values.clear();
     }
     /// Hide every revealed secret, keeping plaintext values; whether any
     /// was shown or still being read.
     pub fn hide_revealed(&mut self) -> bool {
         self.reveal_epoch += 1;
+        self.reveal_tokens.clear();
         let before = self.values.len();
         self.values
             .retain(|_, v| matches!(v, ValueState::Plain(_) | ValueState::Failed(_)));
@@ -616,13 +642,17 @@ mod tests {
             value: Revealed::new("fake-value".into()),
             at: std::time::Instant::now(),
         };
-        model.set_value(generation, key.clone(), ValueState::Reading);
+        let a = model.start_reveal(key.clone());
         model.hide(&key);
-        assert!(!model.finish_reveal(generation, key.clone(), shown()));
+        assert!(!model.finish_reveal(generation, key.clone(), a, shown()));
         assert_eq!(model.value(&key), ValueState::Hidden);
-        // Still reading: it lands.
-        model.set_value(generation, key.clone(), ValueState::Reading);
-        assert!(model.finish_reveal(generation, key.clone(), shown()));
+        // Cancelled A, then B started: A's late result does not fill B's place.
+        let a = model.start_reveal(key.clone());
+        model.hide(&key);
+        let b = model.start_reveal(key.clone());
+        assert!(!model.finish_reveal(generation, key.clone(), a, shown()));
+        assert_eq!(model.value(&key), ValueState::Reading);
+        assert!(model.finish_reveal(generation, key.clone(), b, shown()));
         assert!(matches!(model.value(&key), ValueState::Shown { .. }));
     }
 

@@ -369,7 +369,10 @@ impl CliRunner {
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match crate::process::spawn(&mut self.command_io(args, path, &program, input)) {
+            match crate::process::spawn_with(
+                &mut self.command_io(args, path, &program, input),
+                input,
+            ) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;

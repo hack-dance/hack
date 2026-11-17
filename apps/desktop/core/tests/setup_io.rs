@@ -161,6 +161,12 @@ esac
     let report = source.setup();
     assert!(report.cli_ready());
     assert_eq!(report.cli_program.as_deref(), hack.to_str());
+    // The CLI setup found is now the app's CLI for every read and action.
+    assert_eq!(
+        source.hack_program().as_deref(),
+        Some(hack.as_path()),
+        "the shared runner uses the rediscovered CLI"
+    );
     source.setup_action(SafeAction::StartDaemon, &report);
     assert!(marker.exists());
 }

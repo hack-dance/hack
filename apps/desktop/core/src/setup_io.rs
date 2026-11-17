@@ -83,7 +83,15 @@ impl LiveSource {
         let socket = client.as_ref().and_then(|d| d.status().ok());
         let mut projects = socket
             .as_ref()
-            .filter(|s| cli.as_ref().is_ok_and(|v| v == &s.version))
+            .filter(|s| {
+                // Equal versions, or ones the CLI reports as compatible.
+                cli.as_ref().is_ok_and(|v| v == &s.version)
+                    || daemon
+                        .as_ref()
+                        .and_then(|d| d.get("api_compatible"))
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            })
             .and(client.as_ref())
             .and_then(|d| d.projects().ok());
         if let Some(p) = &mut projects {

@@ -291,8 +291,13 @@ pub fn derive(
     let running = daemon
         .and_then(|d| d.get("running"))
         .and_then(serde_json::Value::as_bool);
+    // The CLI's own answer for differing versions (`api_compatible`), as the
+    // window uses it: compatible versions need nothing.
+    let compatible = daemon
+        .and_then(|d| d.get("api_compatible"))
+        .and_then(serde_json::Value::as_bool);
     let inconsistent = daemon.is_some_and(|d| {
-        ["api_ok", "api_reachable", "api_compatible"]
+        ["api_ok", "api_reachable"]
             .iter()
             .any(|key| d.get(key).and_then(serde_json::Value::as_bool) == Some(false))
             || d.get("stale").and_then(serde_json::Value::as_bool) == Some(true)
@@ -300,37 +305,54 @@ pub fn derive(
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|s| s != "running")
     });
-    let daemon_evidence = match (running, cli, socket_version) {
+    let restart = || Remedy::Copy("hack daemon restart".into());
+    let (status, detail, remedy) = match (running, cli, socket_version) {
         (Some(true), _, _) if inconsistent => (
             Status::Unknown,
-            "Daemon reports starting, stale or incompatible; check again".into(),
+            "Daemon reports starting or stale; check again".into(),
+            restart(),
+        ),
+        // Equal versions the daemon still calls incompatible: contradictory.
+        (Some(true), Ok(c), Some(v)) if c == v && compatible == Some(false) => (
+            Status::Unknown,
+            "Daemon reports an incompatible API at the same version; check again".into(),
+            restart(),
         ),
         (Some(true), Ok(c), Some(v)) if !v.is_empty() && c == v => {
-            (Status::Passed, format!("hackd {v}"))
+            (Status::Passed, format!("hackd {v}"), restart())
         }
-        (Some(true), Ok(c), Some(v)) => (
-            Status::NeedsAttention,
-            format!("hackd {v}, CLI {c}; restart from your terminal"),
+        (Some(true), Ok(c), Some(v)) if !v.is_empty() && compatible == Some(true) => (
+            Status::Passed,
+            format!("hackd {v}, CLI {c}: compatible"),
+            restart(),
         ),
+        // Never restart hackd from an older CLI: that would downgrade it.
+        (Some(true), Ok(c), Some(v)) if !v.is_empty() => {
+            match crate::source::UpdateSide::for_versions(v, c) {
+                crate::source::UpdateSide::Daemon => (
+                    Status::NeedsAttention,
+                    format!("hackd {v} is older than CLI {c}; restart it from your terminal"),
+                    restart(),
+                ),
+                crate::source::UpdateSide::Cli => (
+                    Status::NeedsAttention,
+                    format!("hackd {v} is newer than CLI {c}; update the CLI"),
+                    Remedy::Copy("hack update".into()),
+                ),
+            }
+        }
         (Some(false), _, _) => (
             Status::NeedsAttention,
             "hackd off; status refreshes slowly".into(),
+            Remedy::Run(SafeAction::StartDaemon),
         ),
         _ => (
             Status::Unknown,
             "Could not confirm hackd and socket version".into(),
+            restart(),
         ),
     };
-    cards.push(card(
-        "daemon",
-        "hackd",
-        daemon_evidence,
-        if running == Some(false) {
-            Remedy::Run(SafeAction::StartDaemon)
-        } else {
-            Remedy::Copy("hack daemon restart".into())
-        },
-    ));
+    cards.push(card("daemon", "hackd", (status, detail), remedy));
     if compose {
         cards.push(card(
             "routing",

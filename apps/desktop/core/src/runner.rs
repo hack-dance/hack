@@ -86,6 +86,10 @@ pub struct CliRunner {
     /// The name [`Self::on_path`] searched for; [`Self::rediscover`] searches
     /// for it again.
     path_name: Option<String>,
+    /// What the last [`Self::rediscover`] found, shared by every clone of an
+    /// [`Self::on_path`] runner, so a CLI setup finds (installed since
+    /// launch, or another one) is the one every read and action runs.
+    pinned: Option<std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>>,
 }
 
 /// The selected CLI, refused when another user could change it.
@@ -182,7 +186,19 @@ impl CliRunner {
             clear_env: false,
             verify: false,
             path_name: None,
+            pinned: None,
         }
+    }
+
+    /// The executable to start now: what [`Self::rediscover`] last found,
+    /// else `program` (`None` when [`Self::on_path`] found nothing).
+    fn current_program(&self) -> Option<PathBuf> {
+        if let Some(slot) = &self.pinned
+            && let Some(found) = slot.lock().ok().and_then(|g| g.clone())
+        {
+            return Some(found);
+        }
+        (!self.missing).then(|| self.program.clone())
     }
 
     /// Run the absolute `program` only after checking that no other user
@@ -231,8 +247,14 @@ impl CliRunner {
                 .and_then(|p| trusted_cli(&p).map(|()| p));
         };
         let found = resolve_on_path(name, self.effective_env("PATH").as_deref())
-            .ok_or(RunError::NotFound)?;
-        trusted_cli(&found).map(|()| found)
+            .ok_or(RunError::NotFound)
+            .and_then(|p| trusted_cli(&p).map(|()| p));
+        if let Some(slot) = &self.pinned
+            && let Ok(mut slot) = slot.lock()
+        {
+            *slot = found.as_ref().ok().cloned();
+        }
+        found
     }
 
     /// Change the SIGTERM-to-SIGKILL grace for timed-out commands.
@@ -261,6 +283,7 @@ impl CliRunner {
             }
         };
         r.path_name = Some(name.into());
+        r.pinned = Some(std::sync::Arc::default());
         r
     }
 
@@ -293,13 +316,11 @@ impl CliRunner {
 
     /// The absolute executable this runner would start, without starting it.
     pub(crate) fn program_path(&self) -> Option<PathBuf> {
-        if self.missing {
-            return None;
+        let program = self.current_program()?;
+        if program.is_absolute() {
+            return Some(program);
         }
-        if self.program.is_absolute() {
-            return Some(self.program.clone());
-        }
-        let name = self.program.to_str()?;
+        let name = program.to_str()?;
         resolve_on_path(name, self.env_value("PATH").as_deref())
     }
 
@@ -324,9 +345,9 @@ impl CliRunner {
             })
     }
 
-    fn command(&self, args: &[&str], path: Option<&Path>) -> Command {
+    fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
         use std::os::unix::process::CommandExt;
-        let mut cmd = Command::new(&self.program);
+        let mut cmd = Command::new(program);
         cmd.args(args);
         if let Some(p) = path {
             cmd.arg("--path").arg(p);
@@ -374,18 +395,16 @@ impl CliRunner {
     }
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
-        if self.missing {
-            return Err(RunError::NotFound);
-        }
+        let program = self.current_program().ok_or(RunError::NotFound)?;
         if self.verify {
-            trusted_cli(&self.program)?;
+            trusted_cli(&program)?;
         }
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match crate::process::spawn(&mut self.command(args, path), !self.clear_env) {
+            match crate::process::spawn(&mut self.command(args, path, &program), !self.clear_env) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;
@@ -1399,7 +1418,7 @@ mod tests {
             runner = runner.with_env(name, "/example/value");
         }
         let removed = |runner: &CliRunner| {
-            let command = runner.command(&["x"], None);
+            let command = runner.command(&["x"], None, &runner.program.clone());
             names
                 .iter()
                 .filter(|name| {
@@ -1431,7 +1450,7 @@ mod tests {
             runner = runner.with_env(name, "/example/value");
         }
         let removed = |runner: &CliRunner| {
-            let command = runner.command(&["x"], None);
+            let command = runner.command(&["x"], None, &runner.program.clone());
             names
                 .iter()
                 .filter(|name| {

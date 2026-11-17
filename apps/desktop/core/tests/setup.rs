@@ -508,3 +508,55 @@ fn failed_or_unloaded_launchd_never_passes_login_even_with_a_live_daemon() {
         assert_eq!(report.cards.last().unwrap().status, Status::NeedsAttention);
     }
 }
+
+#[test]
+fn a_daemon_newer_than_the_cli_asks_for_a_cli_update_never_a_restart() {
+    use hack_desktop_core::setup::{Platform, Remedy, Status, derive};
+    let daemon = serde_json::json!({"running": true, "status": "running", "api_compatible": false});
+    let r = derive(
+        Ok("5.0.0"),
+        None,
+        Some("5.1.0"),
+        Some(&daemon),
+        &[],
+        Platform::Linux,
+    );
+    let card = r
+        .cards
+        .iter()
+        .find(|c| c.id == "daemon")
+        .expect("daemon card");
+    assert_eq!(card.status, Status::NeedsAttention);
+    assert_eq!(card.remedy, Remedy::Copy("hack update".into()), "{card:?}");
+    // Older daemon: restart it from this CLI.
+    let r = derive(
+        Ok("5.1.0"),
+        None,
+        Some("5.0.0"),
+        Some(&daemon),
+        &[],
+        Platform::Linux,
+    );
+    let card = r
+        .cards
+        .iter()
+        .find(|c| c.id == "daemon")
+        .expect("daemon card");
+    assert_eq!(card.remedy, Remedy::Copy("hack daemon restart".into()));
+    // Differing versions the CLI reports as compatible need nothing.
+    let ok = serde_json::json!({"running": true, "status": "running", "api_compatible": true});
+    let r = derive(
+        Ok("5.0.1"),
+        None,
+        Some("5.0.0"),
+        Some(&ok),
+        &[],
+        Platform::Linux,
+    );
+    let card = r
+        .cards
+        .iter()
+        .find(|c| c.id == "daemon")
+        .expect("daemon card");
+    assert_eq!(card.status, Status::Passed, "{card:?}");
+}

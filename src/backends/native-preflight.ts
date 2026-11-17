@@ -1648,7 +1648,7 @@ function managedRestartFindings(
       },
       {
         message: line,
-        fix: "Nothing to do to start. Restart the service with hack restart if it stops; automatic restart for these services is planned.",
+        fix: "Nothing to do to start. If the service stops, run hack restart (native restarts the whole project; service names are not accepted). Automatic restart with a fresh delivery is planned.",
       }
     )
   );

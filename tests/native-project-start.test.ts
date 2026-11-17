@@ -939,7 +939,7 @@ test("HACK-2324: a privately delivered service starts without its restart policy
   opts.dependencies.warn = (line) => notices.push(line);
   expect(await startNativeProject(opts)).toBe(0);
   expect(notices.filter((line) => line.includes("private values"))).toEqual([
-    "Service web: restart: unless-stopped is not applied, because the service receives private values that native delivers once per container start. If it crashes it stays stopped until Hack restarts it (hack restart web).",
+    "Service web: restart: unless-stopped is not applied, because the service receives private values that native delivers once per container start. If it crashes it stays stopped until you run hack restart, which restarts the whole project with a fresh delivery.",
   ]);
   expect(notices.join("\n")).not.toContain("synthetic-secret");
 });

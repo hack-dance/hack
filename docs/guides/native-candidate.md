@@ -1479,7 +1479,7 @@ the container, so an engine restart would come back without them. Foreground
 `up` and preflight name each such service, for example `Service web: restart:
 unless-stopped is not applied, because the service receives private values that
 native delivers once per container start. If it crashes it stays stopped until
-Hack restarts it (hack restart web).` Preflight reports it as the warning
+you run hack restart, which restarts the whole project with a fresh delivery.` Preflight reports it as the warning
 `restart_policy_not_applied`.
 
 Every owned stop first sets the engine policy back to `no` and confirms that with a

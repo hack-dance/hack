@@ -92,5 +92,7 @@ test("HACK-2324: only active, privately delivered services with an automatic pol
   });
   expect(notices.map((notice) => notice.service)).toEqual(["adc", "web"]);
   expect(notices[0]?.line).toContain("restart: on-failure:3 is not applied");
-  expect(notices[0]?.line).toContain("hack restart adc");
+  expect(notices[0]?.line).toContain(
+    "run hack restart, which restarts the whole project"
+  );
 });

@@ -104,7 +104,7 @@ export function nativeManagedRestartNotices(opts: {
     ) {
       notices.push({
         service,
-        line: `Service ${service}: restart: ${policy} is not applied, because the service receives private values that native delivers once per container start. If it crashes it stays stopped until Hack restarts it (hack restart ${service}).`,
+        line: `Service ${service}: restart: ${policy} is not applied, because the service receives private values that native delivers once per container start. If it crashes it stays stopped until you run hack restart, which restarts the whole project with a fresh delivery.`,
       });
     }
   }

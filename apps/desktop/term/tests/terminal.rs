@@ -171,6 +171,27 @@ fn typing_while_a_container_tab_opens_does_not_cancel_the_fallback_to_sh() {
 }
 
 #[test]
+fn a_paste_refused_while_input_is_held_keeps_its_notice_after_the_flush() {
+    use hack_desktop_term::pty::INPUT_QUEUE_BYTES;
+    let home = TempHome::new();
+    let mut core =
+        TerminalCore::session(container_plan(&home, &[("FAKE_HACK_NO_BASH", "1")])).expect("spawn");
+    core.send(b"echo \"typed=[$((2 + 3))]\"\n");
+    core.send(&vec![b'#'; INPUT_QUEUE_BYTES + 1]);
+    let refused = core
+        .notice()
+        .map(str::to_owned)
+        .expect("the oversized paste is refused");
+    assert!(refused.contains("input limit"), "{refused}");
+    pump_until(&mut core, "typed=[5]");
+    assert_eq!(
+        core.notice(),
+        Some(refused.as_str()),
+        "delivering the held input does not clear the refusal"
+    );
+}
+
+#[test]
 fn a_container_with_bash_keeps_it_and_a_later_exit_127_is_not_a_fallback() {
     let home = TempHome::new();
     let mut core = TerminalCore::session(container_plan(&home, &[])).expect("spawn");

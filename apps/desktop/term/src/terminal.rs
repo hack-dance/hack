@@ -392,7 +392,9 @@ impl TerminalCore {
                     }
                 } else if !self.held.is_empty() && self.exit_seen.is_none() && self.settled() {
                     let held = std::mem::take(&mut self.held);
-                    self.deliver(&held);
+                    // Input accepted earlier: a notice set since then (a
+                    // refused paste) stays up.
+                    self.deliver(&held, false);
                     busy = true;
                 }
             }
@@ -459,17 +461,21 @@ impl TerminalCore {
             }
             return;
         }
-        self.deliver(bytes);
+        self.deliver(bytes, true);
     }
 
-    /// Write input to the current attempt; it now counts as typed.
-    fn deliver(&mut self, bytes: &[u8]) {
+    /// Write input to the current attempt; it now counts as typed. `fresh`:
+    /// input the user just gave, which replaces any notice; held input
+    /// delivered later leaves the notice as it is.
+    fn deliver(&mut self, bytes: &[u8], fresh: bool) {
         let Backend::Pty(pty) = &self.backend else {
             return;
         };
         match pty.write(bytes) {
             WriteOutcome::Queued => {
-                self.notice = None;
+                if fresh {
+                    self.notice = None;
+                }
                 self.input_sent = true;
             }
             WriteOutcome::Dropped { bytes } => {

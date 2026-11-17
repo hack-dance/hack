@@ -280,11 +280,15 @@ async function runComposeStartPhase(input: {
     finished,
     isDone: () => done,
   });
-  if (watch.stopped) {
+  // Compose may end between the watcher's decision and this point: its own
+  // outcome (success, a signal's exit code) then stands. Only a start the
+  // watchdog actually cut short reports 124.
+  const cutShort = watch.stopped && !done;
+  if (cutShort) {
     watchdog.abort();
   }
   const code = await finished;
-  if (watch.stopped || code === 124) {
+  if ((cutShort && code !== 0) || code === 124) {
     options.onStartupStalled?.(watch.lastSeen);
     return 124;
   }
@@ -311,10 +315,14 @@ async function watchStartProgress(input: {
     if (input.isDone()) {
       return { stopped: false, lastSeen };
     }
-    const ps = await composeRuntimeBackend.psJson({
-      ...input.options,
-      all: true,
-    });
+    // A poll never outlives the start: Compose ending wins the race.
+    const ps = await Promise.race([
+      composeRuntimeBackend.psJson({ ...input.options, all: true }),
+      input.finished.then(() => null),
+    ]);
+    if (ps === null || input.isDone()) {
+      return { stopped: false, lastSeen };
+    }
     const entries = ps.exitCode === 0 ? parseComposePsJson(ps.stdout) : null;
     if (entries) {
       // A failed read is no evidence of progress, never extra time.

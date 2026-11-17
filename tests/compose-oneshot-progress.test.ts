@@ -69,6 +69,31 @@ test("an override's one-shot edges add to the base file's", () => {
   expect(graph.waitsOn.get("api")).toEqual(["migrate", "seed"]);
 });
 
+test("an override that changes the condition removes the one-shot edge", () => {
+  const graph = mergeOneShotGraphs([
+    DOCUMENT,
+    {
+      services: {
+        api: { depends_on: { migrate: { condition: "service_started" } } },
+        worker: { depends_on: ["migrate"] },
+      },
+    },
+  ]);
+  expect(graph.oneShots.size).toBe(0);
+  expect(graph.waitsOn.size).toBe(0);
+  // Changing only one of the two dependents keeps the other edge.
+  const partial = mergeOneShotGraphs([
+    DOCUMENT,
+    {
+      services: {
+        api: { depends_on: { migrate: { condition: "service_started" } } },
+      },
+    },
+  ]);
+  expect([...partial.oneShots]).toEqual(["migrate"]);
+  expect(Object.fromEntries(partial.waitsOn)).toEqual({ worker: ["migrate"] });
+});
+
 test("only a running one-shot is progress; a restarting one is not", () => {
   const graph = composeOneShotGraph(DOCUMENT);
   expect(

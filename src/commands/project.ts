@@ -1082,6 +1082,8 @@ async function checkOneShotInterruption(opts: {
   readonly profiles: readonly string[];
   readonly action: "down" | "restart";
   readonly json: boolean;
+  /** A targeted restart interrupts only these services. */
+  readonly services?: readonly string[];
 }): Promise<{
   readonly proceed: boolean;
   readonly interruption?: OneShotInterruption;
@@ -1098,7 +1100,9 @@ async function checkOneShotInterruption(opts: {
     all: true,
   });
   const entries = ps.exitCode === 0 ? parseComposePsJson(ps.stdout) : null;
-  const services = entries ? runningOneShots({ graph, entries }) : [];
+  const services = (entries ? runningOneShots({ graph, entries }) : []).filter(
+    (service) => !opts.services || opts.services.includes(service)
+  );
   if (services.length === 0) {
     return { proceed: true };
   }
@@ -9122,6 +9126,17 @@ async function runRestartCommand({
     available: allServiceNames,
   });
   if (requestedServices.length > 0) {
+    const targetedInterruption = await checkOneShotInterruption({
+      project,
+      composeProjectName,
+      profiles,
+      action: "restart",
+      json,
+      services: requestedServices,
+    });
+    if (!targetedInterruption.proceed) {
+      return 1;
+    }
     const result = await runTargetedServiceRestart({
       budgets,
       project,
@@ -9161,6 +9176,7 @@ async function runRestartCommand({
           composeProject: composeProjectName ?? baseProjectName,
           started: result.running,
           completed: result.completed,
+          interruption: targetedInterruption.interruption,
           durationMs: Date.now() - (startedAtMs ?? Date.now()),
         }),
       }),

@@ -26,6 +26,9 @@ case " $* " in
     : > "$state/up-done"
     exit 0 ;;
   *" ps "*)
+    if [ -n "\${STUB_PS_SLEEP:-}" ] && [ ! -f "$state/up-done" ]; then
+      sleep "$STUB_PS_SLEEP"
+    fi
     case " $* " in
       *" --format "*)
         if [ -f "$state/up-done" ]; then
@@ -230,4 +233,42 @@ test("restart --json while a one-shot runs reports what it interrupted", async (
   };
   expect(envelope.data.interrupted).toEqual(["migrate"]);
   expect(envelope.data.warnings[0]).toContain("hack restart interrupted");
+}, 60_000);
+
+test("a slow poll never turns a start that already succeeded into a timeout", async () => {
+  // The first poll begins at 1 s and takes 3 s; Compose succeeds at 2 s,
+  // past the 1 s budget but before the poll returns.
+  const result = await cli(["up", "--detach", "--json"], {
+    HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+    STUB_UP_SECONDS: "2",
+    STUB_PS_SLEEP: "3",
+  });
+  expect({ exitCode: result.exitCode, stdout: result.stdout }).toMatchObject({
+    exitCode: 0,
+  });
+  expect((JSON.parse(result.stdout) as { ok: boolean }).ok).toBe(true);
+}, 60_000);
+
+test("a targeted restart of a running one-shot reports the interruption; of another service it does not", async () => {
+  await writeFile(join(state, "up-started"), "");
+  const oneShot = await cli(["restart", "migrate", "--json"], {
+    STUB_UP_SECONDS: "1",
+  });
+  expect(oneShot.exitCode).toBe(0);
+  const interrupted = JSON.parse(oneShot.stdout) as {
+    data: { interrupted?: string[]; warnings?: string[] };
+  };
+  expect(interrupted.data.interrupted).toEqual(["migrate"]);
+  expect(interrupted.data.warnings?.[0]).toContain("hack restart interrupted");
+
+  await rm(join(state, "up-done"), { force: true });
+  await writeFile(join(state, "up-started"), "");
+  const other = await cli(["restart", "api", "--json"], {
+    STUB_UP_SECONDS: "1",
+  });
+  expect(other.exitCode).toBe(0);
+  const untouched = JSON.parse(other.stdout) as {
+    data: { interrupted?: string[] };
+  };
+  expect(untouched.data.interrupted).toBeUndefined();
 }, 60_000);

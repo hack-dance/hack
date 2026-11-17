@@ -31,43 +31,70 @@ export function composeOneShotGraph(document: unknown): ComposeOneShotGraph {
 }
 
 /**
- * The union of the one-shot edges of several Compose documents (a project's
- * base file and its overrides), as Compose merges `depends_on` maps.
+ * The one-shot graph of several Compose documents (a project's base file and
+ * its overrides), merged as Compose merges them: per service, each
+ * `depends_on` entry of a later document replaces that entry's condition, so
+ * an override that turns a completion dependency into `service_started`
+ * removes the one-shot edge. Edges come from the effective conditions only.
  */
 export function mergeOneShotGraphs(
   documents: readonly unknown[]
 ): ComposeOneShotGraph {
-  const oneShots = new Set<string>();
-  const waitsOn = new Map<string, string[]>();
+  // Service -> dependency -> effective condition, in first-seen order.
+  const effective = new Map<string, Map<string, string>>();
   for (const document of documents) {
     if (!(isRecord(document) && isRecord(document.services))) {
       continue;
     }
     for (const [name, service] of Object.entries(document.services)) {
-      for (const dependency of completionDependencies(service)) {
-        oneShots.add(dependency);
-        const list = waitsOn.get(name) ?? [];
-        if (!list.includes(dependency)) {
-          list.push(dependency);
-        }
-        waitsOn.set(name, list);
+      const conditions = effective.get(name) ?? new Map<string, string>();
+      for (const [dependency, condition] of dependencyConditions(service)) {
+        conditions.set(dependency, condition);
       }
+      effective.set(name, conditions);
+    }
+  }
+  const oneShots = new Set<string>();
+  const waitsOn = new Map<string, string[]>();
+  for (const [name, conditions] of effective) {
+    const completions = [...conditions]
+      .filter(([, condition]) => condition === COMPLETED)
+      .map(([dependency]) => dependency);
+    for (const dependency of completions) {
+      oneShots.add(dependency);
+    }
+    if (completions.length > 0) {
+      waitsOn.set(name, completions);
     }
   }
   return { oneShots, waitsOn };
 }
 
-/** The services one Compose service waits on to complete successfully. */
-function completionDependencies(service: unknown): string[] {
-  if (!(isRecord(service) && isRecord(service.depends_on))) {
+const COMPLETED = "service_completed_successfully";
+
+/**
+ * One service's `depends_on` entries and their conditions. The short list
+ * form and an entry without a condition mean `service_started`.
+ */
+function dependencyConditions(service: unknown): [string, string][] {
+  if (!isRecord(service)) {
     return [];
   }
-  return Object.entries(service.depends_on)
-    .filter(
-      ([, spec]) =>
-        isRecord(spec) && spec.condition === "service_completed_successfully"
-    )
-    .map(([dependency]) => dependency);
+  const dependsOn = service.depends_on;
+  if (Array.isArray(dependsOn)) {
+    return dependsOn
+      .filter((name): name is string => typeof name === "string")
+      .map((name) => [name, "service_started"]);
+  }
+  if (!isRecord(dependsOn)) {
+    return [];
+  }
+  return Object.entries(dependsOn).map(([dependency, spec]) => [
+    dependency,
+    isRecord(spec) && typeof spec.condition === "string"
+      ? spec.condition
+      : "service_started",
+  ]);
 }
 
 /**

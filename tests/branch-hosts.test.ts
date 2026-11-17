@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   applyBranchToHost,
   applyBranchToHosts,
+  isCaddySiteLabel,
   rewriteCaddyLabelForBranch,
 } from "../src/lib/branch-hosts.ts";
 import { resolveProjectRouteBaseHosts } from "../src/lib/project.ts";
@@ -45,7 +46,6 @@ test("branch routes preserve hack.local and the legacy OAuth namespace together"
     "api.feature-x.demo.hack.local",
     "feature-x.demo.hack.gy",
     "api.feature-x.demo.hack.gy",
-    "external.example",
   ]);
 });
 
@@ -105,5 +105,95 @@ test("branch host collections preserve order and remove duplicates", () => {
   ).toEqual({
     value: "feature-x.demo.hack, api.feature-x.demo.hack",
     changed: true,
+    dropped: [],
   });
+});
+
+test("HACK-2284: the project's .hack, .hack.local and alias forms are one family whatever dev_host says", () => {
+  const family = ["demo.hack", "demo.hack.local", "demo.hack.gy"].sort();
+  for (const devHost of ["demo.hack", "demo.hack.local", "demo.hack.gy"]) {
+    expect(
+      [...resolveProjectRouteBaseHosts({ devHost, aliasHost: null })].sort()
+    ).toEqual(family);
+  }
+  // A configured alias tld joins the family, from an alias-form dev_host too.
+  expect(
+    resolveProjectRouteBaseHosts({ devHost: "demo.hack.dev", aliasHost: null })
+  ).toContain("demo.hack.dev");
+  expect(
+    resolveProjectRouteBaseHosts({
+      devHost: "demo.hack",
+      aliasHost: "demo.hack.dev",
+    })
+  ).toContain("demo.hack.dev");
+});
+
+test("HACK-2284: an alias-form dev_host no longer leaves the .hack host to both instances", () => {
+  const baseHosts = resolveProjectRouteBaseHosts({
+    devHost: "demo.hack.gy",
+    aliasHost: null,
+  });
+  expect(
+    rewriteCaddyLabelForBranch({
+      value: "web.demo.hack, web.demo.hack.gy",
+      branch: "feature-x",
+      baseHosts,
+    })
+  ).toEqual({
+    value: "web.feature-x.demo.hack, web.feature-x.demo.hack.gy",
+    changed: true,
+    dropped: [],
+  });
+});
+
+test("label sites keep scheme and port, and sites outside the family are dropped", () => {
+  expect(
+    rewriteCaddyLabelForBranch({
+      value:
+        "https://api.demo.hack:8443 api.demo.hack.gy, external.example :80",
+      branch: "feature-x",
+      baseHosts: BASE_HOSTS,
+    })
+  ).toEqual({
+    value: "https://api.feature-x.demo.hack:8443, api.feature-x.demo.hack.gy",
+    changed: true,
+    dropped: ["external.example", ":80"],
+  });
+  expect(
+    rewriteCaddyLabelForBranch({
+      value: "external.example",
+      branch: "feature-x",
+      baseHosts: BASE_HOSTS,
+    })
+  ).toEqual({ value: "", changed: true, dropped: ["external.example"] });
+  expect(isCaddySiteLabel("caddy")).toBe(true);
+  expect(isCaddySiteLabel("caddy_2")).toBe(true);
+  expect(isCaddySiteLabel("caddy.reverse_proxy")).toBe(false);
+  expect(isCaddySiteLabel("caddy_ingress_network")).toBe(false);
+});
+
+test("a mixed-case custom dev_host still matches its own label hosts", () => {
+  const baseHosts = resolveProjectRouteBaseHosts({
+    devHost: "App.Example",
+    aliasHost: null,
+  });
+  expect(
+    rewriteCaddyLabelForBranch({
+      value: "App.Example, API.App.Example",
+      branch: "feature-x",
+      baseHosts,
+    })
+  ).toEqual({
+    value: "feature-x.app.example, api.feature-x.app.example",
+    changed: true,
+    dropped: [],
+  });
+  // Callers that pass their own mixed-case bases match the same way.
+  expect(
+    rewriteCaddyLabelForBranch({
+      value: "web.demo.hack",
+      branch: "feature-x",
+      baseHosts: ["Demo.Hack"],
+    }).value
+  ).toBe("web.feature-x.demo.hack");
 });

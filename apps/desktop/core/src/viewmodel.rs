@@ -183,6 +183,15 @@ pub struct DetailView {
     pub actions: Vec<Action>,
     pub busy: bool,
     pub services: Vec<ServiceView>,
+    /// Services to offer a shell in: the running services of the last read
+    /// that reported this instance's runtime. A failed read, a read with the
+    /// engine down or a row without runtime keeps the previous list, so the
+    /// new-tab menu never loses its shells while a refresh is slow or
+    /// failing; only a good read that reports a service stopped drops it.
+    pub shells: Vec<String>,
+    /// `shells` comes from an earlier read than the one shown, or the last
+    /// read failed: the services may have changed since.
+    pub shells_stale: bool,
     pub last_error: Option<String>,
     /// Why actions are limited (native projects in v0).
     pub note: Option<String>,
@@ -234,9 +243,63 @@ pub struct AppModel {
     refresh_sequence: u64,
     applied_sequence: u64,
     action_epoch: u64,
+    /// Per instance, the running services of the last read that reported
+    /// its runtime, and whether that was an earlier read than the current
+    /// snapshot. See [`DetailView::shells`].
+    shells: HashMap<InstanceKey, (Vec<String>, bool)>,
     /// Bumped by [`AppModel::source_changed`]: work started under an earlier
     /// CLI carries an older value and is not applied.
     source_epoch: u64,
+}
+
+/// The running services a read reports for a row, `None` when it does not
+/// report them. Native rows come from native `ps`, whatever Docker's state,
+/// when it observed the services (or confirmed the project not started).
+/// A Compose row needs a reachable engine and either its runtime, or a
+/// runtime the read confirmed absent (`runtime: null` with
+/// `runtime_status: "stopped"`: no shells). An unknown or unavailable
+/// runtime is not reported.
+fn reported_shells(s: &Snapshot, row: &ProjectRow) -> Option<Vec<String>> {
+    let running = |row: &ProjectRow| {
+        state::services(row)
+            .into_iter()
+            .filter(|v| v.running)
+            .map(|v| v.name)
+            .collect()
+    };
+    if row.is_native() {
+        // As `state::native_state` reads it: only an observation that
+        // establishes service state replaces the list. `runtime_busy` and
+        // the other non-observations return no items without meaning the
+        // services stopped.
+        return match row.native.as_ref().map(|n| n.status.as_str()) {
+            Some("observed" | "runtime_degraded") => Some(running(row)),
+            Some("not_started") => Some(Vec::new()),
+            _ => None,
+        };
+    }
+    if s.projects.engine_down() {
+        return None;
+    }
+    if row.runtime.is_some() {
+        return Some(running(row));
+    }
+    (row.runtime_status.as_deref() == Some("stopped")).then(Vec::new)
+}
+
+/// Every instance a snapshot reports: each project and its branches.
+fn instance_keys(s: &Snapshot) -> Vec<InstanceKey> {
+    s.projects
+        .projects
+        .iter()
+        .flat_map(|p| {
+            std::iter::once(InstanceKey::project(p.name.clone())).chain(
+                p.branch_runtime
+                    .iter()
+                    .map(|b| InstanceKey::branch(p.name.clone(), b.branch.clone())),
+            )
+        })
+        .collect()
 }
 
 /// The row for an instance in a snapshot: the project row itself, or the
@@ -263,6 +326,27 @@ impl AppModel {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Update the remembered shells from a good read: instances it reports
+    /// take its list; ones whose runtime it did not report keep theirs,
+    /// marked stale; instances it no longer has are forgotten.
+    fn remember_shells(&mut self, s: &Snapshot) {
+        let mut next = HashMap::new();
+        for key in instance_keys(s) {
+            let Some(row) = instance_row(s, &key) else {
+                continue;
+            };
+            let entry = match reported_shells(s, &row) {
+                Some(names) => (names, false),
+                None => match self.shells.remove(&key) {
+                    Some((names, _)) => (names, true),
+                    None => continue,
+                },
+            };
+            next.insert(key, entry);
+        }
+        self.shells = next;
     }
 
     /// Start a read. Results from before an action boundary or a newer
@@ -348,6 +432,8 @@ impl AppModel {
         self.local.clear();
         self.action_errors.clear();
         self.loaded_once = false;
+        // Shells the other CLI's reads reported are not this one's.
+        self.shells.clear();
     }
 
     /// Which CLI the model is showing: capture it when work starts, and
@@ -389,6 +475,7 @@ impl AppModel {
                     }
                     _ => first_by_group(&s, &self.local),
                 };
+                self.remember_shells(&s);
                 self.snapshot = Some(s);
                 false
             }
@@ -678,6 +765,13 @@ impl AppModel {
                 None
             },
             busy: local.in_flight.is_some(),
+            shells: self
+                .shells
+                .get(&key)
+                .map(|(names, _)| names.clone())
+                .unwrap_or_default(),
+            shells_stale: self.last_error.is_some()
+                || self.shells.get(&key).is_some_and(|(_, stale)| *stale),
             services,
             last_error: self.action_errors.get(&key).cloned(),
             state: st,
@@ -892,6 +986,190 @@ mod tests {
         })));
         assert_eq!(first_launch.daemon_recovery(), Some(DaemonRecovery::Start));
         assert!(matches!(first_launch.list().phase, Phase::Error { .. }));
+    }
+
+    fn running_storefront() -> AppModel {
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(fixtures::snapshot(Fixture::Running)));
+        m.apply(Event::Select("storefront".into()));
+        m
+    }
+
+    fn shells(m: &AppModel) -> (Vec<String>, bool) {
+        let d = m.detail().expect("storefront is selected");
+        (d.shells, d.shells_stale)
+    }
+
+    fn read_error() -> SourceError {
+        SourceError::Cli {
+            code: "E_TIMEOUT".into(),
+            message: "the read timed out".into(),
+            failed: vec![],
+        }
+    }
+
+    #[test]
+    fn a_good_read_offers_a_shell_in_each_running_service() {
+        let m = running_storefront();
+        let (names, stale) = shells(&m);
+        assert_eq!(names, ["api", "db", "web", "worker"]);
+        assert!(!stale);
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_last_good_shells_marked_stale() {
+        let mut m = running_storefront();
+        m.apply(Event::Refreshed(Err(read_error())));
+        let d = m.detail().unwrap();
+        assert!(
+            d.services.iter().all(|s| !s.running),
+            "the service list itself says the status is unknown"
+        );
+        assert_eq!(d.shells, ["api", "db", "web", "worker"]);
+        assert!(d.shells_stale);
+        // The next good read clears the mark.
+        m.apply(Event::Refreshed(fixtures::snapshot(Fixture::Running)));
+        assert!(!shells(&m).1);
+    }
+
+    #[test]
+    fn a_slow_read_in_flight_changes_nothing() {
+        let mut m = running_storefront();
+        let _token = m.begin_refresh();
+        m.apply(Event::Refreshed(Err(SourceError::Pending)));
+        assert_eq!(
+            shells(&m),
+            (
+                vec!["api".into(), "db".into(), "web".into(), "worker".into()],
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn a_read_without_the_runtime_keeps_the_last_good_shells() {
+        let mut m = running_storefront();
+        // The engine is down: nothing proves the services stopped.
+        m.apply(Event::Refreshed(fixtures::snapshot(Fixture::EngineDown)));
+        let (names, stale) = shells(&m);
+        assert_eq!(names, ["api", "db", "web", "worker"]);
+        assert!(stale);
+        // A row without its runtime (the daemon still reading it).
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        for p in &mut snap.projects.projects {
+            p.runtime = None;
+        }
+        m.apply(Event::Refreshed(Ok(snap)));
+        let (names, stale) = shells(&m);
+        assert_eq!(names, ["api", "db", "web", "worker"]);
+        assert!(stale);
+    }
+
+    #[test]
+    fn a_read_that_confirms_the_runtime_absent_clears_the_shells() {
+        let mut m = running_storefront();
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        for p in &mut snap.projects.projects {
+            p.runtime = None;
+            p.runtime_status = Some("stopped".into());
+        }
+        m.apply(Event::Refreshed(Ok(snap)));
+        assert_eq!(shells(&m), (Vec::<String>::new(), false));
+    }
+
+    #[test]
+    fn native_shells_follow_native_ps_while_the_engine_is_down() {
+        let mut snap = fixtures::snapshot(Fixture::EngineDown).unwrap();
+        let row = snap
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        row.backend = Some("native".into());
+        row.native = Some(crate::models::NativePs {
+            status: "observed".into(),
+            items: vec![crate::models::NativePsItem {
+                service: "api".into(),
+                state: "running".into(),
+                ..Default::default()
+            }],
+        });
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap)));
+        m.apply(Event::Select("storefront".into()));
+        assert_eq!(shells(&m), (vec!["api".to_owned()], false));
+    }
+
+    #[test]
+    fn switching_cli_forgets_the_last_good_shells() {
+        let mut m = running_storefront();
+        m.source_changed();
+        m.apply(Event::Refreshed(Err(read_error())));
+        assert!(m.detail().is_none_or(|d| d.shells.is_empty()));
+    }
+
+    #[test]
+    fn a_busy_native_runtime_keeps_the_last_native_shells() {
+        let native = |status: &str, running: bool| {
+            let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+            let row = snap
+                .projects
+                .projects
+                .iter_mut()
+                .find(|p| p.name == "storefront")
+                .unwrap();
+            row.backend = Some("native".into());
+            row.native = Some(crate::models::NativePs {
+                status: status.into(),
+                items: if running {
+                    vec![crate::models::NativePsItem {
+                        service: "api".into(),
+                        state: "running".into(),
+                        ..Default::default()
+                    }]
+                } else {
+                    vec![]
+                },
+            });
+            snap
+        };
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(native("observed", true))));
+        m.apply(Event::Select("storefront".into()));
+        assert_eq!(shells(&m), (vec!["api".to_owned()], false));
+        for status in [
+            "runtime_busy",
+            "pending",
+            "runtime_not_running",
+            "owner_unconfirmed",
+        ] {
+            m.apply(Event::Refreshed(Ok(native(status, false))));
+            assert_eq!(shells(&m), (vec!["api".to_owned()], true), "{status}");
+        }
+        m.apply(Event::Refreshed(Ok(native("not_started", false))));
+        assert_eq!(shells(&m), (Vec::<String>::new(), false));
+    }
+
+    #[test]
+    fn only_a_good_read_that_reports_a_service_stopped_drops_its_shell() {
+        let mut m = running_storefront();
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        let row = snap
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        row.runtime
+            .as_mut()
+            .unwrap()
+            .services
+            .retain(|s| s.service != "web");
+        m.apply(Event::Refreshed(Ok(snap)));
+        let (names, stale) = shells(&m);
+        assert_eq!(names, ["api", "db", "worker"]);
+        assert!(!stale);
     }
 
     #[test]

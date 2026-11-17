@@ -322,7 +322,14 @@ to find or signal processes in a container; that needs the CLI (DESIGN.md,
 R21). Until then `check-container` reports such a process as known open.
 
 A shell in a service that falls back from `bash` to `sh` keeps what is typed
-while it opens: input waits until the shell that starts has settled.
+while it opens: input waits until the shell that starts has printed something
+and kept running for half a second (or for 10 s, for a shell with no prompt),
+so it reaches only that shell and never runs twice. However slow `docker exec`
+is to fail, typing straight after opening the tab never cancels the fallback.
+
+The new-tab menu offers a shell in each service the last good read reported
+running. While a refresh is slow or failing, it keeps that list, marked
+"(last known)"; only a good read that reports a service stopped removes it.
 
 Renders: [running, dark](screenshots/window/running-dark.png),
 [running, light](screenshots/window/running-light.png),

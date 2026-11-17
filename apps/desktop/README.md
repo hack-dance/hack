@@ -236,6 +236,15 @@ expect-styled <count> [<seconds>]
 expect-notice <text> [<seconds>]
                                 wait for the active tab's notice (a refused
                                 paste) to contain text
+tab <services|logs|env>        show that detail tab
+expect-env <NAME> [<seconds>]   wait for NAME in the Env listing
+env-set <NAME> <value>          edit a row as the pencil and Save do
+env-add [--secret] <NAME> <value>
+                                add a variable as + Variable and Save do
+                                (both write through the CLI: use them only
+                                on a throwaway project, see "Env writes
+                                against the real CLI"; the report prints a
+                                value's length, never the value)
 wait <milliseconds>
 check-container <service> <pattern>
                                 after the app has quit, count processes in
@@ -264,9 +273,12 @@ expect <a line the logs show> 30
 host
 type echo host-$((40+2))\r
 expect host-42 15
-# Ctrl-C through the keymap ends a foreground job
+# Ctrl-C through the keymap ends a foreground job. Wait until the command
+# is running first: a shell with a prompt framework (zsh with a theme) can
+# take a second or two to start it, and a Ctrl-C sent before that only
+# clears the prompt line.
 type sleep 30\r
-wait 500
+wait 2500
 key ctrl-c
 type echo after-ctrl-c-$((1+1))\r
 expect after-ctrl-c-2 10
@@ -304,6 +316,27 @@ type echo branch-in-$((4+4))\r
 expect branch-in-8 30
 STEPS
 cargo run -p hack-desktop --features terminal -- --drive /tmp/panel/panel.steps
+```
+
+### Env writes against the real CLI
+
+`scripts/env-drive/run.sh <hack-desktop binary> [passes]` checks Env editing
+end to end without touching a real project. Each pass makes a temp project,
+`HOME` and `HACK_HOME` under `/tmp`, seeds one plaintext value with this
+checkout's CLI (`bun index.ts`), and drives the app with
+`scripts/env-drive/edit.steps`:
+- select the project and open Env;
+- edit that value;
+- add a plaintext variable and a secret variable.
+
+It then reads the values back with the same CLI and checks that the secret's
+value is in no plaintext YAML. A fake hackd (`fakehackd.py`) serves the
+project list, so no daemon runs; every `hack env` command the app runs is the
+real CLI. Needs `bun` (set `BUN` to choose one) and `python3`.
+
+```sh
+cargo build -p hack-desktop --features terminal
+scripts/env-drive/run.sh target/debug/hack-desktop 10
 ```
 
 The report gives each step's result (a paste step names the notice it got), each

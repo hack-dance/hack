@@ -190,10 +190,12 @@ import {
 import {
   applyBranchToHost,
   applyBranchToHosts,
-  rewriteCaddyLabelForBranch,
+  BranchCaddyHostsError,
+  branchServiceCaddyLabels,
 } from "../lib/branch-hosts.ts";
 import { recordBranchUsage } from "../lib/branch-usage.ts";
 import { resolveEffectiveBranch } from "../lib/branches.ts";
+import { warnSharedCaddyHosts } from "../lib/caddy-host-claims.ts";
 import {
   type CliResult,
   emitCliResult,
@@ -1316,6 +1318,8 @@ async function buildBranchComposeOverride(opts: {
   readonly branch: string;
   readonly devHost: string;
   readonly aliasHost: string | null;
+  /** Told about sites a branch instance drops (outside the project's namespaces). */
+  readonly onDropped?: (notice: string) => void;
 }): Promise<string | null> {
   const yamlText = await readTextFile(opts.project.composeFile);
   if (!yamlText) {
@@ -1353,22 +1357,26 @@ async function buildBranchComposeOverride(opts: {
       continue;
     }
 
-    const caddyRaw = labels.caddy;
-    if (typeof caddyRaw !== "string" || caddyRaw.trim().length === 0) {
+    let branched: Record<string, string> | undefined;
+    try {
+      branched = branchServiceCaddyLabels({
+        service: serviceName,
+        labels,
+        branch: opts.branch,
+        baseHosts,
+        onDropped: opts.onDropped,
+      });
+    } catch (error) {
+      if (error instanceof BranchCaddyHostsError) {
+        throw new CliUsageError(error.message);
+      }
+      throw error;
+    }
+    if (!branched) {
       continue;
     }
 
-    const rewritten = rewriteCaddyLabelForBranch({
-      value: caddyRaw,
-      branch: opts.branch,
-      baseHosts,
-    });
-    if (!rewritten.changed) {
-      continue;
-    }
-
-    labels.caddy = rewritten.value;
-    overrideServices[serviceName] = { labels };
+    overrideServices[serviceName] = { labels: branched };
     changed = true;
   }
 
@@ -3052,6 +3060,7 @@ async function resolveBranchComposeFiles(opts: {
   readonly branch: string;
   readonly devHost: string;
   readonly aliasHost: string | null;
+  readonly onDropped?: (notice: string) => void;
 }): Promise<readonly string[]> {
   const override = await buildBranchComposeOverride(opts);
   if (!override) {
@@ -7061,6 +7070,7 @@ async function runUpCommand({
             branch,
             devHost,
             aliasHost,
+            onDropped: (notice) => logger.warn({ message: notice }),
           })
         : [project.composeFile];
     const composeFilesWithInternal = internalOverride
@@ -7331,6 +7341,11 @@ async function runUpCommand({
         })
       );
     }
+    // HACK-2284: two running instances must not claim one Caddy host.
+    await warnSharedCaddyHosts({
+      composeProject: composeProjectName ?? baseProjectName,
+      warn: (message) => logger.warn({ message }),
+    });
     if (!json) {
       return 0;
     }

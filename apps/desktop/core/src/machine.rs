@@ -348,11 +348,16 @@ fn login_run_text(g: &AutostartGlobal) -> Option<String> {
     if !run.in_progress {
         return None;
     }
-    let done = run.started.len() + run.failed.len();
-    let total = done + run.pending.len();
-    let mut text = format!("At login: started {done} of {total}");
+    // `started` holds only projects that started (or were already running);
+    // `failed` holds unsuccessful attempts; both count toward the total.
+    let started = run.started.len();
+    let total = started + run.failed.len() + run.pending.len();
+    let mut text = format!("At login: started {started} of {total}");
     if !run.failed.is_empty() {
         text.push_str(&format!(" · {} failed", run.failed.len()));
+    }
+    if !run.pending.is_empty() {
+        text.push_str(&format!(" · {} pending", run.pending.len()));
     }
     Some(text)
 }
@@ -671,7 +676,7 @@ mod tests {
         assert_eq!(s.service_ready, Some(true));
         assert_eq!(
             s.login_run.as_deref(),
-            Some("At login: started 2 of 3 · 1 failed")
+            Some("At login: started 1 of 3 · 1 failed · 1 pending")
         );
         assert_eq!(
             s.rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),

@@ -494,45 +494,32 @@ reads for observed stopped projects include that state alongside the stream stat
 The paused fixture also demonstrates the overflow count. Pause has no timeout;
 following resumes through Resume, not automatically when scrolling to the bottom.
 
-## Env tab (names only)
+## Env tab
 
-Env reads `hack env list --json --path <root>` on tab open, project selection,
-and **Check again**, with a 10-second deadline. Native projects select
-`HACK_RUNTIME_BACKEND=native`. There is no polling or disk state for Env.
-A bare report on exit 1 is still a report. Missing required names appear first
-in red; both legacy scope arrays and canonical scope strings are supported.
-An explicit empty `vars` array shows “This project has no env layers” only
-when the report has no configured files/scopes or selected scope. Canonical
-reports label the selected scope (global by default); an empty scope is not
-project-wide absence. Other service scopes are not included in this listing.
-Malformed output shows “Could not read environment metadata”.
+Overlay tabs across the top (`base`, then each overlay the CLI names), scope
+pills on the right, one line for the secret key, and a Name / Value table.
+Names come from `hack env list --json [--env <overlay>] [--service <scope>]`;
+each value from `hack env get <KEY>` on a pipe, through the CLI and nothing
+else. Plaintext values load with the listing. A secret shows dots until its
+eye is pressed, for that one name; it hides again after 60 s and when the
+overlay, scope, detail tab or project changes, or the window is hidden or
+loses focus. Copy reads that one name, puts it on the clipboard and clears the
+clipboard after 60 s if it still holds the value. A missing required name is
+listed first with a `required · missing` chip. With the key missing, the line
+says where the CLI looks and secrets cannot be revealed or copied.
 
-The model retains only name, layer/source, scope, storage kind, set and required
-metadata. It discards unknown fields, including values/materialized data, and
-never includes raw output in errors. No editing, value reads, reveal, copy or
-export is offered. The locked state shows `hack doctor` with **Copy command**.
-Missing/unreadable `key_state` shows a lock. Absent key state means readability
-is unknown, never inferred healthy from `has_value`: Set indicates storage,
-not whether a value can be read.
+Values never reach a log, a render, `--drive` output or an error message, and
+fixtures use fake values. Editing, adding variables or overlays, and choosing
+the key source are the next slice. What the CLI cannot do yet is in DESIGN.md
+(R24 to R27).
 
-Fixtures: `env-loading`, `env-error`, `env-normal`, `env-missing`, `env-locked`,
-`env-empty`. Each renders offscreen in both themes through `--screenshots`.
-To bound rendering to one state, combine `--fixtures env-normal` with
-`--screenshots <output-dir>`.
-Screenshots for this slice: [normal light](screenshots/env-normal-light.png),
-[normal dark](screenshots/env-normal-dark.png),
-[missing](screenshots/env-missing-light.png), [locked](screenshots/env-locked-dark.png).
-
-This Env change is stacked on `feat/desktop-app-core` for focused review;
-the completed desktop stack ultimately targets `next`.
-
-Env reads refuse missing project markers and nested `.dev` targets shadowed by
-an ancestor `.hack` project, using the CLI's discovery precedence. The adapter
-canonicalizes the selected root and checks markers before and after the read;
-concurrent filesystem edits are not an atomic fence. Empty legacy scope arrays
-are shown as `global`. macOS keychain prompting remains unverified. Rapid tab
-changes may launch overlapping bounded reads; stale results are discarded, but
-in-flight reads are not deduplicated.
+Fixtures: `env-loading`, `env-error`, `env-normal`, `env-overlays`,
+`env-running`, `env-missing`, `env-locked`, `env-long`, `env-empty`. Each
+renders offscreen in both themes through `--screenshots`.
+Screenshots: [overlays, running](screenshots/env-running-light.png),
+[key missing](screenshots/env-locked-dark.png),
+[required missing](screenshots/env-missing-light.png),
+[long](screenshots/env-long-dark.png).
 
 ## Process-cleanup tests
 

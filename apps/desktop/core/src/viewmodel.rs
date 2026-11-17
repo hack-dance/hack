@@ -243,24 +243,30 @@ pub struct AppModel {
     shells: HashMap<InstanceKey, (Vec<String>, bool)>,
 }
 
-/// The running services of a row whose runtime the read reported, `None`
-/// when it did not (engine down, or no runtime or native observation).
+/// The running services a read reports for a row, `None` when it does not
+/// report them. Native rows come from native `ps`, whatever Docker's state.
+/// A Compose row needs a reachable engine and either its runtime, or a
+/// runtime the read confirmed absent (`runtime: null` with
+/// `runtime_status: "stopped"`: no shells). An unknown or unavailable
+/// runtime is not reported.
 fn reported_shells(s: &Snapshot, row: &ProjectRow) -> Option<Vec<String>> {
-    let reported = if row.is_native() {
-        row.native.is_some()
-    } else {
-        row.runtime.is_some()
-    };
-    if s.projects.engine_down() || !reported {
-        return None;
-    }
-    Some(
+    let running = |row: &ProjectRow| {
         state::services(row)
             .into_iter()
             .filter(|v| v.running)
             .map(|v| v.name)
-            .collect(),
-    )
+            .collect()
+    };
+    if row.is_native() {
+        return row.native.is_some().then(|| running(row));
+    }
+    if s.projects.engine_down() {
+        return None;
+    }
+    if row.runtime.is_some() {
+        return Some(running(row));
+    }
+    (row.runtime_status.as_deref() == Some("stopped")).then(Vec::new)
 }
 
 /// Every instance a snapshot reports: each project and its branches.
@@ -971,6 +977,42 @@ mod tests {
         let (names, stale) = shells(&m);
         assert_eq!(names, ["api", "db", "web", "worker"]);
         assert!(stale);
+    }
+
+    #[test]
+    fn a_read_that_confirms_the_runtime_absent_clears_the_shells() {
+        let mut m = running_storefront();
+        let mut snap = fixtures::snapshot(Fixture::Running).unwrap();
+        for p in &mut snap.projects.projects {
+            p.runtime = None;
+            p.runtime_status = Some("stopped".into());
+        }
+        m.apply(Event::Refreshed(Ok(snap)));
+        assert_eq!(shells(&m), (Vec::<String>::new(), false));
+    }
+
+    #[test]
+    fn native_shells_follow_native_ps_while_the_engine_is_down() {
+        let mut snap = fixtures::snapshot(Fixture::EngineDown).unwrap();
+        let row = snap
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.name == "storefront")
+            .unwrap();
+        row.backend = Some("native".into());
+        row.native = Some(crate::models::NativePs {
+            status: "observed".into(),
+            items: vec![crate::models::NativePsItem {
+                service: "api".into(),
+                state: "running".into(),
+                ..Default::default()
+            }],
+        });
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Ok(snap)));
+        m.apply(Event::Select("storefront".into()));
+        assert_eq!(shells(&m), (vec!["api".to_owned()], false));
     }
 
     #[test]

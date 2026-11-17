@@ -2383,7 +2383,10 @@ container. Google client libraries refresh access tokens from it over normal
 egress. Host re-login or revocation is not propagated; run `hack restart` to deliver
 a fresh snapshot. The run mapping records only `gcloud: {"mode": "file"}`; restart
 and retained restore keep that selection and deliver a fresh copy into new
-allocations. `hack exec` delivers nothing new: the file is already in the
+allocations. On `up`, an empty `HACK_NATIVE_GCLOUD_ADC=` does not restore a retained
+gcloud selection: it refuses ("cannot change the retained run's … gcloud
+selection"), and nothing is read or delivered. Run `hack down` and then `up`
+without the selection. `hack restart` always uses the retained selection. `hack exec` delivers nothing new: the file is already in the
 container, and exec only rechecks the mount and selectors. One-off `run` does not
 apply the adapter. A mapping with a gcloud selection refuses on earlier candidates.
 

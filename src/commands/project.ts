@@ -6239,6 +6239,7 @@ async function handleNativeUp({
     https: host.https,
     aws: host.aws,
     gcloud: host.gcloud,
+    gcloudWithheld: host.gcloud === undefined && host.origins.gcloud === "env",
     runtimeMetadata: {
       devHost,
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),

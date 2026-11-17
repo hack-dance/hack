@@ -1494,6 +1494,7 @@ function retainedStartupSelection(opts: {
   readonly profiles?: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly gcloud?: NativeGcloudSelection;
+  readonly gcloudWithheld?: boolean;
 }) {
   const { run } = opts;
   if (
@@ -1508,8 +1509,10 @@ function retainedStartupSelection(opts: {
       (opts.aws.profile !== run.aws?.profile ||
         opts.aws.region !== run.aws?.region)) ||
     // Like the AWS selector, an omitted gcloud selection keeps the retained one
-    // (which delivers a fresh file); a different explicit selection refuses.
-    (opts.gcloud !== undefined && opts.gcloud.mode !== run.gcloud?.mode)
+    // (which delivers a fresh file); a different explicit selection refuses,
+    // and so does an explicitly withheld one, so the file is never delivered.
+    (opts.gcloud !== undefined && opts.gcloud.mode !== run.gcloud?.mode) ||
+    (opts.gcloudWithheld === true && run.gcloud != null)
   ) {
     throw new ClosedCliError(
       "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced."
@@ -1531,6 +1534,7 @@ async function selectNativeStartup(opts: {
   readonly requestedProfiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly gcloud?: NativeGcloudSelection;
+  readonly gcloudWithheld?: boolean;
   readonly load: typeof loadNativeProjectRun;
   readonly invoke: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
@@ -1544,6 +1548,7 @@ async function selectNativeStartup(opts: {
           profiles: opts.profiles,
           aws: opts.aws,
           gcloud: opts.gcloud,
+          gcloudWithheld: opts.gcloudWithheld,
         })
       : {
           envName: opts.envName,
@@ -1893,6 +1898,12 @@ type NativeProjectStartOptions = {
   readonly aws?: { readonly profile: string; readonly region?: string };
   /** Explicit gcloud Application Default Credentials adapter selection. */
   readonly gcloud?: NativeGcloudSelection;
+  /**
+   * The gcloud consent was explicitly withheld for this command (an empty
+   * `HACK_NATIVE_GCLOUD_ADC=`). A retained run that recorded a selection then
+   * refuses instead of restoring it.
+   */
+  readonly gcloudWithheld?: boolean;
   /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
@@ -1972,6 +1983,7 @@ async function startNativeProjectAttempt(
       requestedProfiles,
       aws: opts.aws,
       gcloud: opts.gcloud,
+      gcloudWithheld: opts.gcloudWithheld,
       load: deps.load,
       invoke: deps.invoke,
       signal: opts.signal,

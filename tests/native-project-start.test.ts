@@ -1649,6 +1649,22 @@ test("gcloud ADC delivery follows hooks, sends file members privately and persis
     startNativeProject({ ...opts, gcloud: { mode: "file" } })
   ).rejects.toThrow("cannot change the retained run");
   expect(events).toEqual([]);
+  // A retained graph with a gcloud selection is not restored when the consent
+  // is explicitly withheld for this command; nothing is read or delivered.
+  opts.dependencies.load = async () => ({
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+    gcloud: { mode: "file" },
+  });
+  await expect(
+    startNativeProject({ ...opts, gcloudWithheld: true })
+  ).rejects.toThrow("cannot change the retained run");
+  expect(events).toEqual([]);
 });
 
 test("AWS delivery warns value-free before expiry and clears its timers on exit", async () => {

@@ -1963,3 +1963,41 @@ test(
   },
   SPAWN_TIMEOUT_MS
 );
+
+test(
+  "HACK-2324: a GOOGLE_APPLICATION_CREDENTIALS selector from env_file is checked as startup checks it",
+  async () => {
+    const f = await fixture({
+      services: {
+        app: {
+          image: IMAGE,
+          env_file: "app.env",
+          volumes: [
+            "~/.config/gcloud/application_default_credentials.json:/config/adc.json:ro",
+          ],
+        },
+      },
+    });
+    await f.review([], { services: { app: { active: true } } });
+    const env = { ...f.native, ...GRANT, HACK_NATIVE_GCLOUD_ADC: "file" };
+    await writeFile(
+      join(f.projectDir, "app.env"),
+      "GOOGLE_APPLICATION_CREDENTIALS=/config/adc.json\n"
+    );
+    const matching = await preflight(f, env);
+    expect(matching.report.blockers).toEqual([]);
+    expect(matching.report.consent_needed).toEqual([]);
+    // A selector naming another path still refuses.
+    await writeFile(
+      join(f.projectDir, "app.env"),
+      "GOOGLE_APPLICATION_CREDENTIALS=/elsewhere.json\n"
+    );
+    const other = await preflight(f, env);
+    expect(
+      other.report.blockers
+        .filter((found) => found.code.startsWith("gcloud_"))
+        .map((found) => found.code)
+    ).toEqual(["gcloud_adc_mount_refused"]);
+  },
+  SPAWN_TIMEOUT_MS
+);

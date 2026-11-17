@@ -1094,9 +1094,12 @@ async function reviewGcloudCredentialMounts(opts: {
   const blocker = { severity: "blocker", gate: "cli" } as const;
   let input = opts.input;
   try {
+    // As at startup, env-file and shell values are merged first, so a
+    // GOOGLE_APPLICATION_CREDENTIALS selector from env_file is checked as such.
+    // Merging again in checkDelivery is a no-op.
     input = (
       await adaptNativeGcloudEnvironment({
-        input: opts.input,
+        input: mergeNativeShellEnvironment(opts.input),
         mode: "file",
         deliver: false,
       })

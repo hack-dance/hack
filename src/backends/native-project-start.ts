@@ -1922,6 +1922,29 @@ type NativeProjectStartOptions = {
   readonly dependencies?: Partial<Dependencies>;
 };
 
+/**
+ * The credential adapter replaces its recognized mounts after lifecycle hooks.
+ * The pre-hook static review sees the input it will produce: the same mount
+ * removal, with nothing read (HACK-2324; the review refused those
+ * home-relative mounts). Without a recognized mount the input is unchanged.
+ */
+async function staticReviewInput(opts: {
+  readonly input: NativeProjectInput;
+  readonly gcloud: NativeGcloudSelection | undefined;
+  readonly adapt: Dependencies["adaptGcloud"];
+}): Promise<NativeProjectInput> {
+  if (!(opts.gcloud && hasNativeGcloudCredentialMount(opts.input))) {
+    return opts.input;
+  }
+  return (
+    await opts.adapt({
+      input: opts.input,
+      mode: opts.gcloud.mode,
+      deliver: false,
+    })
+  ).input;
+}
+
 async function startNativeProjectAttempt(
   opts: NativeProjectStartOptions,
   observeStartup: () => Promise<void>
@@ -2054,19 +2077,11 @@ async function startNativeProjectAttempt(
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     composeFile: opts.composeFile,
-    // The credential adapter replaces its recognized mounts after lifecycle
-    // hooks. Review the input it will produce: the same mount removal, with
-    // nothing read (HACK-2324; the review refused those home-relative mounts).
-    input:
-      selection.gcloud && hasNativeGcloudCredentialMount(input)
-        ? (
-            await deps.adaptGcloud({
-              input,
-              mode: selection.gcloud.mode,
-              deliver: false,
-            })
-          ).input
-        : input,
+    input: await staticReviewInput({
+      input,
+      gcloud: selection.gcloud,
+      adapt: deps.adaptGcloud,
+    }),
     profiles,
     branch: opts.scope.branch,
     deferredRestore: restore !== undefined,

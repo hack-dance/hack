@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
+  hostInvocationUnsetKeys,
   type NativeComposeHook,
   NativeComposeHostHookError,
   selectNativeComposeAfterHooks,
@@ -117,9 +118,7 @@ async function executeHook(
       {
         cwd: posix.join(opts.projectRoot, hook.cwd ?? "."),
         env,
-        unsetEnvKeys: Object.entries(hook.environment ?? {})
-          .filter(([, value]) => isRecord(value) && value.unset === true)
-          .map(([name]) => name),
+        unsetEnvKeys: hostInvocationUnsetKeys(hook),
         stdin: "inherit",
         stdout: "stderr",
         forwardSignals: true,

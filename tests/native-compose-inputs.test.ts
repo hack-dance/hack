@@ -18,6 +18,7 @@ import {
   acquireNativeComposeFilePlanningInputs,
   acquireNativeComposeInputs,
 } from "../src/lib/native-compose-inputs.ts";
+import { NativeEnvironmentNameError } from "../src/lib/native-environment-name-error.ts";
 import { acquireNativeExecutionInputs } from "../src/lib/native-execution-inputs.ts";
 import {
   type ProjectEnvStoredValue,
@@ -353,6 +354,61 @@ test("shared input owner keeps graph file refusal before env acquisition while C
   await planned.assertFresh();
   await layer("hack.env.default.yaml", { global: { TOKEN: "changed" } });
   await refuses(planned.assertFresh());
+});
+
+test("a configured non-portable environment name is refused by name through the real compiler (HACK-2219)", async () => {
+  process.env.HACK_CONFIG_COMPILER_BINARY = realCompiler;
+  await layer("hack.env.default.yaml", { global: { TOKEN: CANARY } });
+  for (const [environment, location] of [
+    [
+      {
+        services: {
+          web: {
+            image: "fixture",
+            environment: { "FOO%%": { literal: CANARY } },
+          },
+        },
+      },
+      "/services/web/environment",
+    ],
+    [
+      {
+        services: { web: { image: "fixture" } },
+        host: {
+          processes: {
+            tunnel: {
+              command: { exec: ["/bin/true"] },
+              environment: { "BASH_FUNC_x%%": { literal: CANARY } },
+            },
+          },
+        },
+      },
+      "/host/processes/tunnel/environment",
+    ],
+  ] as const) {
+    await writeFile(
+      join(projectRoot, ".hack/hack.project.json"),
+      JSON.stringify({
+        schema_version: 1,
+        name: "env-name-control",
+        worktree: { inherit_local: false, auto_branch: false },
+        ...environment,
+      })
+    );
+    const error: unknown = await acquireNativeExecutionInputs({
+      projectRoot,
+    }).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(NativeEnvironmentNameError);
+    expect(error).toMatchObject({
+      code: "E_CONFIG_INVALID",
+      reason: "environment_name_not_portable",
+    });
+    expect(String(error)).toContain(`at "${location}"`);
+    expect(String(error)).toMatch(/environment variable "(FOO|BASH_FUNC_x)%%"/);
+    for (const forbidden of [CANARY, KEY, root]) {
+      expect(String(error)).not.toContain(forbidden);
+    }
+  }
 });
 
 test("explicit native compiler branch stays captured and avoids implicit routing discovery", async () => {

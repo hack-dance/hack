@@ -117,30 +117,45 @@ test("TTY listings hide values by default and reveal only with an explicit flag"
     [true, true],
   ] as const) {
     let output = "";
-    const terminal = new Bun.Terminal({
+    const ended = Promise.withResolvers<void>();
+    const terminal: Bun.TerminalOptions = {
       cols: 120,
       rows: 40,
       data(_terminal, data) {
         output += new TextDecoder().decode(data);
       },
-    });
+      exit() {
+        ended.resolve();
+      },
+    };
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        CLI,
+        "env",
+        "list",
+        ...(reveal ? ["--show-values"] : []),
+        ...(json ? ["--json"] : []),
+      ],
+      {
+        cwd: root,
+        env: privateCliEnv({ root, env: { HACK_NO_INTERACTIVE: undefined } }),
+        terminal,
+        timeout: 10_000,
+      }
+    );
     try {
-      const child = Bun.spawn(
-        [
-          process.execPath,
-          CLI,
-          "env",
-          "list",
-          ...(reveal ? ["--show-values"] : []),
-          ...(json ? ["--json"] : []),
-        ],
-        {
-          cwd: root,
-          env: privateCliEnv({ root, env: { HACK_NO_INTERACTIVE: undefined } }),
-          terminal,
-        }
-      );
       expect(await child.exited).toBe(0);
+      // Process exit can precede the final PTY data callback.
+      const timeout = setTimeout(() => {
+        ended.reject(new Error("PTY output did not end within 5 seconds"));
+      }, 5000);
+      try {
+        await ended.promise;
+      } finally {
+        clearTimeout(timeout);
+      }
+      expect(output).toContain("TOKEN");
       expect(output.includes(SENTINEL)).toBe(reveal);
       if (json) {
         const row = JSON.parse(output).vars[0];
@@ -151,7 +166,9 @@ test("TTY listings hide values by default and reveal only with an explicit flag"
         }
       }
     } finally {
-      terminal.close();
+      child.kill("SIGKILL");
+      await child.exited;
+      child.terminal?.close();
     }
   }
 });

@@ -9,7 +9,7 @@
 //!
 //! | Tab | What runs, in the instance's checkout |
 //! |---|---|
-//! | Logs (first, not closable) | `hack logs [--branch b] [--no-follow] --tail 500 --pretty`, read-only |
+//! | Logs (first, not closable) | `hack logs [--branch b] [--no-follow] --tail 500`, read-only |
 //! | Shell in a service | `hack exec [--branch b] <service> -- bash`, then `sh` |
 //! | Host shell | the user's login shell |
 //! | Host shell with env | `hack host shell --env <overlay> --scope <scope>` |
@@ -198,9 +198,6 @@ pub fn logs_plan(
         args.push("--no-follow".into());
     }
     args.extend(["--tail".into(), LOG_TAIL.into()]);
-    // The CLI's own styling: coloured service names, dim timestamps, levels.
-    // Without it only what each service prints itself is coloured.
-    args.push("--pretty".into());
     options.args = args;
     Ok(SessionPlan {
         attempts: vec![Launch {
@@ -733,19 +730,22 @@ impl HackApp {
         }
     }
 
-    /// The new-tab menu's entries: a shell in each running service, a host
-    /// shell, and a host shell with env.
+    /// The new-tab menu's entries: a shell in each running service (the
+    /// last known list while a refresh is slow or failing), a host shell,
+    /// and a host shell with env.
     pub(crate) fn menu_entries(&self, d: &DetailView) -> Vec<(String, Glyph, Option<NewTab>)> {
         let cli = self.source.hack_program().is_some();
+        // The last good list while a refresh is slow or failing, never an
+        // empty one (DetailView::shells); marked when it may be out of date.
+        let mark = if d.shells_stale { " (last known)" } else { "" };
         let mut out: Vec<(String, Glyph, Option<NewTab>)> = d
-            .services
+            .shells
             .iter()
-            .filter(|s| s.running)
-            .map(|s| {
+            .map(|name| {
                 (
-                    format!("Shell in {}", s.name),
+                    format!("Shell in {name}{mark}"),
                     Glyph::Container,
-                    cli.then(|| NewTab::Container(s.name.clone())),
+                    cli.then(|| NewTab::Container(name.clone())),
                 )
             })
             .collect();
@@ -1260,35 +1260,6 @@ impl HackApp {
         view.read(cx).notice().map(str::to_owned)
     }
 
-    /// How many cells on the active tab's screen carry a colour or style
-    /// (a foreground other than the default, a background, bold, faint,
-    /// italic or underline). For `--drive`: styled output reached the grid.
-    pub(crate) fn drive_styled_cells(&self, cx: &mut Context<Self>) -> usize {
-        let Some(view) = self.active_view(cx) else {
-            return 0;
-        };
-        view.update(cx, |v, _| {
-            v.emulator()
-                .frame()
-                .map(|f| {
-                    f.rows
-                        .iter()
-                        .flatten()
-                        .filter(|c| !c.text.trim().is_empty())
-                        .filter(|c| {
-                            c.fg != f.foreground
-                                || c.bg.is_some()
-                                || c.bold
-                                || c.faint
-                                || c.italic
-                                || c.underline
-                        })
-                        .count()
-                })
-                .unwrap_or_default()
-        })
-    }
-
     /// The active tab's screen, row by row.
     pub(crate) fn drive_screen(&self, cx: &mut Context<Self>) -> String {
         let Some(view) = self.active_view(cx) else {
@@ -1353,7 +1324,7 @@ mod tests {
     #[test]
     fn the_logs_tab_runs_hack_logs_read_only_in_the_instance_checkout() {
         let plan = logs_plan(Path::new("/bin/hack"), Path::new("/work/p"), None, true).unwrap();
-        assert_eq!(argv(&plan), [["logs", "--tail", "500", "--pretty"]]);
+        assert_eq!(argv(&plan), [["logs", "--tail", "500"]]);
         assert_eq!(plan.kind(), &SessionKind::Logs, "read-only");
         assert_eq!(
             plan.attempts[0].options.cwd.as_deref(),
@@ -1385,8 +1356,7 @@ mod tests {
                 "fix-login",
                 "--no-follow",
                 "--tail",
-                "500",
-                "--pretty"
+                "500"
             ]]
         );
     }
@@ -1474,6 +1444,91 @@ mod tests {
             searches(&[window, terminal]),
             cfg!(target_os = "macos"),
             "off macOS, Ctrl-K in a terminal goes to the shell"
+        );
+    }
+
+    /// The new-tab menu during a slow and a failed refresh: the last good
+    /// service shells, never an empty list.
+    #[cfg(feature = "screenshots")]
+    #[test]
+    fn the_new_tab_menu_keeps_its_shells_while_a_refresh_is_slow_or_fails() {
+        use hack_desktop_core::fixtures::Fixture;
+        use hack_desktop_core::source::{FixtureSource, SourceError};
+        use hack_desktop_core::viewmodel::Event;
+        let mut cx = gpui_kit::HeadlessAppContext::with_platform(
+            std::sync::Arc::new(gpui_kit::NoopTextSystem::new()),
+            std::sync::Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let options = gpui_kit::WindowOptions {
+            focus: false,
+            show: false,
+            ..gpui_kit::WindowOptions::default()
+        };
+        let (_, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, |window, cx| {
+                    cx.new(|cx| {
+                        let mut a = crate::view::HackApp::new(
+                            std::sync::Arc::new(FixtureSource(Fixture::Running)),
+                            false,
+                            window,
+                            cx,
+                        );
+                        a.select("storefront");
+                        a
+                    })
+                })
+            })
+            .expect("open a headless window");
+        let labels = |cx: &mut gpui_kit::HeadlessAppContext| {
+            cx.update(|cx| {
+                let a = app.read(cx);
+                let d = a.model.detail().expect("storefront is selected");
+                a.menu_entries(&d)
+                    .into_iter()
+                    .map(|(label, _, _)| label)
+                    .filter(|l| l.starts_with("Shell in"))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let good = labels(&mut cx);
+        assert_eq!(
+            good,
+            [
+                "Shell in api",
+                "Shell in db",
+                "Shell in web",
+                "Shell in worker"
+            ]
+        );
+        // A refresh in flight: nothing has answered yet.
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                let _token = a.model.begin_refresh();
+                a.model.apply(Event::Refreshed(Err(SourceError::Pending)));
+            });
+        });
+        assert_eq!(labels(&mut cx), good, "a slow refresh changes nothing");
+        // The refresh failed: the last good list, marked.
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                a.model.apply(Event::Refreshed(Err(SourceError::Cli {
+                    code: "E_TIMEOUT".into(),
+                    message: "the read timed out".into(),
+                    failed: vec![],
+                })));
+            });
+        });
+        assert_eq!(
+            labels(&mut cx),
+            [
+                "Shell in api (last known)",
+                "Shell in db (last known)",
+                "Shell in web (last known)",
+                "Shell in worker (last known)"
+            ]
         );
     }
 

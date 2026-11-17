@@ -145,20 +145,10 @@ with only absolute entries (a plain host shell keeps the user's `PATH`):
 
 | Tab | Runs, in the instance's checkout |
 |---|---|
-| Logs (first, not closable) | `hack logs [--branch <b>] [--no-follow] --tail 500 --pretty`, read-only, on a PTY so the CLI's styling (coloured service names, dim timestamps, levels) and each service's own colours reach the grid |
+| Logs (first, not closable) | `hack logs [--branch <b>] [--no-follow] --tail 500`, read-only, colours kept (it runs on a PTY) |
 | Shell in a service (+ menu) | `hack exec [--branch <b>] <service> -- bash`, then `sh` |
 | Host shell (+ menu) | the user's login shell |
 | Host shell with env (+ menu) | `hack host shell --env <overlay> --scope <scope>`, names from `hack env list --json` (`--env base` when no overlay is named); amber badge unless the overlay is the default |
-
-The Logs tab passes `--pretty`: on a PTY, plain `hack logs` keeps only the
-colours services print themselves, while `--pretty` adds the CLI's own
-styling (levels, bold 256-colour service names, dim keys and brackets) through
-the formatter every log path shares. Lines read `[LEVEL] [service] message
-key=value`, plain text in the grid, so find and copy work as before. The 16
-ANSI colours come from your Ghostty `palette` over the light or dark theme, and
-the 256-colour codes from its overrides or the standard xterm palette.
-[`--pretty` tail, light](screenshots/window/logs-pretty-light.png) (the CLI's
-formatter over sample service lines, drawn by the app's terminal).
 
 A Logs stream that ended (a stopped project that now runs) restarts when its
 tab is clicked. Keys: Cmd-J (Ctrl-Shift-J) toggle, Cmd-T new tab menu,
@@ -192,9 +182,6 @@ type <text>                     type it, one keystroke per character
 paste <file>                    paste a file's text as the Paste action
                                 does (into find while it is open)
 expect <text> [<seconds>]       wait for text on the active tab's screen
-expect-styled <count> [<seconds>]
-                                wait for at least <count> styled cells
-                                (colour, bold, faint…) on the active tab
 expect-notice <text> [<seconds>]
                                 wait for the active tab's notice (a refused
                                 paste) to contain text
@@ -284,7 +271,14 @@ to find or signal processes in a container; that needs the CLI (DESIGN.md,
 R21). Until then `check-container` reports such a process as known open.
 
 A shell in a service that falls back from `bash` to `sh` keeps what is typed
-while it opens: input waits until the shell that starts has settled.
+while it opens: input waits until the shell that starts has settled, and input
+an attempt took before it printed anything is replayed to `sh` if that attempt
+then fails with 126 or 127. However slow `docker exec` is to fail, typing
+straight after opening the tab never cancels the fallback.
+
+The new-tab menu offers a shell in each service the last good read reported
+running. While a refresh is slow or failing, it keeps that list, marked
+"(last known)"; only a good read that reports a service stopped removes it.
 
 Renders: [running, dark](screenshots/window/running-dark.png),
 [running, light](screenshots/window/running-light.png),

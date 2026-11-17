@@ -106,6 +106,9 @@ pub struct Panels {
     /// Why the last tab could not start, shown in the strip until the next
     /// tab starts.
     pub error: Option<String>,
+    /// Panels of a previous Hack CLI: their tabs are closed, and they are
+    /// kept so app quit still hurries and awaits those teardowns.
+    retired: Vec<Entity<TerminalPanel>>,
 }
 
 impl Panels {
@@ -313,6 +316,28 @@ impl HackApp {
             row.is_native(),
             row.branch.clone(),
         ))
+    }
+
+    /// End every tab in every panel and drop the panels: they ran the
+    /// previous Hack CLI. Each instance's panel starts again when shown.
+    pub(crate) fn close_all_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for panel in self.panels.by_key.values() {
+            panel.sessions.update(cx, |s, cx| {
+                for i in (0..s.tab_count()).rev() {
+                    s.close(i, window, cx);
+                }
+            });
+        }
+        // Keep the panels: each owns its closed tabs' pending teardowns and
+        // the quit handler that awaits them.
+        let retired: Vec<_> = self
+            .panels
+            .by_key
+            .drain()
+            .map(|(_, p)| p.sessions)
+            .collect();
+        self.panels.retired.extend(retired);
+        self.panels.error = None;
     }
 
     /// Create the selected instance's panel (with its Logs tab) the first

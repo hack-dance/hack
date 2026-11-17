@@ -70,6 +70,11 @@ pub enum Banner {
     DaemonReadFailed {
         error: String,
     },
+    /// The hackd here belongs to another Hack install that shares this home
+    /// (named in the message). No start or restart is offered.
+    SharedHome {
+        message: String,
+    },
     EngineDown {
         error: String,
     },
@@ -98,6 +103,7 @@ impl Banner {
             Self::DaemonMismatch { daemon, cli, .. } => crate::source::mismatch_text(daemon, cli),
             Self::EngineDown { error } => format!("Docker not reachable: {error}"),
             Self::DaemonReadFailed { error } => error.clone(),
+            Self::SharedHome { message } => message.clone(),
             Self::Stale { error } => format!("Showing last known state: {error}"),
         }
     }
@@ -241,6 +247,9 @@ pub struct AppModel {
     /// its runtime, and whether that was an earlier read than the current
     /// snapshot. See [`DetailView::shells`].
     shells: HashMap<InstanceKey, (Vec<String>, bool)>,
+    /// Bumped by [`AppModel::source_changed`]: work started under an earlier
+    /// CLI carries an older value and is not applied.
+    source_epoch: u64,
 }
 
 /// The running services a read reports for a row, `None` when it does not
@@ -355,6 +364,12 @@ impl AppModel {
     #[must_use]
     pub fn daemon_recovery(&self) -> Option<DaemonRecovery> {
         match &self.last_error {
+            // Another install's hackd in a shared home: starting or
+            // restarting it from here would only start a fight over it.
+            Some(SourceError::DaemonUnavailable {
+                shared_with: Some(_),
+                ..
+            }) => None,
             Some(SourceError::DaemonUnavailable { daemon: None, .. }) => {
                 Some(DaemonRecovery::Start)
             }
@@ -392,6 +407,31 @@ impl AppModel {
             };
         }
         state::derive(row, local)
+    }
+
+    /// The source now runs another Hack CLI, with its own hackd, registry and
+    /// homes. Nothing read from the previous one may be shown or acted on:
+    /// reads in flight are rejected (a new action epoch), and until the new
+    /// CLI's first snapshot the window is loading with no actions. The
+    /// selection is kept by name, so the same project is shown again if the
+    /// new CLI has it.
+    pub fn source_changed(&mut self) {
+        self.source_epoch += 1;
+        self.action_epoch += 1;
+        self.snapshot = None;
+        self.last_error = None;
+        self.local.clear();
+        self.action_errors.clear();
+        self.loaded_once = false;
+        // Shells the other CLI's reads reported are not this one's.
+        self.shells.clear();
+    }
+
+    /// Which CLI the model is showing: capture it when work starts, and
+    /// apply the work's result only if it is unchanged.
+    #[must_use]
+    pub fn source_epoch(&self) -> u64 {
+        self.source_epoch
     }
 
     /// Apply an ordered live read; returns whether it was accepted.
@@ -577,9 +617,13 @@ impl AppModel {
             daemon,
             compatible,
             message,
+            shared_with,
         }) = &self.last_error
         {
             banners.push(match daemon {
+                _ if shared_with.is_some() => Banner::SharedHome {
+                    message: message.clone(),
+                },
                 None => Banner::DaemonOff,
                 Some(d) if !compatible => Banner::mismatch(d, cli),
                 Some(_) => Banner::DaemonReadFailed {
@@ -840,6 +884,37 @@ mod tests {
     use crate::models::LifecycleResult;
 
     #[test]
+    fn a_cli_switch_drops_the_old_snapshot_and_rejects_reads_already_in_flight() {
+        let mut m = model(Fixture::Running);
+        m.apply(Event::Select("storefront".into()));
+        assert!(m.detail().is_some_and(|d| !d.actions.is_empty()));
+        let in_flight = m.begin_refresh();
+        let epoch = m.source_epoch();
+        m.source_changed();
+        assert_ne!(
+            m.source_epoch(),
+            epoch,
+            "work started before the switch can tell"
+        );
+        assert!(
+            m.detail().is_none(),
+            "nothing from the previous CLI is shown or actionable"
+        );
+        assert!(
+            !m.finish_refresh(in_flight, Ok(fixtures::snapshot(Fixture::Running).unwrap())),
+            "a read started before the switch is rejected"
+        );
+        assert!(m.detail().is_none());
+        let fresh = m.begin_refresh();
+        assert!(m.finish_refresh(fresh, Ok(fixtures::snapshot(Fixture::Running).unwrap())));
+        assert_eq!(
+            m.detail().map(|d| d.name),
+            Some("storefront".into()),
+            "the selection comes back when the new CLI has the project"
+        );
+    }
+
+    #[test]
     fn unavailable_daemon_invalidates_rows_and_offers_exact_recovery() {
         for (daemon, expected) in [
             (None, DaemonRecovery::Start),
@@ -859,6 +934,7 @@ mod tests {
                 Err(SourceError::DaemonUnavailable {
                     cli: "5.0.0".into(),
                     compatible: false,
+                    shared_with: None,
                     daemon,
                     message: message.into(),
                 }),
@@ -895,6 +971,7 @@ mod tests {
         first_launch.apply(Event::Refreshed(Err(SourceError::DaemonUnavailable {
             cli: "5.0.0".into(),
             compatible: false,
+            shared_with: None,
             daemon: None,
             message: "hackd is off".into(),
         })));
@@ -1013,6 +1090,14 @@ mod tests {
         m.apply(Event::Refreshed(Ok(snap)));
         m.apply(Event::Select("storefront".into()));
         assert_eq!(shells(&m), (vec!["api".to_owned()], false));
+    }
+
+    #[test]
+    fn switching_cli_forgets_the_last_good_shells() {
+        let mut m = running_storefront();
+        m.source_changed();
+        m.apply(Event::Refreshed(Err(read_error())));
+        assert!(m.detail().is_none_or(|d| d.shells.is_empty()));
     }
 
     #[test]
@@ -1548,6 +1633,7 @@ mod tests {
             cli: "5.0.0-next.18".into(),
             daemon: Some("4.3.0".into()),
             compatible: true,
+            shared_with: None,
             message: "hackd could not provide project status".into(),
         })));
         assert!(matches!(

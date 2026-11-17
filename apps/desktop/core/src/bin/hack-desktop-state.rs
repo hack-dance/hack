@@ -10,10 +10,16 @@
 //! invoking today's registry-writing `hack projects` fallback.
 //!
 //! ```text
-//! hack-desktop-state [--project <name>] [--compact] [--setup-fixture <name>]
+//! hack-desktop-state [--project <name>] [--compact] [--reads <n>] [--setup-fixture <name>]
 //!
 //! `--setup-fixture` prints one offline setup report as JSON and runs nothing.
 //! ```
+//!
+//! `--reads <n>` reads `n` times in this one process and reports each
+//! read's time and steps under `reads`, so the first, cold read (no cached
+//! CLI version, hackd location or compatibility answer) can be told from
+//! the warm reads the window does every few seconds. The view models come
+//! from the last read.
 
 use std::time::Instant;
 
@@ -23,7 +29,7 @@ use serde_json::{Value, json};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: hack-desktop-state [--project <name>] [--compact] [--setup-fixture missing-cli|partial|ready|native-unknown|service-unavailable]"
+        "usage: hack-desktop-state [--project <name>] [--compact] [--reads <n>] [--setup-fixture missing-cli|partial|ready|native-unknown|service-unavailable]"
     );
     std::process::exit(2)
 }
@@ -32,12 +38,20 @@ fn main() {
     let mut project: Option<String> = None;
     let mut compact = false;
     let mut setup_fixture = None;
+    let mut reads: usize = 1;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--project" => project = Some(args.next().unwrap_or_else(|| usage())),
             "--compact" => compact = true,
             "--setup-fixture" => setup_fixture = Some(args.next().unwrap_or_else(|| usage())),
+            "--reads" => {
+                reads = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .filter(|n| (1..=20).contains(n))
+                    .unwrap_or_else(|| usage());
+            }
             _ => usage(),
         }
     }
@@ -51,9 +65,24 @@ fn main() {
     }
 
     let source = LiveSource::from_env();
-    let started = Instant::now();
-    let (snap, steps) = source.snapshot_timed();
-    let read_ms = started.elapsed().as_millis();
+    let step_json = |steps: &[(String, std::time::Duration)]| -> Vec<Value> {
+        steps
+            .iter()
+            .map(|(step, d)| json!({ "step": step, "ms": d.as_millis() }))
+            .collect()
+    };
+    let mut each: Vec<Value> = Vec::new();
+    let mut last = None;
+    for _ in 0..reads {
+        let started = Instant::now();
+        let (snap, steps) = source.snapshot_timed();
+        let ms = started.elapsed().as_millis();
+        each.push(json!({ "read_ms": ms, "steps": step_json(&steps) }));
+        last = Some((snap, steps, ms));
+    }
+    let Some((snap, steps, read_ms)) = last else {
+        usage()
+    };
     // Which CLI this read used, what else is installed, and where its
     // hackd is, so a wrong CLI or home is visible (HACK-2283).
     let choice = source.cli_choice();
@@ -63,10 +92,7 @@ fn main() {
         "hackd_socket": source.hackd().map(|d| d.socket().display().to_string()),
         "rejected": choice.as_ref().map(|c| c.rejected.clone()).unwrap_or_default(),
     });
-    let timings: Vec<Value> = steps
-        .iter()
-        .map(|(step, d)| json!({ "step": step, "ms": d.as_millis() }))
-        .collect();
+    let timings = step_json(&steps);
 
     let source_info = match &snap {
         Ok(s) => json!({
@@ -108,6 +134,7 @@ fn main() {
     let out = json!({
         "read_ms": read_ms,
         "read_steps": timings,
+        "reads": each,
         "cli": cli_info,
         "source": source_info,
         "list": list,

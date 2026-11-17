@@ -11,6 +11,7 @@
 #          prompt symbols. It is embedded in the build.
 #
 # Usage:
+#   bash term/scripts/provision-ghostty.sh >/dev/null   # fill the default dir
 #   eval "$(bash term/scripts/provision-ghostty.sh)"              # shell
 #   bash term/scripts/provision-ghostty.sh --emit github >> "$GITHUB_ENV"
 #   bash term/scripts/provision-ghostty.sh --dir DIR --offline    # verify only
@@ -47,7 +48,10 @@ zig_sha_aarch64_linux=a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3
 
 emit=shell
 offline=false
-dir=${HACK_DESKTOP_GHOSTTY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/hack-desktop/ghostty-vt-${ghostty_version}}
+# The default is apps/desktop/target/ghostty-inputs, the directory
+# apps/desktop/.cargo/config.toml names as GHOSTTY_RELEASE_DIR, so a build from
+# apps/desktop finds the inputs there without exporting anything.
+dir=${HACK_DESKTOP_GHOSTTY_CACHE:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)/target/ghostty-inputs}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dir) dir=${2:?--dir needs a directory}; shift 2 ;;

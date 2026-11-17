@@ -15,8 +15,10 @@ path = "src/main.rs"
 # Offscreen rendering of fixture states to PNG (used for design evidence).
 screenshots = ["gpui-kit/test-support", "dep:image", "hack-desktop-ui/screenshots"]
 # The terminal panel (libghostty-vt): logs, container and host shells on
-# app-owned PTYs. Needs the inputs term/scripts/provision-ghostty.sh fetches,
-# so it is off by default; without it the window keeps its Logs tab.
+# app-owned PTYs. Always built on macOS (see the macOS dependency below and
+# build.rs); elsewhere this feature turns it on. Either way it needs the
+# inputs term/scripts/provision-ghostty.sh fetches (scripts/build.sh runs it).
+# Without the panel the window keeps its Logs tab.
 terminal = ["dep:hack-desktop-term", "hack-desktop-term/ghostty"]
 
 [dependencies]
@@ -33,3 +35,6 @@ image = { version = "0.25", optional = true, default-features = false, features 
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSArray"] }
+# The terminal panel is part of the macOS app, not an opt-in feature: the
+# owner's build does not depend on a flag. build.rs turns on `hack_terminal`.
+hack-desktop-term = { workspace = true, features = ["ghostty"] }

@@ -166,16 +166,20 @@ libghostty-vt is built by the `ghostty-vt-sys` build script:
 release archives when `GHOSTTY_RELEASE_DIR` is unset. Three things stop it:
 
 1. `term/scripts/provision-ghostty.sh` is the one step that uses the
-   network. It fetches the pinned inputs into a cache directory, verifies
-   each against a sha256 committed in the script, and prints the
-   environment to export (`GHOSTTY_RELEASE_DIR`, `HACK_TERM_SYMBOLS_FONT`,
-   and `ZIG` on Linux).
+   network. It fetches the pinned inputs into `apps/desktop/target/ghostty-inputs`
+   (or `--dir`), verifies each against a sha256 committed in the script, and
+   prints the environment to export (`GHOSTTY_RELEASE_DIR`,
+   `HACK_TERM_SYMBOLS_FONT`, and `ZIG` on Linux).
    Re-running it verifies the cache; `--offline` only verifies.
+   `scripts/build.sh` runs it and then builds, so building the app is the
+   provisioning path; `scripts/test.sh` runs it on macOS.
 2. `apps/desktop/.cargo/config.toml` sets the build script's download base
    (`GHOSTTY_RELEASE_URL`) to a URL with a scheme that cannot be fetched.
    Without provisioned inputs the dependency fails at once with "unknown
    scheme", before any network use. `GHOSTTY_RELEASE_DIR` takes precedence
-   when set. This applies to cargo run from `apps/desktop` or below, which
+   when set, and the same file defaults it (unforced, so an exported value
+   wins) to `target/ghostty-inputs`: once provisioned, a plain `cargo build`
+   from `apps/desktop` finds the inputs on macOS with nothing exported. This applies to cargo run from `apps/desktop` or below, which
    is how the scripts, CI and README run it.
 3. `term/build.rs` fails with instructions when the `ghostty` feature is on
    and the inputs or `ZIG` are missing. (Cargo may run the dependency's
@@ -216,8 +220,11 @@ yet; the Mac commands are in the PR.
 
 **Defaults chosen (flagged for the owner):**
 
-- The `ghostty` feature stays **off by default**. The app does not depend
-  on it yet, and the two existing desktop jobs are unchanged.
+- The `ghostty` feature stays **off by default** in this crate. *Since
+  then:* the macOS app depends on it unconditionally (the panel is not
+  behind a flag there), the macOS desktop job provisions the inputs and
+  builds and tests the app with the panel, and Linux keeps the app's
+  opt-in `terminal` feature.
 - Inputs are **provisioned from upstream and checksummed**, not vendored
   into the repository (about 67 MB with Zig) and not prebuilt by us.
 - `ZIG` must be set explicitly for a Linux build of the feature; a Zig that

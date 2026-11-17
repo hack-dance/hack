@@ -28,9 +28,12 @@ fn fail(problem: &str) -> ! {
         "\nhack-desktop-term: the `ghostty` feature builds from local, checksummed\n\
          inputs and never downloads during the build.\n\n\
          problem: {problem}\n\n\
-         Provision them once (the only step that uses the network), then export\n\
-         what the script prints:\n\n\
-         \x20   eval \"$(bash term/scripts/provision-ghostty.sh)\"\n\n\
+         From apps/desktop, build with the script that provisions them first\n\
+         (fetching only what is missing, each file checked against its sha256):\n\n\
+         \x20   bash scripts/build.sh\n\n\
+         or provision once (the only step that uses the network), then build:\n\n\
+         \x20   bash term/scripts/provision-ghostty.sh >/dev/null\n\n\
+         On Linux also export ZIG: eval \"$(bash term/scripts/provision-ghostty.sh)\".\n\n\
          See apps/desktop/term/DECISION.md, \"Build and CI\".\n"
     );
     std::process::exit(1);

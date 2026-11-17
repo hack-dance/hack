@@ -24,6 +24,7 @@ import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
 import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import {
   adaptNativeGcloudEnvironment,
+  hasNativeGcloudCredentialMount,
   type NativeGcloudSelection,
 } from "./native-gcloud-environment.ts";
 import {
@@ -2053,7 +2054,19 @@ async function startNativeProjectAttempt(
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     composeFile: opts.composeFile,
-    input,
+    // The credential adapter replaces its recognized mounts after lifecycle
+    // hooks. Review the input it will produce: the same mount removal, with
+    // nothing read (HACK-2324; the review refused those home-relative mounts).
+    input:
+      selection.gcloud && hasNativeGcloudCredentialMount(input)
+        ? (
+            await deps.adaptGcloud({
+              input,
+              mode: selection.gcloud.mode,
+              deliver: false,
+            })
+          ).input
+        : input,
     profiles,
     branch: opts.scope.branch,
     deferredRestore: restore !== undefined,

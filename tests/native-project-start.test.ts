@@ -1538,8 +1538,33 @@ test("AWS profile export follows native login hooks and precedes runtime effects
 
 test("gcloud ADC delivery follows hooks, sends file members privately and persists only the mode", async () => {
   const { opts, events } = await fixture();
-  opts.dependencies.adaptGcloud = async ({ input, mode }) => {
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: {
+          image: `sha256:${"e".repeat(64)}`,
+          volumes: [
+            "~/.config/gcloud/application_default_credentials.json:/config/adc.json:ro",
+          ],
+        },
+      },
+    }),
+  });
+  const reviewed = { normalizedComposeJson: "" };
+  opts.dependencies.adaptGcloud = async ({ input, mode, deliver }) => {
     expect(mode).toBe("file");
+    if (deliver === false) {
+      // HACK-2324: the pre-hook static review sees the input the adapter will
+      // deliver (the host mount removed), and nothing is read for it.
+      events.push("gcloud review");
+      const stripped = JSON.stringify({ services: { web: { image: "x" } } });
+      return {
+        input: { ...input, normalizedComposeJson: stripped },
+        receipt: { mode, types: [], services: ["web"] },
+      };
+    }
     events.push("gcloud");
     return {
       input: {
@@ -1571,8 +1596,21 @@ test("gcloud ADC delivery follows hooks, sends file members privately and persis
   opts.dependencies.remove = async ({ expected }) => {
     expect(saved).toBe(expected);
   };
+  opts.dependencies.staticReview = async ({ input }) => {
+    events.push("static review");
+    reviewed.normalizedComposeJson = input.normalizedComposeJson;
+  };
   expect(await startNativeProject({ ...opts, gcloud: { mode: "file" } })).toBe(
     0
+  );
+  expect(reviewed.normalizedComposeJson).toBe(
+    JSON.stringify({ services: { web: { image: "x" } } })
+  );
+  expect(events.indexOf("gcloud review")).toBeLessThan(
+    events.indexOf("static review")
+  );
+  expect(events.indexOf("static review")).toBeLessThan(
+    events.indexOf("before")
   );
   expect(events.indexOf("gcloud")).toBeGreaterThan(events.indexOf("before"));
   expect(events.indexOf("gcloud")).toBeLessThan(events.indexOf("runtime up"));

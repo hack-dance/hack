@@ -49,6 +49,23 @@ function missingCli(): Error {
   });
 }
 
+/** Whether any service of the input binds the recognized gcloud ADC file. */
+export function hasNativeGcloudCredentialMount(
+  input: Pick<NativeProjectInput, "normalizedComposeJson">
+): boolean {
+  const compose: unknown = JSON.parse(input.normalizedComposeJson);
+  return (
+    isRecord(compose) &&
+    isRecord(compose.services) &&
+    Object.values(compose.services).some(
+      (service) =>
+        isRecord(service) &&
+        Array.isArray(service.volumes) &&
+        service.volumes.some((volume) => nativeGcloudCredentialMount(volume))
+    )
+  );
+}
+
 /** Parse the explicit selector value; only `file` is accepted. */
 export function parseNativeGcloudSelection(
   value: string | undefined

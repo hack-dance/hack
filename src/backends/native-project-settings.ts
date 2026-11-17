@@ -6,6 +6,10 @@ import { isRecord } from "../lib/guards.ts";
 import { sanitizeProjectSlug } from "../lib/project.ts";
 import { isNativeAwsSelector } from "./native-aws-environment.ts";
 import {
+  type NativeGcloudSelection,
+  parseNativeGcloudSelection,
+} from "./native-gcloud-environment.ts";
+import {
   type NativePreparedBase,
   parseNativePreparedBase,
 } from "./native-prepared-base.ts";
@@ -53,6 +57,7 @@ export const NATIVE_SETTING_KEYS = [
   "preparedBase",
   "https",
   "aws",
+  "gcloud",
 ] as const;
 export type NativeSettingKey = (typeof NATIVE_SETTING_KEYS)[number];
 
@@ -70,6 +75,7 @@ const MACHINE_KEYS = new Set([
   "preparedBase",
   "https",
   "aws",
+  "gcloud",
 ]);
 const ENV_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SIBLING_FILE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
@@ -267,6 +273,8 @@ export interface NativeHostSettings {
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
+  /** gcloud ADC file mode: the consent to deliver that one recognized file. */
+  readonly gcloud?: NativeGcloudSelection;
   readonly origins: Readonly<
     Record<Exclude<NativeSettingKey, "adaptation">, NativeSettingOrigin>
   >;
@@ -539,6 +547,7 @@ type MachineValues = {
   readonly preparedBaseSet: boolean;
   readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly gcloud?: NativeGcloudSelection;
 };
 
 /** Validate every machine value, even ones a variable overrides. */
@@ -568,7 +577,24 @@ function machineValues(
       ? {}
       : { https: machineHttps(settings.https) }),
     ...(settings.aws === undefined ? {} : { aws: machineAws(settings.aws) }),
+    ...(settings.gcloud === undefined
+      ? {}
+      : { gcloud: machineGcloud(settings.gcloud) }),
   };
+}
+
+/** `gcloud: {"mode": "file"}`, the only accepted form. */
+function machineGcloud(value: unknown): NativeGcloudSelection {
+  if (
+    !(
+      isRecord(value) &&
+      Object.keys(value).length === 1 &&
+      value.mode === "file"
+    )
+  ) {
+    throw fieldRefused("gcloud");
+  }
+  return { mode: "file" };
 }
 
 /** The AWS variables, refused here when native AWS adaptation would refuse them. */
@@ -672,6 +698,12 @@ export async function resolveNativeHostSettings(opts: {
     machineSet: values.aws !== undefined,
     machine: values.aws,
   });
+  const gcloud = pick<NativeHostSettings["gcloud"]>({
+    envSet: nonEmpty(env, "HACK_NATIVE_GCLOUD_ADC"),
+    fromEnv: () => parseNativeGcloudSelection(env.HACK_NATIVE_GCLOUD_ADC),
+    machineSet: values.gcloud !== undefined,
+    machine: values.gcloud,
+  });
   return {
     sharedSource: sharedSource.value,
     ...(dependencies.value.file === undefined
@@ -684,6 +716,7 @@ export async function resolveNativeHostSettings(opts: {
       : { preparedBase: preparedBase.value }),
     ...(https.value === undefined ? {} : { https: https.value }),
     ...(aws.value === undefined ? {} : { aws: aws.value }),
+    ...(gcloud.value === undefined ? {} : { gcloud: gcloud.value }),
     origins: {
       sharedSource: sharedSource.origin,
       dependencies: dependencies.origin,
@@ -691,6 +724,7 @@ export async function resolveNativeHostSettings(opts: {
       preparedBase: preparedBase.origin,
       https: https.origin,
       aws: aws.origin,
+      gcloud: gcloud.origin,
     },
     ...(machine ? { machineFile: machine.file } : {}),
   };

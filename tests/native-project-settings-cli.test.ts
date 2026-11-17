@@ -447,6 +447,7 @@ test(
                 preparedBase: "unset",
                 https: "unset",
                 aws: "machine",
+                gcloud: "unset",
               },
               adaptationFiles: [join(".hack", "native", "adaptation.json")],
               machineSettings: {

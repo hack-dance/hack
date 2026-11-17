@@ -54,7 +54,6 @@ import {
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
-import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
 import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
@@ -6239,7 +6238,7 @@ async function handleNativeUp({
     preparedBase: host.preparedBase,
     https: host.https,
     aws: host.aws,
-    gcloud: parseNativeGcloudSelection(process.env.HACK_NATIVE_GCLOUD_ADC),
+    gcloud: host.gcloud,
     runtimeMetadata: {
       devHost,
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),

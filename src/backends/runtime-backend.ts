@@ -1,9 +1,16 @@
 import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
+  readComposeOneShotGraph,
+  runningOneShots,
+  startWatchDecision,
+} from "../lib/compose-oneshot-progress.ts";
+import { parseComposePsJson } from "../lib/compose-ps-result.ts";
+import {
   type ComposeStartupPhase,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   resolveComposeImageTimeoutMs,
+  resolveComposeStartupCeilingMs,
   resolveComposeStartupTimeoutMs,
 } from "../lib/compose-startup-budget.ts";
 import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
@@ -60,6 +67,18 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
   readonly startupTimeoutMs?: number;
   /** Detached `images` phase budget (image build/pull and container creation). */
   readonly imageTimeoutMs?: number;
+  /**
+   * Absolute bound on the detached `start` phase while one-shot dependencies
+   * keep it making progress (HACK-2310); see `startupTimeoutMs`.
+   */
+  readonly startupCeilingMs?: number;
+  /** Called each time the start phase sees a one-shot dependency running. */
+  readonly onStartupProgress?: () => void;
+  /**
+   * Called when the start phase is cut short (exit 124) with the one-shot
+   * dependencies it last saw running; empty when none was running.
+   */
+  readonly onStartupStalled?: (inProgress: readonly string[]) => void;
   /**
    * Called before each detached phase begins, so a caller can attribute a
    * non-zero exit (including the 124 deadline) to the phase that produced it.
@@ -204,6 +223,120 @@ async function prepareUnattendedStartup(
   return { ...inputs, exitCode: storage };
 }
 
+/** How often the detached start phase observes one-shot progress. */
+const START_WATCH_POLL_MS = 1000;
+
+/**
+ * The detached `start` phase (HACK-2310). While a one-shot dependency runs,
+ * `up -d` is waiting for it to exit before it starts its dependents: that is
+ * progress, so the start budget then counts only time without progress, up
+ * to an absolute ceiling. A graph without one-shots keeps the plain budget.
+ * Exit 124 (reported through `onStartupStalled` with the one-shots last seen
+ * running) means the wait was cut short; the Compose process group is then
+ * terminated, while the containers it started keep running.
+ */
+async function runComposeStartPhase(input: {
+  readonly cmd: readonly string[];
+  readonly options: RuntimeUpOptions;
+  readonly startupTimeoutMs: number;
+  readonly budgetEnv: Readonly<Record<string, string | undefined>>;
+  readonly runPhase: (
+    cmd: readonly string[],
+    timeoutMs: number
+  ) => Promise<number>;
+}): Promise<number> {
+  const { options } = input;
+  const graph = await readComposeOneShotGraph(options.composeFiles);
+  if (graph.oneShots.size === 0) {
+    const code = await input.runPhase(input.cmd, input.startupTimeoutMs);
+    if (code === 124) {
+      options.onStartupStalled?.([]);
+    }
+    return code;
+  }
+  const ceilingMs = resolveComposeStartupCeilingMs({
+    startupTimeoutMs: input.startupTimeoutMs,
+    startupCeilingMs: options.startupCeilingMs,
+    env: input.budgetEnv,
+  });
+  const watchdog = new AbortController();
+  let done = false;
+  const finished = run(input.cmd, {
+    cwd: options.cwd,
+    env: options.env,
+    stdout: options.routeStdoutToStderr ? "stderr" : "inherit",
+    timeoutMs: ceilingMs,
+    forwardSignals: true,
+    settleProcessGroupOnCancel: true,
+    signal: watchdog.signal,
+  }).finally(() => {
+    done = true;
+  });
+  const watch = await watchStartProgress({
+    options,
+    graph,
+    idleBudgetMs: input.startupTimeoutMs,
+    ceilingMs,
+    finished,
+    isDone: () => done,
+  });
+  if (watch.stopped) {
+    watchdog.abort();
+  }
+  const code = await finished;
+  if (watch.stopped || code === 124) {
+    options.onStartupStalled?.(watch.lastSeen);
+    return 124;
+  }
+  return code;
+}
+
+/** Poll one-shot progress until the start ends or the watchdog decides to stop. */
+async function watchStartProgress(input: {
+  readonly options: RuntimeUpOptions;
+  readonly graph: Awaited<ReturnType<typeof readComposeOneShotGraph>>;
+  readonly idleBudgetMs: number;
+  readonly ceilingMs: number;
+  readonly finished: Promise<number>;
+  readonly isDone: () => boolean;
+}): Promise<{
+  readonly stopped: boolean;
+  readonly lastSeen: readonly string[];
+}> {
+  const startedAt = performance.now();
+  let lastProgressAt = startedAt;
+  let lastSeen: readonly string[] = [];
+  for (;;) {
+    await Promise.race([input.finished, Bun.sleep(START_WATCH_POLL_MS)]);
+    if (input.isDone()) {
+      return { stopped: false, lastSeen };
+    }
+    const ps = await composeRuntimeBackend.psJson({
+      ...input.options,
+      all: true,
+    });
+    const entries = ps.exitCode === 0 ? parseComposePsJson(ps.stdout) : null;
+    if (entries) {
+      // A failed read is no evidence of progress, never extra time.
+      lastSeen = runningOneShots({ graph: input.graph, entries });
+      if (lastSeen.length > 0) {
+        lastProgressAt = performance.now();
+        input.options.onStartupProgress?.();
+      }
+    }
+    const decision = startWatchDecision({
+      now: performance.now(),
+      startedAt,
+      lastProgressAt,
+      idleBudgetMs: input.idleBudgetMs,
+      ceilingMs: input.ceilingMs,
+    });
+    if (decision !== "wait") {
+      return { stopped: true, lastSeen };
+    }
+  }
+}
+
 export const composeRuntimeBackend: RuntimeBackend = {
   name: "compose",
   async up(opts) {
@@ -280,18 +413,27 @@ export const composeRuntimeBackend: RuntimeBackend = {
         if (storage !== 0) {
           return storage;
         }
-        return await runPhase(
-          [
-            ...composeArgs,
-            "up",
-            "-d",
-            "--no-build",
-            ...(opts.unattended ? ["--pull", "never"] : []),
-            ...scope,
-          ],
-          startupTimeoutMs
-        );
+        return await runStartPhase([
+          ...composeArgs,
+          "up",
+          "-d",
+          "--no-build",
+          ...(opts.unattended ? ["--pull", "never"] : []),
+          ...scope,
+        ]);
       };
+      // HACK-2310: while a one-shot dependency runs, `up -d` is waiting for
+      // it to exit before it starts its dependents. That is progress: the
+      // start budget then counts only time without progress, up to an
+      // absolute ceiling. A graph without one-shots keeps the plain budget.
+      const runStartPhase = (cmd: readonly string[]) =>
+        runComposeStartPhase({
+          cmd,
+          options: opts,
+          startupTimeoutMs,
+          budgetEnv,
+          runPhase,
+        });
       const progress = opts.dependencyProgress;
       if (!progress) {
         return await launch();

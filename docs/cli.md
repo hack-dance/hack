@@ -413,7 +413,36 @@ Detached Compose startup runs in two phases, each with its own budget:
 | Phase | Compose invocation | Default | Variable | Range (ms) |
 | --- | --- | --- | --- | --- |
 | Image build/pull and container creation | `up --no-start` | 30 minutes | `HACK_COMPOSE_IMAGE_TIMEOUT_MS` | 1,000–14,400,000 |
-| Start and dependency wait | `up -d --no-build` | 90 seconds | `HACK_COMPOSE_STARTUP_TIMEOUT_MS` | 1,000–3,600,000 |
+| Start and dependency wait | `up -d --no-build` | 90 seconds without progress | `HACK_COMPOSE_STARTUP_TIMEOUT_MS` | 1,000–3,600,000 |
+| Start, while one-shot dependencies run | `up -d --no-build` | 30 minutes in all | `HACK_COMPOSE_STARTUP_CEILING_MS` | 1,000–14,400,000 |
+
+A one-shot dependency is a service that another service waits on with
+`depends_on: <name>: condition: service_completed_successfully`, such as a
+migration or seed job. While one is running, the start is making progress:
+Compose is waiting for it to exit before it starts the services that depend on
+it. The start budget then counts only time in which no one-shot is running, so a
+first start that runs minutes of migrations on an empty database still succeeds.
+The ceiling bounds the whole start phase however long one-shots keep running, and
+is never lower than the start budget. A one-shot in a restart loop is not
+progress. A graph with no one-shot keeps the plain 90-second budget.
+
+The project can set both in `.hack/hack.config.json`; a host variable set on the
+invocation wins over the project setting:
+
+```json
+{ "compose": { "startupTimeoutMs": 180000, "startupCeilingMs": 3600000 } }
+```
+
+If the start is cut short at the ceiling while a one-shot is still running,
+`E_STARTUP_TIMEOUT` names that service and says the start is still in progress
+(`error.detail.inProgress` lists it; `budgetEnv` is then
+`HACK_COMPOSE_STARTUP_CEILING_MS`). The one-shot keeps running, but its dependents
+stay `Created` and nothing starts them when it finishes; `hack ps` shows them as
+`created (waiting for <service>)` (`waiting` in `ps --json`). Once `hack ps` shows
+the one-shot exited, run `hack up -d` again to start them. `hack restart` or
+`hack down` would stop the one-shot mid-run: in a terminal they ask first; with
+`--json` or `--no-interactive` they go on and report the service in
+`data.interrupted` and `data.warnings`.
 
 A first-time build or a large image pull therefore does not consume the start
 budget. Raise the budget for the phase that was hit, on the host CLI invocation
@@ -424,6 +453,8 @@ rather than in a container's environment:
 HACK_COMPOSE_IMAGE_TIMEOUT_MS=3600000 hack up --detach
 # Slow container start or a dependency that is slow to become healthy
 HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up --detach
+# One-shot dependencies (migrations) that may run longer than 30 minutes
+HACK_COMPOSE_STARTUP_CEILING_MS=3600000 hack up --detach
 HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack restart
 ```
 

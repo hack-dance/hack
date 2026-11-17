@@ -47,6 +47,7 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   // Measured locally (not hosted); refresh from CI.
   "native-compose-endpoint-settlement": 369,
   "background-command-compose": 180,
+  "compose-long-oneshot": 165,
   "native-compose-adoption-job-worktrees": 177,
   "native-config-build": 155,
   "native-config-down-hooks": 155,

@@ -23,6 +23,10 @@ import {
 } from "../lib/native-env-plan-protocol.ts";
 import { isNativeEnvironmentNameError } from "../lib/native-environment-name-error.ts";
 import {
+  type NativeAuthoredArtifactPhase,
+  nativeAuthoredArtifactError,
+} from "./native-authored-artifact-error.ts";
+import {
   type NativeAuthoredReceipt,
   type NativeAuthoredReview,
   nativeAuthoredReceiptBinding,
@@ -363,6 +367,7 @@ async function storage<T>(
     branch: input.branch,
   };
   const held: HeldDirectory[] = [];
+  let phase: NativeAuthoredArtifactPhase = "scope";
   try {
     const projectRoot = await realpath(opts.projectRoot);
     const nativeHome = await realpath(opts.nativeHome);
@@ -374,6 +379,7 @@ async function storage<T>(
     ) {
       return refused();
     }
+    phase = "directories";
     for (const path of [projectRoot, opts.projectDir, nativeHome]) {
       held.push(await holdDirectory(path, false));
     }
@@ -384,6 +390,7 @@ async function storage<T>(
       branch: opts.branch,
       directories: held.map(({ info }) => ({ dev: info.dev, ino: info.ino })),
     };
+    phase = "private-store";
     for (const [path, privateRoot] of [
       [join(opts.projectDir, ".internal"), false],
       [join(opts.projectDir, ".internal", "native-authored-runs"), true],
@@ -391,6 +398,7 @@ async function storage<T>(
       const directory = await storeDirectory(path, create, privateRoot);
       if (!directory) {
         await recheckDirectories(held);
+        phase = "action";
         return await action(undefined, async () => {
           await recheckDirectories(held);
           await absent(path);
@@ -413,6 +421,7 @@ async function storage<T>(
       check,
     });
     await check();
+    phase = "action";
     return await action(
       {
         identity,
@@ -440,7 +449,7 @@ async function storage<T>(
     ) {
       throw error;
     }
-    return refused();
+    throw nativeAuthoredArtifactError(error, phase);
   } finally {
     await Promise.all(held.map(({ file }) => file.close()));
   }
@@ -1034,8 +1043,8 @@ export async function withNativeAuthoredProjectAdmission<T>(
         }
         try {
           await verifyLock();
-        } catch {
-          return refused();
+        } catch (error) {
+          throw nativeAuthoredArtifactError(error, "action");
         }
       };
       const withMutation = async <R>(
@@ -1050,8 +1059,8 @@ export async function withNativeAuthoredProjectAdmission<T>(
               await assertHeld();
             });
           });
-        } catch {
-          return refused();
+        } catch (error) {
+          throw nativeAuthoredArtifactError(error, "action");
         }
       };
       const loadStart = async () => {

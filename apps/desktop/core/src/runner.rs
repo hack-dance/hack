@@ -78,6 +78,9 @@ pub struct CliRunner {
     term_grace: Duration,
     /// Remove inherited variables that make interpreters load code.
     strip_startup: bool,
+    /// The program, shared by every clone of a [`Self::selectable`] runner,
+    /// so [`Self::select`] switches all of them at once.
+    pinned: Option<std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>>,
 }
 
 /// Inherited variables that make a shell or language runtime load and run
@@ -154,7 +157,74 @@ impl CliRunner {
             missing: false,
             term_grace: TERM_GRACE,
             strip_startup: false,
+            pinned: None,
         }
+    }
+
+    /// Run `program` (absolute), switchable later with [`Self::select`]:
+    /// every clone follows. The app's own runner is one of these.
+    #[must_use]
+    pub fn selectable(program: impl Into<PathBuf>) -> Self {
+        let program = program.into();
+        let mut runner = Self::new(program.clone());
+        runner.pinned = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(program))));
+        runner
+    }
+
+    /// No usable CLI: every command reports `NotFound` and nothing is
+    /// started, until [`Self::select`] gives it one.
+    #[must_use]
+    pub fn unavailable(name: &str) -> Self {
+        let mut runner = Self::new(name);
+        runner.missing = true;
+        runner.pinned = Some(std::sync::Arc::default());
+        runner
+    }
+
+    /// This runner's settings with another (absolute) program, not switchable.
+    #[must_use]
+    pub fn with_program(&self, program: &Path) -> Self {
+        Self {
+            program: program.to_path_buf(),
+            missing: false,
+            pinned: None,
+            ..self.clone()
+        }
+    }
+
+    /// This runner with its current program fixed: later [`Self::select`]
+    /// calls do not change it. One read uses one of these throughout.
+    #[must_use]
+    pub fn fixed(&self) -> Self {
+        let program = self.current_program();
+        Self {
+            program: program.clone().unwrap_or_else(|| self.program.clone()),
+            missing: program.is_none(),
+            pinned: None,
+            ..self.clone()
+        }
+    }
+
+    /// Run `program` from now on, in this runner and every clone of it. A
+    /// runner that is not [`Self::selectable`] (or [`Self::on_path`]) is
+    /// unchanged.
+    pub fn select(&self, program: &Path) {
+        if let Some(slot) = &self.pinned
+            && let Ok(mut slot) = slot.lock()
+        {
+            *slot = Some(program.to_path_buf());
+        }
+    }
+
+    /// The executable to start now: the selected one, else `program`
+    /// (`None` when [`Self::on_path`] found nothing).
+    fn current_program(&self) -> Option<PathBuf> {
+        if let Some(slot) = &self.pinned
+            && let Some(found) = slot.lock().ok().and_then(|g| g.clone())
+        {
+            return Some(found);
+        }
+        (!self.missing).then(|| self.program.clone())
     }
 
     /// Change the SIGTERM-to-SIGKILL grace for timed-out commands.
@@ -174,14 +244,16 @@ impl CliRunner {
     #[must_use]
     pub fn on_path(name: &str) -> Self {
         let path = std::env::var_os("PATH");
-        match resolve_on_path(name, path.as_deref()) {
+        let mut r = match resolve_on_path(name, path.as_deref()) {
             Some(p) => Self::new(p),
             None => {
                 let mut r = Self::new(name);
                 r.missing = true;
                 r
             }
-        }
+        };
+        r.pinned = Some(std::sync::Arc::default());
+        r
     }
 
     /// Run every command from `dir` (for checks that must run outside any
@@ -213,13 +285,11 @@ impl CliRunner {
 
     /// The absolute executable this runner would start, without starting it.
     pub(crate) fn program_path(&self) -> Option<PathBuf> {
-        if self.missing {
-            return None;
+        let program = self.current_program()?;
+        if program.is_absolute() {
+            return Some(program);
         }
-        if self.program.is_absolute() {
-            return Some(self.program.clone());
-        }
-        let name = self.program.to_str()?;
+        let name = program.to_str()?;
         resolve_on_path(name, self.env_value("PATH").as_deref())
     }
 
@@ -232,9 +302,9 @@ impl CliRunner {
             .or_else(|| std::env::var_os(key))
     }
 
-    fn command(&self, args: &[&str], path: Option<&Path>) -> Command {
+    fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
         use std::os::unix::process::CommandExt;
-        let mut cmd = Command::new(&self.program);
+        let mut cmd = Command::new(program);
         cmd.args(args);
         if let Some(p) = path {
             cmd.arg("--path").arg(p);
@@ -276,15 +346,13 @@ impl CliRunner {
     }
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
-        if self.missing {
-            return Err(RunError::NotFound);
-        }
+        let program = self.current_program().ok_or(RunError::NotFound)?;
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match crate::process::spawn(&mut self.command(args, path)) {
+            match crate::process::spawn(&mut self.command(args, path, &program)) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;
@@ -1298,7 +1366,7 @@ mod tests {
             runner = runner.with_env(name, "/example/value");
         }
         let removed = |runner: &CliRunner| {
-            let command = runner.command(&["x"], None);
+            let command = runner.command(&["x"], None, &runner.program.clone());
             names
                 .iter()
                 .filter(|name| {
@@ -1330,7 +1398,7 @@ mod tests {
             runner = runner.with_env(name, "/example/value");
         }
         let removed = |runner: &CliRunner| {
-            let command = runner.command(&["x"], None);
+            let command = runner.command(&["x"], None, &runner.program.clone());
             names
                 .iter()
                 .filter(|name| {

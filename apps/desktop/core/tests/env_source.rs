@@ -38,7 +38,7 @@ exit 1
 "#).unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
     let source = LiveSource {
-        compat: Default::default(),
+        cache: Default::default(),
         runner: CliRunner::new(exe)
             .with_env("EXPECTED_ROOT", project.to_str().unwrap())
             .with_env("HOME", dir.to_str().unwrap())
@@ -82,7 +82,7 @@ echo '{"vars":[],"missing_required":[]}'
     .unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
     let source = LiveSource {
-        compat: Default::default(),
+        cache: Default::default(),
         runner: CliRunner::new(exe)
             .with_env("HOME", dir.to_str().unwrap())
             .with_env("HACK_HOME", dir.to_str().unwrap())

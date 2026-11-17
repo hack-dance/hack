@@ -450,6 +450,7 @@ impl HackApp {
                 }
                 .into(),
                 compatible: false,
+                shared_with: None,
             },
         )));
     }
@@ -510,7 +511,10 @@ impl HackApp {
         if !self.live {
             return;
         }
-        let source = self.source.clone();
+        // Bound to the CLI selected now: a switch before the background
+        // task runs cannot make this action run another CLI.
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        let epoch = self.model.source_epoch();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -520,6 +524,13 @@ impl HackApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // Started under a CLI the app no longer runs: its result
+                // belongs to that installation, not to what is shown now.
+                if this.model.source_epoch() != epoch {
+                    this.action_started.remove(&key);
+                    cx.notify();
+                    return;
+                }
                 if let Ok(ActionOutcome::Opened(o)) = &result {
                     cx.open_url(&o.url);
                 }
@@ -556,7 +567,10 @@ impl HackApp {
         }
         self.recovery_busy = true;
         self.recovery_error = None;
-        let source = self.source.clone();
+        // Starts or restarts the hackd of the CLI selected now, whatever is
+        // selected by the time the task runs.
+        let source = self.source.pinned().unwrap_or_else(|| self.source.clone());
+        let epoch = self.model.source_epoch();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -564,6 +578,12 @@ impl HackApp {
                 .spawn(async move { source.recover_daemon(action) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // After a switch the recovery state belongs to the new CLI:
+                // leave its guard and error alone.
+                if this.model.source_epoch() != epoch {
+                    cx.notify();
+                    return;
+                }
                 this.recovery_busy = false;
                 this.recovery_error = result.err();
                 // A command exit is not evidence that a compatible daemon
@@ -654,6 +674,85 @@ impl HackApp {
         if to == 2 {
             self.read_env(cx);
         }
+        cx.notify();
+    }
+
+    /// The status bar, naming the Hack CLI the app runs (`hack-next
+    /// 5.0.0-next.19 · prerelease`) and offering another install when one
+    /// was found (HACK-2283).
+    fn status_bar_with_cli(
+        &self,
+        list: &ListView,
+        ui: &Ui,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let choice = self.source.cli_choice();
+        let version = self.cli_label_for(list);
+        let other = choice.as_ref().and_then(|c| c.others().next().cloned());
+        let p = ui.p;
+        status_bar(self.status_items(list), version, ui).children(other.map(|o| {
+            let label = format!("Use {} ({})", o.name, o.channel.label());
+            div()
+                .id("use-other-cli")
+                .ml(space::S5)
+                .cursor_pointer()
+                .text_color(p.accent)
+                .hover(|d| d.underline())
+                .child(label)
+                .on_click(cx.listener(move |this, _, window, cx| this.use_cli(&o.path, window, cx)))
+        }))
+    }
+
+    /// The status bar's CLI label: `hack-next 5.0.0-next.19 · prerelease`.
+    fn cli_label_for(&self, list: &ListView) -> Option<String> {
+        let selected = self.source.cli_choice().and_then(|c| c.selected);
+        list.cli_version.clone().map(|v| match &selected {
+            Some(i) => format!("{} {v} · {}", i.name, i.channel.label()),
+            None => format!("hack {v}"),
+        })
+    }
+
+    /// The CLI label the status bar shows now (`--drive`).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    pub(crate) fn cli_label(&self) -> Option<String> {
+        self.cli_label_for(&self.model.list())
+    }
+
+    /// Run another Hack CLI from now on (saved for next launch), and read
+    /// its hackd.
+    ///
+    /// The switch is an ownership boundary: the other CLI has its own
+    /// hackd, registry and homes. Everything read from or started through
+    /// the previous one is dropped (the snapshot, reads in flight, Env,
+    /// Doctor, the Logs stream and the terminal tabs) before the new CLI's
+    /// first read.
+    pub(crate) fn use_cli(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.source.cli_choice().and_then(|c| c.selected);
+        let result = self.source.use_cli(path);
+        let after = self.source.cli_choice().and_then(|c| c.selected);
+        if let Err(why) = result {
+            // Saving the choice can fail after the switch itself applied.
+            self.recovery_error = Some(why);
+        }
+        if before != after {
+            self.model.source_changed();
+            // A Start or Restart hackd still running belongs to the
+            // previous installation: it must not block this one.
+            self.recovery_busy = false;
+            self.recovery_error = None;
+            self.logs.close();
+            self.env.begin();
+            self.doctor.source_changed();
+            #[cfg(feature = "terminal")]
+            self.close_all_terminals(window, cx);
+        }
+        let _ = window;
+        self.refresh_now_async(cx);
         cx.notify();
     }
 
@@ -901,6 +1000,8 @@ impl HackApp {
                     false,
                 ),
                 Banner::DaemonReadFailed { error } => (BannerTone::Warn, error.clone(), false),
+                // Another install's hackd: name both, offer nothing to do.
+                Banner::SharedHome { message } => (BannerTone::Warn, message.clone(), false),
                 // With a daemon banner, the stale banner repeats its cause.
                 // Otherwise it is the only sign the latest read failed.
                 Banner::Stale { .. } if daemon_banner => continue,
@@ -1407,11 +1508,7 @@ impl Render for HackApp {
                             .child(main),
                     ),
             )
-            .child(status_bar(
-                self.status_items(&list),
-                list.cli_version.clone().map(|v| format!("hack {v}")),
-                &ui,
-            ))
+            .child(self.status_bar_with_cli(&list, &ui, cx))
     }
 }
 

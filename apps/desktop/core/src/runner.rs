@@ -470,10 +470,15 @@ impl CliRunner {
         let writer = match (input, child.stdin.take()) {
             (Some(bytes), Some(mut stdin)) => {
                 let bytes = bytes.to_vec();
-                Some(thread::spawn(move || {
+                let (done, written) = mpsc::channel::<()>();
+                let handle = thread::spawn(move || {
                     use std::io::Write as _;
                     let _ = stdin.write_all(&bytes);
-                }))
+                    // Closing stdin (dropped here) ends the input.
+                    drop(stdin);
+                    let _ = done.send(());
+                });
+                Some((handle, written))
             }
             _ => None,
         };
@@ -520,10 +525,25 @@ impl CliRunner {
                 stdout_head: head(&stdout.text),
             });
         }
-        // The child has exited, so its end of the pipe is closed and the
-        // write has finished or failed.
-        if let Some(w) = writer {
-            let _ = w.join();
+        // The command has exited, but a descendant may still hold its stdin
+        // without reading, which blocks the write. The deadline covers that
+        // too: past it, the group ends, its end of the pipe closes, and the
+        // write fails.
+        if let Some((handle, written)) = writer {
+            let finished = match deadline {
+                Some((d, t)) => {
+                    let left = d.saturating_duration_since(Instant::now());
+                    written.recv_timeout(left).map_err(|_| {
+                        terminate_group(&mut child, grace_left(d));
+                        RunError::Timeout { after: t }
+                    })
+                }
+                None => written
+                    .recv()
+                    .map_err(|_| RunError::Spawn("input writer stopped".into())),
+            };
+            let _ = handle.join();
+            finished?;
         }
         Ok((stdout.text, stderr.text, status.code()))
     }
@@ -1326,6 +1346,29 @@ mod tests {
         let (out, _, _) = f.runner().run_raw(&["x"], None, T).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["stdin"], "");
+    }
+
+    #[test]
+    fn a_descendant_holding_stdin_cannot_hold_the_write_past_the_deadline() {
+        // The command exits at once; a descendant keeps stdin open and never
+        // reads, and the input is larger than any pipe buffer.
+        let f = FakeHack::new("sleep 120 <&0 >/dev/null 2>&1 &\nexit 0");
+        let started = Instant::now();
+        let input = vec![b'x'; 1 << 20];
+        let r = f
+            .runner()
+            .with_term_grace(Duration::from_millis(100))
+            .run_raw_with_input(
+                &["env", "add", "K", "--value-stdin"],
+                None,
+                Duration::from_secs(2),
+                &input,
+            );
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "ended at the deadline, not when the descendant did"
+        );
     }
 
     #[test]

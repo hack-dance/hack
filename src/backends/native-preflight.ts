@@ -40,6 +40,7 @@ import {
   type NativeServicePreparationProblem,
   nativeServicePreparationProblems,
 } from "./native-project-start.ts";
+import { nativeManagedRestartNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
   isNativeRuntimeStopError,
@@ -1627,6 +1628,32 @@ async function collectSetupFinding(
   return runtimeSetup;
 }
 
+/** HACK-2324: a restart policy native does not apply to privately delivered services. */
+function managedRestartFindings(
+  document: NonNullable<AdaptedProject["document"]>,
+  plan: unknown
+): NativePreflightFinding[] {
+  return nativeManagedRestartNotices({
+    compose: JSON.parse(document.normalizedComposeJson),
+    plan,
+    delivered: new Set(document.managedServices),
+  }).map(({ service, line }) =>
+    finding(
+      {
+        severity: "warning",
+        gate: "cli",
+        code: "restart_policy_not_applied",
+        service,
+        field: `services.${service}.restart`,
+      },
+      {
+        message: line,
+        fix: "Nothing to do to start. Restart the service with hack restart if it stops; automatic restart for these services is planned.",
+      }
+    )
+  );
+}
+
 function deliveryFindings(
   document: NonNullable<AdaptedProject["document"]>,
   plan: unknown
@@ -1691,6 +1718,7 @@ export async function collectNativePreflight(
       });
       if (runtime.plan) {
         cli.push(...deliveryFindings(adapted.document, runtime.plan));
+        cli.push(...managedRestartFindings(adapted.document, runtime.plan));
         cli.push(
           ...routeFindings({
             plan: runtime.plan,

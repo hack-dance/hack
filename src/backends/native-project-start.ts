@@ -166,7 +166,10 @@ import {
   requireNativeSourceWithinLimit,
 } from "./native-project-source-size.ts";
 import { requireNativeStaticStartReview } from "./native-project-start-preflight.ts";
-import { reportNativeRestartPolicyNotices } from "./native-restart-policy-notices.ts";
+import {
+  reportNativeManagedRestartNotices,
+  reportNativeRestartPolicyNotices,
+} from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -2354,6 +2357,11 @@ async function startNativeProjectAttempt(
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
+        reportNativeManagedRestartNotices({
+          input,
+          plan: review.report.plan,
+          warn: deps.warn,
+        });
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
         if (metadata) {

@@ -1467,10 +1467,20 @@ unless-stopped is not applied. Restart policies are not applied yet to services
 with published ports or routes (HACK-1935); the service starts without automatic
 restarts.` Other services in the same project keep their policy. For the same
 reason the graph refuses a restart policy, with `graph_restart_policy`, on other
-services with a native HTTP probe, services with host dependencies, services
-that receive managed environment values (delivery is single-use and
-time-bounded) and dependency-cache initializers. Remove the `restart` key from
-those services, or keep them on the Compose backend.
+services with a native HTTP probe, services with host dependencies and
+dependency-cache initializers. Remove the `restart` key from those services, or
+keep them on the Compose backend.
+
+A service that receives private values (managed environment values, privately
+resolved Compose interpolation or a delivered file such as the gcloud ADC
+snapshot) starts without its engine restart policy instead of refusing:
+delivery is single-use and time-bounded, and values are never kept at rest in
+the container, so an engine restart would come back without them. Foreground
+`up` and preflight name each such service, for example `Service web: restart:
+unless-stopped is not applied, because the service receives private values that
+native delivers once per container start. If it crashes it stays stopped until
+Hack restarts it (hack restart web).` Preflight reports it as the warning
+`restart_policy_not_applied`.
 
 Every owned stop first sets the engine policy back to `no` and confirms that with a
 fresh inspection, then requests the stop. A restart that was already pending is

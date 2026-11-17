@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { nativeRestartPolicyNotices } from "../src/backends/native-restart-policy-notices.ts";
+import {
+  nativeManagedRestartNotices,
+  nativePrivatelyDeliveredServices,
+  nativeRestartPolicyNotices,
+} from "../src/backends/native-restart-policy-notices.ts";
 
 const warning = (field: string) => ({
   severity: "warning",
@@ -53,4 +57,40 @@ test("unreviewed names, policies outside the grammar and inactive services are n
   ]) {
     expect(nativeRestartPolicyNotices(plan)).toEqual([]);
   }
+});
+
+test("HACK-2324: only active, privately delivered services with an automatic policy are named", () => {
+  const delivered = nativePrivatelyDeliveredServices({
+    managedEnvironment: { web: { TOKEN: "x" }, empty: {} },
+    shellEnvironment: { shell: {} },
+    managedFiles: { adc: [{}], none: [] },
+  });
+  expect([...delivered].sort()).toEqual(["adc", "shell", "web"]);
+  const restart = (policy: string) => ({ image: "x", restart: policy });
+  const notices = nativeManagedRestartNotices({
+    compose: {
+      services: {
+        web: restart("unless-stopped"),
+        adc: restart("on-failure:3"),
+        shell: restart("no"),
+        worker: restart("always"),
+        inactive: restart("always"),
+        "bad name!": restart("always"),
+      },
+    },
+    plan: {
+      services: {
+        web: { active: true },
+        adc: { active: true },
+        shell: { active: true },
+        worker: { active: true },
+        inactive: { active: false },
+        "bad name!": { active: true },
+      },
+    },
+    delivered: new Set([...delivered, "inactive", "bad name!"]),
+  });
+  expect(notices.map((notice) => notice.service)).toEqual(["adc", "web"]);
+  expect(notices[0]?.line).toContain("restart: on-failure:3 is not applied");
+  expect(notices[0]?.line).toContain("hack restart adc");
 });

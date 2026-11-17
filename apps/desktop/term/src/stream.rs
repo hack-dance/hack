@@ -244,7 +244,8 @@ impl ByteStream {
     /// End a process source on a reaper thread and get a handle to the result.
     pub fn terminate_in_background(mut self) -> PendingTeardown {
         let (tx, rx) = std::sync::mpsc::channel();
-        let hurry = Hurry::new(QUIT_GRACE);
+        // Already sent SIGTERM; at quit, SIGKILL at once (see `Pty`).
+        let hurry = Hurry::new(Duration::ZERO);
         let threads = self.stop_io();
         match self.session.take() {
             None => {

@@ -177,10 +177,20 @@ with only absolute entries (a plain host shell keeps the user's `PATH`):
 
 | Tab | Runs, in the instance's checkout |
 |---|---|
-| Logs (first, not closable) | `hack logs [--branch <b>] [--no-follow] --tail 500`, read-only, colours kept (it runs on a PTY) |
+| Logs (first, not closable) | `hack logs [--branch <b>] [--no-follow] --tail 500 --pretty`, read-only, on a PTY so the CLI's styling (coloured service names, dim timestamps, levels) and each service's own colours reach the grid |
 | Shell in a service (+ menu) | `hack exec [--branch <b>] <service> -- bash`, then `sh` |
 | Host shell (+ menu) | the user's login shell |
 | Host shell with env (+ menu) | `hack host shell --env <overlay> --scope <scope>`, names from `hack env list --json` (`--env base` when no overlay is named); amber badge unless the overlay is the default |
+
+The Logs tab passes `--pretty`: on a PTY, plain `hack logs` keeps only the
+colours services print themselves, while `--pretty` adds the CLI's own
+styling (levels, bold 256-colour service names, dim keys and brackets) through
+the formatter every log path shares. Lines read `[LEVEL] [service] message
+key=value`, plain text in the grid, so find and copy work as before. The 16
+ANSI colours come from your Ghostty `palette` over the light or dark theme, and
+the 256-colour codes from its overrides or the standard xterm palette.
+[`--pretty` tail, light](screenshots/window/logs-pretty-light.png) (the CLI's
+formatter over sample service lines, drawn by the app's terminal).
 
 A Logs stream that ended (a stopped project that now runs) restarts when its
 tab is clicked. Keys: Cmd-J (Ctrl-Shift-J) toggle, Cmd-T new tab menu,
@@ -214,6 +224,9 @@ type <text>                     type it, one keystroke per character
 paste <file>                    paste a file's text as the Paste action
                                 does (into find while it is open)
 expect <text> [<seconds>]       wait for text on the active tab's screen
+expect-styled <count> [<seconds>]
+                                wait for at least <count> styled cells
+                                (colour, bold, faint…) on the active tab
 expect-notice <text> [<seconds>]
                                 wait for the active tab's notice (a refused
                                 paste) to contain text

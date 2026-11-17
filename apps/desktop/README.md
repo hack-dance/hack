@@ -280,6 +280,31 @@ Renders: [running, dark](screenshots/window/running-dark.png),
 [failed start](screenshots/window/failed-start-light.png),
 [Doctor](screenshots/window/doctor-light.png).
 
+## Setup
+
+A live launch checks setup (DESIGN.md section 2) and opens **Set up Hack** when
+something needs attention; Doctor's **Run setup again** opens it any time. One
+card per step, in order: the Hack CLI (required), the Compose or native
+runtime, hackd, routing and DNS, certificate trust, and the login service.
+
+- Checks only read; they never start a service. Unknown and skipped steps stay
+  unresolved; a skip lasts for this session and never satisfies a check. The
+  CLI cannot be skipped, and **Continue** needs it.
+- The app runs only the fixed `hack daemon start` and `hack daemon install`,
+  each followed by fresh checks. Install needs a confirmed login-service
+  manager and an ordinary Hack home.
+- Admin steps (`hack global install`, `hack global trust`) call `sudo`, so they
+  go to your own terminal (**Open in terminal**: Terminal.app, or
+  `xdg-terminal-exec` on Linux). It shows the command and waits for Enter; no
+  password passes through the app. **Copy command** works everywhere.
+- Checks and fixes run the CLI that was checked, by absolute path, refused
+  when another user can change it, with a clean environment of named,
+  non-secret variables only. Setup checks again when the window comes back
+  after a fix.
+
+Renders: [setup, light](screenshots/window/setup-light.png),
+[no CLI, dark](screenshots/window/setup-missing-cli-dark.png).
+
 ## Doctor
 
 The sidebar Doctor row reads `hack doctor --json` once outside all projects and

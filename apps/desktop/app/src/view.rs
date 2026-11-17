@@ -133,7 +133,7 @@ pub struct HackApp {
     filter: String,
     /// When the URL was last copied, for the check mark.
     copied: Option<Instant>,
-    pane: Pane,
+    pub(crate) pane: Pane,
     doctor: DoctorPane,
     /// Is the window visible (not minimised or hidden)? Automatic doctor
     /// runs wait for it.
@@ -141,6 +141,11 @@ pub struct HackApp {
     _visibility: Option<gpui_kit::Subscription>,
     recovery_busy: bool,
     recovery_error: Option<String>,
+    /// Setup checks (DESIGN.md section 2; `setup_view`).
+    pub(crate) setup: hack_desktop_core::setup::Pane,
+    /// The launch check has not reported yet: when it finds something to
+    /// do, setup opens.
+    pub(crate) setup_on_launch: bool,
     /// When each project's running action started, for the slow-action
     /// warning. Display only: the app never terminates a lifecycle command.
     action_started: std::collections::HashMap<InstanceKey, Instant>,
@@ -182,10 +187,13 @@ impl HackApp {
             recovery_busy: false,
             recovery_error: None,
             action_started: std::collections::HashMap::new(),
+            setup: Default::default(),
+            setup_on_launch: live,
         };
         if live {
             this.start_polling(cx);
             this.start_doctor_refresh(cx);
+            this.load_setup(cx);
         } else {
             this.refresh_now();
         }
@@ -318,6 +326,18 @@ impl HackApp {
             |this, visibility, _window, cx| {
                 this.window_visible = visibility.is_visible();
                 this.maybe_auto_refresh(cx);
+                // Back from the terminal after an admin step: check setup
+                // again while it is shown or a fix is outstanding.
+                if this.window_visible
+                    && hack_desktop_core::setup::should_recheck_on_focus(
+                        this.pane == Pane::Setup,
+                        this.setup.pending_fix,
+                        this.setup.loading,
+                        this.setup.action_busy,
+                    )
+                {
+                    this.load_setup(cx);
+                }
             },
         ));
     }
@@ -1497,6 +1517,9 @@ impl Render for HackApp {
         let ui = self.ui(cx);
         let p = ui.p;
         let main: AnyElement = match &list.phase {
+            // Setup applies whatever the project list shows, a missing CLI
+            // included.
+            _ if self.pane == Pane::Setup => crate::setup_view::render(&self.setup, &ui, cx),
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.

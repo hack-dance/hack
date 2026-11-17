@@ -101,6 +101,59 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                 .ok();
         }
     }
+    if fixture.is_none() {
+        setup_shots(dir, &mut cx);
+    }
+}
+
+/// Every setup fixture (`setup_fixtures::NAMES`), light and dark, as
+/// `setup-<name>-<light|dark>.png`.
+fn setup_shots(dir: &Path, cx: &mut HeadlessAppContext) {
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        for name in hack_desktop_core::setup_fixtures::NAMES {
+            cx.update(|cx| Theme::change(mode, None, cx));
+            let opts = WindowOptions {
+                focus: false,
+                show: false,
+                ..crate::window_options()
+            };
+            let report = hack_desktop_core::setup_fixtures::load(name).expect("setup fixture");
+            let (handle, _app) = cx
+                .update(|cx| {
+                    gpui_kit::open_window(opts, cx, |window, cx| {
+                        cx.new(|cx| {
+                            // The window behind setup: no CLI for that card,
+                            // an empty registry otherwise.
+                            let base = if name == "missing-cli" {
+                                Fixture::CliMissing
+                            } else {
+                                Fixture::Empty
+                            };
+                            let mut app =
+                                HackApp::new(crate::source_for(Some(base)), false, window, cx);
+                            app.show_setup_now(report);
+                            app
+                        })
+                    })
+                })
+                .expect("open offscreen window");
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("render");
+            let img = cx
+                .capture_screenshot(handle)
+                .expect("offscreen rendering must be available");
+            let suffix = if mode == ThemeMode::Dark {
+                "dark"
+            } else {
+                "light"
+            };
+            let path = dir.join(format!("setup-{name}-{suffix}.png"));
+            img.save(&path).expect("write png");
+            println!("{}", path.display());
+            cx.update_window(handle, |_, window, _| window.remove_window())
+                .ok();
+        }
+    }
 }
 
 /// One step of the click-through: a name and what the click does.

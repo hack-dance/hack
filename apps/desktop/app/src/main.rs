@@ -23,6 +23,7 @@ mod drive;
 mod logs_view;
 #[cfg(feature = "screenshots")]
 mod screenshots;
+mod setup_view;
 #[cfg(feature = "terminal")]
 mod terminal;
 mod view;

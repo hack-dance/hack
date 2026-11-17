@@ -412,7 +412,7 @@ impl HackApp {
             scope: row
                 .and_then(|r| r.write_scope().ok())
                 .filter(|s| s != "unknown"),
-            blocked: row.and_then(|r| r.write_scope().err()),
+            blocked: row.and_then(EnvRow::write_blocked),
             local: row.is_some_and(EnvRow::is_local_layer),
             id: {
                 self.env_edit_seq += 1;
@@ -421,7 +421,7 @@ impl HackApp {
             name,
             value,
             busy: false,
-            error: row.and_then(|r| r.write_scope().err()).or(read_error),
+            error: row.and_then(EnvRow::write_blocked).or(read_error),
             ready,
         });
         self.env_saved = None;
@@ -1547,5 +1547,34 @@ mod tests {
         });
         assert!(!busy && saved.is_none(), "nothing was written");
         assert!(error.unwrap().contains("api, web"));
+    }
+
+    #[test]
+    fn a_value_mirrored_into_the_backend_cannot_be_saved_and_says_why() {
+        // Saving it would copy the plaintext into the shared YAML (or a new
+        // local file) instead of the backend it lives in.
+        let (mut cx, window, app) = app_window();
+        let mut mirrored = row(&mut cx, &app, "APP_MODE");
+        mirrored.layer = Some("portable_backend".into());
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| a.open_env_edit(Some(&mirrored), window, cx));
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| {
+                let v = a.env_edit.as_ref().unwrap().value.clone();
+                v.update(cx, |s, cx| s.set_value("fake-typed", window, cx));
+                assert!(!HackApp::edit_can_save(a.env_edit.as_ref().unwrap(), cx));
+                a.save_env_edit(cx);
+            });
+        })
+        .unwrap();
+        let (busy, error, saved) = cx.update(|cx| {
+            let a = app.read(cx);
+            let e = a.env_edit.as_ref().unwrap();
+            (e.busy, e.error.clone(), a.env_saved.clone())
+        });
+        assert!(!busy && saved.is_none(), "nothing was written");
+        assert!(error.unwrap().contains("portable_backend"));
     }
 }

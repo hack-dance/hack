@@ -601,7 +601,10 @@ blanks it; a late read never overwrites what you typed); a
 secret starts empty, and its field is masked. A secret cannot be edited while
 the key is missing, and a legacy variable limited to several services cannot
 be edited in the app (one write cannot cover them): the editor says to use the
-CLI per service or `hack env migrate`. The editor closes on another overlay, scope, tab or
+CLI per service or `hack env migrate`. Nor can a value held outside the env
+files (`portable_backend`, a legacy project's mirror in its encrypted
+backend, or `keychain` and `process`): Save would copy it into a YAML file
+instead, so the editor names the layer and says to use the CLI. The editor closes on another overlay, scope, tab or
 project. After Save the tab says "Saved NAME" and lists again.
 
 What needs the CLI is shown, not hidden: **+ Overlay** (create an overlay,

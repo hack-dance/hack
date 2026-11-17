@@ -30,6 +30,9 @@
 //! paste <file>                    paste a file's text as the Paste action
 //!                                 does (relative to the steps file)
 //! expect <text> [<seconds>]       wait for text on the active tab's screen
+//! expect-styled <count> [<seconds>]
+//!                                 wait for at least <count> styled cells
+//!                                 (colour, bold, faint…) on the active tab
 //! expect-notice <text> [<seconds>]
 //!                                 wait for the active tab's notice (a
 //!                                 refused paste) to contain text
@@ -92,6 +95,10 @@ pub enum Step {
         text: String,
         within: Duration,
     },
+    ExpectStyled {
+        count: usize,
+        within: Duration,
+    },
     Wait(Duration),
     CheckContainer {
         service: String,
@@ -138,6 +145,15 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
             ("key", [k]) => Step::Key((*k).into()),
             ("type", _) if !rest.is_empty() => Step::Type(unescape(rest)),
             ("paste", _) if !rest.is_empty() => Step::Paste(base.join(rest)),
+            ("expect-styled", [n]) | ("expect-styled", [n, _]) => Step::ExpectStyled {
+                count: n.parse().map_err(|_| bad("not a number of cells"))?,
+                within: Duration::from_secs(
+                    args.get(1)
+                        .map(|s| s.parse().map_err(|_| bad("not a number of seconds")))
+                        .transpose()?
+                        .unwrap_or(10),
+                ),
+            },
             ("expect" | "expect-notice", _) if !rest.is_empty() => {
                 let (text, within) = match rest.rsplit_once(char::is_whitespace) {
                     Some((t, secs)) if secs.parse::<u64>().is_ok() => (
@@ -387,6 +403,19 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
             })
             .await
             .ok_or_else(|| format!("{text:?} not on screen within {within:?}"))?;
+            Ok(String::new())
+        }
+        Step::ExpectStyled { count, within } => {
+            poll(handle, cx, *within, |app, _, cx| {
+                (app.drive_styled_cells(cx) >= *count).then_some(())
+            })
+            .await
+            .ok_or_else(|| {
+                let now = handle
+                    .update(cx, |app, _, cx| app.drive_styled_cells(cx))
+                    .unwrap_or_default();
+                format!("{count} styled cells not on screen within {within:?} (found {now})")
+            })?;
             Ok(String::new())
         }
         Step::ExpectNotice { text, within } => {
@@ -749,6 +778,7 @@ mod tests {
             logs\n\
             expect ready 5\n\
             expect-notice input limit 3\n\
+            expect-styled 40 5\n\
             host\n\
             container api\n\
             env staging api\n\
@@ -774,9 +804,9 @@ mod tests {
                 within: Duration::from_secs(5)
             }
         );
-        assert_eq!(steps[9], Step::Type("sleep 86399 &\r".into()));
-        assert_eq!(steps[10], Step::Paste(PathBuf::from("/tmp/d/big.txt")));
-        assert_eq!(steps[11], Step::Wait(Duration::from_millis(250)));
+        assert_eq!(steps[10], Step::Type("sleep 86399 &\r".into()));
+        assert_eq!(steps[11], Step::Paste(PathBuf::from("/tmp/d/big.txt")));
+        assert_eq!(steps[12], Step::Wait(Duration::from_millis(250)));
         assert_eq!(
             steps[3],
             Step::ExpectNotice {
@@ -784,7 +814,14 @@ mod tests {
                 within: Duration::from_secs(3)
             }
         );
-        assert_eq!(steps.len(), 14);
+        assert_eq!(
+            steps[4],
+            Step::ExpectStyled {
+                count: 40,
+                within: Duration::from_secs(5)
+            }
+        );
+        assert_eq!(steps.len(), 15);
     }
 
     #[test]

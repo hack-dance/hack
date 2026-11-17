@@ -54,11 +54,22 @@ esac
 "#).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     warm_version(&program, &t.0);
+    // Hermetic: nothing about this machine's tools or Docker selection
+    // reaches the checks. An inherited DOCKER_HOST, DOCKER_CONTEXT or PATH
+    // could make the Doctor preflight refuse before Doctor runs. An empty
+    // value counts as unset.
     let runner = CliRunner::new(program)
         .with_env("HACK_RUNTIME_BACKEND", "native")
         .with_env("CALLS", calls.to_str().unwrap())
         .with_env("HOME", t.0.to_str().unwrap())
         .with_env("HACK_HOME", t.0.join("hack").to_str().unwrap())
+        .with_env("PATH", "/usr/bin:/bin")
+        .with_env("DOCKER_HOST", "")
+        .with_env("DOCKER_CONTEXT", "")
+        .with_env("DOCKER_CONFIG", t.0.join("docker").to_str().unwrap())
+        .with_env("DOCKER_CLI_PLUGIN_EXTRA_DIRS", "")
+        .with_env("HACK_MUTAGEN_PATH", "")
+        .with_env("HACK_GLOBAL_CONFIG_PATH", "")
         .with_term_grace(Duration::from_millis(20));
     let source = LiveSource {
         runner,
@@ -75,13 +86,28 @@ esac
         Status::Unknown
     );
     let read_calls = std::fs::read_to_string(&calls).unwrap();
+    // On failure, show what the CLI was asked and why each card says what
+    // it says (a Doctor preflight refusal names its reason there).
+    let why = || {
+        let cards: Vec<String> = r
+            .cards
+            .iter()
+            .map(|c| format!("{} {:?}: {}", c.id, c.status, c.detail))
+            .collect();
+        format!("calls:\n{read_calls}cards:\n{}", cards.join("\n"))
+    };
     assert!(
         !read_calls.contains("projects"),
-        "registry-writing listing is refused"
+        "registry-writing listing is refused; {}",
+        why()
     );
-    assert!(read_calls.contains("doctor --json backend=compose"));
-    assert!(!read_calls.contains("global"));
-    assert!(!read_calls.contains("daemon start"));
+    assert!(
+        read_calls.contains("doctor --json backend=compose"),
+        "Doctor runs once for the Compose machine checks; {}",
+        why()
+    );
+    assert!(!read_calls.contains("global"), "{}", why());
+    assert!(!read_calls.contains("daemon start"), "{}", why());
     let out = source.setup_action(SafeAction::StartDaemon, &r);
     assert!(out.contains("Some(0)"));
     // The started daemon runs the checked CLI, not whatever is first on PATH.

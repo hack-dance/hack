@@ -334,9 +334,7 @@ pub fn derive(
             Remedy::Doc(NATIVE_DOC.into()),
         ));
     }
-    let running = daemon
-        .and_then(|d| d.get("running"))
-        .and_then(serde_json::Value::as_bool);
+    let running = daemon.and_then(daemon_running);
     // The CLI's own answer for differing versions (`api_compatible`), as the
     // window uses it: compatible versions need nothing.
     let compatible = daemon
@@ -586,6 +584,22 @@ pub fn should_recheck_on_focus(
 }
 
 pub use crate::setup_login::{installation_refusal, qualify_login};
+
+/// Whether `hack daemon status --json` says hackd runs. `running` is the
+/// CLI's tracked-PID view; a hackd whose API answers (`status: "running"`
+/// with `api_ok` or `api_reachable`) runs even without a tracked PID (one
+/// started outside the CLI's PID file, for example). `None` when the report
+/// says neither.
+fn daemon_running(d: &serde_json::Value) -> Option<bool> {
+    let flag = |key: &str| d.get(key).and_then(serde_json::Value::as_bool);
+    let api_answers = d.get("status").and_then(serde_json::Value::as_str) == Some("running")
+        && (flag("api_ok") == Some(true) || flag("api_reachable") == Some(true));
+    match flag("running") {
+        Some(true) => Some(true),
+        _ if api_answers => Some(true),
+        other => other,
+    }
+}
 
 #[cfg(test)]
 mod routing_tests {

@@ -84,10 +84,20 @@ impl DaemonClient {
         serde_json::from_slice(&body).map_err(|e| DaemonError::BadResponse(e.to_string()))
     }
 
+    /// `/v1/status`. A reply without a status or a version is not a status:
+    /// the window would otherwise compare an empty version with the CLI's.
+    ///
     /// # Errors
-    /// Any [`DaemonError`].
+    /// Any [`DaemonError`]; [`DaemonError::BadResponse`] for an empty status
+    /// or version.
     pub fn status(&self) -> Result<DaemonApiStatus, DaemonError> {
-        self.get_json("/v1/status")
+        let status: DaemonApiStatus = self.get_json("/v1/status")?;
+        if status.status.trim().is_empty() || status.version.trim().is_empty() {
+            return Err(DaemonError::BadResponse(
+                "hackd status has no status or version".into(),
+            ));
+        }
+        Ok(status)
     }
 
     /// # Errors
@@ -105,8 +115,16 @@ impl DaemonClient {
         check_socket_path_len(&self.socket)?;
         let uid = current_uid();
         check_private_dir(&self.socket, uid)?;
-        let mut s = UnixStream::connect(&self.socket)
-            .map_err(|e| DaemonError::Unreachable(e.to_string()))?;
+        // One deadline for the whole request: connect, write and read each
+        // get only what is left of it.
+        let deadline = std::time::Instant::now() + self.timeout;
+        let left = || {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            (!left.is_zero())
+                .then_some(left)
+                .ok_or(DaemonError::Timeout)
+        };
+        let mut s = connect_bounded(&self.socket, left()?)?;
         match peer_uid(&s) {
             Some(p) if p == uid => {}
             Some(p) => {
@@ -116,19 +134,203 @@ impl DaemonClient {
             }
             None => return Err(DaemonError::Untrusted("peer uid unavailable".into())),
         }
-        s.set_read_timeout(Some(self.timeout))
-            .and_then(|()| s.set_write_timeout(Some(self.timeout)))
-            .map_err(|e| DaemonError::Unreachable(e.to_string()))?;
         let req = format!(
             "GET {path_and_query} HTTP/1.1\r\nHost: hackd\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
         );
-        s.write_all(req.as_bytes()).map_err(io_err)?;
+        let mut pending = req.as_bytes();
+        while !pending.is_empty() {
+            s.set_write_timeout(Some(left()?))
+                .map_err(|e| DaemonError::Unreachable(e.to_string()))?;
+            match s.write(pending) {
+                Ok(0) => {
+                    return Err(DaemonError::Unreachable(
+                        "hackd closed the connection".into(),
+                    ));
+                }
+                Ok(n) => pending = &pending[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(io_err(e)),
+            }
+        }
         let mut raw = Vec::new();
-        s.take(MAX_BODY as u64 + 64 * 1024)
-            .read_to_end(&mut raw)
-            .map_err(io_err)?;
+        let limit = MAX_BODY + 64 * 1024;
+        let mut buf = [0; 8192];
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(DaemonError::Timeout);
+            }
+            // Wait with poll rather than SO_RCVTIMEO: macOS rejects setting a
+            // receive timeout (EINVAL) once the peer has closed, which is the
+            // normal end of an HTTP/1.1 response here.
+            if !readable_within(&s, left)? {
+                return Err(DaemonError::Timeout);
+            }
+            let n = match s.read(&mut buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result.map_err(io_err)?,
+            };
+            if n == 0 {
+                break;
+            }
+            if raw.len() + n > limit {
+                return Err(DaemonError::BadResponse("response too large".into()));
+            }
+            raw.extend_from_slice(&buf[..n]);
+        }
         parse_http(&raw)
     }
+}
+
+/// Whether `stream` has data, end of file or an error within `timeout`.
+fn readable_within(stream: &UnixStream, timeout: Duration) -> Result<bool, DaemonError> {
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        let mut poll = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll points to one live initialized pollfd for this call.
+        let ready = unsafe {
+            libc::poll(
+                &mut poll,
+                1,
+                left.as_millis().max(1).min(i32::MAX as u128) as i32,
+            )
+        };
+        match ready {
+            0 => return Ok(false),
+            n if n > 0 => return Ok(true),
+            _ => {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(io_err(e));
+                }
+            }
+        }
+    }
+}
+
+/// A full listen backlog must not make an observe-only read block forever.
+fn connect_bounded(path: &Path, timeout: Duration) -> Result<UnixStream, DaemonError> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.contains(&0) {
+        return Err(DaemonError::BadResponse("socket path contains NUL".into()));
+    }
+    // SAFETY: socket has no pointer arguments; an owned descriptor closes on
+    // every error path. sockaddr_un is zero-initialized and its path length
+    // was checked by the caller before this helper.
+    #[cfg(target_os = "linux")]
+    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let kind = libc::SOCK_STREAM;
+    // SAFETY: socket arguments contain no pointers. Linux sets close-on-exec
+    // atomically; other platforms set it before the descriptor is used below.
+    let raw = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+    if raw < 0 {
+        return Err(io_err(std::io::Error::last_os_error()));
+    }
+    // SAFETY: successful socket() returned a fresh descriptor we own.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: zero is valid for sockaddr_un; no references/pointers inside.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= addr.sun_path.len() {
+        return Err(DaemonError::BadResponse("socket path too long".into()));
+    }
+    addr.sun_family = libc::AF_UNIX as _;
+    for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+        *dst = *src as _;
+    }
+    let len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+    {
+        addr.sun_len = len as _;
+    }
+    // SAFETY: descriptor is owned/live, addr is initialized for len bytes;
+    // fcntl changes only this task's new socket, never a shared descriptor.
+    let result = unsafe {
+        if libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) < 0
+            || libc::fcntl(raw, libc::F_SETFL, libc::O_NONBLOCK) < 0
+        {
+            return Err(io_err(std::io::Error::last_os_error()));
+        }
+        libc::connect(
+            raw,
+            std::ptr::from_ref(&addr).cast(),
+            len as libc::socklen_t,
+        )
+    };
+    if result < 0 {
+        let e = std::io::Error::last_os_error();
+        // Unix-domain nonblocking connect reports EAGAIN for a full queue;
+        // there is no connection in progress to wait for in that case.
+        if e.raw_os_error() == Some(libc::EAGAIN) {
+            return Err(DaemonError::Timeout);
+        }
+        if e.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(io_err(e));
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(DaemonError::Timeout);
+            }
+            let mut poll = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: poll points to one live initialized pollfd for this call.
+            let ready = unsafe {
+                libc::poll(
+                    &mut poll,
+                    1,
+                    left.as_millis().max(1).min(i32::MAX as u128) as i32,
+                )
+            };
+            if ready == 0 {
+                return Err(DaemonError::Timeout);
+            }
+            if ready < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(io_err(e));
+            }
+            let mut error: libc::c_int = 0;
+            let mut size = std::mem::size_of_val(&error) as libc::socklen_t;
+            // SAFETY: output pointers name writable integers of the declared size.
+            if unsafe {
+                libc::getsockopt(
+                    raw,
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    std::ptr::from_mut(&mut error).cast(),
+                    &mut size,
+                )
+            } < 0
+            {
+                return Err(io_err(std::io::Error::last_os_error()));
+            }
+            if error != 0 {
+                return Err(io_err(std::io::Error::from_raw_os_error(error)));
+            }
+            break;
+        }
+    }
+    let stream = UnixStream::from(fd);
+    stream.set_nonblocking(false).map_err(io_err)?;
+    Ok(stream)
 }
 
 /// Longest Unix socket path, in bytes, this platform accepts
@@ -342,6 +544,72 @@ mod tests {
             String::from_utf8_lossy(&buf[..n]).into_owned()
         });
         (sock, h)
+    }
+
+    #[test]
+    fn slow_drip_cannot_extend_the_read_deadline() {
+        // One byte every 10 ms: each read returns before a per-read timeout,
+        // so only an overall deadline ends it.
+        let dir = short_socket_dir();
+        let socket = dir.join("slow.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            for _ in 0..20 {
+                if stream.write_all(b"x").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+        let start = std::time::Instant::now();
+        let result = DaemonClient::new(socket, Duration::from_millis(50)).status();
+        assert!(matches!(result, Err(DaemonError::Timeout)), "{result:?}");
+        assert!(start.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_full_socket_backlog_does_not_block_observation() {
+        use std::os::fd::AsRawFd;
+        let dir = short_socket_dir();
+        let socket = dir.join("full.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        // SAFETY: this test exclusively owns the listener; change its backlog.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let _pending = UnixStream::connect(&socket).unwrap();
+        let start = std::time::Instant::now();
+        let result = DaemonClient::new(socket, Duration::from_millis(50)).status();
+        assert!(matches!(result, Err(DaemonError::Timeout)), "{result:?}");
+        assert!(start.elapsed() < Duration::from_secs(2));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_status_without_a_status_or_version_is_refused() {
+        for body in [
+            r#"{"version":"5.0.0"}"#,
+            r#"{"status":"running","version":""}"#,
+            r#"{"status":" ","version":"5.0.0"}"#,
+        ] {
+            let (sock, h) = serve_once(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .into_bytes(),
+            );
+            let result = DaemonClient::new(sock, Duration::from_secs(2)).status();
+            assert!(
+                matches!(result, Err(DaemonError::BadResponse(_))),
+                "{body}: {result:?}"
+            );
+            h.join().unwrap();
+        }
     }
 
     #[test]

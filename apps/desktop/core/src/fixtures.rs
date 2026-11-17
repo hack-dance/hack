@@ -400,6 +400,8 @@ pub fn project(f: Fixture) -> ProjectsPayload {
                     failed_services: vec!["api".into()],
                     last_error_code: Some("E_STARTUP_INCOMPLETE".into()),
                 },
+                max_failures: Some(3),
+                ..Autostart::default()
             });
             r
         }
@@ -463,6 +465,7 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         runtime_error: (f == Fixture::EngineDown)
             .then(|| "Cannot connect to the Docker daemon".into()),
         projects,
+        autostart_global: None,
     }
 }
 

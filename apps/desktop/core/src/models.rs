@@ -30,6 +30,9 @@ pub struct ProjectsPayload {
     pub runtime_error: Option<String>,
     #[serde(deserialize_with = "null_default")]
     pub projects: Vec<ProjectRow>,
+    /// Machine-wide always-on state (docs/always-on-projects.md, "JSON
+    /// contract"). `None` when the payload does not carry it.
+    pub autostart_global: Option<AutostartGlobal>,
 }
 
 impl ProjectsPayload {
@@ -392,7 +395,8 @@ impl Container {
     }
 }
 
-/// Always-on state as designed for HACK-2213 (not yet emitted by the CLI).
+/// Always-on state of one project (docs/always-on-projects.md, "JSON
+/// contract"). The app only reads it: no `hack autostart` command runs.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Autostart {
@@ -402,6 +406,53 @@ pub struct Autostart {
     pub state: String,
     pub paused_reason: Option<String>,
     pub failures: AutostartFailures,
+    /// The keep-up retry bound (`3` today).
+    pub max_failures: Option<u32>,
+    /// `null` for the base instance, else the branch-instance slug.
+    pub branch: Option<String>,
+    /// The individual marker is paused (separate from a global pause).
+    pub paused: bool,
+    /// The last automatic start attempt, `None` before any.
+    pub last_result: Option<AutostartResult>,
+}
+
+/// One recorded automatic start attempt.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AutostartResult {
+    /// `started | already_running | skipped | failed` (an unknown future
+    /// status is shown as a generic failure).
+    #[serde(deserialize_with = "null_default")]
+    pub status: String,
+    /// A machine-readable code, `None` on success. Never command output.
+    pub reason: Option<String>,
+    pub at: Option<String>,
+}
+
+/// `autostart_global`: the machine-wide policy and the login run.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AutostartGlobal {
+    pub paused: bool,
+    pub login_run: AutostartLoginRun,
+    /// A login-service file is installed for this invocation. It does not
+    /// prove the service manager runs it.
+    pub service_ready: bool,
+}
+
+/// Progress of the start pass at login. The arrays hold project ids.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AutostartLoginRun {
+    pub in_progress: bool,
+    pub started_at: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub pending: Vec<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub started: Vec<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub failed: Vec<String>,
+    pub waiting_for_engine: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

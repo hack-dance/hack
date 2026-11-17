@@ -18,6 +18,7 @@ mod doctor_plugins;
 mod doctor_tools;
 pub mod fixtures;
 pub mod logs;
+pub mod machine;
 pub mod machine_gate;
 pub mod models;
 mod process;

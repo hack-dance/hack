@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import packageJson from "../package.json";
 import { writeReleaseArchive } from "../scripts/build-release.ts";
 import { download } from "../scripts/installer/download.ts";
 import {
@@ -557,6 +558,15 @@ test("an offline release transport fails clearly without a leftover download", a
   expect(await readdir(root)).toEqual([]);
 });
 
+/**
+ * A release newer than the CLI this test builds, so `hack update` replaces it
+ * whatever version package.json carries (a stable merge into next bumps it).
+ */
+const NEWER_THAN_BUILT = (() => {
+  const [major, minor, patch] = packageJson.version.split(/[.-]/).map(Number);
+  return `${major}.${minor}.${(patch ?? 0) + 1}`;
+})();
+
 for (const phase of ["assets-published", "compiler-published"]) {
   test(`a real hard kill at ${phase} leaves the previous built CLI able to rerun update`, async () => {
     const root = await scratch();
@@ -602,7 +612,7 @@ for (const phase of ["assets-published", "compiler-published"]) {
     ]);
     expect(buildCode).toBe(0);
     const before = sha(await readFile(binary));
-    const release = await releaseFixture(root);
+    const release = await releaseFixture(root, NEWER_THAN_BUILT);
     const child = Bun.spawn(
       [
         process.execPath,
@@ -612,6 +622,7 @@ for (const phase of ["assets-published", "compiler-published"]) {
         binary,
         assets,
         phase,
+        NEWER_THAN_BUILT,
       ],
       { env, stdout: "pipe", stderr: "pipe", timeout: 10_000 }
     );
@@ -628,10 +639,10 @@ for (const phase of ["assets-published", "compiler-published"]) {
       fetch(request) {
         if (new URL(request.url).pathname.includes("/releases/latest")) {
           return Response.json({
-            tag_name: "v4.3.1",
+            tag_name: `v${NEWER_THAN_BUILT}`,
             assets: [
               {
-                name: `hack-4.3.1-${process.platform}-${process.arch === "x64" ? "x86_64" : "arm64"}.tar.gz`,
+                name: `hack-${NEWER_THAN_BUILT}-${process.platform}-${process.arch === "x64" ? "x86_64" : "arm64"}.tar.gz`,
                 browser_download_url: official,
                 digest: `sha256:${sha(release.bytes)}`,
               },

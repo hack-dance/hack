@@ -78,6 +78,10 @@ pub fn sh_source(script: &str, home: &TempHome) -> StreamSource {
 /// - `exec <service> -- <shell>` prints `container:<service>:<shell>` and
 ///   runs `/bin/sh`. With `FAKE_HACK_NO_BASH` set, `bash` fails the way a
 ///   container without it does: a message and exit status 127.
+///   `FAKE_HACK_FAIL_AFTER` (seconds) delays the message, as a slow
+///   `docker exec` does; `FAKE_HACK_EXIT_AFTER` delays the exit after it,
+///   and `FAKE_HACK_EXIT_MARK` names a file created just before that exit.
+///   `FAKE_HACK_SILENT` starts the shell with no banner and no prompt.
 /// - `host shell --env <overlay> --scope <scope>` prints
 ///   `host-shell env=<overlay> scope=<scope>` and runs `$SHELL -l`, as the
 ///   real command does.
@@ -88,8 +92,15 @@ case "$1" in
   exec)
     [ "$#" -eq 4 ] && [ "$3" = "--" ] || { echo "fake hack: bad exec argv: $*" >&2; exit 2; }
     if [ "$4" = bash ] && [ -n "$FAKE_HACK_NO_BASH" ]; then
+      [ -n "$FAKE_HACK_FAIL_AFTER" ] && sleep "$FAKE_HACK_FAIL_AFTER"
       echo 'exec: "bash": executable file not found in $PATH' >&2
+      [ -n "$FAKE_HACK_EXIT_AFTER" ] && sleep "$FAKE_HACK_EXIT_AFTER"
+      [ -n "$FAKE_HACK_EXIT_MARK" ] && : > "$FAKE_HACK_EXIT_MARK"
       exit 127
+    fi
+    # FAKE_HACK_SILENT: a shell that starts but prints nothing, no prompt.
+    if [ -n "$FAKE_HACK_SILENT" ]; then
+      exec /bin/sh -c 'while IFS= read -r line; do eval "$line"; done'
     fi
     echo "container:$2:$4"
     PS1='container$ ' exec /bin/sh

@@ -397,3 +397,10 @@ does not cover:
   boot;
 - browser trust stores, project workloads, or the installers and release
   packages: the binary here is built from source.
+
+## Isolated-home preflight on an existing host
+
+An alternate `HACK_HOME` does not isolate global Docker projects, networks or
+volumes. Before attempting a non-mutating qualification on an existing host,
+read the [blocked isolated-home result](../qualification/linux-isolated-home-2026-11-16.md)
+and its limited collision gate. That record is not a pass of this runbook.

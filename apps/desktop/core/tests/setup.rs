@@ -512,7 +512,10 @@ fn failed_or_unloaded_launchd_never_passes_login_even_with_a_live_daemon() {
 #[test]
 fn a_daemon_newer_than_the_cli_asks_for_a_cli_update_never_a_restart() {
     use hack_desktop_core::setup::{Platform, Remedy, Status, derive};
-    let daemon = serde_json::json!({"running": true, "status": "running", "api_compatible": false});
+    // The CLI's own payload for an incompatible daemon.
+    let daemon = serde_json::json!({
+        "running": true, "status": "incompatible", "api_ok": false, "api_compatible": false
+    });
     let r = derive(
         Ok("5.0.0"),
         None,

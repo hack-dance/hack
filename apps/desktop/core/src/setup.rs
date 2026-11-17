@@ -307,39 +307,39 @@ pub fn derive(
     });
     let restart = || Remedy::Copy("hack daemon restart".into());
     let (status, detail, remedy) = match (running, cli, socket_version) {
-        (Some(true), _, _) if inconsistent => (
-            Status::Unknown,
-            "Daemon reports starting or stale; check again".into(),
-            restart(),
-        ),
-        // Equal versions the daemon still calls incompatible: contradictory.
-        (Some(true), Ok(c), Some(v)) if c == v && compatible == Some(false) => (
-            Status::Unknown,
-            "Daemon reports an incompatible API at the same version; check again".into(),
-            restart(),
-        ),
-        (Some(true), Ok(c), Some(v)) if !v.is_empty() && c == v => {
-            (Status::Passed, format!("hackd {v}"), restart())
-        }
-        (Some(true), Ok(c), Some(v)) if !v.is_empty() && compatible == Some(true) => (
-            Status::Passed,
-            format!("hackd {v}, CLI {c}: compatible"),
-            restart(),
-        ),
-        // Never restart hackd from an older CLI: that would downgrade it.
-        (Some(true), Ok(c), Some(v)) if !v.is_empty() => {
-            match crate::source::UpdateSide::for_versions(v, c) {
-                crate::source::UpdateSide::Daemon => (
-                    Status::NeedsAttention,
-                    format!("hackd {v} is older than CLI {c}; restart it from your terminal"),
+        // Differing versions first: the CLI reports an incompatible daemon
+        // as `status: "incompatible"`, `api_ok: false`, so the remedy must
+        // come from which side is older, never a blind restart.
+        (Some(true), Ok(c), Some(v)) if !v.is_empty() && c != v => {
+            if compatible == Some(true) && !inconsistent {
+                (
+                    Status::Passed,
+                    format!("hackd {v}, CLI {c}: compatible"),
                     restart(),
-                ),
-                crate::source::UpdateSide::Cli => (
-                    Status::NeedsAttention,
-                    format!("hackd {v} is newer than CLI {c}; update the CLI"),
-                    Remedy::Copy("hack update".into()),
-                ),
+                )
+            } else {
+                match crate::source::UpdateSide::for_versions(v, c) {
+                    // Never restart hackd from an older CLI: that downgrades it.
+                    crate::source::UpdateSide::Cli => (
+                        Status::NeedsAttention,
+                        format!("hackd {v} is newer than CLI {c}; update the CLI"),
+                        Remedy::Copy("hack update".into()),
+                    ),
+                    crate::source::UpdateSide::Daemon => (
+                        Status::NeedsAttention,
+                        format!("hackd {v} is older than CLI {c}; restart it from your terminal"),
+                        restart(),
+                    ),
+                }
             }
+        }
+        (Some(true), _, _) if inconsistent || compatible == Some(false) => (
+            Status::Unknown,
+            "Daemon reports starting, stale or incompatible; check again".into(),
+            restart(),
+        ),
+        (Some(true), Ok(_), Some(v)) if !v.is_empty() => {
+            (Status::Passed, format!("hackd {v}"), restart())
         }
         (Some(false), _, _) => (
             Status::NeedsAttention,

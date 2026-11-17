@@ -135,18 +135,33 @@ impl LiveSource {
         report.cli_program = selected.ok();
         report.context = context.ok();
         setup::qualify_login(&mut report, daemon.as_ref());
-        let restart = report
-            .command(vec!["daemon".into(), "restart".into()])
-            .and_then(|c| c.display())
-            .ok();
-        for card in &mut report.cards {
-            if card.remedy == setup::Remedy::Copy("hack daemon restart".into()) {
-                card.remedy = restart.clone().map(setup::Remedy::Copy).unwrap_or_else(|| {
-                    setup::Remedy::Doc(
-                        "https://github.com/hack-dance/hack/blob/next/docs/architecture.md#daemon"
-                            .into(),
-                    )
-                });
+        // Copy commands run the checked CLI with its checked context, never
+        // whichever `hack` the user's terminal finds first.
+        for (short, args, doc) in [
+            (
+                "hack daemon restart",
+                ["daemon", "restart"],
+                "https://github.com/hack-dance/hack/blob/next/docs/architecture.md#daemon",
+            ),
+            (
+                "hack update",
+                ["update", ""],
+                "https://github.com/hack-dance/hack/blob/next/docs/cli.md",
+            ),
+        ] {
+            let args: Vec<String> = args
+                .iter()
+                .filter(|a| !a.is_empty())
+                .map(|a| (*a).to_owned())
+                .collect();
+            let bound = report.command(args).and_then(|c| c.display()).ok();
+            for card in &mut report.cards {
+                if card.remedy == setup::Remedy::Copy(short.into()) {
+                    card.remedy = bound
+                        .clone()
+                        .map(setup::Remedy::Copy)
+                        .unwrap_or_else(|| setup::Remedy::Doc(doc.into()));
+                }
             }
         }
         report

@@ -300,6 +300,32 @@ pub fn render(pane: &SetupPane, ui: &Ui, cx: &mut Context<HackApp>) -> AnyElemen
         .into_any_element()
 }
 
+/// The `hack …` part of a bound command, for display: a bound command is
+/// `'/usr/bin/env' '-i' 'KEY=value'… '/path/to/hack' 'arg'…` (each argument
+/// quoted); the full one is what Copy and the terminal get. Anything else
+/// is shown as it is.
+fn short_command(bound: &str) -> String {
+    let Some(inner) = bound.strip_prefix('\'').and_then(|b| b.strip_suffix('\'')) else {
+        return bound.to_owned();
+    };
+    let tokens: Vec<&str> = inner.split("' '").collect();
+    if tokens.first() != Some(&"/usr/bin/env") || tokens.iter().any(|t| t.contains('\'')) {
+        return bound.to_owned();
+    }
+    let program = tokens
+        .iter()
+        .skip(1)
+        .position(|t| *t != "-i" && !t.contains('='))
+        .map(|i| i + 1);
+    match program {
+        Some(i) => std::iter::once("hack")
+            .chain(tokens[i + 1..].iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => bound.to_owned(),
+    }
+}
+
 fn card(
     i: usize,
     c: &Card,
@@ -322,7 +348,7 @@ fn card(
     if c.status != Status::Passed {
         match &c.remedy {
             Remedy::Copy(cmd) => {
-                command_line = Some(cmd.clone());
+                command_line = Some(short_command(cmd));
                 let cmd = cmd.clone();
                 actions =
                     actions.child(
@@ -461,6 +487,21 @@ fn card(
         }))
         .child(actions)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::short_command;
+
+    #[test]
+    fn a_bound_command_is_shown_as_its_hack_part() {
+        let bound = "'/usr/bin/env' '-i' 'HOME=/h' 'PATH=/usr/bin:/bin' 'HACK_MCP_COMMAND=/opt/x/hack' '/opt/x/hack' 'daemon' 'restart'";
+        assert_eq!(short_command(bound), "hack daemon restart");
+        assert_eq!(short_command("hack update"), "hack update");
+        // An argument with a quote in it is shown in full, never guessed at.
+        let odd = "'/usr/bin/env' '-i' 'HOME=/h' '/opt/x/hack' 'it'\\''s'";
+        assert_eq!(short_command(odd), odd);
+    }
 }
 
 // A headless app needs GPUI's test support (the `screenshots` feature).

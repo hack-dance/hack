@@ -669,6 +669,7 @@ pub fn daemon_status(f: Fixture) -> Option<crate::models::DaemonStatus> {
         Fixture::Loading | Fixture::CliMissing => return None,
         _ => serde_json::json!({
             "status": "running", "running": true, "api_ok": true, "pid": 4242,
+            "version": "5.0.0", "cli_version": "5.0.0",
             "service": {"manager": "launchd", "available": true, "installed": true, "enabled": true}
         }),
     };

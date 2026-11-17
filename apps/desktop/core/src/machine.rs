@@ -76,7 +76,6 @@ pub struct HackdEvidence<'a> {
 /// could not be read.
 #[must_use]
 pub fn hackd_card(status: Option<&DaemonStatus>, evidence: &HackdEvidence<'_>) -> HackdCard {
-    let cli_version = evidence.cli_version;
     let Some(s) = status else {
         return HackdCard {
             tone: Tone::Unknown,
@@ -88,11 +87,25 @@ pub fn hackd_card(status: Option<&DaemonStatus>, evidence: &HackdEvidence<'_>) -
     };
     let login_service = login_service_line(s);
     let mut details = Vec::new();
-    // `/v1/status` may be from an earlier read: its version describes hackd
+    let nonempty = |v: &&str| !v.is_empty();
+    // Restart is decided only from the versions this same status response
+    // reports: a project read's may describe a hackd that has since been
+    // replaced (by a newer one, which a restart would downgrade).
+    let reported = s
+        .version
+        .as_deref()
+        .filter(nonempty)
+        .filter(|_| hackd_running(s));
+    let cli_version = s
+        .cli_version
+        .as_deref()
+        .filter(nonempty)
+        .or(evidence.cli_version);
+    // For showing a version only, an earlier read's is better than none, and
     // only while the CLI says hackd runs.
-    let version = evidence
+    let version = reported.or(evidence
         .hackd_version
-        .filter(|v| !v.is_empty() && hackd_running(s));
+        .filter(|v| !v.is_empty() && hackd_running(s)));
     if let Some(v) = version {
         details.push(match s.pid {
             Some(pid) => format!("hackd {v} · pid {pid}"),
@@ -103,7 +116,7 @@ pub fn hackd_card(status: Option<&DaemonStatus>, evidence: &HackdEvidence<'_>) -
         details.push(issue.to_owned());
     }
     let (tone, title, action) = if hackd_running(s) {
-        match (version, cli_version) {
+        match (reported, cli_version) {
             (Some(v), Some(c)) if v != c && s.api_compatible != Some(true) => {
                 match UpdateSide::for_versions(v, c) {
                     UpdateSide::Daemon => (
@@ -130,6 +143,20 @@ pub fn hackd_card(status: Option<&DaemonStatus>, evidence: &HackdEvidence<'_>) -
                 "hackd is running but this CLI cannot use it".into(),
                 None,
             ),
+            // Only an earlier read says the versions differ: worth a look,
+            // not an action.
+            (None, Some(c))
+                if version.is_some_and(|v| v != c) && s.api_compatible != Some(true) =>
+            {
+                (
+                    Tone::Attention,
+                    format!(
+                        "hackd {} may not match this CLI ({c}): check again",
+                        version.unwrap_or_default()
+                    ),
+                    None,
+                )
+            }
             _ => (Tone::Ok, "hackd running".into(), None),
         }
     } else if s.stale {
@@ -374,8 +401,14 @@ mod tests {
         api: Option<&DaemonApiStatus>,
         cli: Option<&str>,
     ) -> HackdCard {
+        // As the CLI reports it: the same response carries both versions.
+        let fresh = s.map(|s| DaemonStatus {
+            version: api.map(|a| a.version.clone()),
+            cli_version: cli.map(str::to_owned),
+            ..s.clone()
+        });
         super::hackd_card(
-            s,
+            fresh.as_ref(),
             &HackdEvidence {
                 hackd_version: api.map(|a| a.version.as_str()),
                 cli_version: cli,
@@ -526,11 +559,47 @@ mod tests {
     }
 
     #[test]
+    fn restart_follows_the_status_response_not_an_older_project_read() {
+        // The last project read saw 4.3.0; hackd has since been replaced by
+        // 5.1.0, which this status read reports.
+        let s = status(
+            r#"{"status":"incompatible","running":true,"version":"5.1.0","cli_version":"5.0.0"}"#,
+        );
+        let card = super::hackd_card(
+            Some(&s),
+            &HackdEvidence {
+                hackd_version: Some("4.3.0"),
+                cli_version: Some("5.0.0"),
+                shared_with: None,
+            },
+        );
+        assert_eq!(
+            card.action, None,
+            "never restart (downgrade) the newer hackd"
+        );
+        assert!(card.title.contains("5.1.0 is newer"), "{}", card.title);
+        // A response without its version: the older read alone never restarts.
+        let unversioned = status(r#"{"status":"running","running":true}"#);
+        let card = super::hackd_card(
+            Some(&unversioned),
+            &HackdEvidence {
+                hackd_version: Some("4.3.0"),
+                cli_version: Some("5.0.0"),
+                shared_with: None,
+            },
+        );
+        assert_eq!(card.action, None);
+        assert!(card.title.contains("check again"), "{}", card.title);
+    }
+
+    #[test]
     fn restart_needs_both_versions_and_never_touches_a_shared_hackd() {
         let incompatible = status(r#"{"status":"incompatible","running":true}"#);
         let card = hackd_card(Some(&incompatible), None, Some("5.0.0"));
         assert_eq!(card.action, None, "no versions: not known to be older");
-        let older = status(r#"{"status":"running","running":true}"#);
+        let older = status(
+            r#"{"status":"running","running":true,"version":"4.3.0","cli_version":"5.0.0"}"#,
+        );
         let shared = super::hackd_card(
             Some(&older),
             &HackdEvidence {

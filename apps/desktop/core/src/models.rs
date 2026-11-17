@@ -503,6 +503,11 @@ pub struct DaemonStatus {
     pub next_step: Option<String>,
     pub pid: Option<u32>,
     pub service: Option<DaemonService>,
+    /// The version hackd's API reported in this same read, `None` when it
+    /// did not answer.
+    pub version: Option<String>,
+    /// The version of the CLI that answered.
+    pub cli_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

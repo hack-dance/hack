@@ -222,7 +222,10 @@ The runtime review half needs a native runtime, so run the preflight from the
 checks run and the review is reported as `skipped`. The review needs no running
 VM. A selected runtime also receives a read-only setup inspection. Incomplete or
 unavailable setup is a `native_runtime_setup` blocker; run the `native setup`
-command its fix prints (it names the launcher you used) before retrying. Without native selection, setup is reported as unavailable.
+command its fix prints (it names the launcher you used) before retrying. While setup is
+`not_set_up` or `partial_resumable`, the runtime review still runs and its
+findings are listed beside that blocker; for any other setup state, or when it
+cannot run, it is `skipped` with `native_setup_incomplete`. Without native selection, setup is reported as unavailable.
 
 Use a matching updated CLI and runtime. A runtime without start-admission review
 is reported as `unavailable` with an update hint and cannot produce `ready: true`.
@@ -303,6 +306,8 @@ preflight. Raw runtime stderr and startup output are not configuration findings.
     `HACK_RUNTIME_BACKEND=native` is set without a candidate, and
     `native_adaptation_invalid` when the adaptation was refused: the unadapted
     document is not reviewed, because its findings would mislead.
+    `native_setup_incomplete` when native setup is not ready and the review
+    could not run before it; the text then lists what was not checked.
   - `unavailable`: the selected runtime did not return a review. `code`, when
     present, is the runtime's own failure code. This says nothing about the
     project.

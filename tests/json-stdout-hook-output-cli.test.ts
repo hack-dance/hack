@@ -74,7 +74,8 @@ afterEach(async () => {
 });
 
 async function cli(
-  args: readonly string[]
+  args: readonly string[],
+  extra: Readonly<Record<string, string>> = {}
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = Bun.spawn([process.execPath, CLI, ...args], {
     cwd: project,
@@ -85,6 +86,7 @@ async function cli(
         HACK_RUNTIME_BACKEND: "compose",
         HACK_NO_INTERACTIVE: "1",
         NO_COLOR: "1",
+        ...extra,
       },
     }),
     stdin: "ignore",
@@ -99,14 +101,23 @@ async function cli(
   return { exitCode, stdout, stderr };
 }
 
-/** No hook or Compose output on stdout; the hooks' output on stderr. */
+/**
+ * No hook or Compose output on stdout; the hooks' output on stderr, and the
+ * Compose client's too when it is passed through (`run --detach` captures
+ * it for its result instead).
+ */
 function expectOutputOnStderr(
   result: { readonly stdout: string; readonly stderr: string },
-  phases: readonly string[]
+  phases: readonly string[],
+  composePassedThrough = true
 ): void {
   expect(result.stdout).not.toContain(HOOK_OUT);
   expect(result.stdout).not.toContain(HOOK_ERR);
   expect(result.stdout).not.toContain(COMPOSE_OUT);
+  if (composePassedThrough) {
+    // The Compose client's output is kept, on stderr.
+    expect(result.stderr).toContain(COMPOSE_OUT);
+  }
   for (const phase of phases) {
     // A hook that ran printed both of its lines, and both reached stderr.
     expect(result.stderr).toContain(`${HOOK_OUT} ${phase}`);
@@ -150,7 +161,7 @@ for (const { name, args, phases } of SINGLE_ENVELOPE_CASES) {
     // JSON.parse of the whole of stdout succeeds only for a single value.
     const envelope = JSON.parse(result.stdout) as { ok: boolean };
     expect(envelope.ok).toBe(true);
-    expectOutputOnStderr(result, phases);
+    expectOutputOnStderr(result, phases, args[0] !== "run");
   }, 60_000);
 }
 
@@ -178,3 +189,31 @@ for (const command of ["up", "restart", "down"] as const) {
     );
   }, 60_000);
 }
+
+test("up --detach --json --target remote: dispatch output goes to stderr", async () => {
+  // The dispatch child is `hack dispatch run ... -- hack up ...`; a stand-in
+  // for that `hack` prints to stdout and succeeds.
+  const dispatch = join(bin, "fake-hack");
+  await writeFile(
+    dispatch,
+    "#!/bin/sh\nprintf '%s\\n' 'dispatch-stdout-marker'\nexit 0\n"
+  );
+  await chmod(dispatch, 0o755);
+  // Remote execution needs a node; nothing is contacted.
+  await writeFile(
+    join(project, ".hack", "hack.config.json"),
+    JSON.stringify({
+      name: "shop",
+      internal: { dns: false, tls: false },
+      controlPlane: { execution: { nodeId: "node-1" } },
+    })
+  );
+  const result = await cli(["up", "--detach", "--json", "--target", "remote"], {
+    HACK_MCP_COMMAND: dispatch,
+  });
+  expect(result.exitCode).toBe(0);
+  const envelope = JSON.parse(result.stdout) as { ok: boolean };
+  expect(envelope.ok).toBe(true);
+  expect(result.stdout).not.toContain("dispatch-stdout-marker");
+  expect(result.stderr).toContain("dispatch-stdout-marker");
+}, 60_000);

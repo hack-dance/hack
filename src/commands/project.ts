@@ -6062,6 +6062,9 @@ async function runRemoteLifecycleCommand(opts: {
   return await runShell([invocation.bin, ...dispatchArgs], {
     cwd: opts.project.projectRoot,
     hackReexec: true,
+    // Under Hack's own --json the dispatch output precedes the envelope
+    // (emitRemoteLifecycleJson), so it goes to stderr (HACK-2311).
+    stdout: childStdoutTarget(undefined),
   });
 }
 

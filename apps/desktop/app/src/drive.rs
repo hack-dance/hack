@@ -166,7 +166,19 @@ pub fn parse(text: &str, base: &Path) -> Result<Vec<Step>, String> {
         let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         let rest = rest.trim();
         let args: Vec<&str> = rest.split_whitespace().collect();
-        let bad = |why: &str| format!("line {}: {why}: {line}", n + 1);
+        // A line that writes an env value is never echoed: a malformed one
+        // (a missing name, say) could otherwise print its value.
+        let writes_value = matches!(word, "env-set" | "env-add");
+        let bad = |why: &str| {
+            if writes_value {
+                format!(
+                    "line {}: {why} (the line holds a value, so it is not shown)",
+                    n + 1
+                )
+            } else {
+                format!("line {}: {why}: {line}", n + 1)
+            }
+        };
         let step = match (word, args.as_slice()) {
             ("select", [p]) => Step::Select {
                 project: (*p).into(),
@@ -974,6 +986,24 @@ impl ContainerCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_steps_never_print_their_values() {
+        let base = Path::new("/");
+        // Parsed: the report prints only the length.
+        let steps = parse("env-set FIXTURE_MODE fake-value-SENTINEL\nenv-add --secret FIXTURE_TOKEN fake-value-SENTINEL\n", base).unwrap();
+        assert!(!format!("{steps:?}").contains("SENTINEL"), "{steps:?}");
+        // Malformed: the error names the line, not its value.
+        for line in [
+            "env-add --secret fake-value-SENTINEL",
+            "env-set fake-value-SENTINEL",
+            "env-add fake-value-SENTINEL",
+        ] {
+            let err = parse(line, base).expect_err(line);
+            assert!(!err.contains("SENTINEL"), "{err}");
+            assert!(err.starts_with("line 1:"), "{err}");
+        }
+    }
 
     #[test]
     fn a_steps_file_parses_every_step() {

@@ -9,8 +9,9 @@ publish.workspace = true
 
 [features]
 default = []
-# libghostty-vt emulation and the GPUI terminal view. Off by default until
-# desktop CI provides Zig 0.17.1 on Linux (see DECISION.md, "Build and CI").
+# libghostty-vt emulation and the GPUI terminal view. Off by default in this
+# crate; the macOS app always turns it on, Linux opts in (DECISION.md, "Build
+# and CI").
 ghostty = ["dep:ghostty-vt", "dep:gpui-kit", "dep:sha2", "dep:ttf-parser"]
 # Offscreen PNG capture of the spike window (GPUI test-support).
 screenshots = ["ghostty", "gpui-kit/test-support", "dep:image"]

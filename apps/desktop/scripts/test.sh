@@ -15,6 +15,12 @@ case "$repetitions" in 1|200) ;; *) echo 'HACK_DESKTOP_TEST_REPETITIONS must be 
 # HOME/HACK_HOME. The directory is created by this invocation and removed on exit.
 export CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 export RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
+# On macOS the app always builds the terminal panel, which needs the pinned
+# libghostty-vt inputs: fill the default directory (fetches only what is
+# missing, each file checked against its sha256) unless one is exported.
+if [[ "$(uname -s)" == Darwin && -z "${GHOSTTY_RELEASE_DIR:-}" ]]; then
+  bash "$root/apps/desktop/term/scripts/provision-ghostty.sh" >/dev/null
+fi
 owned=$(mktemp -d "${TMPDIR:-/tmp}/hack-desktop-tests.XXXXXXXX")
 trap 'rm -rf -- "$owned"' EXIT
 mkdir "$owned/home" "$owned/hack"

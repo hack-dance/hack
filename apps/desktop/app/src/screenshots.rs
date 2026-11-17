@@ -79,7 +79,7 @@ pub fn run(dir: &Path, fixture: Option<Fixture>) {
                 .expect("render");
             // The terminal panel's tabs start on the first frame; let their
             // output arrive, then draw again.
-            #[cfg(feature = "terminal")]
+            #[cfg(hack_terminal)]
             cx.update_window(handle, |_, window, cx| {
                 _app.update(cx, |app, cx| app.settle_terminals(cx));
                 window.render_frame(cx);
@@ -232,7 +232,7 @@ pub fn sequence(dir: &Path) {
         ("tab-services", |app, _, cx| app.set_tab(0, cx)),
         ("open-doctor", |app, _, cx| app.open_doctor(None, cx)),
     ];
-    #[cfg(feature = "terminal")]
+    #[cfg(hack_terminal)]
     let steps = {
         let mut steps = steps;
         steps.extend::<[Step; 5]>([
@@ -258,7 +258,7 @@ pub fn sequence(dir: &Path) {
         cx.update_window(handle, |_, window, cx| {
             view.update(cx, |app, cx| step(app, window, cx));
             window.render_frame(cx);
-            #[cfg(feature = "terminal")]
+            #[cfg(hack_terminal)]
             {
                 view.update(cx, |app, cx| app.settle_terminals(cx));
                 window.render_frame(cx);

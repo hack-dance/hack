@@ -1021,3 +1021,133 @@ fn retry_header_stall_never_renews_the_file_deadline() {
     assert!(start.elapsed() < Duration::from_secs(1));
     handle.join().unwrap();
 }
+
+struct ObservedServer {
+    pin: FilePin,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl ObservedServer {
+    /// Empty replies close before headers; a valid fallback exposes unwanted replays.
+    fn start(replies: Vec<&'static str>) -> Self {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let pin = FilePin {
+            url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
+            archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+            size_bytes: 5,
+            max_bytes: 16,
+            redirect_hosts: vec![],
+        };
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (counted, stopped) = (requests.clone(), stop.clone());
+        let handle = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !stopped.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(e) => panic!("observed server accept: {e}"),
+                };
+                assert!(request(&mut stream).starts_with("GET /archive.tgz "));
+                let index = counted.fetch_add(1, Ordering::SeqCst);
+                let reply = replies.get(index).copied().unwrap_or(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        Self {
+            pin,
+            requests,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for ObservedServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn retry_cannot_turn_a_checksum_or_length_failure_into_success() {
+    for (reply, code) in [
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nwrong",
+            "setup_hash_mismatch",
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nhell",
+            "setup_size_mismatch",
+        ),
+    ] {
+        let root = Fixture::new();
+        let server = ObservedServer::start(vec!["", reply]);
+        let failure = download::acquire(&client(), &root.0, &server.pin).unwrap_err();
+        assert_eq!(failure.code, code);
+        assert_eq!(server.count(), 2);
+        assert!(!root.0.join("archive.tgz").exists());
+        assert_eq!(
+            fs::metadata(root.0.join("archive.tgz.part")).unwrap().len(),
+            0
+        );
+    }
+}
+
+#[test]
+fn retry_never_replays_an_interrupted_body_and_preserves_its_partial() {
+    let root = Fixture::new();
+    let server = ObservedServer::start(vec![
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhe",
+    ]);
+    let failure = download::acquire(&client(), &root.0, &server.pin).unwrap_err();
+    assert_eq!(failure.code, "setup_download");
+    assert_eq!(server.count(), 1);
+    assert!(!root.0.join("archive.tgz").exists());
+    assert_eq!(fs::read(root.0.join("archive.tgz.part")).unwrap(), b"he");
+}
+
+#[test]
+fn retry_never_replays_a_setup_http_refusal() {
+    for (reply, code) in [
+        (
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "setup_pin_unavailable",
+        ),
+        (
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "setup_download",
+        ),
+        (
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "setup_download",
+        ),
+    ] {
+        let root = Fixture::new();
+        let server = ObservedServer::start(vec![reply]);
+        let failure = download::acquire(&client(), &root.0, &server.pin).unwrap_err();
+        assert_eq!(failure.code, code);
+        assert_eq!(server.count(), 1);
+        assert!(!root.0.join("archive.tgz").exists());
+    }
+}

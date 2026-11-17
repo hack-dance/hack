@@ -981,6 +981,9 @@ hop, with 250 ms then 500 ms backoff (at most 45.75 seconds per failing hop).
 An explicit 30-minute overall deadline per file spans retries, backoff, redirects
 and body reads; progress does not renew it. HTTP errors, body interruptions,
 length errors and checksum mismatches never trigger an automatic retry.
+The pre-header transport classification also includes TLS handshake and certificate
+errors. A deterministic certificate refusal can therefore consume all three bounded
+attempts; this never bypasses TLS validation or retries file checksum verification.
 
 Registry manifest GETs and token GETs use the same three-attempt/backoff policy
 before headers arrive. Their existing 60-second bound covers each whole request,

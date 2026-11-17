@@ -43,14 +43,15 @@ pub(crate) struct EnvEdit {
     pub busy: bool,
     pub error: Option<String>,
     /// The field holds the value Save may store: false while an existing
-    /// plaintext value is still being read (Save is off, so an unchanged
-    /// Save never blanks it).
+    /// plaintext value is still being read, or could not be. Until then
+    /// Save stores only text the user typed, never an empty field, so an
+    /// unchanged Save never blanks the value.
     pub ready: bool,
 }
 
 /// Why Save stays off when an existing value could not be read.
 const UNREAD_ERROR: &str =
-    "Could not read the current value, so Save is off (it would replace it). Close and try again.";
+    "Could not read the current value. Type the new value to replace it, or close and try again.";
 
 /// Most plaintext values read with one listing (one `hack env get` each).
 /// A listing in one read is DESIGN.md request R25.
@@ -444,9 +445,14 @@ impl HackApp {
                 };
                 match result {
                     Ok(value) => {
+                        // Text typed while reading is the user's new value:
+                        // keep it, and fill only an empty field.
+                        let typed = !edit.value.read(cx).value().is_empty();
                         let text = value.expose().to_owned();
                         edit.value.update(cx, |state, cx| {
-                            state.set_value(text, window, cx);
+                            if !typed {
+                                state.set_value(text, window, cx);
+                            }
                             state.set_placeholder("Value", window, cx);
                         });
                         edit.ready = true;
@@ -500,6 +506,12 @@ impl HackApp {
         }
     }
 
+    /// Save is allowed once the field holds the current value, or text the
+    /// user typed. An empty field over an unread value is never saved.
+    fn edit_can_save(edit: &EnvEdit, cx: &gpui_kit::App) -> bool {
+        edit.ready || !edit.value.read(cx).value().is_empty()
+    }
+
     fn edit_name(edit: &EnvEdit, cx: &gpui_kit::App) -> String {
         match (&edit.key, &edit.name) {
             (Some(key), _) => key.clone(),
@@ -524,7 +536,11 @@ impl HackApp {
         let Some((root, native)) = self.selected_root() else {
             return;
         };
-        let Some(edit) = self.env_edit.as_ref().filter(|e| !e.busy && e.ready) else {
+        let Some(edit) = self
+            .env_edit
+            .as_ref()
+            .filter(|e| !e.busy && Self::edit_can_save(e, cx))
+        else {
             return;
         };
         let name = Self::edit_name(edit, cx);
@@ -672,7 +688,7 @@ impl HackApp {
                     "env-edit-save",
                     Glyph::Check,
                     if edit.busy { "Saving…" } else { "Save" },
-                    !edit.busy && edit.ready,
+                    !edit.busy && Self::edit_can_save(edit, cx),
                     ui,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.save_env_edit(cx))),
@@ -1481,6 +1497,20 @@ mod tests {
             )
         });
         assert!(!ready && !busy && saved.is_none(), "nothing was written");
-        assert!(error.unwrap().contains("Save is off"));
+        assert!(error.unwrap().contains("Could not read the current value"));
+        // Typing a new value (deliberate) allows Save; it never stores an
+        // empty field over the unread value.
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| {
+                let v = a.env_edit.as_ref().unwrap().value.clone();
+                v.update(cx, |s, cx| s.set_value("fake-typed-value", window, cx));
+            });
+        })
+        .unwrap();
+        cx.update(|cx| app.update(cx, |a, cx| a.save_env_edit(cx)));
+        assert_eq!(
+            cx.update(|cx| app.read(cx).env_saved.clone()).as_deref(),
+            Some("Saved NOT_LISTED")
+        );
     }
 }

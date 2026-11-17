@@ -522,8 +522,9 @@ command names the overlay and scope explicitly. An existing row is written in
 its own scope (a global variable shown in a service listing stays global) and
 its own layer (a row from `hack.env[.<overlay>].local.yaml` with `--local`); a
 new one goes to the scope listed, in the shared file. A plaintext value starts filled in (read for
-that one name first when the listing has not shown it; Save stays off until
-then, and off if the read fails, so an unchanged Save never blanks it); a
+that one name first when the listing has not shown it; until then Save
+stores only text you type, never an empty field, so an unchanged Save never
+blanks it; a late read never overwrites what you typed); a
 secret starts empty, and its field is masked. A secret cannot be edited while
 the key is missing. The editor closes on another overlay, scope, tab or
 project. After Save the tab says "Saved NAME" and lists again.

@@ -489,7 +489,6 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.user_navigated();
         self.start_tab(d, tab, false, window, cx);
     }
 
@@ -642,6 +641,9 @@ impl HackApp {
     }
 
     pub(crate) fn open_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+        // The user chose to open a tab. Automatic tabs (the Logs tab a new
+        // panel starts with) go through `open_tab` too and must not count.
+        self.user_navigated();
         let Some(key) = self.model.selected_key() else {
             return;
         };
@@ -1196,6 +1198,7 @@ impl HackApp {
         let before = self
             .drive_tab_count(cx)
             .ok_or("the instance has no panel; select it first")?;
+        self.user_navigated();
         self.open_tab(&d, tab, window, cx);
         Ok(before)
     }
@@ -1443,6 +1446,53 @@ mod tests {
             cfg!(target_os = "macos"),
             "off macOS, Ctrl-K in a terminal goes to the shell"
         );
+    }
+
+    /// The Logs tab a new panel starts with is not the user navigating: the
+    /// launch setup check may still open setup. Opening the new-tab menu is.
+    #[cfg(feature = "screenshots")]
+    #[test]
+    fn an_automatic_logs_tab_does_not_cancel_the_launch_setup_check() {
+        use hack_desktop_core::fixtures::Fixture;
+        use hack_desktop_core::source::FixtureSource;
+        let mut cx = gpui_kit::HeadlessAppContext::with_platform(
+            std::sync::Arc::new(gpui_kit::NoopTextSystem::new()),
+            std::sync::Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let options = gpui_kit::WindowOptions {
+            focus: false,
+            show: false,
+            ..gpui_kit::WindowOptions::default()
+        };
+        let (window, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, |window, cx| {
+                    cx.new(|cx| {
+                        let mut a = crate::view::HackApp::new(
+                            std::sync::Arc::new(FixtureSource(Fixture::Running)),
+                            false,
+                            window,
+                            cx,
+                        );
+                        a.select("storefront");
+                        a.setup_on_launch = true;
+                        a
+                    })
+                })
+            })
+            .expect("open a headless window");
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |a, cx| a.ensure_panel(window, cx));
+        })
+        .expect("window");
+        assert!(
+            cx.update(|cx| app.read(cx).setup_on_launch),
+            "the panel's own Logs tab is not navigation"
+        );
+        cx.update(|cx| app.update(cx, |a, cx| a.open_menu(Menu::Main, cx)));
+        assert!(!cx.update(|cx| app.read(cx).setup_on_launch));
     }
 
     #[test]

@@ -94,7 +94,8 @@ impl HackApp {
         cx.notify();
     }
 
-    /// The user chose where to look (an instance, Doctor, a terminal tab):
+    /// The user chose where to look (an instance, a detail tab, Doctor, the
+    /// new-tab menu):
     /// the launch check no longer opens setup by itself. Losing the CLI
     /// still does.
     pub(crate) fn user_navigated(&mut self) {
@@ -602,6 +603,19 @@ mod tests {
             Pane::Project,
             "the project the user selected stays on screen"
         );
+        // A detail tab the user clicks counts as well.
+        let (mut cx, app) = super::tests::app();
+        let generation = cx.update(|cx| {
+            app.update(cx, |a, _| {
+                a.setup_on_launch = true;
+                a.setup.begin()
+            })
+        });
+        cx.update(|cx| app.update(cx, |a, cx| a.set_tab(2, cx)));
+        cx.update(|cx| {
+            app.update(cx, |a, cx| a.setup_checked(generation, partial.clone(), cx));
+        });
+        assert_eq!(cx.update(|cx| app.read(cx).pane), Pane::Project);
         // Without any navigation, the launch check still opens setup.
         let (mut cx, app) = super::tests::app();
         let generation = cx.update(|cx| {

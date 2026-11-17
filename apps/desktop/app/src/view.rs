@@ -681,6 +681,7 @@ impl HackApp {
     }
 
     pub(crate) fn set_tab(&mut self, to: usize, cx: &mut Context<Self>) {
+        self.user_navigated();
         let from = self.tab;
         if from == to {
             return;

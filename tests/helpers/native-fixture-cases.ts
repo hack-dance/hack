@@ -1,6 +1,10 @@
 import { test as bunTest } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { rm } from "node:fs/promises";
+import {
+  type NativeAuthoredArtifactDiagnostic,
+  observeNativeAuthoredArtifactErrors,
+} from "../../src/backends/native-authored-artifact-error.ts";
 import { restoreEnv } from "./env.ts";
 import {
   createNativeAuthoredSettlement,
@@ -71,6 +75,22 @@ export const NATIVE_FIXTURE_BUN_MARGIN_MS = 5000;
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Closed artifact diagnostics seen by one case, bounded; printed only when it fails. */
+function artifactDiagnostics() {
+  const artifacts: NativeAuthoredArtifactDiagnostic[] = [];
+  let droppedArtifacts = 0;
+  return {
+    record: (diagnostic: NativeAuthoredArtifactDiagnostic) => {
+      if (artifacts.length === 256) {
+        artifacts.shift();
+        droppedArtifacts++;
+      }
+      artifacts.push(diagnostic);
+    },
+    report: () => ({ artifacts, droppedArtifacts }),
+  };
 }
 
 /**
@@ -145,6 +165,8 @@ export function createNativeFixtureCases(opts: {
     body: () => void | Promise<void>,
     timeoutMs: number
   ): Promise<void> => {
+    const originalUmask = process.umask();
+    const diagnostics = artifactDiagnostics();
     const roots: string[] = [];
     const saved = new Map<string, string | undefined>();
     const observed: unknown[] = [];
@@ -184,7 +206,10 @@ export function createNativeFixtureCases(opts: {
     let failure: { readonly error: unknown } | undefined;
     let bodyRunning = true;
     const running = (async () => {
-      await storage.run(context, body);
+      await observeNativeAuthoredArtifactErrors({
+        onDiagnostic: diagnostics.record,
+        action: () => storage.run(context, body),
+      });
     })().finally(() => {
       bodyRunning = false;
     });
@@ -219,7 +244,11 @@ export function createNativeFixtureCases(opts: {
     for (const [key, value] of saved) {
       restoreEnv(key, value);
     }
+    process.umask(originalUmask);
     if (failure !== undefined || unsettled !== undefined) {
+      console.error(
+        `${opts.label} artifact diagnostics: ${JSON.stringify(diagnostics.report())}`
+      );
       reportRetained({ label: opts.label, roots, failure, unsettled });
     }
     await Promise.all(

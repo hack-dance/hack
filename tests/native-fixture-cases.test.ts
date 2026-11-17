@@ -2,6 +2,8 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NativeAuthoredHostDeadlineError } from "../src/backends/native-authored-artifact-error.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import {
   endLifecycleMuxFixtureGroups,
   writeLifecycleMuxFixture,
@@ -63,12 +65,17 @@ afterEach(() => {
 
 test("a failed case runs its failure cleanup, then settles and keeps its own failure", async () => {
   const noise = spyOn(console, "error").mockImplementation(() => undefined);
+  const originalUmask = process.umask();
+  const previousMux = process.env.HACK_TEST_MUX_STATE;
   try {
     let group = 0;
     await expect(
       cases.run(() => {
         group = detachedGroup();
         const owner = cases.current();
+        owner.saveEnv(["HACK_TEST_MUX_STATE"]);
+        process.env.HACK_TEST_MUX_STATE = "synthetic-failed-case";
+        process.umask(0o077);
         owner.settlement.record({
           kind: "process",
           name: "held group",
@@ -81,12 +88,18 @@ test("a failed case runs its failure cleanup, then settles and keeps its own fai
     ).rejects.toThrow("deliberate case failure");
     // Settlement confirmed absence, so no "also unconfirmed" line was reported.
     expect(await groupEnded(group)).toBe(true);
+    await cases.run(() => {
+      expect(process.env.HACK_TEST_MUX_STATE).toBe(previousMux);
+      expect(process.umask()).toBe(originalUmask);
+    });
     expect(
       noise.mock.calls.some((call) =>
         String(call[0]).includes("settlement also unconfirmed")
       )
     ).toBe(false);
   } finally {
+    process.umask(originalUmask);
+    restoreEnv("HACK_TEST_MUX_STATE", previousMux);
     noise.mockRestore();
   }
 });
@@ -151,6 +164,52 @@ test("a body that outlives its budget runs the failure cleanup again when it end
     await ended.promise;
     expect(runs).toBe(2);
   } finally {
+    noise.mockRestore();
+  }
+});
+
+test("failure aborts a cooperative body before restoring its environment and before its next host step", async () => {
+  const noise = spyOn(console, "error").mockImplementation(() => undefined);
+  const release = Promise.withResolvers<void>();
+  const abort = new AbortController();
+  const previous = process.env.HACK_TEST_MUX_STATE;
+  let cleanupSawFixture = false;
+  let hostEffect = false;
+  let bodyFailure: unknown;
+  try {
+    await expect(
+      cases.run(async () => {
+        const owner = cases.current();
+        owner.saveEnv(["HACK_TEST_MUX_STATE"]);
+        process.env.HACK_TEST_MUX_STATE = "synthetic-overrun-case";
+        owner.onFailure(() => abort.abort());
+        owner.onFailure(() => {
+          cleanupSawFixture =
+            abort.signal.aborted &&
+            process.env.HACK_TEST_MUX_STATE === "synthetic-overrun-case";
+        });
+        await release.promise;
+        try {
+          if (abort.signal.aborted) {
+            throw new NativeAuthoredHostDeadlineError();
+          }
+          hostEffect = true;
+        } catch (error) {
+          bodyFailure = error;
+          throw error;
+        }
+      }, 20)
+    ).rejects.toThrow("exceeded its 20 ms budget");
+    expect(cleanupSawFixture).toBe(true);
+    expect(process.env.HACK_TEST_MUX_STATE).toBe(previous);
+    release.resolve();
+    await cases.drain();
+    expect(bodyFailure).toBeInstanceOf(NativeAuthoredHostDeadlineError);
+    expect(hostEffect).toBe(false);
+  } finally {
+    release.resolve();
+    await cases.drain();
+    restoreEnv("HACK_TEST_MUX_STATE", previous);
     noise.mockRestore();
   }
 });

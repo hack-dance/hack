@@ -145,9 +145,14 @@ function requireInterruptedSelection(
   }
 }
 
-async function inspection(
-  command: readonly string[]
-): Promise<{ readonly output: string; readonly code: number }> {
+async function inspection(command: readonly string[]): Promise<{
+  readonly output: string;
+  readonly code: number;
+  readonly elapsedMs: number;
+  readonly timedOut: boolean;
+}> {
+  const started = performance.now();
+  let timedOut = false;
   const child = Bun.spawn([...command], {
     stdin: "ignore",
     stdout: "pipe",
@@ -158,7 +163,10 @@ async function inspection(
       LC_ALL: "C",
     },
   });
-  const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, 3000);
   const observeCpu = beginNativeCpuChild(child, "other");
   try {
     const chunks: Uint8Array[] = [];
@@ -185,6 +193,8 @@ async function inspection(
         .decode(Buffer.concat(chunks))
         .trim(),
       code: await child.exited,
+      elapsedMs: Math.ceil(performance.now() - started),
+      timedOut,
     };
   } finally {
     clearTimeout(timer);
@@ -202,8 +212,12 @@ async function bootId(): Promise<string> {
       "-n",
       "kern.bootsessionuuid",
     ]);
-    if (result.code !== 0) {
-      refuse();
+    if (result.code !== 0 || result.timedOut) {
+      throw new NativeComposeInspectionError({
+        observation: "boot-session",
+        outcome: result.timedOut ? "timeout" : "failed",
+        elapsedMs: result.elapsedMs,
+      });
     }
     value = result.output.toLowerCase();
   } else if (process.platform === "linux") {
@@ -255,6 +269,13 @@ async function processBirth(
     "-o",
     "uid=,lstart=",
   ]);
+  if (result.timedOut) {
+    throw new NativeComposeInspectionError({
+      observation: "process-birth",
+      outcome: "timeout",
+      elapsedMs: result.elapsedMs,
+    });
+  }
   if (result.code === 1 && result.output === "") {
     return null;
   }
@@ -268,7 +289,11 @@ async function processBirth(
     birth === undefined ||
     !BIRTH.test(birth)
   ) {
-    refuse();
+    throw new NativeComposeInspectionError({
+      observation: "process-birth",
+      outcome: result.code === 0 ? "malformed" : "failed",
+      elapsedMs: result.elapsedMs,
+    });
   }
   return { uid, birth };
 }
@@ -369,6 +394,22 @@ export class NativeComposeGenerationError extends Error {
       }[code]
     );
     this.code = code;
+  }
+}
+/** Closed observation details only: neither host-tool output nor process identities escape. */
+export class NativeComposeInspectionError extends NativeComposeGenerationError {
+  readonly observation: "boot-session" | "process-birth";
+  readonly outcome: "timeout" | "failed" | "malformed";
+  readonly elapsedMs: number;
+  constructor(opts: {
+    readonly observation: "boot-session" | "process-birth";
+    readonly outcome: "timeout" | "failed" | "malformed";
+    readonly elapsedMs: number;
+  }) {
+    super("E_NATIVE_COMPOSE_STATE");
+    this.observation = opts.observation;
+    this.outcome = opts.outcome;
+    this.elapsedMs = opts.elapsedMs;
   }
 }
 function refuse(): never {

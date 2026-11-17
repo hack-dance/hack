@@ -35,6 +35,7 @@ import {
 } from "../src/backends/native-project-run.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import type { NativeEnvMetadata } from "../src/lib/native-env-plan-protocol.ts";
+import { NativeEnvironmentNameError } from "../src/lib/native-environment-name-error.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -166,6 +167,28 @@ test("storage still redacts arbitrary errors and lookalike routing errors", asyn
     expect(String(failure)).not.toContain("private fixture detail");
     expect(failure).not.toBeInstanceOf(NativeAuthoredStopUnavailableError);
   }
+});
+
+test("a refused authored variable name crosses storage by its own closed error; a lookalike stays redacted (HACK-2219)", async () => {
+  const scope = await fixture();
+  const original = NativeEnvironmentNameError.forHostCommand({
+    invocation: "tunnel",
+    variable: "FOO%%",
+  });
+  const failure = await admit(scope, async () => {
+    throw original;
+  }).catch((error: unknown) => error);
+  expect(failure).toBe(original);
+  expect(String(failure)).toContain('"FOO%%"');
+  expect(String(failure)).not.toContain("artifact is unsafe");
+  const lookalike = new Error("private fixture detail");
+  lookalike.name = "NativeEnvironmentNameError";
+  const redacted = await admit(scope, async () => {
+    throw lookalike;
+  }).catch((error: unknown) => error);
+  expect(redacted).not.toBe(lookalike);
+  expect(String(redacted)).toContain("artifact is unsafe");
+  expect(String(redacted)).not.toContain("private fixture detail");
 });
 
 test("absent native artifact reads have no writes and storage remains private and excluded", async () => {

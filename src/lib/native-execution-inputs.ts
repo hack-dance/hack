@@ -5,6 +5,7 @@ import {
 } from "./native-authored-runtime-metadata.ts";
 import { assertNativeComposeFileSubset } from "./native-compose-file-subset.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
+import { environmentNameRefusal } from "./native-environment-name-error.ts";
 import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import {
   type NativePreparedProject,
@@ -137,6 +138,14 @@ async function acquireInputs(input: {
   const prepare = () =>
     prepareNativeProjectSelection({ ...selection, requireEnvPlanning: true });
   const prepared = await prepare();
+  if (prepared.projectRoot === projectRoot && !prepared.result.ok) {
+    // The one compiler refusal that names its subject: a non-portable
+    // environment variable name the project sets (HACK-2219).
+    const named = environmentNameRefusal(prepared.result.diagnostics);
+    if (named) {
+      throw named;
+    }
+  }
   if (prepared.projectRoot !== projectRoot || !prepared.result.ok) {
     return refused();
   }

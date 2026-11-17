@@ -6,8 +6,9 @@
 use std::collections::BTreeMap;
 
 use crate::models::{
-    Autostart, AutostartFailures, Container, DaemonApiStatus, DoctorCheck, DoctorReport,
-    InputDiagnostic, LogEntry, ProjectRow, ProjectRuntime, ProjectsPayload, RuntimeService,
+    Autostart, AutostartFailures, BranchRuntime, Container, DaemonApiStatus, DoctorCheck,
+    DoctorReport, InputDiagnostic, LogEntry, ProjectRow, ProjectRuntime, ProjectsPayload,
+    RuntimeService,
 };
 use crate::source::{Snapshot, SourceError};
 use crate::state::{Action, LocalContext};
@@ -40,6 +41,9 @@ pub enum Fixture {
     Stopping,
     FailedStart,
     NeedsAttention,
+    /// The selected project's base instance is stopped while two branch
+    /// instances (`hack up --branch <name>`) run.
+    Branches,
     // Doctor pane.
     /// Findings across areas, machine and project scoped, one failed run.
     Doctor,
@@ -52,7 +56,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -74,6 +78,7 @@ impl Fixture {
         Self::Stopping,
         Self::FailedStart,
         Self::NeedsAttention,
+        Self::Branches,
         Self::Doctor,
         Self::DoctorClean,
         Self::DoctorLink,
@@ -104,6 +109,7 @@ impl Fixture {
             Self::Stopping => "stopping",
             Self::FailedStart => "failed-start",
             Self::NeedsAttention => "needs-attention",
+            Self::Branches => "branches",
             Self::Doctor => "doctor",
             Self::DoctorClean => "doctor-clean",
             Self::DoctorLink => "doctor-link",
@@ -125,7 +131,128 @@ fn container(state: &str, status: &str) -> Container {
         name: None,
         state: state.into(),
         status: status.into(),
+        labels: BTreeMap::new(),
+        working_dir: None,
     }
+}
+
+/// A branch-instance container routed at `caddy` (comma-separated hosts).
+fn routed(state: &str, status: &str, caddy: &str) -> Container {
+    let mut c = container(state, status);
+    c.labels.insert("caddy".into(), caddy.into());
+    c
+}
+
+/// The registered linked worktree of storefront (placeholder path).
+const STOREFRONT_WORKTREE: &str = "/work/storefront-wt/fix-login";
+
+/// Compose's working directory for a branch instance: `fix-login` was
+/// started from the registered linked worktree, others from the checkout.
+fn checkout_dir(branch: &str) -> String {
+    if branch == "fix-login" {
+        format!("{STOREFRONT_WORKTREE}/.hack")
+    } else {
+        "/work/storefront/.hack".into()
+    }
+}
+
+/// A running branch instance of storefront with web and api routes.
+fn running_branch(branch: &str) -> BranchRuntime {
+    BranchRuntime {
+        owner: None,
+        branch: branch.into(),
+        runtime: ProjectRuntime {
+            project: Some(format!("storefront--{branch}")),
+            working_dir: Some(checkout_dir(branch)),
+            services: vec![
+                svc(
+                    "api",
+                    routed(
+                        "running",
+                        "Up 20 minutes (healthy)",
+                        &format!("api.{branch}.storefront.hack"),
+                    ),
+                ),
+                svc("db", container("running", "Up 20 minutes")),
+                svc(
+                    "web",
+                    routed(
+                        "running",
+                        "Up 20 minutes",
+                        &format!("{branch}.storefront.hack"),
+                    ),
+                ),
+            ],
+        },
+    }
+}
+
+/// A branch instance whose api exited non-zero.
+fn failed_branch(branch: &str) -> BranchRuntime {
+    BranchRuntime {
+        owner: None,
+        branch: branch.into(),
+        runtime: ProjectRuntime {
+            project: Some(format!("storefront--{branch}")),
+            working_dir: Some(checkout_dir(branch)),
+            services: vec![
+                svc(
+                    "api",
+                    routed(
+                        "exited",
+                        "Exited (1) 5 minutes ago",
+                        &format!("api.{branch}.storefront.hack"),
+                    ),
+                ),
+                svc("db", container("exited", "Exited (0) 5 minutes ago")),
+            ],
+        },
+    }
+}
+
+/// A running branch instance whose routes are all service subdomains
+/// (nothing is routed on the bare instance host).
+fn subdomain_branch(branch: &str) -> BranchRuntime {
+    let routed_at = |service: &str| {
+        svc(
+            service,
+            routed(
+                "running",
+                "Up 1 hour",
+                &format!("{service}.{branch}.storefront.hack"),
+            ),
+        )
+    };
+    BranchRuntime {
+        owner: None,
+        branch: branch.into(),
+        runtime: ProjectRuntime {
+            project: Some(format!("storefront--{branch}")),
+            working_dir: Some(checkout_dir(branch)),
+            services: vec![
+                routed_at("core"),
+                routed_at("search"),
+                routed_at("temporal-server"),
+            ],
+        },
+    }
+}
+
+/// Every container of each runtime carries its runtime's working directory,
+/// as Compose reports it.
+fn owned(mut branches: Vec<BranchRuntime>) -> Vec<BranchRuntime> {
+    for b in &mut branches {
+        let dir = b.runtime.working_dir.clone();
+        for c in b
+            .runtime
+            .services
+            .iter_mut()
+            .flat_map(|s| &mut s.containers)
+        {
+            c.working_dir.clone_from(&dir);
+        }
+    }
+    branches
 }
 
 fn svc(name: &str, c: Container) -> RuntimeService {
@@ -151,6 +278,7 @@ fn storefront(services: Vec<RuntimeService>, status: &str) -> ProjectRow {
         service_hosts: hosts,
         runtime: Some(ProjectRuntime {
             project: Some("storefront".into()),
+            working_dir: None,
             services,
         }),
         backend: Some("compose".into()),
@@ -187,6 +315,7 @@ fn simple(name: &str, status: &str, backend: &str, always_on: bool) -> ProjectRo
         },
         runtime: (backend != "native").then(|| ProjectRuntime {
             project: Some(name.into()),
+            working_dir: None,
             services: if up {
                 vec![svc("app", container("running", "Up 3 days"))]
             } else {
@@ -265,6 +394,31 @@ pub fn project(f: Fixture) -> ProjectsPayload {
         Fixture::EngineDown => {
             let mut r = storefront(vec![], "unknown");
             r.runtime = None;
+            r
+        }
+        Fixture::Running => {
+            let mut r = storefront(all_up(), "running");
+            r.branch_runtime = owned(vec![
+                running_branch("feature-search"),
+                failed_branch("fix-login"),
+            ]);
+            r.worktrees = vec![crate::models::Worktree {
+                path: Some(STOREFRONT_WORKTREE.into()),
+                branch: Some("fix-login".into()),
+            }];
+            r
+        }
+        Fixture::Branches => {
+            let mut r = storefront(vec![], "stopped");
+            r.branch_runtime = owned(vec![
+                running_branch("feature-search"),
+                running_branch("fix-login"),
+                subdomain_branch("release-2"),
+            ]);
+            r.worktrees = vec![crate::models::Worktree {
+                path: Some(STOREFRONT_WORKTREE.into()),
+                branch: Some("fix-login".into()),
+            }];
             r
         }
         _ => storefront(all_up(), "running"),
@@ -408,6 +562,7 @@ pub fn snapshot(f: Fixture) -> Result<Snapshot, SourceError> {
     };
     Ok(Snapshot {
         cli_version: CLI_VERSION.into(),
+        daemon_compatible: daemon.as_ref().map(|d| d.version == CLI_VERSION),
         projects,
         daemon,
         doctor: Some(doctor(f)),

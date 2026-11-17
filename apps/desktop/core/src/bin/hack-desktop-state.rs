@@ -1,6 +1,6 @@
 //! `hack-desktop-state`: a headless check of the desktop app's live data
 //! path. It reads exactly what the window reads (`LiveSource::from_env`
-//! then `Source::snapshot`: hackd when its version matches the CLI,
+//! then `Source::snapshot`: hackd when the CLI can use it,
 //! plus native `ps` for native projects), applies the
 //! result to the same view model, and prints the list and every project's
 //! detail view as JSON.

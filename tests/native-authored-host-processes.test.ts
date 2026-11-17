@@ -28,6 +28,7 @@ import {
 } from "./helpers/lifecycle-mux-fixture.ts";
 
 const roots = new Set<string>();
+const ODD_NAMES = ["BASH_FUNC_hack2219%%", "FOO%%"] as const;
 let unknown = false;
 let active = false;
 let unconfirmed = false;
@@ -54,11 +55,14 @@ async function fixture() {
   await mkdir(projectDir, { mode: 0o700 });
   await mkdir(bin);
   await writeLifecycleMuxFixture(bin);
-  const before = {
+  const before: Record<string, string | undefined> = {
     PATH: process.env.PATH,
     HACK_SESSIONS_MUX: process.env.HACK_SESSIONS_MUX,
     HACK_TEST_MUX_STATE: process.env.HACK_TEST_MUX_STATE,
   };
+  for (const name of ODD_NAMES) {
+    before[name] = process.env[name];
+  }
   const previousUmask = process.umask(0o077);
   restore = () => {
     process.umask(previousUmask);
@@ -72,6 +76,11 @@ async function fixture() {
   };
   process.env.PATH = `${bin}:${before.PATH ?? "/usr/bin:/bin"}`;
   process.env.HACK_SESSIONS_MUX = "tmux";
+  // HACK-2219: every case (admission, start, stop and recovery) runs with
+  // inherited names that are not portable, as a bash `export -f` leaves them.
+  for (const name of ODD_NAMES) {
+    process.env[name] = "() {  echo fixture-function\n}";
+  }
   const state = join(root, "mux.json");
   process.env.HACK_TEST_MUX_STATE = state;
   const abort = new AbortController();
@@ -96,7 +105,7 @@ async function fixture() {
         process.execPath,
         "--no-env-file",
         "-e",
-        "await Bun.write('value-seen',process.env.HOST_VALUE??'missing');await Bun.write('endpoint-seen',process.env.HOST_URL??'missing');setInterval(()=>{},1000)",
+        "await Bun.write('value-seen',process.env.HOST_VALUE??'missing');await Bun.write('endpoint-seen',process.env.HOST_URL??'missing');await Bun.write('odd-seen',JSON.stringify(Object.keys(process.env).filter((name)=>!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))));setInterval(()=>{},1000)",
       ],
     },
     cwd: ".",
@@ -214,6 +223,10 @@ ownedCase(
         expect(await readFile(join(f.root, "endpoint-seen"), "utf8")).toBe(
           "http://127.0.0.1:4321"
         );
+        // Inherited non-portable names are dropped, not delivered or fatal.
+        expect(
+          JSON.parse(await readFile(join(f.root, "odd-seen"), "utf8"))
+        ).toEqual([]);
         const calls = await readFile(`${f.state}.calls`, "utf8");
         expect(calls).not.toContain(canary);
         expect(calls).not.toContain("set-environment");

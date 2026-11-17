@@ -100,6 +100,34 @@ test("host exec preserves piped stdin and a normal nonzero exit status", async (
   expect(await output).toBe("received:fixture-input\n");
 });
 
+test("host exec runs with non-portable inherited names and passes them through unchanged (HACK-2219)", async () => {
+  // Bash exports a function f as BASH_FUNC_f%%; host exec is a shell-like
+  // passthrough, so the child sees the inherited environment as is.
+  const root = await createFixture({ childIgnoresSignals: false });
+  await writeFile(
+    resolve(root, "child.ts"),
+    "console.log(JSON.stringify([process.env['BASH_FUNC_hack2219%%'], process.env['FOO%%']]));"
+  );
+  const wrapper = Bun.spawn(hostCommand({ root }), {
+    cwd: root,
+    env: {
+      ...fixtureEnv(root),
+      "BASH_FUNC_hack2219%%": "() {  echo fixture-function\n}",
+      "FOO%%": "fixture-odd-name",
+    },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  wrappers.push(wrapper);
+  const output = new Response(wrapper.stdout).text();
+  expect(await wrapper.exited).toBe(0);
+  expect(JSON.parse(await output)).toEqual([
+    "() {  echo fixture-function\n}",
+    "fixture-odd-name",
+  ]);
+});
+
 for (const ignores of [false, true]) {
   test(`host timeout records bounded lifetime and stops descendants (ignores=${ignores})`, async () => {
     const root = await createFixture({ childIgnoresSignals: ignores });

@@ -168,6 +168,68 @@ pub fn project_row(
         })
 }
 
+/// Sidebar branch-instance row, under its project: indented, branch icon,
+/// state dot and branch name.
+pub fn branch_row(
+    id: impl Into<ElementId>,
+    branch: impl Into<SharedString>,
+    status: Status,
+    selected: bool,
+    ui: &Ui,
+) -> Stateful<Div> {
+    let dim = matches!(status, Status::Stopped | Status::Unknown) && !selected;
+    let p = ui.p;
+    div()
+        .id(id)
+        .h(size::ROW)
+        .flex_none()
+        .pl(space::S9)
+        .pr(space::S5)
+        .flex()
+        .items_center()
+        .gap(space::S3)
+        .rounded(radius::CONTROL)
+        .cursor_pointer()
+        .when(selected, |d| d.bg(p.surface_1))
+        .hover(move |d| d.bg(p.surface_1))
+        .child(icon(Glyph::Branch, size::ICON, p.text_muted))
+        .child(dot(status, ui))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .type_step(if selected {
+                    text::BODY_STRONG
+                } else {
+                    text::BODY
+                })
+                .text_color(if dim {
+                    p.text_secondary
+                } else {
+                    p.text_primary
+                })
+                .child(branch.into()),
+        )
+}
+
+/// A small square icon button (copy, close): no label, hover tint.
+pub fn icon_button(id: impl Into<ElementId>, glyph: Glyph, ui: &Ui) -> Stateful<Div> {
+    let p = ui.p;
+    div()
+        .id(id)
+        .size(px(22.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(radius::CONTROL)
+        .cursor_pointer()
+        .hover(move |d| d.bg(p.surface_1))
+        .active(move |d| d.bg(p.surface_2))
+        .child(icon(glyph, size::ICON, p.text_secondary))
+}
+
 /// Sidebar machine row: leading icon, label, trailing dot or count.
 pub fn machine_row(
     id: impl Into<ElementId>,
@@ -260,42 +322,55 @@ pub fn primary_button(
         .child(label.into())
 }
 
-/// "Always on" switch (gpui-kit Switch, accent colour, small).
-pub fn always_on_switch(checked: bool, enabled: bool, ui: &Ui) -> impl IntoElement {
+/// "Always on" switch (gpui-kit Switch, accent colour, small). A disabled
+/// switch says why in its tooltip.
+pub fn always_on_switch(checked: bool, disabled_reason: Option<&'static str>, ui: &Ui) -> Switch {
     use gpui_kit::component::Disableable as _;
-    Switch::new("always-on")
+    let switch = Switch::new("always-on")
         .checked(checked)
         .small()
         .color(ui.p.accent)
         .label("Always on")
-        .disabled(!enabled)
+        .disabled(disabled_reason.is_some());
+    match disabled_reason {
+        Some(reason) => switch.tooltip(reason),
+        None => switch,
+    }
 }
 
-/// Pill tabs: the selected tab gets a filled background, not an underline.
-pub fn pill_tabs(labels: &[&'static str], selected: usize, ui: &Ui) -> Div {
+/// One pill tab: the selected tab gets a filled background, not an
+/// underline. The caller adds the click handler.
+pub fn pill_tab(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    sel: bool,
+    ui: &Ui,
+) -> Stateful<Div> {
     let p = ui.p;
+    div()
+        .id(id)
+        .h(size::CONTROL)
+        .px(space::S5)
+        .flex()
+        .items_center()
+        .rounded(radius::CONTROL)
+        .cursor_pointer()
+        .type_step(if sel { text::BODY_STRONG } else { text::BODY })
+        .text_color(if sel {
+            p.text_primary
+        } else {
+            p.text_secondary
+        })
+        .when(sel, |d| d.bg(p.surface_1))
+        .when(!sel, |d| d.hover(move |d| d.text_color(p.text_primary)))
+        .child(label)
+}
+
+/// Pill tabs, for renders that need no click handlers.
+pub fn pill_tabs(labels: &[&'static str], selected: usize, ui: &Ui) -> Div {
     let mut row = div().flex().items_center().gap(space::S2);
     for (i, label) in labels.iter().enumerate() {
-        let sel = i == selected;
-        row = row.child(
-            div()
-                .id(("tab", i))
-                .h(size::CONTROL)
-                .px(space::S5)
-                .flex()
-                .items_center()
-                .rounded(radius::CONTROL)
-                .cursor_pointer()
-                .type_step(if sel { text::BODY_STRONG } else { text::BODY })
-                .text_color(if sel {
-                    p.text_primary
-                } else {
-                    p.text_secondary
-                })
-                .when(sel, |d| d.bg(p.surface_1))
-                .when(!sel, |d| d.hover(move |d| d.text_color(p.text_primary)))
-                .child(*label),
-        );
+        row = row.child(pill_tab(("tab", i), label, i == selected, ui));
     }
     row
 }
@@ -419,14 +494,18 @@ pub struct ServiceRow {
 }
 
 const COL_STATE: f32 = 92.;
+/// Why CPU and memory show a dash: the CLI does not report them yet.
+pub const UNKNOWN_USAGE: &str = "Not reported: the CLI does not expose per-service usage yet";
 const COL_NUM: f32 = 64.;
 
 /// Services table: Service, State, CPU, Memory, Route. Hairline row
 /// separators, no outer box, numbers right-aligned.
 pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
     let p = ui.p;
-    let num = |v: Option<String>, ui: &Ui| {
+    let num = |id: (&'static str, usize), v: Option<String>, ui: &Ui| {
+        let unknown = v.is_none();
         div()
+            .id(id)
             .w(px(COL_NUM))
             .flex_none()
             .flex()
@@ -438,6 +517,11 @@ pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
                 ui.p.text_muted
             })
             .child(v.unwrap_or_else(|| "—".into()))
+            .when(unknown, |d| {
+                d.tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(UNKNOWN_USAGE).build(window, cx)
+                })
+            })
     };
     let header = div()
         .h(px(26.))
@@ -510,8 +594,8 @@ pub fn services_table(rows: &[ServiceRow], ui: &Ui) -> Div {
                         .text_color(state_color)
                         .child(r.state.clone()),
                 )
-                .child(num(r.cpu.clone(), ui))
-                .child(num(r.memory.clone(), ui))
+                .child(num(("cpu", i), r.cpu.clone(), ui))
+                .child(num(("mem", i), r.memory.clone(), ui))
                 .child(
                     div()
                         .flex_1()

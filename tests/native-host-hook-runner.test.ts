@@ -367,6 +367,51 @@ test("phase preparation captures every selected managed binding before spawn and
     }
   }
 });
+test("native finite hooks run with non-portable inherited names and never receive them (HACK-2219)", async () => {
+  const scope = await fixture();
+  const names = ["BASH_FUNC_hack2219%%", "FOO%%", "HACK_2219_AMBIENT"];
+  const saved = names.map((name) => [name, process.env[name]] as const);
+  for (const name of names) {
+    process.env[name] = "fixture-inherited";
+  }
+  try {
+    const execute = await prepareNativeFiniteHookPhase({
+      hooks: [
+        {
+          name: "seen",
+          env_target: { kind: "host" as const },
+          command: {
+            exec: [
+              process.execPath,
+              "-e",
+              `await Bun.write("seen", JSON.stringify(${JSON.stringify(names)}.map((name) => process.env[name] ?? null)))`,
+            ],
+          },
+        },
+      ],
+      report: report(["seen"]),
+      projectRoot: scope.projectRoot,
+      signal: new AbortController().signal,
+      remaining: () => 3000,
+      assertFresh: async () => undefined,
+      resolveHostValues: async () => ({}),
+      beforeSpawn: () => undefined,
+      onSpawn: async () => undefined,
+    });
+    expect(await execute()).toEqual(complete);
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) {
+        Reflect.deleteProperty(process.env, name);
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+  expect(
+    JSON.parse(await readFile(join(scope.projectRoot, "seen"), "utf8"))
+  ).toEqual([null, null, "fixture-inherited"]);
+});
 test("a live captured foreground group blocks hook journal retirement and recovery", async () => {
   const scope = await fixture();
   const child = Bun.spawn(

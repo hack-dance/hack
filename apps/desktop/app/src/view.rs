@@ -1,28 +1,25 @@
-//! The one window: sidebar, detail pane, status bar.
+//! The one window, in design v1 (`DESIGN-V1.md`): title bar with search,
+//! sidebar, detail pane, status bar.
 //!
-//! All data comes from `hack_desktop_core`; this file only lays it out and
-//! forwards clicks as view-model events. Blocking work (CLI, socket) runs on
-//! the background executor, never on the UI thread.
+//! All data comes from `hack_desktop_core`; this file lays it out with the
+//! `hack_desktop_ui` components and forwards clicks as view-model events.
+//! Blocking work (CLI, socket) runs on the background executor, never on the
+//! UI thread. Nothing here invents a value: what the CLI does not report is
+//! a dash with a tooltip, or absent.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    switch::Switch,
-    tab::{Tab, TabBar},
-    tag::Tag,
-    v_flex,
+    ActiveTheme, Sizable as _,
+    input::{Input, InputEvent, InputState},
 };
 use gpui_kit::{
-    AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, SharedString,
-    Styled, Window, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, IntoElement, KeyBinding, ParentElement,
+    Render, SharedString, Styled, Window, div, prelude::*, px,
 };
 use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
-use hack_desktop_core::models::LogEntry;
 use hack_desktop_core::source::{
     ActionOutcome, DaemonRecovery, DoctorTarget, Snapshot, Source, SourceError,
 };
@@ -31,12 +28,35 @@ use crate::doctor_view::Pane;
 use hack_desktop_core::doctor::DoctorState as DoctorStateView;
 
 use hack_desktop_core::source::target_keys;
-use hack_desktop_core::state::{Action, ProjectState, ServiceView, Tone};
+use hack_desktop_core::state::{Action, ProjectState};
 use hack_desktop_core::viewmodel::{
-    AppModel, DetailView, Event, ListView, Phase, RefreshToken, Row,
+    AppModel, Banner, BranchRow, DetailView, Event, InstanceKey, ListView, Phase, RefreshToken,
+    Row, UpdateSide,
 };
+use hack_desktop_ui::components::{
+    BannerTone, ServiceRow, StyledExt as _, Ui, action_button, always_on_switch, banner, caption,
+    count_pill, dot, empty_pane, icon_button, machine_row, neutral_pill, pill_tab, primary_button,
+    project_row, services_table, skeleton, state_pill, status_bar,
+};
+use hack_desktop_ui::icons::Glyph;
+use hack_desktop_ui::status::{Status, project_label, service_label};
+use hack_desktop_ui::tokens::{Mode, Palette, radius, size, space, text};
 
-const TAIL_LINES: u32 = 20;
+gpui_kit::actions!(hack_desktop, [FocusSearch]);
+
+/// The search shortcut: Cmd-K on macOS, Ctrl-K elsewhere.
+#[cfg(target_os = "macos")]
+const SEARCH_KEY: &str = "cmd-k";
+#[cfg(not(target_os = "macos"))]
+const SEARCH_KEY: &str = "ctrl-k";
+
+/// Why the always-on switch is disabled.
+const ALWAYS_ON_REASON: &str = "Always on needs the CLI's autostart commands (HACK-2213)";
+
+/// The window's key bindings.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(SEARCH_KEY, FocusSearch, None)]);
+}
 
 pub struct HackApp {
     pub(crate) model: AppModel,
@@ -44,9 +64,12 @@ pub struct HackApp {
     pub(crate) logs: crate::logs_view::LogsPane,
     tab: usize,
     env: hack_desktop_core::env::EnvModel,
-    tail: Result<Vec<LogEntry>, String>,
-    follow: bool,
     live: bool,
+    /// The title bar's project filter.
+    search: Entity<InputState>,
+    filter: String,
+    /// When the URL was last copied, for the check mark.
+    copied: Option<Instant>,
     pane: Pane,
     doctor: DoctorPane,
     /// Is the window visible (not minimised or hidden)? Automatic doctor
@@ -57,7 +80,7 @@ pub struct HackApp {
     recovery_error: Option<String>,
     /// When each project's running action started, for the slow-action
     /// warning. Display only: the app never terminates a lifecycle command.
-    action_started: std::collections::HashMap<String, std::time::Instant>,
+    action_started: std::collections::HashMap<InstanceKey, Instant>,
 }
 
 impl HackApp {
@@ -69,6 +92,14 @@ impl HackApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let logs = crate::logs_view::LogsPane::new(window, cx);
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        cx.subscribe(&search, |this: &mut HackApp, state, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.filter = state.read(cx).value().trim().to_lowercase();
+                cx.notify();
+            }
+        })
+        .detach();
         let mut this = Self {
             model: AppModel::new(),
             source,
@@ -79,9 +110,10 @@ impl HackApp {
             window_visible: true,
             _visibility: None,
             env: Default::default(),
-            tail: Ok(Vec::new()),
-            follow: true,
             live,
+            search,
+            filter: String::new(),
+            copied: None,
             recovery_busy: false,
             recovery_error: None,
             action_started: std::collections::HashMap::new(),
@@ -115,10 +147,6 @@ impl HackApp {
     pub fn refresh_now(&mut self) {
         let snap = self.source.snapshot();
         self.model.apply(Event::Refreshed(snap));
-        self.tail = self.selected_root().map_or_else(
-            || Ok(Vec::new()),
-            |(root, native)| self.source.log_tail(&root, native, TAIL_LINES),
-        );
     }
 
     /// Fixtures and screenshots: open the Doctor pane with its data loaded.
@@ -266,17 +294,16 @@ impl HackApp {
         snap: Result<Snapshot, SourceError>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let before = self.model.selected_row().map(|r| r.name.clone());
+        let before = self.model.selected_key();
         let previous_root = self.selected_root();
         if !self.model.finish_refresh(token, snap) {
             return false;
         }
-        let after = self.model.selected_row().map(|r| r.name.clone());
+        let after = self.model.selected_key();
         let selection_changed = before != after || previous_root != self.selected_root();
         if selection_changed {
             // Only accepted snapshots may invalidate a tail or replace a
             // stream. Root/backend changes also change stream ownership.
-            self.tail = Ok(Vec::new());
             self.logs.model.set_service(None);
             self.env.begin();
             if self.tab == 2 {
@@ -301,6 +328,15 @@ impl HackApp {
         self.maybe_auto_refresh(cx);
         cx.notify();
         true
+    }
+
+    /// Type into the title bar search (frame sequences).
+    #[cfg(feature = "screenshots")]
+    pub(crate) fn type_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
+        self.filter = text.trim().to_lowercase();
+        cx.notify();
     }
 
     /// Fixtures: select a project by name.
@@ -347,11 +383,8 @@ impl HackApp {
 
     /// Fixtures: mark an action as in flight without running it.
     pub fn simulate_in_flight(&mut self, action: Action) {
-        if let Some(name) = self.model.detail().map(|d| d.name) {
-            self.model.apply(Event::ActionStarted {
-                project: name,
-                action,
-            });
+        if let Some(key) = self.model.detail().map(|d| d.key) {
+            self.model.apply(Event::ActionStarted { key, action });
         }
     }
 
@@ -367,9 +400,9 @@ impl HackApp {
                     "hackd is off or unreachable: start hackd"
                 }
                 .into(),
+                compatible: false,
             },
         )));
-        self.tail = Err("Project status could not be read".into());
     }
 
     pub(crate) fn selected_root(&self) -> Option<(PathBuf, bool)> {
@@ -392,31 +425,7 @@ impl HackApp {
                         async move { source.snapshot() }
                     })
                     .await;
-                let root = this
-                    .update(cx, |this, cx| {
-                        if !this.apply_refresh(token, snap, cx) {
-                            return None;
-                        }
-                        (this.follow && this.tab == 0)
-                            .then(|| this.selected_root())
-                            .flatten()
-                    })
-                    .ok()
-                    .flatten();
-                if let Some((root, native)) = root {
-                    let requested = (root.clone(), native);
-                    let tail = cx
-                        .background_executor()
-                        .spawn(async move { source.log_tail(&root, native, TAIL_LINES) })
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        // Root and backend both identify the requested tail.
-                        if this.selected_root().as_ref() == Some(&requested) {
-                            this.tail = tail;
-                            cx.notify();
-                        }
-                    });
-                }
+                let _ = this.update(cx, |this, cx| this.apply_refresh(token, snap, cx));
                 let delay = this
                     .update(cx, |this, _| this.model.poll_interval())
                     .unwrap_or(Duration::from_secs(10));
@@ -426,27 +435,28 @@ impl HackApp {
         .detach();
     }
 
-    fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
+    pub(crate) fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
         if self.recovery_busy {
             return;
         }
         let Some(row) = self.model.selected_row() else {
             return;
         };
-        let project = row.name.clone();
+        let Some(key) = self.model.selected_key() else {
+            return;
+        };
         let native = row.is_native();
         let Some(root) = row.repo_root.clone().map(PathBuf::from) else {
             return;
         };
-        if !self.model.can_start(&project) {
+        if !self.model.can_start(&key) {
             return;
         }
         self.model.apply(Event::ActionStarted {
-            project: project.clone(),
+            key: key.clone(),
             action,
         });
-        self.action_started
-            .insert(project.clone(), std::time::Instant::now());
+        self.action_started.insert(key.clone(), Instant::now());
         cx.notify();
         if !self.live {
             return;
@@ -455,15 +465,18 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { source.act(&root, native, action) })
+                .spawn({
+                    let branch = key.branch.clone();
+                    async move { source.act(&root, native, branch.as_deref(), action) }
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Ok(ActionOutcome::Opened(o)) = &result {
                     cx.open_url(&o.url);
                 }
-                this.action_started.remove(&project);
+                this.action_started.remove(&key);
                 if this.model.apply(Event::ActionFinished {
-                    project,
+                    key,
                     action,
                     result,
                 }) {
@@ -514,174 +527,524 @@ impl HackApp {
     }
 }
 
-fn tone_color(tone: Tone, cx: &gpui_kit::App) -> Hsla {
-    let t = cx.theme().clone();
-    match tone {
-        Tone::Ok => t.success,
-        Tone::Warn => t.warning,
-        Tone::Busy => t.info,
-        Tone::Error => t.danger,
-        Tone::Idle => t.muted_foreground,
-    }
-}
-
-fn dot(color: Hsla) -> impl IntoElement {
-    div().size(px(8.)).rounded_full().bg(color).flex_none()
-}
-
-fn state_tag(state: &ProjectState) -> Tag {
-    let tag = match state.tone() {
-        Tone::Ok => Tag::success(),
-        Tone::Warn => Tag::warning(),
-        Tone::Busy => Tag::info(),
-        Tone::Error => Tag::danger(),
-        Tone::Idle => Tag::secondary(),
-    };
-    tag.small().rounded_full().child(state.label())
-}
-
 impl HackApp {
-    fn sidebar(&self, list: &ListView, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-        let header = |label: &'static str| {
-            div()
-                .px_3()
-                .pt_3()
-                .pb_1()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(t.muted_foreground)
-                .child(label)
-        };
-        let mut col = v_flex()
-            .w(px(232.))
-            .h_full()
-            .flex_none()
-            .bg(t.sidebar)
-            .border_r_1()
-            .border_color(t.sidebar_border)
-            .text_color(t.sidebar_foreground)
-            .text_sm();
-        col = col.child(
-            div()
-                .px_3()
-                .py_3()
-                .font_weight(FontWeight::BOLD)
-                .child("Hack"),
-        );
-        // Project groups scroll; the header above and the machine rows below
-        // stay fixed, so every project stays reachable however many there are.
-        let mut body = v_flex()
-            .id("project-list")
+    /// Palette and fonts for the current light or dark mode.
+    pub(crate) fn ui(&self, cx: &App) -> Ui {
+        let t = cx.theme();
+        Ui {
+            p: Palette::for_mode(if t.is_dark() { Mode::Dark } else { Mode::Light }),
+            font: t.font_family.clone(),
+            mono: t.mono_font_family.clone(),
+        }
+    }
+
+    /// Whether a project row (or one of its branch instances) matches the
+    /// title bar's filter. An empty filter matches everything.
+    fn matches(&self, r: &Row) -> bool {
+        self.filter.is_empty()
+            || r.name.to_lowercase().contains(&self.filter)
+            || r.branches
+                .iter()
+                .any(|b| b.branch.to_lowercase().contains(&self.filter))
+    }
+
+    pub(crate) fn select_instance(&mut self, key: InstanceKey, cx: &mut Context<Self>) {
+        self.model.apply(Event::SelectInstance(key));
+        self.after_select(cx);
+    }
+
+    pub(crate) fn select_project(&mut self, name: String, cx: &mut Context<Self>) {
+        self.model.apply(Event::Select(name));
+        self.after_select(cx);
+    }
+
+    /// Everything a selection change resets: the pane, the env read, the
+    /// Logs tab's stream and its service filter.
+    pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
+        self.pane = Pane::Project;
+        self.copied = None;
+        self.env.begin();
+        if self.tab == 2 {
+            self.read_env(cx);
+        }
+        if !self.live {
+            self.refresh_now();
+        }
+        // A service filter belongs to one project: reset it on every
+        // project change, whichever tab is open.
+        self.logs.model.set_service(None);
+        if self.tab == 1 {
+            self.open_logs(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_tab(&mut self, to: usize, cx: &mut Context<Self>) {
+        let from = self.tab;
+        if from == to {
+            return;
+        }
+        self.tab = to;
+        self.env.begin();
+        if to == 1 {
+            self.open_logs(cx);
+        } else if from == 1 {
+            self.logs.close();
+        }
+        if to == 2 {
+            self.read_env(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn copy_url(&mut self, url: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(url));
+        self.copied = Some(Instant::now());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1600))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .copied
+                    .is_some_and(|t| t.elapsed() >= Duration::from_millis(1500))
+                {
+                    this.copied = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn title_bar(&self, ui: &Ui) -> impl IntoElement {
+        let p = ui.p;
+        gpui_kit::component::TitleBar::new()
+            .h(size::TITLE_BAR)
+            .bg(p.chrome)
+            .border_color(p.border)
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .type_step(text::BODY_STRONG)
+                            .text_color(p.text_primary)
+                            .child("Hack"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("search")
+                            .w(size::SEARCH_W)
+                            .h(px(24.))
+                            .rounded(radius::CONTROL)
+                            .bg(p.surface)
+                            .hairline(p.border_strong)
+                            .child(
+                                Input::new(&self.search)
+                                    .appearance(false)
+                                    .small()
+                                    .cleanable(true)
+                                    .prefix(hack_desktop_ui::components::icon(
+                                        Glyph::Search,
+                                        size::ICON,
+                                        p.text_muted,
+                                    )),
+                            ),
+                    )
+                    .child(div().w(space::S6)),
+            )
+    }
+
+    fn sidebar(&self, list: &ListView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = ui.p;
+        let mut projects = div()
+            .id("projects")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .px(space::S3)
+            .pb(space::S4);
         match &list.phase {
             Phase::Loading => {
-                for i in 0..3usize {
-                    body = body.child(
+                projects = projects.child(caption("Projects", ui));
+                for (i, w) in [120., 96., 132.].into_iter().enumerate() {
+                    projects = projects.child(
                         div()
                             .id(("skeleton", i))
-                            .mx_3()
-                            .my_1()
-                            .h(px(20.))
-                            .rounded_md()
-                            .bg(t.muted),
+                            .h(size::ROW)
+                            .px(space::S5)
+                            .flex()
+                            .items_center()
+                            .gap(space::S4)
+                            .child(div().size(size::DOT).rounded_full().bg(p.surface_1))
+                            .child(skeleton(w, ui)),
+                    );
+                }
+            }
+            Phase::Ready => {
+                let running: Vec<&Row> = list.running.iter().filter(|r| self.matches(r)).collect();
+                let stopped: Vec<&Row> = list.stopped.iter().filter(|r| self.matches(r)).collect();
+                let all_unknown = !stopped.is_empty()
+                    && stopped
+                        .iter()
+                        .all(|r| matches!(r.state, ProjectState::Unknown { .. }));
+                for (label, rows) in [
+                    ("Running", running.as_slice()),
+                    (
+                        if all_unknown {
+                            "Not observed"
+                        } else {
+                            "Stopped"
+                        },
+                        stopped.as_slice(),
+                    ),
+                ] {
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    projects = projects.child(caption(label, ui));
+                    for r in rows {
+                        projects = projects.child(self.project_row(r, ui, cx));
+                        for b in &r.branches {
+                            projects = projects.child(self.branch_row(b, ui, cx));
+                        }
+                    }
+                }
+                if !self.filter.is_empty() && running.is_empty() && stopped.is_empty() {
+                    projects = projects.child(
+                        div()
+                            .px(space::S5)
+                            .pt(space::S7)
+                            .type_step(text::BODY)
+                            .text_color(p.text_muted)
+                            .child("No project matches"),
                     );
                 }
             }
             Phase::Empty | Phase::CliMissing | Phase::Error { .. } => {}
-            Phase::Ready => {
-                if !list.running.is_empty() {
-                    body = body.child(header("RUNNING"));
-                    for r in &list.running {
-                        body = body.child(self.project_row(r, cx));
-                    }
-                }
-                if !list.stopped.is_empty() {
-                    let unknown = list
-                        .stopped
-                        .iter()
-                        .filter(|r| matches!(r.state, ProjectState::Unknown { .. }))
-                        .count();
-                    body = body.child(header(if unknown == list.stopped.len() {
-                        "UNKNOWN"
-                    } else if unknown > 0 {
-                        "STOPPED / UNKNOWN"
-                    } else {
-                        "STOPPED"
-                    }));
-                    for r in &list.stopped {
-                        body = body.child(self.project_row(r, cx));
-                    }
-                }
-            }
         }
-        let t = cx.theme().clone();
-        col.child(body).child(
-            v_flex()
-                .border_t_1()
-                .border_color(t.sidebar_border)
-                .py_2()
-                // v0 does not read routing status yet: shown as unknown.
-                .child(machine_row("Routing and DNS", None, t.muted_foreground))
-                .child(self.doctor_row(cx)),
+        let machine = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px(space::S3)
+            .pb(space::S4)
+            .child(caption("Machine", ui))
+            .child(
+                machine_row(
+                    "routing",
+                    Glyph::Globe,
+                    "Routing and DNS",
+                    dot(self.routing_status().unwrap_or(Status::Unknown), ui),
+                    ui,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
+            )
+            .child(
+                machine_row(
+                    "doctor",
+                    Glyph::Stethoscope,
+                    "Doctor",
+                    self.doctor_trailing(list, ui),
+                    ui,
+                )
+                .when(self.pane == Pane::Doctor, |d| d.bg(p.surface_1))
+                .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx))),
+            );
+        div()
+            .w(size::SIDEBAR)
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(p.chrome)
+            .hairline_r(p.border)
+            .child(projects)
+            .child(machine)
+    }
+
+    /// Routing and DNS: from the last completed Doctor run when there is
+    /// one, else from Doctor checks in the snapshot. `None` (a ring) until
+    /// either has reported.
+    fn routing_status(&self) -> Option<Status> {
+        if let DoctorStateView::Loaded(v) = &self.doctor.result {
+            return routing_from_doctor(v);
+        }
+        let checks = &self.model.snapshot()?.doctor.as_ref()?.checks;
+        hack_desktop_ui::window::routing_status(
+            checks.iter().map(|c| (c.id.as_str(), c.status.as_str())),
         )
     }
 
-    /// The sidebar Doctor row: opens the Doctor pane (and runs doctor the
-    /// first time). Its badge counts the loaded findings when there are any.
-    fn doctor_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let t = cx.theme().clone();
-        // Never green unless every run finished clean; grey until it ran.
-        let (count, color) = match &self.doctor.result {
-            DoctorStateView::Loaded(v) => (v.attention_count(), tone_color(self.doctor.tone(), cx)),
-            _ => (0, tone_color(self.doctor.tone(), cx)),
+    /// The Doctor row's trailing mark (see [`doctor_mark`]).
+    fn doctor_trailing(&self, list: &ListView, ui: &Ui) -> AnyElement {
+        match doctor_mark(&self.doctor, list) {
+            DoctorMark::Count(n) => count_pill(n, ui).into_any_element(),
+            DoctorMark::Dot(s) => dot(s, ui).into_any_element(),
+        }
+    }
+
+    fn project_row(&self, r: &Row, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let name = r.name.clone();
+        project_row(
+            SharedString::from(format!("project-{}", r.name)),
+            r.name.clone(),
+            Status::of(&r.state),
+            r.always_on,
+            r.selected && self.pane == Pane::Project,
+            ui,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.select_project(name.clone(), cx)))
+        .into_any_element()
+    }
+
+    fn branch_row(&self, b: &BranchRow, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let key = b.key.clone();
+        hack_desktop_ui::components::branch_row(
+            SharedString::from(format!("branch-{}-{}", b.key.project, b.branch)),
+            b.branch.clone(),
+            Status::of(&b.state),
+            b.selected && self.pane == Pane::Project,
+            ui,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.select_instance(key.clone(), cx)))
+        .into_any_element()
+    }
+
+    fn banners(&self, list: &ListView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+        let daemon_banner = list
+            .banners
+            .iter()
+            .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }));
+        let mut col = div().flex().flex_col();
+        let recovery = self.model.daemon_recovery();
+        let mut recovery_shown = false;
+        for b in &list.banners {
+            let (tone, msg, offers_recovery) = match b {
+                Banner::DaemonOff => (
+                    BannerTone::Warn,
+                    "hackd is not running. Project states are not observed.".to_owned(),
+                    true,
+                ),
+                Banner::DaemonMismatch { .. } => (BannerTone::Warn, b.text(), true),
+                Banner::EngineDown { error } => (
+                    BannerTone::Error,
+                    format!("Docker is not reachable: {error}"),
+                    false,
+                ),
+                Banner::DaemonReadFailed { error } => (BannerTone::Warn, error.clone(), false),
+                // With a daemon banner, the stale banner repeats its cause.
+                // Otherwise it is the only sign the latest read failed.
+                Banner::Stale { .. } if daemon_banner => continue,
+                Banner::Stale { error } => (
+                    BannerTone::Warn,
+                    format!("Showing last known state. The latest read failed: {error}"),
+                    false,
+                ),
+            };
+            let mut row = banner(tone, msg, None, ui);
+            // A daemon newer than the CLI: the remedy is updating the CLI,
+            // never restarting hackd.
+            if let Banner::DaemonMismatch {
+                update: UpdateSide::Cli,
+                ..
+            } = b
+            {
+                row = row.child(
+                    action_button("copy-update", Glyph::Copy, "Copy hack update", true, ui)
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string("hack update".into()));
+                        })),
+                );
+            }
+            if offers_recovery
+                && !recovery_shown
+                && let Some(action) = recovery
+            {
+                recovery_shown = true;
+                let glyph = match action {
+                    DaemonRecovery::Start => Glyph::Power,
+                    DaemonRecovery::Restart => Glyph::Restart,
+                };
+                let label = if self.recovery_busy {
+                    "Working…"
+                } else {
+                    action.label()
+                };
+                row = row.child(
+                    action_button("recover-hackd", glyph, label, !self.recovery_busy, ui).on_click(
+                        cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
+                    ),
+                );
+            }
+            col = col.child(row);
+        }
+        if let Some(e) = &self.recovery_error {
+            col = col.child(banner(BannerTone::Error, e.clone(), None, ui));
+        }
+        col
+    }
+
+    fn header(&self, d: &DetailView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = ui.p;
+        let status = Status::of(&d.state);
+        let mut actions = div().flex().items_center().gap(space::S3);
+        for a in [Action::Open, Action::Restart, Action::Stop, Action::Start] {
+            if !d.actions.contains(&a) {
+                continue;
+            }
+            let enabled = !d.busy && !self.recovery_busy;
+            let (glyph, id) = match a {
+                Action::Open => (Glyph::ExternalLink, "open"),
+                Action::Restart => (Glyph::Restart, "restart"),
+                Action::Stop => (Glyph::Stop, "stop"),
+                Action::Start => (Glyph::Play, "start"),
+            };
+            let button = if a == Action::Start && enabled {
+                primary_button(id, glyph, a.label(), ui)
+            } else {
+                action_button(id, glyph, a.label(), enabled, ui)
+            };
+            actions = actions.child(if enabled {
+                button.on_click(cx.listener(move |this, _, _, cx| this.run_action(a, cx)))
+            } else {
+                button
+            });
+        }
+        let daemon_banner = self
+            .model
+            .list()
+            .banners
+            .iter()
+            .any(|b| matches!(b, Banner::DaemonOff | Banner::DaemonMismatch { .. }));
+        let reason = match (&d.state, &d.last_error) {
+            (_, Some(e)) => Some(format!("Last action failed: {e}")),
+            (ProjectState::NeedsAttention { reason }, None) => Some(reason.clone()),
+            // A daemon banner already explains an unobserved project.
+            (ProjectState::Unknown { reason }, None) if !daemon_banner => Some(reason.clone()),
+            _ => None,
         };
+        let url_row = div()
+            .flex()
+            .items_center()
+            .gap(space::S3)
+            .min_h(px(22.))
+            .children(d.url.clone().map(|u| {
+                let copied = self.copied.is_some();
+                let to_copy = u.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::S2)
+                    .child(
+                        div()
+                            .font_family(ui.mono.clone())
+                            .type_step(text::MONO)
+                            .text_color(p.text_secondary)
+                            .child(u),
+                    )
+                    .child(
+                        icon_button(
+                            "copy-url",
+                            if copied { Glyph::Check } else { Glyph::Copy },
+                            ui,
+                        )
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(if copied {
+                                "Copied"
+                            } else {
+                                "Copy URL"
+                            })
+                            .build(window, cx)
+                        })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.copy_url(to_copy.clone(), cx)),
+                        ),
+                    )
+            }))
+            .child(div().flex_1())
+            .child(always_on_switch(d.always_on, Some(ALWAYS_ON_REASON), ui));
         div()
-            .id("doctor-row")
-            .rounded_md()
-            .cursor_pointer()
-            .when(self.pane == Pane::Doctor, |d| {
-                d.bg(t.sidebar_accent)
-                    .text_color(t.sidebar_accent_foreground)
-            })
-            .hover(|d| d.bg(t.sidebar_accent))
-            .mx_2()
-            .px_2()
-            .py_1()
+            .flex()
+            .flex_col()
+            .gap(space::S4)
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(dot(color))
-                    .child(div().flex_1().child("Doctor"))
-                    .children((count > 0).then(|| {
-                        Tag::warning()
-                            .xsmall()
-                            .rounded_full()
-                            .child(count.to_string())
-                    })),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::S4)
+                    .child(
+                        div()
+                            .type_step(text::TITLE)
+                            .text_color(p.text_primary)
+                            .child(d.name.clone()),
+                    )
+                    .children(d.branch.clone().map(|b| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::S2)
+                            .type_step(text::BODY)
+                            .text_color(p.text_secondary)
+                            .child(hack_desktop_ui::components::icon(
+                                Glyph::Branch,
+                                size::ICON,
+                                p.text_muted,
+                            ))
+                            .child(b)
+                    }))
+                    .child(state_pill(status, project_label(&d.state), ui))
+                    .child(neutral_pill(d.backend.clone(), ui))
+                    .child(div().flex_1())
+                    .child(actions),
             )
-            .on_click(cx.listener(|this, _, _, cx| this.open_doctor(None, cx)))
-            .into_any_element()
+            .child(url_row)
+            .children(reason.map(|r| {
+                let c = if status == Status::Failed {
+                    p.states.failed.fg
+                } else {
+                    p.text_secondary
+                };
+                div().type_step(text::BODY).text_color(c).child(r)
+            }))
+            .children(self.doctor_link(&d.name, ui, cx))
+            .children(self.slow_action_warning(&d.key).map(|w| {
+                div()
+                    .type_step(text::BODY)
+                    .text_color(p.states.degraded.fg)
+                    .child(w)
+            }))
+            .children(d.note.clone().map(|n| {
+                div()
+                    .type_step(text::SMALL)
+                    .text_color(p.text_muted)
+                    .child(n)
+            }))
     }
 
     /// "Doctor: N findings for this project", linking to the Doctor pane
     /// filtered on the project. A link only: it never changes the state pill.
-    fn doctor_link(&self, project: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn doctor_link(&self, project: &str, ui: &Ui, cx: &mut Context<Self>) -> Option<AnyElement> {
         let n = self.doctor.findings_for(project);
         if n == 0 {
             return None;
         }
-        let t = cx.theme().clone();
         let name = project.to_owned();
         Some(
             div()
                 .id("doctor-link")
-                .text_sm()
-                .text_color(t.link)
-                .underline()
+                .type_step(text::BODY)
+                .text_color(ui.p.accent)
                 .cursor_pointer()
+                .hover(|d| d.underline())
                 .child(format!(
                     "Doctor: {n} finding{} for this project",
                     if n == 1 { "" } else { "s" }
@@ -693,275 +1056,159 @@ impl HackApp {
         )
     }
 
-    fn project_row(&self, r: &Row, cx: &mut Context<Self>) -> AnyElement {
-        let t = cx.theme().clone();
-        let name = r.name.clone();
-        h_flex()
-            .id(SharedString::from(format!("project-{}", r.name)))
-            .mx_2()
-            .px_2()
-            .py_1()
-            .gap_2()
-            .rounded_md()
-            .when(r.selected && self.pane == Pane::Project, |d| {
-                d.bg(t.sidebar_accent)
-                    .text_color(t.sidebar_accent_foreground)
+    fn detail(&self, d: &DetailView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows: Vec<ServiceRow> = d
+            .services
+            .iter()
+            .map(|s| ServiceRow {
+                name: s.name.clone(),
+                status: Status::of_service(s),
+                state: service_label(s),
+                // Not reported by the CLI yet: a dash with a tooltip.
+                cpu: None,
+                memory: None,
+                route: s.route.clone().ok_or_else(|| "internal".to_owned()),
             })
-            .hover(|d| d.bg(t.sidebar_accent))
-            .cursor_pointer()
-            .child(dot(tone_color(r.state.tone(), cx)))
-            .child(div().flex_1().truncate().child(r.name.clone()))
-            .when(r.always_on, |d| {
-                d.child(
-                    div()
-                        .text_xs()
-                        .text_color(t.muted_foreground)
-                        .child("always on"),
-                )
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.model.apply(Event::Select(name.clone()));
-                this.pane = Pane::Project;
-                this.env.begin();
-                if this.tab == 2 {
-                    this.read_env(cx);
-                }
-                this.tail = Ok(Vec::new());
-                if !this.live {
-                    this.refresh_now();
-                }
-                // A service filter belongs to one project: reset it on every
-                // project change, whichever tab is open.
-                this.logs.model.set_service(None);
-                if this.tab == 1 {
-                    this.open_logs(cx);
-                }
-                cx.notify();
-            }))
-            .into_any_element()
-    }
-
-    fn banners(&self, list: &ListView, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-        let mut col = v_flex();
-        for b in &list.banners {
-            col = col.child(
-                div()
-                    .px_4()
-                    .py_1()
-                    .text_xs()
-                    .bg(t.warning.opacity(0.15))
-                    .border_b_1()
-                    .border_color(t.border)
-                    .child(b.text()),
+            .collect();
+        let mut tabs = div().flex().items_center().gap(space::S2);
+        for (i, label) in ["Services", "Logs", "Env"].into_iter().enumerate() {
+            tabs = tabs.child(
+                pill_tab(("detail-tab", i), label, self.tab == i, ui)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_tab(i, cx))),
             );
         }
-        if let Some(action) = self.model.daemon_recovery() {
-            col = col.child(
-                h_flex()
-                    .px_4()
-                    .py_2()
-                    .gap_3()
-                    .child(
-                        Button::new("recover-hackd")
-                            .label(action.label())
-                            .small()
-                            .disabled(self.recovery_busy)
-                            .loading(self.recovery_busy)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.recover_daemon(action, cx)),
-                            ),
-                    )
-                    .children(
-                        self.recovery_error
-                            .clone()
-                            .map(|e| div().text_sm().text_color(t.danger).child(e)),
-                    ),
-            );
-        }
-        col
-    }
-
-    fn detail(&self, d: &DetailView, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-        let mut buttons = h_flex().gap_2();
-        for a in [Action::Open, Action::Restart, Action::Stop, Action::Start] {
-            if !d.actions.contains(&a) {
-                continue;
+        let body: AnyElement = match self.tab {
+            1 => {
+                // The Logs tab scrolls inside its own virtualized list.
+                let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
+                self.render_logs(&names, cx).into_any_element()
             }
-            let mut b = Button::new(a.label())
-                .label(a.label())
-                .small()
-                .disabled(d.busy || self.recovery_busy);
-            b = match a {
-                Action::Start => b.primary(),
-                Action::Stop => b.outline(),
-                _ => b.outline(),
-            };
-            buttons = buttons.child(b.on_click(cx.listener(move |this, _, _, cx| {
-                this.run_action(a, cx);
-            })));
-        }
-        let header = v_flex()
-            .gap_2()
-            .px_5()
-            .pt_4()
-            .pb_3()
-            .border_b_1()
-            .border_color(t.border)
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::BOLD)
-                            .child(d.name.clone()),
-                    )
-                    .child(state_tag(&d.state))
-                    .child(
-                        Tag::secondary()
-                            .small()
-                            .outline()
-                            .rounded_full()
-                            .child(d.backend.clone()),
-                    )
-                    .child(div().flex_1())
-                    .child(buttons),
-            )
-            .child(
-                h_flex()
-                    .gap_4()
-                    .text_sm()
-                    .text_color(t.muted_foreground)
-                    .children(d.url.clone().map(|u| div().text_color(t.link).child(u)))
-                    .child(div().flex_1())
-                    .child(
-                        Switch::new("always-on")
-                            .label("Always on")
-                            .checked(d.always_on)
-                            .small()
-                            .disabled(true)
-                            .tooltip("Always-on controls are not available yet"),
-                    ),
-            )
-            .children(reason_line(&d.state, d.last_error.as_deref(), cx))
-            .children(self.doctor_link(&d.name, cx))
-            .children(
-                self.slow_action_warning(&d.name)
-                    .map(|w| div().text_sm().text_color(t.warning).child(w)),
-            )
-            .children(
-                d.note
-                    .clone()
-                    .map(|n| div().text_sm().text_color(t.muted_foreground).child(n)),
-            );
-        let tabs = TabBar::new("detail-tabs")
-            .underline()
-            .small()
-            .selected_index(self.tab)
-            .child(Tab::new().label("Services"))
-            .child(Tab::new().label("Logs"))
-            .child(Tab::new().label("Env"))
-            .child(Tab::new().label("Activity").disabled(true))
-            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                let (from, to) = (this.tab, *ix);
-                this.tab = to;
-                this.env.begin();
-                if to == 1 && from != 1 {
-                    this.open_logs(cx);
-                } else if from == 1 && to != 1 {
-                    this.logs.close();
-                }
-                if to == 2 {
-                    this.read_env(cx);
-                }
-                cx.notify();
-            }));
-        // The header and tabs stay fixed; the tab content scrolls within the
-        // remaining height so every service row and log line is reachable.
-        v_flex()
+            2 => div()
+                .id("detail-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px(space::S8)
+                .pb(space::S5)
+                .child(self.env_tab(ui, cx))
+                .into_any_element(),
+            _ => div()
+                .id("detail-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px(space::S8)
+                .pb(space::S5)
+                .child(if rows.is_empty() {
+                    div()
+                        .pt(space::S5)
+                        .type_step(text::BODY)
+                        .text_color(ui.p.text_muted)
+                        .child("No services reported for this project")
+                } else {
+                    services_table(&rows, ui)
+                })
+                .into_any_element(),
+        };
+        div()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .child(header)
-            .child(div().px_5().pt_2().child(tabs))
-            .map(|col| {
-                if self.tab == 1 {
-                    // The Logs tab scrolls inside its own virtualized list.
-                    let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
-                    col.child(self.render_logs(&names, cx))
-                } else {
-                    col.child(
-                        v_flex()
-                            .id("detail-body")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .child(if self.tab == 2 {
-                                self.env_tab(cx).into_any_element()
-                            } else {
-                                v_flex()
-                                    .child(services_table(&d.services, cx))
-                                    .child(self.log_tail(cx))
-                                    .into_any_element()
-                            }),
-                    )
-                }
-            })
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(space::S8)
+                    .pt(space::S7)
+                    .pb(space::S5)
+                    .child(self.header(d, ui, cx)),
+            )
+            .child(div().px(space::S7).pb(space::S3).child(tabs))
+            .child(body)
     }
 
-    fn env_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn env_tab(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         use hack_desktop_core::env::{EnvView, KeyState};
-        let t = cx.theme().clone();
-        let mut body = v_flex().p_5().gap_3().text_sm().child(
-            h_flex().gap_3().child("Environment · names only").child(
-                Button::new("env-check")
-                    .label("Check again")
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.read_env(cx);
-                        cx.notify();
-                    })),
-            ),
+        let p = ui.p;
+        let line = |s: String| {
+            div()
+                .type_step(text::BODY)
+                .text_color(p.text_secondary)
+                .child(s)
+        };
+        let mut body = div().flex().flex_col().gap(space::S4).pt(space::S3).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(space::S4)
+                .child(
+                    div()
+                        .type_step(text::BODY_STRONG)
+                        .text_color(p.text_primary)
+                        .child("Environment"),
+                )
+                .child(
+                    div()
+                        .type_step(text::SMALL)
+                        .text_color(p.text_muted)
+                        .child("names only; the app never reads a value"),
+                )
+                .child(div().flex_1())
+                .child(
+                    action_button("env-check", Glyph::Restart, "Check again", true, ui).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.read_env(cx);
+                            cx.notify();
+                        }),
+                    ),
+                ),
         );
         match &self.env.view {
-            EnvView::Loading => body = body.child("Reading environment metadata…"),
+            EnvView::Loading => body = body.child(line("Reading environment metadata…".into())),
             EnvView::Unreadable => {
-                body = body
-                    .child("Could not read environment metadata. Check again or run hack doctor.")
+                body = body.child(line(
+                    "Could not read environment metadata. Check again or run hack doctor.".into(),
+                ));
             }
             EnvView::Report(report) => {
                 if let Some(scope) = &report.selected_scope {
-                    body = body.child(format!(
+                    body = body.child(line(format!(
                         "Scope: {scope} · other scopes are not included in this listing"
-                    ));
+                    )));
                 }
-                body = body.child(match report.key_state {
-                    KeyState::Missing | KeyState::Unreadable => {
-                        "🔒 Names are shown; stored values cannot be read."
+                body = body.child(line(
+                    match report.key_state {
+                        KeyState::Missing | KeyState::Unreadable => {
+                            "Names are shown; stored values cannot be read."
+                        }
+                        KeyState::Unknown => "Key readability is unknown.",
+                        KeyState::Ok => "Key is readable.",
                     }
-                    KeyState::Unknown => "Key readability is unknown.",
-                    KeyState::Ok => "Key is readable",
-                });
-                body = body.child(
+                    .into(),
+                ));
+                body = body.child(div().type_step(text::SMALL).text_color(p.text_muted).child(
                     "Set means a value is stored. It does not confirm that the value can be read.",
-                );
+                ));
                 if matches!(report.key_state, KeyState::Missing | KeyState::Unreadable) {
                     body = body.child(
-                        h_flex()
-                            .gap_3()
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::S4)
                             .child(
                                 div()
-                                    .font_family(t.mono_font_family.clone())
+                                    .px(space::S4)
+                                    .py(space::S1)
+                                    .rounded(radius::CONTROL)
+                                    .bg(p.surface_1)
+                                    .font_family(ui.mono.clone())
+                                    .type_step(text::MONO)
                                     .child("hack doctor"),
                             )
                             .child(
-                                Button::new("env-doctor")
-                                    .label("Copy command")
-                                    .small()
+                                action_button("env-doctor", Glyph::Copy, "Copy command", true, ui)
                                     .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
                                             "hack doctor".into(),
                                         ));
                                     })),
@@ -969,47 +1216,69 @@ impl HackApp {
                     );
                 }
                 if report.vars.is_empty() {
-                    body = body.child(report.empty_label()).child(
-                        Button::new("env-docs")
-                            .label("Environment docs")
-                            .small()
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.open_url(
-                                    "https://github.com/hack-dance/hack/blob/next/docs/env.md",
-                                );
-                            })),
+                    body = body.child(line(report.empty_label().to_owned())).child(
+                        action_button(
+                            "env-docs",
+                            Glyph::ExternalLink,
+                            "Environment docs",
+                            true,
+                            ui,
+                        )
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.open_url("https://github.com/hack-dance/hack/blob/next/docs/env.md");
+                        })),
                     );
                 } else {
-                    body = body.child(
-                        h_flex().gap_2().children(
-                            ["Name", "Layer / source", "Scope", "Kind", "Set", "Required"]
-                                .map(|s| div().flex_1().child(s)),
-                        ),
+                    let cell = |s: String| div().flex_1().min_w_0().truncate().child(s);
+                    let mut table = div().flex().flex_col().child(
+                        div()
+                            .h(px(26.))
+                            .flex()
+                            .items_center()
+                            .gap(space::S4)
+                            .type_step(text::SMALL)
+                            .text_color(p.text_muted)
+                            .children(
+                                ["Name", "Layer / source", "Scope", "Kind", "Set", "Required"]
+                                    .map(|s| cell(s.to_owned())),
+                            ),
                     );
                     for row in &report.vars {
-                        body = body.child(
-                            h_flex()
-                                .gap_2()
-                                .py_2()
-                                .border_b_1()
-                                .border_color(t.border)
-                                .when(row.missing, |d| d.text_color(t.danger))
-                                .children(
-                                    [
-                                        row.key.clone(),
-                                        row.layer
-                                            .clone()
-                                            .or_else(|| row.resolved_from.clone())
-                                            .unwrap_or_else(|| "—".into()),
-                                        row.scope.label(),
-                                        row.storage.kind.clone(),
-                                        if row.has_value { "✓" } else { "✗" }.into(),
-                                        if row.required { "Yes" } else { "No" }.into(),
-                                    ]
-                                    .map(|s| div().flex_1().min_w_0().child(s)),
-                                ),
+                        table = table.child(
+                            div()
+                                .h(size::TABLE_ROW)
+                                .flex()
+                                .items_center()
+                                .gap(space::S4)
+                                .hairline_t(p.border)
+                                .type_step(text::BODY)
+                                .text_color(if row.missing {
+                                    p.states.failed.fg
+                                } else {
+                                    p.text_primary
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(ui.mono.clone())
+                                        .type_step(text::MONO)
+                                        .child(row.key.clone()),
+                                )
+                                .child(cell(
+                                    row.layer
+                                        .clone()
+                                        .or_else(|| row.resolved_from.clone())
+                                        .unwrap_or_else(|| "—".into()),
+                                ))
+                                .child(cell(row.scope.label()))
+                                .child(cell(row.storage.kind.clone()))
+                                .child(cell(if row.has_value { "yes" } else { "no" }.into()))
+                                .child(cell(if row.required { "yes" } else { "no" }.into())),
                         );
                     }
+                    body = body.child(table);
                 }
             }
         }
@@ -1018,344 +1287,273 @@ impl HackApp {
 
     /// Shown, never acted on, once an action has run past
     /// `LiveSource::LIFECYCLE_WARN_AFTER`.
-    fn slow_action_warning(&self, project: &str) -> Option<String> {
-        let started = self.action_started.get(project)?;
+    fn slow_action_warning(&self, key: &InstanceKey) -> Option<String> {
+        let started = self.action_started.get(key)?;
         (started.elapsed() >= hack_desktop_core::source::LiveSource::LIFECYCLE_WARN_AFTER).then(|| {
             "Still running after 6 hours. Hack owns this command and its timeouts; the app has not stopped it.".to_owned()
         })
     }
 
-    fn log_tail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-        let mono = t.mono_font_family.clone();
-        let mut lines = v_flex().font_family(mono).text_xs().gap_0p5().px_3().py_2();
-        let entries: &[LogEntry] = match &self.tail {
-            Ok(v) => v,
-            Err(why) => {
-                // A failed read is shown as such, never as an empty log.
-                lines = lines.child(div().text_color(t.muted_foreground).child(why.clone()));
-                &[]
-            }
-        };
-        if matches!(&self.tail, Ok(v) if v.is_empty()) {
-            lines = lines.child(
-                div()
-                    .text_color(t.muted_foreground)
-                    .child("No recent log lines"),
-            );
+    fn status_items(&self, list: &ListView) -> Vec<(Option<Status>, String)> {
+        if list.cli_version.is_none() {
+            return vec![(None, "not connected".into())];
         }
-        for e in entries {
-            let error = e.level.as_deref() == Some("error");
-            lines = lines.child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(64.))
-                            .flex_none()
-                            .text_color(t.muted_foreground)
-                            .child(e.service.clone().unwrap_or_default()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .truncate()
-                            .when(error, |d| d.text_color(t.danger))
-                            .child(e.message.clone()),
-                    ),
-            );
-        }
-        v_flex()
-            .mx_5()
-            .mb_3()
-            .flex_1()
-            .min_h(px(120.))
-            .rounded_md()
-            .border_1()
-            .border_color(t.border)
-            .bg(t.muted.opacity(0.4))
-            .child(
-                h_flex()
-                    .px_3()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(t.border)
-                    .text_xs()
-                    .text_color(t.muted_foreground)
-                    .child("Log tail")
-                    .child(div().flex_1())
-                    .child(
-                        Switch::new("follow")
-                            .label("Follow")
-                            .checked(self.follow)
-                            .xsmall()
-                            .on_change(cx.listener(|this, v: &bool, _, cx| {
-                                this.follow = *v;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(lines)
-            .child(
-                div()
-                    .px_3()
-                    .pb_2()
-                    .text_xs()
-                    .text_color(t.muted_foreground)
-                    .child("Logs are shown as your services print them. Hack does not hide secrets in logs."),
-            )
-    }
-
-    fn full_pane(
-        &self,
-        title: &str,
-        body: String,
-        command: Option<&str>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = cx.theme().clone();
-        v_flex()
-            .flex_1()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title.to_owned()),
-            )
-            .child(div().text_sm().text_color(t.muted_foreground).child(body))
-            .children(command.map(|c| {
-                div()
-                    .mt_2()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(t.muted)
-                    .font_family(t.mono_font_family.clone())
-                    .text_sm()
-                    .child(c.to_owned())
-            }))
-            .into_any_element()
-    }
-
-    fn status_bar(&self, list: &ListView, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-        let stale = list
-            .banners
+        let c = list.counts;
+        let always_on = list
+            .running
             .iter()
-            .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::Stale { .. }));
+            .chain(&list.stopped)
+            .filter(|r| r.always_on)
+            .count();
+        let mut items = vec![];
+        if c.unknown > 0 && c.running == 0 {
+            items.push((None, format!("{} not observed", c.unknown)));
+        } else {
+            items.push((None, format!("{} running", c.running)));
+        }
+        items.push((None, format!("{always_on} always on")));
+        let banners = &list.banners;
         let engine = if !self.model.engine_observed() {
-            ("Docker unknown", t.muted_foreground)
-        } else if list
-            .banners
+            (Status::Unknown, "engine unknown")
+        } else if banners
             .iter()
-            .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::EngineDown { .. }))
+            .any(|b| matches!(b, Banner::EngineDown { .. }))
         {
-            ("Docker down", t.danger)
+            (Status::Failed, "engine down")
         } else {
-            ("Docker ok", t.success)
+            (Status::Running, "engine ok")
         };
-        let daemon = if list
-            .banners
+        items.push((Some(engine.0), engine.1.into()));
+        if banners.iter().any(|b| matches!(b, Banner::DaemonOff)) {
+            items.push((Some(Status::Stopped), "hackd off".into()));
+        } else if banners
             .iter()
-            .any(|b| matches!(b, hack_desktop_core::viewmodel::Banner::DaemonOff))
+            .any(|b| matches!(b, Banner::DaemonMismatch { .. }))
         {
-            ("hackd off", t.muted_foreground)
-        } else if list.banners.iter().any(|b| {
-            matches!(
-                b,
-                hack_desktop_core::viewmodel::Banner::DaemonMismatch { .. }
-            )
-        }) {
-            ("hackd version mismatch", t.warning)
-        } else if stale
-            || list.banners.iter().any(|b| {
-                matches!(
-                    b,
-                    hack_desktop_core::viewmodel::Banner::DaemonReadFailed { .. }
-                )
-            })
-        {
-            ("hackd unknown", t.muted_foreground)
-        } else {
-            ("hackd on", t.success)
-        };
-        h_flex()
-            .h(px(26.))
-            .px_3()
-            .gap_4()
-            .text_xs()
-            .bg(t.status_bar)
-            .border_t_1()
-            .border_color(t.status_bar_border)
-            .text_color(t.muted_foreground)
-            .child({
-                let c = list.counts;
-                let mut text = format!("{} running · {} stopped", c.running, c.stopped);
-                if c.unknown > 0 {
-                    text.push_str(&format!(" · {} unknown", c.unknown));
-                }
-                text
-            })
-            // Without a snapshot the engine and hackd states are unknown.
-            .when(list.cli_version.is_some(), |d| {
-                d.child(h_flex().gap_1().child(dot(engine.1)).child(engine.0))
-                    .child(h_flex().gap_1().child(dot(daemon.1)).child(daemon.0))
-            })
-            .child(div().flex_1())
-            .children(list.cli_version.clone().map(|v| format!("hack {v}")))
-    }
-}
-
-fn machine_row(label: &'static str, count: Option<usize>, color: Hsla) -> impl IntoElement {
-    h_flex()
-        .mx_2()
-        .px_2()
-        .py_1()
-        .gap_2()
-        .child(dot(color))
-        .child(div().flex_1().child(label))
-        .children(count.map(|n| Tag::warning().xsmall().rounded_full().child(n.to_string())))
-}
-
-fn reason_line(
-    state: &ProjectState,
-    error: Option<&str>,
-    cx: &Context<HackApp>,
-) -> Option<AnyElement> {
-    let t = cx.theme().clone();
-    let text = match (state, error) {
-        (_, Some(e)) => format!("Last action failed: {e}"),
-        (ProjectState::NeedsAttention { reason } | ProjectState::Unknown { reason }, None) => {
-            reason.clone()
+            items.push((Some(Status::Degraded), "hackd mismatch".into()));
         }
-        _ => return None,
-    };
-    Some(
-        div()
-            .text_sm()
-            .text_color(t.danger)
-            .child(text)
-            .into_any_element(),
-    )
-}
-
-fn services_table(services: &[ServiceView], cx: &Context<HackApp>) -> impl IntoElement {
-    let t = cx.theme().clone();
-    let cell = |w: f32| div().w(px(w)).flex_none().truncate();
-    let mut table = v_flex()
-        .mx_5()
-        .my_3()
-        .rounded_md()
-        .border_1()
-        .border_color(t.border)
-        .text_sm()
-        .child(
-            h_flex()
-                .px_3()
-                .py_1()
-                .bg(t.table_head)
-                .text_color(t.table_head_foreground)
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(cell(140.).child("SERVICE"))
-                .child(cell(200.).child("STATE"))
-                .child(cell(64.).child("CPU"))
-                .child(cell(80.).child("MEMORY"))
-                .child(div().flex_1().child("ROUTE")),
-        );
-    for s in services {
-        let color = if s.running {
-            t.success
-        } else if s.exit_code.is_some_and(|c| c != 0) {
-            t.danger
-        } else {
-            t.muted_foreground
-        };
-        table = table.child(
-            h_flex()
-                .px_3()
-                .py_1()
-                .border_t_1()
-                .border_color(t.table_row_border)
-                .child(cell(140.).child(s.name.clone()))
-                .child(cell(200.).child(h_flex().gap_2().child(dot(color)).child(s.status.clone())))
-                .child(cell(64.).text_color(t.muted_foreground).child("—"))
-                .child(cell(80.).text_color(t.muted_foreground).child("—"))
-                .child(
-                    div()
-                        .flex_1()
-                        .truncate()
-                        .text_color(t.muted_foreground)
-                        .child(s.route.clone().unwrap_or_default()),
-                ),
-        );
+        items
     }
-    table
 }
 
 impl Render for HackApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let list = self.model.list();
-        let t = cx.theme().clone();
-        let (bg, fg, font) = (t.background, t.foreground, t.font_family.clone());
+        let ui = self.ui(cx);
+        let p = ui.p;
         let main: AnyElement = match &list.phase {
             // Machine checks matter most before any project exists, so the
             // Doctor pane renders for an empty registry too.
             // Diagnostics are most useful when the project list fails.
             Phase::Ready | Phase::Empty | Phase::Error { .. } if self.pane == Pane::Doctor => {
-                crate::doctor_view::render(&self.doctor, cx)
+                crate::doctor_view::render(&self.doctor, &ui, cx)
             }
-            Phase::CliMissing => self.full_pane(
+            Phase::CliMissing => empty_pane(
+                Glyph::CircleAlert,
                 "Hack CLI not found",
-                "The app runs the hack command for everything. Install it, then reopen the app."
-                    .into(),
+                "The app runs the hack command for everything. Install it, then reopen the app.",
                 Some("brew install hack-dance/tap/hack"),
-                cx,
-            ),
-            Phase::Error { code, message } => self.full_pane(
+                &ui,
+            )
+            .into_any_element(),
+            Phase::Error { code, message } => empty_pane(
+                Glyph::CircleAlert,
                 "Could not read projects",
-                format!("{code}: {message}"),
+                format!("{message} ({code})"),
                 self.model
                     .daemon_recovery()
                     .is_none()
                     .then_some("hack projects --json"),
-                cx,
-            ),
-            Phase::Empty => self.full_pane(
+                &ui,
+            )
+            .into_any_element(),
+            Phase::Empty => empty_pane(
+                Glyph::Folder,
                 "No projects yet",
-                "Set up a repository with Hack and it appears here.".into(),
+                "Set up a repository with Hack and it shows up here.",
                 Some("cd your-repo && hack init"),
-                cx,
-            ),
-            Phase::Loading => self.full_pane("Loading projects…", String::new(), None, cx),
+                &ui,
+            )
+            .into_any_element(),
+            Phase::Loading => {
+                empty_pane(Glyph::Loader, "Loading projects…", "", None, &ui).into_any_element()
+            }
             Phase::Ready => match self.model.detail() {
-                Some(d) => self.detail(&d, cx).into_any_element(),
-                None => self.full_pane("Select a project", String::new(), None, cx),
+                Some(d) => self.detail(&d, &ui, cx).into_any_element(),
+                None => {
+                    empty_pane(Glyph::Folder, "Select a project", "", None, &ui).into_any_element()
+                }
             },
         };
-        v_flex()
+        div()
+            .id("hack-window")
+            .key_context("HackWindow")
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.search.update(cx, |s, cx| s.focus(window, cx));
+            }))
             .size_full()
-            .bg(bg)
-            .text_color(fg)
-            .font_family(font)
+            .flex()
+            .flex_col()
+            .bg(p.surface)
+            .text_color(p.text_primary)
+            .font_family(ui.font.clone())
+            .child(self.title_bar(&ui))
             .child(
-                h_flex()
+                div()
                     .flex_1()
                     .min_h_0()
-                    .items_start()
-                    .child(self.sidebar(&list, cx))
+                    .flex()
+                    .child(self.sidebar(&list, &ui, cx))
                     .child(
-                        v_flex()
+                        div()
                             .flex_1()
                             .h_full()
                             .min_w_0()
-                            .child(self.banners(&list, cx))
+                            .flex()
+                            .flex_col()
+                            .child(self.banners(&list, &ui, cx))
                             .child(main),
                     ),
             )
-            .child(self.status_bar(&list, cx))
+            .child(status_bar(
+                self.status_items(&list),
+                list.cli_version.clone().map(|v| format!("hack {v}")),
+                &ui,
+            ))
+    }
+}
+
+/// What the sidebar's Doctor row shows at its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorMark {
+    /// Findings from a current run.
+    Count(usize),
+    Dot(Status),
+}
+
+/// The Doctor row's mark. A completed run decides it: its findings as a
+/// count, or a dot in the run's tone, which is green only when every run
+/// finished clean and nothing changed since (`DoctorPane::tone`). Without a
+/// run, the snapshot's machine checks; a ring while nothing has reported.
+fn doctor_mark(pane: &DoctorPane, list: &ListView) -> DoctorMark {
+    use hack_desktop_core::state::Tone;
+    let tone = |t: Tone| match t {
+        Tone::Ok => Status::Running,
+        Tone::Warn | Tone::Busy => Status::Degraded,
+        Tone::Error => Status::Failed,
+        Tone::Idle => Status::Unknown,
+    };
+    match &pane.result {
+        DoctorStateView::Loaded(v) if !pane.stale && v.attention_count() > 0 => {
+            DoctorMark::Count(v.attention_count())
+        }
+        DoctorStateView::Loaded(_) | DoctorStateView::Error(_) => {
+            DoctorMark::Dot(tone(pane.tone()))
+        }
+        DoctorStateView::NeverRun => match (list.doctor_known, list.doctor_count) {
+            (true, n) if n > 0 => DoctorMark::Count(n),
+            (true, _) => DoctorMark::Dot(Status::Running),
+            (false, _) => DoctorMark::Dot(Status::Unknown),
+        },
+    }
+}
+
+/// Routing and DNS from a completed Doctor run: the worst finding in its
+/// Routing and DNS or Certificates areas; green when the machine was
+/// checked and none was found; `None` when the machine was not checked.
+fn routing_from_doctor(v: &hack_desktop_core::doctor::DoctorView) -> Option<Status> {
+    use hack_desktop_core::doctor::{Area, Severity};
+    let rank = |s: Status| match s {
+        Status::Failed => 3,
+        Status::Degraded => 2,
+        _ => 1,
+    };
+    let worst = v
+        .groups
+        .iter()
+        .filter(|(area, _)| matches!(area, Area::RoutingDns | Area::Certificates))
+        .flat_map(|(_, cards)| cards)
+        .map(|c| match c.severity {
+            Severity::Error => Status::Failed,
+            Severity::Warn => Status::Degraded,
+            Severity::CouldNotCheck => Status::Unknown,
+        })
+        .max_by_key(|s| rank(*s));
+    worst.or_else(|| v.machine_checked.then_some(Status::Running))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hack_desktop_core::doctor::aggregate;
+    use hack_desktop_core::fixtures::Fixture;
+    use hack_desktop_core::source::FixtureSource;
+
+    fn loaded(f: Fixture) -> DoctorPane {
+        let source = FixtureSource(f);
+        let targets = source
+            .snapshot()
+            .ok()
+            .map(|s| DoctorTarget::from_projects(&s.projects))
+            .unwrap_or_default();
+        let keys = target_keys(&targets);
+        let mut pane = DoctorPane::default();
+        let generation = pane.begin(Some(&keys));
+        pane.finish(
+            generation,
+            &source.doctor_runs(&targets),
+            Some(&keys),
+            Instant::now(),
+        );
+        pane
+    }
+
+    fn list(f: Fixture) -> ListView {
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(FixtureSource(f).snapshot()));
+        m.list()
+    }
+
+    #[test]
+    fn routing_follows_the_completed_doctor_run() {
+        let DoctorStateView::Loaded(v) = &loaded(Fixture::Doctor).result else {
+            panic!("doctor fixture loads");
+        };
+        assert_eq!(
+            routing_from_doctor(v),
+            Some(Status::Failed),
+            "resolver error"
+        );
+        let DoctorStateView::Loaded(v) = &loaded(Fixture::DoctorClean).result else {
+            panic!("doctor-clean fixture loads");
+        };
+        assert_eq!(routing_from_doctor(v), Some(Status::Running));
+        let empty = aggregate(&[]);
+        assert_eq!(routing_from_doctor(&empty), None, "machine not checked");
+    }
+
+    #[test]
+    fn the_doctor_row_is_green_only_for_a_clean_current_run() {
+        let clean = loaded(Fixture::DoctorClean);
+        let l = list(Fixture::DoctorClean);
+        assert_eq!(doctor_mark(&clean, &l), DoctorMark::Dot(Status::Running));
+        // A project appears after the run: the result is stale, not green.
+        let mut stale = clean;
+        stale.targets_seen(Some(&[]));
+        assert!(stale.stale);
+        assert_ne!(doctor_mark(&stale, &l), DoctorMark::Dot(Status::Running));
+        // Findings: a count.
+        let found = loaded(Fixture::Doctor);
+        assert!(
+            matches!(doctor_mark(&found, &list(Fixture::Doctor)), DoctorMark::Count(n) if n > 0)
+        );
+        // Never run: the snapshot decides; nothing reported is a ring.
+        let never = DoctorPane::default();
+        let mut m = AppModel::new();
+        m.apply(Event::Refreshed(Err(SourceError::Pending)));
+        assert_eq!(
+            doctor_mark(&never, &m.list()),
+            DoctorMark::Dot(Status::Unknown)
+        );
     }
 }

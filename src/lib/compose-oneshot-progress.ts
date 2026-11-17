@@ -183,7 +183,10 @@ export async function readComposeOneShotGraph(
       continue;
     }
     try {
-      documents.push(YAML.parse(text));
+      // Compose resolves YAML merge keys (`<<: *defaults`), which the yaml
+      // library leaves off by default; a depends_on inherited from an
+      // extension anchor must count too.
+      documents.push(YAML.parse(text, { merge: true }));
     } catch {
       // Unreadable: no evidence of one-shots from this file.
     }

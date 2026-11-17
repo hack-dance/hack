@@ -1,8 +1,12 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   composeOneShotGraph,
   effectiveComposeProfiles,
   mergeOneShotGraphs,
+  readComposeOneShotGraph,
   runningOneShots,
   startWatchDecision,
   waitingDependents,
@@ -277,4 +281,32 @@ test("a start cut short while a one-shot runs says the start is still in progres
   });
   expect(idle.message).toContain("startup budget of 90000 ms");
   expect(idle.inProgress).toEqual([]);
+});
+
+test("a completion dependency inherited from an extension anchor counts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-oneshot-merge-"));
+  try {
+    const file = join(root, "docker-compose.yml");
+    await writeFile(
+      file,
+      [
+        "x-app: &app",
+        "  image: app",
+        "  depends_on:",
+        "    migrate:",
+        "      condition: service_completed_successfully",
+        "services:",
+        "  migrate:",
+        "    image: app",
+        "  api:",
+        "    <<: *app",
+        "",
+      ].join("\n")
+    );
+    const graph = await readComposeOneShotGraph([file]);
+    expect([...graph.oneShots]).toEqual(["migrate"]);
+    expect(Object.fromEntries(graph.waitsOn)).toEqual({ api: ["migrate"] });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

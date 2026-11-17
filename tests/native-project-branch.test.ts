@@ -96,7 +96,7 @@ for (const list of [false, true]) {
     const result = await prepareNativeProjectBranch(f);
     const compose = JSON.parse(result.normalizedComposeJson);
     expect(compose.services.web.labels.caddy).toBe(
-      "feature-a.app.hack.local, api.feature-a.app.hack.local, feature-a.app.hack, feature-a.app.hack.gy, foreign.example"
+      "feature-a.app.hack.local, api.feature-a.app.hack.local, feature-a.app.hack, feature-a.app.hack.gy"
     );
     expect(compose.services.web.labels["caddy.reverse_proxy"]).toBe(
       "{{upstreams 3000}}"
@@ -136,17 +136,66 @@ test("adaptation-added aliases are branched with the original routes", async () 
   ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
 });
 
-test("custom hosts branch by the configured base and don't claim foreign names", async () => {
+test("custom hosts branch by the configured base and drop names outside it", async () => {
   const f = await fixture({
     devHost: "app.dev.example",
     hosts: "app.dev.example, api.app.dev.example, app.hack.gy",
   });
-  const result = await prepareNativeProjectBranch(f);
+  const dropped: string[] = [];
+  const result = await prepareNativeProjectBranch({
+    ...f,
+    onDropped: (notice) => dropped.push(notice),
+  });
   expect(
     JSON.parse(result.normalizedComposeJson).services.web.labels.caddy
-  ).toBe(
-    "feature-a.app.dev.example, api.feature-a.app.dev.example, app.hack.gy"
+  ).toBe("feature-a.app.dev.example, api.feature-a.app.dev.example");
+  expect(dropped).toEqual([
+    "Branch feature-a: service web label caddy drops app.hack.gy, which is outside this project's route namespaces and stays with the base instance.",
+  ]);
+});
+
+test("HACK-2284: an alias-form dev_host branch-qualifies the .hack host too", async () => {
+  const f = await fixture({
+    devHost: "app.hack.gy",
+    hosts: "web.app.hack, web.app.hack.gy",
+  });
+  const compose = JSON.parse(
+    (await prepareNativeProjectBranch(f)).normalizedComposeJson
   );
+  expect(compose.services.web.labels.caddy).toBe(
+    "web.feature-a.app.hack, web.feature-a.app.hack.gy"
+  );
+});
+
+test("every caddy_<n> site label is branched, and a label left with no host refuses by name", async () => {
+  const f = await fixture();
+  const compose = JSON.parse(f.input.normalizedComposeJson);
+  compose.services.web.labels = {
+    caddy_0: "http://web.app.hack:8080",
+    "caddy_0.reverse_proxy": "{{upstreams 3000}}",
+    caddy_1: "web.app.hack.gy",
+  };
+  const input = { ...f.input, normalizedComposeJson: JSON.stringify(compose) };
+  const branched = JSON.parse(
+    (await prepareNativeProjectBranch({ ...f, input })).normalizedComposeJson
+  );
+  expect(branched.services.web.labels).toEqual({
+    caddy_0: "http://web.feature-a.app.hack:8080",
+    "caddy_0.reverse_proxy": "{{upstreams 3000}}",
+    caddy_1: "web.feature-a.app.hack.gy",
+  });
+  compose.services.web.labels = { caddy: "foreign.example, :8080" };
+  await expect(
+    prepareNativeProjectBranch({
+      ...f,
+      input: { ...f.input, normalizedComposeJson: JSON.stringify(compose) },
+    })
+  ).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message: expect.stringContaining(
+      "Service web label caddy lists only hosts outside this project's route namespaces (foreign.example, :8080)"
+    ),
+  });
 });
 
 test("base selection is byte-identical and does not require branch configuration", async () => {

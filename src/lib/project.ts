@@ -474,19 +474,55 @@ export function resolveProjectOauthAliasHost(opts: {
 }
 
 /**
- * Include retained legacy routes when branching a migrated local-domain project.
- * These bases rewrite existing labels; they do not create or claim any routes.
+ * Every host a branch instance must not share with the base instance: the
+ * project's whole managed route family, whatever form `dev_host` is written in
+ * (HACK-2284). For a managed project `<p>` that is `<p>.hack`, `<p>.hack.local`
+ * and the OAuth alias forms `<p>.hack.<tld>` (the default `gy`, plus the tld of
+ * an alias form `dev_host` or of `aliasHost`). A custom `dev_host` outside these
+ * namespaces keeps just itself and `aliasHost`. These bases rewrite existing
+ * labels; they do not create or claim any routes.
  */
 export function resolveProjectRouteBaseHosts(opts: {
   readonly devHost: string;
   readonly aliasHost: string | null;
 }): string[] {
-  const hosts = [opts.devHost, ...(opts.aliasHost ? [opts.aliasHost] : [])];
-  if (opts.devHost.endsWith(`.${DEFAULT_NEW_PROJECT_TLD}`)) {
-    const legacy = `${opts.devHost.slice(0, -DEFAULT_NEW_PROJECT_TLD.length)}${DEFAULT_PROJECT_TLD}`;
-    hosts.push(legacy, `${legacy}.${DEFAULT_OAUTH_ALIAS_TLD}`);
+  // Host names are case-insensitive; label sites are compared in lowercase.
+  const hosts = [opts.devHost, ...(opts.aliasHost ? [opts.aliasHost] : [])].map(
+    (host) => host.toLowerCase()
+  );
+  const project = managedRouteProject(opts.devHost);
+  if (project) {
+    hosts.push(
+      `${project.stem}.${DEFAULT_PROJECT_TLD}`,
+      `${project.stem}.${DEFAULT_NEW_PROJECT_TLD}`,
+      `${project.stem}.${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD}`,
+      ...(project.aliasTld
+        ? [`${project.stem}.${DEFAULT_PROJECT_TLD}.${project.aliasTld}`]
+        : [])
+    );
   }
   return [...new Set(hosts)];
+}
+
+const ALIAS_FORM_HOST = /^(?<stem>.+)\.hack\.(?<tld>[a-z0-9-]+)$/;
+
+/** `<p>` and the alias tld of a `<p>.hack`, `<p>.hack.local` or `<p>.hack.<tld>` host. */
+function managedRouteProject(
+  devHost: string
+): { readonly stem: string; readonly aliasTld: string | null } | null {
+  const host = devHost.toLowerCase();
+  for (const suffix of [
+    `.${DEFAULT_NEW_PROJECT_TLD}`,
+    `.${DEFAULT_PROJECT_TLD}`,
+  ]) {
+    if (host.endsWith(suffix) && host.length > suffix.length) {
+      return { stem: host.slice(0, -suffix.length), aliasTld: null };
+    }
+  }
+  const alias = ALIAS_FORM_HOST.exec(host);
+  return alias?.groups?.stem && alias.groups.tld
+    ? { stem: alias.groups.stem, aliasTld: alias.groups.tld }
+    : null;
 }
 
 export async function readProjectConfig(

@@ -128,6 +128,151 @@ The window follows [DESIGN-V1.md](DESIGN-V1.md).
   buttons, the Doctor and Routing rows and the daemon recovery button. The
   Activity tab is gone until it has content.
 
+### Terminal panel (feature `terminal`)
+
+```sh
+eval "$(bash term/scripts/provision-ghostty.sh)"   # libghostty-vt inputs, checksummed
+cargo run -p hack-desktop --features terminal       # live, with the panel
+```
+
+Each project and each branch instance has a panel docked under the detail
+pane (DESIGN-V1.md, "Terminal panel"): a drag handle (drag to resize, to the
+top to maximize, down to collapse; double-click to maximize), a tab strip and
+the terminal. Its state is kept per instance. The app owns every PTY and runs
+the CLI in it; it passes names only and never builds an environment. A CLI tab
+gets what every CLI call from the app gets: the instance's backend and a `PATH`
+with only absolute entries (a plain host shell keeps the user's `PATH`):
+
+| Tab | Runs, in the instance's checkout |
+|---|---|
+| Logs (first, not closable) | `hack logs [--branch <b>] [--no-follow] --tail 500`, read-only, colours kept (it runs on a PTY) |
+| Shell in a service (+ menu) | `hack exec [--branch <b>] <service> -- bash`, then `sh` |
+| Host shell (+ menu) | the user's login shell |
+| Host shell with env (+ menu) | `hack host shell --env <overlay> --scope <scope>`, names from `hack env list --json` (`--env base` when no overlay is named); amber badge unless the overlay is the default |
+
+A Logs stream that ended (a stopped project that now runs) restarts when its
+tab is clicked. Keys: Cmd-J (Ctrl-Shift-J) toggle, Cmd-T new tab menu,
+Cmd-W close, Cmd-Shift-] / [ next and previous, Cmd-Shift-Return maximize,
+Cmd-F find, Cmd-C / Cmd-V copy and paste in a terminal. On Linux, Ctrl-K focuses
+the project search except in a terminal, where it goes to the shell. Without the feature
+the window keeps its Logs tab. `term/scripts/check-ghostty.sh` builds and
+tests the app with the feature too.
+
+Input (keys and paste) is queued up to 1 MiB for the program in the tab. A
+paste larger than that is refused whole, never cut, and the tab says so.
+
+#### Drive the panel from the command line
+
+`--drive <steps>` runs a steps file in the real window, quits the app the way
+the user does, waits 5 s, and counts every process still alive in a session a
+tab started, every leader a tab tried included (a container shell that fell
+back from bash to sh started two). It exits 0 only when the app reported every
+step done and nothing is left.
+`--hidden` opens the window without showing it. Each step calls what the
+matching click or key calls; tabs come from the panel's own new-tab menu.
+
+```text
+select <project> [<branch>]     select an instance; waits for live data
+logs | host                     show the Logs tab | open "Host shell"
+container <service>             open "Shell in <service>"
+env <overlay> [<scope>]         open "Host shell with env…" for it
+key <keystroke>                 e.g. key ctrl-c (through the keymap)
+type <text>                     type it, one keystroke per character
+                                (\r or \n is Enter, \t is Tab, \\)
+paste <file>                    paste a file's text as the Paste action
+                                does (into find while it is open)
+expect <text> [<seconds>]       wait for text on the active tab's screen
+expect-notice <text> [<seconds>]
+                                wait for the active tab's notice (a refused
+                                paste) to contain text
+wait <milliseconds>
+check-container <service> <pattern>
+                                after the app has quit, count processes in
+                                the service whose command line contains
+                                <pattern> (read through `hack exec`); a count
+                                above 0 is reported as known open (below)
+                                and does not fail the run
+quit                            implied at the end
+```
+
+The by-hand list as one file. Replace the `<…>` names; the paste files are
+comment lines, so a shell that receives one runs nothing. Each `expect` looks
+for the result of arithmetic the shell does, never for text that is on the
+typed command line, so the echoed command cannot satisfy it:
+
+```sh
+# From apps/desktop. Paste paths in the steps file are relative to it.
+mkdir -p /tmp/panel
+yes '# paste check' | head -c 2097152 > /tmp/panel/big.txt   # 2 MiB: refused whole, limit named
+yes '# paste check' | head -c 921600 > /tmp/panel/mid.txt    # 900 KiB: delivered
+cat > /tmp/panel/panel.steps <<'STEPS'
+# Logs and a host shell
+select <project>
+logs
+expect <a line the logs show> 30
+host
+type echo host-$((40+2))\r
+expect host-42 15
+# Ctrl-C through the keymap ends a foreground job
+type sleep 30\r
+wait 500
+key ctrl-c
+type echo after-ctrl-c-$((1+1))\r
+expect after-ctrl-c-2 10
+# Pastes: 2 MiB is refused with the limit named, 900 KiB is delivered
+paste big.txt
+expect-notice more than the 1 MiB input limit 5
+paste mid.txt
+# The shell's line editor takes a moment to read 900 KiB
+wait 2000
+key ctrl-c
+type echo after-paste-$((2+2))\r
+expect after-paste-4 60
+type sleep 86399 &\r
+# A shell in a service, typed into at once (input waits for the shell
+# that starts, sh on an image without bash), and what it leaves inside
+# the container
+container <service>
+type echo in-$((1+1))-container\r
+expect in-2-container 30
+type sleep 86398 &\r
+check-container <service> 86398
+# A host shell with an env overlay: the step line shows the label and
+# badge; check that a variable is set without printing it
+env <overlay> <scope>
+type [ -n "$<VARIABLE>" ] && echo env-set-$((3+3))\r
+expect env-set-6 30
+# The same on a branch instance started from a linked worktree
+select <project> <branch>
+logs
+host
+type echo branch-$((2+3))\r
+expect branch-5 15
+container <service>
+type echo branch-in-$((4+4))\r
+expect branch-in-8 30
+STEPS
+cargo run -p hack-desktop --features terminal -- --drive /tmp/panel/panel.steps
+```
+
+The report gives each step's result (a paste step names the notice it got), each
+tab's session leader, `after quit + 5s: N process(es) alive in the M
+session(s) the tabs started`, the container counts and `result pass|fail`.
+
+The host-side count covers every process in a tab's session (the shell, its
+jobs, `hack`, the `docker exec` client). A process that starts its own session
+(`setsid`) leaves both the panel's teardown and this count. Processes inside a
+container are not host processes; `check-container` counts them through the CLI.
+
+**Known limit:** closing a service-shell tab, or quitting, ends the `hack exec`
+session on the host but not a job that shell started in the background inside
+the container (`sleep 600 &`), as with `docker exec -it`. The app has no way
+to find or signal processes in a container; that needs the CLI (DESIGN.md,
+R21). Until then `check-container` reports such a process as known open.
+
+A shell in a service that falls back from `bash` to `sh` keeps what is typed
+while it opens: input waits until the shell that starts has settled.
+
 Renders: [running, dark](screenshots/window/running-dark.png),
 [running, light](screenshots/window/running-light.png),
 [branch instances](screenshots/window/branches-dark.png),

@@ -323,6 +323,13 @@ pub trait Source: Send + Sync {
     /// A [`SourceError`] when no usable snapshot could be read.
     fn snapshot(&self) -> Result<Snapshot, SourceError>;
 
+    /// The `hack` executable this source runs, for sessions the app starts
+    /// itself (a terminal tab running `hack exec`, `hack logs` or `hack host
+    /// shell`). `None` when there is no CLI (fixtures, CLI missing).
+    fn hack_program(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Run one action for a project root. `native` selects the native
     /// backend (`HACK_RUNTIME_BACKEND=native`), which every native command needs.
     /// `branch` targets that branch instance (`--branch <branch>`); it is
@@ -1107,6 +1114,10 @@ impl Source for LiveSource {
             ))
         }
     }
+    fn hack_program(&self) -> Option<std::path::PathBuf> {
+        self.runner.program_path()
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         let cli_version = self.runner.version(Duration::from_secs(5))?;
         let daemon = self.daemon.as_ref().and_then(|d| d.status().ok());

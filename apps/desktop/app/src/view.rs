@@ -46,16 +46,76 @@ gpui_kit::actions!(hack_desktop, [FocusSearch]);
 
 /// The search shortcut: Cmd-K on macOS, Ctrl-K elsewhere.
 #[cfg(target_os = "macos")]
-const SEARCH_KEY: &str = "cmd-k";
+pub(crate) const SEARCH_KEY: &str = "cmd-k";
 #[cfg(not(target_os = "macos"))]
-const SEARCH_KEY: &str = "ctrl-k";
+pub(crate) const SEARCH_KEY: &str = "ctrl-k";
+/// Where the search shortcut applies. Ctrl-K belongs to the shell in a
+/// terminal (readline: delete to the end of the line), so off macOS it
+/// applies everywhere but a focused terminal. Cmd-K never reaches a shell.
+#[cfg(target_os = "macos")]
+const SEARCH_CONTEXT: Option<&str> = None;
+#[cfg(not(target_os = "macos"))]
+const SEARCH_CONTEXT: Option<&str> = Some("!Terminal");
 
 /// Why the always-on switch is disabled.
 const ALWAYS_ON_REASON: &str = "Always on needs the CLI's autostart commands (HACK-2213)";
 
 /// The window's key bindings.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(SEARCH_KEY, FocusSearch, None)]);
+    cx.bind_keys([KeyBinding::new(SEARCH_KEY, FocusSearch, SEARCH_CONTEXT)]);
+    #[cfg(feature = "terminal")]
+    bind_terminal_keys(cx);
+}
+
+/// The terminal panel's keys (DESIGN-V1.md, "Keyboard"). Panel and tab keys
+/// work wherever focus is; the rest apply in a terminal. Shortcuts that
+/// would reach the shell are never taken: on Linux they are Ctrl-Shift
+/// chords, as in terminals.
+#[cfg(feature = "terminal")]
+fn bind_terminal_keys(cx: &mut App) {
+    use hack_desktop_term::actions::{
+        CloseFind, CloseTab, Copy, Find, FindNewer, FindOlder, NewTab, NextTab, Paste, PrevTab,
+        ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ToggleFollow, ToggleMaximize,
+        TogglePanel,
+    };
+    const TERMINAL: Option<&str> = Some("Terminal");
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("cmd-j", TogglePanel, None),
+            KeyBinding::new("cmd-t", NewTab, None),
+            KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("cmd-shift-]", NextTab, None),
+            KeyBinding::new("cmd-shift-[", PrevTab, None),
+            KeyBinding::new("cmd-shift-enter", ToggleMaximize, None),
+            KeyBinding::new("cmd-f", Find, TERMINAL),
+            KeyBinding::new("cmd-c", Copy, TERMINAL),
+            KeyBinding::new("cmd-v", Paste, TERMINAL),
+        ]);
+    } else {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-shift-j", TogglePanel, None),
+            KeyBinding::new("ctrl-shift-t", NewTab, None),
+            KeyBinding::new("ctrl-shift-w", CloseTab, None),
+            KeyBinding::new("ctrl-shift-pagedown", NextTab, None),
+            KeyBinding::new("ctrl-shift-pageup", PrevTab, None),
+            KeyBinding::new("ctrl-shift-enter", ToggleMaximize, None),
+            KeyBinding::new("ctrl-shift-f", Find, TERMINAL),
+            KeyBinding::new("ctrl-shift-c", Copy, TERMINAL),
+            KeyBinding::new("ctrl-shift-v", Paste, TERMINAL),
+        ]);
+    }
+    cx.bind_keys([
+        KeyBinding::new("enter", FindOlder, Some("TerminalFind")),
+        KeyBinding::new("shift-enter", FindNewer, Some("TerminalFind")),
+        KeyBinding::new("escape", CloseFind, Some("TerminalFind")),
+        KeyBinding::new("shift-pageup", ScrollPageUp, TERMINAL),
+        KeyBinding::new("shift-pagedown", ScrollPageDown, TERMINAL),
+        KeyBinding::new("pageup", ScrollPageUp, Some("TerminalLogs")),
+        KeyBinding::new("pagedown", ScrollPageDown, Some("TerminalLogs")),
+        KeyBinding::new("home", ScrollToTop, Some("TerminalLogs")),
+        KeyBinding::new("end", ScrollToBottom, Some("TerminalLogs")),
+        KeyBinding::new("f", ToggleFollow, Some("TerminalLogs && !TerminalFind")),
+    ]);
 }
 
 pub struct HackApp {
@@ -63,8 +123,11 @@ pub struct HackApp {
     pub(crate) source: Arc<dyn Source>,
     pub(crate) logs: crate::logs_view::LogsPane,
     tab: usize,
-    env: hack_desktop_core::env::EnvModel,
-    live: bool,
+    pub(crate) env: hack_desktop_core::env::EnvModel,
+    /// Terminal panels, one per project or branch instance.
+    #[cfg(feature = "terminal")]
+    pub(crate) panels: crate::terminal::Panels,
+    pub(crate) live: bool,
     /// The title bar's project filter.
     search: Entity<InputState>,
     filter: String,
@@ -114,6 +177,8 @@ impl HackApp {
             search,
             filter: String::new(),
             copied: None,
+            #[cfg(feature = "terminal")]
+            panels: Default::default(),
             recovery_busy: false,
             recovery_error: None,
             action_started: std::collections::HashMap::new(),
@@ -355,7 +420,7 @@ impl HackApp {
         }
     }
 
-    fn read_env(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn read_env(&mut self, cx: &mut Context<Self>) {
         let generation = self.env.begin();
         let Some((root, native)) = self.selected_root() else {
             return;
@@ -372,7 +437,8 @@ impl HackApp {
                 .spawn(async move { source.env(&root, native) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.tab == 2 && this.selected_root() == Some((requested, native)) {
+                // The generation drops a read the user has moved away from.
+                if this.selected_root() == Some((requested, native)) {
                     this.env.finish(generation, view);
                     cx.notify();
                 }
@@ -893,7 +959,13 @@ impl HackApp {
         col
     }
 
-    fn header(&self, d: &DetailView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(
+        &self,
+        d: &DetailView,
+        compact: bool,
+        ui: &Ui,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = ui.p;
         let status = Status::of(&d.state);
         let mut actions = div().flex().items_center().gap(space::S3);
@@ -983,7 +1055,11 @@ impl HackApp {
                     .gap(space::S4)
                     .child(
                         div()
-                            .type_step(text::TITLE)
+                            .type_step(if compact {
+                                text::BODY_STRONG
+                            } else {
+                                text::TITLE
+                            })
                             .text_color(p.text_primary)
                             .child(d.name.clone()),
                     )
@@ -1006,8 +1082,8 @@ impl HackApp {
                     .child(div().flex_1())
                     .child(actions),
             )
-            .child(url_row)
-            .children(reason.map(|r| {
+            .when(!compact, |col| col.child(url_row))
+            .children((!compact).then_some(()).and(reason).map(|r| {
                 let c = if status == Status::Failed {
                     p.states.failed.fg
                 } else {
@@ -1015,14 +1091,23 @@ impl HackApp {
                 };
                 div().type_step(text::BODY).text_color(c).child(r)
             }))
-            .children(self.doctor_link(&d.name, ui, cx))
-            .children(self.slow_action_warning(&d.key).map(|w| {
-                div()
-                    .type_step(text::BODY)
-                    .text_color(p.states.degraded.fg)
-                    .child(w)
-            }))
-            .children(d.note.clone().map(|n| {
+            .children(
+                (!compact)
+                    .then(|| self.doctor_link(&d.name, ui, cx))
+                    .flatten(),
+            )
+            .children(
+                (!compact)
+                    .then(|| self.slow_action_warning(&d.key))
+                    .flatten()
+                    .map(|w| {
+                        div()
+                            .type_step(text::BODY)
+                            .text_color(p.states.degraded.fg)
+                            .child(w)
+                    }),
+            )
+            .children(d.note.clone().filter(|_| !compact).map(|n| {
                 div()
                     .type_step(text::SMALL)
                     .text_color(p.text_muted)
@@ -1056,7 +1141,14 @@ impl HackApp {
         )
     }
 
-    fn detail(&self, d: &DetailView, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
+    fn detail(
+        &mut self,
+        d: &DetailView,
+        ui: &Ui,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let _ = &window;
         let rows: Vec<ServiceRow> = d
             .services
             .iter()
@@ -1070,15 +1162,20 @@ impl HackApp {
                 route: s.route.clone().ok_or_else(|| "internal".to_owned()),
             })
             .collect();
+        // With the terminal panel, logs live in the panel's Logs tab.
+        #[cfg(feature = "terminal")]
+        let pills: &[(usize, &'static str)] = &[(0, "Services"), (2, "Env")];
+        #[cfg(not(feature = "terminal"))]
+        let pills: &[(usize, &'static str)] = &[(0, "Services"), (1, "Logs"), (2, "Env")];
         let mut tabs = div().flex().items_center().gap(space::S2);
-        for (i, label) in ["Services", "Logs", "Env"].into_iter().enumerate() {
+        for &(i, label) in pills {
             tabs = tabs.child(
                 pill_tab(("detail-tab", i), label, self.tab == i, ui)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_tab(i, cx))),
             );
         }
         let body: AnyElement = match self.tab {
-            1 => {
+            1 if cfg!(not(feature = "terminal")) => {
                 // The Logs tab scrolls inside its own virtualized list.
                 let names: Vec<String> = d.services.iter().map(|s| s.name.clone()).collect();
                 self.render_logs(&names, cx).into_any_element()
@@ -1110,6 +1207,13 @@ impl HackApp {
                 })
                 .into_any_element(),
         };
+        #[cfg(feature = "terminal")]
+        let (maximized, panel) = (
+            self.panels.maximized(&d.key),
+            Some(self.terminal_area(d, ui, window, cx)),
+        );
+        #[cfg(not(feature = "terminal"))]
+        let (maximized, panel): (bool, Option<AnyElement>) = (false, None);
         div()
             .flex_1()
             .min_w_0()
@@ -1119,12 +1223,16 @@ impl HackApp {
             .child(
                 div()
                     .px(space::S8)
-                    .pt(space::S7)
+                    .pt(if maximized { space::S5 } else { space::S7 })
                     .pb(space::S5)
-                    .child(self.header(d, ui, cx)),
+                    .when(maximized, |d| d.hairline_b(ui.p.border))
+                    .child(self.header(d, maximized, ui, cx)),
             )
-            .child(div().px(space::S7).pb(space::S3).child(tabs))
-            .child(body)
+            .when(!maximized, |col| {
+                col.child(div().px(space::S7).pb(space::S3).child(tabs))
+                    .child(body)
+            })
+            .children(panel)
     }
 
     fn env_tab(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1336,8 +1444,55 @@ impl HackApp {
     }
 }
 
+impl HackApp {
+    /// The panel's window-level handlers: drag the handle, and the panel
+    /// actions wherever focus is.
+    #[cfg(feature = "terminal")]
+    fn terminal_handlers(
+        &self,
+        root: gpui_kit::Stateful<gpui_kit::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        use hack_desktop_term::actions::{
+            CloseTab, NewTab, NextTab, PrevTab, ToggleMaximize, TogglePanel,
+        };
+        root.on_mouse_move(
+            cx.listener(|this, ev: &gpui_kit::MouseMoveEvent, window, cx| {
+                if this.panels.dragging {
+                    if ev.pressed_button != Some(gpui_kit::MouseButton::Left) {
+                        this.panels.dragging = false;
+                        return;
+                    }
+                    this.drag_to(f32::from(ev.position.y), window, cx);
+                }
+            }),
+        )
+        .on_mouse_up(
+            gpui_kit::MouseButton::Left,
+            cx.listener(|this, _, _, _| this.panels.dragging = false),
+        )
+        .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
+        .on_action(cx.listener(|this, _: &ToggleMaximize, _, cx| this.toggle_maximize(cx)))
+        .on_action(cx.listener(|this, _: &NewTab, _, cx| {
+            this.open_menu(crate::terminal::Menu::Main, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CloseTab, window, cx| this.close_active_tab(window, cx)))
+        .on_action(cx.listener(|this, _: &NextTab, window, cx| this.step_tab(true, window, cx)))
+        .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.step_tab(false, window, cx)))
+    }
+
+    #[cfg(not(feature = "terminal"))]
+    fn terminal_handlers(
+        &self,
+        root: gpui_kit::Stateful<gpui_kit::Div>,
+        _: &mut Context<Self>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        root
+    }
+}
+
 impl Render for HackApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let list = self.model.list();
         let ui = self.ui(cx);
         let p = ui.p;
@@ -1379,7 +1534,7 @@ impl Render for HackApp {
                 empty_pane(Glyph::Loader, "Loading projects…", "", None, &ui).into_any_element()
             }
             Phase::Ready => match self.model.detail() {
-                Some(d) => self.detail(&d, &ui, cx).into_any_element(),
+                Some(d) => self.detail(&d, &ui, window, cx).into_any_element(),
                 None => {
                     empty_pane(Glyph::Folder, "Select a project", "", None, &ui).into_any_element()
                 }
@@ -1391,6 +1546,7 @@ impl Render for HackApp {
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
+            .map(|root| self.terminal_handlers(root, cx))
             .size_full()
             .flex()
             .flex_col()

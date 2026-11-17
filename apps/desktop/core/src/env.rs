@@ -56,6 +56,34 @@ pub struct EnvReport {
     pub selected_scope: Option<String>,
     #[serde(default)]
     pub key_state: KeyState,
+    /// Overlay names the CLI selected: requested, default and effective.
+    /// Names only. The list of every overlay is CLI request 1 (term crate).
+    #[serde(default)]
+    pub env_selection: Option<EnvSelection>,
+}
+
+/// `env_selection` in `hack env list --json`: overlay names, no values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct EnvSelection {
+    pub requested: Option<String>,
+    pub default: Option<String>,
+    pub effective: Option<String>,
+}
+
+impl EnvSelection {
+    /// The overlays a host shell can be opened with: the project's default
+    /// and the effective one, without repeats.
+    #[must_use]
+    pub fn overlays(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for name in [&self.default, &self.effective].into_iter().flatten() {
+            if !name.is_empty() && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
 }
 impl EnvReport {
     /// An empty default-scope listing does not establish project-wide absence.

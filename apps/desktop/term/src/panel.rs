@@ -79,6 +79,23 @@ impl<T> PanelState<T> {
         self.active
     }
 
+    /// Put `tab` in place of the tab at `index` and return the old one.
+    /// The active tab and visibility do not change.
+    pub fn swap(&mut self, index: usize, tab: T) -> Option<T> {
+        let slot = self.tabs.get_mut(index)?;
+        Some(std::mem::replace(slot, tab))
+    }
+
+    /// Put a tab at `index` (clamped to the end), activate it and show the
+    /// panel.
+    pub fn insert(&mut self, index: usize, tab: T) -> usize {
+        let index = index.min(self.tabs.len());
+        self.tabs.insert(index, tab);
+        self.active = index;
+        self.visible = true;
+        index
+    }
+
     pub fn activate(&mut self, index: usize) -> bool {
         if index >= self.tabs.len() {
             return false;
@@ -159,6 +176,12 @@ pub struct TerminalPanel {
     closing: Vec<PendingTeardown>,
     /// Processes that outlived tabs closed so far.
     left_running: usize,
+    /// The session leaders of tabs closed or replaced so far, with each
+    /// tab's label. See [`Self::leaders`].
+    retired_leaders: Vec<(u32, String)>,
+    /// Embedded in a host that draws its own chrome: render only the
+    /// active terminal, and leave panel actions to the host.
+    embedded: bool,
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
@@ -190,7 +213,19 @@ impl TerminalPanel {
             focus: cx.focus_handle(),
             closing: Vec::new(),
             left_running: 0,
+            retired_leaders: Vec::new(),
+            embedded: false,
         }
+    }
+
+    /// For a host that draws its own tab strip and handles the panel
+    /// actions (`TogglePanel`, `NewTab`, `CloseTab`, tab switching,
+    /// `ToggleMaximize`): the panel then renders only the active terminal
+    /// and registers no action handlers, so those actions reach the host.
+    /// Session ownership and teardown are unchanged.
+    pub fn set_embedded(&mut self, embedded: bool, cx: &mut Context<Self>) {
+        self.embedded = embedded;
+        cx.notify();
     }
 
     pub fn is_visible(&self) -> bool {
@@ -213,6 +248,11 @@ impl TerminalPanel {
         self.state.active()
     }
 
+    /// The tab at `index`.
+    pub fn tab(&self, index: usize) -> Option<&Entity<TerminalView>> {
+        self.state.tabs().get(index)
+    }
+
     /// Each tab's kind, in order: what the labels and badges are made from.
     pub fn kinds(&self, cx: &App) -> Vec<SessionKind> {
         self.state
@@ -223,6 +263,20 @@ impl TerminalPanel {
     }
 
     /// How many processes outlived tabs closed in this panel.
+    /// Every session leader any tab of this panel has started, with the
+    /// tab's label: tabs closed or replaced, then the open ones. Each
+    /// leader is also its session's id, so a caller can account for what
+    /// those sessions left running.
+    pub fn leaders(&self, cx: &App) -> Vec<(u32, String)> {
+        let mut out = self.retired_leaders.clone();
+        for view in self.state.tabs() {
+            let v = view.read(cx);
+            let label = v.kind().label();
+            out.extend(v.leaders().iter().map(|&leader| (leader, label.clone())));
+        }
+        out
+    }
+
     pub fn left_running(&self) -> usize {
         self.left_running
     }
@@ -277,14 +331,80 @@ impl TerminalPanel {
         }
     }
 
+    /// Replace the tab at `index` with `view`, ending the old tab's session
+    /// as [`Self::close`] does (for example a log stream that ended and is
+    /// started again).
+    pub fn replace(
+        &mut self,
+        index: usize,
+        view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close(index, window, cx);
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        self.state.insert(index, view);
+        self.focus_active(window, cx);
+        self.changed(cx);
+    }
+
     /// Close the active tab and end its session.
     pub fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.state.close_active() else {
+        if let Some(index) = self.state.active_index() {
+            self.close(index, window, cx);
+        }
+    }
+
+    /// Close one tab and end its session.
+    pub fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.state.close(index) else {
             return;
         };
+        self.retire_view(&view, cx);
+        self.focus_active(window, cx);
+        self.changed(cx);
+    }
+
+    /// Replace the tab at `index` with `view` in place, ending the old
+    /// tab's session: the active tab, focus and visibility are unchanged.
+    /// For work the user did not ask for (a log stream restarted in the
+    /// background), so it never interrupts the tab being typed in.
+    ///
+    /// If the old view had focus, the new one takes it, so its keys (find,
+    /// follow, scrolling) keep working; focus anywhere else is left alone.
+    pub fn replace_in_place(
+        &mut self,
+        index: usize,
+        view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        let incoming = view.read(cx).focus_handle(cx);
+        let Some(old) = self.state.swap(index, view) else {
+            return;
+        };
+        let had_focus = old.read(cx).focus_handle(cx).contains_focused(window, cx);
+        self.retire_view(&old, cx);
+        if had_focus {
+            window.focus(&incoming, cx);
+        }
+        self.changed(cx);
+    }
+
+    /// End a removed tab's session on a reaper thread, keeping its
+    /// teardown so quit can await it and survivors are reported.
+    fn retire_view(&mut self, view: &Entity<TerminalView>, cx: &mut Context<Self>) {
         // End the session now, on a reaper thread, and keep the handle so
         // anything that could not be ended is reported.
         let (shutdown, retired) = view.update(cx, |v, _| (v.take_shutdown(), v.take_retired()));
+        let label = view.read(cx).kind().label();
+        self.retired_leaders.extend(
+            view.read(cx)
+                .leaders()
+                .iter()
+                .map(|&leader| (leader, label.clone())),
+        );
         // The view may be dropped now, and its quit handler with it, so the
         // panel keeps every teardown it had: the one starting here and any
         // the session started by itself.
@@ -309,8 +429,6 @@ impl TerminalPanel {
             })
             .detach();
         }
-        self.focus_active(window, cx);
-        self.changed(cx);
     }
 
     /// Take finished teardown results. Returns whether any are still pending.
@@ -352,6 +470,14 @@ impl TerminalPanel {
             view.update(cx, |v, cx| v.open_find(cx));
         }
     }
+
+    /// Open find on the active tab and focus that terminal, which takes
+    /// the find query's typing (a click on a find button, while focus may
+    /// be in another input).
+    pub fn find_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find(cx);
+        self.focus_active(window, cx);
+    }
 }
 
 impl Focusable for TerminalPanel {
@@ -362,6 +488,13 @@ impl Focusable for TerminalPanel {
 
 impl Render for TerminalPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.embedded {
+            return div()
+                .id("terminal-panel")
+                .track_focus(&self.focus)
+                .size_full()
+                .children(self.state.active().cloned());
+        }
         let root = div()
             .id("terminal-panel")
             .key_context("TerminalPanel")
@@ -477,6 +610,25 @@ mod tests {
         assert!(p.is_visible());
         assert_eq!((p.active_index(), p.active()), (Some(1), Some(&"api · sh")));
         assert_eq!(p.tabs(), ["logs", "api · sh"]);
+    }
+
+    #[test]
+    fn swapping_keeps_the_active_tab() {
+        let mut p = panel(&["logs", "shell"]);
+        assert_eq!(p.active(), Some(&"shell"));
+        assert_eq!(p.swap(0, "logs2"), Some("logs"));
+        assert_eq!(p.tabs(), ["logs2", "shell"]);
+        assert_eq!(p.active(), Some(&"shell"), "the shell stays active");
+        assert_eq!(p.swap(5, "x"), None);
+    }
+
+    #[test]
+    fn inserting_puts_the_tab_in_place_and_activates_it() {
+        let mut p = panel(&["a", "c"]);
+        assert_eq!(p.insert(1, "b"), 1);
+        assert_eq!(p.tabs(), ["a", "b", "c"]);
+        assert_eq!(p.active(), Some(&"b"));
+        assert_eq!(p.insert(9, "d"), 3, "clamped to the end");
     }
 
     #[test]

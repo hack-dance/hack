@@ -14,9 +14,14 @@ path = "src/main.rs"
 [features]
 # Offscreen rendering of fixture states to PNG (used for design evidence).
 screenshots = ["gpui-kit/test-support", "dep:image", "hack-desktop-ui/screenshots"]
+# The terminal panel (libghostty-vt): logs, container and host shells on
+# app-owned PTYs. Needs the inputs term/scripts/provision-ghostty.sh fetches,
+# so it is off by default; without it the window keeps its Logs tab.
+terminal = ["dep:hack-desktop-term", "hack-desktop-term/ghostty"]
 
 [dependencies]
 hack-desktop-core.workspace = true
 hack-desktop-ui.workspace = true
+hack-desktop-term = { workspace = true, optional = true }
 gpui-kit.workspace = true
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }

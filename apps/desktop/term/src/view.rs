@@ -494,10 +494,16 @@ impl TerminalView {
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
             return;
         };
+        self.paste(&text, cx);
+    }
+
+    /// Paste `text` as the Paste action does with the clipboard's text:
+    /// into the find field while it is open, otherwise into the PTY.
+    pub fn paste(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.search_open {
-            self.paste_into_find(&text, cx);
+            self.paste_into_find(text, cx);
         } else {
-            self.paste_text(&text, cx);
+            self.paste_text(text, cx);
         }
     }
 
@@ -535,12 +541,27 @@ impl TerminalView {
     /// Paste text into the PTY as the user would (bracketed when the
     /// program asked for it). No-op for a stream view.
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // A read-only tab (logs) takes no input, pasted or typed.
+        if self.core.read_only() {
+            return;
+        }
         let bytes = self.core.emu().encode_paste(text);
         self.send(&bytes, cx);
     }
 
     pub fn set_font(&mut self, font: TermFont) {
         self.font = font;
+    }
+
+    /// The running session's leader pid; see [`TerminalCore::leader`].
+    pub fn leader(&self) -> Option<u32> {
+        self.core.leader()
+    }
+
+    /// Every session leader this tab has started; see
+    /// [`TerminalCore::leaders`].
+    pub fn leaders(&self) -> &[u32] {
+        self.core.leaders()
     }
 
     pub fn status(&self) -> &Status {

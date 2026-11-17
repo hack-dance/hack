@@ -2,8 +2,9 @@
 
 Status: direction accepted by the owner on Nov 15 2026 (HACK-2252), with
 the logs moved into a terminal panel (approved panel mockup). The real window
-(`app/src/view.rs`) now uses these tokens and components; until the terminal
-panel is wired, its logs stay a Logs tab (DESIGN-V1 renders in
+(`app/src/view.rs`) now uses these tokens and components; the terminal panel
+is wired behind the app's `terminal` feature (it needs the libghostty inputs),
+and without it the logs stay a Logs tab (DESIGN-V1 renders in
 `screenshots/v1/`, the real window's in `screenshots/window/`).
 
 Reference: the approved mockups (main window: title bar with search, sidebar
@@ -348,6 +349,5 @@ the emulator; this spec owns the panel. Session rules:
 ## Not in v1
 
 Menu bar popover (mockup "later"), Doctor and Routing detail views,
-Env and Activity content, per-service usage in the live app, and wiring the
-panel to real sessions (PR 3, after #808 and #806). Accessibility labels are kept from the current view when the
-window is restyled.
+Activity content and per-service usage in the live app. Accessibility labels
+are kept from the current view when the window is restyled.

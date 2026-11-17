@@ -127,6 +127,7 @@ fn a_container_without_bash_falls_back_to_sh_and_the_tab_says_so() {
     let mut core =
         TerminalCore::session(container_plan(&home, &[("FAKE_HACK_NO_BASH", "1")])).expect("spawn");
     assert_eq!(core.kind().label(), "api · bash", "bash is tried first");
+    let first = core.leader().expect("the bash attempt's leader");
     let screen = pump_until(&mut core, "container:api:sh");
     assert!(screen.contains("container:api:sh"), "{screen:?}");
     assert_eq!(
@@ -135,6 +136,11 @@ fn a_container_without_bash_falls_back_to_sh_and_the_tab_says_so() {
         "the label follows the shell"
     );
     assert_eq!(*core.status(), Status::Running);
+    // Both attempts' leaders are kept, so a caller can account for what
+    // each session left running.
+    let now = core.leader().expect("the sh attempt's leader");
+    assert_ne!(now, first);
+    assert_eq!(core.leaders(), [first, now]);
     assert!(
         !screen.contains("not found"),
         "the failed attempt's message is cleared: {screen:?}"
@@ -142,6 +148,47 @@ fn a_container_without_bash_falls_back_to_sh_and_the_tab_says_so() {
     // The shell that started is usable.
     core.send(b"echo \"sum=[$((40 + 2))]\"\n");
     assert!(pump_until(&mut core, "sum=[42]").contains("sum=[42]"));
+}
+
+#[test]
+fn typing_while_a_container_tab_opens_does_not_cancel_the_fallback_to_sh() {
+    let home = TempHome::new();
+    let mut core =
+        TerminalCore::session(container_plan(&home, &[("FAKE_HACK_NO_BASH", "1")])).expect("spawn");
+    // A fast typist: input before the bash attempt has printed or failed.
+    core.send(b"echo \"typed=[$((1 + 2))]\"\n");
+    let screen = pump_until(&mut core, "typed=[3]");
+    assert_eq!(
+        core.kind().label(),
+        "api · sh",
+        "bash was missing, so sh started"
+    );
+    assert!(
+        screen.contains("typed=[3]"),
+        "the held input reached sh: {screen:?}"
+    );
+    assert_eq!(*core.status(), Status::Running);
+}
+
+#[test]
+fn a_paste_refused_while_input_is_held_keeps_its_notice_after_the_flush() {
+    use hack_desktop_term::pty::INPUT_QUEUE_BYTES;
+    let home = TempHome::new();
+    let mut core =
+        TerminalCore::session(container_plan(&home, &[("FAKE_HACK_NO_BASH", "1")])).expect("spawn");
+    core.send(b"echo \"typed=[$((2 + 3))]\"\n");
+    core.send(&vec![b'#'; INPUT_QUEUE_BYTES + 1]);
+    let refused = core
+        .notice()
+        .map(str::to_owned)
+        .expect("the oversized paste is refused");
+    assert!(refused.contains("input limit"), "{refused}");
+    pump_until(&mut core, "typed=[5]");
+    assert_eq!(
+        core.notice(),
+        Some(refused.as_str()),
+        "delivering the held input does not clear the refusal"
+    );
 }
 
 #[test]

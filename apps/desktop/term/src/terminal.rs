@@ -16,6 +16,13 @@
 //! container shell: `bash`, then `sh`) moves to the next attempt when the
 //! current one could not start its program: it ended with exit status 126
 //! or 127 within [`FALLBACK_WINDOW`], before the user typed anything.
+//!
+//! While another attempt is still possible, input is held until the
+//! current attempt has settled: it produced output and stayed running for
+//! [`SETTLE_AFTER_OUTPUT`], or ran for [`SETTLE_MAX`]. Held input goes to
+//! the attempt that settles, `sh` after a missing `bash` included, and does
+//! not count as typing before then, so typing while the tab opens never
+//! cancels the fallback. A single-attempt session never holds input.
 
 use std::time::{Duration, Instant};
 
@@ -38,6 +45,11 @@ pub const EXIT_DRAIN_CAP: Duration = Duration::from_secs(5);
 pub const EOF_EXIT_WAIT: Duration = Duration::from_millis(250);
 /// How soon a "command not found" exit must come to try the next attempt.
 pub const FALLBACK_WINDOW: Duration = Duration::from_secs(10);
+/// With another attempt possible, how long an attempt must keep running
+/// after its first output before held input is delivered to it.
+pub const SETTLE_AFTER_OUTPUT: Duration = Duration::from_millis(500);
+/// With another attempt possible, the longest input is held.
+pub const SETTLE_MAX: Duration = Duration::from_secs(2);
 
 enum Backend {
     Stream(ByteStream),
@@ -94,6 +106,11 @@ pub struct TerminalCore {
     remaining: Vec<Launch>,
     started: Instant,
     input_sent: bool,
+    /// Input typed before the current attempt settled, while another
+    /// attempt is still possible. See the module docs.
+    held: Vec<u8>,
+    /// When the current attempt first produced output.
+    first_output: Option<Instant>,
     /// Teardowns of backends this core ended by itself (end of stream,
     /// the session ended, a failed attempt replaced) that have not finished.
     /// Kept so app quit can hurry and await them; see [`Self::take_retired`].
@@ -101,6 +118,23 @@ pub struct TerminalCore {
     /// Processes left running by retired teardowns that have finished, not
     /// yet handed out by [`Self::take_retired`].
     retired_survivors: usize,
+    /// Every session leader this core started, in order: the first
+    /// attempt and each fallback. See [`Self::leaders`].
+    leaders: Vec<u32>,
+}
+
+/// The notice for input refused whole: larger than the input queue can
+/// ever hold, or the queue is full because the program is not reading.
+fn dropped_notice(bytes: usize) -> String {
+    use crate::pty::INPUT_QUEUE_BYTES;
+    if bytes > INPUT_QUEUE_BYTES {
+        format!(
+            "input not sent: {bytes} bytes is more than the {} MiB input limit",
+            INPUT_QUEUE_BYTES >> 20
+        )
+    } else {
+        format!("input not sent: {bytes} bytes (the program is not reading)")
+    }
 }
 
 /// What [`TerminalCore::take_retired`] hands out: teardowns still running,
@@ -127,6 +161,22 @@ impl TerminalCore {
             SessionKind::Logs,
             Vec::new(),
         ))
+    }
+
+    /// A read-only terminal that shows `text` and has ended, as a file
+    /// stream that reached its end does ("end of stream"), with no file
+    /// and no process: a note in place of a log stream.
+    pub fn note(text: &str, scrollback_lines: usize) -> std::io::Result<Self> {
+        let mut emu = Emulator::new(EmulatorOptions {
+            scrollback_lines,
+            newline_is_crlf: true,
+            ..EmulatorOptions::default()
+        })
+        .map_err(std::io::Error::other)?;
+        emu.feed(text.as_bytes());
+        let mut core = Self::with(emu, Backend::Closed, SessionKind::Logs, Vec::new());
+        core.status = Status::Ended("end of stream".into());
+        Ok(core)
     }
 
     /// An interactive terminal for a session plan: a container shell, a
@@ -167,6 +217,11 @@ impl TerminalCore {
     }
 
     fn with(emu: Emulator, backend: Backend, kind: SessionKind, remaining: Vec<Launch>) -> Self {
+        let leaders = match &backend {
+            Backend::Pty(pty) => vec![pty.pid()],
+            Backend::Stream(stream) => stream.pid().into_iter().collect(),
+            Backend::Closed => Vec::new(),
+        };
         Self {
             emu,
             backend,
@@ -179,8 +234,11 @@ impl TerminalCore {
             remaining,
             started: Instant::now(),
             input_sent: false,
+            held: Vec::new(),
+            first_output: None,
             retired: Vec::new(),
             retired_survivors: 0,
+            leaders,
         }
     }
 
@@ -236,6 +294,24 @@ impl TerminalCore {
         &self.kind
     }
 
+    /// Every session leader this core has started, the first attempt and
+    /// each fallback, whether or not it is still running. Each is also its
+    /// session's id, so a caller can account for what those sessions left.
+    pub fn leaders(&self) -> &[u32] {
+        &self.leaders
+    }
+
+    /// The running session's leader pid, which is also its session id.
+    /// `None` for a file-backed stream or once the backend has closed. A
+    /// container shell that fell back from `bash` to `sh` has a new leader.
+    pub fn leader(&self) -> Option<u32> {
+        match &self.backend {
+            Backend::Pty(pty) => Some(pty.pid()),
+            Backend::Stream(stream) => stream.pid(),
+            Backend::Closed => None,
+        }
+    }
+
     pub fn status(&self) -> &Status {
         &self.status
     }
@@ -276,6 +352,7 @@ impl TerminalCore {
                 if !read.bytes.is_empty() {
                     busy = true;
                     self.last_output = Instant::now();
+                    self.first_output.get_or_insert(self.last_output);
                     let reply = self.emu.feed(&read.bytes);
                     // Query replies are a few bytes; if the child is not
                     // reading there is nobody waiting for them.
@@ -313,11 +390,27 @@ impl TerminalCore {
                         let ended = std::mem::replace(&mut self.backend, Backend::Closed);
                         self.retire(ended);
                     }
+                } else if !self.held.is_empty() && self.exit_seen.is_none() && self.settled() {
+                    let held = std::mem::take(&mut self.held);
+                    // Input accepted earlier: a notice set since then (a
+                    // refused paste) stays up.
+                    self.deliver(&held, false);
+                    busy = true;
                 }
             }
             Backend::Closed => {}
         }
         busy
+    }
+
+    /// Whether input goes straight to the current attempt: no other
+    /// attempt is left, or this one has settled (module docs).
+    fn settled(&self) -> bool {
+        self.remaining.is_empty()
+            || self
+                .first_output
+                .is_some_and(|t| t.elapsed() >= SETTLE_AFTER_OUTPUT)
+            || self.started.elapsed() >= SETTLE_MAX
     }
 
     /// Start the next attempt of the plan if the current one could not
@@ -334,6 +427,7 @@ impl TerminalCore {
         options.size = PtySize::cells(self.emu.cols(), self.emu.rows());
         match Pty::spawn(&options) {
             Ok(pty) => {
+                self.leaders.push(pty.pid());
                 // A full reset: the failed attempt's error text is not part
                 // of the session the user asked for.
                 self.emu.feed(b"\x1bc");
@@ -344,6 +438,7 @@ impl TerminalCore {
                 self.eof_seen = None;
                 self.last_output = Instant::now();
                 self.started = Instant::now();
+                self.first_output = None;
                 true
             }
             Err(_) => false,
@@ -353,21 +448,38 @@ impl TerminalCore {
     /// Queue input for the PTY (no-op for a stream). Input that cannot be
     /// queued is dropped whole and reported through [`Self::notice`].
     pub fn send(&mut self, bytes: &[u8]) {
+        if !matches!(self.backend, Backend::Pty(_)) || bytes.is_empty() {
+            return;
+        }
+        if !self.settled() || !self.held.is_empty() {
+            // Keep order: anything typed after held input waits with it.
+            if self.held.len() + bytes.len() > crate::pty::INPUT_QUEUE_BYTES {
+                self.notice = Some(dropped_notice(bytes.len()));
+            } else {
+                self.held.extend_from_slice(bytes);
+                self.notice = None;
+            }
+            return;
+        }
+        self.deliver(bytes, true);
+    }
+
+    /// Write input to the current attempt; it now counts as typed. `fresh`:
+    /// input the user just gave, which replaces any notice; held input
+    /// delivered later leaves the notice as it is.
+    fn deliver(&mut self, bytes: &[u8], fresh: bool) {
         let Backend::Pty(pty) = &self.backend else {
             return;
         };
-        if bytes.is_empty() {
-            return;
-        }
         match pty.write(bytes) {
             WriteOutcome::Queued => {
-                self.notice = None;
+                if fresh {
+                    self.notice = None;
+                }
                 self.input_sent = true;
             }
             WriteOutcome::Dropped { bytes } => {
-                self.notice = Some(format!(
-                    "input not sent: {bytes} bytes (the program is not reading)"
-                ));
+                self.notice = Some(dropped_notice(bytes));
             }
             WriteOutcome::Closed => {}
         }
@@ -421,6 +533,32 @@ impl TerminalCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_note_shows_its_text_has_ended_and_has_no_process() {
+        let mut core = TerminalCore::note("first line\nsecond line\n", 100).expect("note");
+        assert_eq!(*core.status(), Status::Ended("end of stream".into()));
+        assert!(core.read_only());
+        assert_eq!(core.leader(), None);
+        assert!(core.leaders().is_empty());
+        let frame = core.emulator().frame().expect("frame");
+        let text: Vec<String> = (0..2).map(|r| frame.row_text(r)).collect();
+        assert_eq!(text[0].trim_end(), "first line");
+        assert_eq!(
+            text[1].trim_end(),
+            "second line",
+            "a bare newline starts a new line"
+        );
+    }
+
+    #[test]
+    fn a_paste_larger_than_the_input_queue_names_the_limit() {
+        use crate::pty::INPUT_QUEUE_BYTES;
+        let over = dropped_notice(INPUT_QUEUE_BYTES + 1);
+        assert!(over.contains("more than the 1 MiB input limit"), "{over}");
+        let full = dropped_notice(INPUT_QUEUE_BYTES);
+        assert!(full.contains("the program is not reading"), "{full}");
+    }
     use crate::session::Hurry;
 
     fn finished(survivors: Vec<libc::pid_t>) -> PendingTeardown {

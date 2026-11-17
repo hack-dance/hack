@@ -40,3 +40,8 @@ cargo nextest run --locked --offline -p hack-desktop-term --features screenshots
   --build-jobs 2 --config-file "$root/.config/nextest.toml" --profile ci \
   ${nextest_args[@]+"${nextest_args[@]}"}
 cargo test --locked --offline -p hack-desktop-term --features screenshots --doc --jobs 2
+# The app's terminal panel builds on the same inputs (feature `terminal`).
+cargo clippy --locked --offline -p hack-desktop --all-targets --features terminal,screenshots -- -D warnings
+cargo nextest run --locked --offline -p hack-desktop --features terminal \
+  --build-jobs 2 --config-file "$root/.config/nextest.toml" --profile ci \
+  ${nextest_args[@]+"${nextest_args[@]}"}

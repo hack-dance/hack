@@ -146,6 +146,22 @@ impl TerminalCore {
         ))
     }
 
+    /// A read-only terminal that shows `text` and has ended, as a file
+    /// stream that reached its end does ("end of stream"), with no file
+    /// and no process: a note in place of a log stream.
+    pub fn note(text: &str, scrollback_lines: usize) -> std::io::Result<Self> {
+        let mut emu = Emulator::new(EmulatorOptions {
+            scrollback_lines,
+            newline_is_crlf: true,
+            ..EmulatorOptions::default()
+        })
+        .map_err(std::io::Error::other)?;
+        emu.feed(text.as_bytes());
+        let mut core = Self::with(emu, Backend::Closed, SessionKind::Logs, Vec::new());
+        core.status = Status::Ended("end of stream".into());
+        Ok(core)
+    }
+
     /// An interactive terminal for a session plan: a container shell, a
     /// host shell, or a host shell with env. See [`crate::launch`].
     pub fn session(plan: SessionPlan) -> std::io::Result<Self> {
@@ -461,6 +477,23 @@ impl TerminalCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_note_shows_its_text_has_ended_and_has_no_process() {
+        let mut core = TerminalCore::note("first line\nsecond line\n", 100).expect("note");
+        assert_eq!(*core.status(), Status::Ended("end of stream".into()));
+        assert!(core.read_only());
+        assert_eq!(core.leader(), None);
+        assert!(core.leaders().is_empty());
+        let frame = core.emulator().frame().expect("frame");
+        let text: Vec<String> = (0..2).map(|r| frame.row_text(r)).collect();
+        assert_eq!(text[0].trim_end(), "first line");
+        assert_eq!(
+            text[1].trim_end(),
+            "second line",
+            "a bare newline starts a new line"
+        );
+    }
 
     #[test]
     fn a_paste_larger_than_the_input_queue_names_the_limit() {

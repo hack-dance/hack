@@ -38,7 +38,6 @@ use hack_desktop_term::launch::{
 };
 use hack_desktop_term::panel::TerminalPanel;
 use hack_desktop_term::pty::PtyOptions;
-use hack_desktop_term::stream::StreamSource;
 use hack_desktop_term::terminal::TerminalCore;
 use hack_desktop_term::view::{Status as TermStatus, TerminalView};
 use hack_desktop_ui::components::{StyledExt as _, Ui, icon};
@@ -295,19 +294,12 @@ pub fn env_choices(
 }
 
 /// A read-only tab showing `text` (fixtures, and notes such as "native
-/// projects have no log stream here"). The file is removed once open.
+/// projects have no log stream here"). It has ended, like a log stream that
+/// reached its end, so a click on the Logs tab starts it again.
 fn note_core(text: &str) -> std::io::Result<TerminalCore> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "hack-desktop-note-{}-{}.log",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&path, text)?;
-    let core = TerminalCore::stream(&StreamSource::File(path.clone()), NOTE_SCROLLBACK);
-    let _ = std::fs::remove_file(&path);
-    core
+    // In memory: no file is written, so nothing in a shared temp folder
+    // can be swapped for a link to another file.
+    TerminalCore::note(text, NOTE_SCROLLBACK)
 }
 
 impl HackApp {

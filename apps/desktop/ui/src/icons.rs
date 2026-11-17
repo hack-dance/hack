@@ -62,6 +62,8 @@ pub enum Glyph {
     EyeOff,
     /// Env tab: the secret key line.
     Key,
+    /// Env tab: edit a value.
+    Pencil,
     Copy,
     /// Header: copied.
     Check,
@@ -100,6 +102,7 @@ impl Glyph {
             Self::Eye => "icons/eye.svg",
             Self::EyeOff => "icons/eye-off.svg",
             Self::Key => "icons/key-round.svg",
+            Self::Pencil => "icons/pencil.svg",
         }
     }
 }
@@ -136,6 +139,7 @@ icon_assets!(
         Eye,
         EyeOff,
         KeyRound,
+        Pencil,
     ]
 );
 
@@ -194,6 +198,7 @@ mod tests {
             Glyph::Eye,
             Glyph::EyeOff,
             Glyph::Key,
+            Glyph::Pencil,
         ] {
             assert!(
                 Assets.load(g.path()).unwrap().is_some(),

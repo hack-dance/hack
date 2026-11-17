@@ -207,3 +207,89 @@ exit 1
     assert_eq!(calls(), 3);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_write_sends_the_value_on_stdin_only_and_names_overlay_and_scope() {
+    use hack_desktop_core::env::Revealed;
+    use hack_desktop_core::source::{EnvTarget, env_set_command};
+    let (dir, project, source) = value_fixture(
+        r#"#!/bin/sh
+printf '%s' "$*" > "$HOME/argv"
+cat > "$HOME/stdin"
+env > "$HOME/env"
+"#,
+    );
+    let target = EnvTarget {
+        env: Some("staging".into()),
+        scope: Some("api".into()),
+    };
+    source
+        .env_set(
+            &project,
+            false,
+            &target,
+            "API_TOKEN",
+            true,
+            &Revealed::new("fake-secret-SENTINEL".into()),
+        )
+        .expect("stored");
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+    assert_eq!(
+        read("argv"),
+        format!(
+            "env add API_TOKEN --secret --value-stdin --env staging --service api --path {}",
+            project.display()
+        )
+    );
+    assert_eq!(read("stdin"), "fake-secret-SENTINEL");
+    assert!(
+        !read("env").contains("SENTINEL"),
+        "never in the environment"
+    );
+    // The command shown before it runs is the same, without path or value.
+    assert_eq!(
+        env_set_command(&target, "API_TOKEN", true).unwrap(),
+        "hack env add API_TOKEN --secret --value-stdin --env staging --service api"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_failed_write_never_echoes_the_value_and_odd_names_never_run() {
+    use hack_desktop_core::env::Revealed;
+    use hack_desktop_core::source::EnvTarget;
+    let (dir, project, source) = value_fixture(
+        r#"#!/bin/sh
+echo called >> "$HOME/calls"
+v=$(cat)
+echo "rejected value $v" >&2
+exit 1
+"#,
+    );
+    let value = Revealed::new("fake-secret-SENTINEL".into());
+    let error = source
+        .env_set(
+            &project,
+            false,
+            &EnvTarget::default(),
+            "API_TOKEN",
+            true,
+            &value,
+        )
+        .expect_err("exit 1");
+    assert!(!error.contains("SENTINEL"), "{error}");
+    assert!(
+        error.contains("API_TOKEN") && error.contains("code 1"),
+        "{error}"
+    );
+    for key in ["--secret", "A B", "../x", ""] {
+        assert!(
+            source
+                .env_set(&project, false, &EnvTarget::default(), key, false, &value)
+                .is_err()
+        );
+    }
+    let calls = std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+    assert_eq!(calls.lines().count(), 1, "odd names never reached the CLI");
+    std::fs::remove_dir_all(dir).unwrap();
+}

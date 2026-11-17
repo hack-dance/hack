@@ -25,3 +25,11 @@ hack-desktop-ui.workspace = true
 hack-desktop-term = { workspace = true, optional = true }
 gpui-kit.workspace = true
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+
+# Copying an env value marks the clipboard item concealed (the
+# org.nspasteboard.ConcealedType convention), which GPUI's clipboard API
+# cannot. All three are already in Cargo.lock through GPUI.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSArray"] }

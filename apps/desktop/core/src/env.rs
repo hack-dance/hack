@@ -432,7 +432,7 @@ pub fn fixture(name: &str) -> EnvView {
         "env-empty" => EnvView::parse(r#"{"vars":[],"missing_required":[]}"#, Some(0)),
         // Several overlays, long names and values, a scoped secret, and a
         // required name that is missing.
-        "env-overlays" | "env-running" | "env-locked" | "env-missing" | "env-long" => {
+        "env-overlays" | "env-running" | "env-locked" | "env-missing" | "env-long" | "env-edit" => {
             let key_state = if name == "env-locked" {
                 "missing"
             } else {

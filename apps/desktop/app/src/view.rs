@@ -124,6 +124,10 @@ pub struct HackApp {
     pub(crate) logs: crate::logs_view::LogsPane,
     tab: usize,
     pub(crate) env: hack_desktop_core::env::EnvModel,
+    /// The Env tab's open edit, if any (`env_view`).
+    pub(crate) env_edit: Option<crate::env_view::EnvEdit>,
+    /// "Saved NAME" after the last write, until the next edit or listing.
+    pub(crate) env_saved: Option<String>,
     /// Terminal panels, one per project or branch instance.
     #[cfg(feature = "terminal")]
     pub(crate) panels: crate::terminal::Panels,
@@ -175,6 +179,8 @@ impl HackApp {
             _visibility: None,
             _env_activation: None,
             env: Default::default(),
+            env_edit: None,
+            env_saved: None,
             live,
             search,
             filter: String::new(),
@@ -430,11 +436,18 @@ impl HackApp {
     }
 
     /// Select the Env fixture without opening a window.
-    pub fn show_env_fixture(&mut self, name: &str, cx: &mut Context<Self>) {
+    pub fn show_env_fixture(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = 2;
         // The CLI does not report a running overlay per instance yet (R22).
         self.env.running = (name == "env-running").then(|| "staging".to_owned());
         self.read_env(cx);
+        // The editor open on a secret: an empty masked field and the command.
+        if name == "env-edit"
+            && let hack_desktop_core::env::EnvView::Report(r) = &self.env.view
+            && let Some(row) = r.vars.iter().find(|v| v.key == "API_TOKEN").cloned()
+        {
+            self.open_env_edit(Some(&row), window, cx);
+        }
     }
 
     /// Fixtures: mark an action as in flight without running it.
@@ -641,6 +654,8 @@ impl HackApp {
     /// come through here, so a new project is never listed with the last
     /// one's overlay or scope.
     fn reset_env_selection(&mut self) {
+        self.env_edit = None;
+        self.env_saved = None;
         self.env.env = None;
         self.env.scope = None;
         self.env.running = None;
@@ -672,6 +687,7 @@ impl HackApp {
             return;
         }
         self.tab = to;
+        self.env_edit = None;
         self.env.begin();
         if to == 1 {
             self.open_logs(cx);

@@ -508,13 +508,39 @@ value. A missing required name is
 listed first with a `required · missing` chip. With the key missing, the line
 says where the CLI looks and secrets cannot be revealed or copied.
 
+On macOS the copied item is also marked concealed
+(`org.nspasteboard.ConcealedType`), so clipboard managers that follow that
+convention do not record it. Linux has no such convention: there the 60 s
+clear (or the clear on quit) is the only protection.
+
+**Edit** (the pencil on a row) and **+ Variable** open an editor: the name (new
+variables only), the value, **Secret** (new variables only), and the exact
+command Save runs, for example
+`hack env add API_TOKEN --secret --value-stdin --env staging --service api`.
+The value goes to the CLI on stdin, never in argv or the environment, and the
+command names the overlay and scope explicitly. An existing row is written in
+its own scope (a global variable shown in a service listing stays global); a
+new one goes to the scope listed. A plaintext value starts filled in; a
+secret starts empty, and its field is masked. A secret cannot be edited while
+the key is missing. The editor closes on another overlay, scope, tab or
+project. After Save the tab says "Saved NAME" and lists again.
+
+What needs the CLI is shown, not hidden: **+ Overlay** (create an overlay,
+R27; every overlay as a tab, R24), and, when the key is missing, **Choose key
+file** and **Use env var** (choose the key source for a run, R26). Each is
+inactive, and its tooltip names the request.
+
 Values never reach a log, a render, `--drive` output or an error message, and
-fixtures use fake values. Editing, adding variables or overlays, and choosing
-the key source are the next slice. What the CLI cannot do yet is in DESIGN.md
-(R24 to R27).
+fixtures use fake values. A failed write shows the CLI's reason only when it
+does not contain the value.
+
+Dependencies (macOS only, for the concealed clipboard; all three were already
+in `Cargo.lock` through GPUI): `objc2 =0.6.5` (MIT), `objc2-app-kit =0.3.2`
+(Zlib OR Apache-2.0 OR MIT), `objc2-foundation =0.3.2` (MIT).
 
 Fixtures: `env-loading`, `env-error`, `env-normal`, `env-overlays`,
-`env-running`, `env-missing`, `env-locked`, `env-long`, `env-empty`. Each
+`env-running`, `env-missing`, `env-locked`, `env-long`, `env-edit`,
+`env-empty`. Each
 renders offscreen in both themes through `--screenshots`.
 Screenshots: [overlays, running](screenshots/env-running-light.png),
 [key missing](screenshots/env-locked-dark.png),

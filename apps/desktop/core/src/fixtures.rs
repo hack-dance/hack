@@ -25,6 +25,7 @@ pub enum Fixture {
     EnvOverlays,
     EnvRunning,
     EnvLong,
+    EnvEdit,
     // List states.
     Loading,
     Empty,
@@ -59,7 +60,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::EnvLoading,
         Self::EnvError,
         Self::EnvNormal,
@@ -69,6 +70,7 @@ impl Fixture {
         Self::EnvOverlays,
         Self::EnvRunning,
         Self::EnvLong,
+        Self::EnvEdit,
         Self::Loading,
         Self::Empty,
         Self::DaemonDown,
@@ -103,6 +105,7 @@ impl Fixture {
             Self::EnvOverlays => "env-overlays",
             Self::EnvRunning => "env-running",
             Self::EnvLong => "env-long",
+            Self::EnvEdit => "env-edit",
             Self::Loading => "loading",
             Self::Empty => "empty",
             Self::DaemonDown => "daemon-down",

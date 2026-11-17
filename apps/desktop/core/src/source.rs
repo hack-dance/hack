@@ -339,6 +339,24 @@ pub trait Source: Send + Sync {
         Err("Values are unavailable for this source".into())
     }
 
+    /// Set one value in the overlay and scope named (`hack env add KEY
+    /// [--secret] --value-stdin`): the value goes to the CLI on stdin,
+    /// never argv or the environment. The error never contains the value.
+    ///
+    /// # Errors
+    /// Why the value was not stored, with no value in it.
+    fn env_set(
+        &self,
+        _root: &Path,
+        _native: bool,
+        _target: &EnvTarget,
+        _key: &str,
+        _secret: bool,
+        _value: &crate::env::Revealed,
+    ) -> Result<(), String> {
+        Err("Editing is unavailable for this source".into())
+    }
+
     /// Explicit user recovery only; never called by a poll.
     /// # Errors
     /// Failed or unavailable daemon command.
@@ -1509,6 +1527,51 @@ impl Source for LiveSource {
         }
     }
 
+    fn env_set(
+        &self,
+        root: &Path,
+        native: bool,
+        target: &EnvTarget,
+        key: &str,
+        secret: bool,
+        value: &crate::env::Revealed,
+    ) -> Result<(), String> {
+        let root = env_root(root).ok_or("This checkout's env cannot be changed")?;
+        let args = env_set_args(target, key, secret)?;
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match self
+            .runner_for(native)
+            .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .run_raw_with_input(
+                &args,
+                Some(&root),
+                Duration::from_secs(20),
+                value.expose().as_bytes(),
+            ) {
+            Ok((_, _, Some(0))) => Ok(()),
+            Ok((_, stderr, code)) => {
+                // The CLI's reason helps (an unknown scope, no key), but
+                // only when it does not echo the value.
+                let reason = stderr.trim();
+                let reason = if reason.is_empty()
+                    || (!value.expose().is_empty() && reason.contains(value.expose()))
+                {
+                    String::new()
+                } else {
+                    format!(": {}", reason.lines().last().unwrap_or_default())
+                };
+                Err(format!(
+                    "hack env add {key} {}{reason}",
+                    code.map_or_else(|| "was stopped".into(), |c| format!("exited with code {c}"))
+                ))
+            }
+            Err(e @ (RunError::NotFound | RunError::Spawn(_) | RunError::Timeout { .. })) => {
+                Err(format!("hack env add {key}: {e}"))
+            }
+            Err(_) => Err(format!("hack env add {key} failed")),
+        }
+    }
+
     fn recover_daemon(&self, action: DaemonRecovery) -> Result<(), String> {
         let (_, stderr, code) = self
             .runner
@@ -1878,6 +1941,19 @@ impl Source for FixtureSource {
         }
     }
 
+    fn env_set(
+        &self,
+        _root: &Path,
+        _native: bool,
+        target: &EnvTarget,
+        key: &str,
+        secret: bool,
+        _value: &crate::env::Revealed,
+    ) -> Result<(), String> {
+        // Fixtures store nothing; they check the command as the CLI would get it.
+        env_set_args(target, key, secret).map(|_| ())
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         fixtures::snapshot(self.0)
     }
@@ -1950,6 +2026,38 @@ impl EnvTarget {
         }
         Ok(out)
     }
+}
+
+/// The argv for setting `key` in `target` (`hack env add KEY [--secret]
+/// --value-stdin [--env X] [--service S]`), names checked. The value is
+/// never part of it.
+///
+/// # Errors
+/// A name the app does not pass to the CLI.
+pub fn env_set_args(target: &EnvTarget, key: &str, secret: bool) -> Result<Vec<String>, String> {
+    if !valid_env_name(key) {
+        return Err("Not a variable name the app writes".into());
+    }
+    let mut args = vec!["env".to_owned(), "add".into(), key.into()];
+    if secret {
+        args.push("--secret".into());
+    }
+    args.push("--value-stdin".into());
+    args.extend(target.args()?);
+    Ok(args)
+}
+
+/// The command shown before a write runs, exactly as run but without the
+/// checkout path, and never the value: `hack env add API_TOKEN --secret
+/// --value-stdin --env staging --service api`.
+///
+/// # Errors
+/// As [`env_set_args`].
+pub fn env_set_command(target: &EnvTarget, key: &str, secret: bool) -> Result<String, String> {
+    Ok(format!(
+        "hack {}",
+        env_set_args(target, key, secret)?.join(" ")
+    ))
 }
 
 /// Overlay and scope names: letters, digits, `.`, `_` and `-`, not starting

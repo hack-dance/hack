@@ -302,7 +302,20 @@ impl CliRunner {
             .or_else(|| std::env::var_os(key))
     }
 
+    #[cfg(test)]
     fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
+        self.command_io(args, path, program, false)
+    }
+
+    /// [`Self::command`], with stdin a pipe when `input` (a value the
+    /// caller writes, see [`Self::run_raw_with_input`]), else empty.
+    fn command_io(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        program: &Path,
+        input: bool,
+    ) -> Command {
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(program);
         cmd.args(args);
@@ -338,7 +351,7 @@ impl CliRunner {
         if let Some(dir) = &self.cwd {
             cmd.current_dir(dir);
         }
-        cmd.stdin(Stdio::null())
+        cmd.stdin(if input { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
@@ -346,13 +359,17 @@ impl CliRunner {
     }
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
+        self.spawn_io(args, path, false)
+    }
+
+    fn spawn_io(&self, args: &[&str], path: Option<&Path>, input: bool) -> Result<Child, RunError> {
         let program = self.current_program().ok_or(RunError::NotFound)?;
         // ETXTBSY: the executable was just written (a fresh upgrade, or a test
         // script whose write descriptor a concurrent fork still holds). Retry
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match crate::process::spawn(&mut self.command(args, path, &program)) {
+            match crate::process::spawn(&mut self.command_io(args, path, &program, input)) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;
@@ -377,6 +394,23 @@ impl CliRunner {
         timeout: Duration,
     ) -> Result<(String, String, Option<i32>), RunError> {
         self.run_inner(args, path, Some(timeout))
+    }
+
+    /// [`Self::run_raw`] with `input` written to the command's stdin, which
+    /// is then closed. For a value the CLI reads with `--value-stdin`: it
+    /// never appears in argv or the environment. Nothing here keeps or
+    /// prints `input`.
+    ///
+    /// # Errors
+    /// `NotFound`, `Spawn` or `Timeout`.
+    pub fn run_raw_with_input(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        timeout: Duration,
+        input: &[u8],
+    ) -> Result<(String, String, Option<i32>), RunError> {
+        self.run_io(args, path, Some(timeout), Some(input))
     }
 
     /// Run with no deadline from the app: wait until the command exits and
@@ -405,6 +439,16 @@ impl CliRunner {
         path: Option<&Path>,
         timeout: Option<Duration>,
     ) -> Result<(String, String, Option<i32>), RunError> {
+        self.run_io(args, path, timeout, None)
+    }
+
+    fn run_io(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        timeout: Option<Duration>,
+        input: Option<&[u8]>,
+    ) -> Result<(String, String, Option<i32>), RunError> {
         // The timeout counts from before the spawn: starting the program can
         // itself take time (an ETXTBSY retry, or macOS checking a new
         // executable on first launch). A caller that budgets `timeout` plus
@@ -416,7 +460,20 @@ impl CliRunner {
         let term_grace = self.term_grace;
         let grace_left =
             move |d: Instant| (d + term_grace).saturating_duration_since(Instant::now());
-        let mut child = self.spawn(args, path)?;
+        let mut child = self.spawn_io(args, path, input.is_some())?;
+        // Written on its own thread so a child that does not read cannot
+        // block this one; closing the pipe ends the input. A child that
+        // exits early makes the write fail (EPIPE), which is not an error.
+        let writer = match (input, child.stdin.take()) {
+            (Some(bytes), Some(mut stdin)) => {
+                let bytes = bytes.to_vec();
+                Some(thread::spawn(move || {
+                    use std::io::Write as _;
+                    let _ = stdin.write_all(&bytes);
+                }))
+            }
+            _ => None,
+        };
         let out = read_all(child.stdout.take(), Keep::Head(MAX_STDOUT));
         let err = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
         let status = loop {
@@ -459,6 +516,11 @@ impl CliRunner {
                 error: format!("output larger than {MAX_STDOUT} bytes"),
                 stdout_head: head(&stdout.text),
             });
+        }
+        // The child has exited, so its end of the pipe is closed and the
+        // write has finished or failed.
+        if let Some(w) = writer {
+            let _ = w.join();
         }
         Ok((stdout.text, stderr.text, status.code()))
     }
@@ -1236,6 +1298,31 @@ mod tests {
         let f = FakeHack::new(r#"echo '{"checks":[{"id":"x","status":"error"}]}'; exit 1"#);
         let r: crate::models::DoctorReport = f.runner().run_json(&["doctor"], None, T).unwrap();
         assert_eq!(r.attention_count(), 1);
+    }
+
+    #[test]
+    fn input_goes_to_stdin_never_argv_or_env() {
+        let f = FakeHack::new(
+            r#"printf '{"args":"%s","stdin":"%s","env":"%s"}' "$*" "$(cat)" "$(env | grep -c SENTINEL_VALUE)""#,
+        );
+        let (out, _, code) = f
+            .runner()
+            .run_raw_with_input(
+                &["env", "add", "K", "--value-stdin"],
+                None,
+                T,
+                b"SENTINEL_VALUE",
+            )
+            .unwrap();
+        assert_eq!(code, Some(0));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stdin"], "SENTINEL_VALUE");
+        assert_eq!(v["args"], "env add K --value-stdin");
+        assert_eq!(v["env"], "0");
+        // Without input, stdin is empty.
+        let (out, _, _) = f.runner().run_raw(&["x"], None, T).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stdin"], "");
     }
 
     #[test]

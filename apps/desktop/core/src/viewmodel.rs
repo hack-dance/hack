@@ -319,6 +319,21 @@ impl AppModel {
         state::derive(row, local)
     }
 
+    /// The source now runs another Hack CLI, with its own hackd, registry and
+    /// homes. Nothing read from the previous one may be shown or acted on:
+    /// reads in flight are rejected (a new action epoch), and until the new
+    /// CLI's first snapshot the window is loading with no actions. The
+    /// selection is kept by name, so the same project is shown again if the
+    /// new CLI has it.
+    pub fn source_changed(&mut self) {
+        self.action_epoch += 1;
+        self.snapshot = None;
+        self.last_error = None;
+        self.local.clear();
+        self.action_errors.clear();
+        self.loaded_once = false;
+    }
+
     /// Apply an ordered live read; returns whether it was accepted.
     pub fn finish_refresh(
         &mut self,
@@ -755,6 +770,31 @@ mod tests {
     use super::*;
     use crate::fixtures::{self, Fixture};
     use crate::models::LifecycleResult;
+
+    #[test]
+    fn a_cli_switch_drops_the_old_snapshot_and_rejects_reads_already_in_flight() {
+        let mut m = model(Fixture::Running);
+        m.apply(Event::Select("storefront".into()));
+        assert!(m.detail().is_some_and(|d| !d.actions.is_empty()));
+        let in_flight = m.begin_refresh();
+        m.source_changed();
+        assert!(
+            m.detail().is_none(),
+            "nothing from the previous CLI is shown or actionable"
+        );
+        assert!(
+            !m.finish_refresh(in_flight, Ok(fixtures::snapshot(Fixture::Running).unwrap())),
+            "a read started before the switch is rejected"
+        );
+        assert!(m.detail().is_none());
+        let fresh = m.begin_refresh();
+        assert!(m.finish_refresh(fresh, Ok(fixtures::snapshot(Fixture::Running).unwrap())));
+        assert_eq!(
+            m.detail().map(|d| d.name),
+            Some("storefront".into()),
+            "the selection comes back when the new CLI has the project"
+        );
+    }
 
     #[test]
     fn unavailable_daemon_invalidates_rows_and_offers_exact_recovery() {

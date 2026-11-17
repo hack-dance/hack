@@ -312,6 +312,20 @@ impl HackApp {
         ))
     }
 
+    /// End every tab in every panel and drop the panels: they ran the
+    /// previous Hack CLI. Each instance's panel starts again when shown.
+    pub(crate) fn close_all_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for panel in self.panels.by_key.values() {
+            panel.sessions.update(cx, |s, cx| {
+                for i in (0..s.tab_count()).rev() {
+                    s.close(i, window, cx);
+                }
+            });
+        }
+        self.panels.by_key.clear();
+        self.panels.error = None;
+    }
+
     /// Create the selected instance's panel (with its Logs tab) the first
     /// time it is shown.
     pub(crate) fn ensure_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {

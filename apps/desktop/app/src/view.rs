@@ -685,7 +685,7 @@ impl HackApp {
                 .text_color(p.accent)
                 .hover(|d| d.underline())
                 .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| this.use_cli(&o.path, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.use_cli(&o.path, window, cx)))
         }))
     }
 
@@ -706,10 +706,34 @@ impl HackApp {
 
     /// Run another Hack CLI from now on (saved for next launch), and read
     /// its hackd.
-    pub(crate) fn use_cli(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Err(why) = self.source.use_cli(path) {
+    ///
+    /// The switch is an ownership boundary: the other CLI has its own
+    /// hackd, registry and homes. Everything read from or started through
+    /// the previous one is dropped (the snapshot, reads in flight, Env,
+    /// Doctor, the Logs stream and the terminal tabs) before the new CLI's
+    /// first read.
+    pub(crate) fn use_cli(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.source.cli_choice().and_then(|c| c.selected);
+        let result = self.source.use_cli(path);
+        let after = self.source.cli_choice().and_then(|c| c.selected);
+        if let Err(why) = result {
+            // Saving the choice can fail after the switch itself applied.
             self.recovery_error = Some(why);
         }
+        if before != after {
+            self.model.source_changed();
+            self.logs.close();
+            self.env.begin();
+            self.doctor = DoctorPane::default();
+            #[cfg(feature = "terminal")]
+            self.close_all_terminals(window, cx);
+        }
+        let _ = window;
         self.refresh_now_async(cx);
         cx.notify();
     }

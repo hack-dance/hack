@@ -406,7 +406,7 @@ async fn run_step(handle: &Win, step: &Step, cx: &mut AsyncApp) -> Result<String
                         .and_then(|c| c.others().find(|i| i.name == *name).map(|i| i.path.clone()))
                 })?
                 .ok_or_else(|| format!("no other Hack CLI named {name} was found"))?;
-            handle.update(cx, |app, _, cx| app.use_cli(&path, cx))?;
+            handle.update(cx, |app, window, cx| app.use_cli(&path, window, cx))?;
             Ok(String::new())
         }
         Step::ExpectCli { text, within } => {

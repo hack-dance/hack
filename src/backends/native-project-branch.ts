@@ -1,5 +1,9 @@
 import { resolve } from "node:path";
-import { rewriteCaddyLabelForBranch } from "../lib/branch-hosts.ts";
+import {
+  BranchCaddyHostsError,
+  branchServiceCaddyLabels,
+  isCaddySiteLabel,
+} from "../lib/branch-hosts.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -63,6 +67,38 @@ function labels(value: unknown): Record<string, unknown> | undefined {
   return result;
 }
 
+/** One service's branch labels; non-string site labels and empty results refuse. */
+function branchServiceLabels(opts: {
+  readonly service: string;
+  readonly labels: Record<string, unknown>;
+  readonly branch: string;
+  readonly baseHosts: readonly string[];
+  readonly onDropped: ((notice: string) => void) | undefined;
+}): Record<string, unknown> | undefined {
+  const sites: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(opts.labels)) {
+    if (!isCaddySiteLabel(key)) {
+      sites[key] = value;
+      continue;
+    }
+    if (typeof value !== "string") {
+      throw refused();
+    }
+    sites[key] = value.split(HOST_SEPARATOR).filter(Boolean).join(", ");
+  }
+  try {
+    return branchServiceCaddyLabels({ ...opts, labels: sites });
+  } catch (error) {
+    if (error instanceof BranchCaddyHostsError) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message: error.message,
+      });
+    }
+    throw error;
+  }
+}
+
 /**
  * Rewrite only public route labels after native adaptation has added its aliases.
  * The original Compose digest and private values stay unchanged. Every caller
@@ -72,6 +108,8 @@ export async function prepareNativeProjectBranch(opts: {
   readonly input: NativeProjectInput;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
+  /** Told about sites a branch instance drops (outside the project's namespaces). */
+  readonly onDropped?: (notice: string) => void;
 }): Promise<NativeProjectInput> {
   const branch = opts.scope.branch;
   nativeProjectBranchArgs(branch);
@@ -107,24 +145,22 @@ export async function prepareNativeProjectBranch(opts: {
     throw refused();
   }
   let changed = false;
-  for (const service of Object.values(compose.services)) {
+  for (const [name, service] of Object.entries(compose.services)) {
     if (!isRecord(service)) {
       throw refused();
     }
     const selected = labels(service.labels);
-    if (!selected || selected.caddy === undefined) {
-      continue;
-    }
-    if (typeof selected.caddy !== "string") {
-      throw refused();
-    }
-    const rewritten = rewriteCaddyLabelForBranch({
-      value: selected.caddy.split(HOST_SEPARATOR).filter(Boolean).join(", "),
-      branch,
-      baseHosts,
-    });
-    if (rewritten.changed) {
-      service.labels = { ...selected, caddy: rewritten.value };
+    const next = selected
+      ? branchServiceLabels({
+          service: name,
+          labels: selected,
+          branch,
+          baseHosts,
+          onDropped: opts.onDropped,
+        })
+      : undefined;
+    if (next) {
+      service.labels = next;
       changed = true;
     }
   }

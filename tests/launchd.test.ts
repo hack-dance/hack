@@ -21,6 +21,12 @@ describe("launchd plist generation", () => {
     expect(plist).toContain("<string>daemon</string>");
     expect(plist).toContain("<string>start</string>");
     expect(plist).toContain("<string>--foreground</string>");
+    expect(plist).toContain(
+      "<key>HACK_DAEMON_LOGIN_SERVICE</key>\n    <string>1</string>"
+    );
+    expect(plist).toContain(
+      "<key>HACK_NO_INTERACTIVE</key>\n    <string>1</string>"
+    );
     expect(plist).toContain("<key>RunAtLoad</key>");
     expect(plist).toContain("<false/>");
     expect(plist).toContain("<key>WorkingDirectory</key>");
@@ -89,6 +95,7 @@ describe("launchd plist generation", () => {
     expect(plist).toContain("/bin");
     expect(plist).toContain(".bun/bin");
     expect(plist).toContain(".hack/bin");
+    expect(plist).not.toContain("/Users/testuser/.docker/bin");
   });
 
   test("plist is valid XML structure", () => {

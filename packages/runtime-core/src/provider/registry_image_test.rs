@@ -213,6 +213,9 @@ impl Registry {
                 };
                 thread_log.lock().unwrap().push(request.clone());
                 let reply = handler(&request, port);
+                if reply.status == 0 {
+                    continue;
+                }
                 let mut head = format!(
                     "HTTP/1.1 {} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n",
                     reply.status,
@@ -1967,4 +1970,144 @@ fn build_bases_accept_only_docker_hub_references() {
         let error = resolve_build_base(&named(value), Instant::now()).unwrap_err();
         assert_eq!(error.code, "registry_image", "{value}");
     }
+}
+
+#[test]
+fn retry_token_and_manifest_stalled_headers_within_deadline() {
+    retry_registry_preheader_failure(false);
+}
+
+#[test]
+fn retry_token_and_manifest_closed_connection_within_deadline() {
+    retry_registry_preheader_failure(true);
+}
+
+fn retry_registry_preheader_failure(close: bool) {
+    for token in [true, false] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let fixture = Registry::serve(Box::new(move |_, _| {
+            if counted.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                if close {
+                    return Reply::new(0, "");
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            Reply::new(
+                200,
+                if token {
+                    r#"{"token":"fixture"}"#
+                } else {
+                    "manifest"
+                },
+            )
+        }));
+        let docker = empty_docker();
+        let policy = fixture.policy(&docker);
+        let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
+        let registry = super::registry(&named, &policy).unwrap();
+        let mut fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
+        fetch.request_timeout = Duration::from_millis(100);
+        fetch.deadline = Instant::now() + Duration::from_secs(3);
+        let start = Instant::now();
+        if token {
+            assert_eq!(
+                fetch
+                    .token(&registry.origin.join("/token").unwrap(), None, None)
+                    .unwrap()
+                    .as_str(),
+                "fixture"
+            );
+        } else {
+            assert_eq!(fetch.manifest("latest").unwrap(), b"manifest");
+        }
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+}
+
+#[test]
+fn retry_registry_permanent_failure_names_host_and_attempts() {
+    let fixture = Registry::serve(Box::new(|_, _| Reply::new(200, "unused")));
+    let docker = empty_docker();
+    let policy = fixture.policy(&docker);
+    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
+    let registry = super::registry(&named, &policy).unwrap();
+    let fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
+    drop(fixture);
+    let start = Instant::now();
+    let failure = fetch
+        .token(&registry.origin.join("/token").unwrap(), None, None)
+        .unwrap_err();
+    assert!(failure.message.contains("127.0.0.1"));
+    assert!(failure.message.contains("3 attempt(s)"));
+    assert!(start.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn retry_does_not_replay_http_refusals_or_invalid_token_bodies() {
+    for (status, body) in [
+        (403, "refused"),
+        (429, "slow down"),
+        (500, "failed"),
+        (200, "invalid json"),
+    ] {
+        let fixture = Registry::serve(Box::new(move |_, _| Reply::new(status, body)));
+        let docker = empty_docker();
+        let policy = fixture.policy(&docker);
+        let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
+        let registry = super::registry(&named, &policy).unwrap();
+        let fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
+        assert!(
+            fetch
+                .token(&registry.origin.join("/token").unwrap(), None, None)
+                .is_err()
+        );
+        assert_eq!(fixture.requests().len(), 1);
+    }
+}
+
+#[test]
+fn retry_does_not_replay_oauth_refresh_posts() {
+    let fixture = Registry::serve(Box::new(|_, _| Reply::new(200, "unused")));
+    let docker = empty_docker();
+    let policy = fixture.policy(&docker);
+    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
+    let registry = super::registry(&named, &policy).unwrap();
+    let fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
+    drop(fixture);
+    let credential = Credential::IdentityToken(Zeroizing::new("fixture-refresh".into()));
+    let failure = fetch
+        .token(
+            &registry.origin.join("/token").unwrap(),
+            None,
+            Some(&credential),
+        )
+        .unwrap_err();
+    assert!(failure.message.contains("1 attempt(s)"));
+    let json = serde_json::to_value(failure).unwrap();
+    assert_eq!(json["network_request"]["attempts"], 1);
+    assert!(!json.to_string().contains("fixture-refresh"));
+}
+
+#[test]
+fn retry_expired_registry_deadline_still_names_host_and_attempt_count() {
+    let fixture = Registry::serve(Box::new(|_, _| Reply::new(200, "unused")));
+    let docker = empty_docker();
+    let policy = fixture.policy(&docker);
+    let named = named(&format!("{}/{REPOSITORY}:latest", fixture.domain())).unwrap();
+    let registry = super::registry(&named, &policy).unwrap();
+    let mut fetch = Fetch::new(&registry, REPOSITORY, &policy).unwrap();
+    fetch.deadline = Instant::now();
+    for failure in [
+        fetch
+            .token(&registry.origin.join("/token").unwrap(), None, None)
+            .unwrap_err(),
+        fetch.manifest("latest").unwrap_err(),
+    ] {
+        let json = serde_json::to_value(failure).unwrap();
+        assert_eq!(json["network_request"]["host"], "127.0.0.1");
+        assert_eq!(json["network_request"]["attempts"], 0);
+    }
+    assert!(fixture.requests().is_empty());
 }

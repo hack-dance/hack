@@ -4,6 +4,7 @@ import { legacyComposeAdoptionContainerInspectFormat } from "../src/lib/native-c
 import {
   adoptionDependencyHealthcheck,
   adoptionDependencyReadAllowed,
+  adoptionFixtureCommandFailure,
   assertAdoptionDependencyControl,
   assertAdoptionDependencyHealthcheck,
   assertAdoptionDependencyStart,
@@ -33,6 +34,34 @@ const options = {
 };
 const refusal =
   "Adoption dependency fixture ordering check failed; values omitted.";
+
+test("fixture failure diagnostics keep only closed stages, exit status and known error codes", () => {
+  const message = adoptionFixtureCommandFailure({
+    stage: "dependency-preview",
+    exitCode: 1,
+    timedOut: false,
+    stdout: JSON.stringify({
+      error: {
+        code: "E_CONFIG_INVALID",
+        message: "private-sentinel",
+        detail: { path: "private-sentinel" },
+      },
+    }),
+  });
+  expect(message).toContain(
+    "stage=dependency-preview exit=1 timedOut=false code=E_CONFIG_INVALID"
+  );
+  expect(message).not.toContain("private-sentinel");
+  const unknown = adoptionFixtureCommandFailure({
+    stage: "private-sentinel",
+    exitCode: Number.NaN,
+    timedOut: false,
+    stdout: JSON.stringify({ error: { code: "private-sentinel" } }),
+  });
+  expect(unknown).toContain("stage=unspecified exit=-1");
+  expect(unknown).toContain("code=unavailable");
+  expect(unknown).not.toContain("private-sentinel");
+});
 
 test("missing fixture controls retain fixed stage and exit diagnostics instead of ENOENT or private CLI output", () => {
   expect(() =>

@@ -1,0 +1,11 @@
+flowchart TB
+  input["Built binary + paths"] --> paths{"Contained new home?"}
+  paths -->|No| refuse["Exit 2: refuse"]
+  paths -->|Yes| version["Print isolated version"]
+  version --> projects{"Shared projects exist?"}
+  projects -->|Yes| blocked["Exit 3: blocked"]
+  projects -->|No| network{"Ingress network exists?"}
+  network -->|Yes| blocked
+  network -->|No| limited["Exit 4: incomplete"]
+  blocked --> stop["Stop before installation"]
+  limited --> stop

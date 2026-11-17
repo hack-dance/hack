@@ -34,6 +34,7 @@ v5 prerelease bundles are Apple Silicon macOS only; see
 
 ## Do a task
 
+- [Start projects at login](https://github.com/hack-dance/hack/blob/next/docs/always-on-projects.md)
 - [Set up a Linux host](../guides/linux-setup.md): local DNS, trust and the daemon.
 - [Configure Linux certificate trust](../guides/linux-certificate-trust.md): distribution and browser trust stores.
 - [Upgrade a v4 machine to v5](guides/upgrade-from-v4.md): preparation, rollback and checks awaiting the dogfood run.

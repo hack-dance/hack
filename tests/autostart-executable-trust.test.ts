@@ -1,0 +1,303 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  assertAutostartExecutablePathTrusted,
+  assertAutostartInvocationTrusted,
+} from "../src/lib/autostart-executable-trust.ts";
+import {
+  DARWIN_ADMIN_GID,
+  isDarwinAdminDirectory,
+} from "../src/lib/path-trust.ts";
+
+let root = "";
+let bin = "";
+let program = "";
+beforeEach(async () => {
+  root = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-executable-trust-"))
+  );
+  bin = join(root, "bin");
+  program = join(bin, "docker");
+  await mkdir(bin, { mode: 0o700 });
+  await writeFile(program, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+});
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+test("safe owned lookup directories and programs are accepted without execution", async () => {
+  await expect(
+    assertAutostartExecutablePathTrusted({ path: bin })
+  ).resolves.toBeUndefined();
+  expect(await readFile(program, "utf8")).toBe("#!/bin/sh\nexit 0\n");
+});
+
+test("a group-writable optional tool directory refuses only automatic execution", async () => {
+  const homebrew = join(root, "homebrew");
+  await mkdir(homebrew, { mode: 0o775 });
+  await chmod(homebrew, 0o775);
+  await writeFile(join(homebrew, "docker"), "#!/bin/sh\nexit 99\n", {
+    mode: 0o755,
+  });
+  await expect(
+    assertAutostartExecutablePathTrusted({ path: `${homebrew}:${bin}` })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  expect((await Bun.file(homebrew).stat()).mode & 0o777).toBe(0o775);
+});
+
+test("writable lookup directories and ancestor paths refuse without permission repair", async () => {
+  await chmod(bin, 0o777);
+  await expect(
+    assertAutostartExecutablePathTrusted({ path: bin })
+  ).rejects.toMatchObject({
+    code: "E_PERMISSION",
+    detail: { reason: "executable_path_untrusted" },
+  });
+  expect((await Bun.file(program).stat()).mode & 0o777).toBe(0o700);
+  await chmod(bin, 0o700);
+  await chmod(root, 0o777);
+  await expect(
+    assertAutostartExecutablePathTrusted({ path: bin })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await chmod(root, 0o700);
+});
+
+test("writable helper entries and symlink targets refuse even with private lookup directories", async () => {
+  await chmod(program, 0o777);
+  await expect(
+    assertAutostartExecutablePathTrusted({ path: bin })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await rm(program);
+  const target = join(root, "target");
+  await writeFile(target, "#!/bin/sh\nexit 0\n", { mode: 0o777 });
+  await chmod(target, 0o777);
+  await symlink(target, program);
+  await expect(
+    assertAutostartExecutablePathTrusted({ path: bin })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await chmod(target, 0o700);
+  await expect(
+    assertAutostartExecutablePathTrusted({ path: bin })
+  ).resolves.toBeUndefined();
+});
+
+test("empty or relative lookup entries refuse with fixed value-free errors", async () => {
+  for (const path of ["", `${bin}:`, "private-sentinel/relative"]) {
+    let error: unknown;
+    try {
+      await assertAutostartExecutablePathTrusted({ path });
+    } catch (failure) {
+      error = failure;
+    }
+    expect(error).toMatchObject({
+      code: "E_PERMISSION",
+      detail: { reason: "executable_path_untrusted" },
+    });
+    expect(String(error)).not.toContain(root);
+    expect(String(error)).not.toContain("private-sentinel");
+  }
+});
+
+test("Darwin ACL inspection includes lookup ancestors, programs and symlink target chains", async () => {
+  const targetDir = join(root, "targets");
+  await mkdir(targetDir, { mode: 0o700 });
+  const target = join(targetDir, "helper");
+  await writeFile(target, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await symlink(target, join(bin, "helper"));
+  const inspected = new Set<string>();
+  await assertAutostartExecutablePathTrusted(
+    { path: `${bin}:${join(root, "missing", "bin")}` },
+    {
+      platform: "darwin",
+      inspect: async (paths, timeoutMs) => {
+        expect(timeoutMs).toBeGreaterThan(0);
+        expect(timeoutMs).toBeLessThanOrEqual(3000);
+        for (const path of paths) {
+          inspected.add(path);
+        }
+        return {
+          exitCode: 0,
+          stdout:
+            " 0: group:everyone deny delete\n 1: user:reader allow read,execute\n",
+        };
+      },
+    }
+  );
+  for (const path of [
+    "/",
+    root,
+    bin,
+    program,
+    join(bin, "helper"),
+    targetDir,
+    target,
+  ]) {
+    expect(inspected.has(path)).toBe(true);
+  }
+  expect(inspected.has(join(root, "missing"))).toBe(false);
+});
+
+for (const stdout of [
+  " 0: user:other allow write\n",
+  " 0: group:other allow add_file,add_subdirectory\n",
+  " 0: user:other allow unknown_right\n",
+  " 0: malformed ACL\n",
+]) {
+  test(`Darwin mutation or unknown ACL refuses without exposing output: ${stdout.trim()}`, async () => {
+    await expect(
+      assertAutostartExecutablePathTrusted(
+        { path: bin },
+        { platform: "darwin", inspect: async () => ({ exitCode: 0, stdout }) }
+      )
+    ).rejects.toMatchObject({
+      code: "E_PERMISSION",
+      detail: { reason: "executable_path_untrusted" },
+    });
+    expect((await Bun.file(program).stat()).mode & 0o777).toBe(0o700);
+  });
+}
+
+test("Darwin ACL inventories retain an ancestor symlink and its physical executable chain", async () => {
+  const physical = join(root, "physical");
+  const physicalBin = join(physical, "bin");
+  const alias = join(root, "alias");
+  await mkdir(physicalBin, { recursive: true, mode: 0o700 });
+  const helper = join(physicalBin, "docker");
+  await writeFile(helper, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await symlink(physical, alias);
+  const inspected = new Set<string>();
+  await assertAutostartExecutablePathTrusted(
+    { path: join(alias, "bin") },
+    {
+      platform: "darwin",
+      inspect: async (paths) => {
+        for (const path of paths) {
+          inspected.add(path);
+        }
+        return { exitCode: 0, stdout: "" };
+      },
+    }
+  );
+  for (const path of [root, alias, physical, physicalBin, helper]) {
+    expect(inspected.has(path)).toBe(true);
+  }
+});
+
+test("Darwin ACL probe failures refuse with closed diagnostics", async () => {
+  for (const exitCode of [1, 124, 125]) {
+    await expect(
+      assertAutostartExecutablePathTrusted(
+        { path: bin },
+        {
+          platform: "darwin",
+          inspect: async () => ({ exitCode, stdout: "private-sentinel" }),
+        }
+      )
+    ).rejects.toThrow(
+      "Automatic startup refused an unsafe executable search path."
+    );
+  }
+});
+
+test("macOS admin directories such as /Applications are accepted only on darwin, never world-writable", () => {
+  const dir = (fields: { uid: number; gid: number; mode: number }) => ({
+    ...fields,
+    isDirectory: () => true,
+  });
+  // /Applications: root:admin drwxrwxr-x.
+  const applications = dir({ uid: 0, gid: DARWIN_ADMIN_GID, mode: 0o4_0775 });
+  expect(isDarwinAdminDirectory(applications, "darwin")).toBe(true);
+  expect(isDarwinAdminDirectory(applications, "linux")).toBe(false);
+  // /var/run is root:daemon 0775: the daemon account can replace its
+  // entries, so it is never an administrator directory.
+  expect(
+    isDarwinAdminDirectory(dir({ uid: 0, gid: 1, mode: 0o4_0775 }), "darwin")
+  ).toBe(false);
+  expect(
+    isDarwinAdminDirectory(
+      dir({ uid: 0, gid: DARWIN_ADMIN_GID, mode: 0o4_0777 }),
+      "darwin"
+    )
+  ).toBe(false);
+  expect(
+    isDarwinAdminDirectory(dir({ uid: 0, gid: 20, mode: 0o4_0775 }), "darwin")
+  ).toBe(false);
+  expect(
+    isDarwinAdminDirectory(
+      dir({ uid: 501, gid: DARWIN_ADMIN_GID, mode: 0o4_0775 }),
+      "darwin"
+    )
+  ).toBe(false);
+  expect(
+    isDarwinAdminDirectory(
+      {
+        uid: 0,
+        gid: DARWIN_ADMIN_GID,
+        mode: 0o10_0775,
+        isDirectory: () => false,
+      },
+      "darwin"
+    )
+  ).toBe(false);
+});
+
+test("the directly executed Hack binary is audited, and a source checkout needs a manual start", async () => {
+  const hack = join(bin, "hack");
+  await writeFile(hack, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await expect(
+    assertAutostartInvocationTrusted({ executable: hack, compiled: true })
+  ).resolves.toBeUndefined();
+  // `bun index.ts` loads a whole source tree this audit cannot bound.
+  await expect(
+    assertAutostartInvocationTrusted({ executable: hack, compiled: false })
+  ).rejects.toMatchObject({
+    code: "E_PERMISSION",
+    detail: { reason: "executable_path_untrusted" },
+  });
+  // Others can rewrite the file, or replace it through its directory.
+  await chmod(hack, 0o777);
+  await expect(
+    assertAutostartInvocationTrusted({ executable: hack, compiled: true })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await chmod(hack, 0o755);
+  await chmod(bin, 0o777);
+  await expect(
+    assertAutostartInvocationTrusted({ executable: hack, compiled: true })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await chmod(bin, 0o700);
+  // A link is followed hop by hop; its target must be trusted too.
+  const shared = join(root, "shared");
+  await mkdir(shared, { mode: 0o700 });
+  await chmod(shared, 0o777);
+  const target = join(shared, "hack");
+  await writeFile(target, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const link = join(bin, "hack-link");
+  await symlink(target, link);
+  await expect(
+    assertAutostartInvocationTrusted({ executable: link, compiled: true })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  await expect(
+    assertAutostartInvocationTrusted({
+      executable: join(bin, "missing"),
+      compiled: true,
+    })
+  ).rejects.toMatchObject({ code: "E_PERMISSION" });
+  // A message never carries the path.
+  await assertAutostartInvocationTrusted({
+    executable: link,
+    compiled: true,
+  }).catch((error: unknown) => {
+    expect(String(error)).not.toContain(root);
+  });
+});

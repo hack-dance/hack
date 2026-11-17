@@ -26,6 +26,7 @@ import type {
 } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { childEnvironment } from "./child-environment.ts";
+import { HackCliError } from "./cli-result.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import { ensureDir } from "./fs.ts";
@@ -162,6 +163,17 @@ export async function resolveSecretStore(input: {
     ...(input.projectDir ? { projectDir: input.projectDir } : {}),
   });
   const secretsConfig = controlPlane.config.secrets;
+  if (
+    process.env.HACK_AUTOSTART_LOGIN === "1" &&
+    secretsConfig.backend === "cloud"
+  ) {
+    throw new HackCliError({
+      code: "E_PERMISSION",
+      message:
+        "Automatic startup does not run external secret providers; start this project manually.",
+      detail: { reason: "command_provider_requires_manual_start" },
+    });
+  }
   if (secretsConfig.backend === "encrypted_file") {
     return await createEncryptedFileSecretStore({
       projectName: input.projectName,

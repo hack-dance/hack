@@ -1,5 +1,6 @@
 //! Bounded HTTPS transfers with explicit redirect admission and digest-only cache trust.
 use super::{FilePin, FileResult, Outcome};
+use crate::provider::network_retry::{ATTEMPTS, HEADER_TIMEOUT, backoff, transient};
 use crate::{CandidateError, provider::state};
 use reqwest::{Response, Url, header};
 use sha2::{Digest, Sha256};
@@ -18,6 +19,7 @@ pub(super) struct Client {
     http: reqwest::Client,
     runtime: tokio::runtime::Runtime,
     file_timeout: Duration,
+    header_timeout: Duration,
 }
 
 fn build_client(
@@ -46,7 +48,14 @@ fn build_client(
         http,
         runtime,
         file_timeout,
+        header_timeout: HEADER_TIMEOUT,
     })
+}
+
+#[cfg(test)]
+pub(super) fn with_header_timeout(mut client: Client, timeout: Duration) -> Client {
+    client.header_timeout = timeout;
+    client
 }
 
 #[cfg(test)]
@@ -238,10 +247,47 @@ async fn response(
         if offset > 0 {
             request = request.header(header::RANGE, format!("bytes={offset}-"));
         }
-        let response = tokio::time::timeout_at(deadline, request.send())
-            .await
-            .map_err(|_| deadline_error(pin))?
-            .map_err(|e| error(pin, "setup_download", e.without_url()))?;
+        let mut attempt = 0;
+        let response = loop {
+            attempt += 1;
+            let end = deadline.min(tokio::time::Instant::now() + client.header_timeout);
+            let result = tokio::time::timeout_at(
+                end,
+                request
+                    .try_clone()
+                    .ok_or_else(|| error(pin, "setup_download", "request cannot be replayed"))?
+                    .send(),
+            )
+            .await;
+            let (retry, reason) = match result {
+                Ok(Ok(response)) => break response,
+                Ok(Err(failure)) => (
+                    transient(&failure),
+                    "connection failed or timed out before response headers",
+                ),
+                Err(_) => (true, "response-header deadline exceeded"),
+            };
+            if !retry
+                || attempt == ATTEMPTS
+                || tokio::time::Instant::now() + backoff(attempt) >= deadline
+            {
+                let code = if tokio::time::Instant::now() >= deadline {
+                    "setup_download_deadline"
+                } else {
+                    "setup_download"
+                };
+                return Err(error(
+                    pin,
+                    code,
+                    format!(
+                        "host {} after {attempt} attempt(s): {reason}",
+                        url.host_str().unwrap_or("unknown")
+                    ),
+                )
+                .with_network_request(url.host_str().unwrap_or("unknown"), attempt));
+            }
+            tokio::time::sleep(backoff(attempt)).await;
+        };
         if matches!(
             response.status(),
             reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
@@ -296,7 +342,8 @@ fn range_length(response: &Response, offset: u64, pin: &FilePin) -> Result<u64, 
     Ok(total - start)
 }
 
-/// One request attempt (at most five admitted redirects), never an unbounded retry.
+/// Up to three header attempts per admitted hop (at most five redirects).
+/// No automatic replay after consuming body bytes or a verification failure.
 /// A valid partial prefix is only a resume hint; the complete bytes are always rehashed.
 pub(super) fn acquire(
     client: &Client,

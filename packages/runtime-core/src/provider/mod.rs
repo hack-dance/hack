@@ -53,6 +53,7 @@ pub mod managed_environment;
 mod native_environment;
 #[cfg(feature = "native-config-plan")]
 pub mod native_input;
+mod network_retry;
 pub mod private_deadline;
 pub mod private_input;
 mod registry_credentials;

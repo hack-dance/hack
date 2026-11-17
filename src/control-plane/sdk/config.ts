@@ -77,11 +77,18 @@ const DaemonLaunchdConfigSchema = z.object({
 });
 
 const DaemonConfigInputSchema = z.object({
+  autostartEngineWaitMs: z.number().int().min(1).max(3_600_000).optional(),
   autoStart: z.boolean().optional(),
   launchd: DaemonLaunchdConfigInputSchema.optional(),
 });
 
 const DaemonConfigSchema = z.object({
+  autostartEngineWaitMs: z
+    .number()
+    .int()
+    .min(1)
+    .max(3_600_000)
+    .default(600_000),
   autoStart: z.boolean().default(true),
   launchd: DaemonLaunchdConfigSchema.default(
     DaemonLaunchdConfigSchema.parse({})
@@ -408,6 +415,8 @@ export function createDefaultControlPlaneConfig(): ControlPlaneConfig {
  */
 export async function readControlPlaneConfig(opts: {
   readonly projectDir?: string;
+  /** Explicit owned service path bypasses shell configuration overrides. */
+  readonly globalConfigPath?: string;
   /**
    * Throw when a configuration file exists but cannot be read, instead of
    * treating it as empty (HACK-2165): for callers that must tell an absent
@@ -416,7 +425,7 @@ export async function readControlPlaneConfig(opts: {
   readonly strict?: boolean;
 }): Promise<ControlPlaneConfigResult> {
   const globalLayer = await readControlPlaneLayer({
-    path: resolveGlobalConfigPath(),
+    path: opts.globalConfigPath ?? resolveGlobalConfigPath(),
     label: "Global config",
     strict: opts.strict === true,
   });

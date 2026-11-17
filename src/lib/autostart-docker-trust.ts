@@ -1,0 +1,298 @@
+import { createHash } from "node:crypto";
+import {
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
+import {
+  type AutostartAclDependencies,
+  assertAutostartPathAclsTrustedSync,
+} from "./autostart-path-acl.ts";
+import { HackCliError } from "./cli-result.ts";
+import { isRecord } from "./guards.ts";
+import { isDarwinAdminDirectory, walkReplaceableChain } from "./path-trust.ts";
+
+const LOGIN_DOCKER_TRANSPORT = /^unix:\/\//;
+
+/**
+ * Docker's engine when no context or `DOCKER_HOST` selects another. On macOS
+ * Docker Desktop and OrbStack install it as a root-owned link in `/var/run`,
+ * which is root:daemon 0775: the `daemon` account could replace that link
+ * after this check and before Docker reopens it, so automatic startup refuses
+ * it. Both engines' own contexts (`desktop-linux`, `orbstack`) name a socket
+ * in the user's home, which passes.
+ */
+export const DEFAULT_DOCKER_HOST = "unix:///var/run/docker.sock";
+
+/** Fixed system directories the Docker CLI searches for plugins such as Compose. */
+export const DOCKER_SYSTEM_PLUGIN_DIRECTORIES: readonly string[] = [
+  "/usr/local/lib/docker/cli-plugins",
+  "/usr/local/libexec/docker/cli-plugins",
+  "/usr/lib/docker/cli-plugins",
+  "/usr/libexec/docker/cli-plugins",
+];
+
+/** Machine inputs a test replaces so it never reads the host's (see below). */
+export type AutostartDockerTrustRoots = {
+  readonly defaultHost?: string;
+  readonly systemPluginDirectories?: readonly string[];
+  readonly acl?: AutostartAclDependencies;
+};
+
+let rootsForTests: AutostartDockerTrustRoots | null = null;
+
+/**
+ * Tests only. A CLI subprocess cannot receive the options below, so its test
+ * preload (`tests/helpers/autostart-docker-trust-preload.ts`) calls this.
+ * Production code never calls it and reads no environment variable for it.
+ */
+export function useAutostartDockerTrustRootsForTests(
+  roots: AutostartDockerTrustRoots | null
+): void {
+  rootsForTests = roots;
+}
+
+/** Authenticate Docker's engine-selection inputs without exposing credentials. */
+export function assertAutostartDockerConfigTrusted(opts: {
+  readonly home: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Tests only: replaces {@link DOCKER_SYSTEM_PLUGIN_DIRECTORIES}. */
+  readonly systemPluginDirectories?: readonly string[];
+  /** Tests only: replaces {@link DEFAULT_DOCKER_HOST}. */
+  readonly defaultHost?: string;
+  /** Tests only: replaces the Darwin ACL inspection. */
+  readonly acl?: AutostartAclDependencies;
+}): void {
+  const acl = opts.acl ?? rootsForTests?.acl;
+  try {
+    const uid = process.getuid?.();
+    if (uid === undefined) {
+      throw new Error("Unavailable owner");
+    }
+    const root = join(opts.home, ".docker");
+    const checked = new Set<string>();
+    const visited = new Set<string>();
+    let count = 0;
+    const visit = (path: string, depth: number): void => {
+      count += 1;
+      if (count > 4096 || depth > 16) {
+        throw new Error("Selection inputs exceed bound");
+      }
+      const trust = walkReplaceableChain({
+        path,
+        uid,
+        hackHome: null,
+        checked,
+        allowMissing: true,
+        acceptDarwinAdminDirectories: true,
+      });
+      if ("error" in trust) {
+        throw new Error("Unsafe selection input");
+      }
+      // Sticky directories protect existing names, not absent plugin/config names.
+      const existing = statSync(trust.existing);
+      if (
+        existing.isDirectory() &&
+        (existing.mode & 0o022) !== 0 &&
+        !isDarwinAdminDirectory(existing)
+      ) {
+        throw new Error("Selection directory permits new entries");
+      }
+      if (!trust.complete) {
+        return;
+      }
+      const info = statSync(path);
+      if (info.isFile()) {
+        return;
+      }
+      if (!info.isDirectory()) {
+        throw new Error("Unsupported selection input");
+      }
+      const physical = realpathSync(path);
+      if (visited.has(physical)) {
+        throw new Error("Cyclic selection input");
+      }
+      visited.add(physical);
+      for (const name of readdirSync(path)) {
+        visit(join(path, name), depth + 1);
+      }
+    };
+    // Docker loads context metadata/TLS below this directory. Other .docker
+    // caches do not select an engine and can be arbitrarily large.
+    visit(join(root, "config.json"), 0);
+    visit(join(root, "contexts"), 0);
+    visit(join(root, "cli-plugins"), 0);
+    for (const directory of opts.systemPluginDirectories ??
+      rootsForTests?.systemPluginDirectories ??
+      DOCKER_SYSTEM_PLUGIN_DIRECTORIES) {
+      visit(directory, 0);
+    }
+    const env = opts.env ?? process.env;
+    let currentContext = "default";
+    const configPath = join(root, "config.json");
+    assertAutostartPathAclsTrustedSync(checked, acl);
+    const configTrust = walkReplaceableChain({
+      path: configPath,
+      uid,
+      hackHome: null,
+      allowMissing: true,
+    });
+    if (!("error" in configTrust) && configTrust.complete) {
+      if (statSync(configPath).size > 1024 * 1024) {
+        throw new Error("Docker configuration exceeds bound");
+      }
+      // Credential fields stay inside this parser and never enter diagnostics.
+      const config: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+      if (!isRecord(config)) {
+        throw new Error("Invalid Docker configuration");
+      }
+      if (config.currentContext !== undefined) {
+        if (typeof config.currentContext !== "string") {
+          throw new Error("Invalid context selection");
+        }
+        currentContext = config.currentContext || "default";
+      }
+      if (config.cliPluginsExtraDirs !== undefined) {
+        // Custom plugin discovery is not part of the fixed login toolchain.
+        throw new Error("Custom plugin search path requires manual startup");
+      }
+    }
+    const context = env.DOCKER_CONTEXT?.trim() || currentContext;
+    const host = env.DOCKER_HOST?.trim();
+    if (context !== "default") {
+      const digest = createHash("sha256").update(context).digest("hex");
+      const metadataPath = join(root, "contexts/meta", digest, "meta.json");
+      if (statSync(metadataPath).size > 1024 * 1024) {
+        throw new Error("Context metadata exceeds bound");
+      }
+      const metadata: unknown = JSON.parse(readFileSync(metadataPath, "utf8"));
+      if (
+        !(
+          isRecord(metadata) &&
+          isRecord(metadata.Endpoints) &&
+          isRecord(metadata.Endpoints.docker)
+        )
+      ) {
+        throw new Error("Invalid Docker endpoint");
+      }
+      assertLoginDockerTransport(metadata.Endpoints.docker.Host, uid, acl);
+    }
+    // Docker uses this socket when no named context or direct host is selected.
+    if (context === "default") {
+      assertLoginDockerTransport(
+        host ||
+          (opts.defaultHost ??
+            rootsForTests?.defaultHost ??
+            DEFAULT_DOCKER_HOST),
+        uid,
+        acl
+      );
+    } else if (host) {
+      assertLoginDockerTransport(host, uid, acl);
+    }
+  } catch {
+    throw new HackCliError({
+      code: "E_PERMISSION",
+      message:
+        "Automatic startup refused unsafe Docker engine-selection files. Review Docker configuration ownership and permissions before retrying. Values omitted.",
+      detail: { reason: "docker_config_untrusted" },
+    });
+  }
+}
+
+/**
+ * The physical path of a unix socket. On macOS, Bun's `realpathSync` opens the
+ * path and a socket refuses that (EOPNOTSUPP), which refused every real engine
+ * socket. Resolve the way the kernel does instead: one component at a time with
+ * lstat and readlink, following each link where it is met and applying `..` to
+ * the physical directory reached so far (never collapsing it as text first). The
+ * socket itself is only lstat'd. A missing component throws ENOENT.
+ */
+export function resolveSocketPath(path: string): string {
+  const queue = (isAbsolute(path) ? path : `${process.cwd()}/${path}`).split(
+    "/"
+  );
+  let current = "/";
+  let hops = 0;
+  while (queue.length > 0) {
+    const component = queue.shift() as string;
+    if (component === "" || component === ".") {
+      continue;
+    }
+    if (component === "..") {
+      current = dirname(current);
+      continue;
+    }
+    const next = current === "/" ? `/${component}` : `${current}/${component}`;
+    if (!lstatSync(next).isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    hops += 1;
+    if (hops > 40) {
+      throw new Error("Too many socket links");
+    }
+    const target = readlinkSync(next);
+    if (isAbsolute(target)) {
+      current = "/";
+    }
+    queue.unshift(...target.split("/"));
+  }
+  return current;
+}
+
+/** Network transports need peer authentication beyond filesystem/context ownership. */
+function assertLoginDockerTransport(
+  host: unknown,
+  uid: number,
+  acl?: AutostartAclDependencies
+): void {
+  if (typeof host !== "string" || !LOGIN_DOCKER_TRANSPORT.test(host)) {
+    throw new Error("Docker transport requires manual startup");
+  }
+  const path = host.slice("unix://".length);
+  const checked = new Set<string>();
+  let physical: string | null = null;
+  try {
+    physical = resolveSocketPath(path);
+    const info = lstatSync(physical);
+    if (!info.isSocket() || (info.uid !== uid && info.uid !== 0)) {
+      throw new Error("Unsafe Docker socket");
+    }
+    // Socket write permissions grant connection, not replacement authority.
+    checked.add(physical);
+  } catch (error: unknown) {
+    if (!(isRecord(error) && error.code === "ENOENT")) {
+      throw error;
+    }
+  }
+  const trust = walkReplaceableChain({
+    path,
+    uid,
+    hackHome: null,
+    checked,
+    allowMissing: true,
+    acceptDarwinAdminDirectories: true,
+  });
+  if ("error" in trust) {
+    throw new Error("Unsafe socket path");
+  }
+  for (const entry of checked) {
+    if (entry === physical) {
+      continue;
+    }
+    const info = lstatSync(entry);
+    if (
+      info.isDirectory() &&
+      (info.mode & 0o022) !== 0 &&
+      !isDarwinAdminDirectory(info)
+    ) {
+      throw new Error("Replaceable socket parent");
+    }
+  }
+  assertAutostartPathAclsTrustedSync(checked, acl);
+}

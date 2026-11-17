@@ -973,9 +973,26 @@ home, acquiring a lease or hashing provider trees. Only the manager's
 The executable embeds `provider-pins.json` and checks its hashes against the
 manual preparation pins. HTTPS redirects may use only the original host and the
 pin's explicit `redirect_hosts`. The GitHub release pin allows
-`release-assets.githubusercontent.com`. Connections have a 15-second timeout;
-each network read has a 60-second timeout. An explicit 30-minute overall deadline
-per file spans all redirect headers and body reads; progress does not renew it.
+`release-assets.githubusercontent.com`. The 15-second setup bound is a connection
+timeout, not a whole-file timeout. Response headers also have a 15-second attempt
+bound; body reads retain their 60-second read timeout. Before headers arrive,
+connection failures and timeouts get at most three attempts per admitted redirect
+hop, with 250 ms then 500 ms backoff (at most 45.75 seconds per failing hop).
+An explicit 30-minute overall deadline per file spans retries, backoff, redirects
+and body reads; progress does not renew it. HTTP errors, body interruptions,
+length errors and checksum mismatches never trigger an automatic retry.
+The pre-header transport classification also includes TLS handshake and certificate
+errors. A deterministic certificate refusal can therefore consume all three bounded
+attempts; this never bypasses TLS validation or retries file checksum verification.
+
+Registry manifest GETs and token GETs use the same three-attempt/backoff policy
+before headers arrive. Their existing 60-second bound covers each whole request,
+including its body; the registry connection bound remains 10 seconds. Exhausting
+three header attempts takes at most 180.75 seconds per hop, also capped by the
+existing acquisition deadline. Registry blobs and OAuth refresh POSTs are not
+replayed. A 4xx/5xx response, malformed body or digest mismatch is not retried
+(the existing authentication challenge flow still applies). Final network errors
+identify the host and number of attempts without exposing URL paths or credentials.
 `size_bytes` pins the exact compressed length, shown in the prompt and checked on
 responses, streamed bytes and complete-file verification. `max_bytes` remains a
 separate sanity ceiling. Either a length or hash mismatch refuses publication.

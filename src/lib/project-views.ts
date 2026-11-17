@@ -9,11 +9,16 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseSessionBase } from "../mux/session-names.ts";
+import { serializeProjectAutostart } from "./autostart-view.ts";
 import {
   type ComposeServiceActivation,
   composeServiceActivation,
 } from "./compose-service-activation.ts";
 import { composeServiceReadiness } from "./compose-service-readiness.ts";
+
+// biome-ignore lint/performance/noBarrelFile: Preserve the existing project policy serializer import contract.
+export { serializeProjectAutostart } from "./autostart-view.ts";
+
 import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -100,6 +105,7 @@ export type ProjectView = {
   readonly serviceActivation?: ComposeServiceActivation;
   readonly serviceReadiness?: Readonly<Record<string, ServiceReadiness>>;
   readonly projectId?: string;
+  readonly autostart?: RegisteredProject["autostart"];
   readonly name: string;
   readonly devHost: string | null;
   readonly repoRoot: string | null;
@@ -357,6 +363,7 @@ async function buildRegisteredProjectView(opts: {
 
   return {
     projectId: opts.registration.id,
+    autostart: opts.registration.autostart,
     name: opts.name,
     devHost: opts.registration.devHost ?? null,
     repoRoot: opts.registration.repoRoot,
@@ -387,6 +394,7 @@ function buildUnavailableProjectView(opts: {
 }): ProjectView {
   return {
     projectId: opts.registration.id,
+    autostart: opts.registration.autostart,
     name: opts.name,
     devHost: opts.registration.devHost ?? null,
     repoRoot: opts.registration.repoRoot,
@@ -462,6 +470,7 @@ export function serializeProjectSummary(
         nativeSelected: false,
       })),
     project_id: view.projectId ?? null,
+    autostart: serializeProjectAutostart(view.autostart),
     name: view.name,
     repo_root: view.repoRoot,
     dev_host: view.devHost,
@@ -498,6 +507,7 @@ export function serializeProjectView(
         nativeSelected: false,
       })),
     project_id: view.projectId ?? null,
+    autostart: serializeProjectAutostart(view.autostart),
     name: view.name,
     dev_host: view.devHost ?? null,
     repo_root: view.repoRoot ?? null,

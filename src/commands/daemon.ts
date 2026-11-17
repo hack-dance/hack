@@ -28,6 +28,7 @@ import {
   resolveLaunchdAccess,
   uninstallLaunchdService,
 } from "../daemon/launchd.ts";
+import { isLoginServiceAutostart } from "../daemon/login-autostart.ts";
 import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessRefusal,
@@ -70,6 +71,7 @@ import { updateGlobalConfig } from "../lib/config.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { resolveUserHomeDir } from "../lib/home-dir.ts";
+import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import {
   buildDockerStatusProbe,
   detectDockerBackend,
@@ -436,6 +438,29 @@ function readServiceManagerState(opts: {
  * `start` once no hackd of this home runs (or it was just replaced). The
  * outcome says how far it got, for the replacement fallback.
  */
+/** A manual cache daemon start does not acquire authority to start projects. */
+export async function reportManualAutostartSkip(opts?: {
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly readRegistry?: typeof readProjectsRegistry;
+  readonly note?: (message: string) => void;
+}): Promise<void> {
+  if (isLoginServiceAutostart({ env: opts?.env ?? process.env })) {
+    return;
+  }
+  const registry = await (opts?.readRegistry ?? readProjectsRegistry)().catch(
+    () => null
+  );
+  if (registry?.projects.some((project) => project.autostart)) {
+    const message =
+      "This manual daemon launch did not run the login autostart pass. Run it intentionally with: hack autostart run --no-interactive";
+    if (opts?.note) {
+      opts.note(message);
+    } else {
+      logger.info({ message });
+    }
+  }
+}
+
 async function startStoppedDaemon(opts: {
   readonly paths: DaemonPaths;
   readonly foreground: boolean;
@@ -498,6 +523,7 @@ async function startStoppedDaemon(opts: {
   }
 
   if (opts.foreground) {
+    await reportManualAutostartSkip();
     await runDaemon({ paths, foreground: true });
     return { kind: "direct-attempted", exitCode: 0, manager: null };
   }
@@ -871,6 +897,9 @@ async function startDaemonDetached(opts: {
     logger.error({ message: argv });
     return 1;
   }
+  // A directly started hackd never runs the login autostart pass (its
+  // environment drops HACK_DAEMON_LOGIN_SERVICE); say so once per launch.
+  await reportManualAutostartSkip();
   spawnDetachedDaemon({ argv: [...argv], path: opts.path });
 
   const started = await waitForDaemonStart({ paths });

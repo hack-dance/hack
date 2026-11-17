@@ -7,11 +7,15 @@ import { hackReexecEnvironment } from "../lib/child-environment.ts";
  *   one repair;
  * - `HACK_DAEMON_RECONCILE_ONLY`: `hack update` sets it for the new
  *   executable's `daemon start --json`, which never starts a stopped
- *   daemon. A daemon it replaces must start normally (HACK-2216).
+ *   daemon. A daemon it replaces must start normally (HACK-2216);
+ * - `HACK_DAEMON_LOGIN_SERVICE`: only the login service's own hackd runs the
+ *   once-per-boot autostart pass. A directly started daemon, including a
+ *   replacement started by a command that runs inside that service, must not.
  */
 const INVOCATION_ONLY_ENV_KEYS = [
   "HACK_DAEMON_SERVICE_READ_ONLY",
   "HACK_DAEMON_RECONCILE_ONLY",
+  "HACK_DAEMON_LOGIN_SERVICE",
 ] as const;
 
 /**

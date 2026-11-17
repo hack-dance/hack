@@ -26,6 +26,7 @@ libvulkan-dev`.
 
 ```sh
 cd apps/desktop
+bash scripts/build.sh                   # provision libghostty-vt inputs, then build the app
 bash scripts/test.sh                    # pinned nextest, separate process per test
 cargo run -p hack-desktop                # live: matching hackd; otherwise needs R18
 cargo run -p hack-desktop -- --list-fixtures
@@ -192,12 +193,28 @@ The window follows [DESIGN-V1.md](DESIGN-V1.md).
   buttons, the Doctor and Routing rows and the daemon recovery button. The
   Activity tab is gone until it has content.
 
-### Terminal panel (feature `terminal`)
+### Terminal panel
+
+On macOS the panel is always part of the app; there is no flag to turn it on.
+It needs the pinned libghostty-vt inputs, which `scripts/build.sh` provisions
+before it builds: it fetches only what is missing into `target/ghostty-inputs`
+and checks each file against the sha256 committed in
+`term/scripts/provision-ghostty.sh`. That is the only step that uses the
+network; cargo then builds offline from that directory (`.cargo/config.toml`
+names it, and an exported `GHOSTTY_RELEASE_DIR` wins). A build without the
+inputs stops at once and says which file is missing and which script to run.
+`scripts/test.sh` provisions them on macOS too.
 
 ```sh
-eval "$(bash term/scripts/provision-ghostty.sh)"   # libghostty-vt inputs, checksummed
-cargo run -p hack-desktop --features terminal       # live, with the panel
+bash scripts/build.sh                 # provision, then build with the panel
+cargo run -p hack-desktop             # macOS: live, with the panel
 ```
+
+On Linux the panel is the opt-in `terminal` feature (it also needs the
+provisioned Zig): `bash scripts/build.sh` turns it on, or
+`eval "$(bash term/scripts/provision-ghostty.sh)"` and then
+`cargo run -p hack-desktop --features terminal`. Without it the window keeps
+its Logs tab.
 
 Each project and each branch instance has a panel docked under the detail
 pane (DESIGN-V1.md, "Terminal panel"): a drag handle (drag to resize, to the
@@ -341,7 +358,7 @@ container <service>
 type echo branch-in-$((4+4))\r
 expect branch-in-8 30
 STEPS
-cargo run -p hack-desktop --features terminal -- --drive /tmp/panel/panel.steps
+cargo run -p hack-desktop --features terminal -- --drive /tmp/panel/panel.steps  # the flag is only needed on Linux
 ```
 
 ### Env writes against the real CLI
@@ -361,7 +378,7 @@ project list, so no daemon runs; every `hack env` command the app runs is the
 real CLI. Needs `bun` (set `BUN` to choose one) and `python3`.
 
 ```sh
-cargo build -p hack-desktop --features terminal
+bash scripts/build.sh
 scripts/env-drive/run.sh target/debug/hack-desktop 10
 ```
 

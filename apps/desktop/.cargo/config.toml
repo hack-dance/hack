@@ -5,5 +5,12 @@
 # script's download base is set to a URL that cannot be fetched: without
 # GHOSTTY_RELEASE_DIR the build fails instead of using the network.
 # GHOSTTY_RELEASE_DIR, when set, takes precedence and this value is unused.
+#
+# GHOSTTY_RELEASE_DIR defaults to target/ghostty-inputs, where
+# term/scripts/provision-ghostty.sh puts the inputs by default (scripts/build.sh
+# and, on macOS, scripts/test.sh run it). An exported GHOSTTY_RELEASE_DIR wins.
+# When the directory is empty, term/build.rs stops the build and names the
+# script.
 [env]
+GHOSTTY_RELEASE_DIR = { value = "target/ghostty-inputs", relative = true }
 GHOSTTY_RELEASE_URL = "downloads-disabled://run-term/scripts/provision-ghostty.sh-and-export-GHOSTTY_RELEASE_DIR"

@@ -93,6 +93,15 @@ jobs:
             apps/desktop/target
           key: desktop-${{ runner.os }}-${{ hashFiles('apps/desktop/Cargo.lock') }}
           restore-keys: desktop-${{ runner.os }}-
+      # The terminal panel is part of the macOS app (no feature flag), so
+      # every build below needs the pinned libghostty-vt inputs: the prebuilt,
+      # checksummed XCFramework (no Zig on macOS) and the symbols font.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ghostty-inputs
+          key: desktop-ghostty-inputs-${{ runner.os }}-${{ hashFiles('apps/desktop/term/scripts/provision-ghostty.sh') }}
+      - name: Provision pinned libghostty-vt inputs (checksummed)
+        run: bash term/scripts/provision-ghostty.sh --dir "$RUNNER_TEMP/ghostty-inputs" --emit github >> "$GITHUB_ENV"
       - name: Install pinned per-test process runner
         run: |
           bash ../../scripts/install-cargo-nextest.sh "$RUNNER_TEMP/desktop-nextest"
@@ -103,18 +112,16 @@ jobs:
         run: bash scripts/test.sh
       - name: Clippy (default features)
         run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Build app
-        run: cargo build --locked -p hack-desktop
-      # The terminal surface on a real Mac: libghostty-vt from the prebuilt,
-      # checksummed XCFramework (no Zig on macOS), and every hack-desktop-term
-      # test, including the render target whose `main` creates GPUI's macOS
-      # platform on the main thread (real fonts, Metal offscreen rendering).
-      - uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/ghostty-inputs
-          key: desktop-ghostty-inputs-${{ runner.os }}-${{ hashFiles('apps/desktop/term/scripts/provision-ghostty.sh') }}
-      - name: Provision pinned libghostty-vt inputs (checksummed)
-        run: bash term/scripts/provision-ghostty.sh --dir "$RUNNER_TEMP/ghostty-inputs" --emit github >> "$GITHUB_ENV"
+      # The owner's build: no feature flag. Fails if the default macOS app
+      # stops depending on the terminal crate.
+      - name: Build app (terminal panel included by default)
+        run: |
+          cargo build --locked -p hack-desktop
+          cargo tree --locked -p hack-desktop -e normal --depth 1 --prefix none | grep -q '^hack-desktop-term ' \
+            || { echo "the default macOS build no longer includes the terminal panel" >&2; exit 1; }
+      # Every hack-desktop-term test, including the render target whose `main`
+      # creates GPUI's macOS platform on the main thread (real fonts, Metal
+      # offscreen rendering).
       - name: Terminal surface tests (ghostty, real platform)
         env:
           HACK_DAEMON_AUTOSTART_DISABLE: "1"

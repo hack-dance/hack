@@ -77,6 +77,8 @@ fn pipe() -> io::Result<(File, File)> {
 pub(crate) struct Child {
     pid: libc::pid_t,
     status: Option<ExitStatus>,
+    /// The write end of the child's stdin, when spawned with `stdin: true`.
+    pub(crate) stdin: Option<File>,
     pub(crate) stdout: Option<File>,
     pub(crate) stderr: Option<File>,
 }
@@ -128,13 +130,19 @@ impl Child {
     }
 }
 
-/// The runner always supplies null stdin, piped outputs, and its own process
-/// group. Environment overrides/removals and cwd come from the authored Command.
-/// With `inherit_env` the child starts from the parent environment, like
-/// CliRunner's default; without it (the runner's clean-environment mode, which
-/// also calls env_clear) it starts empty. Command offers no accessor for its
-/// environment-clear flag, so the caller must pass it explicitly.
-pub(crate) fn spawn(command: &mut Command, inherit_env: bool) -> io::Result<Child> {
+/// The runner supplies null stdin (or, with `stdin`, a pipe whose write end
+/// is returned in [`Child::stdin`]: the caller writes a value, then closes
+/// it), piped outputs, and its own process group. Environment
+/// overrides/removals and cwd come from the authored Command. With
+/// `inherit_env` the child starts from the parent environment, like
+/// CliRunner's default; without it (the runner's clean-environment mode,
+/// which also calls env_clear) it starts empty. Command offers no accessor
+/// for its environment-clear flag, so the caller must pass it explicitly.
+pub(crate) fn spawn_with(
+    command: &mut Command,
+    inherit_env: bool,
+    stdin: bool,
+) -> io::Result<Child> {
     let args: Vec<CString> = std::iter::once(command.get_program())
         .chain(command.get_args())
         .map(cstring)
@@ -196,6 +204,9 @@ pub(crate) fn spawn(command: &mut Command, inherit_env: bool) -> io::Result<Chil
     envp.push(std::ptr::null_mut());
     let (out, out_write) = pipe()?;
     let (err, err_write) = pipe()?;
+    // The parent keeps the write end; the read end is dup2'd onto 0 in the
+    // child and closed in the parent when this function returns.
+    let input = if stdin { Some(pipe()?) } else { None };
     let null = CString::new("/dev/null").expect("fixed path");
     // SAFETY: the init calls initialize the opaque values before use. The
     // RAII wrappers destroy them on all later errors. All pointer buffers
@@ -207,13 +218,26 @@ pub(crate) fn spawn(command: &mut Command, inherit_env: bool) -> io::Result<Chil
         let mut attributes = MaybeUninit::uninit();
         check(libc::posix_spawnattr_init(attributes.as_mut_ptr()))?;
         let mut attributes = Attributes(attributes.assume_init());
-        check(libc::posix_spawn_file_actions_addopen(
-            &mut actions.0,
-            0,
-            null.as_ptr(),
-            libc::O_RDONLY,
-            0,
-        ))?;
+        match &input {
+            Some((read, _)) => {
+                check(libc::posix_spawn_file_actions_adddup2(
+                    &mut actions.0,
+                    read.as_raw_fd(),
+                    0,
+                ))?;
+                check(libc::posix_spawn_file_actions_addclose(
+                    &mut actions.0,
+                    read.as_raw_fd(),
+                ))?;
+            }
+            None => check(libc::posix_spawn_file_actions_addopen(
+                &mut actions.0,
+                0,
+                null.as_ptr(),
+                libc::O_RDONLY,
+                0,
+            ))?,
+        }
         for (fd, target) in [(out_write.as_raw_fd(), 1), (err_write.as_raw_fd(), 2)] {
             check(libc::posix_spawn_file_actions_adddup2(
                 &mut actions.0,
@@ -264,6 +288,7 @@ pub(crate) fn spawn(command: &mut Command, inherit_env: bool) -> io::Result<Chil
         Ok(Child {
             pid,
             status: None,
+            stdin: input.map(|(_, write)| write),
             stdout: Some(out),
             stderr: Some(err),
         })
@@ -301,7 +326,7 @@ mod tests {
             control.stdout, b"inherited",
             "probe detects the old boundary"
         );
-        let mut child = spawn(&mut command, true).unwrap();
+        let mut child = spawn_with(&mut command, true, false).unwrap();
         let mut output = String::new();
         child
             .stdout
@@ -341,7 +366,7 @@ mod contract_tests {
             "-c", "printf '%s\\n' \"$1\" \"$HACK_DESKTOP_PROCESS_TEST\" \"$PWD\"; if read -r unused; then printf unexpected; else printf 'eof\\n'; fi; /bin/ps -o pgid= -p $$; printf diagnostic >&2",
             "fixture", "space and ' quote",
         ]);
-        let mut child = spawn(&mut command, true).unwrap();
+        let mut child = spawn_with(&mut command, true, false).unwrap();
         let mut stdout = String::new();
         let mut stderr = String::new();
         child
@@ -370,6 +395,43 @@ mod contract_tests {
         assert_eq!(lines[4].trim().parse::<u32>().unwrap(), child.id());
         assert_eq!(stderr, "diagnostic");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod stdin_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn a_piped_stdin_reaches_the_child_and_closing_it_ends_the_input() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "cat"]);
+        let mut child = spawn_with(&mut command, true, true).unwrap();
+        let mut stdin = child.stdin.take().expect("a pipe");
+        stdin.write_all(b"fake-value").unwrap();
+        drop(stdin);
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(out, "fake-value");
+        // Without the flag, stdin stays empty.
+        let mut child = spawn_with(&mut command, true, false).unwrap();
+        assert!(child.stdin.is_none());
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(out, "");
     }
 }
 
@@ -415,7 +477,7 @@ mod signal_tests {
                 );
                 let mut command = Command::new("/bin/sh");
                 command.args(["-c", "kill -TERM $$; sleep 5; echo survived"]);
-                let mut child = spawn(&mut command, true).unwrap();
+                let mut child = spawn_with(&mut command, true, false).unwrap();
                 assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
             }
         })

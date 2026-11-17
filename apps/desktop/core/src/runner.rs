@@ -403,7 +403,20 @@ impl CliRunner {
             })
     }
 
+    #[cfg(test)]
     fn command(&self, args: &[&str], path: Option<&Path>, program: &Path) -> Command {
+        self.command_io(args, path, program, false)
+    }
+
+    /// [`Self::command`], with stdin a pipe when `input` (a value the
+    /// caller writes, see [`Self::run_raw_with_input`]), else empty.
+    fn command_io(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        program: &Path,
+        input: bool,
+    ) -> Command {
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(program);
         cmd.args(args);
@@ -445,7 +458,7 @@ impl CliRunner {
         if let Some(dir) = &self.cwd {
             cmd.current_dir(dir);
         }
-        cmd.stdin(Stdio::null())
+        cmd.stdin(if input { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
@@ -453,6 +466,10 @@ impl CliRunner {
     }
 
     fn spawn(&self, args: &[&str], path: Option<&Path>) -> Result<Child, RunError> {
+        self.spawn_io(args, path, false)
+    }
+
+    fn spawn_io(&self, args: &[&str], path: Option<&Path>, input: bool) -> Result<Child, RunError> {
         let program = self.current_program().ok_or(RunError::NotFound)?;
         if self.verify {
             trusted_cli(&program)?;
@@ -462,7 +479,11 @@ impl CliRunner {
         // briefly instead of reporting a spawn failure.
         let mut attempt = 0;
         loop {
-            match crate::process::spawn(&mut self.command(args, path, &program), !self.clear_env) {
+            match crate::process::spawn_with(
+                &mut self.command_io(args, path, &program, input),
+                !self.clear_env,
+                input,
+            ) {
                 Ok(c) => return Ok(c),
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
                     attempt += 1;
@@ -487,6 +508,23 @@ impl CliRunner {
         timeout: Duration,
     ) -> Result<(String, String, Option<i32>), RunError> {
         self.run_inner(args, path, Some(timeout))
+    }
+
+    /// [`Self::run_raw`] with `input` written to the command's stdin, which
+    /// is then closed. For a value the CLI reads with `--value-stdin`: it
+    /// never appears in argv or the environment. Nothing here keeps or
+    /// prints `input`.
+    ///
+    /// # Errors
+    /// `NotFound`, `Spawn` or `Timeout`.
+    pub fn run_raw_with_input(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        timeout: Duration,
+        input: &[u8],
+    ) -> Result<(String, String, Option<i32>), RunError> {
+        self.run_io(args, path, Some(timeout), Some(input))
     }
 
     /// Run with no deadline from the app: wait until the command exits and
@@ -515,6 +553,16 @@ impl CliRunner {
         path: Option<&Path>,
         timeout: Option<Duration>,
     ) -> Result<(String, String, Option<i32>), RunError> {
+        self.run_io(args, path, timeout, None)
+    }
+
+    fn run_io(
+        &self,
+        args: &[&str],
+        path: Option<&Path>,
+        timeout: Option<Duration>,
+        input: Option<&[u8]>,
+    ) -> Result<(String, String, Option<i32>), RunError> {
         // The timeout counts from before the spawn: starting the program can
         // itself take time (an ETXTBSY retry, or macOS checking a new
         // executable on first launch). A caller that budgets `timeout` plus
@@ -526,7 +574,30 @@ impl CliRunner {
         let term_grace = self.term_grace;
         let grace_left =
             move |d: Instant| (d + term_grace).saturating_duration_since(Instant::now());
-        let mut child = self.spawn(args, path)?;
+        let mut child = self.spawn_io(args, path, input.is_some())?;
+        // Written on its own thread so a child that does not read cannot
+        // block this one; closing the pipe ends the input. A child that
+        // exits early makes the write fail (EPIPE), which is not an error.
+        let writer = match (input, child.stdin.take()) {
+            (Some(bytes), Some(stdin)) => {
+                let bytes = bytes.to_vec();
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stop = cancel.clone();
+                let (done, written) = mpsc::channel::<()>();
+                let handle = thread::spawn(move || {
+                    write_cancellable(stdin, &bytes, &stop);
+                    let _ = done.send(());
+                });
+                Some((
+                    WriterGuard {
+                        handle: Some(handle),
+                        cancel,
+                    },
+                    written,
+                ))
+            }
+            _ => None,
+        };
         let out = read_all(child.stdout.take(), Keep::Head(MAX_STDOUT));
         let err = read_all(child.stderr.take(), Keep::Tail(STDERR_KEEP));
         let status = loop {
@@ -569,6 +640,30 @@ impl CliRunner {
                 error: format!("output larger than {MAX_STDOUT} bytes"),
                 stdout_head: head(&stdout.text),
             });
+        }
+        // The command has exited, but a descendant may still hold its stdin
+        // without reading, which blocks the write. The deadline covers that
+        // too: past it, the group ends, its end of the pipe closes, and the
+        // write fails.
+        if let Some((guard, written)) = writer {
+            let finished = match deadline {
+                Some((d, t)) => {
+                    let left = d.saturating_duration_since(Instant::now());
+                    written.recv_timeout(left).map_err(|_| {
+                        // A reader outside the group (its own session) can
+                        // keep the pipe open after the group ends: the
+                        // writer stops on its own when told.
+                        guard.cancel();
+                        terminate_group(&mut child, grace_left(d));
+                        RunError::Timeout { after: t }
+                    })
+                }
+                None => written
+                    .recv()
+                    .map_err(|_| RunError::Spawn("input writer stopped".into())),
+            };
+            drop(guard);
+            finished?;
         }
         Ok((stdout.text, stderr.text, status.code()))
     }
@@ -1051,6 +1146,65 @@ pub fn resolve_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<Pat
 /// Ask the process group to stop (SIGTERM), give the CLI `grace` to retire
 /// the subprocesses it owns, then SIGKILL whatever is left of the group and
 /// reap. Returns only once the direct child has exited.
+/// The stdin writer of one run. Dropping it, on every exit path including
+/// early returns (a leader timeout, a failed drain), stops the writer and
+/// waits for it, so no thread keeps the input or the pipe after the call.
+struct WriterGuard {
+    handle: Option<thread::JoinHandle<()>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WriterGuard {
+    fn cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        // A finished writer ignores this; a blocked one stops within a poll.
+        self.cancel();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Write `bytes` to a child's stdin, then close it. The descriptor is made
+/// non-blocking and the write waits in short polls, so `cancel` stops it even
+/// when a reader holds the pipe open without reading (a descendant in
+/// another process group). Errors (the reader went away) end the write.
+fn write_cancellable<W>(mut stdin: W, bytes: &[u8], cancel: &std::sync::atomic::AtomicBool)
+where
+    W: std::io::Write + std::os::fd::AsRawFd,
+{
+    let fd = stdin.as_raw_fd();
+    // SAFETY: fd is the live write end this function owns through `stdin`.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return;
+    }
+    let mut off = 0;
+    while off < bytes.len() && !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        match stdin.write(&bytes[off..]) {
+            Ok(0) => return,
+            Ok(n) => off += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: one valid pollfd for a live descriptor; 50 ms bound.
+                unsafe { libc::poll(&mut pfd, 1, 50) };
+            }
+            Err(_) => return,
+        }
+    }
+    // `stdin` drops here: closing it ends the input.
+}
+
 fn terminate_group(child: &mut Child, grace: Duration) {
     if let Ok(pid) = i32::try_from(child.id()) {
         // SAFETY: plain syscall on the group we created with process_group(0).
@@ -1346,6 +1500,124 @@ mod tests {
         let f = FakeHack::new(r#"echo '{"checks":[{"id":"x","status":"error"}]}'; exit 1"#);
         let r: crate::models::DoctorReport = f.runner().run_json(&["doctor"], None, T).unwrap();
         assert_eq!(r.attention_count(), 1);
+    }
+
+    #[test]
+    fn input_goes_to_stdin_never_argv_or_env() {
+        let f = FakeHack::new(
+            r#"printf '{"args":"%s","stdin":"%s","env":"%s"}' "$*" "$(cat)" "$(env | grep -c SENTINEL_VALUE)""#,
+        );
+        let (out, _, code) = f
+            .runner()
+            .run_raw_with_input(
+                &["env", "add", "K", "--value-stdin"],
+                None,
+                T,
+                b"SENTINEL_VALUE",
+            )
+            .unwrap();
+        assert_eq!(code, Some(0));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stdin"], "SENTINEL_VALUE");
+        assert_eq!(v["args"], "env add K --value-stdin");
+        assert_eq!(v["env"], "0");
+        // Without input, stdin is empty.
+        let (out, _, _) = f.runner().run_raw(&["x"], None, T).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stdin"], "");
+    }
+
+    #[test]
+    fn a_descendant_holding_stdin_cannot_hold_the_write_past_the_deadline() {
+        // The command exits at once; a descendant keeps stdin open and never
+        // reads, and the input is larger than any pipe buffer.
+        // POSIX gives a background job /dev/null as stdin before explicit
+        // redirections (dash does), so stdin is saved on fd 3 first.
+        let f = FakeHack::new("exec 3<&0\nsleep 120 <&3 >/dev/null 2>&1 &\nexit 0");
+        let started = Instant::now();
+        let input = vec![b'x'; 1 << 20];
+        let r = f
+            .runner()
+            .with_term_grace(Duration::from_millis(100))
+            .run_raw_with_input(
+                &["env", "add", "K", "--value-stdin"],
+                None,
+                Duration::from_secs(2),
+                &input,
+            );
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "ended at the deadline, not when the descendant did"
+        );
+    }
+
+    #[test]
+    fn a_reader_outside_the_group_cannot_hold_the_write_past_the_deadline() {
+        // The descendant starts its own session (outside the group the
+        // runner ends) and holds stdin without reading.
+        let f = FakeHack::new(
+            "exec 3<&0\nif command -v setsid >/dev/null; then setsid sleep 6 <&3 >/dev/null 2>&1 & else perl -e 'use POSIX; POSIX::setsid(); sleep 6' <&3 >/dev/null 2>&1 & fi\nexit 0",
+        );
+        let started = Instant::now();
+        let input = vec![b'x'; 1 << 20];
+        let r = f
+            .runner()
+            .with_term_grace(Duration::from_millis(100))
+            .run_raw_with_input(
+                &["env", "add", "K", "--value-stdin"],
+                None,
+                Duration::from_secs(1),
+                &input,
+            );
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "ended near the deadline, not when the reader did ({:?})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_leader_timeout_also_stops_the_stdin_writer() {
+        // The leader outlives the deadline, and a reader in its own session
+        // holds stdin without reading: the early timeout return must still
+        // stop the writer rather than leave it polling.
+        let f = FakeHack::new(
+            "exec 3<&0\nif command -v setsid >/dev/null; then setsid sleep 6 <&3 >/dev/null 2>&1 & else perl -e 'use POSIX; POSIX::setsid(); sleep 6' <&3 >/dev/null 2>&1 & fi\nexec 3<&-\nsleep 30 </dev/null",
+        );
+        // Threads of this process (nextest runs each test in its own).
+        #[cfg(target_os = "linux")]
+        let threads = || std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count);
+        #[cfg(target_os = "linux")]
+        let before = threads();
+        let started = Instant::now();
+        let input = vec![b'x'; 1 << 20];
+        let r = f
+            .runner()
+            .with_term_grace(Duration::from_millis(100))
+            .run_raw_with_input(
+                &["env", "add", "K", "--value-stdin"],
+                None,
+                Duration::from_secs(1),
+                &input,
+            );
+        assert!(matches!(r, Err(RunError::Timeout { .. })), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "returned at the deadline ({:?})",
+            started.elapsed()
+        );
+        // The writer is gone, not left polling while the reader in its own
+        // session still holds the pipe.
+        #[cfg(target_os = "linux")]
+        {
+            let until = Instant::now() + Duration::from_secs(2);
+            while threads() > before && Instant::now() < until {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(threads() <= before, "a thread outlived the call");
+        }
     }
 
     #[test]

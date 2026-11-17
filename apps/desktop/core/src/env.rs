@@ -58,6 +58,55 @@ impl EnvRow {
         matches!(self.storage.kind.as_str(), "secret" | "encrypted")
     }
 
+    /// The value comes from a worktree-local layer: `hack.env.local.yaml`,
+    /// `hack.env.<overlay>.local.yaml`, or a legacy dotenv file (`.env`,
+    /// `.env.<overlay>`) or `local` layer, which are not committed either. A
+    /// write must go there too (`--local`): otherwise the local value keeps
+    /// winning, and a value kept out of the repository would be copied into
+    /// the shared, committed YAML.
+    #[must_use]
+    pub fn is_local_layer(&self) -> bool {
+        matches!(self.write_layer(), Ok(true))
+    }
+
+    /// Where a write to this existing row may go: `Ok(true)` its
+    /// worktree-local layer (`--local`), `Ok(false)` the shared, committed
+    /// `hack.env*.yaml`. Only a layer known to be one of those is written; any
+    /// other (a backend such as `portable_backend`, or a name the app does not
+    /// know) is refused, so a value never moves from a place kept out of the
+    /// repository into the shared file. A row without a layer writes to the
+    /// shared file only when it has no stored value to move (a missing
+    /// required name); a stored value whose layer is not listed is refused.
+    ///
+    /// # Errors
+    /// The reason, for a layer the app does not write.
+    pub fn write_layer(&self) -> Result<bool, String> {
+        let Some(layer) = self.layer.as_deref() else {
+            if self.missing || !self.has_value {
+                return Ok(false);
+            }
+            return Err(format!(
+                "{} has a value but the listing does not say where it is stored: edit it with the CLI so it stays there.",
+                self.key
+            ));
+        };
+        let name = layer.rsplit('/').next().unwrap_or(layer);
+        if name == "local"
+            || name == ".env"
+            || name.starts_with(".env.")
+            || (name.starts_with("hack.env") && name.ends_with(".local.yaml"))
+        {
+            return Ok(true);
+        }
+        if name.starts_with("hack.env") && name.ends_with(".yaml") {
+            return Ok(false);
+        }
+        Err(format!(
+            "{} is stored in {layer}, which the app does not write: edit it with the CLI so it stays there.",
+            self.key
+        ))
+    }
+
     /// A plaintext value: shown with the listing, no eye needed.
     #[must_use]
     pub fn is_plaintext(&self) -> bool {
@@ -80,6 +129,36 @@ impl EnvRow {
             }
             Scope::Canonical(_) => None,
         }
+    }
+
+    /// The one scope a write to this row goes to (`--service`). A legacy
+    /// row limited to several services has none: one write cannot cover
+    /// them, so editing it in the app is refused and the reason says how.
+    ///
+    /// # Errors
+    /// The reason, for a row the app cannot write in one scope.
+    pub fn write_scope(&self) -> Result<String, String> {
+        match &self.scope {
+            Scope::Legacy(services) if services.len() > 1 => Err(format!(
+                "{} applies to {}; one write cannot cover several services. Edit it with the CLI per service, or migrate the project's env (hack env migrate).",
+                self.key,
+                services.join(", ")
+            )),
+            Scope::Legacy(services) => {
+                Ok(services.first().cloned().unwrap_or_else(|| "global".into()))
+            }
+            Scope::Canonical(_) => Ok(self.scope_name()),
+        }
+    }
+
+    /// Why the app will not write this row, if it will not: a scope one
+    /// write cannot cover, or a layer it does not write (see
+    /// [`Self::write_layer`]).
+    #[must_use]
+    pub fn write_blocked(&self) -> Option<String> {
+        self.write_scope()
+            .err()
+            .or_else(|| self.write_layer().err())
     }
 
     /// The scope name, `global` when the listing does not name one.
@@ -432,7 +511,7 @@ pub fn fixture(name: &str) -> EnvView {
         "env-empty" => EnvView::parse(r#"{"vars":[],"missing_required":[]}"#, Some(0)),
         // Several overlays, long names and values, a scoped secret, and a
         // required name that is missing.
-        "env-overlays" | "env-running" | "env-locked" | "env-missing" | "env-long" => {
+        "env-overlays" | "env-running" | "env-locked" | "env-missing" | "env-long" | "env-edit" => {
             let key_state = if name == "env-locked" {
                 "missing"
             } else {
@@ -705,6 +784,100 @@ mod tests {
         );
         assert_eq!(row(Scope::Canonical("global".into())).value_scope(), None);
         assert_eq!(row(Scope::Canonical("project".into())).value_scope(), None);
+    }
+
+    #[test]
+    fn a_local_layer_is_told_from_the_shared_one() {
+        let row = |layer: Option<&str>| EnvRow {
+            key: "K".into(),
+            required: false,
+            storage: Storage {
+                kind: "plaintext".into(),
+            },
+            resolved_from: None,
+            has_value: true,
+            scope: Scope::Canonical("global".into()),
+            layer: layer.map(Into::into),
+            missing: false,
+        };
+        assert!(row(Some("/work/p/.hack/hack.env.local.yaml")).is_local_layer());
+        assert!(row(Some(".hack/hack.env.staging.local.yaml")).is_local_layer());
+        assert!(!row(Some(".hack/hack.env.default.yaml")).is_local_layer());
+        assert!(!row(Some(".hack/hack.env.staging.yaml")).is_local_layer());
+        // Legacy dotenv files and the legacy `local` layer are local too.
+        assert!(row(Some("/work/p/.hack/.env")).is_local_layer());
+        assert!(row(Some(".hack/.env.staging")).is_local_layer());
+        assert!(row(Some("local")).is_local_layer());
+        assert!(!row(Some(".hack/hack.env.json")).is_local_layer());
+        assert!(!row(None).is_local_layer());
+    }
+
+    #[test]
+    fn a_value_held_outside_the_env_files_is_never_written() {
+        // A legacy project mirroring plaintext into its encrypted backend
+        // lists those values as `portable_backend`. Saving one without
+        // `--local` would copy it into the shared, committed YAML; with it,
+        // into a new local file. Neither keeps it where it is, so the app
+        // refuses and points at the CLI.
+        let row = |layer: Option<&str>| EnvRow {
+            key: "K".into(),
+            required: false,
+            storage: Storage {
+                kind: "plaintext".into(),
+            },
+            resolved_from: layer.map(Into::into),
+            has_value: true,
+            scope: Scope::Legacy(vec![]),
+            layer: layer.map(Into::into),
+            missing: false,
+        };
+        for layer in ["portable_backend", "keychain", "process", "unknown"] {
+            let r = row(Some(layer));
+            let why = r.write_blocked().expect(layer);
+            assert!(why.contains(layer) && why.contains("CLI"), "{why}");
+            assert!(!r.is_local_layer());
+        }
+        assert_eq!(row(Some(".hack/hack.env.yaml")).write_layer(), Ok(false));
+        assert_eq!(row(Some(".hack/.env")).write_layer(), Ok(true));
+        // No layer: a missing name writes to the shared file; a stored
+        // value of unknown origin is refused.
+        let mut absent = row(None);
+        absent.has_value = false;
+        absent.missing = true;
+        assert_eq!(absent.write_blocked(), None);
+        let why = row(None).write_blocked().expect("stored, no layer");
+        assert!(why.contains("CLI"), "{why}");
+    }
+
+    #[test]
+    fn a_legacy_row_for_several_services_has_no_single_write_scope() {
+        let row = |scope: Scope| EnvRow {
+            key: "K".into(),
+            required: false,
+            storage: Storage {
+                kind: "plaintext".into(),
+            },
+            resolved_from: None,
+            has_value: true,
+            scope,
+            layer: None,
+            missing: false,
+        };
+        assert_eq!(row(Scope::Legacy(vec![])).write_scope().unwrap(), "global");
+        assert_eq!(
+            row(Scope::Legacy(vec!["api".into()]))
+                .write_scope()
+                .unwrap(),
+            "api"
+        );
+        assert_eq!(
+            row(Scope::Canonical("web".into())).write_scope().unwrap(),
+            "web"
+        );
+        let refused = row(Scope::Legacy(vec!["api".into(), "web".into()]))
+            .write_scope()
+            .unwrap_err();
+        assert!(refused.contains("api, web") && refused.contains("hack env migrate"));
     }
 
     #[test]

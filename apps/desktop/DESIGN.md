@@ -143,15 +143,17 @@ pipe for each value shown. Owner direction, Nov 17; mockup in the lead's brief.
 | Key line | `key_state` only: "Secret key found", or, when missing, the two places the CLI looks (`.hack.secret.key`, `HACK_ENV_SECRET_KEY`). Which source the CLI used is R26. |
 | Table | Name, Value, actions. A scope chip when not global; `required · missing` only for that exception, first. Plaintext values load with the listing (one `hack env get` each, at most 48; one read for all is R25). Secrets are dots with an eye and copy. With the key missing, secrets offer neither. |
 | Reveal | The eye reads that one name. It hides again after 60 s, and when the overlay, scope, detail tab or project changes, or the window is hidden or loses focus. |
-| Copy | Reads that one name if it is not shown, puts it on the clipboard, and clears the clipboard after 60 s, or when the app quits sooner, if it still holds the value. GPUI cannot yet mark a clipboard item concealed (macOS `org.nspasteboard.ConcealedType`); that is an open gap in the toolkit, not the CLI. |
+| Copy | Reads that one name if it is not shown, puts it on the clipboard, and clears the clipboard after 60 s, or when the app quits sooner, if it still holds the value. On macOS the item is marked concealed (`org.nspasteboard.ConcealedType`, written through AppKit because GPUI's clipboard API cannot); Linux has no such convention, so the clear is the only protection there. |
+| Edit, + Variable | An editor with the name (new only), the value (masked for a secret; a secret starts empty, plaintext starts filled), Secret (new only), and the exact command Save runs: `hack env add KEY [--secret] --value-stdin --env <overlay> --service <scope>`, value on stdin, overlay and scope always named. An existing row is written in its own scope; a new variable in the scope listed. No secret edit without the key. |
+| Needs the CLI | Shown inactive with the request in a tooltip: + Overlay (R27, and R24 for every overlay as a tab); Choose key file and Use env var when the key is missing (R26). |
 
 A value never reaches a log, a render, `--drive` output, a test snapshot or an
 error message: `Revealed` prints only its length, failures name the variable
-and exit code, and fixtures use obviously fake values. Editing, adding a
-variable or an overlay, and choosing the key source are slice 2. The key
-source will be stored per project in the app's machine-local settings file
-(the same file as the CLI choice), as a path or a variable name, never key
-bytes.
+and exit code, and fixtures use obviously fake values. Adding an overlay and
+choosing the key source wait for the CLI (R24, R26, R27). When R26 exists, the
+key source will be stored per project in the app's machine-local settings
+file (the same file as the CLI choice), as a path or a variable name, never
+key bytes.
 
 ### Activity tab
 

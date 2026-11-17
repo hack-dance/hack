@@ -44,8 +44,9 @@ impl Launcher for SystemLauncher {
         // so the launcher cannot inherit a pipe or file another thread has
         // not yet marked close-on-exec. `launch_command` cleared the
         // environment, so the boundary must not rebuild it from the parent.
-        let mut child = crate::process::spawn(
+        let mut child = crate::process::spawn_with(
             &mut launch_command(program, args, |key| std::env::var_os(key)),
+            false,
             false,
         )
         .map_err(|e| e.to_string())?;

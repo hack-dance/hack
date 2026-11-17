@@ -147,6 +147,7 @@ printf 'fake-value-not-a-secret'
     let selection = EnvTarget {
         env: Some("staging".into()),
         scope: Some("api".into()),
+        local: false,
     };
     let value = source
         .env_value(&project, false, &selection, "API_TOKEN")
@@ -193,6 +194,7 @@ exit 1
         let selection = EnvTarget {
             env: env.map(Into::into),
             scope: scope.map(Into::into),
+            local: false,
         };
         assert!(source.env_value(&project, false, &selection, key).is_err());
         assert!(
@@ -205,5 +207,127 @@ exit 1
     // The first read, then the plain listing for each of the two cases with
     // no overlay or scope; never `env get` with an odd name.
     assert_eq!(calls(), 3);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_write_sends_the_value_on_stdin_only_and_names_overlay_and_scope() {
+    use hack_desktop_core::env::Revealed;
+    use hack_desktop_core::source::{EnvTarget, env_set_command};
+    let (dir, project, source) = value_fixture(
+        r#"#!/bin/sh
+printf '%s' "$*" > "$HOME/argv"
+cat > "$HOME/stdin"
+env > "$HOME/env"
+"#,
+    );
+    let target = EnvTarget {
+        env: Some("staging".into()),
+        scope: Some("api".into()),
+        local: false,
+    };
+    source
+        .env_set(
+            &project,
+            false,
+            &target,
+            "API_TOKEN",
+            true,
+            &Revealed::new("fake-secret-SENTINEL".into()),
+        )
+        .expect("stored");
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+    assert_eq!(
+        read("argv"),
+        format!(
+            "env add API_TOKEN --secret --value-stdin --env staging --service api --path {}",
+            project.display()
+        )
+    );
+    assert_eq!(
+        read("stdin"),
+        "fake-secret-SENTINEL\r\n",
+        "ends with the one CRLF the CLI strips"
+    );
+    assert!(
+        !read("env").contains("SENTINEL"),
+        "never in the environment"
+    );
+    // The command shown before it runs is the same, without path or value.
+    assert_eq!(
+        env_set_command(&target, "API_TOKEN", true).unwrap(),
+        "hack env add API_TOKEN --secret --value-stdin --env staging --service api"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_failed_write_never_echoes_the_value_and_odd_names_never_run() {
+    use hack_desktop_core::env::Revealed;
+    use hack_desktop_core::source::EnvTarget;
+    let (dir, project, source) = value_fixture(
+        r#"#!/bin/sh
+echo called >> "$HOME/calls"
+v=$(cat)
+echo "rejected value $v" >&2
+exit 1
+"#,
+    );
+    let value = Revealed::new("fake-secret-SENTINEL".into());
+    let error = source
+        .env_set(
+            &project,
+            false,
+            &EnvTarget::default(),
+            "API_TOKEN",
+            true,
+            &value,
+        )
+        .expect_err("exit 1");
+    assert!(!error.contains("SENTINEL"), "{error}");
+    assert!(
+        error.contains("API_TOKEN") && error.contains("code 1"),
+        "{error}"
+    );
+    for key in ["--secret", "A B", "../x", ""] {
+        assert!(
+            source
+                .env_set(&project, false, &EnvTarget::default(), key, false, &value)
+                .is_err()
+        );
+    }
+    let calls = std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+    assert_eq!(calls.lines().count(), 1, "odd names never reached the CLI");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_value_ending_in_a_newline_survives_the_clis_strip() {
+    use hack_desktop_core::env::Revealed;
+    use hack_desktop_core::source::EnvTarget;
+    // Stand-in for the CLI's stripOneTrailingNewline: one CRLF, else one LF.
+    let (dir, project, source) = value_fixture(
+        r#"#!/bin/sh
+cat > "$HOME/raw"
+"#,
+    );
+    for value in ["line\n", "line\r", "line\r\n", "plain"] {
+        source
+            .env_set(
+                &project,
+                false,
+                &EnvTarget::default(),
+                "K",
+                false,
+                &Revealed::new(value.into()),
+            )
+            .unwrap();
+        let raw = std::fs::read_to_string(dir.join("raw")).unwrap();
+        let stored = raw
+            .strip_suffix("\r\n")
+            .or_else(|| raw.strip_suffix('\n'))
+            .unwrap_or(&raw);
+        assert_eq!(stored, value, "{value:?}");
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -525,7 +525,8 @@ test("only the explicit file selector is accepted", () => {
 });
 
 test("HACK-2324: every ADC spelling is a candidate for the pre-hook review, and the pure removal reads nothing", async () => {
-  const root = "/home/fixture-user";
+  // A home with no ADC file: the pure removal must not read one.
+  const root = join(tmpdir(), "native-gcloud-absent-home");
   for (const source of [
     `~/${ADC}`,
     `$HOME/${ADC}`,

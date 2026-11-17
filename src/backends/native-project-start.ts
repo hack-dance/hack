@@ -2068,8 +2068,16 @@ async function startNativeProjectAttempt(
   // Pure build admission before hooks, VM or provider start; refuses when disabled.
   const builds = admitStartBuilds(input, opts);
   const buildServices = new Set(builds.keys());
-  let specs = prepareNativeProjectServices(
+  // Pre-hook checks (static review, source size, images, bridge capacity) use
+  // the input the credential adapter will produce; delivery after the hooks
+  // still adapts the original input.
+  const reviewInput = await staticReviewInput({
     input,
+    gcloud: selection.gcloud,
+    adapt: deps.adaptGcloud,
+  });
+  let specs = prepareNativeProjectServices(
+    reviewInput,
     selectedDependencyFile !== undefined,
     buildServices
   );
@@ -2077,11 +2085,7 @@ async function startNativeProjectAttempt(
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
     composeFile: opts.composeFile,
-    input: await staticReviewInput({
-      input,
-      gcloud: selection.gcloud,
-      adapt: deps.adaptGcloud,
-    }),
+    input: reviewInput,
     profiles,
     branch: opts.scope.branch,
     deferredRestore: restore !== undefined,

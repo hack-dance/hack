@@ -1600,6 +1600,12 @@ test("gcloud ADC delivery follows hooks, sends file members privately and persis
     events.push("static review");
     reviewed.normalizedComposeJson = input.normalizedComposeJson;
   };
+  // The only bind is the ADC file, which delivery replaces: no project source
+  // is captured, so the source-size check never runs.
+  opts.dependencies.sourceSize = async () => {
+    events.push("source size");
+    return undefined as never;
+  };
   expect(await startNativeProject({ ...opts, gcloud: { mode: "file" } })).toBe(
     0
   );
@@ -1612,6 +1618,7 @@ test("gcloud ADC delivery follows hooks, sends file members privately and persis
   expect(events.indexOf("static review")).toBeLessThan(
     events.indexOf("before")
   );
+  expect(events).not.toContain("source size");
   expect(events.indexOf("gcloud")).toBeGreaterThan(events.indexOf("before"));
   expect(events.indexOf("gcloud")).toBeLessThan(events.indexOf("runtime up"));
   expect(envelope?.version).toBe(2);

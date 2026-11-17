@@ -10,7 +10,9 @@
 //! invoking today's registry-writing `hack projects` fallback.
 //!
 //! ```text
-//! hack-desktop-state [--project <name>] [--compact]
+//! hack-desktop-state [--project <name>] [--compact] [--setup-fixture <name>]
+//!
+//! `--setup-fixture` prints one offline setup report as JSON and runs nothing.
 //! ```
 
 use std::time::Instant;
@@ -20,20 +22,32 @@ use hack_desktop_core::viewmodel::{AppModel, Event};
 use serde_json::{Value, json};
 
 fn usage() -> ! {
-    eprintln!("usage: hack-desktop-state [--project <name>] [--compact]");
+    eprintln!(
+        "usage: hack-desktop-state [--project <name>] [--compact] [--setup-fixture missing-cli|partial|ready|native-unknown|service-unavailable]"
+    );
     std::process::exit(2)
 }
 
 fn main() {
     let mut project: Option<String> = None;
     let mut compact = false;
+    let mut setup_fixture = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--project" => project = Some(args.next().unwrap_or_else(|| usage())),
             "--compact" => compact = true,
+            "--setup-fixture" => setup_fixture = Some(args.next().unwrap_or_else(|| usage())),
             _ => usage(),
         }
+    }
+    if let Some(name) = setup_fixture {
+        let report = hack_desktop_core::setup_fixtures::load(&name).unwrap_or_else(|| usage());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("fixture JSON")
+        );
+        return;
     }
 
     let source = LiveSource::from_env();

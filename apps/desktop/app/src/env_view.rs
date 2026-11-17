@@ -270,8 +270,9 @@ impl HackApp {
                     Ok(value) => {
                         cx.write_to_clipboard(ClipboardItem::new_string(value.expose().to_owned()));
                         this.env.copied = Some(key.clone());
-                        this.env.clipboard = Some(value.clone());
-                        this.clear_clipboard_later(value, cx);
+                        this.env.clipboard = Some(value);
+                        this.env.clipboard_copy += 1;
+                        this.clear_clipboard_later(this.env.clipboard_copy, cx);
                     }
                     Err(e) => this
                         .env
@@ -285,13 +286,13 @@ impl HackApp {
         }
     }
 
-    fn clear_clipboard_later(&mut self, value: Revealed, cx: &mut Context<Self>) {
+    fn clear_clipboard_later(&mut self, copy: u64, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REVEAL_FOR).await;
             let _ = this.update(cx, |this, cx| {
-                // Only the value this timer was started for: a later copy
-                // has its own timer.
-                if this.env.clipboard.as_ref() == Some(&value) {
+                // Only the copy this timer was started for: a later copy,
+                // even of the same value, restarts the time with its own.
+                if this.env.clipboard_copy == copy {
                     this.clear_owned_clipboard(cx);
                 }
                 this.env.copied = None;
@@ -724,6 +725,18 @@ mod tests {
         cx.update(|cx| app.update(cx, |a, cx| a.clear_owned_clipboard(cx)));
         let text = cx.update(|cx| cx.read_from_clipboard().and_then(|i| i.text()));
         assert_eq!(text.as_deref(), Some("user text"));
+    }
+
+    #[test]
+    fn copying_again_restarts_the_clipboard_time() {
+        let (mut cx, app) = app();
+        let secret = row(&mut cx, &app, "DATABASE_URL");
+        cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
+        let first = cx.update(|cx| app.read(cx).env.clipboard_copy);
+        cx.update(|cx| app.update(cx, |a, cx| a.copy_value(&secret, cx)));
+        let second = cx.update(|cx| app.read(cx).env.clipboard_copy);
+        assert_ne!(first, second, "the first copy's timer no longer matches");
+        assert!(cx.update(|cx| app.read(cx).env.clipboard.is_some()));
     }
 
     #[test]

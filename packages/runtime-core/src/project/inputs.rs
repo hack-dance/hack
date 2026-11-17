@@ -674,6 +674,14 @@ fn compile_inner(
             .unwrap_or_default();
         let health_test = if service.healthcheck.as_ref().is_some_and(|h| h.disabled) {
             Some(vec!["NONE".into()])
+        } else if service
+            .healthcheck
+            .as_ref()
+            .is_some_and(|h| h.native_http.is_some())
+        {
+            // A native probe decides readiness and the engine check is NONE, so
+            // an authored command it replaced (HACK-2324) is never resolved.
+            None
         } else {
             match raw.get("healthcheck").and_then(|h| h.get("test")) {
                 Some(Value::String(s)) => Some(vec!["CMD-SHELL".into(), resolver.resolve(s)?]),

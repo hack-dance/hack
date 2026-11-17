@@ -183,6 +183,27 @@ fn routed_command_healthcheck_is_replaced_by_the_inferred_route_probe() {
 }
 
 #[test]
+fn a_replaced_route_command_is_never_resolved_as_an_execution_input() {
+    use project::inputs;
+    use std::collections::BTreeMap;
+    // The command never runs on native, so an input it names that is not
+    // available must not refuse execution (HACK-2324 review).
+    let document = format!(
+        "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n    healthcheck:\n      test: [CMD, curl, -f, '${{HEALTH_URL}}']\n"
+    );
+    let fixture = Fixture::new(&document);
+    let review = fixture.plan();
+    let compiled = inputs::compile(
+        &fixture.candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(compiled.services["web"].health_test, None);
+}
+
+#[test]
 fn replaced_route_probe_still_does_not_satisfy_compose_healthy_dependencies() {
     // Like any inferred route probe, the replacement is route readiness only;
     // a service_healthy dependent still needs a healthcheck native can run.

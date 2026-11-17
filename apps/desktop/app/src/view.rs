@@ -467,6 +467,7 @@ impl HackApp {
                 }
                 .into(),
                 compatible: false,
+                shared_with: None,
             },
         )));
     }
@@ -996,6 +997,8 @@ impl HackApp {
                     false,
                 ),
                 Banner::DaemonReadFailed { error } => (BannerTone::Warn, error.clone(), false),
+                // Another install's hackd: name both, offer nothing to do.
+                Banner::SharedHome { message } => (BannerTone::Warn, message.clone(), false),
                 // With a daemon banner, the stale banner repeats its cause.
                 // Otherwise it is the only sign the latest read failed.
                 Banner::Stale { .. } if daemon_banner => continue,

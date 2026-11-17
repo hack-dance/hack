@@ -70,6 +70,11 @@ pub enum Banner {
     DaemonReadFailed {
         error: String,
     },
+    /// The hackd here belongs to another Hack install that shares this home
+    /// (named in the message). No start or restart is offered.
+    SharedHome {
+        message: String,
+    },
     EngineDown {
         error: String,
     },
@@ -98,6 +103,7 @@ impl Banner {
             Self::DaemonMismatch { daemon, cli, .. } => crate::source::mismatch_text(daemon, cli),
             Self::EngineDown { error } => format!("Docker not reachable: {error}"),
             Self::DaemonReadFailed { error } => error.clone(),
+            Self::SharedHome { message } => message.clone(),
             Self::Stale { error } => format!("Showing last known state: {error}"),
         }
     }
@@ -283,6 +289,12 @@ impl AppModel {
     #[must_use]
     pub fn daemon_recovery(&self) -> Option<DaemonRecovery> {
         match &self.last_error {
+            // Another install's hackd in a shared home: starting or
+            // restarting it from here would only start a fight over it.
+            Some(SourceError::DaemonUnavailable {
+                shared_with: Some(_),
+                ..
+            }) => None,
             Some(SourceError::DaemonUnavailable { daemon: None, .. }) => {
                 Some(DaemonRecovery::Start)
             }
@@ -527,9 +539,13 @@ impl AppModel {
             daemon,
             compatible,
             message,
+            shared_with,
         }) = &self.last_error
         {
             banners.push(match daemon {
+                _ if shared_with.is_some() => Banner::SharedHome {
+                    message: message.clone(),
+                },
                 None => Banner::DaemonOff,
                 Some(d) if !compatible => Banner::mismatch(d, cli),
                 Some(_) => Banner::DaemonReadFailed {
@@ -833,6 +849,7 @@ mod tests {
                 Err(SourceError::DaemonUnavailable {
                     cli: "5.0.0".into(),
                     compatible: false,
+                    shared_with: None,
                     daemon,
                     message: message.into(),
                 }),
@@ -869,6 +886,7 @@ mod tests {
         first_launch.apply(Event::Refreshed(Err(SourceError::DaemonUnavailable {
             cli: "5.0.0".into(),
             compatible: false,
+            shared_with: None,
             daemon: None,
             message: "hackd is off".into(),
         })));
@@ -1388,6 +1406,7 @@ mod tests {
             cli: "5.0.0-next.18".into(),
             daemon: Some("4.3.0".into()),
             compatible: true,
+            shared_with: None,
             message: "hackd could not provide project status".into(),
         })));
         assert!(matches!(

@@ -81,10 +81,16 @@ click (**Use hack (stable)**); the choice is saved in the app's settings
 `$XDG_CONFIG_HOME/hack-desktop/settings.json` elsewhere), never an environment
 variable. `--drive` has `use-cli <name>` and `expect-cli <text>` for it.
 
-Each read starts the CLI for `hack version --json`, then one `hack ps --json`
-per native project (4 at a time). Through a launcher such as `hack-next`, every
-start costs the launcher's own checks, so the read grows with the number of
-native projects; Compose projects come from hackd alone.
+Through a launcher such as `hack-next`, every CLI start re-verifies the
+installed version first (receipt, bundle checksums, signatures), so each costs
+on the order of a second. A read asks the CLI for its version at most every
+30 s, and runs one `hack ps --json` per native project, up to 8 at once;
+Compose projects come from hackd alone.
+
+When another install's CLI reports the same hackd (both use one home, such as a
+stable `hack` and a v5 build in `~/.hack`), a version mismatch names both
+installs and offers neither Start nor Restart: the other install would replace
+the app's hackd again. Use that install in the app, or give each its own home.
 
 An accepted refresh that changes the selected project root or backend clears the
 previous log tail, including when Follow is off, and replaces any open Logs stream.

@@ -181,6 +181,17 @@ impl CliRunner {
         runner
     }
 
+    /// This runner's settings with another (absolute) program, not switchable.
+    #[must_use]
+    pub fn with_program(&self, program: &Path) -> Self {
+        Self {
+            program: program.to_path_buf(),
+            missing: false,
+            pinned: None,
+            ..self.clone()
+        }
+    }
+
     /// This runner with its current program fixed: later [`Self::select`]
     /// calls do not change it. One read uses one of these throughout.
     #[must_use]

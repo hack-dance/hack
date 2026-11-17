@@ -53,6 +53,7 @@ impl WindowData {
         if matches!(f, Fixture::DaemonDown | Fixture::DaemonMismatch) {
             let mismatch = f == Fixture::DaemonMismatch;
             model.apply(Event::Refreshed(Err(SourceError::DaemonUnavailable {
+                shared_with: None,
                 cli: fixtures::CLI_VERSION.into(),
                 daemon: mismatch.then(|| "4.3.0".into()),
                 message: if mismatch {
@@ -341,6 +342,7 @@ impl MainWindow {
                     None,
                 ),
                 Banner::DaemonReadFailed { error } => (BannerTone::Warn, error.clone(), None),
+                Banner::SharedHome { message } => (BannerTone::Warn, message.clone(), None),
                 // With a daemon banner, the stale banner repeats its cause.
                 // Otherwise it is the only sign the latest read failed.
                 Banner::Stale { .. } if self.daemon_banner() => continue,

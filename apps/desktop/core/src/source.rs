@@ -220,6 +220,10 @@ pub enum SourceError {
         /// the failure was the project read itself, not a mismatch.
         compatible: bool,
         message: String,
+        /// Another Hack install whose CLI reports the same hackd (same
+        /// home), as "hack 4.2.1 (stable)". The app then never starts or
+        /// restarts that hackd: the other install would replace it again.
+        shared_with: Option<String>,
     },
     Cli {
         code: String,
@@ -801,7 +805,15 @@ pub struct CliCache {
     generation: std::sync::atomic::AtomicU64,
     /// The Hack CLIs found and the one this source runs ([`LiveSource::from_env`]).
     choice: std::sync::Mutex<Option<crate::cli_choice::Choice>>,
+    /// `hack version --json` per executable, for [`CLI_VERSION_TTL`]: every
+    /// start of a launcher such as `hack-next` re-verifies its bundle.
+    versions: std::sync::Mutex<std::collections::HashMap<PathBuf, (String, std::time::Instant)>>,
+    /// The hackd socket each other install's CLI reports, per executable.
+    other_sockets: std::sync::Mutex<std::collections::HashMap<PathBuf, Option<PathBuf>>>,
 }
+
+/// How long a CLI's reported version is reused before asking again.
+const CLI_VERSION_TTL: Duration = Duration::from_secs(30);
 
 /// Where one CLI's hackd is, and when that was asked. Keyed by the CLI
 /// executable and the version it reported, so an upgrade asks again.
@@ -814,7 +826,7 @@ struct FoundHackd {
 }
 
 /// Native `ps` reads (each a CLI start) run this many at a time.
-const NATIVE_PS_PARALLEL: usize = 4;
+const NATIVE_PS_PARALLEL: usize = 8;
 
 /// After a failed lookup (or a socket that stopped answering), how long
 /// before asking the CLI again.
@@ -1049,8 +1061,8 @@ impl LiveSource {
         let generation = self.cache.generation();
         let runner = self.runner.fixed();
         let t = std::time::Instant::now();
-        let cli_version = runner.version(Duration::from_secs(5));
-        timed("hack version --json", t);
+        let cli_version = self.cli_version(&runner);
+        timed("hack version --json (cached 30 s per CLI)", t);
         let cli_version = cli_version?;
         let t = std::time::Instant::now();
         let client = self.hackd_for(&runner, Some(&cli_version), generation);
@@ -1072,19 +1084,30 @@ impl LiveSource {
             .filter(|_| daemon_compatible == Some(true))
             .and_then(|d| d.projects().ok());
         timed("hackd projects", t);
+        // A mismatch with a hackd that another install's CLI also uses:
+        // name it, and never offer to restart it.
+        let shared_with = match (&daemon, daemon_compatible, &client) {
+            (Some(_), Some(false), Some(c)) => self.install_sharing(&runner, c.socket()),
+            _ => None,
+        };
         let mut projects = from_daemon.ok_or_else(|| SourceError::DaemonUnavailable {
+            shared_with: shared_with.clone(),
             cli: cli_version.clone(),
             daemon: daemon.as_ref().map(|d| d.version.clone()),
             compatible: daemon_compatible == Some(true),
-            message: match &daemon {
-                None => "hackd is off or unreachable. Start hackd to read project status.".into(),
-                Some(d) if daemon_compatible != Some(true) => {
+            message: match (&daemon, &shared_with) {
+                (Some(d), Some(other)) => format!(
+                    "hackd {} here belongs to {other}, which shares this home with the app's CLI ({cli_version}). The app does not restart it: use {other} in the app, or give each install its own home.",
+                    d.version
+                ),
+                (None, _) => "hackd is off or unreachable. Start hackd to read project status.".into(),
+                (Some(d), None) if daemon_compatible != Some(true) => {
                     format!(
                         "{} to read project status.",
                         mismatch_text(&d.version, &cli_version)
                     )
                 }
-                Some(_) => {
+                (Some(_), None) => {
                     "hackd could not provide project status. Check again or restart hackd.".into()
                 }
             },
@@ -1193,6 +1216,67 @@ impl LiveSource {
             });
         }
         client
+    }
+
+    /// `runner`'s version, reused for [`CLI_VERSION_TTL`] per executable.
+    fn cli_version(&self, runner: &CliRunner) -> Result<String, SourceError> {
+        let program = runner.program_path();
+        if let Some(p) = &program
+            && let Ok(v) = self.cache.versions.lock()
+            && let Some((version, at)) = v.get(p)
+            && at.elapsed() < CLI_VERSION_TTL
+        {
+            return Ok(version.clone());
+        }
+        let version = runner.version(Duration::from_secs(5))?;
+        if let Some(p) = program
+            && let Ok(mut v) = self.cache.versions.lock()
+        {
+            v.insert(p, (version.clone(), std::time::Instant::now()));
+        }
+        Ok(version)
+    }
+
+    /// Another discovered install whose CLI reports `socket` as its hackd,
+    /// as "name version (channel)". Each other CLI is asked once.
+    fn install_sharing(&self, runner: &CliRunner, socket: &Path) -> Option<String> {
+        let ours = runner.program_path()?;
+        let choice = self.cli_choice()?;
+        for other in choice.installs.iter().filter(|i| i.path != ours) {
+            let other_runner = runner.with_program(&other.path);
+            let reported = {
+                let known = self
+                    .cache
+                    .other_sockets
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(&other.path).cloned());
+                match known {
+                    Some(s) => s,
+                    None => {
+                        let s = self
+                            .ask_cli_for_hackd(&other_runner)
+                            .map(|d| d.socket().to_path_buf());
+                        if let Ok(mut m) = self.cache.other_sockets.lock() {
+                            m.insert(other.path.clone(), s.clone());
+                        }
+                        s
+                    }
+                }
+            };
+            if reported.as_deref() == Some(socket) {
+                let version = self
+                    .cli_version(&other_runner)
+                    .map(|v| format!(" {v}"))
+                    .unwrap_or_default();
+                return Some(format!(
+                    "{}{version} ({})",
+                    other.name,
+                    other.channel.label()
+                ));
+            }
+        }
+        None
     }
 
     /// The cached hackd stopped answering: ask the CLI again, after the
@@ -3921,6 +4005,96 @@ esac
         );
     }
 
+    /// A fixture CLI at `version` whose `daemon status` reports `socket`,
+    /// recording each `version` call in `<dir>/version-calls`.
+    fn cli_at(tag: &str, name: &str, version: &str, socket: &Path) -> (PathBuf, PathBuf) {
+        let dir = private_temp_dir(tag);
+        let hack = dir.join(name);
+        crate::test_support::script(
+            &hack,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  version) echo x >> \"{dir}/version-calls\"; echo '{{\"ok\":true,\"data\":{{\"schema\":\"hack.version.v1\",\"version\":\"{version}\"}}}}' ;;\n  daemon) echo '{{\"running\":true,\"socket_path\":\"{sock}\"}}' ;;\n  *) exit 2 ;;\nesac\n",
+                dir = dir.display(),
+                sock = socket.display()
+            ),
+        );
+        fixture_runner(&hack)
+            .version(Duration::from_secs(60))
+            .unwrap();
+        let _ = std::fs::remove_file(dir.join("version-calls"));
+        (hack, dir)
+    }
+
+    #[test]
+    fn a_hackd_shared_with_another_install_is_named_and_never_restarted() {
+        let (daemon, server) = fake_daemon_bodies(vec![status_body("4.2.1")]);
+        let (next, next_dir) = cli_at("shared-next", "hack-next", "5.0.0", daemon.socket());
+        let (stable, stable_dir) = cli_at("shared-stable", "hack", "4.2.1", daemon.socket());
+        let src = LiveSource::new(
+            fixture_runner(&next).with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1"),
+            None,
+        );
+        let install = |name: &str, channel, path: &Path| crate::cli_choice::Install {
+            name: name.into(),
+            channel,
+            path: path.to_path_buf(),
+        };
+        *src.cache.choice.lock().unwrap() = Some(crate::cli_choice::Choice::pick(
+            vec![
+                install("hack", crate::cli_choice::Channel::Stable, &stable),
+                install("hack-next", crate::cli_choice::Channel::Prerelease, &next),
+            ],
+            Some(&next),
+        ));
+        let err = src.snapshot().expect_err("a mismatched hackd");
+        let SourceError::DaemonUnavailable {
+            shared_with,
+            message,
+            ..
+        } = &err
+        else {
+            panic!("{err:?}")
+        };
+        assert_eq!(shared_with.as_deref(), Some("hack 4.2.1 (stable)"));
+        assert!(
+            message.contains("hack 4.2.1 (stable)") && message.contains("5.0.0"),
+            "{message}"
+        );
+        let mut m = crate::viewmodel::AppModel::new();
+        m.apply(crate::viewmodel::Event::Refreshed(Err(err)));
+        assert_eq!(
+            m.daemon_recovery(),
+            None,
+            "no start or restart of another install's hackd"
+        );
+        server.join().unwrap();
+        for d in [next_dir, stable_dir] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_cli_version_is_asked_once_per_cli_not_on_every_read() {
+        let (daemon, server) = fake_daemon_bodies(vec![
+            status_body("5.0.0"),
+            PROJECTS_BODY.into(),
+            status_body("5.0.0"),
+            PROJECTS_BODY.into(),
+        ]);
+        let (hack, dir) = cli_at("version-cache", "hack", "5.0.0", daemon.socket());
+        let src = LiveSource::new(fixture_runner(&hack), None);
+        src.snapshot().unwrap();
+        src.snapshot().unwrap();
+        let calls = std::fs::read_to_string(dir.join("version-calls")).unwrap_or_default();
+        assert_eq!(
+            calls.lines().count(),
+            1,
+            "one version read for two snapshots"
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn switching_cli_reads_the_new_clis_hackd() {
         let (first, first_server) = fake_daemon(PROJECTS_BODY);
@@ -4056,6 +4230,7 @@ esac
                         &r,
                         Err(SourceError::DaemonUnavailable {
                             compatible: false,
+                            shared_with: None,
                             ..
                         })
                     ),

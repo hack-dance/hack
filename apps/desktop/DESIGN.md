@@ -162,7 +162,9 @@ snapshot, only counts and nothing else.
 
 ## 2. First-run onboarding
 
-Shown on first launch and from the Doctor row ("Run setup again"). One card per
+Shown on first launch when a check needs attention and the user has not yet
+selected an instance, opened Doctor or opened a terminal tab (a lost CLI shows
+it regardless), and from the Doctor row ("Run setup again"). One card per
 check, in order. Every check is read-only; every card offers **Check again**.
 
 ![Onboarding](diagrams/onboarding.svg) ([source](diagrams/onboarding.mmd))

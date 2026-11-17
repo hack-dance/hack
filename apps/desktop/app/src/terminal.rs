@@ -489,6 +489,7 @@ impl HackApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.user_navigated();
         self.start_tab(d, tab, false, window, cx);
     }
 

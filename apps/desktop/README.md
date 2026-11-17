@@ -283,7 +283,10 @@ Renders: [running, dark](screenshots/window/running-dark.png),
 ## Setup
 
 A live launch checks setup (DESIGN.md section 2) and opens **Set up Hack** when
-something needs attention; Doctor's **Run setup again** opens it any time. One
+something needs attention, unless you have already selected an instance,
+opened Doctor or opened a terminal tab: the check can take seconds and never
+pulls the window away from what you opened. A missing CLI still opens it.
+Doctor's **Run setup again** opens it any time. One
 card per step, in order: the Hack CLI (required), the Compose or native
 runtime, hackd, routing and DNS, certificate trust, and the login service.
 

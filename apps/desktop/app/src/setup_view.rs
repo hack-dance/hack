@@ -39,7 +39,8 @@ impl HackApp {
     }
 
     /// Fresh checks, off the UI thread. A launch check opens setup only when
-    /// something needs attention; losing the CLI always brings it back.
+    /// something needs attention and the user has not navigated since
+    /// launch; losing the CLI always brings it back.
     pub(crate) fn load_setup(&mut self, cx: &mut Context<Self>) {
         if self.setup.loading {
             self.setup.refresh_again = true;
@@ -50,8 +51,8 @@ impl HackApp {
         }
         let generation = self.setup.begin();
         if !self.live {
-            self.setup.finish(generation, self.source.setup());
-            cx.notify();
+            let report = self.source.setup();
+            self.setup_checked(generation, report, cx);
             return;
         }
         let source = self.source.clone();
@@ -60,26 +61,44 @@ impl HackApp {
                 .background_executor()
                 .spawn(async move { source.setup() })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                let needed = report.needed();
-                this.setup.finish(generation, report);
-                let again = std::mem::take(&mut this.setup.refresh_again);
-                if again {
-                    this.load_setup(cx);
-                } else {
-                    this.setup.pending_fix = false;
-                }
-                if std::mem::take(&mut this.setup_on_launch) && needed {
-                    this.pane = Pane::Setup;
-                }
-                if this.setup.report.force_cli_gate && !this.setup.report.cli_ready() {
-                    this.pane = Pane::Setup;
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.setup_checked(generation, report, cx));
         })
         .detach();
         cx.notify();
+    }
+
+    /// A setup check finished. The launch check opens setup only if the user
+    /// has not gone anywhere since launch (see [`Self::user_navigated`]):
+    /// the check can take seconds, and must never pull the window away from
+    /// a project, a Doctor run or a terminal tab the user opened meanwhile.
+    pub(crate) fn setup_checked(
+        &mut self,
+        generation: u64,
+        report: hack_desktop_core::setup::Report,
+        cx: &mut Context<Self>,
+    ) {
+        let needed = report.needed();
+        self.setup.finish(generation, report);
+        let again = std::mem::take(&mut self.setup.refresh_again);
+        if again {
+            self.load_setup(cx);
+        } else {
+            self.setup.pending_fix = false;
+        }
+        if std::mem::take(&mut self.setup_on_launch) && needed {
+            self.pane = Pane::Setup;
+        }
+        if self.setup.report.force_cli_gate && !self.setup.report.cli_ready() {
+            self.pane = Pane::Setup;
+        }
+        cx.notify();
+    }
+
+    /// The user chose where to look (an instance, Doctor, a terminal tab):
+    /// the launch check no longer opens setup by itself. Losing the CLI
+    /// still does.
+    pub(crate) fn user_navigated(&mut self) {
+        self.setup_on_launch = false;
     }
 
     fn skip_setup(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -556,6 +575,43 @@ mod tests {
         assert!(ready, "the fixture has a CLI");
         cx.update(|cx| app.update(cx, |a, cx| a.finish_setup(cx)));
         assert_eq!(cx.update(|cx| app.read(cx).pane), Pane::Project);
+    }
+
+    /// A launch check that finishes after the user opened something (the
+    /// drive's select, Logs, host shell) leaves the window where it is.
+    #[test]
+    fn a_late_launch_check_never_replaces_what_the_user_opened() {
+        let (mut cx, app) = app();
+        let partial = hack_desktop_core::setup_fixtures::load("partial").expect("fixture");
+        assert!(partial.needed(), "the fixture has something to do");
+        // Launch: the check is in flight and nobody has moved yet.
+        let generation = cx.update(|cx| {
+            app.update(cx, |a, _| {
+                a.setup_on_launch = true;
+                a.setup.begin()
+            })
+        });
+        cx.update(|cx| {
+            app.update(cx, |a, cx| a.select_project("storefront".into(), cx));
+        });
+        cx.update(|cx| {
+            app.update(cx, |a, cx| a.setup_checked(generation, partial.clone(), cx));
+        });
+        assert_eq!(
+            cx.update(|cx| app.read(cx).pane),
+            Pane::Project,
+            "the project the user selected stays on screen"
+        );
+        // Without any navigation, the launch check still opens setup.
+        let (mut cx, app) = super::tests::app();
+        let generation = cx.update(|cx| {
+            app.update(cx, |a, _| {
+                a.setup_on_launch = true;
+                a.setup.begin()
+            })
+        });
+        cx.update(|cx| app.update(cx, |a, cx| a.setup_checked(generation, partial, cx)));
+        assert_eq!(cx.update(|cx| app.read(cx).pane), Pane::Setup);
     }
 
     #[test]

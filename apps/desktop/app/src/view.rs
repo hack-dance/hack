@@ -297,6 +297,7 @@ impl HackApp {
     /// doctor when it never ran or the result is older than 10 minutes.
     pub fn open_doctor(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
         self.pane = Pane::Doctor;
+        self.user_navigated();
         self.doctor.filter = filter;
         if self.doctor.needs_refresh(std::time::Instant::now()) {
             self.load_doctor(cx);
@@ -661,6 +662,7 @@ impl HackApp {
     /// Logs tab's stream and its service filter.
     pub(crate) fn after_select(&mut self, cx: &mut Context<Self>) {
         self.pane = Pane::Project;
+        self.user_navigated();
         self.copied = None;
         self.env.begin();
         if self.tab == 2 {

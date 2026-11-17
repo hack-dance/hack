@@ -1471,16 +1471,18 @@ services with a native HTTP probe, services with host dependencies and
 dependency-cache initializers. Remove the `restart` key from those services, or
 keep them on the Compose backend.
 
-A service that receives private values (managed environment values, privately
-resolved Compose interpolation or a delivered file such as the gcloud ADC
-snapshot) starts without its engine restart policy instead of refusing:
+A service whose process receives private values (managed environment values or
+privately resolved Compose interpolation) starts without its engine restart
+policy instead of refusing:
 delivery is single-use and time-bounded, and values are never kept at rest in
 the container, so an engine restart would come back without them. Foreground
 `up` and preflight name each such service, for example `Service web: restart:
 unless-stopped is not applied, because the service receives private values that
 native delivers once per container start. If it crashes it stays stopped until
 you run hack restart, which restarts the whole project with a fresh delivery.` Preflight reports it as the warning
-`restart_policy_not_applied`.
+`restart_policy_not_applied`. A service that receives only a private file, such
+as the gcloud ADC snapshot, keeps its restart policy: the file stays mounted for
+the container's lifetime and its entrypoint is unchanged.
 
 Every owned stop first sets the engine policy back to `no` and confirms that with a
 fresh inspection, then requests the stop. A restart that was already pending is

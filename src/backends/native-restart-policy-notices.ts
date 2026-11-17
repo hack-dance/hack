@@ -68,8 +68,8 @@ export function reportNativeRestartPolicyNotices(
 
 /**
  * One notice per active service that declares an automatic restart policy and
- * receives private values (managed environment, privately resolved shell
- * values or file members): native starts it without the engine policy,
+ * receives private values (managed or privately resolved shell values):
+ * native starts it without the engine policy,
  * because private delivery is single-incarnation and values are never kept at
  * rest in the container (HACK-2324). Only the service name and the
  * closed-grammar policy are printed.
@@ -111,21 +111,29 @@ export function nativeManagedRestartNotices(opts: {
   return notices;
 }
 
-/** Services the private envelope delivers to: values, shell values or files. */
+/**
+ * Services whose process receives private values (managed or privately
+ * resolved shell values): exactly the runtime's managed-environment set,
+ * whose restart policy native drops. A service that only receives a private
+ * file (such as the gcloud ADC snapshot) keeps its entrypoint and its file for
+ * the container's lifetime, so its restart policy still applies.
+ */
 export function nativePrivatelyDeliveredServices(input: {
   readonly managedEnvironment: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
   readonly shellEnvironment?: Readonly<Record<string, unknown>>;
-  readonly managedFiles?: Readonly<Record<string, readonly unknown[]>>;
 }): Set<string> {
+  const nonEmpty = (value: unknown) =>
+    typeof value === "object" &&
+    value !== null &&
+    Object.keys(value).length > 0;
   return new Set([
     ...Object.entries(input.managedEnvironment)
-      .filter(([, values]) => Object.keys(values).length > 0)
+      .filter(([, values]) => nonEmpty(values))
       .map(([name]) => name),
-    ...Object.keys(input.shellEnvironment ?? {}),
-    ...Object.entries(input.managedFiles ?? {})
-      .filter(([, files]) => files.length > 0)
+    ...Object.entries(input.shellEnvironment ?? {})
+      .filter(([, values]) => nonEmpty(values))
       .map(([name]) => name),
   ]);
 }

@@ -944,6 +944,53 @@ test("HACK-2324: a privately delivered service starts without its restart policy
   expect(notices.join("\n")).not.toContain("synthetic-secret");
 });
 
+test("HACK-2324: a service that receives only a private file keeps its restart policy and is not named", async () => {
+  // The fixture delivers a managed value to web; worker gets only a file.
+  const { opts } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: {
+        web: { image: `sha256:${"e".repeat(64)}` },
+        worker: { image: `sha256:${"e".repeat(64)}`, restart: "always" },
+      },
+    }),
+    managedFiles: {
+      worker: [
+        {
+          name: "gcloud-adc.json",
+          target: "/config/adc.json",
+          content: Buffer.from("synthetic-adc-bytes"),
+        },
+      ],
+    },
+  });
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) =>
+    await review({
+      ...request,
+      run: (reviewed) =>
+        request.run({
+          ...reviewed,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: { active: true },
+                worker: { active: true, restart: "always" },
+              },
+              diagnostics: [],
+            },
+          },
+        }),
+    });
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(notices.filter((line) => line.includes("private values"))).toEqual([]);
+});
+
 test("published, attempted or retained runs never have their data removed", async () => {
   // A successful start publishes its mapping before the graph stops.
   const published = await fixture();

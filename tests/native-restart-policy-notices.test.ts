@@ -60,19 +60,21 @@ test("unreviewed names, policies outside the grammar and inactive services are n
 });
 
 test("HACK-2324: only active, privately delivered services with an automatic policy are named", () => {
+  // Mirrors the runtime's managed-environment set: non-empty values only.
+  // A file-only recipient keeps its restart policy, so it is not named.
   const delivered = nativePrivatelyDeliveredServices({
     managedEnvironment: { web: { TOKEN: "x" }, empty: {} },
-    shellEnvironment: { shell: {} },
-    managedFiles: { adc: [{}], none: [] },
+    shellEnvironment: { shell: { VALUE: "x" }, blank: {} },
   });
-  expect([...delivered].sort()).toEqual(["adc", "shell", "web"]);
+  expect([...delivered].sort()).toEqual(["shell", "web"]);
   const restart = (policy: string) => ({ image: "x", restart: policy });
   const notices = nativeManagedRestartNotices({
     compose: {
       services: {
         web: restart("unless-stopped"),
         adc: restart("on-failure:3"),
-        shell: restart("no"),
+        shell: restart("on-failure:3"),
+        none: restart("no"),
         worker: restart("always"),
         inactive: restart("always"),
         "bad name!": restart("always"),
@@ -83,14 +85,15 @@ test("HACK-2324: only active, privately delivered services with an automatic pol
         web: { active: true },
         adc: { active: true },
         shell: { active: true },
+        none: { active: true },
         worker: { active: true },
         inactive: { active: false },
         "bad name!": { active: true },
       },
     },
-    delivered: new Set([...delivered, "inactive", "bad name!"]),
+    delivered: new Set([...delivered, "none", "inactive", "bad name!"]),
   });
-  expect(notices.map((notice) => notice.service)).toEqual(["adc", "web"]);
+  expect(notices.map((notice) => notice.service)).toEqual(["shell", "web"]);
   expect(notices[0]?.line).toContain("restart: on-failure:3 is not applied");
   expect(notices[0]?.line).toContain(
     "run hack restart, which restarts the whole project"

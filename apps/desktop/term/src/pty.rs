@@ -45,8 +45,10 @@ use crate::session::{
 
 /// How long a dropped session has after SIGHUP before SIGKILL.
 pub const TERMINATE_GRACE: Duration = Duration::from_millis(300);
-/// The shorter grace used when the whole app is quitting.
-pub const QUIT_GRACE: Duration = Duration::from_millis(100);
+/// The grace an open tab's session gets after SIGHUP when the whole app
+/// is quitting: long enough for a shell to save its history, short enough
+/// that SIGKILL lands well inside GPUI's 200 ms shutdown window under load.
+pub const QUIT_GRACE: Duration = Duration::from_millis(50);
 /// Most child output held in memory before the reader stops reading.
 pub const OUTPUT_QUEUE_BYTES: usize = 1 << 20;
 /// Most input (keys, paste) held for a child that is not reading.
@@ -417,7 +419,10 @@ impl Pty {
     /// so the caller can report [`Teardown::survivors`] without waiting.
     pub fn terminate_in_background(mut self) -> PendingTeardown {
         let (tx, rx) = std::sync::mpsc::channel();
-        let hurry = Hurry::new(QUIT_GRACE);
+        // This session already had its hangup and SIGTERM. At quit nothing
+        // is gained by waiting: SIGKILL at once, so it lands well inside
+        // GPUI's fixed shutdown window even on a loaded machine.
+        let hurry = Hurry::new(Duration::ZERO);
         match self.session.take() {
             None => {
                 let _ = tx.send(Teardown::nothing());

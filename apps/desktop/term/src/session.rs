@@ -534,9 +534,10 @@ impl PendingTeardown {
         self.rx.recv_timeout(timeout).ok()
     }
 
-    /// Cut the rest of the grace period short: SIGKILL follows within the
-    /// quit grace ([`crate::pty::QUIT_GRACE`]) of the reaper seeing this.
-    /// For app quit, so a closed tab's teardown fits the quit deadline.
+    /// Cut the rest of the grace period short: the reaper sends SIGKILL as
+    /// soon as it sees this (the session already had its hangup and
+    /// SIGTERM). For app quit, so a closed or ended tab's teardown fits
+    /// GPUI's fixed shutdown window even on a loaded machine.
     pub fn hurry(&self) {
         self.hurry.set.store(true, Ordering::Release);
     }

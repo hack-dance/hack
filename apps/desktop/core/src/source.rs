@@ -374,6 +374,25 @@ pub trait Source: Send + Sync {
     /// A [`SourceError`] when no usable snapshot could be read.
     fn snapshot(&self) -> Result<Snapshot, SourceError>;
 
+    /// The snapshot without reading native projects: each native row with a
+    /// checkout has [`ProjectRow::native_pending`] set and no observation,
+    /// for the caller to read with [`Self::native_ps`] one at a time. A
+    /// native `hack ps` is a CLI start each (seconds), so the window shows
+    /// Compose state at once and fills native state in as each returns.
+    /// Sources without that cost return the full snapshot.
+    ///
+    /// # Errors
+    /// As [`Self::snapshot`].
+    fn listing(&self) -> Result<Snapshot, SourceError> {
+        self.snapshot()
+    }
+
+    /// One native project's `hack ps --json`, run in `repo_root` with the
+    /// native backend. `None` when it could not be read.
+    fn native_ps(&self, _repo_root: &Path) -> Option<crate::models::NativePs> {
+        None
+    }
+
     /// The `hack` executable this source runs, for sessions the app starts
     /// itself (a terminal tab running `hack exec`, `hack logs` or `hack host
     /// shell`). `None` when there is no CLI (fixtures, CLI missing).
@@ -969,7 +988,7 @@ struct FoundHackd {
 }
 
 /// Native `ps` reads (each a CLI start) run this many at a time.
-const NATIVE_PS_PARALLEL: usize = 8;
+pub const NATIVE_PS_PARALLEL: usize = 8;
 
 /// After a failed lookup (or a socket that stopped answering), how long
 /// before asking the CLI again.
@@ -1209,12 +1228,64 @@ impl LiveSource {
     }
 
     fn read_snapshot(&self, steps: &mut Vec<(String, Duration)>) -> Result<Snapshot, SourceError> {
+        let runner = self.runner.fixed();
+        let mut snapshot = self.read_listing(&runner, steps)?;
+        // The window shows the list here (`Source::listing`); a full
+        // snapshot then asks native ps for each, a few at a time: each is a
+        // CLI start.
+        let listed: Duration = steps.iter().map(|(_, d)| *d).sum();
+        steps.push(("list shown in the window after".into(), listed));
+        let native = Self::native_runner(&runner);
+        let t = std::time::Instant::now();
+        let mut rows: Vec<&mut crate::models::ProjectRow> = snapshot
+            .projects
+            .projects
+            .iter_mut()
+            .filter(|r| r.native_pending)
+            .collect();
+        let count = rows.len();
+        for chunk in rows.chunks_mut(NATIVE_PS_PARALLEL) {
+            std::thread::scope(|s| {
+                for row in chunk.iter_mut() {
+                    let native = native.clone();
+                    s.spawn(move || {
+                        let root = row.repo_root.clone().unwrap_or_default();
+                        row.native = Self::read_native_ps(&native, Path::new(&root));
+                        row.native_pending = false;
+                    });
+                }
+            });
+        }
+        steps.push((
+            format!("native ps for {count} project(s), {NATIVE_PS_PARALLEL} at a time"),
+            t.elapsed(),
+        ));
+        Ok(snapshot)
+    }
+
+    fn native_runner(runner: &CliRunner) -> CliRunner {
+        runner.clone().with_env("HACK_RUNTIME_BACKEND", "native")
+    }
+
+    fn read_native_ps(native: &CliRunner, root: &Path) -> Option<crate::models::NativePs> {
+        native
+            .run_json(&["ps", "--json"], Some(root), Self::READ)
+            .ok()
+    }
+
+    /// Everything but native `ps`: native rows with a checkout come back
+    /// with `native_pending` set.
+    fn read_listing(
+        &self,
+        runner: &CliRunner,
+        steps: &mut Vec<(String, Duration)>,
+    ) -> Result<Snapshot, SourceError> {
         let mut timed = |label: &str, started: std::time::Instant| {
             steps.push((label.to_owned(), started.elapsed()));
         };
         // One CLI for the whole read, even if the user switches meanwhile.
         let generation = self.cache.generation();
-        let runner = self.runner.fixed();
+        let runner = runner.clone();
         let t = std::time::Instant::now();
         let cli_version = self.cli_version(&runner);
         timed("hack version --json (cached 30 s per CLI)", t);
@@ -1283,33 +1354,11 @@ impl LiveSource {
         for row in &mut projects.projects {
             row.resolve_branch_owners();
         }
-        // Project views do not read native projects; ask native ps for each,
-        // a few at a time: each is a CLI start.
-        let native = runner.clone().with_env("HACK_RUNTIME_BACKEND", "native");
-        let t = std::time::Instant::now();
-        let mut rows: Vec<&mut crate::models::ProjectRow> = projects
-            .projects
-            .iter_mut()
-            .filter(|r| r.is_native() && r.repo_root.is_some())
-            .collect();
-        let count = rows.len();
-        for chunk in rows.chunks_mut(NATIVE_PS_PARALLEL) {
-            std::thread::scope(|s| {
-                for row in chunk.iter_mut() {
-                    let native = native.clone();
-                    s.spawn(move || {
-                        let root = row.repo_root.clone().unwrap_or_default();
-                        row.native = native
-                            .run_json(&["ps", "--json"], Some(Path::new(&root)), Self::READ)
-                            .ok();
-                    });
-                }
-            });
+        // Project views do not read native projects: `hack ps` does, one CLI
+        // start each. Marked here, read by the caller.
+        for row in &mut projects.projects {
+            row.native_pending = row.is_native() && row.repo_root.is_some();
         }
-        timed(
-            &format!("native ps for {count} project(s), {NATIVE_PS_PARALLEL} at a time"),
-            t,
-        );
         Ok(Snapshot {
             cli_version,
             projects,
@@ -1790,6 +1839,14 @@ impl Source for LiveSource {
 
     fn snapshot(&self) -> Result<Snapshot, SourceError> {
         self.snapshot_timed().0
+    }
+
+    fn listing(&self) -> Result<Snapshot, SourceError> {
+        self.read_listing(&self.runner.fixed(), &mut Vec::new())
+    }
+
+    fn native_ps(&self, repo_root: &Path) -> Option<crate::models::NativePs> {
+        Self::read_native_ps(&Self::native_runner(&self.runner.fixed()), repo_root)
     }
 
     fn act(
@@ -2438,6 +2495,68 @@ mod tests {
     }
 
     /// A trusted fake daemon provides rows; only native ps uses the fake CLI.
+    #[test]
+    fn a_listing_runs_no_native_ps_and_each_native_read_runs_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "hack-desktop-listing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = dir.join("hack");
+        let log = dir.join("ps.log");
+        crate::test_support::script(
+            &hack,
+            format!(
+                r#"#!/bin/sh
+case "$1" in
+  version) echo '{{"ok":true,"data":{{"schema":"hack.version.v1","version":"5.0.0"}}}}' ;;
+  ps) echo "$HACK_RUNTIME_BACKEND" >> '{log}'; echo '{{"ok":true,"data":{{"backend":"native","status":"not_started","items":[]}}}}' ;;
+esac
+"#,
+                log = log.display()
+            ),
+        );
+        let runner = || {
+            fixture_runner(&hack)
+                .with_env("HOME", &dir.to_string_lossy())
+                .with_env("HACK_HOME", &dir.to_string_lossy())
+                .with_env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+        };
+        runner().version(Duration::from_secs(60)).unwrap();
+        let (daemon, server) = fake_daemon(
+            r#"{"runtime_ok":true,"projects":[{"name":"svc","status":"running","repo_root":"/work/svc"},{"name":"nat","status":"unavailable","repo_root":"/work/nat","backend":"native"},{"name":"gone","status":"missing","backend":"native"}]}"#,
+        );
+        let src = LiveSource {
+            cache: Default::default(),
+            runner: runner(),
+            daemon: Some(daemon),
+        };
+        let listing = src.listing().unwrap();
+        server.join().unwrap();
+        assert!(!log.exists(), "the listing ran no hack ps");
+        let row = |name: &str| {
+            listing
+                .projects
+                .projects
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .clone()
+        };
+        assert!(row("nat").native_pending && row("nat").native.is_none());
+        assert!(!row("svc").native_pending, "Compose rows are complete");
+        assert!(!row("gone").native_pending, "no checkout, nothing to read");
+        let ps = src.native_ps(Path::new("/work/nat")).unwrap();
+        let backends = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(ps.status, "not_started");
+        assert_eq!(backends, "native\n", "one ps, with the native backend");
+    }
+
     #[test]
     fn automatic_daemon_status_reads_run_the_selected_cli_in_its_checked_context() {
         let dir = std::env::temp_dir().join(format!(

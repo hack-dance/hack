@@ -55,6 +55,14 @@ cargo run -p hack-desktop-core --bin hack-desktop-state -- --reads 3 --compact  
 matches the CLI, plus native `hack ps` for native projects. This app does not
 use a CLI project-list fallback. Without a matching daemon the reader reports
 Unknown, rather than writing or claiming no projects exist.
+The window does not wait for native projects: a native project's `hack ps`
+is a CLI start each (seconds, more for a prerelease channel), so it shows the
+list and Compose state at once and fills each native project in as its
+`hack ps` returns, at most 8 at a time, keeping the previous state meanwhile
+("Reading native status…" on a first load). A kept state is not evidence: it
+never clears a failed start. `read_steps` names when the window shows the
+list (`list shown in the window after`) before the native reads. This lasts
+until hackd reports native runtime itself (DESIGN.md R19).
 The window retains stale names with Unknown states and disables project actions.
 It offers **Start hackd** when unreachable or **Restart hackd** for a version
 mismatch. Only a fresh matching snapshot restores observed states.

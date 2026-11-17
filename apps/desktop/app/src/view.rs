@@ -17,12 +17,12 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, KeyBinding, ParentElement,
-    Render, SharedString, Styled, Window, div, prelude::*, px,
+    Render, SharedString, Styled, Task, Window, div, prelude::*, px,
 };
 use hack_desktop_core::doctor::{DoctorPane, Finish, TargetKey, should_auto_refresh};
 use hack_desktop_core::machine_gate::{Holder, MachineGate};
 use hack_desktop_core::source::{
-    ActionOutcome, DaemonRecovery, DoctorTarget, Snapshot, Source, SourceError,
+    ActionOutcome, DaemonRecovery, DoctorTarget, NATIVE_PS_PARALLEL, Snapshot, Source, SourceError,
 };
 
 use crate::doctor_view::Pane;
@@ -551,10 +551,22 @@ impl HackApp {
                     .background_executor()
                     .spawn({
                         let source = source.clone();
-                        async move { source.snapshot() }
+                        async move { source.listing() }
                     })
                     .await;
-                let _ = this.update(cx, |this, cx| this.apply_refresh(token, snap, cx));
+                let workers = this
+                    .update(cx, |this, cx| {
+                        if this.apply_refresh(token, snap, cx) {
+                            this.read_pending_native(token, cx)
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .unwrap_or_default();
+                // The next poll waits for this one's native reads.
+                for worker in workers {
+                    worker.await;
+                }
                 let delay = this
                     .update(cx, |this, _| this.model.poll_interval())
                     .unwrap_or(Duration::from_secs(10));
@@ -633,11 +645,79 @@ impl HackApp {
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
-                .spawn(async move { source.snapshot() })
+                .spawn(async move { source.listing() })
                 .await;
-            let _ = this.update(cx, |this, cx| this.apply_refresh(token, snap, cx));
+            let _ = this.update(cx, |this, cx| {
+                if this.apply_refresh(token, snap, cx) {
+                    for worker in this.read_pending_native(token, cx) {
+                        worker.detach();
+                    }
+                }
+            });
         })
         .detach();
+    }
+
+    /// Read each native project the shown listing left pending, at most
+    /// [`NATIVE_PS_PARALLEL`] at a time, applying each `hack ps` as it
+    /// returns ([`AppModel::finish_native`] drops it once a newer read is
+    /// shown or an action starts). The tasks end when the queue is empty.
+    fn read_pending_native(
+        &mut self,
+        token: RefreshToken,
+        cx: &mut Context<Self>,
+    ) -> Vec<Task<()>> {
+        let queue = std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::from(
+            self.model.pending_native(),
+        )));
+        let workers = queue.borrow().len().min(NATIVE_PS_PARALLEL);
+        (0..workers)
+            .map(|_| {
+                let queue = queue.clone();
+                let source = self.source.clone();
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        let Some((name, root)) = queue.borrow_mut().pop_front() else {
+                            return;
+                        };
+                        let ps = cx
+                            .background_executor()
+                            .spawn({
+                                let source = source.clone();
+                                let root = root.clone();
+                                async move { source.native_ps(std::path::Path::new(&root)) }
+                            })
+                            .await;
+                        let applied = this
+                            .update(cx, |this, cx| {
+                                let applied = this.model.finish_native(token, &name, &root, ps);
+                                if applied {
+                                    this.native_filled(cx);
+                                }
+                                applied
+                            })
+                            .unwrap_or(false);
+                        // A newer read or an action superseded this one: the
+                        // rest of its queue is stale too.
+                        if !applied {
+                            return;
+                        }
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// A native project's state arrived: a shown stopped project's Logs
+    /// read follows once it runs, as after a full refresh.
+    fn native_filled(&mut self, cx: &mut Context<Self>) {
+        if self.tab == 1 {
+            let running = self.model.detail().is_some_and(|d| d.state.is_active());
+            if self.logs.model.should_follow_now(running) {
+                self.open_logs(cx);
+            }
+        }
+        cx.notify();
     }
 
     /// The last Start / Restart hackd failure, if any.
@@ -1859,6 +1939,145 @@ mod tests {
         assert_eq!(
             doctor_mark(&never, &m.list()),
             DoctorMark::Dot(Status::Unknown)
+        );
+    }
+}
+
+/// The live refresh path in a window: list first, then each native `ps`.
+#[cfg(all(test, feature = "screenshots"))]
+mod native_fill_tests {
+    use super::*;
+    use gpui_kit::{HeadlessAppContext, WindowOptions};
+    use hack_desktop_core::fixtures::{self, Fixture};
+    use hack_desktop_core::models::{LogEntry, NativePs};
+    use hack_desktop_core::source::{FixtureSource, LogFeed};
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    /// Fixture data, with `storefront` native: `listing` leaves it pending,
+    /// `native_ps` reports it stopped. Records every read, in order.
+    struct Listing {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Listing {
+        fn snapshot_with(&self, pending: bool) -> Result<Snapshot, SourceError> {
+            let mut s = fixtures::snapshot(Fixture::Running)?;
+            for row in &mut s.projects.projects {
+                if row.name == "storefront" {
+                    row.backend = Some("native".into());
+                    row.repo_root = Some("/work/storefront".into());
+                    row.native_pending = pending;
+                }
+            }
+            Ok(s)
+        }
+        fn log(&self, call: &str) {
+            self.calls.lock().unwrap().push(call.to_owned());
+        }
+    }
+
+    impl Source for Listing {
+        fn snapshot(&self) -> Result<Snapshot, SourceError> {
+            self.log("snapshot");
+            self.snapshot_with(false)
+        }
+        fn listing(&self) -> Result<Snapshot, SourceError> {
+            self.log("listing");
+            self.snapshot_with(true)
+        }
+        fn native_ps(&self, repo_root: &Path) -> Option<NativePs> {
+            self.log(&format!("ps {}", repo_root.display()));
+            Some(NativePs {
+                status: "not_started".into(),
+                items: vec![],
+            })
+        }
+        fn act(
+            &self,
+            repo_root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            action: Action,
+        ) -> Result<ActionOutcome, SourceError> {
+            FixtureSource(Fixture::Running).act(repo_root, native, branch, action)
+        }
+        fn log_tail(
+            &self,
+            repo_root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            lines: u32,
+        ) -> Result<Vec<LogEntry>, String> {
+            FixtureSource(Fixture::Running).log_tail(repo_root, native, branch, lines)
+        }
+        fn doctor_runs(
+            &self,
+            projects: &[DoctorTarget],
+        ) -> Vec<hack_desktop_core::doctor::DoctorRun> {
+            FixtureSource(Fixture::Running).doctor_runs(projects)
+        }
+        fn open_logs(
+            &self,
+            repo_root: &Path,
+            native: bool,
+            branch: Option<&str>,
+            args: &[String],
+        ) -> Result<Box<dyn LogFeed>, String> {
+            FixtureSource(Fixture::Running).open_logs(repo_root, native, branch, args)
+        }
+    }
+
+    #[test]
+    fn a_refresh_lists_first_and_then_reads_each_native_project() {
+        let source = Arc::new(Listing {
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_kit::NoopTextSystem::new()),
+            Arc::new(hack_desktop_ui::icons::Assets),
+            || Ok(None),
+        );
+        cx.update(gpui_kit::init);
+        let options = WindowOptions {
+            focus: false,
+            show: false,
+            ..WindowOptions::default()
+        };
+        let (_, app) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, |window, cx| {
+                    cx.new(|cx| HackApp::new(source.clone(), false, window, cx))
+                })
+            })
+            .unwrap();
+        source.calls.lock().unwrap().clear();
+        cx.update(|cx| app.update(cx, |a, cx| a.refresh_now_async(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            *source.calls.lock().unwrap(),
+            vec!["listing".to_owned(), "ps /work/storefront".to_owned()],
+            "the window lists without native ps, then reads each native project once"
+        );
+        let state = cx.update(|cx| {
+            let a = app.read(cx);
+            assert!(a.model.pending_native().is_empty());
+            a.model
+                .snapshot()
+                .and_then(|s| {
+                    s.projects
+                        .projects
+                        .iter()
+                        .find(|p| p.name == "storefront")
+                        .cloned()
+                })
+                .and_then(|p| p.native)
+                .map(|n| n.status)
+        });
+        assert_eq!(
+            state.as_deref(),
+            Some("not_started"),
+            "applied when it returned"
         );
     }
 }

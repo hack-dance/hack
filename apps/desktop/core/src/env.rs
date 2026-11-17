@@ -58,15 +58,22 @@ impl EnvRow {
         matches!(self.storage.kind.as_str(), "secret" | "encrypted")
     }
 
-    /// The value comes from a worktree-local layer
-    /// (`hack.env.local.yaml`, `hack.env.<overlay>.local.yaml`): a write
-    /// must go there too (`--local`), or the local value keeps winning.
+    /// The value comes from a worktree-local layer: `hack.env.local.yaml`,
+    /// `hack.env.<overlay>.local.yaml`, or a legacy dotenv file (`.env`,
+    /// `.env.<overlay>`) or `local` layer, which are not committed either. A
+    /// write must go there too (`--local`): otherwise the local value keeps
+    /// winning, and a value kept out of the repository would be copied into
+    /// the shared, committed YAML.
     #[must_use]
     pub fn is_local_layer(&self) -> bool {
-        self.layer
-            .as_deref()
-            .and_then(|l| l.rsplit('/').next())
-            .is_some_and(|name| name.starts_with("hack.env") && name.ends_with(".local.yaml"))
+        let Some(layer) = self.layer.as_deref() else {
+            return false;
+        };
+        let name = layer.rsplit('/').next().unwrap_or(layer);
+        name == "local"
+            || name == ".env"
+            || name.starts_with(".env.")
+            || (name.starts_with("hack.env") && name.ends_with(".local.yaml"))
     }
 
     /// A plaintext value: shown with the listing, no eye needed.
@@ -736,6 +743,11 @@ mod tests {
         assert!(row(Some(".hack/hack.env.staging.local.yaml")).is_local_layer());
         assert!(!row(Some(".hack/hack.env.default.yaml")).is_local_layer());
         assert!(!row(Some(".hack/hack.env.staging.yaml")).is_local_layer());
+        // Legacy dotenv files and the legacy `local` layer are local too.
+        assert!(row(Some("/work/p/.hack/.env")).is_local_layer());
+        assert!(row(Some(".hack/.env.staging")).is_local_layer());
+        assert!(row(Some("local")).is_local_layer());
+        assert!(!row(Some(".hack/hack.env.json")).is_local_layer());
         assert!(!row(None).is_local_layer());
     }
 

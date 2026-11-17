@@ -527,7 +527,9 @@ command Save runs, for example
 The value goes to the CLI on stdin, never in argv or the environment, and the
 command names the overlay and scope explicitly. An existing row is written in
 its own scope (a global variable shown in a service listing stays global) and
-its own layer (a row from `hack.env[.<overlay>].local.yaml` with `--local`); a
+its own layer (a row from `hack.env[.<overlay>].local.yaml`, or a legacy
+`.env` / `.env.<overlay>`, with `--local`, so a value kept out of the
+repository never lands in the shared YAML); a
 new one goes to the scope listed, in the shared file. A plaintext value starts filled in (read for
 that one name first when the listing has not shown it; until then Save
 stores only text you type, never an empty field, so an unchanged Save never

@@ -21,6 +21,7 @@ import {
   type NativeEnvMetadata,
   parseNativeEnvMetadata,
 } from "../lib/native-env-plan-protocol.ts";
+import { isNativeEnvironmentNameError } from "../lib/native-environment-name-error.ts";
 import {
   type NativeAuthoredReceipt,
   type NativeAuthoredReview,
@@ -434,7 +435,8 @@ async function storage<T>(
     // Recovery must still acquire its leases and prove the selected state itself.
     if (
       error instanceof NativeAuthoredStopUnavailableError ||
-      error instanceof NativeAuthoredReservedStartError
+      error instanceof NativeAuthoredReservedStartError ||
+      isNativeEnvironmentNameError(error)
     ) {
       throw error;
     }

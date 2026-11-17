@@ -11,6 +11,7 @@ import {
   NativeConfigCompilerError,
   nativeConfigCompilerTimeoutWithin,
 } from "../lib/native-config-compiler.ts";
+import { renderNativeEnvironmentNameError } from "../lib/native-environment-name-error.ts";
 import { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
 import {
   assertNativeFiniteHookBindings,
@@ -138,6 +139,11 @@ export class NativeAuthoredProjectStartError extends Error {
   readonly stage: Stage;
   readonly compilerCode?: string;
   readonly nativeConfigurationRefusals?: readonly NativeConfigurationRefusal[];
+  /** Set when the project configuration set a non-portable variable name (HACK-2219). */
+  readonly environmentName?: {
+    readonly code: "E_CONFIG_INVALID";
+    readonly reason: "environment_name_not_portable";
+  };
 
   constructor(opts: {
     readonly outcome: Outcome;
@@ -147,11 +153,22 @@ export class NativeAuthoredProjectStartError extends Error {
     readonly stage?: Stage;
     readonly compilerCode?: string;
     readonly configurationRefusals?: unknown;
+    /** Only a genuine NativeEnvironmentNameError is used, by its construction-time sentence. */
+    readonly environmentName?: unknown;
   }) {
-    const nativeCode =
-      opts.nativeCode && CODE.test(opts.nativeCode)
-        ? opts.nativeCode
-        : undefined;
+    const environmentName = renderNativeEnvironmentNameError(
+      opts.environmentName
+    );
+    let nativeCode: string | undefined = environmentName
+      ? "environment_name_not_portable"
+      : undefined;
+    if (
+      nativeCode === undefined &&
+      opts.nativeCode !== undefined &&
+      CODE.test(opts.nativeCode)
+    ) {
+      nativeCode = opts.nativeCode;
+    }
     const stage = STAGES.includes(opts.stage ?? "selection")
       ? (opts.stage ?? "selection")
       : "selection";
@@ -177,8 +194,14 @@ export class NativeAuthoredProjectStartError extends Error {
       )
       .join("\n");
     super(
-      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.${findings ? `\n${findings}` : ""}`
+      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.${findings ? `\n${findings}` : ""}${environmentName ? `\n${environmentName}` : ""}`
     );
+    if (environmentName) {
+      this.environmentName = {
+        code: "E_CONFIG_INVALID",
+        reason: "environment_name_not_portable",
+      };
+    }
     this.outcome = opts.outcome;
     this.canceled = opts.canceled;
     this.nativeCode = nativeCode;
@@ -879,6 +902,7 @@ async function failedAdmission(opts: {
     nativeCauseCode,
     stage: opts.stage,
     compilerCode: compilerDiagnostic(error),
+    environmentName: error,
     // These entries have already passed the runtime decoder. Restore only its
     // literal-text marker for the startup error's independently checked boundary.
     configurationRefusals:

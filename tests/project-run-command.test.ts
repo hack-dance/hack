@@ -9,6 +9,7 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: Array<{
@@ -153,6 +154,33 @@ test("hack run -- passes child flags intact and keeps the default compose projec
     "other",
   ]);
   expect(runCalls[0]?.composeProject).toBeNull();
+});
+
+test("hack run is not refused by non-portable inherited names and injects only project values (HACK-2219)", async () => {
+  const projectRoot = await createProject();
+  const names = ["BASH_FUNC_hack2219%%", "FOO%%"] as const;
+  const saved = names.map((name) => [name, process.env[name]] as const);
+  for (const name of names) {
+    process.env[name] = "fixture-odd-name";
+  }
+  try {
+    const exitCode = await runCli([
+      "run",
+      `--path=${projectRoot}`,
+      "--",
+      "api",
+      "true",
+    ]);
+    expect(exitCode).toBe(0);
+    expect(runCalls).toHaveLength(1);
+    for (const name of names) {
+      expect(Object.keys(runCalls[0]?.env ?? {})).not.toContain(name);
+    }
+  } finally {
+    for (const [name, value] of saved) {
+      restoreEnv(name, value);
+    }
+  }
 });
 
 async function runPrintenv({

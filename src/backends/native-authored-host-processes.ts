@@ -28,6 +28,7 @@ import {
   type NativeHostLifecycle,
   resolveNativeHostInvocationEnvironment,
 } from "../lib/native-host-lifecycle-contract.ts";
+import { portableInheritedEnvironment } from "../lib/portable-env-name.ts";
 import {
   createLifecycleProcessController,
   stopLifecycleProcessController,
@@ -567,11 +568,10 @@ export async function createNativeAuthoredHostProcesses(input: {
     scope: { ...input.scope },
     lifecycle: structuredClone(input.lifecycle),
   };
-  const inheritedEnvironment = Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string"
-    )
-  );
+  // Only portable names: the launch delivery accepts nothing else, and an
+  // inherited `BASH_FUNC_f%%` (bash `export -f`) must not refuse the start
+  // (HACK-2219). Authored names were already checked by the host contract.
+  const inheritedEnvironment = portableInheritedEnvironment();
   if (!(RUN.test(opts.run) && SHA.test(opts.semanticHash))) {
     return refuse();
   }

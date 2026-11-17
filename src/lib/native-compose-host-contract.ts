@@ -1,7 +1,9 @@
 import { posix } from "node:path";
 import type { HostHook } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
+import { NativeEnvironmentNameError } from "./native-environment-name-error.ts";
 import { parseNativeHostTarget } from "./native-host-plan-protocol.ts";
+import { isPortableEnvName, nonPortableEnvNames } from "./portable-env-name.ts";
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 export type NativeComposeHook = Omit<HostHook, "environment"> & {
@@ -16,6 +18,22 @@ export class NativeComposeHostHookError extends Error {
     );
     this.name = "NativeComposeHostHookError";
   }
+}
+
+/**
+ * Inherited variables a host hook or process launch drops: every non-portable
+ * inherited name (bash `export -f` functions, HACK-2219), then the authored
+ * `unset` destinations. Shared by the Compose and native hook runners.
+ */
+export function hostInvocationUnsetKeys(
+  hook: Pick<NativeComposeHook, "environment">
+): string[] {
+  return [
+    ...nonPortableEnvNames(),
+    ...Object.entries(hook.environment ?? {})
+      .filter(([, value]) => isRecord(value) && value.unset === true)
+      .map(([name]) => name),
+  ];
 }
 
 /** Shared host hook contract guard: every violation is the same value-free refusal. */
@@ -147,6 +165,14 @@ export function readNativeHostInvocation(entry: unknown): NativeComposeHook {
   assertHostHookContract(
     entry.environment === undefined || isRecord(entry.environment)
   );
+  for (const variable of Object.keys(entry.environment ?? {})) {
+    if (!isPortableEnvName(variable)) {
+      throw NativeEnvironmentNameError.forHostCommand({
+        invocation: entry.name,
+        variable,
+      });
+    }
+  }
   return {
     name: entry.name,
     command: entry.command,

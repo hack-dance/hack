@@ -20,6 +20,7 @@ import {
   tryNativeAuthoredCommand,
 } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
+import { NativeEnvironmentNameError } from "../src/lib/native-environment-name-error.ts";
 import { refuseUnsupportedNativeUpOptions } from "../src/lib/native-up-refusals.ts";
 import { withOwnedProcessListeners } from "./helpers/owned-process-listeners.ts";
 
@@ -322,6 +323,30 @@ macTest(
         expect(result).toHaveProperty("code", expected);
       }
     }
+  }
+);
+
+macTest(
+  "HACK-2219: a refused authored variable name reports E_CONFIG_INVALID with the name",
+  async () => {
+    const selected = await fixture();
+    const result = await tryNativeAuthoredCommand({
+      ...selected,
+      serve: () =>
+        Promise.reject(
+          new NativeAuthoredProjectStartError({
+            outcome: "not-started",
+            canceled: false,
+            stage: "selection",
+            environmentName: NativeEnvironmentNameError.forHostCommand({
+              invocation: "tunnel",
+              variable: "FOO%%",
+            }),
+          })
+        ),
+    }).catch((error: unknown) => error);
+    expect(result).toHaveProperty("code", "E_CONFIG_INVALID");
+    expect(String(result)).toContain('environment variable "FOO%%"');
   }
 );
 

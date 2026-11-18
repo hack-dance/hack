@@ -1778,18 +1778,6 @@ export type ProjectEnvOverlayEntry = {
   readonly isDefault: boolean;
 };
 
-/**
- * Every overlay a project has: each committed `hack.env.<name>.yaml`, each
- * overlay that exists only as its machine-local layer, and the configured
- * default overlay even when it has no file yet. In a linked worktree that
- * inherits local inputs, overlays that exist only as the primary checkout's
- * machine-local layer are included too, by the same inheritance rule runtime
- * reads use. Layers may be regular files
- * or in-project symlinks (`exists` reports the entry; a read checks where it
- * leads). Base layers (`default`, the bare local file) are not overlays.
- * Names that the `--env` grammar cannot select are left out. Sorted by name;
- * names only, never values.
- */
 async function listOverlayLayerEntryNames(
   projectDir: string
 ): Promise<string[]> {
@@ -1821,9 +1809,26 @@ function localOverlayLayerNames(entries: readonly string[]): string[] {
     .map((name) =>
       name.slice(PROJECT_ENV_CONFIG_FILENAME_PREFIX.length, -localSuffix.length)
     )
-    .filter((name) => name.length > 0 && name !== "default");
+    .filter(
+      (name) =>
+        name.length > 0 &&
+        name !== "default" &&
+        name !== PROJECT_ENV_LOCAL_SEGMENT
+    );
 }
 
+/**
+ * Every overlay a project has: each committed `hack.env.<name>.yaml`, each
+ * overlay that exists only as its machine-local layer, and the configured
+ * default overlay even when it has no file yet. In a linked worktree that
+ * inherits local inputs, overlays that exist only as the primary checkout's
+ * machine-local layer are included too, by the same inheritance rule runtime
+ * reads use. Layers may be regular files
+ * or in-project symlinks (`exists` reports the entry; a read checks where it
+ * leads). Base layers (`default`, the bare local file) are not overlays.
+ * Names that the `--env` grammar cannot select are left out. Sorted by name;
+ * names only, never values.
+ */
 export async function listProjectEnvOverlays(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;

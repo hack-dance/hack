@@ -1,7 +1,11 @@
 import { dirname, relative, resolve } from "node:path";
 import { confirm, isCancel, password, select, text } from "@clack/prompts";
 import { YAML } from "bun";
-import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
+import type {
+  AnyCommandSpec,
+  CliContext,
+  CommandHandlerFor,
+} from "../cli/command.ts";
 import {
   CliUsageError,
   defineCommand,
@@ -20,7 +24,7 @@ import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { HackCliError } from "../lib/cli-result.ts";
+import { emitCliResult, HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import { parseDotEnv } from "../lib/env.ts";
@@ -72,16 +76,19 @@ import {
   requireInteractive,
 } from "../lib/interactivity.ts";
 import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
+import { MACHINE_SCHEMAS, machineSuccess } from "../lib/machine-output.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   findProjectContext,
+  parseEnvConfigSelection,
   resolveEffectiveProjectName,
 } from "../lib/project.ts";
 import {
   assertMachineLocalFileGitPrivate,
   assertProjectEnvLayerPaths,
   assertValidProjectEnvScopeName,
+  createProjectEnvOverlay,
   describeUnmigratedLegacyDotenv,
   discoverComposeServiceNames,
   ENV_KEY_INVALID_MESSAGE,
@@ -89,18 +96,24 @@ import {
   finishImplicitLegacyEnvMigration,
   hasUnmigratedLegacyDotenv,
   hydrateProjectEnvLocalLayer,
+  listProjectEnvOverlays,
   listProjectEnvPlaintextEntries,
   materializeProjectEnv,
+  PROJECT_ENV_OVERLAY_NAME_INVALID_MESSAGE,
+  type ProjectEnvKeySource,
   type ProjectEnvKeyState,
+  type ProjectEnvOverlayEntry,
+  ProjectEnvOverlayExistsError,
   type ProjectEnvResolvedMetadata,
   parseProjectEnvTarget,
-  probeProjectEnvKeyState,
+  probeProjectEnvKey,
   projectEnvConfigExists,
   projectEnvConfigExistsForMutation,
   protectProjectEnvEntries,
   readMaterializedProjectEnv,
   resolveProjectEnvConfig,
   resolveProjectEnvMetadata,
+  resolveProjectEnvMetadataWithPlaintext,
   resolveProjectEnvValue,
   selectProjectEnvMetadata,
   selectProjectEnvValues,
@@ -109,13 +122,17 @@ import {
   unsetProjectEnvValue,
 } from "../lib/project-env-config.ts";
 import {
+  parseProjectEnvKeyOverride,
+  runWithProjectEnvKeyOverride,
+} from "../lib/project-env-key-override.ts";
+import {
   formatSecretStoreDescriptor,
   provisionEncryptedFileKey,
   resolveSecretStore,
 } from "../lib/secret-store.ts";
 import { run } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
-import { logger } from "../ui/logger.ts";
+import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { envMigrateCommand } from "./env-migrate.ts";
 import { hostPsCommand } from "./host-ps.ts";
 
@@ -138,6 +155,32 @@ const optShowValues = defineOption({
   type: "boolean",
   long: "--show-values",
   description: "Reveal resolved values only in an interactive terminal",
+} as const);
+
+const optPlaintextValues = defineOption({
+  name: "plaintextValues",
+  type: "boolean",
+  long: "--plaintext-values",
+  description:
+    "With --json, include values of plaintext entries only; secret values are never included (safe for pipes)",
+} as const);
+
+const optKeyFile = defineOption({
+  name: "keyFile",
+  type: "string",
+  long: "--key-file",
+  valueHint: "<path>",
+  description:
+    "Use this project env key file for this run instead of key discovery (pass a path, never the key)",
+} as const);
+
+const optKeyEnv = defineOption({
+  name: "keyEnv",
+  type: "string",
+  long: "--key-env",
+  valueHint: "<NAME>",
+  description:
+    "Use the key held by the environment variable NAME for this run instead of key discovery (pass the NAME, never the key)",
 } as const);
 
 const optAllowSecretArgv = defineOption({
@@ -258,7 +301,10 @@ const listSpec = defineCommand({
     optJson,
     optShowValues,
     optShowSecrets,
+    optPlaintextValues,
     optService,
+    optKeyFile,
+    optKeyEnv,
   ],
   positionals: [],
   subcommands: [],
@@ -270,7 +316,7 @@ const getSpec = defineCommand({
   description:
     "Read one global or service value without starting a runtime. Empty values succeed; missing values fail. Omit --env to use the configured default, or use --env default for base layers. Plaintext is written only to stdout; errors go to stderr.",
   group: "Project",
-  options: [optPath, optProject, optEnv, optService],
+  options: [optPath, optProject, optEnv, optService, optKeyFile, optKeyEnv],
   positionals: [{ name: "key", required: true }],
   subcommands: [],
   sensitiveOutputError:
@@ -322,6 +368,8 @@ const addSpec = defineCommand({
     optValueStdin,
     optLocal,
     optService,
+    optKeyFile,
+    optKeyEnv,
   ],
   positionals: [
     { name: "key", required: false },
@@ -345,6 +393,8 @@ const setSpec = defineCommand({
     optValueStdin,
     optLocal,
     optService,
+    optKeyFile,
+    optKeyEnv,
   ],
   positionals: [
     { name: "key", required: false },
@@ -1274,28 +1324,33 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     );
   }
   const json = args.options.json === true;
+  const plaintextValues = args.options.plaintextValues === true;
+  if (plaintextValues && !json) {
+    throw new CliUsageError(
+      "--plaintext-values requires --json. It never includes secret values; use hack env get KEY for one explicit value."
+    );
+  }
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
+  });
+  const selectedScopeOption = parseEnvScopeOption({
+    scopeName: args.options.service,
   });
 
   const revealedModern = showSecrets
     ? await loadModernProjectEnv({ project, envName })
     : null;
-  const modern = showSecrets
-    ? revealedModern
-    : await resolveProjectEnvMetadata({
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
+  const withPlaintext = showSecrets
+    ? null
+    : await loadEnvListMetadata({
+        project,
         envName,
-        fileDiagnostics: true,
-        serviceNames: await discoverComposeServiceNames({
-          composeFile: project.composeFile,
-        }),
+        scope: selectedScopeOption,
+        plaintextValues,
       });
+  const modern = showSecrets ? revealedModern : withPlaintext?.metadata;
   if (modern) {
-    const selectedScope = parseEnvScopeOption({
-      scopeName: args.options.service,
-    });
+    const selectedScope = selectedScopeOption;
     const selectedMetadata = selectProjectEnvMetadata({
       resolved: modern,
       scopeName: selectedScope,
@@ -1325,10 +1380,21 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       projectDir: project.projectDir,
     });
     const materializedExists = Object.keys(materialized).length > 0;
-    const keyState = await probeProjectEnvKeyState({
+    const keyProbe = await probeProjectEnvKey({
       projectRoot: project.projectRoot,
     });
+    const keyState = keyProbe.state;
     if (json) {
+      // Best effort: an unlistable project dir must not fail the listing.
+      const overlays = await listProjectEnvOverlays({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+      }).catch(() => {
+        process.stderr.write(
+          "WARN: Could not list env overlays; overlays is empty. Run hack doctor.\n"
+        );
+        return [] as const;
+      });
       process.stdout.write(
         `${JSON.stringify(
           buildModernEnvJsonPayload({
@@ -1337,11 +1403,14 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
             modern,
             selectedScope,
             envValues,
+            plaintextValues: withPlaintext?.plaintextValues ?? null,
             sourceFiles,
             showSecrets,
             materialized,
             materializedExists,
             keyState,
+            keySource: keyProbe.source,
+            overlays,
           }),
           null,
           2
@@ -1360,6 +1429,13 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
         ["selected_scope", selectedScope],
         ["files", modern.files.join(", ")],
         ["project_key", keyState],
+        [
+          "key_source",
+          describeProjectEnvKeySourceForDisplay({
+            project,
+            source: keyProbe.source,
+          }),
+        ],
         [
           "unknown_scopes",
           modern.unknownScopes.length > 0
@@ -1429,6 +1505,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       resolved: selectedResolved,
       layersByKey,
       showSecrets,
+      plaintextValues,
     });
     return selectedResolved.missingRequired.length > 0 ? 1 : 0;
   }
@@ -1440,6 +1517,45 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     showSecrets,
   });
 };
+
+/**
+ * Names-only metadata for `hack env list`, plus plaintext values from the
+ * same single read when requested (R25). Secret entries are never decrypted
+ * on this path and no key is acquired.
+ */
+async function loadEnvListMetadata(input: {
+  readonly project: ProjectContext;
+  readonly envName: string | null | undefined;
+  readonly scope: string;
+  readonly plaintextValues: boolean;
+}): Promise<{
+  readonly metadata: ProjectEnvResolvedMetadata | null;
+  readonly plaintextValues: Readonly<Record<string, string>> | null;
+}> {
+  const options = {
+    projectRoot: input.project.projectRoot,
+    projectDir: input.project.projectDir,
+    envName: input.envName,
+    fileDiagnostics: true,
+    serviceNames: await discoverComposeServiceNames({
+      composeFile: input.project.composeFile,
+    }),
+  };
+  if (!input.plaintextValues) {
+    return {
+      metadata: await resolveProjectEnvMetadata(options),
+      plaintextValues: null,
+    };
+  }
+  const resolved = await resolveProjectEnvMetadataWithPlaintext({
+    ...options,
+    scope: input.scope,
+  });
+  return {
+    metadata: resolved?.metadata ?? null,
+    plaintextValues: resolved?.plaintextValues ?? null,
+  };
+}
 
 type EnvExplainPayload = {
   readonly key: string;
@@ -1659,10 +1775,80 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
 
 /**
  * `key_state` in `hack env list --json`: whether the project env key can be
- * read (see {@link probeProjectEnvKeyState}), or `not_checked` for the legacy
+ * read (see {@link probeProjectEnvKey}), or `not_checked` for the legacy
  * contract format, which does not use that key. Never carries key material.
  */
 type EnvListKeyState = ProjectEnvKeyState | "not_checked";
+
+/**
+ * `key_source` in `hack env list --json` (R26): where the project env key
+ * comes from, never the key. `relative_path` is relative to the checkout,
+ * or null when the file lies outside it.
+ */
+function serializeProjectEnvKeySourceForJson(input: {
+  readonly project: ProjectContext;
+  readonly source: ProjectEnvKeySource | null;
+}) {
+  if (input.source === null) {
+    return null;
+  }
+  if (input.source.kind === "file") {
+    const relativePath =
+      input.source.path === null
+        ? ""
+        : relative(input.project.projectRoot, input.source.path);
+    return {
+      kind: "file" as const,
+      origin: input.source.origin,
+      path: input.source.path,
+      relative_path:
+        relativePath.startsWith("..") || relativePath === ""
+          ? null
+          : relativePath,
+    };
+  }
+  if (input.source.kind === "env") {
+    return {
+      kind: "env" as const,
+      origin: input.source.origin,
+      name: input.source.name,
+    };
+  }
+  return { kind: "none" as const };
+}
+
+function describeProjectEnvKeySourceForDisplay(input: {
+  readonly project: ProjectContext;
+  readonly source: ProjectEnvKeySource | null;
+}): string {
+  const source = serializeProjectEnvKeySourceForJson(input);
+  if (source === null) {
+    return "unknown";
+  }
+  if (source.kind === "file") {
+    return `file ${source.relative_path ?? source.path ?? "(not found)"} (${source.origin})`;
+  }
+  if (source.kind === "env") {
+    return `env ${source.name} (${source.origin})`;
+  }
+  return "none";
+}
+
+/** One `overlays[]` entry (R24); names and paths only. */
+function serializeProjectEnvOverlayForJson(input: {
+  readonly overlay: ProjectEnvOverlayEntry;
+}) {
+  return {
+    name: input.overlay.name,
+    path: input.overlay.path,
+    exists: input.overlay.exists,
+    local_path: input.overlay.localPath,
+    local_exists: input.overlay.localExists,
+    inherited_local_path: input.overlay.inheritedLocalPath,
+    inherited_local_exists: input.overlay.inheritedLocalExists,
+    default: input.overlay.isDefault,
+  };
+}
 
 function buildModernEnvJsonPayload(input: {
   readonly project: ProjectContext;
@@ -1670,11 +1856,15 @@ function buildModernEnvJsonPayload(input: {
   readonly modern: ProjectEnvResolvedMetadata;
   readonly selectedScope: string;
   readonly envValues: Readonly<Record<string, string>>;
+  /** Plaintext entries only (R25); null when not requested. Never secrets. */
+  readonly plaintextValues: Readonly<Record<string, string>> | null;
   readonly sourceFiles: Readonly<Record<string, string | null>>;
   readonly showSecrets: boolean;
   readonly materialized: Record<string, string>;
   readonly materializedExists: boolean;
   readonly keyState: ProjectEnvKeyState;
+  readonly keySource: ProjectEnvKeySource | null;
+  readonly overlays: readonly ProjectEnvOverlayEntry[];
 }) {
   return {
     project: input.projectName,
@@ -1687,6 +1877,13 @@ function buildModernEnvJsonPayload(input: {
     },
     format: "project_env_config_v1",
     key_state: input.keyState,
+    key_source: serializeProjectEnvKeySourceForJson({
+      project: input.project,
+      source: input.keySource,
+    }),
+    overlays: input.overlays.map((overlay) =>
+      serializeProjectEnvOverlayForJson({ overlay })
+    ),
     status: {
       ...MODERN_ENV_STATUS_CLASSIFICATION,
       summary: "Project env config overlays",
@@ -1773,6 +1970,11 @@ function buildModernEnvJsonPayload(input: {
         layer: input.sourceFiles[key],
         scope: resolvedValue?.scope ?? input.selectedScope,
         ...(input.showSecrets ? { value } : {}),
+        ...(!(input.showSecrets || secret) &&
+        input.plaintextValues !== null &&
+        Object.hasOwn(input.plaintextValues, key)
+          ? { value: input.plaintextValues[key] }
+          : {}),
       };
     }),
     missing_required: [],
@@ -1902,6 +2104,7 @@ function writeEnvListJson(input: {
   readonly projectName: string;
   readonly resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
   readonly showSecrets: boolean;
+  readonly plaintextValues: boolean;
   readonly layersByKey: Readonly<Record<string, string | null>>;
 }): void {
   process.stdout.write(
@@ -1918,8 +2121,13 @@ function writeEnvListJson(input: {
         status: describeEnvAggregateStatusForJson({
           storage: input.resolved.storage,
         }),
-        // The legacy contract does not use the project env key.
+        // The legacy contract does not use the project env key; secret values
+        // live in the configured secret store.
         key_state: "not_checked" satisfies EnvListKeyState,
+        key_source: {
+          kind: "secret_store",
+          backend: input.resolved.storage.localSecrets.backend,
+        },
         storage: serializeEnvStorageForJson({
           storage: input.resolved.storage,
         }),
@@ -1943,7 +2151,12 @@ function writeEnvListJson(input: {
           has_value: v.value !== null,
           scope: v.services ?? ["global"],
           layer: input.layersByKey[v.key],
-          ...(input.showSecrets ? { value: v.value } : {}),
+          ...(input.showSecrets ||
+          (input.plaintextValues &&
+            v.source === "plain_env" &&
+            v.resolvedFrom === "dotenv")
+            ? { value: v.value }
+            : {}),
         })),
         missing_required: input.resolved.missingRequired.map((v) => v.key),
       },
@@ -2896,6 +3109,191 @@ async function resolveEnvValue(opts: {
   return v;
 }
 
+/**
+ * Run an env handler with the one-run key override from `--key-file` or
+ * `--key-env` (R26). The override carries a path or a variable NAME, never
+ * the key; see `project-env-key-override.ts` for its invariant.
+ */
+function withEnvKeyOverride<C extends AnyCommandSpec>(
+  handler: CommandHandlerFor<C>
+): CommandHandlerFor<C> {
+  return async (input) => {
+    const options: Record<string, unknown> = input.args.options;
+    const override = parseProjectEnvKeyOverride({
+      keyFile:
+        typeof options.keyFile === "string" ? options.keyFile : undefined,
+      keyEnv: typeof options.keyEnv === "string" ? options.keyEnv : undefined,
+      cwd: input.ctx.cwd,
+    });
+    return await runWithProjectEnvKeyOverride({
+      override,
+      run: async () => await handler(input),
+    });
+  };
+}
+
+const overlaySpec = defineCommand({
+  name: "overlay",
+  summary: "List or create env overlays",
+  description:
+    "An overlay is a named layer, .hack/hack.env.<name>.yaml, selected with --env <name>. Its machine-local layer, .hack/hack.env.<name>.local.yaml, stays ignored by git.",
+  group: "Project",
+  options: [],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const overlayListSpec = defineCommand({
+  name: "list",
+  summary: "List every env overlay of the project (names and paths only)",
+  group: "Project",
+  options: [optPath, optProject, optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const overlayAddSpec = defineCommand({
+  name: "add",
+  summary: "Create an empty env overlay file",
+  description:
+    "Creates .hack/hack.env.<name>.yaml with no values and refuses a name that already exists. Add values with hack env set --env <name>.",
+  group: "Project",
+  options: [optPath, optProject, optJson],
+  positionals: [{ name: "name", required: true }],
+  subcommands: [],
+} as const);
+
+const ENV_OVERLAYS_SCHEMA = MACHINE_SCHEMAS.envOverlays;
+
+const handleEnvOverlayList: CommandHandlerFor<typeof overlayListSpec> = async ({
+  ctx,
+  args,
+}) => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const overlays = await listProjectEnvOverlays({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+  });
+  if (args.options.json === true) {
+    emitCliResult({
+      result: machineSuccess({
+        schema: ENV_OVERLAYS_SCHEMA,
+        data: {
+          project: await resolveProjectName(project),
+          overlays: overlays.map((overlay) =>
+            serializeProjectEnvOverlayForJson({ overlay })
+          ),
+        },
+      }),
+    });
+    return 0;
+  }
+  if (overlays.length === 0) {
+    process.stdout.write("No env overlays.\n");
+    return 0;
+  }
+  for (const overlay of overlays) {
+    const state = [
+      overlay.exists ? "committed" : null,
+      overlay.localExists ? "local" : null,
+      overlay.inheritedLocalExists ? "inherited" : null,
+      overlay.isDefault ? "default" : null,
+    ]
+      .filter((value): value is string => value !== null)
+      .join(",");
+    process.stdout.write(
+      `${overlay.name}\t${state || "configured"}\t${relative(project.projectRoot, overlay.path)}\n`
+    );
+  }
+  return 0;
+};
+
+const handleEnvOverlayAdd: CommandHandlerFor<typeof overlayAddSpec> = async ({
+  ctx,
+  args,
+}) => {
+  // The name becomes a file name, so it is never slugged; a refusal names the
+  // grammar, not the argument.
+  const name = args.positionals.name.trim();
+  const selection = parseEnvConfigSelection(name);
+  if (selection !== name || name === "local") {
+    throw new CliUsageError(PROJECT_ENV_OVERLAY_NAME_INVALID_MESSAGE);
+  }
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const json = args.options.json === true;
+  // With --json, migration and warning lines go to stderr; stdout holds only
+  // the envelope.
+  if (json) {
+    setLoggerBackendOverride({ backend: "console" });
+  }
+  let created: Awaited<ReturnType<typeof createProjectEnvOverlay>>;
+  try {
+    // The first YAML layer would hide a legacy hack.env.json project from
+    // implicit migration, so migrate first, as the other env writes do.
+    const migrated = await maybeMigrateLegacyProjectEnv({
+      project,
+      projectName: await resolveProjectName(project),
+      reason: "mutation",
+    });
+    try {
+      created = await createProjectEnvOverlay({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        name,
+      });
+    } catch (error) {
+      if (migrated && error instanceof ProjectEnvOverlayExistsError) {
+        throw new ProjectEnvOverlayExistsError(error.path, {
+          afterMigration: true,
+        });
+      }
+      throw error;
+    }
+  } finally {
+    if (json) {
+      setLoggerBackendOverride({ backend: null });
+    }
+  }
+  if (json) {
+    emitCliResult({
+      result: machineSuccess({
+        schema: ENV_OVERLAYS_SCHEMA,
+        data: {
+          project: await resolveProjectName(project),
+          created: serializeProjectEnvOverlayForJson({
+            overlay: created.overlay,
+          }),
+          committed_path_ignored: created.committedIgnored,
+          local_path_ignored: created.localIgnored,
+        },
+      }),
+    });
+    return 0;
+  }
+  process.stdout.write(
+    `Created ${relative(project.projectRoot, created.overlay.path)}\n`
+  );
+  if (created.committedIgnored === true) {
+    process.stderr.write(
+      "WARN: git ignores the new overlay file, so it will not be committed. Check your .gitignore rules.\n"
+    );
+  }
+  if (created.localIgnored === false) {
+    process.stderr.write(
+      "WARN: git does not ignore the overlay's machine-local layer. Run hack doctor --fix to restore .hack/.gitignore.\n"
+    );
+  }
+  return 0;
+};
+
 export const envCommand = defineCommand({
   name: "env",
   summary: "Set project env vars and local secrets",
@@ -2905,18 +3303,38 @@ export const envCommand = defineCommand({
   positionals: [],
   subcommands: [
     envMigrateCommand,
-    withHandler(listSpec, handleEnvList),
+    withHandler(listSpec, withEnvKeyOverride(handleEnvList)),
     withHandler(protectSpec, handleEnvProtect),
-    withHandler(getSpec, handleEnvGet),
+    withHandler(getSpec, withEnvKeyOverride(handleEnvGet)),
     withHandler(explainSpec, handleEnvExplain),
     withHandler(applySpec, handleEnvApply),
-    withHandler(addSpec, handleEnvAdd),
-    withHandler(setSpec, handleEnvSet),
+    withHandler(addSpec, withEnvKeyOverride(handleEnvAdd)),
+    withHandler(setSpec, withEnvKeyOverride(handleEnvSet)),
     withHandler(hydrateSpec, handleEnvHydrate),
     withHandler(materializeSpec, handleEnvMaterialize),
     withHandler(execSpec, handleEnvExec),
     withHandler(shellSpec, handleEnvShell),
     withHandler(unsetSpec, handleEnvUnset),
+    withHandler(
+      defineCommand({
+        ...overlaySpec,
+        subcommands: [
+          withHandler(overlayListSpec, handleEnvOverlayList),
+          withHandler(overlayAddSpec, handleEnvOverlayAdd),
+        ],
+      } as const),
+      async () => {
+        await display.panel({
+          title: "Env overlay commands",
+          tone: "info",
+          lines: [
+            "hack env overlay list [--json]",
+            "hack env overlay add <name> [--json]",
+          ],
+        });
+        return 0;
+      }
+    ),
     withHandler(
       defineCommand({
         ...backendSpec,

@@ -100,6 +100,16 @@ the older suffix. Follow the hint: use the same Compose-selected v5 CLI to run
 `hack config set dev_host <name>.<suffix>`. Review host-change prompts.
 See [the DNS troubleshooting row](troubleshooting.md).
 
+A first start can take minutes: images build or pull (up to 30 minutes), and
+one-shot services such as migrations run before the services that wait on them
+(`service_completed_successfully`). On Compose, `up -d` keeps waiting while a
+one-shot runs, up to 30 minutes in all; raise that with
+`HACK_COMPOSE_STARTUP_CEILING_MS` or `compose.startupCeilingMs` in
+`.hack/hack.config.json`. If it stops while a one-shot still runs, the error
+names it: do not run `restart` or `down` then, which would interrupt it. Wait
+until `hack ps` shows it exited and run `hack up -d` again. The native backend
+keeps a plain start budget, `HACK_COMPOSE_STARTUP_TIMEOUT_MS`.
+
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.
 

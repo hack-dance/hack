@@ -98,6 +98,8 @@ success behavior stays covered by command-specific suites.
 | `hack env hydrate --json` | Legacy bare object (no `data` envelope) |
 | `hack env list --json` | Legacy bare object (no `data` envelope) |
 | `hack env migrate --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
+| `hack env overlay add --json` | Envelope; versioned `data.schema`: `hack.env-overlays.v1` |
+| `hack env overlay list --json` | Envelope; versioned `data.schema`: `hack.env-overlays.v1` |
 | `hack env protect --json` | Legacy bare object (no `data` envelope) |
 | `hack exec --json` | Envelope (`ok`, `data` / `error`); legacy payload has no required schema |
 | `hack exec-sessions --json` | Legacy bare object (no `data` envelope) |

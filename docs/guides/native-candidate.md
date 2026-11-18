@@ -3204,7 +3204,11 @@ When any service opts in, native `up` requests a pool with translation
 (`runtime up --amd64-emulation`). A fresh pool is created with SmolVM's `--rosetta`;
 a stopped pool is updated with `machine update --rosetta` before it starts; a running
 pool without translation refuses with `amd64_emulation_restart_required` and nothing is
-stopped. Stop every native project that uses the pool, then start again. A pool keeps
+stopped. Stop every native project that uses the pool (`hack down` in each), stop the pool
+(`runtime down --json` on the native home), then start again. A pool recorded as running
+whose provider process has exited (for example after the VM process was killed) refuses
+instead with `pool_process_exited`: run `runtime recover --json` on the native home, which
+proves the process exited and records the stop, then start again. A pool keeps
 translation once it has it, so other projects sharing it are unaffected: their services
 still resolve arm64 images. Without Rosetta 2 the start refuses with
 `amd64_emulation_unavailable` before any VM effect.

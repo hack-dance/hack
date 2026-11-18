@@ -567,6 +567,26 @@ export function renderProjectConfigSchemaJson(): string {
           retention_period: { type: "string" },
         },
       },
+      compose: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          startupTimeoutMs: {
+            description:
+              "Detached Compose start budget in milliseconds: how long a start may go without progress (a running one-shot dependency counts as progress). Default 90000. HACK_COMPOSE_STARTUP_TIMEOUT_MS on the host invocation wins.",
+            type: "integer",
+            minimum: 1000,
+            maximum: 3_600_000,
+          },
+          startupCeilingMs: {
+            description:
+              "Absolute bound on a detached Compose start while one-shot dependencies keep it making progress, in milliseconds. Default 1800000 (30 minutes). HACK_COMPOSE_STARTUP_CEILING_MS on the host invocation wins.",
+            type: "integer",
+            minimum: 1000,
+            maximum: 14_400_000,
+          },
+        },
+      },
       native: {
         type: "object",
         additionalProperties: true,

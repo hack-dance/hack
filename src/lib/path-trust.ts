@@ -219,6 +219,27 @@ function readSymlinkTarget(path: string): string | null {
   }
 }
 
+/**
+ * Removes group/other write from an own directory inside the Hack home; true
+ * when it is then safe. In observe-only mode nothing changes and the repair
+ * is assumed to succeed (see `observeOnly`).
+ */
+function repairHackHomeDirectory(opts: {
+  readonly path: string;
+  readonly mode: number;
+  readonly observeOnly: boolean;
+}): boolean {
+  if (opts.observeOnly) {
+    return true;
+  }
+  try {
+    chmodSync(opts.path, opts.mode & 0o7755);
+    return (lstatSync(opts.path).mode & 0o022) === 0;
+  } catch {
+    return false;
+  }
+}
+
 function checkServicePathEntry(opts: {
   readonly path: string;
   readonly uid: number;
@@ -268,18 +289,17 @@ function checkServicePathEntry(opts: {
   const insideHackHome =
     opts.hackHome !== null &&
     (opts.path === opts.hackHome || opts.path.startsWith(`${opts.hackHome}/`));
-  if (insideHackHome && info.isDirectory() && info.uid === opts.uid) {
-    if (opts.observeOnly === true) {
-      return null;
-    }
-    try {
-      chmodSync(opts.path, info.mode & 0o7755);
-      if ((lstatSync(opts.path).mode & 0o022) === 0) {
-        return null;
-      }
-    } catch {
-      // Reported below.
-    }
+  if (
+    insideHackHome &&
+    info.isDirectory() &&
+    info.uid === opts.uid &&
+    repairHackHomeDirectory({
+      path: opts.path,
+      mode: info.mode,
+      observeOnly: opts.observeOnly === true,
+    })
+  ) {
+    return null;
   }
   return `${opts.path} is writable by other users (mode ${(info.mode & 0o777).toString(8)}); run: chmod go-w ${opts.path}`;
 }

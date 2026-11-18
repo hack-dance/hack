@@ -117,7 +117,10 @@ and status lines go to stderr. `--follow` keeps reading until the command ends.
 ## Outcomes
 
 `command.ended` carries `outcome`, `exitCode`, `signal`, `durationMs`,
-`truncated` and `suppressed`, and sometimes `reason`:
+`truncated` and `suppressed`, and sometimes `reason`. `signal` is the signal's
+name (`"SIGTERM"`), or its number in decimal (`"42"`) for a signal without a
+name, such as a Linux real-time signal; it is `null` when no signal ended the
+command:
 
 | Outcome | When |
 | --- | --- |

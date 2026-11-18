@@ -112,6 +112,10 @@
     "turbo": "^2.5.8",
     "ultracite": "7.0.12"
   },
+  "overrides": {
+    "@types/node": "26.6.6",
+    "undici-types": "8.9.0"
+  },
   "config": {
     "commitizen": {
       "path": "cz-conventional-changelog"

@@ -1,15 +1,4 @@
 #!/usr/bin/env bun
-import { closeSync, openSync } from "node:fs";
-import {
-  appendFile,
-  copyFile,
-  mkdir,
-  readdir,
-  readFile,
-  stat,
-} from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
 /**
  * Fixed-budget Bun crash loop for the gated `bun-crash-experiment` workflow.
  *
@@ -40,6 +29,17 @@ import { join, resolve } from "node:path";
  *
  * Do not run this on a shared host: it is meant for an isolated hosted runner.
  */
+import { closeSync, openSync } from "node:fs";
+import {
+  appendFile,
+  copyFile,
+  mkdir,
+  readdir,
+  readFile,
+  stat,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { subprocessSignalLabel } from "../src/lib/subprocess-signal.ts";
 import {
   type BunRunOutcome,

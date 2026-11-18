@@ -40,3 +40,16 @@ test("Bun reports a named signal from a real subprocess by name", async () => {
     128 + osConstants.signals.SIGTERM
   );
 });
+
+// Linux real-time signals have no name; Bun 1.4 reports them by number.
+test.skipIf(process.platform !== "linux")(
+  "Bun reports an unnamed Linux real-time signal from a real subprocess by number",
+  async () => {
+    const proc = Bun.spawn(["sleep", "5"]);
+    process.kill(proc.pid, 42);
+    await proc.exited;
+    expect(proc.signalCode).toBe(42);
+    expect(subprocessSignalLabel(proc.signalCode)).toBe("42");
+    expect(subprocessSignalExitStatus(proc.signalCode ?? 0, 0)).toBe(170);
+  }
+);

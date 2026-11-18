@@ -20,6 +20,9 @@ pub enum Holder {
     Setup,
     /// Start or Restart hackd from the project pane.
     Recovery,
+    /// An upgrade snapshot or restore (files under the CLI's home and in
+    /// registered checkouts).
+    Upgrade,
 }
 
 /// Proof of admission; pass it back to [`MachineGate::finish`].

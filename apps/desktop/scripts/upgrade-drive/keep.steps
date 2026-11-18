@@ -1,0 +1,5 @@
+# Part 3 (the harness edited .hack/.gitignore since): a restore leaves the
+# edited file as it is (the app never passes --overwrite).
+upgrade
+upgrade-restore
+expect-upgrade changed since the snapshot, left as it is 120

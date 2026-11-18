@@ -30,6 +30,7 @@ import {
 import {
   planPollingFix,
   pollingFixPreservesDocument,
+  redactContextLine,
 } from "../src/lib/doctor-polling-fix.ts";
 
 const FILE = ".hack/docker-compose.yml";
@@ -618,6 +619,14 @@ test("redaction keeps only plain keys: block scalars, list maps and header comme
   expect(only.diff).toContain("+    environment: {} # [REDACTED]");
   expect(only.diff).not.toContain("synthetic-pw5");
   expect(only.after).toContain("environment: {} # synthetic-pw5");
+  const quoted = planPollingFix({
+    text: 'services:\n  web:\n    image: x:1\n    "environment": # synthetic-pw6\n      WATCHPACK_POLLING: "true"\n',
+    file: FILE,
+  });
+  expect(quoted.removed).toHaveLength(1);
+  expect(quoted.diff).not.toContain("synthetic-pw6");
+  expect(quoted.diff).toContain('-    "environment": # [REDACTED]');
+  expect(redactContextLine("    ports:\r")).toBe("    ports:\r");
 });
 
 describe("container architectures", () => {

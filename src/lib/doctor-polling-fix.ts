@@ -166,10 +166,14 @@ const REDACTED = "[REDACTED]";
  * `KEY: "true"` form, so they are shown as they are.
  */
 export function redactContextLine(line: string): string {
-  const body = line.endsWith("\r") ? line.slice(0, -1) : line;
+  const eol = line.endsWith("\r") ? "\r" : "";
+  return `${redactContextBody(eol ? line.slice(0, -1) : line)}${eol}`;
+}
+
+function redactContextBody(body: string): string {
   const trimmed = body.trim();
   if (!trimmed) {
-    return line;
+    return body;
   }
   const indent = body.slice(0, body.length - body.trimStart().length);
   if (trimmed.startsWith("#")) {
@@ -215,7 +219,8 @@ function redactChangedLine(line: string): string {
 
 const QUOTES = /^["']|["']$/g;
 const PLAIN_KEY = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
-const HEADER_COMMENT = /^(\s*environment:\s*(?:\{\}\s*)?)#.*$/;
+const HEADER_COMMENT =
+  /^(\s*(?:environment|"environment"|'environment')\s*:\s*(?:\{\}\s*)?)#.*$/;
 
 function unifiedDiff(opts: {
   readonly lines: readonly string[];

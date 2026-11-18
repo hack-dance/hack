@@ -217,10 +217,13 @@ import {
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import {
   classifyDownObservation,
+  type DownObservation,
   downIncompleteMessage,
-  type InstanceContainer,
+  type InstanceContainerListing,
+  listInstanceContainersByProject,
   resolveInstanceStopProfiles,
   selectOwnedInstanceContainers,
+  unionProfiles,
 } from "../lib/compose-instance-stop.ts";
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import {
@@ -8203,9 +8206,7 @@ async function runDownCommand({
     },
   });
   let code: number;
-  let stopObservation: Awaited<ReturnType<typeof finishInstanceStop>> = {
-    complete: true,
-  };
+  let stopObservation: DownObservation = { complete: true };
   let helperReleaseFailures: readonly string[] = [];
   try {
     const beforeCode = await runLifecycleCommands({
@@ -8279,15 +8280,22 @@ async function runDownCommand({
   if (!stopObservation.complete) {
     // Compose exited 0, but the instance is not down: report what was
     // observed. The runtime state entry is kept for the next down.
-    const message = downIncompleteMessage({
-      running: stopObservation.running,
-    });
+    const message = downIncompleteMessage({ observation: stopObservation });
     if (json) {
       return emitLifecycleResult({
         result: errorResult({
           code: "E_DOWN_INCOMPLETE",
           message,
-          detail: { running: [...stopObservation.running] },
+          detail: {
+            running: [...stopObservation.running],
+            foreign: stopObservation.foreign.map((entry) => ({
+              service: entry.service,
+              working_dir: entry.workingDir,
+            })),
+            ...(stopObservation.unknownReason === undefined
+              ? {}
+              : { unknown: true, reason: stopObservation.unknownReason }),
+          },
         }),
         exitCode: 1,
       });
@@ -8442,39 +8450,15 @@ async function runRestartDownPhase(opts: {
       cfg: opts.cfg,
       composeProject: opts.lifecycleComposeProject,
     });
-    // The same complete stop as `hack down` (HACK-2340): every profile the
-    // instance may have started, with its env, then what Compose left.
-    const stopSelection = await resolveInstanceStopSelection({
-      projectDir: opts.project.projectDir,
-      lifecycleComposeProject: opts.lifecycleComposeProject,
-      cliProfiles: opts.profiles,
-      composeEnv: opts.envForCompose,
-    });
     downCode = opts.preserveComposeRuntime
       ? 0
       : await composeRuntimeBackend.down({
           composeFiles: [opts.project.composeFile],
           composeProject: opts.composeProjectName,
-          profiles: stopSelection.profiles,
+          profiles: opts.profiles,
           cwd: dirname(opts.project.composeFile),
-          env: opts.envForCompose,
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
         });
-    if (downCode === 0 && !opts.preserveComposeRuntime) {
-      const observed = await finishInstanceStop({
-        project: opts.project,
-        composeProjectName: opts.composeProjectName,
-        profiles: stopSelection.profiles,
-        env: opts.envForCompose,
-        routeStdoutToStderr: opts.routeStdoutToStderr === true,
-      });
-      if (!observed.complete) {
-        logger.error({
-          message: downIncompleteMessage({ running: observed.running }),
-        });
-        downCode = 1;
-      }
-    }
     // A preserved Compose runtime was never shut down: its containers are
     // kept, so their helpers stay held.
     helperReleaseFailures = await lifecycleDownCleanup(
@@ -9719,6 +9703,10 @@ export function resolveRestartTarget(opts: {
  * Record the env selection of a full-stack up/restart together with fresh,
  * value-free digests of the env set delivered to each prepared service, so
  * `hack exec` can warn when the resolved env later changes.
+ *
+ * Compose profiles accumulate while the entry exists: a full up with fewer
+ * profiles does not stop the services of the others, so `down` must still
+ * enable them. A complete `down` removes the entry, which clears them.
  */
 async function persistProjectRuntimeEnvSelection(opts: {
   readonly projectDir: string;
@@ -9731,6 +9719,10 @@ async function persistProjectRuntimeEnvSelection(opts: {
   /** Profiles Compose activated, so `down` can enable them (HACK-2340). */
   readonly composeProfiles: readonly string[];
 }): Promise<void> {
+  const previous = await readProjectRuntimeStateEntry({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
   await upsertProjectRuntimeStateEntry({
     projectDir: opts.projectDir,
     entry: {
@@ -9742,18 +9734,29 @@ async function persistProjectRuntimeEnvSelection(opts: {
         services: opts.services,
         envByService: opts.envByService,
       }),
-      composeProfiles: [...opts.composeProfiles],
+      composeProfiles: unionProfiles([
+        ...(previous?.composeProfiles ?? []),
+        ...opts.composeProfiles,
+      ]),
     },
   });
 }
 
-/** Bound on one docker inspect/rm call while finishing a stop. */
+/** Bound on one docker ps/rm call while finishing a stop. */
 const INSTANCE_STOP_DOCKER_TIMEOUT_MS = 15_000;
+/**
+ * Bound on `docker stop` of leftovers. Each container keeps its own
+ * `stop_grace_period` (Compose stores it as the container's stop timeout),
+ * so this only caps a daemon that never answers.
+ */
+const INSTANCE_STOP_GRACE_CAP_MS = 10 * 60_000;
 
 /**
- * The env and profiles a stop of the instance uses (HACK-2340): the managed
- * env of the instance's recorded selection (the same env `up` gave Compose,
- * so interpolation matches), and every profile it may have started.
+ * The profiles a stop of the instance enables (HACK-2340): every profile it
+ * may have started. Compose itself receives the env `down` resolved for its
+ * hooks from the instance's recorded selection (the host-target global
+ * env). That is close to, but not exactly, the env `up` gave Compose; the
+ * recorded profiles and the leftover stop below do not depend on it.
  */
 async function resolveInstanceStopSelection(opts: {
   readonly projectDir: string;
@@ -9778,66 +9781,58 @@ async function resolveInstanceStopSelection(opts: {
 }
 
 /**
- * Containers Compose still lists for the instance, with their working dir;
- * null when they cannot be read (an unknown result, never "none left").
+ * Every container labelled with the instance's Compose project, any state,
+ * with service and working dir. Compose resolves the project name (for a
+ * primary checkout without `name:` it is the directory's, not the config
+ * name); `docker ps` then lists by that label. Any failed or unreadable read
+ * is unknown, never empty.
  */
 async function listInstanceContainers(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly composeProjectName: string | null;
   readonly profiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
-}): Promise<InstanceContainer[] | null> {
-  const res = await composeRuntimeBackend.psJson({
-    composeFiles: [opts.project.composeFile],
-    composeProject: opts.composeProjectName,
-    profiles: opts.profiles,
-    cwd: dirname(opts.project.composeFile),
-    all: true,
-    env: opts.env,
-  });
-  if (res.exitCode !== 0) {
-    return null;
-  }
-  const entries = parseJsonLines(res.stdout)
-    .map((entry) => ({
-      id: getString(entry, "ID") ?? "",
-      service: getString(entry, "Service") ?? "",
-      state: (getString(entry, "State") ?? "").toLowerCase(),
-    }))
-    .filter((entry) => entry.id.length > 0);
-  if (entries.length === 0) {
-    return [];
-  }
-  const inspected = await exec(
-    [
-      "docker",
-      "inspect",
-      "--format",
-      '{{.Id}}\t{{index .Config.Labels "com.docker.compose.project.working_dir"}}',
-      ...entries.map((entry) => entry.id),
-    ],
-    { stdin: "ignore", timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS }
-  );
-  const workingDirs = new Map<string, string>();
-  for (const line of inspected.stdout.split("\n")) {
-    const [id, workingDir] = line.split("\t");
-    if (id && workingDir) {
-      workingDirs.set(id, workingDir);
+}): Promise<InstanceContainerListing> {
+  let composeProject = opts.composeProjectName;
+  if (composeProject === null) {
+    const res = await composeRuntimeBackend.psJson({
+      composeFiles: [opts.project.composeFile],
+      composeProject: null,
+      profiles: opts.profiles,
+      cwd: dirname(opts.project.composeFile),
+      all: true,
+      env: opts.env,
+    });
+    if (res.exitCode !== 0) {
+      return {
+        ok: false,
+        reason: `docker compose ps failed (exit ${res.exitCode})`,
+      };
+    }
+    const entries = parseJsonLines(res.stdout);
+    if (entries.length === 0) {
+      return { ok: true, containers: [] };
+    }
+    composeProject = getString(entries[0] ?? {}, "Project") ?? null;
+    if (!composeProject) {
+      return {
+        ok: false,
+        reason: "docker compose ps did not name the Compose project",
+      };
     }
   }
-  return entries.map((entry) => ({
-    ...entry,
-    workingDir:
-      [...workingDirs.entries()].find(([id]) => id.startsWith(entry.id))?.[1] ??
-      null,
-  }));
+  return await listInstanceContainersByProject({
+    composeProject,
+    timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
+  });
 }
 
 /**
- * After `docker compose down`: stop and remove what this checkout still owns
- * of the instance (containers Compose left behind), run down once more so
- * the network goes too, and report what remains running. Unknown reads are
- * a failure, never an empty result.
+ * After `docker compose down`: stop and remove the containers of the
+ * instance that this checkout owns and Compose left behind (a profile the
+ * down did not enable, an orphan), run down once more so the network goes
+ * too, and report what was observed. Containers of another checkout are
+ * never stopped; while they run, the down is incomplete.
  */
 async function finishInstanceStop(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
@@ -9845,50 +9840,37 @@ async function finishInstanceStop(opts: {
   readonly profiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly routeStdoutToStderr: boolean;
-}): Promise<
-  | { readonly complete: true }
-  | { readonly complete: false; readonly running: readonly string[] }
-> {
+}): Promise<DownObservation> {
   const leftovers = await listInstanceContainers(opts);
-  if (leftovers === null) {
-    return { complete: false, running: ["(unknown: compose ps failed)"] };
+  if (leftovers.ok) {
+    const owned = selectOwnedInstanceContainers({
+      containers: leftovers.containers,
+      projectDir: opts.project.projectDir,
+    });
+    if (owned.length > 0) {
+      const ids = owned.map((container) => container.id);
+      await exec(["docker", "stop", ...ids], {
+        stdin: "ignore",
+        timeoutMs: INSTANCE_STOP_GRACE_CAP_MS,
+      });
+      await exec(["docker", "rm", ...ids], {
+        stdin: "ignore",
+        timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
+      });
+      await composeRuntimeBackend.down({
+        composeFiles: [opts.project.composeFile],
+        composeProject: opts.composeProjectName,
+        profiles: opts.profiles,
+        cwd: dirname(opts.project.composeFile),
+        env: opts.env,
+        routeStdoutToStderr: opts.routeStdoutToStderr,
+      });
+    }
   }
-  const owned = selectOwnedInstanceContainers({
-    containers: leftovers,
+  return classifyDownObservation({
+    listing: await listInstanceContainers(opts),
     projectDir: opts.project.projectDir,
   });
-  if (owned.length > 0) {
-    const ids = owned.map((container) => container.id);
-    await exec(["docker", "stop", "--time", "10", ...ids], {
-      stdin: "ignore",
-      timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS * 2,
-    });
-    await exec(["docker", "rm", ...ids], {
-      stdin: "ignore",
-      timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
-    });
-    await composeRuntimeBackend.down({
-      composeFiles: [opts.project.composeFile],
-      composeProject: opts.composeProjectName,
-      profiles: opts.profiles,
-      cwd: dirname(opts.project.composeFile),
-      env: opts.env,
-      routeStdoutToStderr: opts.routeStdoutToStderr,
-    });
-  }
-  const remaining = await listInstanceContainers(opts);
-  if (remaining === null) {
-    return { complete: false, running: ["(unknown: compose ps failed)"] };
-  }
-  const observed = classifyDownObservation({
-    remaining: selectOwnedInstanceContainers({
-      containers: remaining,
-      projectDir: opts.project.projectDir,
-    }),
-  });
-  return observed.complete
-    ? { complete: true }
-    : { complete: false, running: observed.running };
 }
 
 async function maybeManageProjectLogsAfterDown(opts: {

@@ -11,6 +11,28 @@ non-TTY refusal keep their ordinary parser behavior without initializing OpenTUI
 This changes the startup import path; it does not establish a measured CPU or
 memory improvement. The remote surface remains unsupported.
 
+## End-to-end latency baseline
+
+```sh
+bun run build
+bun scripts/benchmark-cli-latency.ts --out /tmp/hack-latency.json
+bun scripts/benchmark-cli-latency.ts --launcher ~/.hack-next/bin/hack-next
+```
+
+The script reports medians over repeated runs for the costs of daily use: cold and
+warm `--version`, `ps`, `env list`, `open` and `logs`; the candidate launcher against
+the executable it runs; `up -d`, a second `up -d` and `down` on a three-service
+fixture against raw `docker compose` on the same file; `/v1/projects` with 1, 5 and
+20 registered projects; and 60 seconds of idle CPU and RSS for hackd and one
+`hack mcp serve`. Each command's output is checked before its time counts.
+
+It runs every Hack process with a private HOME under `/tmp`, never pulls an image
+(the fixture needs a local `alpine:3.20`, or `--image`), and removes its Compose
+projects and directory on exit. It uses the host's real Docker engine, so other
+running containers add to the numbers; the report counts them. "Cold" is a fresh copy
+of the executable with a fresh HOME, not a dropped page cache. Compare runs only on
+the same host, executable build and engine load.
+
 ## Project listing
 
 ```sh

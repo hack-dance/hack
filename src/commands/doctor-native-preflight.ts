@@ -6,6 +6,7 @@ import {
   readNativePreflightCompose,
   renderNativePreflightReport,
 } from "../backends/native-preflight.ts";
+import { resolveNativeProfileSelectionForProject } from "../backends/native-profile-selection.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   type NativeHostAliasSource,
@@ -237,7 +238,20 @@ export async function collectProjectNativePreflight(opts: {
     hasHostDependencies,
     hasDefaultDependencyFile,
     effectiveEnvName: effectiveEnv,
-    profiles: opts.profiles,
+    // Without --profile, the profiles a fresh `hack up` would select from
+    // COMPOSE_PROFILES (managed env, then shell), so the review and the
+    // source check judge the services up starts (HACK-2338 items 7 and 8).
+    profiles:
+      opts.profiles.length > 0
+        ? opts.profiles
+        : (
+            await resolveNativeProfileSelectionForProject({
+              project,
+              envName: effectiveEnv,
+              cliProfile: undefined,
+              shellEnv: env,
+            })
+          ).profiles,
     runtime: opts.runtimeReview === false ? null : selectedRuntime(env),
   });
   return report;

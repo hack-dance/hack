@@ -1934,12 +1934,36 @@ function selectedRuntimeFindings(
 /** Routed hostnames checked per preflight, so lookups stay bounded. */
 const HOST_RESOLUTION_LIMIT = 32;
 
+const MAPPED_DOTTED = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/;
+const MAPPED_HEX = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
+
+/**
+ * One spelling per address: an IPv4-mapped IPv6 answer, dotted or
+ * hexadecimal (`::ffff:7f00:1`), becomes the IPv4 address it reaches.
+ */
+function canonicalAddress(address: string): string {
+  const lower = address.toLowerCase();
+  const dotted = MAPPED_DOTTED.exec(lower);
+  if (dotted?.[1]) {
+    return dotted[1];
+  }
+  const hex = MAPPED_HEX.exec(lower);
+  if (hex?.[1] && hex[2]) {
+    const high = Number.parseInt(hex[1], 16);
+    const low = Number.parseInt(hex[2], 16);
+    return [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
+  }
+  return lower;
+}
+
+/** Native's HTTPS listener binds exactly 127.0.0.1. */
+function reachesNativeListener(address: string): boolean {
+  return canonicalAddress(address) === "127.0.0.1";
+}
+
 function loopbackAddress(address: string): boolean {
-  return (
-    address === "::1" ||
-    address.startsWith("127.") ||
-    address.toLowerCase().startsWith("::ffff:127.")
-  );
+  const canonical = canonicalAddress(address);
+  return canonical === "::1" || canonical.startsWith("127.");
 }
 
 /** Each active routed service's hostnames, in service order. */
@@ -1988,13 +2012,16 @@ function classifyRouteAnswers(
   const elsewhere = new Map<string, Set<string>>();
   const loopbackOnly = new Set<string>();
   for (const answer of answers) {
-    const foreign = answer.addresses.filter(
-      (address) => !loopbackAddress(address)
-    );
+    // A non-loopback answer can win the connection; a loopback-only answer
+    // misses native unless one of its addresses is exactly 127.0.0.1 (::1
+    // beside it is the usual localhost pair, which clients fall back from).
+    const foreign = answer.addresses.some(reachesNativeListener)
+      ? answer.addresses.filter((address) => !loopbackAddress(address))
+      : answer.addresses;
     if (foreign.length > 0) {
       const set = elsewhere.get(answer.service) ?? new Set<string>();
       for (const address of foreign) {
-        set.add(address);
+        set.add(canonicalAddress(address));
       }
       elsewhere.set(answer.service, set);
     } else if (answer.addresses.length > 0) {

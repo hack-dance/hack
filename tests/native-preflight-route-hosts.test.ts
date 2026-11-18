@@ -96,3 +96,41 @@ test("unknown lookups and a failing resolver report nothing", async () => {
     })
   ).toEqual([]);
 });
+
+test("only 127.0.0.1 reaches native: ::1 or another 127 address alone warns; the localhost pair does not", async () => {
+  for (const [addresses, warns] of [
+    [["::1"], true],
+    [["127.0.0.2"], true],
+    [["127.0.0.1", "::1"], false],
+  ] as const) {
+    const found = await hostResolutionFindings({
+      plan: {
+        services: { web: { routing: { hostnames: ["web.example.hack"] } } },
+      },
+      httpsPort: 18_443,
+      resolveHost: () => Promise.resolve(addresses),
+      defaultHttpsTaken: () => Promise.resolve(false),
+    });
+    expect(found.map((item) => item.code)).toEqual(
+      warns ? ["route_host_resolves_elsewhere"] : []
+    );
+  }
+});
+
+test("IPv4-mapped answers count as the IPv4 address they reach", async () => {
+  const mapped = (addresses: readonly string[]) =>
+    hostResolutionFindings({
+      plan: {
+        services: { web: { routing: { hostnames: ["web.example.hack"] } } },
+      },
+      httpsPort: 18_443,
+      resolveHost: () => Promise.resolve(addresses),
+      defaultHttpsTaken: () => Promise.resolve(false),
+    });
+  expect(await mapped(["::ffff:7f00:1"])).toEqual([]);
+  expect(await mapped(["::FFFF:127.0.0.1"])).toEqual([]);
+  const compose = await mapped(["::ffff:ac1e:2"]);
+  expect(compose[0]?.message).toContain(
+    "172.30.0.2, the address of Hack's Compose proxy"
+  );
+});

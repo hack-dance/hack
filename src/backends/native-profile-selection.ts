@@ -1,4 +1,10 @@
 import { isRecord } from "../lib/guards.ts";
+import { readNativeComposeDocument } from "../lib/native-compose-backend-features.ts";
+import type { ProjectContext } from "../lib/project.ts";
+import {
+  resolveProjectEnvConfig,
+  selectProjectEnvValuesForExecutionTarget,
+} from "../lib/project-env-config.ts";
 
 /** Where native's Compose profile selection came from. */
 export type NativeProfileSource = "cli" | "managed-env" | "shell" | "none";
@@ -196,4 +202,51 @@ export function parseNativeProfileNotice(
     };
   }
   return null;
+}
+
+/**
+ * Native's Compose profile selection for a project, from the same sources
+ * and in the same order as Compose under Hack: `cliProfile`, else
+ * `COMPOSE_PROFILES` in the managed env of `envName`, else in `shellEnv`
+ * (see {@link selectNativeProfiles}). `up` and `--native-preflight` share it.
+ * A managed env that cannot be resolved here contributes nothing; native
+ * input preparation refuses it next.
+ */
+export async function resolveNativeProfileSelectionForProject(opts: {
+  readonly project: Pick<
+    ProjectContext,
+    "composeFile" | "projectRoot" | "projectDir"
+  >;
+  readonly envName: string | null | undefined;
+  readonly cliProfile: string | undefined;
+  readonly shellEnv?: Readonly<Record<string, string | undefined>>;
+}): Promise<NativeProfileSelection> {
+  const compose = await readNativeComposeDocument(
+    opts.project.composeFile
+  ).catch(() => null);
+  const serviceNames =
+    isRecord(compose) && isRecord(compose.services)
+      ? Object.keys(compose.services)
+      : [];
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    envName: opts.envName,
+    serviceNames,
+  }).catch(() => null);
+  return selectNativeProfiles({
+    cliProfiles:
+      opts.cliProfile === undefined
+        ? undefined
+        : parseProfiles(opts.cliProfile),
+    managedEnv: resolved
+      ? selectProjectEnvValuesForExecutionTarget({
+          resolved,
+          scopeName: "global",
+          target: "compose",
+        })
+      : {},
+    shellEnv: opts.shellEnv ?? process.env,
+    declaredProfiles: declaredComposeProfiles(compose),
+  });
 }

@@ -8290,7 +8290,7 @@ async function runDownCommand({
             running: [...stopObservation.running],
             foreign: stopObservation.foreign.map((entry) => ({
               service: entry.service,
-              working_dir: entry.workingDir,
+              workingDir: entry.workingDir,
             })),
             ...(stopObservation.unknownReason === undefined
               ? {}
@@ -9834,12 +9834,16 @@ async function finishInstanceStop(opts: {
     });
     if (owned.length > 0) {
       const ids = owned.map((container) => container.id);
+      // The same env Compose ran with, so a managed DOCKER_HOST or
+      // DOCKER_CONTEXT targets the same daemon.
       await exec(["docker", "stop", ...ids], {
         stdin: "ignore",
+        env: { ...opts.env },
         timeoutMs: INSTANCE_STOP_GRACE_CAP_MS,
       });
       await exec(["docker", "rm", ...ids], {
         stdin: "ignore",
+        env: { ...opts.env },
         timeoutMs: INSTANCE_STOP_DOCKER_TIMEOUT_MS,
       });
       await composeRuntimeBackend.down({

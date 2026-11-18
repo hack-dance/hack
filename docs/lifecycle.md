@@ -45,7 +45,9 @@ Explicit `hack down` uses the same command-before-wrapper order
 after interrupting its owned lifecycle panes. On Docker Compose it stops every
 service the instance started, profiled ones included, removes any container of
 the instance Compose left behind, and fails with `E_DOWN_INCOMPLETE` (exit 1) if
-one is still running afterwards.
+one may still run afterwards, if a container of another checkout with the same
+Compose project still runs (`error.detail.foreign`, never stopped from here), or if
+the containers could not be listed (`error.detail.unknown`).
 Commands that finish their TERM handler sooner do not wait out the grace period.
 A second Ctrl-C skips the remaining command grace and requests the single SIGKILL;
 identity/ownership checks and post-KILL confirmation still run. An in-flight

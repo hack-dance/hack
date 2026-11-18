@@ -93,7 +93,7 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
   },
   E_DOWN_INCOMPLETE: {
     meaning:
-      "After down, a container of the instance is still running; `error.detail.running` names the services.",
+      "After down, a container of the instance may still run. `error.detail.running` names this checkout's services, `error.detail.foreign` another checkout's containers and their working dir (stop them from there), and `error.detail.unknown` means the containers could not be listed.",
     readFirst: "`hack ps --json`",
   },
   E_DEPENDENCY_BOOTSTRAP_FAILED: {

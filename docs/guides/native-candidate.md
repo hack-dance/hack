@@ -4247,7 +4247,10 @@ name every refused service and field at once (for example
 or the image's `USER` (`postgres`, `app:staff`, `1000:staff`), is resolved from the
 pinned image's own `/etc/passwd` and `/etc/group` before any reservation: a bare name
 becomes its UID, so the engine still applies the image's groups, and `name:group`
-becomes `UID:GID`. `hack doctor` on the native
+becomes `UID:GID`. IDs compare as numbers (`01000` is UID 1000). A bare name stays
+unresolved, and so is refused, when an earlier account has the same UID or an earlier
+entry's UID is not plain digits, because the engine would pick that other account and
+its groups. `hack doctor` on the native
 backend reports the Compose-declared cases in its `native process wrappers`
 check, for every service native may wrap. Only profile-active services are
 checked by `up` and `restart`; a service behind an unselected profile never runs

@@ -25,6 +25,12 @@ const LAYER_ROOT: &str = "/var/lib/docker/overlay2/";
 /// hold: `passwd <b64>` holds `name:x:uid:gid` for the first entry with the user's UID and
 /// for the user's own entry, and `group <b64>` holds `name:x:gid` for the group. Each is `absent`, `symlink` or `large`
 /// instead when the file cannot be used. A single layer is read in place.
+///
+/// Lines are trimmed and empty ones skipped, and only the first entry with a name counts,
+/// as in the engine's resolver. IDs are compared and printed as numbers, so `01000` is
+/// UID 1000. An entry before the user's own whose UID is not plain digits could equal it
+/// after the engine's own parsing, so it is reported as `?`, which leaves the name
+/// unresolved; so does a first entry with the UID that the report cannot carry.
 const READ_ACCOUNT_LINES: &str = r#"set -eu
 budget=$1; user=$2; group=$3; shift 3
 root=/var/lib/docker/overlay2
@@ -53,12 +59,17 @@ report() {
   if test "$name" = passwd; then
     lines=$(awk -F: -v n="$key" '
       function ok() { return length($1) <= 64 && $3 ~ /^[0-9]+$/ && length($3) <= 10 && $4 ~ /^[0-9]+$/ && length($4) <= 10 }
-      NR == FNR { if ($1 == n && u == "" && ok()) u = $3; next }
-      u != "" && $3 == u && !first && ok() { print $1 ":x:" $3 ":" $4; first = 1 }
-      $1 == n && own == "" && ok() { own = $1 ":x:" $3 ":" $4 }
+      { sub(/^[ \t\r]+/, ""); sub(/[ \t\r]+$/, "") }
+      $0 == "" { next }
+      NR == FNR { if ($1 == n && !seen) { seen = 1; if (ok()) { u = $3 + 0; own = $1 ":x:" u ":" ($4 + 0) } } next }
+      own == "" || done { next }
+      $3 !~ /^[0-9]+$/ || length($3) > 10 { print "?"; done = 1; next }
+      $3 + 0 == u { if (ok()) print $1 ":x:" ($3 + 0) ":" ($4 + 0); else print "?"; done = 1 }
       END { if (own != "") print own }' "$f" "$f")
   else
-    lines=$(awk -F: -v n="$key" '$1 == n && length($1) <= 64 && $3 ~ /^[0-9]+$/ && length($3) <= 10 { print $1 ":x:" $3; exit }' "$f")
+    lines=$(awk -F: -v n="$key" '
+      { sub(/^[ \t\r]+/, ""); sub(/[ \t\r]+$/, "") }
+      $1 == n { if (length($1) <= 64 && $3 ~ /^[0-9]+$/ && length($3) <= 10) print $1 ":x:" ($3 + 0); exit }' "$f")
   fi
   printf '%s %s\n' "$name" "$(printf '%s\n' "$lines" | base64 -w0)"
 }
@@ -68,6 +79,11 @@ if test -n "$group"; then report group "$group"; fi
 
 fn numeric(value: &str) -> bool {
     !value.is_empty() && value.len() <= 10 && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The value of a numeric ID field, so `01000` and `1000` are the same ID.
+fn id_value(value: &str) -> Option<u64> {
+    numeric(value).then(|| value.parse().ok()).flatten()
 }
 
 /// Whether `user` names an account rather than giving numeric IDs only.
@@ -80,8 +96,13 @@ pub(super) fn named(user: &str) -> bool {
 fn passwd_entry(passwd: &str, name: &str) -> Option<(String, String)> {
     passwd.lines().find_map(|line| {
         let fields: Vec<&str> = line.split(':').collect();
-        (fields.len() >= 4 && fields[0] == name && numeric(fields[2]) && numeric(fields[3]))
-            .then(|| (fields[2].to_owned(), fields[3].to_owned()))
+        if fields.len() < 4 || fields[0] != name {
+            return None;
+        }
+        Some((
+            id_value(fields[2])?.to_string(),
+            id_value(fields[3])?.to_string(),
+        ))
     })
 }
 
@@ -89,7 +110,10 @@ fn passwd_entry(passwd: &str, name: &str) -> Option<(String, String)> {
 fn group_entry(group: &str, name: &str) -> Option<String> {
     group.lines().find_map(|line| {
         let fields: Vec<&str> = line.split(':').collect();
-        (fields.len() >= 3 && fields[0] == name && numeric(fields[2])).then(|| fields[2].to_owned())
+        if fields.len() < 3 || fields[0] != name {
+            return None;
+        }
+        id_value(fields[2]).map(|gid| gid.to_string())
     })
 }
 
@@ -104,12 +128,12 @@ pub(super) fn resolve_text(user: &str, passwd: &str, group: Option<&str>) -> Opt
         .then(|| passwd_entry(passwd, uid_part))
         .flatten();
     let uid = if numeric(uid_part) {
-        uid_part.to_owned()
+        id_value(uid_part)?.to_string()
     } else {
         account.as_ref()?.0.clone()
     };
     let gid = match gid_part {
-        Some(gid) if numeric(gid) => gid.to_owned(),
+        Some(gid) if numeric(gid) => id_value(gid)?.to_string(),
         Some(gid) if !gid.is_empty() => group_entry(group?, gid)?,
         _ => account?.1,
     };
@@ -208,16 +232,27 @@ pub(super) fn resolve(
 
 /// Docker resolves a numeric UID to the first account with that UID. Writing a bare name
 /// as its UID is only faithful when that first account is the name itself; otherwise the
-/// process would get another account's groups, so the name is left unresolved.
+/// process would get another account's groups, so the name is left unresolved. UIDs are
+/// compared as numbers, as the engine parses them; an entry whose UID does not parse comes
+/// before any match could be trusted, so it also leaves the name unresolved.
 fn first_with_uid_is(passwd: &str, name: &str) -> bool {
-    let Some((uid, _)) = passwd_entry(passwd, name) else {
+    let Some(uid) = passwd_entry(passwd, name).and_then(|(uid, _)| uid.parse::<u64>().ok()) else {
         return false;
     };
-    passwd
+    for line in passwd
         .lines()
-        .find(|line| line.split(':').nth(2) == Some(uid.as_str()))
-        .and_then(|line| line.split(':').next())
-        == Some(name)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let mut fields = line.split(':');
+        let account = fields.next();
+        match fields.nth(1).and_then(id_value) {
+            Some(value) if value == uid => return account == Some(name),
+            Some(_) => {}
+            None => return false,
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -289,6 +324,20 @@ mod tests {
         assert!(first_with_uid_is(shared, "first"));
         assert!(first_with_uid_is(PASSWD, "temporal"));
         assert!(!first_with_uid_is(PASSWD, "missing"));
+        // UIDs are numbers: a leading zero does not hide that `first` holds the same UID.
+        let padded = "first:x:1000:100::/:/bin/sh\napp:x:01000:200::/:/bin/sh\n";
+        assert!(!first_with_uid_is(padded, "app"));
+        assert!(first_with_uid_is(padded, "first"));
+        let padded_own = "first:x:01000:100::/:/bin/sh\napp:x:1000:200::/:/bin/sh\n";
+        assert!(!first_with_uid_is(padded_own, "app"));
+        assert_eq!(resolve_text("app:200", padded, None).unwrap(), "1000:200");
+        assert_eq!(resolve_text("first", padded_own, None).unwrap(), "1000:100");
+        // An entry whose UID does not parse could be the engine's match, so nothing resolves.
+        let unparsed = "?\napp:x:1000:200::/:/bin/sh\n";
+        assert!(!first_with_uid_is(unparsed, "app"));
+        let non_numeric = "odd:x:abc:0::/:/bin/sh\napp:x:1000:200::/:/bin/sh\n";
+        assert!(!first_with_uid_is(non_numeric, "app"));
+        assert!(!first_with_uid_is("app:x:1000x:200::/:/bin/sh\n", "app"));
         // With an explicit group the identity is UID:GID, so a shared UID is not ambiguous.
         assert_eq!(resolve_text("app:200", shared, None).unwrap(), "1000:200");
         assert_eq!(

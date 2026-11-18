@@ -397,7 +397,7 @@ describe("doctor output", () => {
       ]);
       const polling = data.checks.find((c) => c.id === "polling watchers");
       expect(polling?.fix).toEqual({
-        kind: "safe",
+        kind: "manual",
         args: ["doctor", "--fix", "--only", "polling watchers", "--json"],
         doc_url: DEV_PERFORMANCE_GUIDE_URL,
       });
@@ -481,6 +481,77 @@ describe("polling fix", () => {
       expect(plan.after).toBe(text);
       expect(plan.diff).toBe("");
     }
+  });
+});
+
+describe("review follow-ups", () => {
+  test("only Node or Bun images get the dev image note", () => {
+    const text = [
+      "services:",
+      "  db:",
+      "    image: postgres",
+      "    volumes:",
+      "      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql",
+      "  app:",
+      "    image: oven/bun",
+      "    volumes:",
+      "      - ..:/app",
+      "",
+    ].join("\n");
+    const check = devImageTagsCheck({
+      inputs: composeDevInputsFromText({ file: FILE, text }),
+      declared: [{ tool: "node", version: "20", source: ".nvmrc" }],
+    });
+    expect(check.devPerformance).toMatchObject({
+      services: [{ service: "app", image: "oven/bun", line: 7 }],
+    });
+  });
+
+  test("a duplicated key reports the entry Compose keeps", () => {
+    const text =
+      'services:\n  web:\n    environment:\n      CHOKIDAR_USEPOLLING: "false"\n      CHOKIDAR_USEPOLLING: "true"\n';
+    const parsed = composeDevInputsFromText({ file: FILE, text });
+    expect(pollingWatchersCheck(parsed).devPerformance).toMatchObject({
+      services: [{ line: 5, legacy: true }],
+    });
+  });
+
+  test("the fix is refused when the document would change beyond the removed keys", () => {
+    const text =
+      'services:\n  web:\n    environment:\n      CHOKIDAR_USEPOLLING: "true"\n      CHOKIDAR_USEPOLLING: "false"\n';
+    const plan = planPollingFix({ text, file: FILE });
+    expect(plan.removed).toHaveLength(1);
+    expect(pollingFixPreservesDocument(plan)).toBe(false);
+  });
+
+  test("a service whose only property is the block keeps environment: {}", () => {
+    const text =
+      'services:\n  web:\n    environment:\n      CHOKIDAR_USEPOLLING: "true"\n';
+    const plan = planPollingFix({ text, file: FILE });
+    expect(plan.after).toBe("services:\n  web:\n    environment: {}\n");
+    expect(pollingFixPreservesDocument(plan)).toBe(true);
+  });
+
+  test("a column-0 comment after the block does not keep the header, and CRLF is kept", () => {
+    const text =
+      'services:\r\n  web:\r\n    image: x:1\r\n    environment:\r\n      CHOKIDAR_USEPOLLING: "true"\r\n# trailing\r\n';
+    const plan = planPollingFix({ text, file: FILE });
+    expect(plan.after).toBe(
+      "services:\r\n  web:\r\n    image: x:1\r\n# trailing\r\n"
+    );
+    const only = planPollingFix({
+      text: 'services:\r\n  web:\r\n    environment:\r\n      WATCHPACK_POLLING: "true"\r\n',
+      file: FILE,
+    });
+    expect(only.after).toBe("services:\r\n  web:\r\n    environment: {}\r\n");
+  });
+
+  test("ps annotation gives up after its deadline and leaves items unchanged", async () => {
+    const items = [{ ID: "aaaa" }];
+    const hang: ArchitectureProbe = () => new Promise(() => undefined);
+    expect(
+      await annotateEmulatedPsItems({ items, probe: hang, deadlineMs: 20 })
+    ).toEqual(items);
   });
 });
 

@@ -156,12 +156,13 @@ export function doctorMetadata(opts: {
     };
   }
   if (opts.id === "polling watchers") {
-    // Shows the diff only; applying needs the same command plus --yes.
+    // Shows the diff only (exit 0, nothing written); applying needs a human
+    // to review it and rerun with --yes, so it is not a one-click safe fix.
     return {
       area,
       scope,
       fix: {
-        kind: "safe",
+        kind: "manual",
         args: ["doctor", "--fix", "--only", "polling watchers", "--json"],
         doc_url: DEV_GUIDE_URL,
       },

@@ -30,6 +30,8 @@ export type ArchitectureProbe = (
 ) => Promise<ArchitectureProbeResult>;
 
 const PROBE_TIMEOUT_MS = 5000;
+/** Total time `hack ps --json` spends on the `emulated` annotation. */
+const PS_ANNOTATION_DEADLINE_MS = 3000;
 
 /** The default probe: one bounded `docker` call, stdin closed. */
 export const dockerArchitectureProbe: ArchitectureProbe = async (args) => {
@@ -197,6 +199,7 @@ function parseJsonLines(text: string): Record<string, unknown>[] {
 export async function annotateEmulatedPsItems(opts: {
   readonly items: readonly Record<string, unknown>[];
   readonly probe?: ArchitectureProbe;
+  readonly deadlineMs?: number;
 }): Promise<Record<string, unknown>[]> {
   const probe = opts.probe ?? dockerArchitectureProbe;
   const ids = opts.items.flatMap((item) =>
@@ -205,10 +208,22 @@ export async function annotateEmulatedPsItems(opts: {
   if (ids.length === 0) {
     return [...opts.items];
   }
-  const [engine, archs] = await Promise.all([
-    readEngineArchitecture(probe),
-    inspectContainerArchitectures({ ids, probe }),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const [engine, archs] = await Promise.race([
+    Promise.all([
+      readEngineArchitecture(probe),
+      inspectContainerArchitectures({ ids, probe }),
+    ]),
+    // One budget for the annotation: a slow engine leaves items unchanged.
+    new Promise<[null, ReadonlyMap<string, ContainerArchitecture>]>(
+      (resolve) => {
+        timer = setTimeout(
+          () => resolve([null, new Map()]),
+          opts.deadlineMs ?? PS_ANNOTATION_DEADLINE_MS
+        );
+      }
+    ),
+  ]).finally(() => clearTimeout(timer));
   if (!engine) {
     return [...opts.items];
   }

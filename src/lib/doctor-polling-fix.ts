@@ -14,7 +14,7 @@
  *   computed from; otherwise nothing is written.
  */
 
-import { rename, stat, writeFile } from "node:fs/promises";
+import { lstat, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { YAML } from "bun";
 import { HackCliError } from "./cli-result.ts";
@@ -73,6 +73,8 @@ export function planPollingFix(opts: {
       lines,
       header: info.environmentBlock - 1,
       propertyIndent: info.propertyIndent ?? 0,
+      // A service left with no properties would parse as null.
+      onlyProperty: info.keys.size <= 1,
       changes,
     });
   }
@@ -105,6 +107,7 @@ function closeEmptiedBlock(opts: {
   readonly lines: readonly string[];
   readonly header: number;
   readonly propertyIndent: number;
+  readonly onlyProperty: boolean;
   readonly changes: Map<number, LineChange>;
 }): void {
   let keepsEntry = false;
@@ -116,10 +119,13 @@ function closeEmptiedBlock(opts: {
       continue;
     }
     const indent = indentOf(line);
+    // Comments at or left of the property indent belong to what follows.
     const ownsLine =
       indent > opts.propertyIndent ||
-      (indent === opts.propertyIndent && trimmed.startsWith("-"));
-    if (!(ownsLine || trimmed.startsWith("#"))) {
+      (indent === opts.propertyIndent &&
+        trimmed.startsWith("-") &&
+        !trimmed.startsWith("#"));
+    if (!ownsLine) {
       break;
     }
     if (opts.changes.has(i)) {
@@ -136,12 +142,13 @@ function closeEmptiedBlock(opts: {
   }
   const header = opts.lines[opts.header] ?? "";
   const comment = header.slice(header.indexOf(":") + 1).trim();
+  const eol = header.endsWith("\r") ? "\r" : "";
   opts.changes.set(
     opts.header,
-    keepsComment
+    keepsComment || opts.onlyProperty
       ? {
           index: opts.header,
-          replacement: `${" ".repeat(indentOf(header))}environment: {}${comment ? ` ${comment}` : ""}`,
+          replacement: `${" ".repeat(indentOf(header))}environment: {}${comment ? ` ${comment}` : ""}${eol}`,
         }
       : { index: opts.header }
   );
@@ -278,7 +285,14 @@ export async function runPollingFixForFile(opts: {
   if (!opts.apply) {
     return { plan, changed: false, confirmed: false };
   }
-  const mode = (await stat(opts.composeFile)).mode & 0o777;
+  const info = await lstat(opts.composeFile);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: `${opts.displayPath} is a symlink or not a regular file; nothing written. Edit the target by hand.`,
+    });
+  }
+  const mode = info.mode & 0o777;
   if ((await read()) !== before) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
@@ -289,8 +303,16 @@ export async function runPollingFixForFile(opts: {
     dirname(opts.composeFile),
     `.${basename(opts.composeFile)}.hack-fix-${process.pid}`
   );
-  await writeFile(temp, plan.after, { mode });
-  await rename(temp, opts.composeFile);
+  let renamed = false;
+  try {
+    await writeFile(temp, plan.after, { mode, flag: "wx" });
+    await rename(temp, opts.composeFile);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      await rm(temp, { force: true });
+    }
+  }
   const after = await read();
   const confirmed =
     after === plan.after &&

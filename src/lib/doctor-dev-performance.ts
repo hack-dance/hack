@@ -51,6 +51,17 @@ const WHITESPACE = /\s+/;
 const MISE_TOOL_LINE = /^\s*(node|bun)\s*=\s*["']?([^"'\s#]+)/;
 const INTERPOLATION = /^\$\{[A-Za-z_][A-Za-z0-9_]*(?::?-([^}]*))?\}$/;
 
+/** Image names that ship Node or Bun (`node`, `oven/bun`, `x/bun-node`). */
+const NODE_OR_BUN_IMAGE = /(^|[/_.-])(node|nodejs|bun)([/_.-]|$)/;
+
+/** Repository and name without tag or digest, lowercased. */
+function imageName(image: string): string {
+  const ref = image.trim().toLowerCase().split("@")[0] ?? "";
+  const slash = ref.lastIndexOf("/");
+  const colon = ref.lastIndexOf(":");
+  return colon > slash ? ref.slice(0, colon) : ref;
+}
+
 const POLLING_VARIABLES = ["CHOKIDAR_USEPOLLING", "WATCHPACK_POLLING"] as const;
 type PollingVariable = (typeof POLLING_VARIABLES)[number];
 
@@ -297,7 +308,7 @@ export function emulatedServicesCheck(opts: {
       status: "ok",
       message:
         opts.containers === null
-          ? `No Compose service pins a platform other than this host's ${opts.hostArch}; running containers not inspected (Docker unavailable).`
+          ? `No Compose service pins a platform other than this host's ${opts.hostArch}; running containers not inspected (Docker unavailable or did not answer in time).`
           : `No service is pinned to or running another architecture than this host's ${opts.hostArch}.`,
       devPerformance: report,
     };
@@ -414,7 +425,8 @@ export function findPollingWatchers(
       }
       const line = inputs.lines
         .get(service)
-        ?.environment.find((entry) => entry.key === key);
+        // Compose keeps the last of duplicate keys.
+        ?.environment.findLast((entry) => entry.key === key);
       findings.push({
         service,
         variable: key,
@@ -564,6 +576,7 @@ export function findMutableDevImages(
       spec.build !== undefined ||
       typeof spec.image !== "string" ||
       !isMutableImageReference(spec.image) ||
+      !NODE_OR_BUN_IMAGE.test(imageName(spec.image)) ||
       !mountsProjectSource(spec)
     ) {
       continue;

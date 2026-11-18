@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -48,7 +48,10 @@ async function fixture(compose: string) {
     );
     await chmod(join(tools, name), 0o700);
   }
-  const invoke = async (flags: readonly string[]) => {
+  const invoke = async (
+    flags: readonly string[],
+    opts: { readonly toolsAllowed?: boolean } = {}
+  ) => {
     let child: Bun.SyncSubprocess<"pipe", "pipe">;
     try {
       child = spawnSyncBounded(
@@ -84,7 +87,9 @@ async function fixture(compose: string) {
       }
       throw error;
     }
-    expect(await Bun.file(called).exists()).toBe(false);
+    if (!opts.toolsAllowed) {
+      expect(await Bun.file(called).exists()).toBe(false);
+    }
     return {
       code: child.exitCode,
       stdout: child.stdout.toString(),
@@ -189,6 +194,44 @@ test.each(REFUSED.map((flags) => [flags.join(" "), flags] as const))(
         error: { code: "E_USAGE" },
       });
       expect(await Bun.file(f.file).text()).toBe(LEGACY);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+  ONE_RUN_BUDGET_MS
+);
+
+test(
+  "plain doctor --fix never edits the polling lines",
+  async () => {
+    const f = await fixture(LEGACY);
+    try {
+      // Broad --fix runs its other repairs (and may call the stub tools);
+      // the Compose file must be untouched whatever they report.
+      await f.invoke(["--fix"], { toolsAllowed: true });
+      expect(await Bun.file(f.file).text()).toBe(LEGACY);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+  ONE_RUN_BUDGET_MS
+);
+
+test(
+  "a symlinked Compose file is refused and its target is unchanged",
+  async () => {
+    const f = await fixture(LEGACY);
+    try {
+      const target = join(f.root, "shared-compose.yml");
+      await rename(f.file, target);
+      await symlink(target, f.file);
+      const result = await f.invoke([...SELECT, "--yes", "--json"]);
+      expect(result.code).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_CONFIG_INVALID" },
+      });
+      expect(await Bun.file(target).text()).toBe(LEGACY);
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }

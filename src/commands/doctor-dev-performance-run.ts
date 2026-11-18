@@ -46,28 +46,35 @@ export async function runDevPerformanceDoctorChecks<T>(opts: {
   readonly dockerOk: boolean;
   readonly run: CheckRunner<T>;
 }): Promise<T[]> {
-  const shared = collect(opts);
-  // Settle the shared promise so an unobserved rejection never escapes.
-  shared.catch(() => undefined);
-  const rows: T[] = [];
-  for (const name of DEV_PERFORMANCE_CHECKS) {
-    if (name === SHARED_VOLUME_ARCH_CHECK && !opts.dockerOk) {
-      continue;
+  let checks: DevPerformanceCheck[] | null = null;
+  // The first row carries the observation's duration.
+  const first = await opts.run(DEV_PERFORMANCE_CHECKS[0], async () => {
+    checks = await collect(opts);
+    return checks?.[0] ?? skipped(DEV_PERFORMANCE_CHECKS[0]);
+  });
+  const rows: T[] = [first];
+  const observed: DevPerformanceCheck[] | null = checks;
+  if (observed === null) {
+    for (const name of DEV_PERFORMANCE_CHECKS.slice(1)) {
+      if (name !== SHARED_VOLUME_ARCH_CHECK) {
+        rows.push(await opts.run(name, async () => skipped(name)));
+      }
     }
-    rows.push(
-      await opts.run(name, async () => {
-        const found = (await shared).find((check) => check.name === name);
-        return (
-          found ?? {
-            name,
-            status: "warn",
-            message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
-          }
-        );
-      })
-    );
+    return rows;
+  }
+  // The shared-volume row is present only when Docker was actually read.
+  for (const check of (observed as DevPerformanceCheck[]).slice(1)) {
+    rows.push(await opts.run(check.name, async () => check));
   }
   return rows;
+}
+
+function skipped(name: string): DevPerformanceCheck {
+  return {
+    name,
+    status: "warn",
+    message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+  };
 }
 
 /**
@@ -98,10 +105,10 @@ async function withDeadline<T>(work: Promise<T>, fallback: T): Promise<T> {
 async function collect(opts: {
   readonly startDir: string;
   readonly dockerOk: boolean;
-}): Promise<DevPerformanceCheck[]> {
+}): Promise<DevPerformanceCheck[] | null> {
   const ctx = await findProjectContext(opts.startDir);
   if (!ctx) {
-    return [];
+    return null;
   }
   const [hostArch, containers] = opts.dockerOk
     ? await withDeadline(

@@ -159,6 +159,10 @@ project:
   `engines` or `packageManager`, `.nvmrc`, `.node-version`, `.bun-version`, `.tool-versions`,
   `mise.toml`).
 
+These checks do not run for an adopted Compose project (`hack config adopt`), whose inputs
+belong to the adoption, or on the native backend, which has its own `amd64 emulation` check.
+The `dev image tags` note covers images whose name contains `node` or `bun`.
+
 `hack ps --json` adds `emulated: true` to each Compose item whose image architecture differs from
 the engine's, so other tools can show the same fact.
 

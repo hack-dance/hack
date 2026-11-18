@@ -7,7 +7,7 @@ import { ensureHackDirGitignore } from "./project-env-config.ts";
 export const DOCTOR_SAFE_FIX_ID = "hack gitignore";
 
 /** Select an ordinary legacy project again at publication; adoption never authorizes this write. */
-async function selectedProject(startDir: string) {
+export async function selectDoctorFixProject(startDir: string) {
   if (await preflightDoctorProject({ startDir })) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
@@ -26,7 +26,7 @@ async function selectedProject(startDir: string) {
 
 /** Exactly one additive repair, followed by readback. Never calls the broad guided remediation. */
 export async function runDoctorSafeFix(opts: { readonly startDir: string }) {
-  const project = await selectedProject(opts.startDir);
+  const project = await selectDoctorFixProject(opts.startDir);
   const inspect = () =>
     inspectHackDirGitignoreForDoctor({ projectDir: project.projectDir });
   const before = await inspect();
@@ -41,7 +41,7 @@ export async function runDoctorSafeFix(opts: { readonly startDir: string }) {
     const result = await ensureHackDirGitignore({
       projectDir: project.projectDir,
       beforePublish: async () => {
-        const current = await selectedProject(opts.startDir);
+        const current = await selectDoctorFixProject(opts.startDir);
         if (
           current.projectRoot !== project.projectRoot ||
           current.projectDir !== project.projectDir

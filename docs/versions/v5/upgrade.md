@@ -107,6 +107,17 @@ In a stable terminal, reinstall its login daemon with `command hack daemon insta
 if you removed it. Then use stable `command hack up --detach` and check the app
 and data again. A native trial's data never moves into Compose volumes by itself.
 
+### In the desktop app
+
+The desktop app's **Upgrade** pane (sidebar, Machine) shows `hack upgrade
+check` (the verdict, blockers and plan), saves a snapshot, explains review
+findings and restores a snapshot the CLI lists. It never runs `hack upgrade
+apply` or installs a version: copy those commands to a terminal. A restore
+never overwrites: a file changed since the snapshot (or since the apply step
+that recorded it) stays as it is, and whatever a restore replaces is kept in
+the snapshot. Restoring is how you undo `hack upgrade apply`; it does not
+undo migrated files, volumes or a different binary.
+
 If Doctor blocks the trial, use [Troubleshooting](troubleshooting.md).
 If an env layer is refused, check and `upgrade review --only env-format` name
 its file with code `env-layer-refused`. Replace the link with a real readable

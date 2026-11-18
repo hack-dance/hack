@@ -119,6 +119,7 @@ import {
   DAEMON_SERVICE_CHECK,
   decideDaemonServiceFix,
 } from "../lib/doctor-daemon-service.ts";
+import { DEV_PERFORMANCE_CHECKS } from "../lib/doctor-dev-performance.ts";
 import {
   describeEnvKeyInspection,
   type EnvKeyInspection,
@@ -153,6 +154,7 @@ import {
   NATIVE_SOURCE_CHECK,
   type NativeSourceReport,
 } from "../lib/doctor-native-source.ts";
+import { POLLING_FIX_ID } from "../lib/doctor-polling-fix.ts";
 import {
   DOCTOR_SAFE_FIX_ID,
   runDoctorSafeFix,
@@ -309,6 +311,12 @@ import {
   resolveSystemdSummary,
   withSystemdIncompatibleNextStep,
 } from "./daemon-systemd.ts";
+import {
+  type DevPerformanceReport,
+  renderDevPerformanceNotes,
+  runDevPerformanceDoctorChecks,
+  runPollingWatcherFix,
+} from "./doctor-dev-performance-run.ts";
 import { runNativePreflightCommand } from "./doctor-native-preflight.ts";
 import {
   analyzeComposeNetworkHygiene,
@@ -355,6 +363,8 @@ interface CheckResult {
   readonly nativeSource?: NativeSourceReport;
   /** Service names and closed process fields only. */
   readonly nativeProcess?: NativeProcessReport;
+  /** HACK-2323 dev performance findings: services, files, lines, architectures. */
+  readonly devPerformance?: DevPerformanceReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -446,13 +456,14 @@ const doctorOptions = [
     type: "string",
     long: "--only",
     valueHint: "<id>",
-    description: "With --fix --yes, run exactly one allowlisted safe repair",
+    description:
+      "With --fix, select exactly one allowlisted repair: 'hack gitignore' (needs --yes) or 'polling watchers' (shows the diff; --yes applies it)",
   } as const),
   defineOption({
     name: "yes",
     type: "boolean",
     long: "--yes",
-    description: "Consent to the one safe repair selected with --fix --only",
+    description: "Consent to the one repair selected with --fix --only",
   } as const),
   optMigrateEnvConfig,
   optAcceptTrackedEnvChanges,
@@ -611,6 +622,10 @@ const DOCTOR_SUMMARY_GROUPS = [
       "generated files",
       HACK_GITIGNORE_CHECK,
     ]),
+  },
+  {
+    title: "Dev performance",
+    checks: new Set<string>(DEV_PERFORMANCE_CHECKS),
   },
   {
     title: "Sessions",
@@ -1139,6 +1154,7 @@ async function runDoctorAudit(
     }),
     renderHuman: async () => {
       await renderDoctorSummary(results);
+      renderDevPerformanceNotes(results);
       emitSlowChecksNote(results);
       await renderMacNote(results);
     },
@@ -1265,17 +1281,29 @@ async function runSelectedDoctorFix(
   args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
 ): Promise<number> {
   const allowed = new Set(["path", "fix", "only", "yes", "json"]);
+  const otherOptions = Object.entries(args.options).some(
+    ([key, value]) =>
+      !allowed.has(key) && value !== undefined && value !== false
+  );
   if (
-    Object.entries(args.options).some(
-      ([key, value]) =>
-        !allowed.has(key) && value !== undefined && value !== false
-    ) ||
+    !otherOptions &&
+    args.options.fix &&
+    args.options.only === POLLING_FIX_ID
+  ) {
+    return await runSelectedPollingFix({
+      startDir: resolveDoctorStartDir(args.options.path),
+      apply: args.options.yes === true,
+      json: args.options.json === true,
+    });
+  }
+  if (
+    otherOptions ||
     !args.options.fix ||
     !args.options.yes ||
     args.options.only !== DOCTOR_SAFE_FIX_ID
   ) {
     throw new CliUsageError(
-      "Use --fix --only 'hack gitignore' --yes for the supported safe repair; other check IDs and repair modes are refused."
+      "Use --fix --only 'hack gitignore' --yes, or --fix --only 'polling watchers' to preview (add --yes to apply), for the supported selected repairs; other check IDs and repair modes are refused."
     );
   }
   const started = performance.now();
@@ -1302,6 +1330,51 @@ async function runSelectedDoctorFix(
     await renderDoctorSummary(results);
   }
   return fixed.confirmed ? 0 : 1;
+}
+
+/**
+ * The opt-in polling repair (HACK-2323): always the diff, the write only with
+ * --yes. Text mode prints the diff to stdout; JSON carries it in `data.fix`.
+ */
+async function runSelectedPollingFix(opts: {
+  readonly startDir: string;
+  readonly apply: boolean;
+  readonly json: boolean;
+}): Promise<number> {
+  const started = performance.now();
+  const outcome = await runPollingWatcherFix({
+    startDir: opts.startDir,
+    apply: opts.apply,
+  });
+  const results = [
+    {
+      ...outcome.check,
+      durationMs: Math.round(performance.now() - started),
+    },
+  ];
+  if (opts.json) {
+    emitCliResult({
+      result: okResult({
+        data: {
+          ...buildDoctorJsonData({ results }),
+          fix: {
+            id: POLLING_FIX_ID,
+            applied: outcome.applied,
+            changed: outcome.changed,
+            confirmed: outcome.confirmed,
+            removed: outcome.plan.removed,
+            diff: outcome.plan.diff,
+          },
+        },
+      }),
+    });
+  } else {
+    if (outcome.plan.diff) {
+      process.stdout.write(outcome.plan.diff);
+    }
+    note(outcome.check.message, POLLING_FIX_ID);
+  }
+  return outcome.check.status === "ok" ? 0 : 1;
 }
 
 /**
@@ -1793,6 +1866,8 @@ export type DoctorJsonCheck = DoctorMetadata & {
   readonly nativeProcess?: NativeProcessReport;
   /** Present only on the native source size check: sizes and project-relative paths. */
   readonly nativeSource?: NativeSourceReport;
+  /** Present only on the four dev performance checks (HACK-2323). */
+  readonly devPerformance?: DevPerformanceReport;
 };
 
 export type DoctorJsonData = {
@@ -1809,6 +1884,37 @@ export type DoctorJsonData = {
     readonly error: number;
   };
 };
+
+/** Optional structured reports, in their established JSON key order. */
+const DOCTOR_REPORT_FIELDS = [
+  "supersededRoots",
+  "hackLocalRoute",
+  "envKey",
+  "caTrust",
+  "composeBackend",
+  "nativeData",
+  "amd64Emulation",
+  "nativeSettings",
+  "nativeProcess",
+  "nativeSource",
+  "devPerformance",
+] as const satisfies readonly (keyof CheckResult)[];
+
+type DoctorReportFields = Pick<
+  CheckResult,
+  (typeof DOCTOR_REPORT_FIELDS)[number]
+>;
+
+/** The reports a check carries; absent ones are omitted, never null. */
+function doctorCheckReports(result: CheckResult): DoctorReportFields {
+  const reports: Record<string, unknown> = {};
+  for (const field of DOCTOR_REPORT_FIELDS) {
+    if (result[field]) {
+      reports[field] = result[field];
+    }
+  }
+  return reports as DoctorReportFields;
+}
 
 /**
  * Shape the doctor check results for the `--json` envelope.
@@ -1830,26 +1936,7 @@ export function buildDoctorJsonData(opts: {
       status: result.status,
       detail: result.message,
       durationMs: result.durationMs,
-      ...(result.supersededRoots
-        ? { supersededRoots: result.supersededRoots }
-        : {}),
-      ...(result.hackLocalRoute
-        ? { hackLocalRoute: result.hackLocalRoute }
-        : {}),
-      ...(result.envKey ? { envKey: result.envKey } : {}),
-      ...(result.caTrust ? { caTrust: result.caTrust } : {}),
-      ...(result.composeBackend
-        ? { composeBackend: result.composeBackend }
-        : {}),
-      ...(result.nativeData ? { nativeData: result.nativeData } : {}),
-      ...(result.amd64Emulation
-        ? { amd64Emulation: result.amd64Emulation }
-        : {}),
-      ...(result.nativeSettings
-        ? { nativeSettings: result.nativeSettings }
-        : {}),
-      ...(result.nativeProcess ? { nativeProcess: result.nativeProcess } : {}),
-      ...(result.nativeSource ? { nativeSource: result.nativeSource } : {}),
+      ...doctorCheckReports(result),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -3742,6 +3829,14 @@ async function runProjectChecks(opts: {
     await runCheck(s, COMPOSE_BACKEND_CHECK, () =>
       checkComposeBackendFeatures({ startDir, backend: "compose" })
     )
+  );
+  results.push(
+    ...(await runDevPerformanceDoctorChecks({
+      startDir,
+      dockerOk,
+      // The shared observation carries its own deadline.
+      run: (name, fn) => runCheck(s, name, fn),
+    }))
   );
   results.push(await runCheck(s, "DEV_HOST", () => checkDevHost({ startDir })));
   results.push(

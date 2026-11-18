@@ -303,13 +303,16 @@ export async function runPollingFixForFile(opts: {
     dirname(opts.composeFile),
     `.${basename(opts.composeFile)}.hack-fix-${process.pid}`
   );
+  let created = false;
   let renamed = false;
   try {
     await writeFile(temp, plan.after, { mode, flag: "wx" });
+    created = true;
     await rename(temp, opts.composeFile);
     renamed = true;
   } finally {
-    if (!renamed) {
+    // Never remove a temp path another run left behind.
+    if (created && !renamed) {
       await rm(temp, { force: true });
     }
   }

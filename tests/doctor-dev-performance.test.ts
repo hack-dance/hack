@@ -621,3 +621,31 @@ describe("container architectures", () => {
     ]);
   });
 });
+
+test("the ps annotation deadline also ends the probes' docker children", async () => {
+  const root = await mkdtemp(join(tmpdir(), "doctor-dev-deadline-"));
+  try {
+    const bin = join(root, "bin");
+    await Bun.write(join(bin, "docker"), "#!/bin/sh\nsleep 4\n");
+    await Bun.spawn(["chmod", "+x", join(bin, "docker")]).exited;
+    const script = join(root, "run.ts");
+    const mod = join(import.meta.dir, "../src/lib/container-architecture.ts");
+    await Bun.write(
+      script,
+      `import { annotateEmulatedPsItems } from ${JSON.stringify(mod)};\nconst out = await annotateEmulatedPsItems({ items: [{ ID: "aaaa" }], deadlineMs: 300 });\nconsole.log(JSON.stringify(out));\n`
+    );
+    const started = Date.now();
+    const child = Bun.spawn([process.execPath, "--no-env-file", script], {
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(child.stdout).text();
+    await child.exited;
+    expect(JSON.parse(stdout)).toEqual([{ ID: "aaaa" }]);
+    // Without the process deadline the process lived ~8 s (two 4 s probes).
+    expect(Date.now() - started).toBeLessThan(3000);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 15_000);

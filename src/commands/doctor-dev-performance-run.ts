@@ -27,6 +27,7 @@ import {
   runPollingFixForFile,
 } from "../lib/doctor-polling-fix.ts";
 import { selectDoctorFixProject } from "../lib/doctor-safe-fix.ts";
+import { withProcessDeadline } from "../lib/process-deadline.ts";
 import { findProjectContext } from "../lib/project.ts";
 
 export type { DevPerformanceReport } from "../lib/doctor-dev-performance.ts";
@@ -47,12 +48,18 @@ export async function runDevPerformanceDoctorChecks<T>(opts: {
   readonly run: CheckRunner<T>;
 }): Promise<T[]> {
   let checks: DevPerformanceCheck[] | null = null;
-  // The first row carries the observation's duration.
+  let collected = false;
+  // The first row carries the observation's duration. If the observation
+  // throws, runCheck reports that row as an error and no other row is added.
   const first = await opts.run(DEV_PERFORMANCE_CHECKS[0], async () => {
     checks = await collect(opts);
+    collected = true;
     return checks?.[0] ?? skipped(DEV_PERFORMANCE_CHECKS[0]);
   });
   const rows: T[] = [first];
+  if (!collected) {
+    return rows;
+  }
   const observed: DevPerformanceCheck[] | null = checks;
   if (observed === null) {
     for (const name of DEV_PERFORMANCE_CHECKS.slice(1)) {
@@ -83,11 +90,14 @@ function skipped(name: string): DevPerformanceCheck {
  */
 const RUNTIME_OBSERVATION_DEADLINE_MS = 15_000;
 
-async function withDeadline<T>(work: Promise<T>, fallback: T): Promise<T> {
+async function withDeadline<T>(
+  work: () => Promise<T>,
+  fallback: T
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      work,
+      withProcessDeadline(Date.now() + RUNTIME_OBSERVATION_DEADLINE_MS, work),
       new Promise<T>((resolve) => {
         timer = setTimeout(
           () => resolve(fallback),
@@ -112,13 +122,14 @@ async function collect(opts: {
   }
   const [hostArch, containers] = opts.dockerOk
     ? await withDeadline(
-        Promise.all([
-          readEngineArchitecture(),
-          observeDevRuntime({
-            projectRoot: ctx.projectRoot,
-            projectDir: ctx.projectDir,
-          }),
-        ]),
+        () =>
+          Promise.all([
+            readEngineArchitecture(),
+            observeDevRuntime({
+              projectRoot: ctx.projectRoot,
+              projectDir: ctx.projectDir,
+            }),
+          ]),
         [null, null]
       )
     : [null, null];

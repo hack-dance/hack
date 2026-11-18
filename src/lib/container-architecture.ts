@@ -13,6 +13,7 @@
  */
 
 import { isRecord } from "./guards.ts";
+import { withProcessDeadline } from "./process-deadline.ts";
 import { exec } from "./shell.ts";
 
 /** Normalized CPU architecture names, as Docker image metadata spells them. */
@@ -208,19 +209,21 @@ export async function annotateEmulatedPsItems(opts: {
   if (ids.length === 0) {
     return [...opts.items];
   }
+  const budget = opts.deadlineMs ?? PS_ANNOTATION_DEADLINE_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const [engine, archs] = await Promise.race([
-    Promise.all([
-      readEngineArchitecture(probe),
-      inspectContainerArchitectures({ ids, probe }),
-    ]),
+    // The process deadline also ends the probes' children, so giving up
+    // leaves nothing running that would keep the process alive.
+    withProcessDeadline(Date.now() + budget, () =>
+      Promise.all([
+        readEngineArchitecture(probe),
+        inspectContainerArchitectures({ ids, probe }),
+      ])
+    ),
     // One budget for the annotation: a slow engine leaves items unchanged.
     new Promise<[null, ReadonlyMap<string, ContainerArchitecture>]>(
       (resolve) => {
-        timer = setTimeout(
-          () => resolve([null, new Map()]),
-          opts.deadlineMs ?? PS_ANNOTATION_DEADLINE_MS
-        );
+        timer = setTimeout(() => resolve([null, new Map()]), budget);
       }
     ),
   ]).finally(() => clearTimeout(timer));

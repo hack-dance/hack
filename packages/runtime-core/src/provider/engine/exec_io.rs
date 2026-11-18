@@ -72,11 +72,33 @@ pub(super) fn write(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> io:
         )
     };
     let result = count(result);
-    // Capture send's errno before restoring flags, and refuse a failed restore.
+    // Capture send's errno before restoring flags, and refuse a failed restore. A restore
+    // that fails after send accepted bytes is reported as `SentThenFailed`, never as a
+    // retryable kind, so no caller resends bytes the peer may already hold.
     if unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_SETFL, flags) } < 0 {
-        return Err(io::Error::last_os_error());
+        return Err(match result {
+            Ok(sent) if sent > 0 => io::Error::other(SentThenFailed),
+            _ => io::Error::last_os_error(),
+        });
     }
     result
+}
+
+/// `write` sent at least one byte and then failed to restore the descriptor flags.
+#[derive(Debug)]
+pub(super) struct SentThenFailed;
+impl std::fmt::Display for SentThenFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("bytes were sent before the descriptor flags could be restored")
+    }
+}
+impl std::error::Error for SentThenFailed {}
+
+/// Whether `error` came after `write` had already sent bytes.
+pub(super) fn sent_before(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<SentThenFailed>())
 }
 
 fn count(result: isize) -> io::Result<usize> {
@@ -98,6 +120,15 @@ pub(super) fn retry(error: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::{io::Write, time::Duration};
+
+    #[test]
+    fn only_a_failure_after_an_accepted_send_is_marked_and_it_is_never_retryable() {
+        let marked = io::Error::other(SentThenFailed);
+        assert!(sent_before(&marked));
+        assert!(!retry(&marked));
+        assert!(!sent_before(&io::Error::from(io::ErrorKind::Interrupted)));
+        assert!(!sent_before(&io::Error::other("other")));
+    }
 
     #[test]
     fn closed_peer_keeps_buffered_bytes_and_descriptor_flags() {

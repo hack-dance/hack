@@ -118,6 +118,30 @@ impl RelayExec {
     }
 }
 
+/// Why an attached start did not upgrade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StartFailure {
+    /// The shared deadline passed.
+    Deadline,
+    /// The engine closed or reset the connection.
+    Closed,
+    /// Another transport error.
+    Io,
+    /// The response was not the expected upgrade.
+    Protocol,
+}
+fn start_failure(error: &std::io::Error) -> StartFailure {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut => StartFailure::Deadline,
+        std::io::ErrorKind::BrokenPipe
+        | std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::ConnectionAborted
+        | std::io::ErrorKind::NotConnected => StartFailure::Closed,
+        _ => StartFailure::Io,
+    }
+}
+/// [`start_mode`] without a console.
+#[cfg(test)]
 pub(super) fn start(
     stream: &mut UnixStream,
     id: &str,
@@ -125,12 +149,33 @@ pub(super) fn start(
 ) -> Result<(), CandidateError> {
     start_mode(stream, id, deadline, None)
 }
+/// [`start_mode`] without a console, keeping why the upgrade failed.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "environment-launcher")),
+    allow(dead_code)
+)]
+pub(super) fn start_classified(
+    stream: &mut UnixStream,
+    id: &str,
+    deadline: Instant,
+) -> Result<(), StartFailure> {
+    upgrade(stream, id, deadline, None)
+}
 pub(super) fn start_mode(
     stream: &mut UnixStream,
     id: &str,
     deadline: Instant,
     console_size: Option<[u16; 2]>,
 ) -> Result<(), CandidateError> {
+    upgrade(stream, id, deadline, console_size).map_err(|_| refused())
+}
+fn upgrade(
+    stream: &mut UnixStream,
+    id: &str,
+    deadline: Instant,
+    console_size: Option<[u16; 2]>,
+) -> Result<(), StartFailure> {
+    let refused = || StartFailure::Protocol;
     let body = match console_size {
         Some([rows, cols]) if rows > 0 && cols > 0 => {
             format!(r#"{{"Detach":false,"Tty":true,"ConsoleSize":[{rows},{cols}]}}"#)
@@ -145,10 +190,10 @@ pub(super) fn start_mode(
     let mut bytes = request.as_bytes();
     while !bytes.is_empty() {
         match super::exec_io::write(stream, bytes, deadline) {
-            Ok(0) => return Err(refused()),
+            Ok(0) => return Err(StartFailure::Closed),
             Ok(n) => bytes = &bytes[n..],
             Err(error) if super::exec_io::retry(&error) => continue,
-            Err(_) => return Err(refused()),
+            Err(error) => return Err(start_failure(&error)),
         }
     }
     let mut header = Vec::new();
@@ -159,8 +204,9 @@ pub(super) fn start_mode(
         let mut byte = [0];
         match super::exec_io::read(stream, &mut byte, deadline) {
             Ok(1) => {}
+            Ok(_) => return Err(StartFailure::Closed),
             Err(error) if super::exec_io::retry(&error) => continue,
-            _ => return Err(refused()),
+            Err(error) => return Err(start_failure(&error)),
         }
         header.push(byte[0]);
     }

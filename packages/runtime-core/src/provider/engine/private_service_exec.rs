@@ -103,6 +103,18 @@ fn remaining(deadline: Instant, stage: Stage) -> Result<Duration, CandidateError
         .filter(|v| !v.is_zero())
         .ok_or_else(|| failed(stage, Reason::Deadline))
 }
+/// `Deadline` once the exec's deadline has passed, otherwise `reason`.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "environment-launcher")),
+    allow(dead_code)
+)]
+fn past_or(deadline: Instant, reason: Reason) -> Reason {
+    if Instant::now() >= deadline {
+        Reason::Deadline
+    } else {
+        reason
+    }
+}
 fn io_failure(stage: Stage, error: &io::Error) -> CandidateError {
     let reason = match error.kind() {
         io::ErrorKind::TimedOut => Reason::Deadline,
@@ -178,6 +190,15 @@ fn deliver(
     deadline: Instant,
     values: &BTreeMap<String, String>,
 ) -> Result<(), CandidateError> {
+    deliver_with(stream, deadline, values, super::exec_io::write)
+}
+/// [`deliver`] with an injectable writer, so tests can fail a write after it sent bytes.
+fn deliver_with(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    values: &BTreeMap<String, String>,
+    mut write: impl FnMut(&UnixStream, &[u8], Instant) -> io::Result<usize>,
+) -> Result<(), CandidateError> {
     let mut hello = Vec::new();
     while !hello.ends_with(b"\n") {
         let (kind, bytes) = frame(stream, deadline, 64 - hello.len())?;
@@ -223,12 +244,16 @@ fn deliver(
     };
     bytes.truncate(used);
     // Until the last byte is accepted the launcher holds an incomplete document, which
-    // never parses, so the command cannot run.
+    // never parses, so the command cannot run. A failure after send accepted bytes of
+    // unknown count may have completed the document, so it counts as release.
     let mut pending = bytes.as_slice();
     while !pending.is_empty() {
-        match super::exec_io::write(stream, pending, deadline) {
+        match write(stream, pending, deadline) {
             Ok(0) => return Err(failed(Stage::Deliver, Reason::Closed)),
             Ok(count) => pending = &pending[count..],
+            Err(error) if super::exec_io::sent_before(&error) => {
+                return Err(io_failure(Stage::Release, &error));
+            }
             Err(error) if super::exec_io::retry(&error) => continue,
             Err(error) => return Err(io_failure(Stage::Deliver, &error)),
         }
@@ -277,36 +302,40 @@ impl super::Engine<'_> {
         if let Some(dir) = workdir {
             body["WorkingDir"] = json!(dir);
         }
-        let created = super::Transport::new(&socket, remaining(deadline, Stage::Create)?)?
+        // An engine refusal such as a missing container keeps its own code; every other
+        // create failure is tagged. Nothing has started either way.
+        let tagged = |stage: Stage, error: CandidateError| {
+            if error.code == "engine_not_found" {
+                error
+            } else {
+                failed(stage, past_or(deadline, Reason::Io))
+            }
+        };
+        let created = super::Transport::new(&socket, remaining(deadline, Stage::Create)?)
+            .map_err(|error| tagged(Stage::Create, error))?
             .request(
                 Method::POST,
                 &format!("/v1.53/containers/{container}/exec"),
                 Some(&body),
-            )?;
+            )
+            .map_err(|error| tagged(Stage::Create, error))?;
         let id = created["Id"]
             .as_str()
             .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
             .ok_or_else(|| failed(Stage::Create, Reason::Protocol))?;
         self.guest.verify()?;
         self.guest.before_effect()?;
-        let mut stream =
-            crate::provider::agent::connect_until(&socket, deadline).map_err(|_| {
-                failed(
-                    Stage::Connect,
-                    if Instant::now() >= deadline {
-                        Reason::Deadline
-                    } else {
-                        Reason::Io
-                    },
-                )
-            })?;
-        super::relay_exec::start(&mut stream, id, deadline).map_err(|_| {
+        let mut stream = crate::provider::agent::connect_until(&socket, deadline)
+            .map_err(|_| failed(Stage::Connect, past_or(deadline, Reason::Io)))?;
+        super::relay_exec::start_classified(&mut stream, id, deadline).map_err(|failure| {
+            use super::relay_exec::StartFailure;
             failed(
                 Stage::Start,
-                if Instant::now() >= deadline {
-                    Reason::Deadline
-                } else {
-                    Reason::Protocol
+                match failure {
+                    StartFailure::Deadline => Reason::Deadline,
+                    StartFailure::Closed => Reason::Closed,
+                    StartFailure::Io => past_or(deadline, Reason::Io),
+                    StartFailure::Protocol => Reason::Protocol,
                 },
             )
         })?;
@@ -317,9 +346,10 @@ impl super::Engine<'_> {
         self.guest
             .verify()
             .map_err(|_| failed(Stage::Inspect, Reason::Io))?;
-        let inspected = super::Transport::new(&socket, remaining(deadline, Stage::Inspect)?)?
+        let inspected = super::Transport::new(&socket, remaining(deadline, Stage::Inspect)?)
+            .map_err(|_| failed(Stage::Inspect, past_or(deadline, Reason::Io)))?
             .request(Method::GET, &format!("/v1.53/exec/{id}/json"), None)
-            .map_err(|_| failed(Stage::Inspect, Reason::Io))?;
+            .map_err(|_| failed(Stage::Inspect, past_or(deadline, Reason::Io)))?;
         if inspected["ID"] != id
             || inspected["ContainerID"] != container
             || inspected["Running"] != false
@@ -563,5 +593,28 @@ mod tests {
             spinner.join().unwrap();
         }
         assert!(results.iter().all(Result::is_ok));
+    }
+
+    #[test]
+    fn a_write_that_fails_after_sending_bytes_may_have_run_and_is_never_resent() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        send(&mut guest, b"HKEE1 100\n");
+        let mut calls = 0;
+        let error = deliver_with(
+            &mut host,
+            Instant::now() + Duration::from_secs(2),
+            &BTreeMap::from([("TOKEN".into(), "synthetic-private-value".into())]),
+            |stream, bytes, deadline| {
+                calls += 1;
+                // Send everything, then report the flag-restore failure.
+                super::super::exec_io::write(stream, bytes, deadline)?;
+                Err(io::Error::other(super::super::exec_io::SentThenFailed))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1, "bytes the peer may hold are never resent");
+        assert_eq!(error.code, "graph_service_exec_uncertain");
+        assert_eq!(stage_of(&error)["stage"], "release");
+        assert_eq!(stage_of(&error)["command_may_have_run"], true);
     }
 }

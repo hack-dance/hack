@@ -333,14 +333,10 @@ export function mergeOneShotGraphs(
       continue;
     }
     for (const [name, service] of Object.entries(document.services)) {
-      const conditions = effective.get(name) ?? new Map<string, string>();
-      for (const [dependency, condition] of dependencyConditions(service)) {
-        conditions.set(
-          dependency,
-          effectiveCondition(condition, options.interpolationEnv)
-        );
-      }
-      effective.set(name, conditions);
+      effective.set(
+        name,
+        mergeConditions(effective.get(name), service, options.interpolationEnv)
+      );
       const profiles = declaredProfiles(service, options.interpolationEnv);
       if (profiles !== null) {
         // Compose merges `profiles` across files: the union, in order.
@@ -357,6 +353,27 @@ export function mergeOneShotGraphs(
     activeProfiles: options.activeProfiles,
     presentServices: options.presentServices,
   });
+}
+
+/**
+ * A service's effective conditions after one more document: a later entry's
+ * condition replaces the earlier one, and an entry without a condition keeps
+ * it (or means `service_started` when there is none).
+ */
+function mergeConditions(
+  earlier: Map<string, string> | undefined,
+  service: unknown,
+  env: Readonly<Record<string, string | undefined>> | undefined
+): Map<string, string> {
+  const conditions = earlier ?? new Map<string, string>();
+  for (const [dependency, condition] of dependencyConditions(service)) {
+    if (condition !== null) {
+      conditions.set(dependency, effectiveCondition(condition, env));
+    } else if (!conditions.has(dependency)) {
+      conditions.set(dependency, STARTED);
+    }
+  }
+  return conditions;
 }
 
 /** `earlier` then each of `later` not already in it. */
@@ -412,6 +429,7 @@ function graphFromConditions(input: {
 }
 
 const COMPLETED = "service_completed_successfully";
+const STARTED = "service_started";
 
 /**
  * A `depends_on` condition after Compose interpolation. One Hack cannot
@@ -542,9 +560,11 @@ function serviceActive(
 
 /**
  * One service's `depends_on` entries and their conditions. The short list
- * form and an entry without a condition mean `service_started`.
+ * form means `service_started`. A mapping entry without a condition is
+ * `null`: Compose merges mappings, so it keeps a condition an earlier file
+ * or an `extends` base set, and means `service_started` only when none did.
  */
-function dependencyConditions(service: unknown): [string, string][] {
+function dependencyConditions(service: unknown): [string, string | null][] {
   if (!isRecord(service)) {
     return [];
   }
@@ -552,7 +572,7 @@ function dependencyConditions(service: unknown): [string, string][] {
   if (Array.isArray(dependsOn)) {
     return dependsOn
       .filter((name): name is string => typeof name === "string")
-      .map((name) => [name, "service_started"]);
+      .map((name) => [name, STARTED]);
   }
   if (!isRecord(dependsOn)) {
     return [];
@@ -561,7 +581,7 @@ function dependencyConditions(service: unknown): [string, string][] {
     dependency,
     isRecord(spec) && typeof spec.condition === "string"
       ? spec.condition
-      : "service_started",
+      : null,
   ]);
 }
 
@@ -783,20 +803,33 @@ async function resolveServiceExtends(input: {
   }
   return {
     ...service,
-    depends_on: Object.fromEntries([
-      ...dependencyConditions(base).map(([dependency, condition]) => [
-        dependency,
-        { condition },
-      ]),
-      ...dependencyConditions(service).map(([dependency, condition]) => [
-        dependency,
-        { condition },
-      ]),
-    ]),
+    depends_on: mergeDependsOn(base, service),
     ...(service.profiles === undefined && base.profiles !== undefined
       ? { profiles: base.profiles }
       : {}),
   };
+}
+
+/**
+ * The `depends_on` of a service over its `extends` base, merged as Compose
+ * merges mappings: an entry without a condition keeps the base's.
+ */
+function mergeDependsOn(
+  base: unknown,
+  service: unknown
+): Record<string, { condition?: string }> {
+  const merged = new Map<string, string | null>();
+  for (const source of [base, service]) {
+    for (const [dependency, condition] of dependencyConditions(source)) {
+      merged.set(dependency, condition ?? merged.get(dependency) ?? null);
+    }
+  }
+  return Object.fromEntries(
+    [...merged].map(([dependency, condition]) => [
+      dependency,
+      condition === null ? {} : { condition },
+    ])
+  );
 }
 
 /** `extends: name` or `extends: { service, file? }`. */

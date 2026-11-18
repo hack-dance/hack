@@ -738,3 +738,59 @@ test("dependency conditions are interpolated before they are classified", () => 
   expect(oneShots({})).toEqual(["migrate"]);
   expect(oneShots()).toEqual(["migrate"]);
 });
+
+test("an override entry without a condition keeps the inherited one", async () => {
+  const base = {
+    services: {
+      migrate: { image: "app" },
+      api: {
+        image: "app",
+        depends_on: {
+          migrate: { condition: "service_completed_successfully" },
+        },
+      },
+    },
+  };
+  // Compose merges the entry: `restart` is added, the condition stays.
+  const override = {
+    services: { api: { depends_on: { migrate: { restart: true } } } },
+  };
+  expect([...mergeOneShotGraphs([base, override]).oneShots]).toEqual([
+    "migrate",
+  ]);
+  // A new entry without a condition is still service_started.
+  const added = {
+    services: { api: { depends_on: { cache: { restart: true } } } },
+  };
+  const graph = mergeOneShotGraphs([base, added]);
+  expect([...graph.oneShots]).toEqual(["migrate"]);
+  expect(graph.dependsOn.get("api")?.sort()).toEqual(["cache", "migrate"]);
+  // The same through extends.
+  const root = await mkdtemp(join(tmpdir(), "hack-oneshot-partial-"));
+  try {
+    const file = join(root, "docker-compose.yml");
+    await writeFile(
+      file,
+      [
+        "services:",
+        "  migrate:",
+        "    image: app",
+        "  base:",
+        "    image: app",
+        "    depends_on:",
+        "      migrate:",
+        "        condition: service_completed_successfully",
+        "  api:",
+        "    extends: base",
+        "    depends_on:",
+        "      migrate:",
+        "        restart: true",
+        "",
+      ].join("\n")
+    );
+    const extended = await readComposeOneShotGraph([file]);
+    expect(extended.waitsOn.get("api")).toEqual(["migrate"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

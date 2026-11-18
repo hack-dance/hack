@@ -69,7 +69,11 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "docker plugin discovery"
         | "bun"
         | "mutagen" => (Engine, Machine),
-        "compose backend features" => (Engine, Project),
+        // Dev performance (doctor-dev-performance.ts): image architecture
+        // against the engine's, and the Compose file's own settings.
+        "compose backend features" | "emulated services" | "shared volume architectures" => {
+            (Engine, Project)
+        }
         "proxy ports"
         | "proxy network"
         | "dnsmasq:53"
@@ -94,9 +98,8 @@ pub fn classify(id: &str) -> Option<(Area, Scope)> {
         | "secrets hygiene"
         | "compose env at rest" => (EnvSecrets, Project),
         "project" | "runtime hygiene" | "lifecycle hygiene" | "compose networks"
-        | "generated files" | "hack gitignore" | "worktree instances" | "sessions mux" => {
-            (ProjectFiles, Project)
-        }
+        | "generated files" | "hack gitignore" | "worktree instances" | "sessions mux"
+        | "polling watchers" | "dev image tags" => (ProjectFiles, Project),
         "native host dns"
         | "native hack.local route"
         | "native hack.local repair"
@@ -2051,6 +2054,7 @@ mod tests {
             "Browser access",
             "Resolver & DNS",
             "Project & env",
+            "Dev performance",
             "Sessions",
         ]
         .contains(&s)

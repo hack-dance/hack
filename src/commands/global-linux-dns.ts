@@ -12,6 +12,7 @@ import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import { createLinuxDnsHost } from "../lib/linux-dns-host.ts";
 import {
   applyLinuxDns,
+  describeLinuxDnsPlanSteps,
   inspectLinuxDns,
   type LinuxDnsHost,
   type LinuxDnsInspection,
@@ -119,15 +120,20 @@ export async function bootstrapLinuxGlobalDns(opts: {
     case "pending":
       logger.warn({
         message: [
-          `Linux DNS not applied (code=${outcome.code}). Run the commands below as they are, then check with hack doctor.`,
+          `Linux DNS not applied (code=${outcome.code}). It needs root (sudo) for these steps:`,
+          ...numberedSteps(describeLinuxDnsPlanSteps(outcome.plan)),
           ...(outcome.plan.notes ?? []),
+          "Review the exact commands below, run them as they are, then check with hack doctor. hack global install --plan --json lists the same steps.",
         ].join("\n"),
       });
       print(renderManualPlanText(outcome.plan));
       return "skipped";
     case "failed":
       logger.error({
-        message: `Linux DNS setup failed (code=${outcome.code}): \`${outcome.failedStep}\` exited ${outcome.exitCode}. Rerun hack global install, or run the commands below as they are.`,
+        message: [
+          `Linux DNS setup failed (code=${outcome.code}): \`${outcome.failedStep}\` exited ${outcome.exitCode}. Rerun hack global install, or run the commands below as they are. They need root (sudo) for these steps:`,
+          ...numberedSteps(describeLinuxDnsPlanSteps(outcome.plan)),
+        ].join("\n"),
       });
       print(renderManualPlanText(outcome.plan));
       return "failed";
@@ -140,6 +146,10 @@ export async function bootstrapLinuxGlobalDns(opts: {
     default:
       return "failed";
   }
+}
+
+function numberedSteps(steps: readonly string[]): string[] {
+  return steps.map((step, index) => `  ${index + 1}. ${step}`);
 }
 
 /** The manual plan as one paste-able block, framed by blank lines. */

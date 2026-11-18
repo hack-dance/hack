@@ -21,6 +21,12 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The selected native home needs runtime setup before project startup.",
     readFirst: "`hack doctor --native-preflight --json`",
   },
+  E_UNSUPPORTED_PLATFORM: {
+    meaning:
+      "The command needs a platform this host is not, such as the native runtime outside Apple Silicon macOS.",
+    readFirst:
+      "The error's first line names the supported platform; use the Compose backend instead.",
+  },
   E_DOCKER_UNAVAILABLE: {
     meaning: "The container runtime CLI or engine cannot be reached.",
     readFirst: "`hack doctor --json`",

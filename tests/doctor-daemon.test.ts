@@ -63,3 +63,28 @@ for (const state of [
     }
   });
 }
+
+test("doctor names why hackd would refuse to start, also for a candidate run (HACK-2329)", () => {
+  const report = buildDaemonStatusReport({
+    pid: null,
+    processRunning: false,
+    socketExists: false,
+    logExists: false,
+    apiReachable: false,
+    apiCompatible: false,
+  });
+  const refusal =
+    "hackd state directory /h/.hack/daemon is not safe from other users: /h is writable by other users (mode 775); run: chmod go-w /h";
+  for (const candidate of [false, true]) {
+    expect(
+      buildDoctorDaemonCheck({ report, candidate, startRefusal: refusal })
+    ).toEqual({
+      name: "daemon",
+      status: "warn",
+      message: `hackd cannot start: ${refusal}`,
+    });
+  }
+  expect(buildDoctorDaemonCheck({ report, candidate: false }).message).toBe(
+    "hackd not running (run: hack daemon start)"
+  );
+});

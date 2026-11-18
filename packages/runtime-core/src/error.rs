@@ -180,6 +180,18 @@ pub struct StateComponentDiagnostic {
     pub path: String,
 }
 
+/// How far the bridge sockets got when the fresh-boot socket deadline passed: counts
+/// only, never paths. `missing + not_private <= expected`, and `budget_seconds` is the
+/// deadline that applied.
+#[derive(Debug, Serialize)]
+pub struct BridgeSocketsDiagnostic {
+    pub version: u8,
+    pub expected: u8,
+    pub missing: u8,
+    pub not_private: u8,
+    pub budget_seconds: u16,
+}
+
 /// Value-free refusal locations, boxed together so every
 /// `Result<_, CandidateError>` stays small; serialized flat as
 /// `process_refusals`, `plan_change` and `route_probe`.
@@ -189,6 +201,8 @@ pub struct RefusalDiagnostics {
     pub network_request: Option<NetworkRequestDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_component: Option<StateComponentDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bridge_sockets: Option<BridgeSocketsDiagnostic>,
     /// File-only explanations. Every sentence and field is a compile-time literal;
     /// only validated service names come from the project. Never contains values.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -342,6 +356,27 @@ impl CandidateError {
                     version: 1,
                     path: path.to_owned(),
                 });
+        }
+        self
+    }
+
+    /// Carry the bridge socket counts (see [`BridgeSocketsDiagnostic`]); inconsistent
+    /// counts are dropped rather than reported.
+    pub fn with_bridge_sockets(
+        mut self,
+        expected: u8,
+        missing: u8,
+        not_private: u8,
+        budget_seconds: u16,
+    ) -> Self {
+        if expected > 0 && u16::from(missing) + u16::from(not_private) <= u16::from(expected) {
+            self.refusals.get_or_insert_default().bridge_sockets = Some(BridgeSocketsDiagnostic {
+                version: 1,
+                expected,
+                missing,
+                not_private,
+                budget_seconds,
+            });
         }
         self
     }

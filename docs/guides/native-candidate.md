@@ -3238,6 +3238,11 @@ The mode is part of the reviewed plan. Restart and restored `up` reuse a service
 retained image only when the retained graph recorded the same mode for it; after a mode
 change the service's image is selected again under the new mode.
 
+Each container whose image is linux/amd64 gets the guest's Rosetta 2 runtime bound
+read-only at `/mnt/rosetta`: the translation wrapper starts the translator from that
+path inside the container. A service that mounts anything at `/mnt/rosetta` itself
+refuses with `graph_rosetta_mount`.
+
 Emulated services are slower than native ones and can behave differently from arm64
 builds. `hack doctor` on the native backend reports an `amd64 emulation` warning with
 the number of opted-in services in each mode (counts only, no service names), and

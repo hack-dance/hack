@@ -3,6 +3,7 @@ mod disk_handles;
 pub mod host_filesystem;
 mod interrupted;
 mod operating_guard;
+mod pool_users;
 mod prepared_boot;
 #[cfg(test)]
 mod pressure_tests;
@@ -58,7 +59,17 @@ pub struct RuntimeStatus {
     /// Prepared-base selection and activation, for pools that requested one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepared_base: Option<super::prepared_start::Status>,
+    /// Graph runs this home records, Compose and native-authored, running or
+    /// retained after `down`; `null` when either inventory cannot be read.
+    pub graph_runs: Option<usize>,
+    /// `true` only when the pool runs with a live provider process and records
+    /// no graph, environment allocation or exec session (see
+    /// [`pool_users`]); `false` when it is not running or something uses it;
+    /// `null` when that cannot be established. An active image build is not
+    /// observed here; `runtime down` refuses during one.
+    pub pool_idle: Option<bool>,
 }
+
 fn root(candidate: &Candidate) -> std::path::PathBuf {
     candidate.state_root.join("run/smolvm")
 }
@@ -908,6 +919,7 @@ pub fn check_project_share(
 
 pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     reject_aliased_state(&root(candidate))?;
+    let users = pool_users::observe(&candidate.state_root);
     if !root(candidate)
         .join("owner.json")
         .try_exists()
@@ -932,6 +944,8 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             persistent_disks_identified: false,
             guest_boot_id: None,
             prepared_base: None,
+            graph_runs: users.graph_runs,
+            pool_idle: Some(false),
         });
     }
     let owner = Owner::load(candidate)?;
@@ -956,6 +970,12 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     } else {
         None
     };
+    let phase = if alive == Some(false) && owner.phase == "running" {
+        "process-exited".to_owned()
+    } else {
+        owner.phase.clone()
+    };
+    let pool_idle = pool_users::pool_idle(&phase, alive, users);
     Ok(RuntimeStatus {
         network: Some(owner.network.clone()),
         project_share: owner.project_share.clone(),
@@ -973,11 +993,7 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         reclamation: owner.reclamation,
         guest_memory_mib: Some(owner.profile.memory_mib()),
         application_bridge: owner.application_bridge,
-        phase: if alive == Some(false) && owner.phase == "running" {
-            "process-exited".into()
-        } else {
-            owner.phase.clone()
-        },
+        phase,
         qualification: owner.profile.qualification(),
         machine: Some(owner.machine.clone()),
         process_alive: alive,
@@ -988,6 +1004,8 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         persistent_disks_identified: owner.storage.is_some(),
         guest_boot_id: owner.guest_boot_id,
         prepared_base: super::prepared_start::status(candidate),
+        graph_runs: users.graph_runs,
+        pool_idle,
     })
 }
 

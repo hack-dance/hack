@@ -101,8 +101,11 @@ enum Pin {
     /// Selected, or found and checked by [`CliRunner::rediscover`].
     Program(PathBuf),
     /// The last [`CliRunner::rediscover`] found nothing usable: run
-    /// nothing, never the (unchecked) program found at launch.
-    Refused,
+    /// nothing, never the (unchecked) program found at launch or the
+    /// selected one it refused. `candidate` is the explicit program it
+    /// refused, which the next rediscovery checks again (a runner created
+    /// by name searches PATH again instead).
+    Refused { candidate: Option<PathBuf> },
 }
 
 impl CliRunner {
@@ -276,7 +279,7 @@ impl CliRunner {
     fn current_program(&self) -> Option<PathBuf> {
         match self.pin().as_deref() {
             Some(Pin::Program(p)) => Some(p.clone()),
-            Some(Pin::Refused) => None,
+            Some(Pin::Refused { .. }) => None,
             Some(Pin::Launch) | None => (!self.missing).then(|| self.program.clone()),
         }
     }
@@ -321,10 +324,28 @@ impl CliRunner {
     /// `NotFound`, or `Spawn` for a CLI in a location others can change.
     pub fn rediscover(&self) -> Result<PathBuf, RunError> {
         let Some(name) = &self.path_name else {
-            // Created with an explicit program: that is the one to use.
-            return self
-                .resolve_program()
-                .and_then(|p| trusted_cli(&p).map(|()| p));
+            // Created with an explicit program: that is the one to check,
+            // the selected one included, even after it was refused.
+            let candidate = match self.pin().as_deref() {
+                Some(Pin::Program(p)) => Some(p.clone()),
+                Some(Pin::Refused { candidate }) => candidate.clone(),
+                Some(Pin::Launch) | None => None,
+            };
+            let Some(candidate) = candidate else {
+                return self
+                    .resolve_program()
+                    .and_then(|p| trusted_cli(&p).map(|()| p));
+            };
+            let checked = trusted_cli(&candidate).map(|()| candidate.clone());
+            if let Some(mut pin) = self.pin() {
+                *pin = match &checked {
+                    Ok(p) => Pin::Program(p.clone()),
+                    Err(_) => Pin::Refused {
+                        candidate: Some(candidate),
+                    },
+                };
+            }
+            return checked;
         };
         let found = resolve_on_path(name, self.effective_env("PATH").as_deref())
             .ok_or(RunError::NotFound)
@@ -332,7 +353,7 @@ impl CliRunner {
         if let Some(mut pin) = self.pin() {
             *pin = match &found {
                 Ok(p) => Pin::Program(p.clone()),
-                Err(_) => Pin::Refused,
+                Err(_) => Pin::Refused { candidate: None },
             };
         }
         found
@@ -1781,6 +1802,52 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         runner.select(&hack);
         assert_eq!(clone.resolve_program().unwrap(), hack);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The chooser's runner (`selectable`): a selected CLI that rediscovery
+    /// refuses is not run by any clone, and the next rediscovery checks the
+    /// same program again, so trusting it again brings it back.
+    #[test]
+    fn a_refused_selected_cli_is_not_run_until_it_is_trusted_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "hack-desktop-refused-sel-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let marker = root.join("ran");
+        let hack = bin.join("hack");
+        crate::test_support::script(
+            &hack,
+            format!("#!/bin/sh\n: > '{}'\necho '{{}}'\n", marker.display()),
+        );
+        let runner = CliRunner::selectable(&hack);
+        let clone = runner.clone();
+        assert_eq!(runner.rediscover().unwrap(), hack, "positive control");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(runner.rediscover(), Err(RunError::Spawn(_))));
+        for r in [&runner, &clone] {
+            assert!(matches!(r.resolve_program(), Err(RunError::NotFound)));
+            assert!(r.run_raw(&["x"], None, T).is_err());
+            assert!(r.fixed().run_raw(&["x"], None, T).is_err(), "fixed too");
+        }
+        assert!(!marker.exists(), "the refused CLI never ran");
+        // Still refused while it stays changeable by others.
+        assert!(runner.rediscover().is_err());
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            runner.rediscover().unwrap(),
+            hack,
+            "checked again, accepted"
+        );
+        clone
+            .run_raw(&["x"], None, T)
+            .expect("runs once trusted again");
+        assert!(marker.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

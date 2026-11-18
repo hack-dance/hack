@@ -2534,6 +2534,30 @@ fn env_root(root: &Path) -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn effective_socket_requires_explicit_absolute_cli_evidence() {
+        let source = LiveSource {
+            cache: Default::default(),
+            runner: CliRunner::new("/missing/hack-next"),
+            daemon: None,
+        };
+        for status in [
+            serde_json::json!({}),
+            serde_json::json!({"socket_path":"relative/hackd.sock"}),
+            serde_json::json!({"socket_path":false}),
+        ] {
+            assert!(source.effective_daemon(Some(&status)).is_none());
+        }
+        assert!(source.effective_daemon(None).is_none());
+        assert!(
+            source
+                .effective_daemon(Some(
+                    &serde_json::json!({"socket_path":"/private/candidate/daemon/hackd.sock"})
+                ))
+                .is_some()
+        );
+    }
+
     fn fixture_runner(hack: &Path) -> CliRunner {
         let root = hack.parent().unwrap().to_str().unwrap();
         let bin = hack.parent().unwrap().join("fixture-tools");

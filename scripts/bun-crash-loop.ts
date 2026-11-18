@@ -40,7 +40,6 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { subprocessSignalLabel } from "../src/lib/subprocess-signal.ts";
 import {
   type BunRunOutcome,
   type BunRunReason,
@@ -545,7 +544,12 @@ export function executeWithLog(opts: {
     }
     return {
       exitCode: proc.exitCode,
-      signal: subprocessSignalLabel(proc.signalCode),
+      // Self-contained: the crash workflow relocates only this script and
+      // scripts/lib/bun-crash-classify.ts. Bun reports an unnamed signal by number.
+      signal:
+        typeof proc.signalCode === "number"
+          ? String(proc.signalCode)
+          : (proc.signalCode ?? null),
       output: await readFile(logPath, "utf8"),
       stoppedAtDeadline,
     };

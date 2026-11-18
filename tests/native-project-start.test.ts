@@ -4852,6 +4852,68 @@ test("Docker Hub shorthand is admitted once per distinct reference before the ru
   expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
 });
 
+test("a service outside the selected profiles is not pulled, and the start says it was left out (HACK-2338)", async () => {
+  const id = `sha256:${"e".repeat(64)}`;
+  for (const selected of [[], ["jobs"]] as const) {
+    const { opts } = await fixture(false);
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          web: { image: "alpine:3.21" },
+          jobs: { image: "redis", profiles: ["jobs"] },
+        },
+      }),
+      serviceNames: ["web", "jobs"],
+    });
+    opts.dependencies.review = async (request) =>
+      request.run({
+        planId: "a".repeat(64),
+        namespace: "b".repeat(64),
+        projectArgs: ["--project", request.projectRoot],
+        report: {
+          plan: {
+            enrollment_compatible: true,
+            services: {
+              web: { active: true },
+              jobs: { active: selected.length > 0 },
+            },
+          },
+        },
+      });
+    const ensured: string[] = [];
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "ensure-image") {
+        ensured.push(String(request.args[3]));
+        return { image_id: id };
+      }
+      return await invoke(request);
+    };
+    const notices: string[] = [];
+    opts.dependencies.warn = (line) => notices.push(line);
+    expect(
+      await startNativeProject({
+        ...opts,
+        profiles: [...selected],
+        profileSource: selected.length > 0 ? "managed-env" : "none",
+      })
+    ).toBe(0);
+    if (selected.length === 0) {
+      expect(ensured).toEqual(["alpine:3.21"]);
+      expect(notices).toContain(
+        "Not starting 1 service whose Compose profiles are not selected: jobs. Selected profiles: none (from no --profile or COMPOSE_PROFILES). Select others with --profile or COMPOSE_PROFILES."
+      );
+    } else {
+      expect(ensured).toEqual(["alpine:3.21", "redis"]);
+      expect(notices.some((line) => line.startsWith("Not starting"))).toBe(
+        false
+      );
+    }
+  }
+});
+
 test("a runtime failure during image admission keeps its own diagnostic and starts nothing", async () => {
   const { opts, events } = await fixture(false);
   withImages(opts, { web: "alpine:3.21" });

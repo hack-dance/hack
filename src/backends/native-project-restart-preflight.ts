@@ -349,6 +349,11 @@ async function pinRestartImages(opts: {
         `Native restart reuses built images and never builds; no running or retained image was found for ${name}. Run hack up to build it; nothing was stopped.`
       );
     }
+    // As at startup, an image service outside the selected profiles is not
+    // acquired (HACK-2338 item 4).
+    if (!nativeServiceActive(spec, opts.profiles)) {
+      continue;
+    }
     const image = String(spec.image);
     if (IMAGE.test(image)) {
       continue;

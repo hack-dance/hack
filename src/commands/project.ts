@@ -56,6 +56,11 @@ import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
+import {
+  declaredComposeProfiles,
+  type NativeProfileSelection,
+  selectNativeProfiles,
+} from "../backends/native-profile-selection.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   nativeDownEnvironment,
@@ -320,7 +325,10 @@ import {
   runLokiSnapshotWithFallback,
 } from "../lib/logs.ts";
 import { MissingProjectContextError } from "../lib/missing-project-error.ts";
-import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
+import {
+  readNativeComposeDocument,
+  refuseNativeComposeBackendFeatures,
+} from "../lib/native-compose-backend-features.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
@@ -6392,6 +6400,46 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
   }
 }
 
+/**
+ * Native's Compose profile selection for this project, from the same sources
+ * and in the same order as Compose under Hack: `--profile`, else
+ * `COMPOSE_PROFILES` in the managed env of the selected env, else in the shell
+ * (see {@link selectNativeProfiles}). A managed env that cannot be resolved
+ * here contributes nothing; native input preparation refuses it next.
+ */
+export async function resolveNativeProfileSelectionForProject(opts: {
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly envName: string | null | undefined;
+  readonly cliProfile: string | undefined;
+}): Promise<NativeProfileSelection> {
+  const compose = await readNativeComposeDocument(
+    opts.project.composeFile
+  ).catch(() => null);
+  const serviceNames =
+    isRecord(compose) && isRecord(compose.services)
+      ? Object.keys(compose.services)
+      : [];
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    envName: opts.envName,
+    serviceNames,
+  }).catch(() => null);
+  return selectNativeProfiles({
+    cliProfiles:
+      opts.cliProfile === undefined ? undefined : parseCsvList(opts.cliProfile),
+    managedEnv: resolved
+      ? selectProjectEnvValuesForExecutionTarget({
+          resolved,
+          scopeName: "global",
+          target: "compose",
+        })
+      : {},
+    shellEnv: process.env,
+    declaredProfiles: declaredComposeProfiles(compose),
+  });
+}
+
 async function handleNativeUp({
   ctx,
   args,
@@ -6487,6 +6535,11 @@ async function handleNativeUp({
   };
   const envFingerprints =
     createNativeEnvFingerprintSession(envFingerprintScope);
+  const profileSelection = await resolveNativeProfileSelectionForProject({
+    project,
+    envName: requestedEnvName,
+    cliProfile: args.options.profile,
+  });
   const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
     await resolveNativeInternalExtraHostSelection({ project, cfg });
   const startup: Parameters<typeof startNativeProject>[0] = {
@@ -6499,7 +6552,8 @@ async function handleNativeUp({
     },
     composeFile: project.composeFile,
     envName: requestedEnvName,
-    profiles: parseCsvList(args.options.profile),
+    profiles: profileSelection.profiles,
+    profileSource: profileSelection.source,
     sharedSource: host.sharedSource,
     dependencyFile: host.dependencyFile,
     dependencyFileByEnv: host.dependencyFileByEnv,
@@ -6701,7 +6755,9 @@ async function restartNativeImageProject({
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,
-    profiles: args.options.profile === undefined ? undefined : startup.profiles,
+    // An explicit or env-selected profile set replaces the retained one, as
+    // Compose's restart would use it; with none, the retained set stays.
+    profiles: startup.profileSource === "none" ? undefined : startup.profiles,
     recovery: recovery
       ? {
           ...recovery,

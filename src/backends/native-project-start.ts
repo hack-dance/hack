@@ -47,6 +47,10 @@ import {
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
 import { nativePrivateEnvironmentPayload } from "./native-private-environment-payload.ts";
+import {
+  type NativeProfileSource,
+  nativeInactiveProfileNotice,
+} from "./native-profile-selection.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   admitNativeProjectBuilds,
@@ -55,6 +59,7 @@ import {
   type NativeBuildRequest,
   nativeBuildsEnabled,
   nativeRebuildRequested,
+  nativeServiceActive,
   refuseEmulatedBuilds,
   refuseManagedSecretBuildArguments,
 } from "./native-project-builds.ts";
@@ -724,6 +729,8 @@ async function pinNativeProjectImages(opts: {
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  /** The selected Compose profiles: a service outside them is never pulled. */
+  readonly profiles: readonly string[];
   /** Opted-in services' platform policies; every other service resolves Linux arm64. */
   readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly signal: AbortSignal;
@@ -736,6 +743,12 @@ async function pinNativeProjectImages(opts: {
     const retainedImage = opts.retainedImages.get(name);
     if (retainedImage) {
       spec.image = retainedImage;
+      continue;
+    }
+    // As Compose does, a service outside the selected profiles is not
+    // acquired; the graph requires a pinned image only for active services
+    // (HACK-2338 item 4).
+    if (!nativeServiceActive(spec, opts.profiles)) {
       continue;
     }
     // A build service left unbuilt here is outside the selected profiles.
@@ -1519,7 +1532,7 @@ function retainedStartupSelection(opts: {
     (opts.gcloudWithheld === true && run.gcloud != null)
   ) {
     throw new ClosedCliError(
-      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced."
+      "Native up cannot change the retained run's environment, profiles, AWS profile or gcloud selection; data was not replaced. Run hack restart to start it with the new selection, or select the retained one (profiles can also come from COMPOSE_PROFILES in the managed env)."
     );
   }
   return {
@@ -1869,6 +1882,11 @@ type NativeProjectStartOptions = {
   readonly composeFile: string;
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
+  /**
+   * Where `profiles` came from (`--profile`, managed env, shell), for the
+   * notice naming services left out by profile; omitted reads as `--profile`.
+   */
+  readonly profileSource?: NativeProfileSource;
   readonly sharedSource: boolean;
   readonly restore?: NativeProjectRun;
   readonly onReady?: (services: {
@@ -2382,6 +2400,7 @@ async function startNativeProjectAttempt(
       projectRoot: opts.scope.projectRoot,
       specs,
       retainedImages,
+      profiles,
       amd64Emulation: input.amd64Emulation,
       signal: controller.signal,
       invoke: deps.invoke,
@@ -2409,6 +2428,21 @@ async function startNativeProjectAttempt(
         });
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
+        // Compose leaves unselected-profile services out silently; native
+        // names them (HACK-2338 item 8).
+        const inactive = nativeInactiveProfileNotice({
+          plan: review.report.plan,
+          selection: {
+            profiles,
+            source:
+              JSON.stringify(profiles) === JSON.stringify(requestedProfiles)
+                ? (opts.profileSource ?? "cli")
+                : "retained",
+          },
+        });
+        if (inactive) {
+          deps.warn(inactive);
+        }
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,

@@ -1887,6 +1887,27 @@ async function ensureHackdForGlobalUp(): Promise<void> {
   }
 }
 
+/**
+ * After the proxy's `compose up` failed: a failed start can leave the proxy
+ * created but never started, with no network endpoint, so remove it for the
+ * next attempt to recreate (HACK-2328), then name the listeners on 80/443.
+ */
+async function reportProxyStartFailure(opts: {
+  readonly composeFile: string;
+}): Promise<void> {
+  const cleanup = await removeUnstartedProxyContainers();
+  if (cleanup.kind === "failed") {
+    logger.warn({ message: cleanup.message });
+  }
+  logger.error({
+    message: await diagnoseProxyPortConflict({
+      bindAddress: readProxyBindFromCompose(
+        (await readTextFile(opts.composeFile)) ?? ""
+      ),
+    }),
+  });
+}
+
 /** Which part of `hack global up` failed, for install's decision (HACK-2328). */
 type GlobalUpResult = {
   readonly exit: number;
@@ -1987,18 +2008,7 @@ async function runGlobalUp(): Promise<GlobalUpResult> {
     { cwd: dirname(paths.caddyCompose) }
   );
   if (caddyExit !== 0) {
-    // A failed start can leave the proxy created but never started, with no
-    // network endpoint; remove it so the next attempt recreates it (HACK-2328).
-    const cleanup = await removeUnstartedProxyContainers();
-    if (cleanup.kind === "failed") {
-      logger.warn({ message: cleanup.message });
-    }
-    const conflict = await diagnoseProxyPortConflict({
-      bindAddress: readProxyBindFromCompose(
-        (await readTextFile(paths.caddyCompose)) ?? ""
-      ),
-    });
-    logger.error({ message: conflict });
+    await reportProxyStartFailure({ composeFile: paths.caddyCompose });
     return { exit: caddyExit, failedStage: "routing" };
   }
   const remainingProxyIssues = await inspectProxyNetwork({

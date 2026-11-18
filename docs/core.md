@@ -52,7 +52,10 @@ inspect them and `hack logs` to read their output. On the Compose backend,
 state and exit-code columns. An exited one-shot with code `0` completed
 successfully; a nonzero code indicates failure. `hack ps --json` reads Compose
 directly and retains each item's `State` and `ExitCode`, including immediately
-after a failed startup. Removed containers are not retained as run history.
+after a failed startup. An item whose image architecture differs from the
+engine's also carries `emulated: true` (the field is absent otherwise); see
+[Check an existing project](guides/development-runtime-safety.md#check-an-existing-project).
+Removed containers are not retained as run history.
 When Compose cannot list containers, `hack ps --json` prints the
 `{ok: false, error}` envelope with a stable code: `E_DOCKER_UNAVAILABLE` when the
 engine is not reachable or does not answer in time, `E_PERMISSION` when the Docker

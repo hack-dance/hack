@@ -621,10 +621,46 @@ Fixtures `hackd` and `hackd-off`; renders:
 --hidden`), and the env drive ends by reading it live through the stand-in
 CLI and fake hackd.
 
+## Upgrade
+
+The **Upgrade** row in the Machine group opens the upgrade review flow
+(HACK-2289), on `hack upgrade check | review | snapshot | rollback --json`,
+each run by the selected CLI in its checked context:
+
+- **Check** (read-only; when the pane opens and on Check again): the CLI's own
+  verdict (`ready`: no blockers and nothing incomplete), each blocker and
+  each check that could not run, and the plan with one row per step. A
+  step's command is for copying: the app never runs `hack upgrade apply` or
+  a plan command.
+- **Save snapshot** keeps a private copy of the files an upgrade changes,
+  under the CLI's home, and says what it did not cover.
+- **Review findings** (read-only) lists the findings that cannot be applied
+  safely and why.
+- **Restore** lists the CLI's snapshots, newest first. Restore… asks first;
+  only a snapshot the CLI listed, at `…/upgrade/snapshots/<id>/manifest.json`,
+  is restored, and never with `--overwrite`: a file changed since the
+  snapshot (or since the apply step that recorded it) stays as it is, and
+  whatever a restore replaces is kept in the snapshot. Its real use is
+  undoing `hack upgrade apply`.
+
+Snapshot and Restore go through the same machine gate as Setup and hackd.
+The CLI reports refusals and a not-ready check as an `ok: true` envelope
+with exit 1, so the app reads stdout whatever the exit code.
+
+Fixtures `upgrade` and `upgrade-blocked`; renders:
+[ready, light](screenshots/window/upgrade-light.png),
+[blocked, dark](screenshots/window/upgrade-blocked-dark.png).
+`scripts/upgrade-drive/run.sh <binary> [passes]` drives it against the real
+CLI in a temp HOME, HACK_HOME and registered git project: the app saves a
+snapshot; the harness runs `hack upgrade apply --only ignore-rules`; the app
+restores apply's snapshot and `.hack/.gitignore` must come back byte for
+byte; the harness edits it; a second restore must leave the edit.
+
 ## What v0 does not do yet
 
-The Activity tab, CPU and memory, onboarding, changing always-on and upgrades
-come in later units. The design and the CLI/daemon requests they need
+The Activity tab, CPU and memory, onboarding, changing always-on and
+running an upgrade (`hack upgrade apply`, installing a new version) come in
+later units. The design and the CLI/daemon requests they need
 are in `DESIGN.md` (PR #800).
 
 ## Logs tab

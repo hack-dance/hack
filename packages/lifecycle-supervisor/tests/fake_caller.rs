@@ -758,6 +758,18 @@ fn stale_sweep_reaps_other_builds_and_keeps_an_occupied_root() {
         .current_dir(&root)
         .spawn()
         .unwrap();
+    let bystander_pid = bystander.id() as i32;
+    let deadline = Instant::now() + TIMEOUT;
+    while !occupants(&root).iter().any(|p| p.pid == bystander_pid) {
+        assert!(
+            Instant::now() < deadline,
+            "bystander not visible as an occupant: cwd={:?} exe={:?} identity={}",
+            cwd_of(bystander_pid),
+            exe_of(bystander_pid),
+            identity(bystander_pid).is_some(),
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     reap_stale_fixture_roots(parent);
     let status = wait(&mut foreign_build, TIMEOUT);
     assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
@@ -795,6 +807,15 @@ fn stale_roots_of_a_dead_test_process_are_reaped_and_removed() {
     assert_eq!(
         unsafe { libc::kill(supervisor.id() as i32, libc::SIGSTOP) },
         0
+    );
+    let supervisor_pid = supervisor.id() as i32;
+    let seen = occupants(&root).iter().any(|p| p.pid == supervisor_pid);
+    assert!(
+        seen && exe_of(supervisor_pid).is_some_and(|exe| is_fixture_executable(&exe)),
+        "stopped supervisor not visible to the sweep: occupant={seen} cwd={:?} exe={:?} identity={}",
+        cwd_of(supervisor_pid),
+        exe_of(supervisor_pid),
+        identity(supervisor_pid).is_some(),
     );
     reap_stale_fixture_roots(parent);
     for child in [&mut stray, &mut supervisor] {

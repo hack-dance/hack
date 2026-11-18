@@ -44,6 +44,7 @@ v5 prerelease bundles are Apple Silicon macOS only; see
 - [Share environment and secrets](guides/share-environment.md)
 - [Manage helpers and tunnels](guides/project-helpers.md)
 - [Use a cloud agent or another host](guides/cloud-environments.md)
+- [Desktop app (preview)](guides/desktop-app.md): what the window shows, how it finds the CLI, and what it never does.
 - [Try the native backend (beta)](../guides/native-candidate.md)
 
 ## Recipes

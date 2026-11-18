@@ -1258,18 +1258,19 @@ impl<'a> Fetch<'a> {
                     Some(status.as_u16()),
                 ));
             }
-            let Err(failure) = refusal(response) else {
-                unreachable!("a non-success status refuses")
-            };
-            // Access and absence keep their own guidance; any other status is named.
+            // Access and absence keep their own guidance; any other status is named
+            // with the host, attempts and code like a retried one.
             return Err(LayerAttempt::Refused(
                 if matches!(
                     status,
                     StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
                 ) {
-                    failure
+                    match refusal(response) {
+                        Err(failure) => failure,
+                        Ok(_) => unreachable!("a non-success status refuses"),
+                    }
                 } else {
-                    failure.with_network_failure(
+                    layer_failure(
                         host,
                         attempt,
                         NetworkFailureReason::HttpStatus,
@@ -1367,13 +1368,24 @@ fn layer_failure(
     reason: NetworkFailureReason,
     status: Option<u16>,
 ) -> CandidateError {
-    let why = match reason {
-        NetworkFailureReason::Timeout => "the transfer timed out",
-        NetworkFailureReason::ShortRead => "the connection ended before the whole layer arrived",
-        NetworkFailureReason::DigestMismatch => "the layer did not match its digest",
-        NetworkFailureReason::SizeMismatch => "the layer did not match its size",
-        NetworkFailureReason::HttpStatus => "the registry answered with an error status",
-        NetworkFailureReason::Deadline => "the 360-second image deadline was reached",
+    let why = match (reason, status) {
+        (NetworkFailureReason::Timeout, _) => "the transfer timed out".to_owned(),
+        (NetworkFailureReason::ShortRead, _) => {
+            "the connection ended before the whole layer arrived".to_owned()
+        }
+        (NetworkFailureReason::DigestMismatch, _) => {
+            "the layer did not match its digest".to_owned()
+        }
+        (NetworkFailureReason::SizeMismatch, _) => "the layer did not match its size".to_owned(),
+        (NetworkFailureReason::HttpStatus, Some(code)) => {
+            format!("the registry answered HTTP {code}")
+        }
+        (NetworkFailureReason::HttpStatus, None) => {
+            "the registry answered an error status".to_owned()
+        }
+        (NetworkFailureReason::Deadline, _) => {
+            "the 360-second image deadline was reached".to_owned()
+        }
     };
     error(format!(
         "A registry layer transfer failed: {why}. Host {host} after {attempts} attempt(s)."

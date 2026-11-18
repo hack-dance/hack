@@ -2372,6 +2372,13 @@ fn a_transient_status_is_retried_and_a_persistent_one_is_named_with_its_code() {
     )
     .unwrap_err();
     assert_eq!(calls.load(AtomicOrdering::SeqCst), ATTEMPTS);
+    assert!(
+        failure
+            .message
+            .contains("answered HTTP 502. Host 127.0.0.1 after 3 attempt(s)"),
+        "{}",
+        failure.message
+    );
     let json = serde_json::to_value(&failure).unwrap();
     assert_eq!(
         json["network_request"],
@@ -2390,6 +2397,10 @@ fn a_transient_status_is_retried_and_a_persistent_one_is_named_with_its_code() {
     )
     .unwrap_err();
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(
+        failure.message,
+        "A registry layer transfer failed: the registry answered HTTP 410. Host 127.0.0.1 after 1 attempt(s)."
+    );
     let json = serde_json::to_value(&failure).unwrap();
     assert_eq!(json["network_request"]["status"], 410);
     assert_eq!(json["network_request"]["attempts"], 1);

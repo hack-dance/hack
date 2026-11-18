@@ -656,9 +656,41 @@ snapshot; the harness runs `hack upgrade apply --only ignore-rules`; the app
 restores apply's snapshot and `.hack/.gitignore` must come back byte for
 byte; the harness edits it; a second restore must leave the edit.
 
+## Resource use in the Services tab
+
+The Services tab of a running Compose instance shows each service's CPU and
+memory, an **emulated** pill on a service whose image runs under emulation,
+and the instance total in the header (DESIGN.md section 10). Read-only:
+
+- CPU and memory come from `hack usage --json --by-service --path <root>`,
+  read every 5 seconds, one read at a time, only while that tab is shown in
+  a visible window. Rows are matched by the instance's Compose project, so a
+  branch instance shows its own. Memory has the limit in its tooltip when
+  Docker reports one.
+- The emulated flag comes from `hack ps --json --path <root> [--branch <name>]`,
+  read again when the instance or its running services change, and every
+  60 seconds (a recreated container keeps its name). Both reads run with the
+  Compose backend whatever the app inherited, and values are shown only for
+  the checkout and Compose project they were read for.
+- A value the CLI did not report is a dash, never 0, and the tooltip says
+  why: not running, not read yet, Docker reported no value, or the read
+  failed (Docker not running, say). The total appears only when every
+  running service has both values.
+- A native instance shows a dash: the CLI does not report native usage yet
+  (DESIGN.md R29).
+
+Fixture `usage`; renders:
+[light](screenshots/window/usage-light.png),
+[dark](screenshots/window/usage-dark.png).
+`scripts/usage-drive/run.sh <binary> [passes]` drives it live in a temp HOME
+and HACK_HOME: a fake hackd lists one running project, a stand-in `hack`
+answers `usage` and `ps` with canned JSON, the drive's `expect-usage` steps
+check the rows, the marker and the total, and the harness checks the app ran
+only read commands.
+
 ## What v0 does not do yet
 
-The Activity tab, CPU and memory, onboarding, changing always-on and
+The Activity tab, per-process CPU and memory for native projects, onboarding, changing always-on and
 running an upgrade (`hack upgrade apply`, installing a new version) come in
 later units. The design and the CLI/daemon requests they need
 are in `DESIGN.md` (PR #800).
